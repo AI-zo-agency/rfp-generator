@@ -1,0 +1,158 @@
+name: Slack Push Notification
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Summarize changes with Fireworks AI
+        id: ai
+        env:
+          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE" 2>/dev/null; then
+            RANGE="$BEFORE..$AFTER"
+            DIFF=$(git diff "$BEFORE" "$AFTER" | head -c 8000)
+            FILES=$(git diff --stat "$BEFORE" "$AFTER" | tail -40)
+            COMMITS=$(git log --pretty=format:'• %s (%an)' "$RANGE")
+          else
+            RANGE="$AFTER^..$AFTER"
+            DIFF=$(git show "$AFTER" | head -c 8000)
+            FILES=$(git show --stat "$AFTER" | tail -40)
+            COMMITS=$(git log --pretty=format:'• %s (%an)' -1 "$AFTER")
+          fi
+
+          [ -n "$FILES" ] || FILES="n/a"
+          [ -n "$COMMITS" ] || COMMITS="• No commits found"
+
+          clean_summary() {
+            printf '%s\n' "$1" \
+              | sed 's/\*\*//g; s/\*//g; s/`//g' \
+              | grep -E '^([•\-] |[0-9]+\. )' \
+              | sed 's/^[0-9]\+\. /• /; s/^- /• /' \
+              | head -6
+          }
+
+          summarize() {
+            local prompt
+            prompt=$(printf 'Repo: %s\nCommits:\n%s\nFiles:\n%s\nDiff:\n%s' \
+              "$REPO" "$COMMITS" "$FILES" "$DIFF")
+
+            jq -n --arg p "$prompt" '{
+              model: "accounts/fireworks/models/kimi-k2p6",
+              max_tokens: 1000,
+              temperature: 0.1,
+              messages: [
+                {
+                  role: "system",
+                  content: "You write Slack push summaries. Output ONLY 3-5 bullet lines. Each line must start with •. Plain text only. No intro, no analysis, no headings, no markdown, no bold."
+                },
+                {
+                  role: "user",
+                  content: $p
+                }
+              ]
+            }'
+          }
+
+          if [ -z "${FIREWORKS_API_KEY:-}" ]; then
+            SUMMARY="• Summary unavailable — add FIREWORKS_API_KEY to repo secrets."
+          else
+            HTTP_CODE=$(curl -sS \
+              -o "$RUNNER_TEMP/fireworks.json" \
+              -w '%{http_code}' \
+              "https://api.fireworks.ai/inference/v1/chat/completions" \
+              -H "Authorization: Bearer $FIREWORKS_API_KEY" \
+              -H "Content-Type: application/json" \
+              --data "$(summarize)")
+
+            SUMMARY_RAW=$(jq -r '.choices[0].message.content // empty' "$RUNNER_TEMP/fireworks.json" 2>/dev/null || true)
+            SUMMARY=$(clean_summary "$SUMMARY_RAW")
+
+            if [ -z "$SUMMARY" ] || [ "$HTTP_CODE" -ge 400 ]; then
+              API_ERROR=$(jq -r '.error.message // empty' "$RUNNER_TEMP/fireworks.json" 2>/dev/null || true)
+
+              if [ -n "$API_ERROR" ]; then
+                SUMMARY="• Summary unavailable — $API_ERROR"
+              elif [ -n "$SUMMARY_RAW" ]; then
+                SUMMARY="• Summary unavailable — model returned analysis instead of bullets."
+              else
+                SUMMARY="• Summary unavailable — AI returned empty response (HTTP $HTTP_CODE)."
+              fi
+            fi
+          fi
+
+          printf '%s' "$COMMITS" > "$RUNNER_TEMP/commits.txt"
+          printf '%s' "$SUMMARY" > "$RUNNER_TEMP/summary.txt"
+
+      - name: Send to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+
+          COMMITS=$(cat "$RUNNER_TEMP/commits.txt")
+          SUMMARY=$(cat "$RUNNER_TEMP/summary.txt")
+
+          [ -n "$COMMITS" ] || COMMITS="(no commits found)"
+          [ -n "$SUMMARY" ] || SUMMARY="(no summary)"
+
+          PAYLOAD=$(jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg actor "${{ github.actor }}" \
+            --arg compare "${{ github.event.compare }}" \
+            --arg commits "$COMMITS" \
+            --arg summary "$SUMMARY" \
+            '
+            def trunc($n):
+              if length > $n then .[0:$n] + "..." else . end;
+
+            {
+              text: (
+                "Push to " + ($repo | trunc(200)) + "\n" +
+                "Branch: " + ($branch | trunc(200)) + " | By: " + ($actor | trunc(100)) + "\n\n" +
+                "Commits\n" + ($commits | trunc(1500)) + "\n\n" +
+                "Summary\n" + ($summary | trunc(1500)) +
+                (if ($compare | length) > 0 then "\n\n" + $compare else "" end)
+              )
+            }')
+
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "SLACK_WEBHOOK_URL secret is not set"
+            exit 1
+          fi
+
+          HTTP_CODE=$(curl -sS \
+            -o "$RUNNER_TEMP/slack.json" \
+            -w '%{http_code}' \
+            -X POST \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD" \
+            "$SLACK_WEBHOOK_URL")
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "Slack failed (HTTP $HTTP_CODE)"
+            cat "$RUNNER_TEMP/slack.json"
+            exit 1
+          fi
+
+          exit 0
