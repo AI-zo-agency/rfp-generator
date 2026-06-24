@@ -1,0 +1,53 @@
+import { NextResponse } from "next/server";
+
+const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8001";
+const IMPROVE_TIMEOUT_MS = 8 * 60 * 1000;
+
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string; sectionId: string }> }
+) {
+  const { id, sectionId } = await params;
+  let body: { message?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ detail: "Invalid JSON body" }, { status: 400 });
+  }
+  if (!body.message?.trim()) {
+    return NextResponse.json({ detail: "message is required" }, { status: 400 });
+  }
+
+  try {
+    const res = await fetch(
+      `${BACKEND_URL}/api/v1/rfps/${id}/proposal/sections/${sectionId}/improve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: body.message }),
+        signal: AbortSignal.timeout(IMPROVE_TIMEOUT_MS),
+      }
+    );
+    const text = await res.text();
+    if (!text.trim()) {
+      return NextResponse.json(
+        { detail: "Empty response from backend." },
+        { status: 502 }
+      );
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return NextResponse.json(
+        { detail: "Invalid JSON from backend." },
+        { status: 502 }
+      );
+    }
+    return NextResponse.json(data, { status: res.status });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Section improve failed";
+    return NextResponse.json({ detail: message }, { status: 502 });
+  }
+}

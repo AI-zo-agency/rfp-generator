@@ -1,0 +1,44 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment & secrets (never commit)
+.env
+.env.*
+!.env.example
+
+# Python
+backend/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Node / Next.js
+rfp-dashboard/node_modules/
+rfp-dashboard/.next/
+rfp-dashboard/out/
+rfp-dashboard/build/
+*.tsbuildinfo
+next-env.d.ts
+
+# Local data & uploads
+rfp-dashboard/data/
+rfp-dashboard/storage/
+*.pem
+*.key
+*.p12
+credentials.json
+token.json
+*-session.json
+
+# IDE / logs
+.idea/
+.vscode/
+*.log
+*.swp
+npm-debug.log*
+
+# Vercel
+.vercel/

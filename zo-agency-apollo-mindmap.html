@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zo Agency × Apollo Mind Map</title>
+  <style>
+    :root {
+      --teal: #274742;
+      --teal-dark: #1a2f2c;
+      --orange: #ef5018;
+      --orange-soft: #fff5f0;
+      --bg: #eef2f1;
+      --card: #ffffff;
+      --text: #1a2f2c;
+      --muted: #5a6b67;
+      --line: #b8c9c4;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      background: #d8dedc;
+      color: var(--text);
+      margin: 0;
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    .viewport-fit {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .mindmap-poster {
+      width: 1480px;
+      background: var(--bg);
+      border-radius: 16px;
+      box-shadow: 0 12px 48px rgba(26,47,44,.18);
+      overflow: hidden;
+      transform-origin: center center;
+    }
+
+    header {
+      background: #111;
+      color: #fff;
+      padding: 12px 28px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    header img { height: 26px; }
+    header h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.03em; }
+
+    .canvas {
+      padding: 28px 28px 32px;
+      position: relative;
+    }
+
+    /* ── Team row ── */
+    .team-row {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 12px;
+      margin-bottom: 0;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1.5px solid var(--teal);
+      border-radius: 10px;
+      padding: 14px 12px;
+      text-align: center;
+      box-shadow: 0 2px 8px rgba(39,71,66,.07);
+    }
+
+    .card .name {
+      font-weight: 700;
+      font-size: 12.5px;
+      color: var(--teal);
+      margin-bottom: 4px;
+      line-height: 1.3;
+    }
+
+    .card .role {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    .card .desc {
+      font-size: 10.5px;
+      color: var(--text);
+      line-height: 1.45;
+    }
+
+    /* ── Connector zone ── */
+    .connector-zone {
+      position: relative;
+      height: 56px;
+      display: flex;
+      justify-content: center;
+      align-items: flex-end;
+    }
+
+    .connector-zone svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    /* ── Hub ── */
+    .hub-row {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 0;
+    }
+
+    .hub {
+      background: var(--teal);
+      color: #fff;
+      border-radius: 50%;
+      width: 110px;
+      height: 110px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-weight: 700;
+      font-size: 15px;
+      line-height: 1.35;
+      box-shadow: 0 4px 20px rgba(39,71,66,.25);
+      z-index: 2;
+      position: relative;
+    }
+
+    .v-line {
+      display: flex;
+      justify-content: center;
+      height: 36px;
+    }
+
+    .v-line::after {
+      content: '';
+      width: 2px;
+      height: 100%;
+      background: var(--line);
+    }
+
+    /* ── Automation hub ── */
+    .auto-hub-row {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 0;
+    }
+
+    .auto-hub {
+      background: linear-gradient(135deg, var(--orange) 0%, #d94410 100%);
+      color: #fff;
+      border-radius: 999px;
+      padding: 14px 40px;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      box-shadow: 0 4px 18px rgba(239,80,24,.35);
+      z-index: 2;
+      position: relative;
+    }
+
+    /* ── Automation columns ── */
+    .auto-columns {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      align-items: stretch;
+      margin-top: 0;
+    }
+
+    .auto-column {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      background: var(--card);
+      border-radius: 14px;
+      border: 1.5px solid rgba(239,80,24,.2);
+      box-shadow: 0 6px 24px rgba(39,71,66,.08);
+      overflow: hidden;
+    }
+
+    .auto-lead {
+      background: linear-gradient(135deg, var(--orange) 0%, #d94410 100%);
+      color: #fff;
+      padding: 16px 18px;
+      font-weight: 700;
+      font-size: 16px;
+      text-align: center;
+      letter-spacing: 0.02em;
+      z-index: 2;
+      position: relative;
+    }
+
+    .auto-col-line {
+      display: none;
+    }
+
+    .auto-brief {
+      background: var(--orange-soft);
+      padding: 12px 12px 14px;
+      text-align: left;
+      flex: 1;
+      border-top: 3px solid rgba(239,80,24,.15);
+    }
+
+    .auto-brief ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      counter-reset: auto-step;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px 10px;
+    }
+
+    .auto-brief--fin ul {
+      grid-template-columns: 1fr;
+    }
+
+    .auto-brief li {
+      font-size: 11.5px;
+      line-height: 1.4;
+      color: var(--text);
+      padding: 6px 8px 6px 30px;
+      position: relative;
+      border-radius: 6px;
+      background: rgba(255,255,255,.45);
+    }
+
+    .auto-brief li::before {
+      counter-increment: auto-step;
+      content: counter(auto-step);
+      position: absolute;
+      left: 6px;
+      top: 7px;
+      width: 18px;
+      height: 18px;
+      background: var(--orange);
+      color: #fff;
+      font-size: 9.5px;
+      font-weight: 700;
+      border-radius: 50%;
+      text-align: center;
+      line-height: 18px;
+    }
+
+    /* ── Auto connector zone ── */
+    .auto-connector {
+      position: relative;
+      height: 52px;
+    }
+
+    .auto-connector svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    body.export-mode {
+      overflow: auto;
+      height: auto;
+      width: auto;
+      background: var(--bg);
+    }
+
+    body.export-mode .viewport-fit {
+      display: block;
+      width: auto;
+      height: auto;
+      overflow: visible;
+      padding: 0;
+    }
+
+    body.export-mode .mindmap-poster {
+      transform: none !important;
+      border-radius: 0;
+      box-shadow: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="viewport-fit">
+    <div class="mindmap-poster" id="poster">
+      <header>
+        <img src="logo.png" alt="Zo Agency" />
+        <h1>Zo Agency × Apollo</h1>
+      </header>
+
+      <div class="canvas">
+
+    <!-- TEAM -->
+    <div class="team-row" id="team-row">
+      <div class="card" id="t0">
+        <div class="name">Sonja Anderson</div>
+        <div class="role">CEO & owner</div>
+        <div class="desc">Sales, brand vision,<br/>RFP final review</div>
+      </div>
+      <div class="card" id="t1">
+        <div class="name">Todd Anderson</div>
+        <div class="role">Finance & personnel lead</div>
+        <div class="desc">Budget decisions,<br/>compliance, team support</div>
+      </div>
+      <div class="card" id="t2">
+        <div class="name">Ella Lindau</div>
+        <div class="role">Director of operations</div>
+        <div class="desc">Systems, SOPs,<br/>reporting, auditing</div>
+      </div>
+      <div class="card" id="t3">
+        <div class="name">Britton</div>
+        <div class="role">RFP contractor</div>
+        <div class="desc">Finds opportunities,<br/>writes proposals</div>
+      </div>
+      <div class="card" id="t4">
+        <div class="name">Rachel</div>
+        <div class="role">Ops & revenue coordinator</div>
+        <div class="desc">RFP triage,<br/>weekly audit train</div>
+      </div>
+      <div class="card" id="t5">
+        <div class="name">Curt</div>
+        <div class="role">Creative director</div>
+        <div class="desc">Proposal design,<br/>slide template, brand</div>
+      </div>
+    </div>
+
+    <!-- Lines: team → hub -->
+    <div class="connector-zone" id="team-connector">
+      <svg id="team-svg"></svg>
+    </div>
+
+    <!-- HUB -->
+    <div class="hub-row">
+      <div class="hub" id="hub">Zo<br/>Agency</div>
+    </div>
+
+    <!-- Line: hub → auto hub -->
+    <div class="v-line"></div>
+
+  <div class="auto-hub-row">
+      <div class="auto-hub" id="auto-hub">Automation Services</div>
+    </div>
+
+    <!-- Lines: auto hub → cards -->
+    <div class="auto-connector" id="auto-connector">
+      <svg id="auto-svg"></svg>
+    </div>
+
+    <!-- AUTOMATION: 3 service pillars -->
+    <div class="auto-columns" id="auto-row">
+
+      <div class="auto-column">
+        <div class="auto-lead">RFP Process</div>
+        <div class="auto-col-line"></div>
+        <div class="auto-brief">
+          <ul>
+            <li>Set up knowledge base — import facts, pricing, bios, case studies, won proposals, and guides</li>
+            <li>RFP intake from JustWin — detect new RFPs, pull metadata and PDF, create an active record</li>
+            <li>Go / no-go analysis — parse RFP, score fit and worth-it, recommend bid or pass for approval</li>
+            <li>Compliance mapping — build checklist and outline with sections, page limits, and required questions</li>
+            <li>Sections 1–3 — auto-fill company overview, bios, and case studies from the knowledge base</li>
+            <li>Sections 4–5 — draft custom approach and scope using RFP context and the Writing Guide</li>
+            <li>Pricing assistant — suggest line items, tiers, and qualifying language from the Pricing Guide</li>
+            <li>Pre-submission review — run voice, verification, and compliance checks before submit</li>
+            <li>Export manuscript — output design-ready content for zö's design team to lay out and submit</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="auto-column">
+        <div class="auto-lead">Financial Dashboard</div>
+        <div class="auto-col-line"></div>
+        <div class="auto-brief auto-brief--fin">
+          <ul>
+            <li>One live view of revenue, project hours, and costs</li>
+            <li>Spend vs budget tracking on every active project</li>
+            <li>Auto-flag billing errors and unusual transactions</li>
+            <li>Catch scope creep before projects run over</li>
+            <li>Track revenue and profit against agency goals</li>
+            <li>AI insights — weekly brief on risks, trends, and wins</li>
+            <li>Ask your finances — AI answers questions over live data</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="auto-column">
+        <div class="auto-lead">Lead Finding &amp; Outreach</div>
+        <div class="auto-col-line"></div>
+        <div class="auto-brief">
+          <ul>
+            <li>Research prospects that match zö's sectors and client profile</li>
+            <li>Score lead fit before the team spends time on outreach</li>
+            <li>Pull context on each prospect — industry, size, recent news</li>
+            <li>Draft personalized first-touch emails in zö's voice</li>
+            <li>Suggest follow-up timing and next steps per lead</li>
+            <li>Track who's been contacted and current response status</li>
+            <li>Log outreach in the pipeline so nothing falls through</li>
+            <li>Flag municipal and government opportunities worth pursuing</li>
+            <li>Draft intro messages for warm LinkedIn or referral connections</li>
+            <li>Surface relevant past wins and case studies per prospect</li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function drawLines(svgId, fromEls, toEl, containerId) {
+      const svg = document.getElementById(svgId);
+      const container = document.getElementById(containerId);
+      const cr = container.getBoundingClientRect();
+      const to = toEl.getBoundingClientRect();
+      const tx = to.left + to.width / 2 - cr.left;
+      const ty = to.top - cr.top;
+
+      svg.setAttribute('viewBox', `0 0 ${cr.width} ${cr.height}`);
+      svg.innerHTML = '';
+
+      fromEls.forEach(el => {
+        const fr = el.getBoundingClientRect();
+        const fx = fr.left + fr.width / 2 - cr.left;
+        const fy = fr.bottom - cr.top;
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const midY = (fy + ty) / 2;
+        path.setAttribute('d', `M ${fx} ${fy} C ${fx} ${midY}, ${tx} ${midY}, ${tx} ${ty}`);
+        path.setAttribute('stroke', '#b8c9c4');
+        path.setAttribute('stroke-width', '1.5');
+        path.setAttribute('fill', 'none');
+        svg.appendChild(path);
+      });
+    }
+
+    function redraw() {
+      const teamCards = [...document.querySelectorAll('.team-row .card')];
+      const hub = document.getElementById('hub');
+      const autoHub = document.getElementById('auto-hub');
+      const autoLeads = [...document.querySelectorAll('.auto-lead')];
+
+      drawLines('team-svg', teamCards, hub, 'team-connector');
+      drawLines('auto-svg', autoLeads, autoHub, 'auto-connector');
+    }
+
+    const isExport = new URLSearchParams(location.search).has('export');
+    if (isExport) document.body.classList.add('export-mode');
+
+    function fitPoster() {
+      if (isExport) return;
+      const poster = document.getElementById('poster');
+      const pad = 24;
+      const scale = Math.min(
+        (window.innerWidth - pad) / poster.offsetWidth,
+        (window.innerHeight - pad) / poster.offsetHeight,
+        1
+      );
+      poster.style.transform = `scale(${scale})`;
+    }
+
+    function refresh() {
+      redraw();
+      fitPoster();
+    }
+
+    window.addEventListener('load', refresh);
+    if (!isExport) window.addEventListener('resize', refresh);
+  </script>
+</body>
+</html>

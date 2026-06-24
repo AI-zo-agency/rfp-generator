@@ -1,0 +1,591 @@
+@import "tailwindcss";
+
+/* ── Light theme (default) ── */
+:root,
+[data-theme="light"] {
+  --zo-primary: #ef5018;
+  --zo-secondary: #0a0f1a;
+  --zo-accent: #ef5018;
+  --zo-off: #f1f3f2;
+  --zo-teal: #274742;
+  --zo-yellow: #ffd652;
+  --zo-olive: #90882a;
+  --zo-gray: #333333;
+  --zo-mid: #4c4c4c;
+  --zo-orange-soft: #ff8939;
+  --zo-danger: #cf2e2e;
+  --zo-black: #000000;
+  --zo-white: #ffffff;
+  --zo-teal-dark: #1e3632;
+  --zo-orange: #ef5018;
+  --zo-coral: #ff8939;
+  --zo-bg: #f6f7f9;
+  --zo-text: #0a0f1a;
+  --zo-cream: #f1f3f2;
+  --zo-cream-light: #ffffff;
+  --zo-charcoal: #f1f3f2;
+  --zo-warm-gray: #e5e7eb;
+  --zo-text-secondary: rgba(10, 15, 26, 0.82);
+  --zo-text-muted: rgba(10, 15, 26, 0.58);
+  --zo-border: rgba(17, 24, 39, 0.12);
+  --zo-card-bg: #ffffff;
+  --zo-card-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+  --zo-surface: rgba(17, 24, 39, 0.04);
+  --zo-surface-hover: rgba(17, 24, 39, 0.06);
+  --zo-input-bg: rgba(17, 24, 39, 0.04);
+  --zo-hover-bg: rgba(17, 24, 39, 0.04);
+  --shell-bg: #ffffff;
+  --shell-header-bg: rgba(255, 255, 255, 0.95);
+  --shell-border: rgba(17, 24, 39, 0.14);
+  --shell-marquee-bg: #ffffff;
+  --shell-nav-text: rgba(10, 15, 26, 0.82);
+  --shell-nav-hover: rgba(17, 24, 39, 0.06);
+  --grid-opacity: 0.35;
+  --background: var(--zo-bg);
+  --foreground: var(--zo-text);
+}
+
+/* ── Dark theme (legacy — not used in UI) ── */
+[data-theme="dark"] {
+  --zo-bg: #000000;
+  --zo-text: #ffffff;
+  --zo-cream: #1a1a1a;
+  --zo-cream-light: #111111;
+  --zo-charcoal: #0c0c0c;
+  --zo-warm-gray: #4c4c4c;
+  --zo-text-secondary: rgba(255, 255, 255, 0.84);
+  --zo-text-muted: rgba(255, 255, 255, 0.62);
+  --zo-border: rgba(255, 255, 255, 0.13);
+  --zo-card-bg: rgba(12, 12, 12, 0.86);
+  --zo-card-shadow: 0 22px 70px rgba(0, 0, 0, 0.45);
+  --zo-surface: rgba(255, 255, 255, 0.06);
+  --zo-surface-hover: rgba(255, 255, 255, 0.1);
+  --zo-input-bg: rgba(255, 255, 255, 0.05);
+  --zo-hover-bg: rgba(255, 255, 255, 0.05);
+  --shell-bg: rgba(0, 0, 0, 0.8);
+  --shell-header-bg: rgba(0, 0, 0, 0.7);
+  --shell-border: rgba(255, 255, 255, 0.1);
+  --shell-marquee-bg: rgba(0, 0, 0, 0.4);
+  --shell-nav-text: rgba(255, 255, 255, 0.84);
+  --shell-nav-hover: rgba(255, 255, 255, 0.1);
+  --grid-opacity: 1;
+  --background: var(--zo-bg);
+  --foreground: var(--zo-text);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-zo-primary: var(--zo-primary);
+  --color-zo-black: var(--zo-black);
+  --color-zo-white: var(--zo-white);
+  --color-zo-cream: var(--zo-cream);
+  --color-zo-cream-light: var(--zo-cream-light);
+  --color-zo-teal: var(--zo-teal);
+  --color-zo-teal-dark: var(--zo-teal-dark);
+  --color-zo-orange: var(--zo-orange);
+  --color-zo-coral: var(--zo-coral);
+  --color-zo-warm-gray: var(--zo-warm-gray);
+  --color-zo-charcoal: var(--zo-charcoal);
+  --color-zo-text-secondary: var(--zo-text-secondary);
+  --color-zo-text-muted: var(--zo-text-muted);
+  --color-zo-border: var(--zo-border);
+  --color-zo-surface: var(--zo-surface);
+  --color-zo-success: var(--zo-success);
+  --color-zo-warning: var(--zo-warning);
+  --color-zo-error: var(--zo-error);
+  --color-zo-off: var(--zo-off);
+  --color-zo-yellow: var(--zo-yellow);
+  --color-zo-orange-soft: var(--zo-orange-soft);
+  --color-zo-danger: var(--zo-danger);
+  --font-sans: var(--font-open-sans);
+  --font-heading: var(--font-open-sans);
+  --font-cabin: var(--font-cabin);
+}
+
+:root {
+  --font-heading: var(--font-open-sans);
+  --font-body: var(--font-open-sans);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-smooth: 350ms;
+  --duration-fast: 200ms;
+  --zo-radius-sm: 8px;
+  --zo-radius-md: 12px;
+  --zo-radius-lg: 16px;
+  --zo-radius-xl: 20px;
+  --zo-radius-2xl: 24px;
+  --zo-radius-full: 9999px;
+}
+
+body {
+  margin: 0;
+  background: var(--zo-bg);
+  color: var(--zo-text);
+  font-family: var(--font-body), system-ui, sans-serif;
+  font-weight: 400;
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: var(--grid-opacity);
+  background:
+    radial-gradient(circle at 8% 12%, rgba(239, 80, 24, 0.08), transparent 28%),
+    radial-gradient(circle at 82% 10%, rgba(39, 71, 66, 0.06), transparent 30%),
+    linear-gradient(90deg, rgba(17, 24, 39, 0.04) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(17, 24, 39, 0.04) 1px, transparent 1px);
+  background-size: auto, auto, 44px 44px, 44px 44px;
+  z-index: -2;
+}
+
+body::after {
+  display: none;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-heading), system-ui, sans-serif;
+  font-weight: 300;
+  letter-spacing: -0.04em;
+  color: var(--foreground);
+}
+
+.font-heading {
+  font-family: var(--font-heading), system-ui, sans-serif;
+  font-weight: 300;
+  letter-spacing: -0.04em;
+}
+
+.font-cabin {
+  font-family: var(--font-cabin), var(--font-body), system-ui, sans-serif;
+}
+
+/* ── Zo design system utilities ── */
+.zo-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--zo-primary);
+  color: #fff;
+  border: 0;
+  border-radius: var(--zo-radius-md);
+  padding: 12px 18px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-family: var(--font-cabin), var(--font-body), system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 13px;
+  transition:
+    transform 0.25s var(--ease-out-expo),
+    background 0.25s,
+    box-shadow 0.25s;
+  box-shadow: 0 10px 30px rgba(239, 80, 24, 0.2);
+  cursor: pointer;
+}
+
+.zo-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  background: #ff6935;
+  box-shadow: 0 18px 44px rgba(239, 80, 24, 0.33);
+}
+
+.zo-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.zo-btn.secondary {
+  background: transparent;
+  border: 1px solid var(--zo-border);
+  color: var(--foreground);
+  box-shadow: none;
+}
+
+.zo-btn.secondary:hover:not(:disabled) {
+  background: var(--zo-surface-hover);
+  transform: translateY(-2px);
+}
+
+[data-theme="light"] .zo-btn.secondary {
+  border-color: rgba(10, 15, 26, 0.22);
+  color: #0a0f1a;
+}
+
+.zo-btn.yellow {
+  background: var(--zo-yellow);
+  color: #000;
+  box-shadow: 0 12px 36px rgba(255, 214, 82, 0.18);
+}
+
+.zo-btn.yellow:hover:not(:disabled) {
+  background: #ffe07a;
+}
+
+.zo-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-family: var(--font-cabin), system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border: 1px solid var(--zo-border);
+  border-radius: var(--zo-radius-full);
+  color: var(--foreground);
+}
+
+.zo-panel-white {
+  background: #f1f3f2;
+  color: #0a0f1a;
+  border-radius: var(--zo-radius-xl);
+}
+
+.zo-panel-teal {
+  background: #274742;
+  color: #fff;
+  border-radius: var(--zo-radius-lg);
+}
+
+.zo-card {
+  background: var(--zo-card-bg);
+  border: 1px solid var(--zo-border);
+  border-radius: var(--zo-radius-xl);
+  box-shadow: var(--zo-card-shadow);
+  backdrop-filter: blur(18px);
+  color: var(--foreground);
+}
+
+.zo-panel-white h1,
+.zo-panel-white h2,
+.zo-panel-white h3,
+.zo-panel-white p,
+.zo-panel-white span {
+  color: inherit;
+}
+
+/* ── App shell ── */
+.shell-app {
+  background: var(--zo-bg);
+  color: var(--foreground);
+}
+
+.shell-sidebar {
+  background: var(--shell-bg);
+  border-color: var(--shell-border);
+  color: var(--foreground);
+}
+
+.shell-header {
+  background: var(--shell-header-bg);
+  border-color: var(--shell-border);
+  color: var(--foreground);
+}
+
+.shell-marquee {
+  background: var(--shell-marquee-bg);
+  border-color: var(--shell-border);
+}
+
+.shell-icon-btn {
+  border-color: var(--shell-border);
+  color: var(--shell-nav-text);
+  border-radius: var(--zo-radius-md);
+}
+
+.shell-nav-link {
+  color: var(--shell-nav-text);
+  border-radius: var(--zo-radius-md);
+}
+
+.shell-nav-link:hover {
+  background: var(--shell-nav-hover);
+  color: var(--foreground);
+}
+
+.shell-icon-btn:hover {
+  border-color: var(--zo-primary);
+  color: var(--foreground);
+}
+
+.zo-input {
+  background: var(--zo-input-bg);
+  color: var(--foreground);
+  border: 1px solid var(--zo-border);
+  border-radius: var(--zo-radius-md);
+}
+
+.zo-surface-panel {
+  background: var(--zo-surface);
+  border-radius: var(--zo-radius-lg);
+}
+
+.zo-toolbar-panel {
+  background: var(--shell-header-bg);
+}
+
+/* ── Smooth transitions (GPU-friendly properties only) ── */
+.transition-smooth {
+  transition-property: color, background-color, border-color, opacity, box-shadow,
+    transform;
+  transition-duration: var(--duration-fast);
+  transition-timing-function: var(--ease-smooth);
+}
+
+/* Sidebar width — single property, consistent easing */
+.sidebar-shell {
+  transition: width var(--duration-smooth) var(--ease-smooth);
+  contain: layout style;
+}
+
+.sidebar-text {
+  overflow: hidden;
+  white-space: nowrap;
+  transition: opacity var(--duration-fast) var(--ease-smooth),
+    max-width var(--duration-smooth) var(--ease-smooth);
+  max-width: 12rem;
+  opacity: 1;
+}
+
+.sidebar-shell[data-collapsed="true"] .sidebar-text {
+  max-width: 0;
+  opacity: 0;
+}
+
+.sidebar-shell[data-collapsed="true"] .sidebar-section-label {
+  opacity: 0;
+  max-height: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+.sidebar-section-label {
+  transition: opacity var(--duration-fast) var(--ease-smooth),
+    max-height var(--duration-smooth) var(--ease-smooth);
+}
+
+/* Main content shifts with sidebar — no jump */
+.main-column {
+  transition: flex-basis var(--duration-smooth) var(--ease-smooth);
+}
+
+.pipeline-step-active {
+  background: var(--zo-teal);
+  color: var(--zo-off);
+  border-radius: var(--zo-radius-full);
+}
+
+.pipeline-step-complete {
+  background: var(--zo-primary);
+  color: var(--zo-white);
+  border-radius: var(--zo-radius-full);
+}
+
+.pipeline-step-pending {
+  background: var(--zo-surface);
+  color: var(--zo-text-muted);
+  border-radius: var(--zo-radius-full);
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--zo-border);
+  border-radius: 3px;
+}
+
+/* ── Marquee ── */
+.marquee {
+  white-space: nowrap;
+  overflow: hidden;
+  border-block: 1px solid var(--shell-border);
+}
+
+.marquee-track {
+  display: inline-block;
+  padding-left: 100%;
+  animation: marquee 22s linear infinite;
+}
+
+@keyframes marquee {
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+@media (max-width: 980px) {
+  body::after {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Proposals workspace ── */
+.proposal-header {
+  color: #0a0f1a;
+}
+
+.proposal-header .text-zo-text-muted,
+.proposal-header .proposal-stat-card .text-zo-text-muted {
+  color: rgba(10, 15, 26, 0.58);
+}
+
+.proposal-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  width: 100%;
+}
+
+@media (min-width: 640px) {
+  .proposal-stat-grid {
+    width: auto;
+    min-width: 21rem;
+  }
+}
+
+.proposal-stat-card {
+  display: flex;
+  min-height: 5.5rem;
+  flex-direction: column;
+  justify-content: center;
+  border-radius: var(--zo-radius-lg);
+  border: 1px solid rgba(10, 15, 26, 0.1);
+  background: #ffffff;
+  padding: 0.875rem 1rem;
+  color: #0a0f1a;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+}
+
+.proposal-header .proposal-stat-card {
+  background: #ffffff;
+  border: 1px solid rgba(10, 15, 26, 0.1);
+  color: #0a0f1a;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+}
+
+.proposal-header .proposal-progress-track {
+  background: rgba(17, 24, 39, 0.08);
+  border-radius: var(--zo-radius-full);
+}
+
+.proposal-progress-track {
+  height: 8px;
+  border-radius: var(--zo-radius-full);
+  background: rgba(17, 24, 39, 0.08);
+  overflow: hidden;
+}
+
+.proposal-progress-fill {
+  height: 100%;
+  border-radius: var(--zo-radius-full);
+  background: linear-gradient(90deg, #ef5018 0%, #ff6935 100%);
+  transition: width var(--duration-smooth) var(--ease-smooth);
+}
+
+.proposal-section-active,
+.proposal-go-item-active {
+  background: linear-gradient(
+    90deg,
+    rgba(239, 80, 24, 0.1) 0%,
+    transparent 72%
+  );
+  box-shadow: inset 3px 0 0 var(--zo-primary);
+}
+
+.proposal-editor-pane {
+  background: #ffffff;
+  color: var(--foreground);
+}
+
+.proposal-section-list {
+  background: #fafbfc;
+}
+
+.proposal-toolbar {
+  background: #f1f3f2;
+  border-color: rgba(17, 24, 39, 0.1);
+}
+
+.proposal-content-article {
+  border: 1px solid rgba(17, 24, 39, 0.1);
+  border-radius: var(--zo-radius-xl);
+  background: #ffffff;
+  color: var(--foreground);
+  padding: 1.5rem 1.75rem;
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.04);
+  transition:
+    border-color var(--duration-fast) var(--ease-smooth),
+    box-shadow var(--duration-fast) var(--ease-smooth);
+}
+
+.proposal-content-article:hover {
+  border-color: rgba(239, 80, 24, 0.22);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.07);
+}
+
+.proposal-on-page-nav {
+  position: sticky;
+  top: 5.5rem;
+  align-self: start;
+  max-height: calc(100vh - 8rem);
+  overflow-y: auto;
+  border-left: 1px solid rgba(17, 24, 39, 0.1);
+  background: #fafbfc;
+}
+
+.proposal-on-page-link {
+  display: block;
+  border-radius: var(--zo-radius-md);
+  padding: 0.5rem 0.625rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--zo-text-secondary);
+  transition:
+    color var(--duration-fast) var(--ease-smooth),
+    background var(--duration-fast) var(--ease-smooth);
+}
+
+.proposal-on-page-link:hover {
+  background: rgba(239, 80, 24, 0.08);
+  color: var(--zo-orange);
+}
+
+.proposal-workspace-card {
+  overflow: hidden;
+  border-radius: var(--zo-radius-2xl);
+  border: 1px solid rgba(17, 24, 39, 0.1);
+  background: #ffffff;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.06);
+}
+
+.proposal-go-sidebar {
+  border-radius: var(--zo-radius-2xl);
+  border: 1px solid rgba(17, 24, 39, 0.1);
+  background: #ffffff;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.05);
+}
