@@ -4,7 +4,7 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
-_DASHBOARD_ROOT = _BACKEND_ROOT.parent / "rfp-dashboard"
+_DASHBOARD_ROOT = _BACKEND_ROOT.parent / "frontend"
 
 
 class Settings(BaseSettings):

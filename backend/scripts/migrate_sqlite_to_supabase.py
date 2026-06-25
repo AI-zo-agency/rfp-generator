@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-off: migrate rfp-dashboard/data/rfps.db → Supabase Postgres."""
+"""One-off: migrate frontend/data/rfps.db → Supabase Postgres."""
 
 from __future__ import annotations
 
