@@ -20,6 +20,7 @@ from app.services.proposal_generator import (
     _static_sections_from_draft,
 )
 from app.services.proposal_langchain import _provider_name
+from app.services.proposal_loss_lessons import format_avoidance_block
 from app.services.proposal_repository import get_proposal_draft, get_research_cache, save_proposal_draft, save_research_cache
 from app.services.proposal_retrieval_graph import (
     EXCERPT_MAX_CHARS,
@@ -50,6 +51,7 @@ Rules:
 3. Improve substantially on the previous draft — never return the same placeholder or [VERIFY] block if evidence now supports the content.
 4. Use [VERIFY: ...] only for requirements still missing from evidence.
 5. Match brand voice. Write submission-ready prose.
+6. Apply WRITING AVOIDANCES from lost bids when provided — do not repeat past loss patterns.
 
 Return ONLY JSON:
 {
@@ -218,6 +220,7 @@ async def _redraft_rfp_section(
     user_message: str,
     prior_content: str,
     zo_context: str,
+    avoidance_block: str = "",
 ) -> tuple[ProposalSection, str]:
     requirements = rfp_section.requirements if rfp_section else []
     raw, provider = await llm.chat_json(
@@ -237,6 +240,7 @@ async def _redraft_rfp_section(
                     f"Previous draft:\n{prior_content[:3000]}\n\n"
                     f"RFP excerpt:\n{rfp_context[:4000]}\n\n"
                     f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
+                    + (f"{avoidance_block}\n\n" if avoidance_block else "")
                     + (f"zö Sections 1–3 reference:\n{zo_context[:3000]}\n" if zo_context else "")
                 ),
             },
@@ -441,6 +445,11 @@ async def improve_proposal_section(
             if s.content.strip()
         )
 
+        avoidance_block = format_avoidance_block(
+            research.writing_avoidances,
+            research.loss_lessons,
+        )
+
         updated_section, provider = await _redraft_rfp_section(
             section=section,
             rfp_section=rfp_section,
@@ -451,6 +460,7 @@ async def improve_proposal_section(
             user_message=user_message,
             prior_content=section.content,
             zo_context=zo_context,
+            avoidance_block=avoidance_block,
         )
 
         new_queries = {**research.section_queries, section_id: [*prior_queries, *queries]}

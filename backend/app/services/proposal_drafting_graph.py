@@ -10,7 +10,8 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from app.models.proposal import EvidenceItem, ProposalBrandVoice, ProposalSection, RfpSectionMap
+from app.models.proposal import EvidenceItem, ProposalBrandVoice, ProposalSection, RfpSectionMap, LossLesson
+from app.services.proposal_loss_lessons import format_avoidance_block
 from app.services import llm
 from app.services.llm import LlmError
 from app.services.proposal_langchain import _provider_name
@@ -30,6 +31,7 @@ Rules (strict):
 4. For template/layout pulls (zoMode pull/select), include [DESIGNER NOTE: ...] and reference evidence.
 5. Match the brand voice block. Mirror RFP terminology where appropriate.
 6. Write complete, submission-ready prose (not bullet outlines unless the RFP requires bullets).
+7. Apply WRITING AVOIDANCES from lost bids/debriefs when provided — do not repeat patterns that caused past losses.
 
 Return ONLY JSON:
 {
@@ -55,6 +57,8 @@ class DraftingGraphState(TypedDict, total=False):
     evidence_corpus: list[dict[str, Any]]
     brand_voice: dict[str, Any]
     zo_sections_context: str
+    writing_avoidances: list[str]
+    loss_lessons: list[dict[str, Any]]
     drafted_sections: list[dict[str, Any]]
     provider: str
     error: str | None
@@ -163,6 +167,16 @@ async def _draft_batch(
             "do not duplicate verbatim — adapt to RFP section requirements):\n"
             f"{zo_ctx[:6000]}\n\n"
         )
+    avoid_block = format_avoidance_block(
+        state.get("writing_avoidances") or [],
+        [
+            LossLesson.model_validate(item)
+            for item in (state.get("loss_lessons") or [])
+            if isinstance(item, dict)
+        ],
+    )
+    if avoid_block:
+        user_content += f"{avoid_block}\n\n"
     user_content += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
 
     async with _LLM_SEMAPHORE:
@@ -308,6 +322,8 @@ async def run_drafting_graph(
     evidence_corpus: list[EvidenceItem],
     brand_voice: ProposalBrandVoice | None,
     zo_template_sections: list[ProposalSection] | None = None,
+    writing_avoidances: list[str] | None = None,
+    loss_lessons: list[LossLesson] | None = None,
 ) -> tuple[list[ProposalSection], str]:
     if not llm.is_configured():
         raise LlmError(
@@ -326,6 +342,10 @@ async def run_drafting_graph(
         "evidence_corpus": [e.model_dump(by_alias=True) for e in evidence_corpus],
         "brand_voice": brand_voice.model_dump(by_alias=True) if brand_voice else {},
         "zo_sections_context": _zo_sections_context(zo_template_sections or []),
+        "writing_avoidances": writing_avoidances or [],
+        "loss_lessons": [
+            lesson.model_dump(by_alias=True) for lesson in (loss_lessons or [])
+        ],
         "drafted_sections": [],
     }
 

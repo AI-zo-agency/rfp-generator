@@ -10,22 +10,23 @@ import {
 import {
   fetchProposalDraft,
   generateFullProposalWithResearch,
+  generateProposalPricing,
   generateProposalSections1to3,
-  runPhase2Retrieval,
-  runPhase3Drafting,
   saveProposalDraft,
 } from "@/lib/proposal-api";
-import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
+import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
 import { SectionStatusPill } from "./SectionStatusPill";
 import { SectionEditChat } from "./SectionEditChat";
+import { ProposalBudgetPanel } from "./ProposalBudgetPanel";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
 
-type WorkspaceTab = "outline" | "content" | "export";
+type WorkspaceTab = "outline" | "content" | "pricing" | "export";
 
 const workspaceTabs = [
   { id: "outline", label: "Outline" },
   { id: "content", label: "Content" },
+  { id: "pricing", label: "Budget" },
   { id: "export", label: "Export" },
 ];
 
@@ -53,6 +54,152 @@ function StatCard({
       ) : (
         <span className="mt-1.5 block h-[1.05rem]" aria-hidden />
       )}
+    </div>
+  );
+}
+
+function ResearchStatusPanel({
+  research,
+  fullProposalDone,
+  phase3Done,
+  sectionCount,
+  defaultExpanded,
+}: {
+  research: ProposalResearch;
+  fullProposalDone: boolean;
+  phase3Done: boolean;
+  sectionCount: number;
+  defaultExpanded: boolean;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const avoidances = research.writingAvoidances ?? [];
+  const statusLabel = fullProposalDone
+    ? "Full proposal ready"
+    : phase3Done
+      ? "RFP sections drafted"
+      : "Research ready";
+
+  return (
+    <div className="mx-4 mb-4 md:mx-6">
+      <div className="overflow-hidden rounded-2xl border border-zo-border/80 bg-white shadow-sm">
+        <button
+          type="button"
+          onClick={() => setExpanded((open) => !open)}
+          className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition-smooth hover:bg-[#fafbfc] md:px-6"
+          aria-expanded={expanded}
+        >
+          <div className="min-w-0">
+            <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-orange">
+              {statusLabel}
+            </p>
+            <p className="mt-1.5 text-sm leading-relaxed text-zo-text-secondary">
+              {research.rfpSections.length} mapped sections ·{" "}
+              {research.evidenceCorpus.length} evidence items
+              {fullProposalDone ? ` · ${sectionCount} in manuscript` : ""}
+            </p>
+          </div>
+          <svg
+            className={`h-5 w-5 shrink-0 text-zo-text-muted transition-transform ${
+              expanded ? "rotate-180" : ""
+            }`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+            aria-hidden
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+          </svg>
+        </button>
+
+        {expanded && (
+          <div className="space-y-6 border-t border-zo-border/60 px-5 py-5 md:px-6 md:py-6">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="rounded-xl bg-[#fafbfc] px-4 py-3">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
+                  Static
+                </p>
+                <p className="mt-1 text-sm text-foreground">
+                  Sections 1–3 — company, team, case studies
+                </p>
+              </div>
+              <div className="rounded-xl bg-[#fafbfc] px-4 py-3">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
+                  RFP-varying
+                </p>
+                <p className="mt-1 text-sm text-foreground">
+                  {research.rfpSections.length} sections from structural map
+                </p>
+              </div>
+              <div className="rounded-xl bg-[#fafbfc] px-4 py-3 sm:col-span-2 lg:col-span-1">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
+                  Retrieval
+                </p>
+                <p className="mt-1 text-sm text-foreground">
+                  {research.retrievalRounds} round
+                  {research.retrievalRounds === 1 ? "" : "s"} ·{" "}
+                  {research.evidenceCorpus.length} KB excerpts
+                </p>
+              </div>
+            </div>
+
+            {research.rfpSections.length > 0 && (
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
+                  Section coverage
+                </p>
+                <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {research.rfpSections.map((section) => {
+                    const pct = section.coveragePercent ?? 0;
+                    return (
+                      <li
+                        key={section.id}
+                        className="flex items-center gap-3 rounded-lg border border-zo-border/50 bg-[#fafbfc] px-3 py-2.5"
+                      >
+                        <span
+                          className="min-w-0 flex-1 text-sm leading-snug text-foreground"
+                          title={section.title}
+                        >
+                          {section.title}
+                        </span>
+                        <div className="hidden w-20 shrink-0 sm:block">
+                          <div className="h-1.5 overflow-hidden rounded-full bg-zo-warm-gray">
+                            <div
+                              className="proposal-progress-fill h-full"
+                              style={{ width: `${Math.min(100, pct)}%` }}
+                            />
+                          </div>
+                        </div>
+                        <span className="w-10 shrink-0 text-right text-xs font-semibold tabular-nums text-zo-text-secondary">
+                          {section.coveragePercent ?? "—"}%
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+
+            {avoidances.length > 0 && (
+              <div className="rounded-xl border border-amber-200/80 bg-amber-50/50 px-4 py-4">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-amber-900/70">
+                  Avoid from past losses (08_ / 09_)
+                </p>
+                <ul className="mt-3 space-y-3">
+                  {avoidances.map((item) => (
+                    <li
+                      key={item}
+                      className="text-sm leading-relaxed text-amber-950/85"
+                    >
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -99,8 +246,9 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
   );
   const [isGenerating, setIsGenerating] = useState(false);
   const [isFullProposalRunning, setIsFullProposalRunning] = useState(false);
-  const [isPhase2Running, setIsPhase2Running] = useState(false);
-  const [isPhase3Running, setIsPhase3Running] = useState(false);
+  const [isPricingRunning, setIsPricingRunning] = useState(false);
+  const [pricingError, setPricingError] = useState<string | null>(null);
+  const [budget, setBudget] = useState<ProposalBudget | null>(null);
   const [research, setResearch] = useState<ProposalResearch | null>(null);
   const [newSectionTitle, setNewSectionTitle] = useState("");
   const [hydrated, setHydrated] = useState(false);
@@ -127,6 +275,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
         setSelectedSectionId(defaults.sections[0]?.id ?? null);
       }
       setResearch(r ?? null);
+      setBudget(r?.budget ?? null);
       setHydrated(true);
     }
 
@@ -183,7 +332,31 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
   const fullProposalDone = phase3Done;
 
   const anyPipelineRunning =
-    isGenerating || isFullProposalRunning || isPhase2Running || isPhase3Running;
+    isGenerating || isFullProposalRunning || isPricingRunning;
+
+  const handleGeneratePricing = useCallback(async () => {
+    if (
+      budget &&
+      !confirm("Regenerate budget from Supermemory? (Uses LLM tokens.)")
+    ) {
+      return;
+    }
+    setIsPricingRunning(true);
+    setPricingError(null);
+    try {
+      const { budget: generated, research: updatedResearch } =
+        await generateProposalPricing(rfp.id);
+      setBudget(generated);
+      setResearch(updatedResearch);
+      setActiveTab("pricing");
+    } catch (error) {
+      setPricingError(
+        error instanceof Error ? error.message : "Pricing generation failed"
+      );
+    } finally {
+      setIsPricingRunning(false);
+    }
+  }, [rfp.id, budget]);
 
   const handleGenerateFullProposal = useCallback(async () => {
     if (
@@ -250,53 +423,6 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
       setIsGenerating(false);
     }
   }, [rfp.id, sections1to3Done]);
-
-  const handlePhase2Retrieval = useCallback(async () => {
-    setIsPhase2Running(true);
-    setGenerateError(null);
-    try {
-      const result = await runPhase2Retrieval(rfp.id);
-      setResearch(result);
-    } catch (error) {
-      setGenerateError(
-        error instanceof Error ? error.message : "Phase 2 retrieval failed"
-      );
-    } finally {
-      setIsPhase2Running(false);
-    }
-  }, [rfp.id]);
-
-  const handlePhase3Drafting = useCallback(async () => {
-    if (
-      phase3Done &&
-      !confirm(
-        "RFP sections already drafted. Re-run Phase 3 anyway? (Uses LLM tokens.)"
-      )
-    ) {
-      return;
-    }
-    setIsPhase3Running(true);
-    setGenerateError(null);
-    try {
-      const { draft, research: updatedResearch } = await runPhase3Drafting(
-        rfp.id
-      );
-      skipNextSaveRef.current = true;
-      setOutline(draft);
-      setResearch(updatedResearch);
-      await saveProposalDraft(rfp.id, draft);
-      setActiveTab("content");
-      setSelectedSectionId(
-        draft.sections.find((s) => s.content)?.id ?? draft.sections[0]?.id ?? null
-      );
-    } catch (error) {
-      setGenerateError(
-        error instanceof Error ? error.message : "Phase 3 drafting failed"
-      );
-    } finally {
-      setIsPhase3Running(false);
-    }
-  }, [rfp.id, phase3Done]);
 
   const handleResetOutline = () => {
     if (!confirm("Reset outline and clear all generated content?")) return;
@@ -463,52 +589,6 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
           </button>
           <button
             type="button"
-            onClick={handlePhase2Retrieval}
-            disabled={
-              !sections1to3Done || anyPipelineRunning
-            }
-            className="zo-btn secondary !py-2 disabled:opacity-50"
-            title={
-              sections1to3Done
-                ? "Map RFP sections, search Supermemory per section, build evidence corpus"
-                : "Generate Sections 1–3 first"
-            }
-          >
-            {isPhase2Running ? (
-              <>
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-zo-orange/30 border-t-zo-orange" />
-                Phase 2…
-              </>
-            ) : phase2Done ? (
-              "Re-run Phase 2"
-            ) : (
-              "Phase 2 — KB"
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={handlePhase3Drafting}
-            disabled={!phase2Done || anyPipelineRunning}
-            className="zo-btn secondary !py-2 disabled:opacity-50"
-            title={
-              phase2Done
-                ? "Draft RFP sections from evidence (keeps static Sections 1–3)"
-                : "Run Phase 2 first"
-            }
-          >
-            {isPhase3Running ? (
-              <>
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-zo-orange/30 border-t-zo-orange" />
-                Phase 3…
-              </>
-            ) : phase3Done ? (
-              "Re-run Phase 3"
-            ) : (
-              "Phase 3 — Draft"
-            )}
-          </button>
-          <button
-            type="button"
             onClick={handleGenerateSections1to3}
             disabled={anyPipelineRunning}
             className="zo-btn secondary !py-2 disabled:opacity-60"
@@ -557,39 +637,16 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
         </div>
       </div>
 
-      {phase2Done && research && (
-        <div className="mx-4 mb-2 rounded-xl border border-zo-border bg-[#fafbfc] px-5 py-4 md:mx-6">
-          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-orange">
-            {fullProposalDone
-              ? "Full proposal ready"
-              : phase3Done
-                ? "Phase 3 — Draft ready"
-                : "Phase 2 — Research ready"}
-          </p>
-          <p className="mt-1 text-sm text-zo-text-secondary">
-            <span className="font-medium text-foreground">Static:</span> Sections
-            1–3 (company, team, case studies) ·{" "}
-            <span className="font-medium text-foreground">RFP-varying:</span>{" "}
-            {research.rfpSections.length} mapped sections ·{" "}
-            {research.evidenceCorpus.length} evidence items ·{" "}
-            {research.retrievalRounds} retrieval round
-            {research.retrievalRounds === 1 ? "" : "s"}
-            {fullProposalDone &&
-              ` · ${outline.sections.length} sections in manuscript`}
-          </p>
-          {research.rfpSections.length > 0 && (
-            <ul className="mt-3 max-h-32 space-y-1 overflow-y-auto text-xs text-zo-text-muted">
-              {research.rfpSections.map((section) => (
-                <li key={section.id} className="flex justify-between gap-2">
-                  <span className="truncate">{section.title}</span>
-                  <span className="shrink-0 font-semibold tabular-nums">
-                    {section.coveragePercent ?? "—"}%
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+      {(activeTab === "outline" || activeTab === "content") &&
+        phase2Done &&
+        research && (
+        <ResearchStatusPanel
+          research={research}
+          fullProposalDone={fullProposalDone}
+          phase3Done={phase3Done}
+          sectionCount={outline.sections.length}
+          defaultExpanded={activeTab === "outline"}
+        />
       )}
 
       {/* Outline tab */}
@@ -801,7 +858,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                       })
                     }
                     rows={16}
-                    placeholder="Generate Sections 1–3 or run Phase 3 to auto-fill, or write manually…"
+                    placeholder="Generate Sections 1–3 or run full proposal to auto-fill, or write manually…"
                     className="zo-input w-full resize-y px-4 py-4 text-sm leading-[1.75] text-foreground outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
                   />
                 </label>
@@ -815,6 +872,9 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                     setOutline(updatedDraft);
                     if (updatedResearch) {
                       setResearch(updatedResearch);
+                      if (updatedResearch.budget) {
+                        setBudget(updatedResearch.budget);
+                      }
                     }
                     void saveProposalDraft(rfp.id, updatedDraft);
                   }}
@@ -834,8 +894,8 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
       {/* Content tab */}
       <TabPanel id="content" activeTab={activeTab}>
         {outline.sections.some((s) => s.content.trim()) ? (
-          <div className="grid lg:grid-cols-[minmax(0,1fr)_240px]">
-            <div className="custom-scrollbar max-h-[calc(100vh-18rem)] space-y-4 overflow-y-auto bg-[#f6f7f9] p-4 md:p-6">
+          <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(220px,280px)] lg:gap-6 lg:p-6">
+            <div className="custom-scrollbar max-h-[calc(100vh-14rem)] space-y-6 overflow-y-auto p-4 md:p-6 lg:max-h-[calc(100vh-12rem)] lg:p-0">
               {outline.sections.map((section, index) =>
                 section.content ? (
                   <article
@@ -870,20 +930,22 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
               )}
             </div>
 
-            <nav className="proposal-on-page-nav hidden p-5 lg:block">
+            <nav className="proposal-on-page-nav hidden lg:block lg:rounded-2xl lg:border lg:border-zo-border/80">
               <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                 On this page
               </p>
-              <ul className="mt-4 space-y-1">
+              <ul className="mt-4 space-y-0.5">
                 {outline.sections
                   .filter((s) => s.content)
                   .map((section, index) => (
                     <li key={section.id}>
                       <a
                         href={`#${section.id}`}
-                        className="proposal-on-page-link truncate"
+                        className="proposal-on-page-link"
+                        title={section.title}
                       >
-                        {index + 1}. {section.title}
+                        <span className="proposal-on-page-num">{index + 1}</span>
+                        <span className="proposal-on-page-title">{section.title}</span>
                       </a>
                     </li>
                   ))}
@@ -914,6 +976,19 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
             </button>
           </div>
         )}
+      </TabPanel>
+
+      {/* Budget tab — Supermemory pricing KB, RFP-aware */}
+      <TabPanel id="pricing" activeTab={activeTab}>
+        <div className="p-6 md:p-8">
+          <ProposalBudgetPanel
+            budget={budget}
+            isRunning={isPricingRunning}
+            error={pricingError}
+            disabled={anyPipelineRunning}
+            onGenerate={() => void handleGeneratePricing()}
+          />
+        </div>
       </TabPanel>
 
       {/* Export tab */}

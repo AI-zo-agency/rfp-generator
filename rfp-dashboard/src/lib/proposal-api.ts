@@ -2,6 +2,7 @@ import type {
   ProposalOutline,
   OutlineSection,
   ProposalResearch,
+  ProposalBudget,
 } from "@/types/proposal";
 
 interface ApiProposalSection {
@@ -195,6 +196,32 @@ export async function runPhase3Drafting(
     draft: apiDraftToOutline(data.draft),
     research: data.research,
   };
+}
+
+export async function generateProposalPricing(
+  rfpId: string
+): Promise<{ budget: ProposalBudget; research: ProposalResearch }> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/pricing/generate`, {
+    method: "POST",
+  });
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    budget?: ProposalBudget;
+    research?: ProposalResearch;
+  };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from server (pricing may have timed out).");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Pricing generation failed");
+  }
+  if (!data.budget || !data.research) {
+    throw new Error("No budget data returned from server");
+  }
+  return { budget: data.budget, research: data.research };
 }
 
 export async function improveProposalSection(

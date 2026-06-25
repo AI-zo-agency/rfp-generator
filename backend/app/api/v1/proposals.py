@@ -5,6 +5,7 @@ from app.models.proposal import (
     ProposalGenerateResponse,
     ProposalPhase2Response,
     ProposalPhase3Response,
+    ProposalPricingResponse,
     ProposalResearchCache,
     ProposalSectionImproveResponse,
     SectionImproveRequest,
@@ -16,6 +17,7 @@ from app.services.proposal_generator import (
     run_phase2_retrieval,
     run_phase3_drafting,
 )
+from app.services.proposal_pricing_service import generate_proposal_budget
 from app.services.proposal_section_editor import improve_proposal_section
 from app.services.proposal_repository import get_proposal_draft, get_research_cache, save_proposal_draft
 from app.services.rfp_repository import get_rfp
@@ -135,6 +137,25 @@ async def phase3_drafting_endpoint(rfp_id: str) -> ProposalPhase3Response:
         ) from exc
 
     return ProposalPhase3Response(draft=draft, research=research)
+
+
+@router.post(
+    "/{rfp_id}/proposal/pricing/generate",
+    response_model=ProposalPricingResponse,
+)
+async def generate_pricing_endpoint(rfp_id: str) -> ProposalPricingResponse:
+    """Build RFP-aware budget from Supermemory pricing KB (05_) — not Google Drive."""
+    try:
+        budget, research = await generate_proposal_budget(rfp_id)
+    except ProposalError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Pricing generation failed: {exc}",
+        ) from exc
+
+    return ProposalPricingResponse(budget=budget, research=research)
 
 
 @router.post(

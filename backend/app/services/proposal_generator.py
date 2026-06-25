@@ -25,6 +25,7 @@ from app.services.proposal_repository import (
     save_research_cache,
 )
 from app.services.proposal_drafting_graph import run_drafting_graph
+from app.services.proposal_loss_lessons import build_loss_lessons_for_rfp
 from app.services.proposal_retrieval_graph import run_retrieval_graph
 from app.services.proposal_sections_graph import run_sections_1_3_graph
 from app.services.rfp_repository import get_rfp
@@ -503,6 +504,11 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         rfp_context=rfp_context,
     )
 
+    loss_lessons, writing_avoidances, _loss_sources = await build_loss_lessons_for_rfp(
+        rfp=rfp,
+        rfp_context=rfp_context,
+    )
+
     now = datetime.now(timezone.utc).isoformat()
     research = ProposalResearchCache(
         rfpId=rfp.id,
@@ -513,17 +519,20 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         sectionQueries=section_queries,
         retrievalRounds=retrieval_rounds,
         coverageThreshold=85,
+        lossLessons=loss_lessons,
+        writingAvoidances=writing_avoidances,
+        budget=prior_research.budget if prior_research else None,
         updatedAt=now,
         provider=provider,
     )
     save_research_cache(research)
 
     logger.info(
-        "Phase 2 complete for %s: %d RFP sections, %d evidence items, %d rounds",
+        "Phase 2 complete for %s: %d RFP sections, %d evidence items, %d loss lessons",
         rfp_id,
         len(rfp_sections),
         len(evidence_corpus),
-        retrieval_rounds,
+        len(loss_lessons),
     )
     return research
 
@@ -626,6 +635,8 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         evidence_corpus=research.evidence_corpus,
         brand_voice=research.brand_voice,
         zo_template_sections=static_sections,
+        writing_avoidances=research.writing_avoidances,
+        loss_lessons=research.loss_lessons,
     )
 
     merged_sections = _merge_static_with_rfp_sections(

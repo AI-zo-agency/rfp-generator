@@ -46,6 +46,7 @@ async def search_knowledge_base(
     *,
     limit: int = 6,
     category: str | None = None,
+    max_chars: int | None = None,
 ) -> tuple[str, list[str]]:
     if not supermemory.is_configured():
         return "(Supermemory not configured.)", []
@@ -82,7 +83,9 @@ async def search_knowledge_base(
         )
         sources.append(str(label))
 
-    text = supermemory.format_search_hits(hits, max_chars=SEARCH_CHARACTER_LIMIT)
+    text = supermemory.format_search_hits(
+        hits, max_chars=max_chars or SEARCH_CHARACTER_LIMIT
+    )
     return text or "(No matching knowledge-base content.)", sources
 
 

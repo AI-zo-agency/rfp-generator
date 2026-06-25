@@ -183,6 +183,9 @@ def parse_filename(filename: str) -> ParsedFilename:
     body = match.group("body")
 
     category = CODE_TO_CATEGORY.get(code) or PREFIX_TO_CATEGORY.get(prefix, "reference")
+    # 00_Guide_Pricing etc. — pricing rules, not generic reference
+    if prefix == "00" and re.search(r"pricing|price|rate", body, re.I):
+        category = "pricing"
     client, doc_kind = _split_body(body)
     title = _build_title(client, doc_kind, body)
 
