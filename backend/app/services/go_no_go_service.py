@@ -1113,27 +1113,40 @@ Cite specific RFP requirements and specific knowledge-base evidence. Tag uncerta
         {"role": "user", "content": user_prompt},
     ]
 
-    try:
-        raw, provider = await llm.chat_json(messages, max_tokens=12_000, temperature=0.45)
-        normalized = _apply_hard_rules(raw, deadline=deadline_info)
-        normalized = _coerce_go_no_go_raw(normalized)
-        analysis = GoNoGoAnalysis.model_validate({**normalized, "provider": provider})
-    except ValidationError as exc:
-        logger.error(
-            "Go/No-Go validation failed for rfp %s: %s",
-            rfp.id,
-            exc.errors()[:8],
-        )
-        raise GoNoGoError(
-            f"Go/No-Go analysis validation failed: {exc.errors()[0].get('msg', exc)}",
-            status_code=502,
-        ) from exc
-    except llm.LlmError as exc:
-        logger.error("LLM failed for rfp %s: %s", rfp.id, exc)
-        if content.metadata_only:
-            logger.info("Falling back to local needs-input template for %s", rfp.id)
-            return _build_needs_input_analysis(rfp, content)
-        raise GoNoGoError(f"Go/No-Go analysis failed: {exc}", status_code=502) from exc
+    analysis: GoNoGoAnalysis | None = None
+    for attempt in range(2):
+        try:
+            raw, provider = await llm.chat_json(messages, max_tokens=12_000, temperature=0.45)
+            normalized = _apply_hard_rules(raw, deadline=deadline_info)
+            normalized = _coerce_go_no_go_raw(normalized)
+            analysis = GoNoGoAnalysis.model_validate({**normalized, "provider": provider})
+            break
+        except ValidationError as exc:
+            logger.error(
+                "Go/No-Go validation failed for rfp %s: %s",
+                rfp.id,
+                exc.errors()[:8],
+            )
+            raise GoNoGoError(
+                f"Go/No-Go analysis validation failed: {exc.errors()[0].get('msg', exc)}",
+                status_code=502,
+            ) from exc
+        except llm.LlmError as exc:
+            logger.error(
+                "LLM failed for rfp %s (attempt %d/2): %s",
+                rfp.id,
+                attempt + 1,
+                exc,
+            )
+            if attempt == 0:
+                continue
+            if content.metadata_only:
+                logger.info("Falling back to local needs-input template for %s", rfp.id)
+                return _build_needs_input_analysis(rfp, content)
+            raise GoNoGoError(f"Go/No-Go analysis failed: {exc}", status_code=502) from exc
+
+    if analysis is None:
+        raise GoNoGoError("Go/No-Go analysis failed after retries", status_code=502)
 
     logger.info(
         "Go/No-Go analysis complete for rfp_id=%s provider=%s recommendation=%s "

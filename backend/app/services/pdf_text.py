@@ -7,8 +7,16 @@ def extract_pdf_text(pdf_path: str, *, max_chars: int = 120_000) -> str:
     path = Path(pdf_path)
     if not path.is_file():
         return ""
+    return extract_pdf_text_from_bytes(path.read_bytes(), max_chars=max_chars)
 
-    reader = PdfReader(str(path))
+
+def extract_pdf_text_from_bytes(content: bytes, *, max_chars: int = 120_000) -> str:
+    if not content or not content.startswith(b"%PDF"):
+        return ""
+
+    from io import BytesIO
+
+    reader = PdfReader(BytesIO(content))
     parts: list[str] = []
     total = 0
 

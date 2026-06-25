@@ -1,10 +1,4 @@
-import { insertManualRfp } from "@/lib/db";
-import {
-  buildManualRfpRecord,
-  saveManualRfpPdf,
-  validateManualRfpInput,
-  type ManualRfpInput,
-} from "@/lib/manual-rfp";
+import { backendFetch } from "@/lib/backend-api";
 import { getDashboardData } from "@/lib/rfp-service";
 import type { RfpPriority } from "@/types/rfp";
 import { NextResponse } from "next/server";
@@ -14,75 +8,56 @@ export async function GET() {
 
   return NextResponse.json({
     ...data,
-    source: process.env.JUSTWIN_API_KEY ? "justwin" : "mock",
+    source: "backend",
   });
-}
-
-function parseOptionalInt(value: FormDataEntryValue | null): number | undefined {
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function formToInput(form: FormData): ManualRfpInput {
-  const priority = form.get("priority");
-  return {
-    title: String(form.get("title") ?? ""),
-    client: String(form.get("client") ?? ""),
-    location: String(form.get("location") ?? ""),
-    sector: String(form.get("sector") ?? ""),
-    dueDate: String(form.get("dueDate") ?? ""),
-    description: String(form.get("description") ?? ""),
-    pageLimit: parseOptionalInt(form.get("pageLimit")),
-    estimatedValue: parseOptionalInt(form.get("estimatedValue")),
-    priority:
-      typeof priority === "string" && priority
-        ? (priority as RfpPriority)
-        : undefined,
-  };
 }
 
 export async function POST(request: Request) {
   try {
     const contentType = request.headers.get("content-type") ?? "";
-    let input: ManualRfpInput;
-    let pdfFile: File | null = null;
+    const isMultipart = contentType.includes("multipart/form-data");
 
-    if (contentType.includes("multipart/form-data")) {
-      const form = await request.formData();
-      input = formToInput(form);
-      const file = form.get("pdf");
-      pdfFile = file instanceof File && file.size > 0 ? file : null;
-    } else {
-      const body = (await request.json()) as ManualRfpInput;
-      input = body;
+    const response = await backendFetch("/rfps", {
+      method: "POST",
+      body: isMultipart ? await request.formData() : await request.text(),
+      headers: isMultipart ? undefined : { "Content-Type": contentType || "application/json" },
+    });
+
+    const text = await response.text();
+    if (!text.trim()) {
+      return NextResponse.json(
+        { error: "Empty response from backend" },
+        { status: 502 }
+      );
     }
 
-    const validationError = validateManualRfpInput(input);
-    if (validationError) {
-      return NextResponse.json({ error: validationError }, { status: 400 });
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON from backend" },
+        { status: 502 }
+      );
     }
 
-    const record = buildManualRfpRecord(input);
-
-    if (pdfFile) {
-      try {
-        record.pdfPath = await saveManualRfpPdf(record.id, pdfFile);
-        record.pdfUrl = `/api/rfps/${record.id}/pdf`;
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Failed to save PDF.";
-        return NextResponse.json({ error: message }, { status: 400 });
-      }
+    if (!response.ok) {
+      const detail =
+        typeof data === "object" && data && "detail" in data
+          ? String((data as { detail: unknown }).detail)
+          : typeof data === "object" && data && "error" in data
+            ? String((data as { error: unknown }).error)
+            : "Failed to create RFP";
+      return NextResponse.json({ error: detail }, { status: response.status });
     }
 
-    insertManualRfp(record);
-
-    return NextResponse.json({ ok: true, rfp: record }, { status: 201 });
+    return NextResponse.json(
+      { ok: true, rfp: data },
+      { status: response.status }
+    );
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to create manual RFP.";
-    const status = message.includes("UNIQUE constraint") ? 409 : 500;
-    return NextResponse.json({ error: message }, { status });
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

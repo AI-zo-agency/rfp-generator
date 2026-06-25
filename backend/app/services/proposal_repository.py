@@ -3,11 +3,18 @@ import sqlite3
 from datetime import datetime, timezone
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache
+from app.services import supabase_db as sb
 from app.services.rfp_repository import _connect, init_db as init_rfp_db
+
+
+def _use_supabase() -> bool:
+    return sb.use_supabase_db()
 
 
 def init_proposal_db() -> None:
     init_rfp_db()
+    if _use_supabase():
+        return
     with _connect() as conn:
         conn.executescript(
             """
@@ -26,6 +33,8 @@ def init_proposal_db() -> None:
 
 
 def get_research_cache(rfp_id: str) -> ProposalResearchCache | None:
+    if _use_supabase():
+        return sb.get_research_cache(rfp_id)
     with _connect() as conn:
         row = conn.execute(
             "SELECT payload FROM proposal_research WHERE rfp_id = ?",
@@ -37,6 +46,9 @@ def get_research_cache(rfp_id: str) -> ProposalResearchCache | None:
 
 
 def save_research_cache(cache: ProposalResearchCache) -> None:
+    if _use_supabase():
+        sb.save_research_cache(cache)
+        return
     now = datetime.now(timezone.utc).isoformat()
     cache.updated_at = now
     with _connect() as conn:
@@ -53,6 +65,8 @@ def save_research_cache(cache: ProposalResearchCache) -> None:
 
 
 def get_proposal_draft(rfp_id: str) -> ProposalDraft | None:
+    if _use_supabase():
+        return sb.get_proposal_draft(rfp_id)
     with _connect() as conn:
         row = conn.execute(
             "SELECT payload FROM proposal_drafts WHERE rfp_id = ?",
@@ -64,6 +78,9 @@ def get_proposal_draft(rfp_id: str) -> ProposalDraft | None:
 
 
 def save_proposal_draft(draft: ProposalDraft) -> None:
+    if _use_supabase():
+        sb.save_proposal_draft(draft)
+        return
     now = datetime.now(timezone.utc).isoformat()
     draft.updated_at = now
     with _connect() as conn:

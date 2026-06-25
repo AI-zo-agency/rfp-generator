@@ -2,14 +2,32 @@ import "./load-env";
 import { getAuthenticatedContext, getJustWinBaseUrl } from "./browser";
 import { scrapeAllLeads } from "./scrape-leads";
 import { downloadPdfFromSolicitationPackage } from "./solicitation-package";
-import { closeDb, finishSyncJob, upsertRfp } from "../../src/lib/db";
 import { mapLeadToRfp } from "../../src/lib/justwin-mapper";
+import {
+  finishSyncJob,
+  upsertRfpViaBackend,
+} from "../../src/lib/sync-jobs-api";
+
+const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8001";
 
 /**
  * JustWin Playwright CLI — disabled while the dashboard uses FastAPI backend.
  * Set to true to run manually (also update package.json sync:justwin script).
  */
 const JUSTWIN_SYNC_CLI_ENABLED = false;
+
+async function uploadPdfToBackend(rfpId: string, pdfPath: string): Promise<void> {
+  const fs = await import("fs");
+  const content = fs.readFileSync(pdfPath);
+  const response = await fetch(`${BACKEND_URL}/api/v1/rfps/${rfpId}/pdf`, {
+    method: "POST",
+    headers: { "Content-Type": "application/pdf" },
+    body: content,
+  });
+  if (!response.ok) {
+    throw new Error(`PDF upload failed for ${rfpId}: ${response.status}`);
+  }
+}
 
 async function main() {
   if (!JUSTWIN_SYNC_CLI_ENABLED) {
@@ -51,12 +69,16 @@ async function main() {
         lead.externalId,
         lead.detailUrl
       );
-      if (pdfPath) pdfsDownloaded++;
-      upsertRfp(mapLeadToRfp(lead, pdfPath));
+      const record = mapLeadToRfp(lead, pdfPath ? `pending:${lead.externalId}` : undefined);
+      await upsertRfpViaBackend(record);
+      if (pdfPath) {
+        await uploadPdfToBackend(record.id, pdfPath);
+        pdfsDownloaded++;
+      }
     }
 
     if (jobId !== "manual") {
-      finishSyncJob(jobId, {
+      await finishSyncJob(jobId, {
         status: "completed",
         rfpsFound: leads.length,
         pdfsDownloaded,
@@ -74,7 +96,7 @@ async function main() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (jobId !== "manual") {
-      finishSyncJob(jobId, {
+      await finishSyncJob(jobId, {
         status: "failed",
         rfpsFound: 0,
         pdfsDownloaded: 0,
@@ -86,7 +108,6 @@ async function main() {
   } finally {
     await context.close();
     await browser.close();
-    closeDb();
   }
 }
 

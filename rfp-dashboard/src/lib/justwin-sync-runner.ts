@@ -14,7 +14,7 @@ import {
   finishSyncJob,
   getLatestSyncJob,
   getRunningSyncJob,
-} from "@/lib/db";
+} from "@/lib/sync-jobs-api";
 
 function tryParseJson(output: string): {
   rfpsFound?: number;
@@ -42,53 +42,18 @@ function tryParseJson(output: string): {
   return null;
 }
 
-export function startJustWinSync():
-  | { jobId: string; status: "running" }
-  | { error: string } {
+export async function startJustWinSync():
+  Promise<{ jobId: string; status: "running" } | { error: string }> {
   if (!JUSTWIN_SYNC_ENABLED) {
     return { error: JUSTWIN_SYNC_DISABLED_MESSAGE };
   }
 
-  if (getRunningSyncJob()) {
+  if (await getRunningSyncJob()) {
     return { error: "Sync already in progress" };
   }
 
   const jobId = randomUUID();
-  createSyncJob(jobId);
-
-  // Playwright sync — uncomment when re-enabled:
-  // const child = spawn("npm", ["run", "sync:justwin", "--", jobId], {
-  //   cwd: process.cwd(),
-  //   stdio: ["ignore", "pipe", "pipe"],
-  //   env: {
-  //     ...process.env,
-  //     JUSTWIN_RFP_TITLE_FILTER:
-  //       process.env.JUSTWIN_RFP_TITLE_FILTER ??
-  //       "Advertising, Marketing, Communications for Tennessee Board of Regents",
-  //   },
-  //   shell: process.platform === "win32",
-  // });
-  //
-  // let output = "";
-  // child.stdout?.on("data", (chunk: Buffer) => {
-  //   output += chunk.toString();
-  // });
-  // child.stderr?.on("data", (chunk: Buffer) => {
-  //   output += chunk.toString();
-  // });
-  //
-  // child.on("close", (code) => {
-  //   const parsed = tryParseJson(output);
-  //   finishSyncJob(jobId, {
-  //     status: code === 0 ? "completed" : "failed",
-  //     rfpsFound: parsed?.rfpsFound ?? 0,
-  //     pdfsDownloaded: parsed?.pdfsDownloaded ?? 0,
-  //     error:
-  //       code !== 0
-  //         ? (parsed?.error ?? (output.trim() || "Sync failed"))
-  //         : undefined,
-  //   });
-  // });
+  await createSyncJob(jobId);
 
   finishSyncJob(jobId, {
     status: "failed",

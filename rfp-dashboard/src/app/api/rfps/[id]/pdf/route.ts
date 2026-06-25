@@ -1,45 +1,80 @@
-import fs from "fs";
-import path from "path";
 import { NextResponse } from "next/server";
-import { getRfpPdfPath } from "@/lib/db";
+
+const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8001";
 
 export const runtime = "nodejs";
 
-function resolvePdfPath(rfpId: string, recorded: string | null): string | null {
-  const pdfRoot =
-    process.env.PDF_STORAGE_PATH ?? path.join(process.cwd(), "storage", "pdfs");
-  const candidates = [
-    path.join(pdfRoot, rfpId, "rfp.pdf"),
-    ...(recorded
-      ? [
-          recorded,
-          path.join(process.cwd(), recorded),
-          path.resolve(process.cwd(), recorded),
-        ]
-      : []),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
+async function proxyPdf(
+  request: Request,
+  id: string,
+  method: "GET" | "HEAD"
+) {
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/v1/rfps/${id}/pdf`, {
+      method,
+      cache: "no-store",
+      redirect: "manual",
+    });
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (location) {
+        return NextResponse.redirect(location, response.status);
+      }
+    }
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const message =
+        typeof body === "object" && body && "detail" in body
+          ? String((body as { detail: unknown }).detail)
+          : "PDF not found";
+      return NextResponse.json({ error: message }, { status: response.status });
+    }
+
+    if (method === "HEAD") {
+      return new NextResponse(null, {
+        status: response.status,
+        headers: {
+          "Content-Type": response.headers.get("content-type") ?? "application/pdf",
+          "Content-Disposition": "inline",
+          ...(response.headers.get("content-length")
+            ? { "Content-Length": response.headers.get("content-length")! }
+            : {}),
+        },
+      });
+    }
+
+    const buffer = await response.arrayBuffer();
+    return new NextResponse(buffer, {
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": "inline",
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load PDF";
+    return NextResponse.json(
+      {
+        error: `Cannot reach API at ${BACKEND_URL}. Start the FastAPI backend. (${message})`,
+      },
+      { status: 502 }
+    );
   }
-  return null;
 }
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
   const { id } = await context.params;
-  const pdfPath = resolvePdfPath(id, getRfpPdfPath(id));
+  return proxyPdf(request, id, "GET");
+}
 
-  if (!pdfPath) {
-    return NextResponse.json({ error: "PDF not found" }, { status: 404 });
-  }
-
-  const buffer = fs.readFileSync(pdfPath);
-  return new NextResponse(buffer, {
-    headers: {
-      "Content-Type": "application/pdf",
-      "Content-Disposition": "inline",
-    },
-  });
+export async function HEAD(
+  request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
+  const { id } = await context.params;
+  return proxyPdf(request, id, "HEAD");
 }

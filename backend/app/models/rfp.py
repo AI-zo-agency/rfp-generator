@@ -103,6 +103,9 @@ class DashboardResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     status: str
     app: str
-    database_path: str
+    database: str = Field(description="supabase or sqlite")
+    database_path: str | None = Field(default=None, alias="databasePath")

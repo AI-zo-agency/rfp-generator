@@ -1,40 +1,19 @@
-"""Read uploaded RFP content from local storage only (not Supermemory)."""
+"""Read uploaded RFP content from Supabase Storage or local disk (not Supermemory)."""
 
 from pathlib import Path
 
-from app.core.config import _BACKEND_ROOT, settings
 from app.models.rfp import RfpRecord
-from app.services.pdf_text import extract_pdf_text
+from app.services.pdf_text import extract_pdf_text, extract_pdf_text_from_bytes
 from app.services.rfp_repository import get_rfp_pdf_path
+from app.services.rfp_storage import is_supabase_path, load_rfp_pdf_bytes, resolve_local_pdf_path
 
 
 def resolve_rfp_pdf_path(rfp_id: str, pdf_path: str | None = None) -> Path | None:
-    """Find the on-disk PDF for an RFP (handles legacy relative paths in SQLite)."""
+    """Local filesystem path only — None when PDF is in Supabase."""
     recorded = (pdf_path or get_rfp_pdf_path(rfp_id) or "").strip()
-    candidates: list[Path] = [
-        settings.pdf_storage_path / rfp_id / "rfp.pdf",
-    ]
-    if recorded:
-        path = Path(recorded)
-        dashboard_root = settings.database_path.parent.parent
-        candidates.extend(
-            [
-                path,
-                Path.cwd() / path,
-                _BACKEND_ROOT / path,
-                dashboard_root / path,
-            ]
-        )
-
-    seen: set[str] = set()
-    for candidate in candidates:
-        key = str(candidate)
-        if key in seen:
-            continue
-        seen.add(key)
-        if candidate.is_file():
-            return candidate
-    return None
+    if is_supabase_path(recorded):
+        return None
+    return resolve_local_pdf_path(rfp_id, recorded or None)
 
 
 def load_local_rfp_text(
@@ -45,11 +24,21 @@ def load_local_rfp_text(
     """Return description, pdf_text, pdf_exists, pdf_file_missing."""
     description = (rfp.description or "").strip()
     pdf_path_recorded = rfp.pdf_path or get_rfp_pdf_path(rfp.id)
-    resolved = resolve_rfp_pdf_path(rfp.id, pdf_path_recorded)
-    pdf_exists = resolved is not None
+
+    pdf_bytes = load_rfp_pdf_bytes(rfp.id, pdf_path_recorded)
+    pdf_exists = pdf_bytes is not None
     pdf_text = (
-        extract_pdf_text(str(resolved), max_chars=max_chars) if resolved else ""
+        extract_pdf_text_from_bytes(pdf_bytes, max_chars=max_chars)
+        if pdf_bytes
+        else ""
     )
+
+    if not pdf_text and pdf_path_recorded and not is_supabase_path(pdf_path_recorded):
+        resolved = resolve_rfp_pdf_path(rfp.id, pdf_path_recorded)
+        if resolved:
+            pdf_text = extract_pdf_text(str(resolved), max_chars=max_chars)
+            pdf_exists = True
+
     pdf_file_missing = bool(pdf_path_recorded and not pdf_exists)
     return description, pdf_text, pdf_exists, pdf_file_missing
 

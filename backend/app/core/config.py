@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     fireworks_model: str = "accounts/fireworks/models/llama-v3p3-70b-instruct"
     fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
 
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+    supabase_rfp_bucket: str = "rfp-pdfs"
+
     @field_validator("supermemory_container_tag")
     @classmethod
     def normalize_container_tag(cls, value: str) -> str:

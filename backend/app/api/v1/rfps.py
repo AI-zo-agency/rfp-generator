@@ -16,6 +16,7 @@ from app.services.rfp_repository import (
     save_go_no_go_analysis,
     save_manual_pdf,
     update_rfp_pdf_path,
+    upsert_rfp,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,13 @@ def get_dashboard() -> DashboardResponse:
         allRfps=all_rfps,
         stats=compute_stats(all_rfps),
     )
+
+
+@router.put("/upsert")
+def upsert_rfp_endpoint(record: RfpRecord) -> dict[str, bool]:
+    """JustWin sync — upsert by external_id."""
+    upsert_rfp(record)
+    return {"ok": True}
 
 
 @router.get("/{rfp_id}", response_model=RfpRecord)
@@ -146,19 +154,88 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
     }
 
 
-@router.get("/{rfp_id}/pdf")
-def get_rfp_pdf(rfp_id: str):
-    from fastapi.responses import FileResponse
+@router.post("/{rfp_id}/pdf")
+async def upload_rfp_pdf(rfp_id: str, request: Request) -> dict[str, str]:
+    """Upload or replace RFP PDF (Supabase bucket when configured)."""
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    content_type = request.headers.get("content-type", "")
+    content: bytes | None = None
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        pdf_file = form.get("pdf")
+        if pdf_file and hasattr(pdf_file, "read"):
+            content = await pdf_file.read()
+    else:
+        content = await request.body()
+
+    if not content:
+        raise HTTPException(status_code=400, detail="PDF file is required")
+
+    try:
+        pdf_path = save_manual_pdf(rfp_id, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    update_rfp_pdf_path(rfp_id, pdf_path)
+    return {"ok": "true", "pdfPath": pdf_path}
+
+
+@router.api_route("/{rfp_id}/pdf", methods=["GET", "HEAD"])
+def get_rfp_pdf(rfp_id: str, request: Request):
+    from fastapi.responses import FileResponse, RedirectResponse, Response
 
     from app.services.rfp_content import resolve_rfp_pdf_path
+    from app.services.rfp_storage import (
+        is_supabase_path,
+        load_rfp_pdf_bytes,
+        resolve_pdf_view_url,
+    )
+
+    head_only = request.method == "HEAD"
 
     rfp = get_rfp(rfp_id)
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
-    path = resolve_rfp_pdf_path(rfp_id, rfp.pdf_path or get_rfp_pdf_path(rfp_id))
+    pdf_path = rfp.pdf_path or get_rfp_pdf_path(rfp_id)
+
+    if pdf_path and is_supabase_path(pdf_path):
+        signed = resolve_pdf_view_url(rfp_id, pdf_path, sign=True)
+        if signed and signed.startswith("http"):
+            return RedirectResponse(url=signed, status_code=302)
+
+    pdf_bytes = load_rfp_pdf_bytes(rfp_id, pdf_path)
+    if pdf_bytes:
+        headers = {
+            "Content-Disposition": 'inline; filename="rfp.pdf"',
+            "Content-Length": str(len(pdf_bytes)),
+        }
+        if head_only:
+            return Response(status_code=200, media_type="application/pdf", headers=headers)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers=headers,
+        )
+
+    path = resolve_rfp_pdf_path(rfp_id, pdf_path)
     if not path:
-        raise HTTPException(status_code=404, detail="PDF file missing on disk")
+        raise HTTPException(status_code=404, detail="PDF file not found")
+
+    if head_only:
+        size = path.stat().st_size
+        return Response(
+            status_code=200,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": 'inline; filename="rfp.pdf"',
+                "Content-Length": str(size),
+            },
+        )
 
     return FileResponse(
         path,

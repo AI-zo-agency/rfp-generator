@@ -1,70 +1,71 @@
-import { getAllRfps, getRfpById as getRfpByIdFromDb } from "@/lib/db";
+import { cache } from "react";
+import { backendJson } from "@/lib/backend-api";
+import { withDashboardPdfUrl } from "@/lib/rfp-pdf";
 import { computeStats, mockRfps } from "@/lib/mock-rfps";
 import type { DashboardStats, RfpRecord } from "@/types/rfp";
 
-/**
- * Reads synced JustWin RFPs from SQLite first, then optional API, then mock data.
- */
-export async function getRfps(): Promise<RfpRecord[]> {
-  try {
-    const synced = getAllRfps();
-    if (synced.length > 0) {
-      return synced;
-    }
-  } catch {
-    // Database not initialized yet.
-  }
-
-  const apiKey = process.env.JUSTWIN_API_KEY;
-  const apiUrl = process.env.JUSTWIN_API_URL;
-
-  if (apiKey && apiUrl) {
-    try {
-      const response = await fetch(`${apiUrl}/rfps`, {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          Accept: "application/json",
-        },
-        next: { revalidate: 300 },
-      });
-
-      if (response.ok) {
-        const data = (await response.json()) as RfpRecord[];
-        return data;
-      }
-    } catch {
-      // Fall through to mock data
-    }
-  }
-
-  return mockRfps;
-}
-
-export async function getRfpById(id: string): Promise<RfpRecord | null> {
-  try {
-    const fromDb = getRfpByIdFromDb(id);
-    if (fromDb) return fromDb;
-  } catch {
-    // Database not initialized yet.
-  }
-
-  const all = await getRfps();
-  return all.find((r) => r.id === id || r.externalId === id) ?? null;
-}
-
-export async function getDashboardData(): Promise<{
+interface DashboardResponse {
   rfps: RfpRecord[];
   allRfps: RfpRecord[];
   stats: DashboardStats;
-}> {
-  const allRfps = await getRfps();
-  const rfps = allRfps.filter(
-    (r) => !["won", "lost", "passed", "submitted"].includes(r.status)
-  );
+}
+
+/**
+ * Reads RFPs from FastAPI backend (Supabase Postgres or SQLite fallback on backend).
+ */
+export const getRfps = cache(async (): Promise<RfpRecord[]> => {
+  const { data, error } = await backendJson<RfpRecord[]>("/rfps");
+  if (data) return data.map(withDashboardPdfUrl);
+
+  if (process.env.NODE_ENV === "development" && process.env.USE_MOCK_RFPS === "true") {
+    return mockRfps;
+  }
+
+  if (error) {
+    console.warn("[rfp-service] backend unavailable:", error);
+  }
+  return [];
+});
+
+export const getRfpById = cache(async (id: string): Promise<RfpRecord | null> => {
+  const { data } = await backendJson<RfpRecord>(`/rfps/${encodeURIComponent(id)}`);
+  if (data) return withDashboardPdfUrl(data);
+
+  if (process.env.NODE_ENV === "development" && process.env.USE_MOCK_RFPS === "true") {
+    return mockRfps.find((r) => r.id === id || r.externalId === id) ?? null;
+  }
+  return null;
+});
+
+export const getDashboardData = cache(async (): Promise<{
+  rfps: RfpRecord[];
+  allRfps: RfpRecord[];
+  stats: DashboardStats;
+}> => {
+  const { data, error } = await backendJson<DashboardResponse>("/rfps/dashboard");
+  if (data) {
+    return {
+      rfps: data.rfps.map(withDashboardPdfUrl),
+      allRfps: data.allRfps.map(withDashboardPdfUrl),
+      stats: data.stats,
+    };
+  }
+
+  if (process.env.NODE_ENV === "development" && process.env.USE_MOCK_RFPS === "true") {
+    const allRfps = mockRfps;
+    const rfps = allRfps.filter(
+      (r) => !["won", "lost", "passed", "submitted"].includes(r.status)
+    );
+    return { rfps, allRfps, stats: computeStats(allRfps) };
+  }
+
+  if (error) {
+    console.warn("[rfp-service] dashboard unavailable:", error);
+  }
 
   return {
-    rfps,
-    allRfps,
-    stats: computeStats(allRfps),
+    rfps: [],
+    allRfps: [],
+    stats: computeStats([]),
   };
-}
+});

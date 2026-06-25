@@ -143,43 +143,6 @@ function ResearchStatusPanel({
               </div>
             </div>
 
-            {research.rfpSections.length > 0 && (
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
-                  Section coverage
-                </p>
-                <ul className="mt-3 grid gap-2 sm:grid-cols-2">
-                  {research.rfpSections.map((section) => {
-                    const pct = section.coveragePercent ?? 0;
-                    return (
-                      <li
-                        key={section.id}
-                        className="flex items-center gap-3 rounded-lg border border-zo-border/50 bg-[#fafbfc] px-3 py-2.5"
-                      >
-                        <span
-                          className="min-w-0 flex-1 text-sm leading-snug text-foreground"
-                          title={section.title}
-                        >
-                          {section.title}
-                        </span>
-                        <div className="hidden w-20 shrink-0 sm:block">
-                          <div className="h-1.5 overflow-hidden rounded-full bg-zo-warm-gray">
-                            <div
-                              className="proposal-progress-fill h-full"
-                              style={{ width: `${Math.min(100, pct)}%` }}
-                            />
-                          </div>
-                        </div>
-                        <span className="w-10 shrink-0 text-right text-xs font-semibold tabular-nums text-zo-text-secondary">
-                          {section.coveragePercent ?? "—"}%
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            )}
-
             {avoidances.length > 0 && (
               <div className="rounded-xl border border-amber-200/80 bg-amber-50/50 px-4 py-4">
                 <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-amber-900/70">

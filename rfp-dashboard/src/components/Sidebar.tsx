@@ -14,8 +14,8 @@ import {
 
 const workspaceNav = [
   { href: "/", label: "Dashboard", Icon: IconDashboard },
-  { href: "/rfps", label: "RFPs", Icon: IconRfp },
-  { href: "/proposals", label: "Proposals", Icon: IconProposal },
+  { href: "/rfps", label: "RFPs", Icon: IconRfp, prefetch: false },
+  { href: "/proposals", label: "Proposals", Icon: IconProposal, prefetch: false },
   { href: "/knowledge-base", label: "Knowledge Base", Icon: IconKnowledge },
   { href: "/pipeline", label: "Pipeline", Icon: IconPipeline },
   { href: "/analytics", label: "Analytics", Icon: IconAnalytics },
@@ -58,6 +58,7 @@ export function Sidebar({ collapsed }: SidebarProps) {
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={"prefetch" in item ? item.prefetch : undefined}
                 title={collapsed ? item.label : undefined}
                 className={`flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-normal transition-smooth ${
                   active

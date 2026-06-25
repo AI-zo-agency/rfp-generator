@@ -1,5 +1,5 @@
+import { backendFetch } from "@/lib/backend-api";
 import { NextResponse } from "next/server";
-import { updateRfpGoNoGo } from "@/lib/db";
 
 export async function POST(
   _request: Request,
@@ -8,12 +8,13 @@ export async function POST(
   const { id } = await context.params;
 
   try {
-    const updated = updateRfpGoNoGo(id, "go");
-    if (!updated) {
-      return NextResponse.json({ error: "RFP not found" }, { status: 404 });
-    }
-    return NextResponse.json({ ok: true, goNoGo: "go" });
-  } catch {
-    return NextResponse.json({ error: "Failed to update" }, { status: 500 });
+    const response = await backendFetch(`/rfps/${encodeURIComponent(id)}/go`, {
+      method: "POST",
+    });
+    const data = await response.json();
+    return NextResponse.json(data, { status: response.status });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to update";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

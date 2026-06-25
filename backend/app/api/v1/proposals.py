@@ -20,14 +20,14 @@ from app.services.proposal_generator import (
 from app.services.proposal_pricing_service import generate_proposal_budget
 from app.services.proposal_section_editor import improve_proposal_section
 from app.services.proposal_repository import get_proposal_draft, get_research_cache, save_proposal_draft
-from app.services.rfp_repository import get_rfp
+from app.services.rfp_repository import get_rfp, rfp_exists
 
 router = APIRouter(prefix="/rfps", tags=["proposals"])
 
 
 @router.get("/{rfp_id}/proposal")
 def get_proposal(rfp_id: str) -> dict[str, object]:
-    if not get_rfp(rfp_id):
+    if not rfp_exists(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
     draft = get_proposal_draft(rfp_id)
     research = get_research_cache(rfp_id)

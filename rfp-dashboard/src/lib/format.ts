@@ -47,7 +47,7 @@ export function computeGoScore(
 ): number | null {
   if (isMissingScore(fitScore) && isMissingScore(worthScore)) return null;
   if (!isMissingScore(fitScore) && !isMissingScore(worthScore)) {
-    return Math.round((fitScore + worthScore) / 2);
+    return Math.round((fitScore! + worthScore!) / 2);
   }
   return fitScore ?? worthScore ?? null;
 }

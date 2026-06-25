@@ -1,5 +1,4 @@
 import json
-import shutil
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -8,8 +7,14 @@ from pathlib import Path
 from app.core.config import settings
 from app.models.go_no_go import GoNoGoAnalysis
 from app.models.rfp import DashboardStats, ManualRfpCreate, RfpRecord
+from app.services.rfp_storage import delete_rfp_pdf, save_rfp_pdf
+from app.services import supabase_db as sb
 
 TERMINAL_STATUSES = {"won", "lost", "passed", "submitted"}
+
+
+def _use_supabase() -> bool:
+    return sb.use_supabase_db()
 
 
 def _db_path() -> Path:
@@ -25,6 +30,14 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    if _use_supabase():
+        try:
+            sb.ping()
+        except sb.SupabaseDbError as exc:
+            import logging
+
+            logging.getLogger(__name__).warning("Supabase ping failed: %s", exc)
+        return
     with _connect() as conn:
         conn.executescript(
             """
@@ -118,7 +131,7 @@ def _row_to_rfp(row: sqlite3.Row) -> RfpRecord:
         goNoGoAnalysis=_parse_analysis_json(
             row["go_no_go_analysis"] if "go_no_go_analysis" in row.keys() else None
         ),
-        pdfUrl=f"/api/v1/rfps/{rfp_id}/pdf" if pdf_path else None,
+        pdfUrl=None,
     )
 
 
@@ -143,6 +156,8 @@ def _dedupe_by_title(rfps: list[RfpRecord]) -> list[RfpRecord]:
 
 
 def list_rfps() -> list[RfpRecord]:
+    if _use_supabase():
+        return sb.list_rfps()
     with _connect() as conn:
         rows = conn.execute(
             "SELECT * FROM rfps ORDER BY synced_at DESC, received_date DESC"
@@ -151,6 +166,8 @@ def list_rfps() -> list[RfpRecord]:
 
 
 def get_rfp(rfp_id: str) -> RfpRecord | None:
+    if _use_supabase():
+        return sb.get_rfp(rfp_id)
     with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM rfps WHERE id = ? OR external_id = ?",
@@ -159,7 +176,20 @@ def get_rfp(rfp_id: str) -> RfpRecord | None:
     return _row_to_rfp(row) if row else None
 
 
+def rfp_exists(rfp_id: str) -> bool:
+    if _use_supabase():
+        return sb.rfp_exists(rfp_id)
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM rfps WHERE id = ? OR external_id = ? LIMIT 1",
+            (rfp_id, rfp_id),
+        ).fetchone()
+    return row is not None
+
+
 def get_rfp_pdf_path(rfp_id: str) -> str | None:
+    if _use_supabase():
+        return sb.get_rfp_pdf_path(rfp_id)
     with _connect() as conn:
         row = conn.execute(
             "SELECT pdf_path FROM rfps WHERE id = ? OR external_id = ?",
@@ -197,8 +227,11 @@ def insert_manual_rfp(payload: ManualRfpCreate, pdf_path: str | None = None) -> 
         description=payload.description.strip() if payload.description else None,
         syncedAt=now,
         pdfPath=pdf_path,
-        pdfUrl=f"/api/v1/rfps/{rfp_id}/pdf" if pdf_path else None,
+        pdfUrl=None,
     )
+
+    if _use_supabase():
+        return sb.insert_rfp(record)
 
     with _connect() as conn:
         conn.execute(
@@ -249,6 +282,71 @@ def insert_manual_rfp(payload: ManualRfpCreate, pdf_path: str | None = None) -> 
     return record
 
 
+def upsert_rfp(record: RfpRecord) -> None:
+    if _use_supabase():
+        sb.upsert_rfp(record)
+        return
+
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO rfps (
+                id, external_id, title, client, source, sector, location,
+                due_date, received_date, stage, status, priority, fit_score, worth_score,
+                go_no_go, assigned_to, estimated_value, page_limit, last_activity,
+                last_activity_note, contract_role, description, justwin_tab, pdf_path,
+                justwin_detail_url, synced_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?
+            )
+            ON CONFLICT(external_id) DO UPDATE SET
+                title = excluded.title,
+                client = excluded.client,
+                due_date = excluded.due_date,
+                received_date = excluded.received_date,
+                fit_score = excluded.fit_score,
+                description = excluded.description,
+                justwin_tab = excluded.justwin_tab,
+                pdf_path = COALESCE(excluded.pdf_path, rfps.pdf_path),
+                last_activity = excluded.last_activity,
+                last_activity_note = excluded.last_activity_note,
+                synced_at = excluded.synced_at
+            """,
+            (
+                record.id,
+                record.external_id or record.id,
+                record.title,
+                record.client,
+                record.source,
+                record.sector,
+                record.location,
+                record.due_date,
+                record.received_date,
+                record.stage,
+                record.status,
+                record.priority,
+                record.fit_score,
+                record.worth_score,
+                record.go_no_go,
+                record.assigned_to,
+                record.estimated_value,
+                record.page_limit,
+                record.last_activity,
+                record.last_activity_note,
+                record.contract_role,
+                record.description,
+                record.justwin_tab,
+                record.pdf_path,
+                record.justwin_detail_url,
+                record.synced_at,
+            ),
+        )
+
+
 def _composite_go_score(
     fit_score: int | None, worth_score: int | None
 ) -> int | None:
@@ -260,6 +358,9 @@ def _composite_go_score(
 
 
 def save_go_no_go_analysis(rfp_id: str, analysis: GoNoGoAnalysis) -> RfpRecord | None:
+    if _use_supabase():
+        return sb.save_go_no_go_analysis(rfp_id, analysis)
+
     from app.services.go_no_go_service import analysis_activity_note
 
     now = datetime.now(timezone.utc).isoformat()
@@ -313,6 +414,9 @@ def save_go_no_go_analysis(rfp_id: str, analysis: GoNoGoAnalysis) -> RfpRecord |
 
 
 def mark_rfp_go(rfp_id: str) -> bool:
+    if _use_supabase():
+        return sb.mark_rfp_go(rfp_id)
+
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as conn:
         cursor = conn.execute(
@@ -359,39 +463,19 @@ def compute_stats(all_rfps: list[RfpRecord]) -> DashboardStats:
 
 
 def save_manual_pdf(rfp_id: str, content: bytes) -> str:
-    if len(content) < 500 or not content.startswith(b"%PDF"):
-        raise ValueError("Uploaded file is not a valid PDF")
-
-    pdf_dir = settings.pdf_storage_path / rfp_id
-    pdf_dir.mkdir(parents=True, exist_ok=True)
-    target = pdf_dir / "rfp.pdf"
-    target.write_bytes(content)
-    return str(target)
+    return save_rfp_pdf(rfp_id, content)
 
 
 def update_rfp_pdf_path(rfp_id: str, pdf_path: str) -> None:
+    if _use_supabase():
+        sb.update_rfp_pdf_path(rfp_id, pdf_path)
+        return
+
     with _connect() as conn:
         conn.execute(
             "UPDATE rfps SET pdf_path = ? WHERE id = ? OR external_id = ?",
             (pdf_path, rfp_id, rfp_id),
         )
-
-
-def _remove_rfp_pdf_files(rfp_id: str, pdf_path: str | None) -> None:
-    pdf_root = settings.pdf_storage_path / rfp_id
-    if pdf_root.is_dir():
-        shutil.rmtree(pdf_root, ignore_errors=True)
-
-    if not pdf_path:
-        return
-
-    recorded = Path(pdf_path)
-    if not recorded.is_absolute():
-        recorded = (_db_path().parent.parent / recorded).resolve()
-    if recorded.is_file():
-        recorded.unlink(missing_ok=True)
-    if recorded.parent.is_dir() and recorded.parent.name == rfp_id:
-        shutil.rmtree(recorded.parent, ignore_errors=True)
 
 
 def delete_rfp(rfp_id: str) -> RfpRecord | None:
@@ -400,6 +484,12 @@ def delete_rfp(rfp_id: str) -> RfpRecord | None:
         return None
 
     pdf_path = rfp.pdf_path or get_rfp_pdf_path(rfp.id)
+
+    if _use_supabase():
+        if not sb.delete_rfp_row(rfp.id):
+            return None
+        delete_rfp_pdf(rfp.id, pdf_path)
+        return rfp
 
     with _connect() as conn:
         conn.execute("DELETE FROM proposal_research WHERE rfp_id = ?", (rfp.id,))
@@ -411,5 +501,5 @@ def delete_rfp(rfp_id: str) -> RfpRecord | None:
         if cursor.rowcount == 0:
             return None
 
-    _remove_rfp_pdf_files(rfp.id, pdf_path)
+    delete_rfp_pdf(rfp.id, pdf_path)
     return rfp
