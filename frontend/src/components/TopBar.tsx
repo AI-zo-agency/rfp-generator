@@ -1,11 +1,21 @@
 "use client";
 
+import { useRouter } from "next/navigation";
+
 interface TopBarProps {
   collapsed: boolean;
   onToggleSidebar: () => void;
 }
 
 export function TopBar({ collapsed, onToggleSidebar }: TopBarProps) {
+  const router = useRouter();
+
+  const handleLogout = () => {
+    localStorage.removeItem("auth_token");
+    localStorage.removeItem("auth_user");
+    router.push("/login");
+  };
+
   return (
     <header className="shell-header sticky top-0 z-30 flex flex-wrap items-center justify-between gap-4 border-b px-6 py-4 backdrop-blur-xl md:px-10">
       <div className="flex items-center gap-4">
@@ -46,7 +56,7 @@ export function TopBar({ collapsed, onToggleSidebar }: TopBarProps) {
           <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-[#ef5018]" />
         </button>
 
-        <button type="button" className="zo-btn secondary !py-3">
+        <button type="button" onClick={handleLogout} className="zo-btn secondary !py-3">
           Logout
         </button>
       </div>
