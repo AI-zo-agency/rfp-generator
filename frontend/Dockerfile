@@ -19,6 +19,10 @@ COPY . .
 # Next.js telemetry can be disabled during the build
 ENV NEXT_TELEMETRY_DISABLED=1
 
+# Expose Railway variables to the build step
+ARG NEXT_PUBLIC_BACKEND_URL
+ENV NEXT_PUBLIC_BACKEND_URL=$NEXT_PUBLIC_BACKEND_URL
+
 RUN npm run build
 
 # Production image, copy all the files and run next
