@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8001";
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
 const PHASE2_TIMEOUT_MS = 10 * 60 * 1000;
 
 export async function POST(

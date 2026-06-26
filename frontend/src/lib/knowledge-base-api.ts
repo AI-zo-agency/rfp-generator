@@ -23,7 +23,7 @@ export interface KnowledgeBaseFoldersResponse {
   source: string;
 }
 
-const BACKEND = process.env.BACKEND_URL ?? "http://localhost:8001";
+const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
 
 async function backendFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BACKEND}/api/v1${path}`, {

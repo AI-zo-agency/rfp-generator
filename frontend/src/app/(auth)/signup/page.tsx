@@ -62,7 +62,7 @@ export default function SignupPage() {
     >
       
       <div className="mb-8 text-center">
-        <div className="text-[14px] uppercase tracking-[0.34em] text-[#4a1805] drop-shadow-md font-bold">
+        <div className="text-[14px] uppercase tracking-[0.34em] text-white drop-shadow-md font-bold">
           ZO AGENCY
         </div>
         <h1 className="mt-2 text-3xl font-heading font-light text-white drop-shadow-md">Create an Account</h1>

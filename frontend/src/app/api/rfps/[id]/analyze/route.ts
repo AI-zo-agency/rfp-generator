@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8001";
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
 /** Go/No-Go runs KB search + large JSON LLM (~60–90s). */
 const ANALYZE_TIMEOUT_MS = 4 * 60 * 1000;
 
