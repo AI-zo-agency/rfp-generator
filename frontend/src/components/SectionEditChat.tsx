@@ -14,6 +14,7 @@ interface SectionEditChatProps {
   rfpId: string;
   section: OutlineSection;
   disabled?: boolean;
+  docked?: boolean;
   onSectionUpdated: (draft: ProposalOutline, research: ProposalResearch | null) => void;
 }
 
@@ -28,6 +29,7 @@ export function SectionEditChat({
   rfpId,
   section,
   disabled,
+  docked = false,
   onSectionUpdated,
 }: SectionEditChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -84,29 +86,44 @@ export function SectionEditChat({
         setIsRunning(false);
       }
     },
-    [rfpId, section.id, isRunning, onSectionUpdated]
+    [rfpId, section.id, isRunning, onSectionUpdated],
   );
 
   return (
-    <div className="mt-8 rounded-xl border border-zo-border bg-[#fafbfc]">
-      <div className="border-b border-zo-border px-4 py-3">
+    <div
+      className={
+        docked
+          ? "flex h-full min-h-0 flex-col"
+          : "mt-8 rounded-xl border border-zo-border bg-[#fafbfc]"
+      }
+    >
+      <div
+        className={
+          docked
+            ? "shrink-0 border-b border-zo-border px-3 py-2"
+            : "border-b border-zo-border px-4 py-3"
+        }
+      >
         <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-orange">
           Section agent
         </p>
-        <p className="mt-1 text-xs text-zo-text-muted">
-          Re-queries Supermemory with new detailed searches (never repeats prior
-          queries), then rewrites only this section.
-        </p>
+        {!docked ? (
+          <p className="mt-1 text-xs text-zo-text-muted">
+            Re-queries Supermemory with new detailed searches (never repeats prior
+            queries), then rewrites only this section.
+          </p>
+        ) : null}
       </div>
 
       <div
         ref={scrollRef}
-        className="custom-scrollbar max-h-48 space-y-3 overflow-y-auto px-4 py-3"
+        className={`custom-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-2 ${
+          docked ? "" : "max-h-48"
+        }`}
       >
         {messages.length === 0 && (
           <p className="text-xs text-zo-text-muted">
-            Tell the agent what is wrong — e.g. &quot;not well, need firm history
-            and org chart&quot; — or use a quick prompt below.
+            Ask the agent to improve this section, or use a quick prompt below.
           </p>
         )}
         {messages.map((msg) => (
@@ -114,40 +131,42 @@ export function SectionEditChat({
             key={msg.id}
             className={`rounded-lg px-3 py-2 text-sm leading-relaxed ${
               msg.role === "user"
-                ? "ml-6 bg-[#ef5018]/10 text-foreground"
-                : "mr-6 bg-white text-zo-text-secondary"
+                ? "ml-4 bg-[#ef5018]/10 text-foreground"
+                : "mr-4 bg-white text-zo-text-secondary"
             }`}
           >
             {msg.content}
           </div>
         ))}
-        {isRunning && (
+        {isRunning ? (
           <p className="text-xs font-medium text-zo-orange">
             Searching KB with new queries and rewriting section…
           </p>
-        )}
+        ) : null}
       </div>
 
-      {error && (
-        <p className="px-4 pb-2 text-xs text-zo-error">{error}</p>
-      )}
+      {error ? (
+        <p className="shrink-0 px-3 pb-1 text-xs text-zo-error">{error}</p>
+      ) : null}
 
-      <div className="flex flex-wrap gap-2 border-t border-zo-border px-4 py-2">
-        {QUICK_PROMPTS.map((prompt) => (
-          <button
-            key={prompt}
-            type="button"
-            disabled={disabled || isRunning}
-            onClick={() => void runImprove(prompt)}
-            className="rounded-full border border-zo-border bg-white px-3 py-1 text-[11px] text-zo-text-secondary transition-smooth hover:border-zo-orange hover:text-zo-orange disabled:opacity-50"
-          >
-            {prompt.length > 48 ? `${prompt.slice(0, 48)}…` : prompt}
-          </button>
-        ))}
+      <div className="custom-scrollbar shrink-0 overflow-x-auto border-t border-zo-border px-3 py-1.5">
+        <div className="flex w-max min-w-full gap-1.5">
+          {QUICK_PROMPTS.map((prompt) => (
+            <button
+              key={prompt}
+              type="button"
+              disabled={disabled || isRunning}
+              onClick={() => void runImprove(prompt)}
+              className="shrink-0 rounded-full border border-zo-border bg-white px-2.5 py-1 text-[10px] text-zo-text-secondary transition-smooth hover:border-zo-orange hover:text-zo-orange disabled:opacity-50"
+            >
+              {prompt.length > 42 ? `${prompt.slice(0, 42)}…` : prompt}
+            </button>
+          ))}
+        </div>
       </div>
 
       <form
-        className="flex gap-2 border-t border-zo-border p-3"
+        className="flex shrink-0 gap-2 border-t border-zo-border p-2.5"
         onSubmit={(e) => {
           e.preventDefault();
           void runImprove(input);
@@ -159,12 +178,12 @@ export function SectionEditChat({
           onChange={(e) => setInput(e.target.value)}
           disabled={disabled || isRunning}
           placeholder="Ask to improve this section…"
-          className="min-w-0 flex-1 zo-input px-3 py-2.5 text-sm outline-none focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
+          className="min-w-0 flex-1 zo-input px-3 py-2 text-sm outline-none focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
         />
         <button
           type="submit"
           disabled={disabled || isRunning || !input.trim()}
-          className="zo-btn shrink-0 !px-4 !py-2.5 disabled:opacity-50"
+          className="zo-btn shrink-0 !px-3 !py-2 disabled:opacity-50"
         >
           {isRunning ? "…" : "Send"}
         </button>

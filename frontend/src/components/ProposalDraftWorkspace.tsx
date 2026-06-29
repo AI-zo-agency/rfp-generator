@@ -8,6 +8,10 @@ import {
   createCustomSection,
 } from "@/lib/proposal-draft";
 import {
+  findBudgetSection,
+  mergeBudgetIntoOutline,
+} from "@/lib/proposal-budget-content";
+import {
   fetchProposalDraft,
   generateFullProposalWithResearch,
   generateProposalPricing,
@@ -220,6 +224,20 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [provider, setProvider] = useState<string | null>(null);
   const skipNextSaveRef = useRef(false);
+  const editorScrollRef = useRef<HTMLDivElement>(null);
+  const sectionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+
+  useEffect(() => {
+    if (!selectedSectionId) return;
+    sectionButtonRefs.current
+      .get(selectedSectionId)
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    editorScrollRef.current?.scrollTo({ top: 0 });
+  }, [selectedSectionId]);
+
+  const selectSection = useCallback((id: string) => {
+    setSelectedSectionId(id);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -308,11 +326,23 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
     setIsPricingRunning(true);
     setPricingError(null);
     try {
-      const { budget: generated, research: updatedResearch } =
+      const { budget: generated, research: updatedResearch, draft } =
         await generateProposalPricing(rfp.id);
       setBudget(generated);
       setResearch(updatedResearch);
-      setActiveTab("pricing");
+
+      const mergedOutline = draft ?? mergeBudgetIntoOutline(outline, generated);
+      skipNextSaveRef.current = true;
+      setOutline(mergedOutline);
+      await saveProposalDraft(rfp.id, mergedOutline);
+
+      const budgetSection = findBudgetSection(mergedOutline.sections);
+      if (budgetSection) {
+        setSelectedSectionId(budgetSection.id);
+        setActiveTab("content");
+      } else {
+        setActiveTab("pricing");
+      }
     } catch (error) {
       setPricingError(
         error instanceof Error ? error.message : "Pricing generation failed"
@@ -320,7 +350,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
     } finally {
       setIsPricingRunning(false);
     }
-  }, [rfp.id, budget]);
+  }, [rfp.id, budget, outline]);
 
   const handleGenerateFullProposal = useCallback(async () => {
     if (
@@ -615,9 +645,9 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
 
       {/* Outline tab */}
       <TabPanel id="outline" activeTab={activeTab}>
-        <div className="grid min-h-[560px] gap-0 lg:grid-cols-[280px_minmax(0,1fr)] lg:gap-3 lg:p-3">
-          <div className="proposal-section-list flex flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-xl lg:border lg:border-zo-border">
-            <div className="flex items-center justify-between border-b border-zo-border/60 px-4 py-3">
+        <div className="proposal-outline-layout grid gap-0 lg:grid-cols-[260px_minmax(0,1fr)] lg:gap-3 lg:p-3">
+          <div className="proposal-section-list flex min-h-0 flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-xl lg:border lg:border-zo-border">
+            <div className="flex shrink-0 items-center justify-between border-b border-zo-border/60 px-3 py-2.5">
               <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                 Sections
               </p>
@@ -625,7 +655,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                 {outline.sections.length} total
               </span>
             </div>
-            <ul className="custom-scrollbar flex-1 overflow-y-auto">
+            <ul className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
               {outline.sections.map((section, index) => {
                 const active = selectedSectionId === section.id;
                 const hasContent = Boolean(section.content);
@@ -633,13 +663,17 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                   <li key={section.id}>
                     <button
                       type="button"
-                      onClick={() => setSelectedSectionId(section.id)}
-                      className={`flex w-full items-start gap-3 border-b border-zo-border/40 px-4 py-3 text-left transition-smooth hover:bg-[var(--zo-hover-bg)] ${
-                        active ? "proposal-section-active" : ""
+                      ref={(node) => {
+                        if (node) sectionButtonRefs.current.set(section.id, node);
+                        else sectionButtonRefs.current.delete(section.id);
+                      }}
+                      onClick={() => selectSection(section.id)}
+                      className={`proposal-section-list-item ${
+                        active ? "is-active" : ""
                       }`}
                     >
                       <span
-                        className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
                           hasContent
                             ? "bg-[#ef5018] text-white"
                             : "border border-zo-border bg-[var(--zo-input-bg)] text-zo-text-muted"
@@ -649,24 +683,24 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                       </span>
                       <div className="min-w-0 flex-1">
                         <p
-                          className={`text-sm font-semibold leading-snug ${
+                          className={`line-clamp-2 text-[13px] font-semibold leading-snug ${
                             active ? "text-zo-orange" : "text-foreground"
                           }`}
                         >
                           {section.title}
                         </p>
-                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
                           <SectionStatusPill status={section.status} />
-                          {section.custom && (
-                            <span className="text-[10px] font-bold uppercase text-zo-orange">
+                          {section.custom ? (
+                            <span className="text-[9px] font-bold uppercase text-zo-orange">
                               Custom
                             </span>
-                          )}
-                          {section.pageLimit && (
+                          ) : null}
+                          {section.pageLimit ? (
                             <span className="text-[10px] text-zo-text-muted">
                               {section.pageLimit} pg
                             </span>
-                          )}
+                          ) : null}
                         </div>
                       </div>
                     </button>
@@ -675,7 +709,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
               })}
             </ul>
 
-            <div className="border-t border-zo-border rounded-b-2xl bg-[var(--zo-input-bg)] p-4">
+            <div className="shrink-0 border-t border-zo-border bg-[var(--zo-input-bg)] p-3">
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -683,12 +717,12 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                   onChange={(e) => setNewSectionTitle(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && addCustomSection()}
                   placeholder="New section title…"
-                  className="min-w-0 flex-1 zo-input px-3 py-2.5 text-sm outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
+                  className="min-w-0 flex-1 zo-input px-3 py-2 text-sm outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
                 />
                 <button
                   type="button"
                   onClick={addCustomSection}
-                  className="zo-btn shrink-0 !px-4 !py-2.5"
+                  className="zo-btn shrink-0 !px-3 !py-2"
                 >
                   Add
                 </button>
@@ -696,10 +730,14 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
             </div>
           </div>
 
-          <div className="proposal-editor-pane rounded-none lg:rounded-2xl lg:border lg:border-zo-border">
+          <div className="proposal-editor-pane flex min-h-0 flex-col overflow-hidden rounded-none lg:rounded-xl lg:border lg:border-zo-border">
             {selectedSection ? (
-              <div className="proposal-tab-panel">
-                <div className="flex flex-wrap items-start justify-between gap-4">
+              <>
+                <div
+                  ref={editorScrollRef}
+                  className="custom-scrollbar min-h-0 flex-1 overflow-y-auto proposal-tab-panel"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                       Editing section {outline.sections.findIndex((s) => s.id === selectedSection.id) + 1}
@@ -746,7 +784,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                   </div>
                 </div>
 
-                <div className="mt-6 grid gap-4 sm:grid-cols-3">
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
                   <label className="block">
                     <span className="text-xs font-semibold text-zo-text-muted">
                       Page limit
@@ -798,8 +836,8 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                   </div>
                 </div>
 
-                <label className="mt-8 block">
-                  <div className="mb-3 flex items-center justify-between gap-4">
+                <label className="mt-5 block">
+                  <div className="mb-2 flex items-center justify-between gap-4">
                     <span className="text-xs font-bold uppercase tracking-[0.12em] text-zo-text-muted">
                       Draft content
                     </span>
@@ -821,31 +859,35 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                         status: e.target.value ? "generated" : "outline",
                       })
                     }
-                    rows={16}
+                    rows={8}
                     placeholder="Generate Sections 1–3 or run full proposal to auto-fill, or write manually…"
-                    className="zo-input w-full resize-y px-4 py-4 text-sm leading-[1.75] text-foreground outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
+                    className="proposal-draft-textarea zo-input w-full px-3 py-3 text-sm leading-[1.7] text-foreground outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
                   />
                 </label>
+                </div>
 
-                <SectionEditChat
-                  rfpId={rfp.id}
-                  section={selectedSection}
-                  disabled={anyPipelineRunning}
-                  onSectionUpdated={(updatedDraft, updatedResearch) => {
-                    skipNextSaveRef.current = true;
-                    setOutline(updatedDraft);
-                    if (updatedResearch) {
-                      setResearch(updatedResearch);
-                      if (updatedResearch.budget) {
-                        setBudget(updatedResearch.budget);
+                <div className="proposal-section-agent-dock">
+                  <SectionEditChat
+                    rfpId={rfp.id}
+                    section={selectedSection}
+                    disabled={anyPipelineRunning}
+                    docked
+                    onSectionUpdated={(updatedDraft, updatedResearch) => {
+                      skipNextSaveRef.current = true;
+                      setOutline(updatedDraft);
+                      if (updatedResearch) {
+                        setResearch(updatedResearch);
+                        if (updatedResearch.budget) {
+                          setBudget(updatedResearch.budget);
+                        }
                       }
-                    }
-                    void saveProposalDraft(rfp.id, updatedDraft);
-                  }}
-                />
-              </div>
+                      void saveProposalDraft(rfp.id, updatedDraft);
+                    }}
+                  />
+                </div>
+              </>
             ) : (
-              <div className="flex min-h-[400px] flex-col items-center justify-center p-8 text-center">
+              <div className="flex min-h-[16rem] flex-1 flex-col items-center justify-center p-6 text-center">
                 <p className="text-sm text-zo-text-muted">
                   Select a section from the list to edit.
                 </p>

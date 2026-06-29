@@ -20,7 +20,13 @@ from app.services.proposal_generator import (
     _static_sections_from_draft,
 )
 from app.services.proposal_langchain import _provider_name
+from app.services.proposal_brand_voice import (
+    classify_section_register,
+    format_brand_voice_block,
+    resolve_voice_context,
+)
 from app.services.proposal_loss_lessons import format_avoidance_block
+from app.services.proposal_voice_enforcement import enforce_narrative_voice
 from app.services.proposal_repository import get_proposal_draft, get_research_cache, save_proposal_draft, save_research_cache
 from app.services.proposal_retrieval_graph import (
     EXCERPT_MAX_CHARS,
@@ -50,8 +56,11 @@ Rules:
 2. Use ONLY facts from the evidence corpus. Cite inline as [E1], [E2], etc.
 3. Improve substantially on the previous draft — never return the same placeholder or [VERIFY] block if evidence now supports the content.
 4. Use [VERIFY: ...] only for requirements still missing from evidence.
-5. Match brand voice. Write submission-ready prose.
-6. Apply WRITING AVOIDANCES from lost bids when provided — do not repeat past loss patterns.
+5. Follow the REGISTER block: narrative sections use first person we/our — NEVER "The Vendor", "The Offeror", or third-person agency distance.
+6. PRESERVE the full BRAND VOICE block — zö core voice + RFP adaptation. User edits must NOT flatten tone into generic consultant/corporate prose.
+7. Keep rhythm, confidence, warmth, and client-centered framing from the previous draft unless the user explicitly requests a tone change.
+8. Apply WRITING AVOIDANCES from lost bids when provided — do not repeat past loss patterns.
+9. Write submission-ready prose in zö's voice.
 
 Return ONLY JSON:
 {
@@ -64,6 +73,9 @@ STATIC_SECTION_REDRAFT_PROMPT = """Improve ONE static zö proposal section (comp
 
 Use ONLY the knowledge-base excerpts provided. For pull/select sections, include [DESIGNER NOTE: ...] where layout applies.
 Address the user's feedback. Do not invent clients or metrics.
+
+NARRATIVE REGISTER: first person we/our — never "The Vendor" or third-person procurement language.
+PRESERVE the BRAND VOICE block — zö core voice and RFP adaptation are mandatory.
 
 Return ONLY JSON:
 {
@@ -217,18 +229,31 @@ async def _redraft_rfp_section(
     rfp_context: str,
     evidence: list[EvidenceItem],
     brand_voice: dict[str, Any] | None,
+    kb_zo_voice: str,
     user_message: str,
     prior_content: str,
     zo_context: str,
     avoidance_block: str = "",
 ) -> tuple[ProposalSection, str]:
     requirements = rfp_section.requirements if rfp_section else []
+    register = classify_section_register(
+        section_id=section.id,
+        title=section.title,
+        zo_mode=section.mode,
+    )
+    voice_block = format_brand_voice_block(
+        brand_voice,
+        kb_zo_voice=kb_zo_voice,
+        rfp_client=rfp.client,
+        register=register,
+    )
     raw, provider = await llm.chat_json(
         [
             {"role": "system", "content": SECTION_REDRAFT_PROMPT},
             {
                 "role": "user",
                 "content": (
+                    f"BRAND VOICE (mandatory — maintain throughout):\n{voice_block}\n\n"
                     f"Client: {rfp.client}\n"
                     f"Sector: {rfp.sector}\n"
                     f"RFP: {rfp.title}\n"
@@ -237,7 +262,7 @@ async def _redraft_rfp_section(
                     f"Requirements:\n"
                     + "\n".join(f"- {r}" for r in requirements)
                     + f"\n\nUser edit request:\n{user_message}\n\n"
-                    f"Previous draft:\n{prior_content[:3000]}\n\n"
+                    f"Previous draft (preserve zö voice while improving):\n{prior_content[:3000]}\n\n"
                     f"RFP excerpt:\n{rfp_context[:4000]}\n\n"
                     f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
                     + (f"{avoidance_block}\n\n" if avoidance_block else "")
@@ -248,7 +273,12 @@ async def _redraft_rfp_section(
         max_tokens=4096,
         temperature=0.4,
     )
-    content = str(raw.get("content", "")).strip()
+    content = enforce_narrative_voice(
+        str(raw.get("content", "")).strip(),
+        section_id=section.id,
+        title=section.title,
+        zo_mode=section.mode,
+    )
     kb_refs = raw.get("kbRefs") or raw.get("kb_refs") or []
     if not isinstance(kb_refs, list):
         kb_refs = []
@@ -274,6 +304,8 @@ async def _improve_static_section(
     rfp_context: str,
     queries: list[str],
     user_message: str,
+    brand_voice: dict[str, Any] | None,
+    kb_zo_voice: str,
 ) -> tuple[ProposalSection, str]:
     kb_parts: list[str] = []
     sources: list[str] = []
@@ -294,17 +326,25 @@ async def _improve_static_section(
         kb_parts.append(text[:4000])
         sources.extend(refs)
 
+    voice_block = format_brand_voice_block(
+        brand_voice,
+        kb_zo_voice=kb_zo_voice,
+        rfp_client=rfp.client,
+        register="narrative",
+    )
+
     raw, provider = await llm.chat_json(
         [
             {"role": "system", "content": STATIC_SECTION_REDRAFT_PROMPT},
             {
                 "role": "user",
                 "content": (
+                    f"BRAND VOICE (mandatory — maintain throughout):\n{voice_block}\n\n"
                     f"Section: {section.title}\n"
                     f"Mode: {section.mode}\n"
                     f"Client: {rfp.client}\n"
                     f"User request:\n{user_message}\n\n"
-                    f"Previous content:\n{section.content[:2500]}\n\n"
+                    f"Previous content (preserve zö voice while improving):\n{section.content[:2500]}\n\n"
                     f"KB excerpts:\n{'---'.join(kb_parts)[:10000]}\n\n"
                     f"RFP excerpt:\n{rfp_context[:3000]}"
                 ),
@@ -313,7 +353,12 @@ async def _improve_static_section(
         max_tokens=4096,
         temperature=0.35,
     )
-    content = str(raw.get("content", "")).strip()
+    content = enforce_narrative_voice(
+        str(raw.get("content", "")).strip(),
+        section_id=section.id,
+        title=section.title,
+        register="narrative",
+    )
     kb_refs = raw.get("kbRefs") or sources[:8]
     updated = section.model_copy(
         update={
@@ -348,6 +393,16 @@ async def improve_proposal_section(
 
     research = get_research_cache(rfp_id)
     is_static = section_id in STATIC_SECTION_IDS or section.source == "template"
+
+    brand_voice_dict, kb_zo_voice = await resolve_voice_context(
+        rfp=rfp,
+        rfp_context=rfp_context,
+        brand_voice=(
+            research.brand_voice.model_dump(by_alias=True)
+            if research and research.brand_voice
+            else None
+        ),
+    )
 
     logger.info(
         "Section improve for %s / %s: static=%s message=%r",
@@ -385,6 +440,8 @@ async def improve_proposal_section(
             rfp_context=rfp_context,
             queries=queries,
             user_message=user_message,
+            brand_voice=brand_voice_dict,
+            kb_zo_voice=kb_zo_voice,
         )
         new_queries = {
             **(research.section_queries if research else {}),
@@ -456,7 +513,8 @@ async def improve_proposal_section(
             rfp=rfp,
             rfp_context=rfp_context,
             evidence=section_evidence,
-            brand_voice=research.brand_voice.model_dump(by_alias=True) if research.brand_voice else None,
+            brand_voice=brand_voice_dict,
+            kb_zo_voice=kb_zo_voice,
             user_message=user_message,
             prior_content=section.content,
             zo_context=zo_context,

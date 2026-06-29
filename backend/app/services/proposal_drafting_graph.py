@@ -11,7 +11,16 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.models.proposal import EvidenceItem, ProposalBrandVoice, ProposalSection, RfpSectionMap, LossLesson
+from app.services.proposal_brand_voice import (
+    classify_section_register,
+    format_brand_voice_block,
+    format_register_block,
+)
 from app.services.proposal_loss_lessons import format_avoidance_block
+from app.services.proposal_voice_enforcement import (
+    enforce_narrative_voice,
+    is_duplicate_static_rfp_section,
+)
 from app.services import llm
 from app.services.llm import LlmError
 from app.services.proposal_langchain import _provider_name
@@ -29,9 +38,11 @@ Rules (strict):
 2. Never invent clients, metrics, certifications, team members, or contract values not in evidence.
 3. For requirements not covered by evidence, write [VERIFY: describe what must be confirmed].
 4. For template/layout pulls (zoMode pull/select), include [DESIGNER NOTE: ...] and reference evidence.
-5. Match the brand voice block. Mirror RFP terminology where appropriate.
-6. Write complete, submission-ready prose (not bullet outlines unless the RFP requires bullets).
-7. Apply WRITING AVOIDANCES from lost bids/debriefs when provided — do not repeat patterns that caused past losses.
+5. Match the BRAND VOICE and REGISTER blocks for each section.
+6. NARRATIVE sections (register=narrative): first person we/our — NEVER "The Vendor", "The Offeror", or third-person agency distance. RFP form language does not apply to narrative prose.
+7. PROCUREMENT sections (register=procurement): formal third-person Vendor/Offeror language is OK for attachments, forms, and compliance tables.
+8. Write complete, submission-ready prose (not bullet outlines unless the RFP requires bullets).
+9. Apply WRITING AVOIDANCES from lost bids/debriefs when provided — do not repeat patterns that caused past losses.
 
 Return ONLY JSON:
 {
@@ -98,22 +109,18 @@ def _format_evidence_block(items: list[dict[str, Any]]) -> str:
     return "\n\n".join(lines) if lines else "(No evidence items tagged for this section.)"
 
 
-def _brand_voice_block(brand_voice: dict[str, Any] | None) -> str:
-    if not brand_voice:
-        return "Tone: professional, client-focused. Formality: semi-formal."
-    lines = [
-        f"Tone: {brand_voice.get('tone', '')}",
-        f"Formality: {brand_voice.get('formality', 'semi-formal')}",
-        f"Client expectations: {brand_voice.get('clientExpectations') or brand_voice.get('client_expectations', '')}",
-    ]
-    guidelines = brand_voice.get("voiceGuidelines") or brand_voice.get("voice_guidelines") or []
-    if guidelines:
-        lines.append("Guidelines:")
-        lines.extend(f"- {g}" for g in guidelines)
-    terms = brand_voice.get("keyTerms") or brand_voice.get("key_terms") or []
-    if terms:
-        lines.append(f"Key terms: {', '.join(str(t) for t in terms)}")
-    return "\n".join(lines)
+def _brand_voice_block(
+    brand_voice: dict[str, Any] | None,
+    *,
+    register: str = "narrative",
+    rfp_client: str = "",
+) -> str:
+    reg = "procurement" if register == "procurement" else "narrative"
+    return format_brand_voice_block(
+        brand_voice,
+        rfp_client=rfp_client,
+        register=reg,  # type: ignore[arg-type]
+    )
 
 
 def _chunk_sections(sections: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
@@ -139,12 +146,20 @@ async def _draft_batch(
     for section in batch:
         sid = str(section.get("id") or "")
         evidence = _evidence_for_section(sid, corpus)
+        zo_mode = str(section.get("zoMode") or section.get("zo_mode") or "write")
+        title = str(section.get("title") or sid)
+        register = classify_section_register(
+            section_id=sid,
+            title=title,
+            zo_mode=zo_mode,
+        )
         batch_payload.append(
             {
                 "sectionId": sid,
-                "title": section.get("title"),
+                "title": title,
+                "register": register,
                 "requirements": section.get("requirements") or [],
-                "zoMode": section.get("zoMode") or section.get("zo_mode") or "write",
+                "zoMode": zo_mode,
                 "wordTarget": _word_target(section),
                 "uncoveredRequirements": section.get("uncoveredRequirements")
                 or section.get("uncovered_requirements")
@@ -153,13 +168,29 @@ async def _draft_batch(
             }
         )
 
+    narrative_sections = [p for p in batch_payload if p.get("register") == "narrative"]
+    procurement_sections = [
+        p for p in batch_payload if p.get("register") == "procurement"
+    ]
+
     user_content = (
         f"Client: {state['rfp_client']}\n"
         f"Sector: {state['rfp_sector']}\n"
         f"Location: {state.get('rfp_location') or ''}\n"
         f"RFP: {state['rfp_title']}\n\n"
-        f"Brand voice:\n{_brand_voice_block(state.get('brand_voice'))}\n\n"
     )
+    if narrative_sections:
+        user_content += (
+            "NARRATIVE sections in this batch (first person we/our — never The Vendor):\n"
+            f"{format_register_block('narrative')}\n\n"
+            f"Brand voice for narrative sections:\n"
+            f"{_brand_voice_block(state.get('brand_voice'), register='narrative', rfp_client=state['rfp_client'])}\n\n"
+        )
+    if procurement_sections:
+        user_content += (
+            "PROCUREMENT sections in this batch (formal third-person OK):\n"
+            f"{format_register_block('procurement')}\n\n"
+        )
     zo_ctx = (state.get("zo_sections_context") or "").strip()
     if zo_ctx:
         user_content += (
@@ -210,6 +241,14 @@ async def _draft_batch(
                 f"insufficient evidence in corpus. Requirements: "
                 f"{'; '.join(str(r) for r in reqs[:3])}]"
             )
+        else:
+            zo_mode = str(section.get("zoMode") or section.get("zo_mode") or "write")
+            content = enforce_narrative_voice(
+                content,
+                section_id=sid,
+                title=str(section.get("title") or sid),
+                zo_mode=zo_mode,
+            )
         kb_refs = _extract_kb_refs(content, item.get("kbRefs") or item.get("kb_refs"))
         results.append(
             {
@@ -233,6 +272,20 @@ async def _draft_batch(
 
 async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
     sections = state.get("rfp_sections") or []
+    skipped = [
+        s for s in sections if is_duplicate_static_rfp_section(str(s.get("title") or ""))
+    ]
+    sections = [
+        s
+        for s in sections
+        if not is_duplicate_static_rfp_section(str(s.get("title") or ""))
+    ]
+    if skipped:
+        logger.info(
+            "Phase 3 skipping %d RFP sections (duplicate of static Sections 1–3): %s",
+            len(skipped),
+            [s.get("title") for s in skipped[:5]],
+        )
     if not sections:
         return {"error": "No RFP sections to draft. Run Phase 2 first."}
 

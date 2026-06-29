@@ -200,7 +200,11 @@ export async function runPhase3Drafting(
 
 export async function generateProposalPricing(
   rfpId: string
-): Promise<{ budget: ProposalBudget; research: ProposalResearch }> {
+): Promise<{
+  budget: ProposalBudget;
+  research: ProposalResearch;
+  draft: ProposalOutline | null;
+}> {
   const res = await fetch(`/api/rfps/${rfpId}/proposal/pricing/generate`, {
     method: "POST",
   });
@@ -209,6 +213,7 @@ export async function generateProposalPricing(
     detail?: string;
     budget?: ProposalBudget;
     research?: ProposalResearch;
+    draft?: Parameters<typeof apiDraftToOutline>[0] | null;
   };
   try {
     data = text.trim() ? JSON.parse(text) : {};
@@ -221,7 +226,11 @@ export async function generateProposalPricing(
   if (!data.budget || !data.research) {
     throw new Error("No budget data returned from server");
   }
-  return { budget: data.budget, research: data.research };
+  return {
+    budget: data.budget,
+    research: data.research,
+    draft: data.draft ? apiDraftToOutline(data.draft) : null,
+  };
 }
 
 export async function improveProposalSection(

@@ -17,7 +17,9 @@ from app.services.go_no_go_service import (
     _assess_rfp_content,
     _build_rfp_context,
 )
+from app.services.proposal_brand_voice import format_register_block
 from app.services.proposal_langchain import run_tool_research_agent
+from app.services.proposal_voice_enforcement import enforce_narrative_voice
 from app.services.proposal_repository import (
     get_proposal_draft,
     get_research_cache,
@@ -276,7 +278,8 @@ async def _write_custom_section(
             {
                 "role": "system",
                 "content": (
-                    "You write zö agency proposal content for Sections 4–5 ONLY. "
+                    "You write zö agency proposal content for Sections 4–5 ONLY.\n"
+                    f"{format_register_block('narrative')}\n"
                     "Use ONLY facts from the research brief and RFP excerpt. "
                     "Flag unverified items as [VERIFY: ...]. "
                     "Include [DESIGNER NOTE: ...] where layout is needed. "
@@ -564,6 +567,23 @@ async def generate_sections_1_3(
     else:
         merged = _merge_sections_into_draft(_default_sections(rfp.page_limit), sections_1_3)
 
+    merged = [
+        section.model_copy(
+            update={
+                "content": enforce_narrative_voice(
+                    section.content,
+                    section_id=section.id,
+                    title=section.title,
+                    zo_mode=section.mode,
+                    register="narrative",
+                )
+            }
+        )
+        if section.content.strip()
+        else section
+        for section in merged
+    ]
+
     draft = ProposalDraft(
         rfpId=rfp.id,
         sections=merged,
@@ -643,6 +663,21 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         static_sections,
         drafted_rfp_sections,
     )
+    merged_sections = [
+        section.model_copy(
+            update={
+                "content": enforce_narrative_voice(
+                    section.content,
+                    section_id=section.id,
+                    title=section.title,
+                    zo_mode=section.mode,
+                )
+            }
+        )
+        if section.content.strip()
+        else section
+        for section in merged_sections
+    ]
 
     now = datetime.now(timezone.utc).isoformat()
     draft = ProposalDraft(

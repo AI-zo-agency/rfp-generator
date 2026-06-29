@@ -10,6 +10,8 @@ from langgraph.graph import END, START, StateGraph
 from app.models.proposal import ProposalBrandVoice, ProposalSection
 from app.services import llm, proposal_knowledge_base_tools
 from app.services.llm import LlmError
+from app.services.proposal_brand_voice import format_brand_voice_block, format_register_block
+from app.services.proposal_voice_enforcement import enforce_narrative_voice
 from app.services.proposal_langchain import _provider_name
 
 logger = logging.getLogger(__name__)
@@ -38,37 +40,22 @@ class SectionsGraphState(TypedDict, total=False):
 
 
 def _proposal_voice_block(state: SectionsGraphState) -> str:
-    brand_voice = state.get("brand_voice") or {}
-    zo_kb = (state.get("kb_zo_voice") or "").strip()
-    guidelines = brand_voice.get("voiceGuidelines") or brand_voice.get("voice_guidelines") or []
-    terms = brand_voice.get("keyTerms") or brand_voice.get("key_terms") or []
-
-    lines = [
-        "## zö core brand voice (from knowledge base — do not contradict)",
-        brand_voice.get("zoCoreVoice") or brand_voice.get("zo_core_voice") or "(see KB excerpt)",
-    ]
-    if zo_kb:
-        lines.append(zo_kb[:2500])
-
-    lines.extend(
-        [
-            "",
-            "## This RFP voice adaptation (must differ per client/sector)",
-            f"Tone: {brand_voice.get('tone', '')}",
-            f"Formality: {brand_voice.get('formality', 'semi-formal')}",
-            f"Client expectations: {brand_voice.get('clientExpectations') or brand_voice.get('client_expectations', '')}",
-        ]
+    return format_brand_voice_block(
+        state.get("brand_voice"),
+        kb_zo_voice=state.get("kb_zo_voice") or "",
+        rfp_client=state.get("rfp_client") or "",
+        register="narrative",
     )
-    adaptation = brand_voice.get("rfpAdaptationNotes") or brand_voice.get("rfp_adaptation_notes")
-    if adaptation:
-        lines.append(f"Adaptation notes: {adaptation}")
-    if guidelines:
-        lines.append("Writing guidelines for this proposal:")
-        lines.extend(f"- {g}" for g in guidelines)
-    if terms:
-        lines.append(f"Mirror RFP terminology: {', '.join(str(t) for t in terms)}")
 
-    return "\n".join(lines)
+
+def _narrative_section_preamble(state: SectionsGraphState) -> str:
+    return (
+        "You write zö agency NARRATIVE proposal content.\n"
+        f"{format_register_block('narrative')}\n\n"
+        "Facts (clients, certs, team, case studies) must come ONLY from knowledge-base excerpts.\n"
+        "Voice must follow BOTH zö core brand voice AND the RFP-specific adaptation block.\n"
+        f"Client: {state['rfp_client']} | Sector: {state['rfp_sector']}\n"
+    )
 
 
 async def _fetch_knowledge_base(state: SectionsGraphState) -> dict[str, Any]:
@@ -108,11 +95,16 @@ async def _synthesize_proposal_voice(state: SectionsGraphState) -> dict[str, Any
                         "You define how zö agency should write THIS proposal.\n\n"
                         "Two layers (both required):\n"
                         "1. zö core voice — from the knowledge-base brand voice excerpt (identity, "
-                        "personality, how zö always sounds).\n"
+                        "personality, how zö always sounds). zö narrative proposals use FIRST PERSON "
+                        "(we/our/us), active voice, outcome-focused proof — never third-person "
+                        "'The Vendor' procurement language.\n"
                         "2. RFP adaptation — how tone/formality/terminology should shift for THIS "
                         "client, sector, and solicitation (read the RFP closely).\n\n"
-                        "Different RFPs MUST produce different adaptations (e.g., state agency formal "
-                        "vs. tourism warm vs. higher-ed collaborative). Never generic one-size-fits-all.\n"
+                        "CRITICAL: Government RFPs often say 'Vendor' in instructions. That register "
+                        "is for attachments/forms only. Narrative sections (cover letter, company "
+                        "overview, team, case studies, approach) must sound like zö speaking directly "
+                        "to the client — not a legal brief about a vendor.\n\n"
+                        "Different RFPs MUST produce different adaptations. Never generic one-size-fits-all.\n"
                         "Never contradict verified zö KB facts or invent zö positioning not in KB.\n\n"
                         "Return JSON only:\n"
                         '{"zoCoreVoice":"1-2 sentences from KB",'
@@ -148,12 +140,13 @@ async def _synthesize_proposal_voice(state: SectionsGraphState) -> dict[str, Any
         logger.warning("Proposal voice synthesis failed: %s", exc)
         return {
             "brand_voice": {
-                "zoCoreVoice": "Professional, confident, human-centered marketing partner.",
+                "zoCoreVoice": "zö agency writes in first person (we/our) as a confident, human-centered marketing partner.",
                 "tone": "professional",
                 "formality": "semi-formal",
                 "voiceGuidelines": [
-                    "Lead with verified zö capabilities.",
-                    f"Match {state['rfp_client']} public-sector formality.",
+                    "Write in first person: we, our, us — never 'The Vendor' or third-person agency distance.",
+                    "Lead with verified zö capabilities and client outcomes.",
+                    f"Match {state['rfp_client']} public-sector formality without sounding like a legal form.",
                 ],
                 "keyTerms": [],
                 "clientExpectations": "",
@@ -164,13 +157,7 @@ async def _synthesize_proposal_voice(state: SectionsGraphState) -> dict[str, Any
 
 
 def _section_system_preamble(state: SectionsGraphState) -> str:
-    return (
-        "You write zö agency proposal content.\n"
-        "Facts (clients, certs, team, case studies) must come ONLY from knowledge-base excerpts.\n"
-        "Voice must follow BOTH zö core brand voice AND the RFP-specific adaptation block — "
-        "each proposal should read differently based on the client/RFP.\n"
-        f"Client: {state['rfp_client']} | Sector: {state['rfp_sector']}\n"
-    )
+    return _narrative_section_preamble(state)
 
 
 async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
@@ -182,7 +169,8 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
                 "content": (
                     f"{_section_system_preamble(state)}"
                     "Write Section 1 — Company Overview.\n"
-                    "PULL from KB facts only. Framing prose must match the voice block.\n"
+                    "PULL from KB facts only. All framing prose must be first-person zö voice (we/our).\n"
+                    "Never write 'The Vendor' or third-person procurement language.\n"
                     'Return JSON: {"content":"...","designerNote":"...","kbRefs":["..."]}'
                 ),
             },
@@ -224,7 +212,7 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
                     f"{_section_system_preamble(state)}"
                     "Write Section 2 — Team Overview.\n"
                     "SELECT bios from KB only — do not embellish credentials.\n"
-                    "Framing paragraph must use this RFP's adapted voice.\n"
+                    "Framing paragraphs must be first-person zö voice (we/our) for this RFP.\n"
                     'Return JSON: {"content":"...","designerNote":"...","kbRefs":["..."],'
                     '"layout":"full-page|multi|overview","bios":["Name 1"]}'
                 ),
@@ -267,7 +255,8 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                 "content": (
                     f"{_section_system_preamble(state)}"
                     "Write Section 3 — Our Work (Case Studies).\n"
-                    "SELECT 2–4 verified case studies from KB. Intro must match this RFP's voice.\n"
+                    "SELECT 2–4 verified case studies from KB. Intro must be first-person zö voice (we/our).\n"
+                    "Describe work as what WE did for each client — not what 'The Vendor' delivered.\n"
                     'Return JSON: {"content":"...","designerNote":"...","kbRefs":["..."],'
                     '"selected":["case study 1"]}'
                 ),
@@ -313,7 +302,12 @@ def _section_payload(
     kb_sources: list[str],
     extra_refs: list[str] | None = None,
 ) -> dict[str, Any]:
-    content = str(raw.get("content", "")).strip()
+    content = enforce_narrative_voice(
+        str(raw.get("content", "")).strip(),
+        section_id=section_id,
+        title=title,
+        register="narrative",
+    )
     designer = str(raw.get("designerNote") or designer_note_default).strip()
     kb_refs = raw.get("kbRefs") if isinstance(raw.get("kbRefs"), list) else []
     refs = list(

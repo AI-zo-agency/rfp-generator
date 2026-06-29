@@ -225,3 +225,4 @@ class ProposalPricingResponse(BaseModel):
     ok: bool = True
     budget: ProposalBudget
     research: ProposalResearchCache
+    draft: ProposalDraft | None = None
