@@ -24,15 +24,6 @@ const shellReveal = {
   },
 };
 
-const bgReveal = {
-  hidden: { opacity: 0, scale: 1.12 },
-  visible: {
-    opacity: 1,
-    scale: 1,
-    transition: { duration: 1.35, ease: expoOutEase },
-  },
-};
-
 export function AuthGate({ children }: Readonly<{ children: React.ReactNode }>) {
   const [ready, setReady] = useState(false);
 
@@ -86,12 +77,10 @@ export function AuthGate({ children }: Readonly<{ children: React.ReactNode }>) 
           initial="hidden"
           animate="visible"
         >
-          <motion.div
-            className="auth-shell__bg"
-            variants={bgReveal}
-            initial="hidden"
-            animate="visible"
-          />
+          <div className="auth-shell__bg" aria-hidden>
+            <div className="auth-shell__bg-photo" />
+            <div className="auth-shell__bg-grid" />
+          </div>
           <div className="auth-shell__vignette" aria-hidden />
           <div className="auth-shell__glow auth-shell__glow--left" aria-hidden />
           <div

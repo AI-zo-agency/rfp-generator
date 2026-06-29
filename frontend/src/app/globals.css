@@ -286,18 +286,38 @@ h4 {
 .auth-shell__bg {
   position: absolute;
   inset: 0;
-  background-image:
-    url("/auth/zo_Grid.webp"),
-    url("/auth/skateboard-bg.webp");
-  background-size: cover, cover;
-  background-position: center, center;
-  transform-origin: center center;
-  will-change: transform, opacity;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.auth-shell__bg-photo {
+  position: absolute;
+  inset: 0;
+  background-image: url("/auth/skateboard-bg.webp");
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 1;
+  transform: scale(1.08);
+  animation: auth-bg-enter 1.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: transform;
+}
+
+.auth-shell__bg-grid {
+  position: absolute;
+  inset: 0;
+  background-image: url("/auth/zo_Grid.webp");
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 1;
 }
 
 .auth-shell__vignette {
   position: absolute;
   inset: 0;
+  z-index: 1;
   pointer-events: none;
   background:
     radial-gradient(ellipse 80% 60% at 50% 40%, transparent 30%, rgba(0, 0, 0, 0.55) 100%),
@@ -306,6 +326,7 @@ h4 {
 
 .auth-shell__glow {
   position: absolute;
+  z-index: 1;
   width: 28rem;
   height: 28rem;
   border-radius: 50%;
@@ -469,6 +490,17 @@ h4 {
 .auth-link:hover::after {
   transform: scaleX(1);
   transform-origin: left;
+}
+
+@keyframes auth-bg-enter {
+  from {
+    transform: scale(1.12);
+    opacity: 0.92;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
 @keyframes auth-glow-drift {
@@ -704,9 +736,15 @@ h4 {
   }
 
   .auth-shell__glow,
+  .auth-shell__bg-photo,
   .auth-blocker__glow,
   .auth-blocker__ring {
     animation: none !important;
+  }
+
+  .auth-shell__bg-photo {
+    transform: scale(1) !important;
+    opacity: 1 !important;
   }
 }
 
