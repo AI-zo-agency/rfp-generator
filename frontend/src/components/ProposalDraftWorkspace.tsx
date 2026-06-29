@@ -17,6 +17,7 @@ import {
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
 import { SectionStatusPill } from "./SectionStatusPill";
+import { MarkdownReportBody } from "./MarkdownReportBody";
 import { SectionEditChat } from "./SectionEditChat";
 import { ProposalBudgetPanel } from "./ProposalBudgetPanel";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
@@ -44,7 +45,7 @@ function StatCard({
       <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
         {label}
       </p>
-      <p className="font-heading mt-1.5 text-2xl font-bold leading-none tabular-nums text-inherit">
+      <p className="font-heading mt-1 text-xl font-bold leading-none tabular-nums text-inherit md:text-2xl">
         {value}
       </p>
       {sub ? (
@@ -52,7 +53,7 @@ function StatCard({
           {sub}
         </p>
       ) : (
-        <span className="mt-1.5 block h-[1.05rem]" aria-hidden />
+        <span className="mt-1 block h-[0.85rem]" aria-hidden />
       )}
     </div>
   );
@@ -80,7 +81,7 @@ function ResearchStatusPanel({
       : "Research ready";
 
   return (
-    <div className="mx-4 mb-4 md:mx-6">
+    <div className="mx-3 mb-3 md:mx-4">
       <div className="overflow-hidden rounded-2xl border border-zo-border/80 bg-white shadow-sm">
         <button
           type="button"
@@ -471,27 +472,27 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
 
   return (
     <section className="proposal-workspace-card">
-      <div className="p-4 pb-0 md:p-5 md:pb-0">
-        <div className="proposal-header zo-panel-white relative overflow-hidden rounded-2xl px-6 py-6 md:px-8 md:py-7">
+      <div className="proposal-workspace-header-wrap">
+        <div className="proposal-header zo-panel-white relative overflow-hidden rounded-xl px-4 py-4 md:px-5 md:py-4">
           <div
             className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-[#ef5018]/15"
             aria-hidden
           />
 
-          <div className="relative grid gap-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+          <div className="relative grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-full bg-[#ef5018] px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-white">
+                <span className="rounded-full bg-[#ef5018] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">
                   Proposal Draft
                 </span>
                 <span className="text-xs font-medium text-black/65">
                   {rfp.client}
                 </span>
               </div>
-              <h2 className="font-heading mt-3 text-xl font-semibold leading-snug text-black md:text-[1.65rem]">
+              <h2 className="mt-2 text-lg font-bold leading-snug tracking-tight text-black md:text-xl lg:text-[1.45rem]">
                 {rfp.title}
               </h2>
-              <p className="mt-2 text-sm text-black/65">
+              <p className="mt-1.5 text-sm text-black/65">
                 {rfp.location || "—"} · Page limit {pageLimit}
                 {provider ? ` · via ${provider}` : ""}
               </p>
@@ -515,7 +516,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
             </div>
           </div>
 
-          <div className="relative mt-6">
+          <div className="relative mt-4">
             <div className="mb-2 flex items-center justify-between text-xs font-semibold text-black/65">
               <span>Manuscript progress</span>
               <span>
@@ -532,7 +533,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
         </div>
       </div>
 
-      <div className="proposal-toolbar sticky top-16 z-10 flex flex-col gap-4 border-y px-4 py-4 sm:flex-row sm:items-center sm:justify-between md:px-6">
+      <div className="proposal-toolbar sticky top-16 z-10 flex flex-col gap-2.5 border-y sm:flex-row sm:items-center sm:justify-between">
         <OutlineTabs
           tabs={workspaceTabs}
           activeTab={activeTab}
@@ -614,9 +615,9 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
 
       {/* Outline tab */}
       <TabPanel id="outline" activeTab={activeTab}>
-        <div className="grid min-h-[600px] gap-0 lg:grid-cols-[300px_minmax(0,1fr)] lg:gap-4 lg:p-4 lg:pt-2">
-          <div className="proposal-section-list flex flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-2xl lg:border lg:border-zo-border">
-            <div className="flex items-center justify-between border-b border-zo-border/60 px-5 py-4">
+        <div className="grid min-h-[560px] gap-0 lg:grid-cols-[280px_minmax(0,1fr)] lg:gap-3 lg:p-3">
+          <div className="proposal-section-list flex flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-xl lg:border lg:border-zo-border">
+            <div className="flex items-center justify-between border-b border-zo-border/60 px-4 py-3">
               <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                 Sections
               </p>
@@ -633,7 +634,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                     <button
                       type="button"
                       onClick={() => setSelectedSectionId(section.id)}
-                      className={`flex w-full items-start gap-3 border-b border-zo-border/40 px-5 py-4 text-left transition-smooth hover:bg-[var(--zo-hover-bg)] ${
+                      className={`flex w-full items-start gap-3 border-b border-zo-border/40 px-4 py-3 text-left transition-smooth hover:bg-[var(--zo-hover-bg)] ${
                         active ? "proposal-section-active" : ""
                       }`}
                     >
@@ -697,7 +698,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
 
           <div className="proposal-editor-pane rounded-none lg:rounded-2xl lg:border lg:border-zo-border">
             {selectedSection ? (
-              <div className="p-6 md:p-8 lg:p-10">
+              <div className="proposal-tab-panel">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div className="min-w-0 flex-1">
                     <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
@@ -857,8 +858,8 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
       {/* Content tab */}
       <TabPanel id="content" activeTab={activeTab}>
         {outline.sections.some((s) => s.content.trim()) ? (
-          <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(220px,280px)] lg:gap-6 lg:p-6">
-            <div className="custom-scrollbar max-h-[calc(100vh-14rem)] space-y-6 overflow-y-auto p-4 md:p-6 lg:max-h-[calc(100vh-12rem)] lg:p-0">
+          <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(200px,260px)] lg:gap-4 lg:p-3">
+            <div className="custom-scrollbar max-h-[calc(100vh-14rem)] space-y-4 overflow-y-auto p-3 md:p-4 lg:max-h-[calc(100vh-12rem)] lg:py-2 lg:px-2">
               {outline.sections.map((section, index) =>
                 section.content ? (
                   <article
@@ -866,27 +867,29 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                     id={section.id}
                     className="proposal-content-article scroll-mt-28"
                   >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="flex min-w-0 items-start gap-3">
-                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#ef5018] text-sm font-bold text-white">
+                    {/* Section card header */}
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#ef5018] text-sm font-bold text-white shadow-[0_4px_12px_rgba(239,80,24,0.3)]">
                           {index + 1}
                         </span>
                         <div className="min-w-0">
-                          <h3 className="font-heading text-lg font-bold leading-snug text-foreground">
+                          <h3 className="text-[1.05rem] font-bold leading-tight tracking-tight text-foreground">
                             {section.title}
                           </h3>
-                          <p className="mt-1 text-xs text-zo-text-muted">
-                            {countWords(section.content)} words
-                            {section.pageLimit
-                              ? ` · ~${section.pageLimit} pages`
-                              : ""}
+                          <p className="mt-0.5 text-[11px] text-zo-text-muted">
+                            {countWords(section.content).toLocaleString()} words
+                            {section.pageLimit ? ` · ~${section.pageLimit} pages` : ""}
                           </p>
                         </div>
                       </div>
                       <SectionStatusPill status={section.status} />
                     </div>
-                    <div className="mt-5 whitespace-pre-wrap text-sm leading-[1.8] text-zo-text-secondary">
-                      {section.content}
+                    {/* Divider */}
+                    <div className="my-5 h-px bg-zo-border/60" />
+                    {/* Section body: parsed markdown */}
+                    <div className="proposal-prose">
+                      <MarkdownReportBody body={section.content} variant="document" />
                     </div>
                   </article>
                 ) : null
@@ -943,7 +946,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
 
       {/* Budget tab — Supermemory pricing KB, RFP-aware */}
       <TabPanel id="pricing" activeTab={activeTab}>
-        <div className="p-6 md:p-8">
+        <div className="proposal-tab-panel">
           <ProposalBudgetPanel
             budget={budget}
             isRunning={isPricingRunning}
@@ -956,7 +959,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
 
       {/* Export tab */}
       <TabPanel id="export" activeTab={activeTab}>
-        <div className="grid gap-8 p-6 md:grid-cols-2 md:p-8">
+        <div className="proposal-tab-panel grid gap-5 md:grid-cols-2">
           <div>
             <h3 className="font-heading text-lg font-bold text-foreground">
               Export manuscript

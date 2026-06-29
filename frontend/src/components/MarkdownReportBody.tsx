@@ -139,8 +139,71 @@ function renderInline(text: string) {
   });
 }
 
-export function MarkdownReportBody({ body }: { body: string }) {
+export function MarkdownReportBody({
+  body,
+  variant = "report",
+}: {
+  body: string;
+  variant?: "report" | "document";
+}) {
   const blocks = parseBlocks(body);
+
+  if (variant === "document") {
+    return (
+      <div>
+        {blocks.map((block, index) => {
+          if (block.type === "heading") {
+            if (block.level === 1) return <h1 key={index}>{renderInline(block.text)}</h1>;
+            if (block.level === 2) return <h2 key={index}>{renderInline(block.text)}</h2>;
+            if (block.level === 3) return <h3 key={index}>{renderInline(block.text)}</h3>;
+            return <h4 key={index}>{renderInline(block.text)}</h4>;
+          }
+
+          if (block.type === "table") {
+            return (
+              <div key={index} className="my-4 overflow-x-auto rounded-xl border border-zo-border bg-white">
+                <table className="w-full min-w-[520px] text-left text-[13px]">
+                  <thead>
+                    <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-xs uppercase tracking-wide text-zo-text-muted">
+                      {block.headers.map((header) => (
+                        <th key={header} className="px-4 py-2.5 font-bold">
+                          {renderInline(header)}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {block.rows.map((row, rowIndex) => (
+                      <tr key={rowIndex} className="border-b border-zo-border/60 align-top last:border-0">
+                        {row.map((cell, cellIndex) => (
+                          <td key={cellIndex} className="px-4 py-3">
+                            {renderInline(cell)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          }
+
+          if (block.type === "list") {
+            const ListTag = block.ordered ? "ol" : "ul";
+            return (
+              <ListTag key={index}>
+                {block.items.map((item) => (
+                  <li key={item}>{renderInline(item)}</li>
+                ))}
+              </ListTag>
+            );
+          }
+
+          return <p key={index}>{renderInline(block.text)}</p>;
+        })}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4 text-sm leading-relaxed text-zo-text-secondary">

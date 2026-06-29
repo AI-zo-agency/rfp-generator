@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { IconTrash } from "./ui/icons";
 
 interface DeleteRfpButtonProps {
   rfpId: string;
@@ -21,8 +22,8 @@ export function DeleteRfpButton({
   const [error, setError] = useState<string | null>(null);
 
   async function handleDelete() {
-    const confirmed = window.confirm(
-      `Delete "${title}"?\n\nThis removes the RFP record, saved proposal draft, and uploaded PDF. This cannot be undone.`
+    const confirmed = globalThis.confirm(
+      `Delete "${title}"?\n\nThis removes the RFP record, saved proposal draft, and uploaded PDF. This cannot be undone.`,
     );
     if (!confirmed) return;
 
@@ -44,26 +45,44 @@ export function DeleteRfpButton({
     }
   }
 
-  const className =
-    variant === "table"
-      ? "text-xs font-semibold text-zo-error transition-colors hover:text-red-400 disabled:opacity-60"
-      : "zo-btn secondary border-zo-error/40 text-zo-error hover:border-zo-error hover:bg-zo-error/10 disabled:opacity-60";
+  if (variant === "table") {
+    return (
+      <div className="inline-flex flex-col items-center">
+        <button
+          type="button"
+          onClick={handleDelete}
+          disabled={loading}
+          className="table-action-btn table-action-btn--danger"
+          title={loading ? "Deleting…" : "Delete RFP"}
+          aria-label={loading ? "Deleting RFP" : `Delete ${title}`}
+        >
+          <IconTrash className={loading ? "h-4 w-4 animate-pulse" : "h-4 w-4"} />
+        </button>
+        {error ? (
+          <p className="mt-1 max-w-[8rem] text-center text-[10px] text-zo-danger" role="alert">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
-    <div className={variant === "table" ? "inline-flex flex-col items-end" : "inline-flex flex-col gap-2"}>
+    <div className="inline-flex flex-col gap-2">
       <button
         type="button"
         onClick={handleDelete}
         disabled={loading}
-        className={className}
+        className="zo-btn secondary inline-flex items-center gap-2 border-zo-danger/30 text-zo-danger hover:border-zo-danger hover:bg-zo-danger/8 disabled:opacity-60"
       >
-        {loading ? "Deleting…" : variant === "table" ? "Delete" : "Delete RFP"}
+        <IconTrash className="h-4 w-4" />
+        {loading ? "Deleting…" : "Delete RFP"}
       </button>
-      {error && (
-        <p className="max-w-xs text-xs text-zo-error" role="alert">
+      {error ? (
+        <p className="max-w-xs text-xs text-zo-danger" role="alert">
           {error}
         </p>
-      )}
+      ) : null}
     </div>
   );
 }

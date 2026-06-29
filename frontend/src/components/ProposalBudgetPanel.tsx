@@ -27,10 +27,10 @@ export function ProposalBudgetPanel({
   onGenerate,
 }: ProposalBudgetPanelProps) {
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h2 className="font-heading text-xl font-bold text-foreground">
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="font-heading text-lg font-bold text-foreground md:text-xl">
             Budget & Pricing
           </h2>
           <p className="mt-1 max-w-2xl text-sm text-zo-text-muted">
@@ -59,7 +59,7 @@ export function ProposalBudgetPanel({
       )}
 
       {!budget && !isRunning && (
-        <div className="rounded-xl border border-dashed border-zo-border bg-[#fafbfc] px-6 py-10 text-center">
+        <div className="rounded-xl border border-dashed border-zo-border bg-[#fafbfc] px-4 py-8 text-center">
           <p className="text-sm text-zo-text-muted">
             Run Go/No-Go (Stage 1) and generate proposal for scope map (Stage 2),
             then build budget from 00_Guide_Pricing + Supermemory.
@@ -69,7 +69,7 @@ export function ProposalBudgetPanel({
 
       {budget && (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div className="proposal-stat-card">
               <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                 RFP budget cap

@@ -36,9 +36,24 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <head>
+        <style
+          dangerouslySetInnerHTML={{
+            __html: `
+              html.auth-route {
+                background: #0a0f1a !important;
+              }
+              html.auth-route body {
+                background: #0a0f1a !important;
+              }
+              html.auth-route body::before {
+                display: none !important;
+              }
+            `,
+          }}
+        />
         <script
           dangerouslySetInnerHTML={{
-            __html: `document.documentElement.setAttribute('data-theme','light');`,
+            __html: `(function(){document.documentElement.setAttribute('data-theme','light');var p=location.pathname;if(p==='/login'||p==='/signup'||p.indexOf('/login/')===0||p.indexOf('/signup/')===0){document.documentElement.classList.add('auth-route');document.documentElement.style.backgroundColor='#0a0f1a';new Image().src='/auth/zo_Grid.webp';new Image().src='/auth/skateboard-bg.webp';}})();`,
           }}
         />
       </head>

@@ -1,4 +1,7 @@
+"use client";
+
 import type { DashboardStats } from "@/types/rfp";
+import { FadeInItem, FadeInStagger } from "./ui/FadeIn";
 
 interface SummaryCardsProps {
   stats: DashboardStats;
@@ -9,7 +12,7 @@ interface SummaryCardsProps {
 
 function CardIcon({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-12 w-12 items-center justify-center bg-[#ef5018]/15 text-[#ef5018]">
+    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#ef5018]/12 text-[#ef5018]">
       {children}
     </div>
   );
@@ -53,26 +56,25 @@ export function SummaryCards({
   ];
 
   return (
-    <div className="grid gap-5 sm:grid-cols-3">
+    <FadeInStagger className="grid gap-4 sm:grid-cols-2 sm:gap-5 lg:grid-cols-3">
       {cards.map((card) => (
-        <div
-          key={card.label}
-          className="zo-card flex items-center gap-5 p-6 transition-shadow duration-200 hover:shadow-md md:p-7"
-        >
-          <CardIcon>{card.icon}</CardIcon>
-          <div>
-            <p className="font-heading text-3xl font-normal tracking-tight text-foreground md:text-4xl">
-              {card.value}
-            </p>
-            <p className="mt-1 text-sm font-medium text-zo-text-secondary">
-              {card.label}
-            </p>
-            {"sub" in card && card.sub && (
-              <p className="mt-0.5 text-xs text-zo-text-muted">{card.sub}</p>
-            )}
+        <FadeInItem key={card.label}>
+          <div className="zo-card flex h-full items-center gap-4 p-5 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg sm:gap-5 sm:p-6 md:p-7">
+            <CardIcon>{card.icon}</CardIcon>
+            <div className="min-w-0">
+              <p className="font-heading text-3xl font-normal tracking-tight text-foreground md:text-4xl">
+                {card.value}
+              </p>
+              <p className="mt-1 text-sm font-medium text-zo-text-secondary">
+                {card.label}
+              </p>
+              {"sub" in card && card.sub ? (
+                <p className="mt-0.5 text-xs text-zo-text-muted">{card.sub}</p>
+              ) : null}
+            </div>
           </div>
-        </div>
+        </FadeInItem>
       ))}
-    </div>
+    </FadeInStagger>
   );
 }

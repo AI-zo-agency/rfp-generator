@@ -16,6 +16,7 @@ import { TeamWorkload } from "./TeamWorkload";
 import { ActivityFeed } from "./ActivityFeed";
 import { KnowledgeBasePreview } from "./KnowledgeBasePreview";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
+import { FadeIn } from "./ui/FadeIn";
 
 interface DashboardContentProps {
   rfps: RfpRecord[];
@@ -61,8 +62,10 @@ export function DashboardContent({
   }));
 
   return (
-    <div className="space-y-10">
-      <HeroBanner />
+    <div className="space-y-8 sm:space-y-10">
+      <FadeIn>
+        <HeroBanner />
+      </FadeIn>
 
       <SummaryCards
         stats={stats}
@@ -71,18 +74,20 @@ export function DashboardContent({
         subconsultant={subconsultant}
       />
 
-      <KnowledgeBasePreview />
+      <FadeIn delay={0.08}>
+        <KnowledgeBasePreview />
+      </FadeIn>
 
-      <div>
+      <FadeIn delay={0.1}>
         <OutlineTabs
           tabs={tabsWithCounts}
           activeTab={activeTab}
           onChange={setActiveTab}
         />
-      </div>
+      </FadeIn>
 
       <TabPanel id="recent" activeTab={activeTab}>
-        <div className="space-y-10">
+        <FadeIn className="space-y-8 sm:space-y-10">
           <RecentRfpsTable rfps={rfps} />
           <div className="grid gap-8 lg:grid-cols-5">
             <div className="lg:col-span-3">
@@ -92,18 +97,20 @@ export function DashboardContent({
               <TeamWorkload team={team} />
             </div>
           </div>
-        </div>
+        </FadeIn>
       </TabPanel>
 
       <TabPanel id="pipeline" activeTab={activeTab}>
-        <div className="space-y-10">
+        <FadeIn className="space-y-8 sm:space-y-10">
           <ProcessPipeline rfps={rfps} />
           <TeamWorkload team={team} />
-        </div>
+        </FadeIn>
       </TabPanel>
 
       <TabPanel id="all" activeTab={activeTab}>
-        <RfpTable rfps={rfps} />
+        <FadeIn>
+          <RfpTable rfps={rfps} />
+        </FadeIn>
       </TabPanel>
 
       <footer className="border-t border-zo-border pt-8 text-center">
