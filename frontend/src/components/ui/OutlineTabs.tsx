@@ -56,7 +56,7 @@ export function OutlineTabs({
   return (
     <div
       ref={containerRef}
-      className={`relative inline-flex gap-1 rounded-xl border border-zo-border bg-white p-1 shadow-sm ${className}`}
+      className={`relative inline-flex gap-2 rounded-xl border border-zo-border bg-white p-1.5 shadow-sm ${className}`}
       role="tablist"
     >
       {ready && (
@@ -84,19 +84,19 @@ export function OutlineTabs({
             role="tab"
             aria-selected={isActive}
             onClick={() => onChange(tab.id)}
-            className={`relative z-10 flex items-center gap-2 rounded-lg px-5 py-2.5 text-xs font-cabin font-semibold uppercase tracking-[0.08em] transition-smooth ${
+            className={`relative z-10 flex items-center gap-2.5 rounded-lg px-6 py-3 text-xs font-cabin font-semibold uppercase tracking-[0.08em] transition-smooth ${
               isActive
                 ? "text-white"
                 : "text-zo-text-secondary hover:text-foreground"
             }`}
           >
             {tab.label}
-            {tab.count !== undefined && (
+            {tab.count !== undefined && tab.count > 0 && (
               <span
-                className={`px-2 py-0.5 text-[10px] font-bold transition-smooth rounded-full ${
+                className={`min-w-[1.25rem] px-2 py-0.5 text-center text-[10px] font-bold transition-smooth rounded-full ${
                   isActive
-                    ? "bg-zo-orange text-white"
-                    : "bg-[var(--zo-surface)] text-zo-text-muted"
+                    ? "bg-white/20 text-white"
+                    : "bg-red-100 text-red-800"
                 }`}
               >
                 {tab.count}

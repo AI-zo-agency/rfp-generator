@@ -1,12 +1,15 @@
 import logging
-from datetime import datetime, timezone
 import re
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 
 from app.models.proposal import (
+    PreSubmitReview,
     ProposalBrandVoice,
     ProposalDraft,
     ProposalResearchCache,
     ProposalSection,
+    PreSubmitAutoFixReport,
     ResearchQuestion,
     RfpSectionMap,
 )
@@ -27,7 +30,11 @@ from app.services.proposal_repository import (
     save_research_cache,
 )
 from app.services.proposal_drafting_graph import run_drafting_graph
+from app.services.proposal_fee_justification import generate_fee_justification_memo
 from app.services.proposal_loss_lessons import build_loss_lessons_for_rfp
+from app.services.proposal_presubmit_review import run_presubmit_review
+from app.services.proposal_presubmit_autofix import run_presubmit_autofix_loop
+from app.services.proposal_proof_points import build_proof_points_for_rfp
 from app.services.proposal_retrieval_graph import run_retrieval_graph
 from app.services.proposal_sections_graph import run_sections_1_3_graph
 from app.services.rfp_repository import get_rfp
@@ -512,6 +519,12 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         rfp_context=rfp_context,
     )
 
+    proof_points = await build_proof_points_for_rfp(
+        rfp=rfp,
+        rfp_context=rfp_context,
+        rfp_sections=rfp_sections,
+    )
+
     now = datetime.now(timezone.utc).isoformat()
     research = ProposalResearchCache(
         rfpId=rfp.id,
@@ -524,18 +537,21 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         coverageThreshold=85,
         lossLessons=loss_lessons,
         writingAvoidances=writing_avoidances,
+        proofPoints=proof_points,
         budget=prior_research.budget if prior_research else None,
+        presubmitReview=prior_research.presubmit_review if prior_research else None,
         updatedAt=now,
         provider=provider,
     )
     save_research_cache(research)
 
     logger.info(
-        "Phase 2 complete for %s: %d RFP sections, %d evidence items, %d loss lessons",
+        "Phase 2 complete for %s: %d RFP sections, %d evidence items, %d loss lessons, %d proof points",
         rfp_id,
         len(rfp_sections),
         len(evidence_corpus),
         len(loss_lessons),
+        len(proof_points),
     )
     return research
 
@@ -657,6 +673,7 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         zo_template_sections=static_sections,
         writing_avoidances=research.writing_avoidances,
         loss_lessons=research.loss_lessons,
+        proof_points=research.proof_points,
     )
 
     merged_sections = _merge_static_with_rfp_sections(
@@ -702,6 +719,99 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         len(merged_sections),
     )
     return draft, updated_research
+
+
+async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, ProposalResearchCache]:
+    """Stage 4: pre-submit copy-paste scan + compliance checklist."""
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise ProposalError("RFP not found", status_code=404)
+
+    draft = get_proposal_draft(rfp_id)
+    if not draft or not any(s.content.strip() for s in draft.sections):
+        raise ProposalError(
+            "No proposal content to review. Generate proposal sections first.",
+            status_code=400,
+        )
+
+    research = get_research_cache(rfp_id)
+    review = run_presubmit_review(rfp=rfp, draft=draft, research=research)
+
+    now = datetime.now(timezone.utc).isoformat()
+    updated_research = (research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)).model_copy(
+        update={"presubmit_review": review, "updated_at": now}
+    )
+    save_research_cache(updated_research)
+
+    logger.info(
+        "Phase 4 pre-submit review for %s: %d issues, ready=%s",
+        rfp_id,
+        len(review.issues),
+        review.ready_to_submit,
+    )
+    return review, updated_research
+
+
+async def run_phase4_presubmit_autofix(
+    rfp_id: str,
+    *,
+    use_llm: bool = True,
+    should_cancel: Callable[[], Awaitable[bool]] | None = None,
+) -> tuple[PreSubmitReview, ProposalResearchCache, ProposalDraft, PreSubmitAutoFixReport]:
+    """Run bounded auto-fix passes on review findings, then re-scan."""
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise ProposalError("RFP not found", status_code=404)
+
+    draft = get_proposal_draft(rfp_id)
+    if not draft or not any(s.content.strip() for s in draft.sections):
+        raise ProposalError(
+            "No proposal content to fix. Generate proposal sections first.",
+            status_code=400,
+        )
+
+    research = get_research_cache(rfp_id)
+    issues_before = len(
+        run_presubmit_review(rfp=rfp, draft=draft, research=research).issues
+    )
+
+    updated_draft, review, section_logs, stopped_reason, iterations_run, updated_research_cache = (
+        await run_presubmit_autofix_loop(
+            rfp=rfp,
+            draft=draft,
+            research=research,
+            use_llm=use_llm,
+            should_cancel=should_cancel,
+        )
+    )
+
+    save_proposal_draft(updated_draft)
+
+    now = datetime.now(timezone.utc).isoformat()
+    base_research = updated_research_cache or research
+    updated_research = (base_research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)).model_copy(
+        update={"presubmit_review": review, "updated_at": now}
+    )
+    save_research_cache(updated_research)
+
+    report = PreSubmitAutoFixReport(
+        iterations_run=iterations_run,
+        issues_before=issues_before,
+        issues_after=len(review.issues),
+        sections_patched=len(section_logs),
+        stopped_reason=stopped_reason,
+        section_logs=section_logs,
+    )
+
+    logger.info(
+        "Phase 4 auto-fix for %s: %d → %d issues, %d sections patched, stopped=%s",
+        rfp_id,
+        report.issues_before,
+        report.issues_after,
+        report.sections_patched,
+        stopped_reason,
+    )
+    return review, updated_research, updated_draft, report
 
 
 async def generate_full_proposal(

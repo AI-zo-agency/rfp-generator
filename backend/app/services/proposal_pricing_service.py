@@ -15,6 +15,7 @@ from app.models.proposal import (
 )
 from app.models.rfp import RfpRecord
 from app.services import llm, supermemory
+from app.services.proposal_fee_justification import generate_fee_justification_memo
 from app.services.proposal_generator import ProposalError, _load_rfp_for_proposal
 from app.services.proposal_knowledge_base_tools import search_knowledge_base
 from app.services.proposal_repository import get_research_cache, save_research_cache
@@ -402,6 +403,15 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         updatedAt=now,
         provider=provider,
     )
+
+    stage_one_text, _ = _stage_one_text(rfp)
+    fee_memo = await generate_fee_justification_memo(
+        rfp=rfp,
+        budget=budget,
+        stage_one_excerpt=stage_one_text,
+    )
+    if fee_memo:
+        budget = budget.model_copy(update={"fee_justification_memo": fee_memo})
 
     if prior_research:
         research = prior_research.model_copy(

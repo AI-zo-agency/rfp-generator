@@ -1,6 +1,7 @@
 "use client";
 
 import type { ProposalBudget } from "@/types/proposal";
+import { FeeJustificationBlock } from "./ProposalReviewPanel";
 
 function formatUsd(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return "—";
@@ -279,6 +280,10 @@ export function ProposalBudgetPanel({
                 {budget.qualifyingLanguage}
               </div>
             </div>
+          )}
+
+          {budget.feeJustificationMemo?.markdown && (
+            <FeeJustificationBlock markdown={budget.feeJustificationMemo.markdown} />
           )}
 
           {budget.scopeSummary && (

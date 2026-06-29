@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
 const FULL_PROPOSAL_TIMEOUT_MS = 25 * 60 * 1000;
 
+export const maxDuration = 900;
+
 export async function POST(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }

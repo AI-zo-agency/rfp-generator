@@ -94,7 +94,7 @@ export function ProposalsWorkspace({ goRfps }: ProposalsWorkspaceProps) {
   }
 
   return (
-    <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
+    <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)] xl:gap-5">
       <aside className="proposal-go-sidebar flex flex-col overflow-hidden xl:sticky xl:top-24 xl:max-h-[calc(100vh-7rem)]">
         <div className="border-b border-zo-border/80 bg-[#fafbfc] px-5 py-5">
           <div className="flex items-center justify-between gap-3">
@@ -163,6 +163,7 @@ export function ProposalsWorkspace({ goRfps }: ProposalsWorkspaceProps) {
                       </p>
                       <p className="mt-1 truncate text-xs text-zo-text-muted">
                         {rfp.client}
+                        {rfp.location ? ` · ${rfp.location}` : ""}
                       </p>
                       <div className="mt-2.5 flex flex-wrap items-center gap-2">
                         <span className="rounded-md border border-zo-border bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zo-text-secondary">

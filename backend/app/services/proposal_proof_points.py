@@ -1,0 +1,132 @@
+"""Proof-point matcher: RFP requirements → verified case studies."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from app.models.proposal import ProofPoint, RfpSectionMap
+from app.models.rfp import RfpRecord
+from app.services import llm
+from app.services.llm import LlmError
+from app.services.proposal_knowledge_base_tools import search_knowledge_base
+from app.services.proposal_langchain import _provider_name
+
+logger = logging.getLogger(__name__)
+
+PROOF_POINT_PROMPT = """Match zö agency case studies to RFP requirements for a winning proposal.
+
+Use ONLY case study excerpts provided. Each match must cite a real 03_CS_ or won-proposal client.
+
+For each requirement, return the best proof point with a first-person narrative hook (we/our — never "The Vendor").
+
+Return ONLY JSON:
+{
+  "proofPoints": [
+    {
+      "requirement": "exact requirement text",
+      "caseStudy": "Client / project name",
+      "kbSource": "filename or source label from excerpts",
+      "narrativeHook": "We built... / We led... (1-2 sentences, outcome-focused)",
+      "relevance": "high|medium|low",
+      "sectionIds": ["rfp-sec-5"],
+      "evaluationWeight": 40
+    }
+  ]
+}
+
+Max 12 proof points. Prioritize highest evaluationWeight sections first."""
+
+
+async def build_proof_points_for_rfp(
+    *,
+    rfp: RfpRecord,
+    rfp_context: str,
+    rfp_sections: list[RfpSectionMap],
+) -> list[ProofPoint]:
+    if not llm.is_configured():
+        logger.warning("Proof points skipped — LLM not configured")
+        return []
+
+    case_text, case_sources = await search_knowledge_base(
+        f"zö agency case studies {rfp.sector} {rfp.client} public sector marketing campaign outcomes",
+        limit=10,
+        category="case_studies",
+        max_chars=14_000,
+    )
+    if case_text.startswith("(") and "not configured" in case_text.lower():
+        return []
+
+    requirements_payload: list[dict[str, Any]] = []
+    for section in rfp_sections:
+        weight = section.evaluation_weight
+        for req in (section.requirements or [])[:4]:
+            requirements_payload.append(
+                {
+                    "sectionId": section.id,
+                    "sectionTitle": section.title,
+                    "evaluationWeight": weight,
+                    "requirement": req,
+                }
+            )
+
+    if not requirements_payload:
+        for section in sorted(
+            rfp_sections,
+            key=lambda s: -(s.evaluation_weight or 0),
+        )[:6]:
+            requirements_payload.append(
+                {
+                    "sectionId": section.id,
+                    "sectionTitle": section.title,
+                    "evaluationWeight": section.evaluation_weight,
+                    "requirement": section.title,
+                }
+            )
+
+    requirements_payload = requirements_payload[:24]
+
+    try:
+        raw, _provider = await llm.chat_json(
+            [
+                {"role": "system", "content": PROOF_POINT_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Client: {rfp.client}\n"
+                        f"Sector: {rfp.sector}\n"
+                        f"RFP: {rfp.title}\n\n"
+                        f"Requirements to match:\n{requirements_payload}\n\n"
+                        f"Case study KB excerpts:\n{case_text[:12_000]}\n\n"
+                        f"Sources: {', '.join(case_sources[:8])}\n\n"
+                        f"RFP excerpt:\n{rfp_context[:6000]}"
+                    ),
+                },
+            ],
+            max_tokens=4096,
+            temperature=0.25,
+        )
+    except LlmError as exc:
+        logger.warning("Proof point matching failed: %s", exc)
+        return []
+
+    items = raw.get("proofPoints") or raw.get("proof_points") or []
+    if not isinstance(items, list):
+        return []
+
+    proof_points: list[ProofPoint] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            proof_points.append(ProofPoint.model_validate(item))
+        except Exception:
+            logger.debug("Skipped invalid proof point", exc_info=True)
+
+    logger.info(
+        "Proof points for %s: %d matches (provider=%s)",
+        rfp.id,
+        len(proof_points),
+        _provider_name(),
+    )
+    return proof_points

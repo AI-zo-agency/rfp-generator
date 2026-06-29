@@ -59,6 +59,68 @@ export interface LossLesson {
   relevance?: string;
 }
 
+export interface ProofPoint {
+  requirement: string;
+  caseStudy: string;
+  kbSource?: string;
+  narrativeHook?: string;
+  relevance?: string;
+  sectionIds?: string[];
+  evaluationWeight?: number | null;
+}
+
+export interface PreSubmitIssue {
+  severity: "critical" | "warning" | "info";
+  category: string;
+  message: string;
+  sectionId?: string | null;
+  sectionTitle?: string | null;
+  excerpt?: string | null;
+}
+
+export interface ComplianceCheckItem {
+  item: string;
+  status: "pass" | "fail" | "manual";
+  notes: string;
+}
+
+export interface PreSubmitReview {
+  rfpId: string;
+  issues: PreSubmitIssue[];
+  complianceChecklist: ComplianceCheckItem[];
+  summary: string;
+  readyToSubmit: boolean;
+  scannedAt: string;
+  provider?: string | null;
+}
+
+export interface SectionAutoFixLog {
+  sectionId: string;
+  sectionTitle: string;
+  iteration: number;
+  methods: string[];
+  issuesTargeted: number;
+}
+
+export interface PreSubmitAutoFixReport {
+  iterationsRun: number;
+  issuesBefore: number;
+  issuesAfter: number;
+  sectionsPatched: number;
+  stoppedReason: string;
+  sectionLogs: SectionAutoFixLog[];
+}
+
+export interface FeeJustificationMemo {
+  markdown: string;
+  pricingPosture: string;
+  targetVsCap: string;
+  roleHoursSummary: string[];
+  internalNotes: string[];
+  generatedAt: string;
+  provider?: string | null;
+}
+
 export interface ProposalResearch {
   rfpId: string;
   rfpSections: RfpSectionMap[];
@@ -68,6 +130,8 @@ export interface ProposalResearch {
   budget?: ProposalBudget | null;
   lossLessons?: LossLesson[];
   writingAvoidances?: string[];
+  proofPoints?: ProofPoint[];
+  presubmitReview?: PreSubmitReview | null;
   updatedAt: string;
   provider?: string | null;
   sectionQueries?: Record<string, string[]>;
@@ -125,6 +189,7 @@ export interface ProposalBudget {
   kbSources: string[];
   kbBucketsUsed: string[];
   confidence: number;
+  feeJustificationMemo?: FeeJustificationMemo | null;
   updatedAt: string;
   provider?: string | null;
 }

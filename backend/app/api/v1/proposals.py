@@ -1,13 +1,16 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.models.proposal import (
     ProposalDraft,
     ProposalGenerateResponse,
     ProposalPhase2Response,
     ProposalPhase3Response,
+    ProposalPhase4AutoFixResponse,
+    ProposalPhase4Response,
     ProposalPricingResponse,
     ProposalResearchCache,
     ProposalSectionImproveResponse,
+    PreSubmitAutoFixRequest,
     SectionImproveRequest,
 )
 from app.services.proposal_generator import (
@@ -16,6 +19,8 @@ from app.services.proposal_generator import (
     generate_sections_1_3,
     run_phase2_retrieval,
     run_phase3_drafting,
+    run_phase4_presubmit_autofix,
+    run_phase4_presubmit_review,
 )
 from app.services.proposal_budget_content import incorporate_budget_into_draft
 from app.services.proposal_pricing_service import generate_proposal_budget
@@ -189,4 +194,60 @@ async def improve_section_endpoint(
         draft=draft,
         research=research,
         assistantMessage=assistant_message,
+    )
+
+
+@router.post(
+    "/{rfp_id}/proposal/phase-4-review",
+    response_model=ProposalPhase4Response,
+)
+async def phase4_presubmit_review_endpoint(rfp_id: str) -> ProposalPhase4Response:
+    """Stage 4: pre-submit copy-paste scan + compliance checklist."""
+    try:
+        review, research = await run_phase4_presubmit_review(rfp_id)
+    except ProposalError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Pre-submit review failed: {exc}",
+        ) from exc
+
+    return ProposalPhase4Response(review=review, research=research)
+
+
+@router.post(
+    "/{rfp_id}/proposal/phase-4-auto-fix",
+    response_model=ProposalPhase4AutoFixResponse,
+)
+async def phase4_presubmit_autofix_endpoint(
+    rfp_id: str,
+    request: Request,
+    body: PreSubmitAutoFixRequest | None = None,
+) -> ProposalPhase4AutoFixResponse:
+    """AI + Supermemory repair for all review findings — cancellable."""
+    use_llm = body.use_llm if body else True
+
+    async def should_cancel() -> bool:
+        return await request.is_disconnected()
+
+    try:
+        review, research, draft, auto_fix = await run_phase4_presubmit_autofix(
+            rfp_id,
+            use_llm=use_llm,
+            should_cancel=should_cancel,
+        )
+    except ProposalError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Pre-submit auto-fix failed: {exc}",
+        ) from exc
+
+    return ProposalPhase4AutoFixResponse(
+        review=review,
+        research=research,
+        draft=draft,
+        auto_fix=auto_fix,
     )

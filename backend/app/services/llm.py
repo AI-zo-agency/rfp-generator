@@ -158,30 +158,6 @@ async def chat_json(
             return _parse_json_response(raw), "openrouter"
         except LlmError as exc:
             errors.append(str(exc))
-            if exc.status_code == 402 and max_tokens and max_tokens > 1400:
-                affordable = 1400
-                logger.info(
-                    "OpenRouter 402 (insufficient credits for max_tokens=%s) — retrying with %d",
-                    max_tokens,
-                    affordable,
-                )
-                try:
-                    raw = await _post_chat(
-                        base_url=settings.openrouter_base_url,
-                        api_key=openrouter_key,
-                        model=settings.openrouter_model,
-                        messages=messages,
-                        provider="OpenRouter",
-                        extra_headers={
-                            "HTTP-Referer": settings.app_url,
-                            "X-Title": settings.app_name,
-                        },
-                        max_tokens=affordable,
-                        temperature=temperature,
-                    )
-                    return _parse_json_response(raw), "openrouter"
-                except LlmError as retry_exc:
-                    errors.append(str(retry_exc))
             logger.info("OpenRouter failed, trying Fireworks fallback")
 
     fireworks_key = _fireworks_key()

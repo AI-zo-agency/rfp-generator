@@ -13,25 +13,31 @@ import {
 } from "@/lib/proposal-budget-content";
 import {
   fetchProposalDraft,
-  generateFullProposalWithResearch,
+  generateFullProposalStaged,
   generateProposalPricing,
   generateProposalSections1to3,
+  recoverProposalDraftIfSaved,
+  runPhase4PreSubmitReview,
+  runPhase4PreSubmitAutoFix,
   saveProposalDraft,
+  type FullProposalProgress,
 } from "@/lib/proposal-api";
-import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch } from "@/types/proposal";
+import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
 import { SectionStatusPill } from "./SectionStatusPill";
 import { MarkdownReportBody } from "./MarkdownReportBody";
 import { SectionEditChat } from "./SectionEditChat";
 import { ProposalBudgetPanel } from "./ProposalBudgetPanel";
+import { ProposalReviewPanel } from "./ProposalReviewPanel";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
 
-type WorkspaceTab = "outline" | "content" | "pricing" | "export";
+type WorkspaceTab = "outline" | "content" | "pricing" | "review" | "export";
 
-const workspaceTabs = [
+const baseWorkspaceTabs = [
   { id: "outline", label: "Outline" },
   { id: "content", label: "Content" },
   { id: "pricing", label: "Budget" },
+  { id: "review", label: "Review" },
   { id: "export", label: "Export" },
 ];
 
@@ -39,13 +45,21 @@ function StatCard({
   label,
   value,
   sub,
+  variant = "default",
 }: {
   label: string;
   value: string | number;
   sub?: string;
+  variant?: "default" | "danger" | "success";
 }) {
+  const variantClass =
+    variant === "danger"
+      ? "proposal-stat-card--danger"
+      : variant === "success"
+        ? "proposal-stat-card--success"
+        : "";
   return (
-    <div className="proposal-stat-card">
+    <div className={`proposal-stat-card ${variantClass}`}>
       <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
         {label}
       </p>
@@ -165,6 +179,27 @@ function ResearchStatusPanel({
                 </ul>
               </div>
             )}
+
+            {(research.proofPoints?.length ?? 0) > 0 && (
+              <div className="rounded-xl border border-zo-border bg-white px-4 py-4">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-orange">
+                  Proof points (requirement → case study)
+                </p>
+                <ul className="mt-3 space-y-3">
+                  {research.proofPoints!.slice(0, 6).map((point) => (
+                    <li key={`${point.requirement}-${point.caseStudy}`} className="text-sm">
+                      <p className="font-medium text-foreground">{point.caseStudy}</p>
+                      <p className="mt-0.5 text-zo-text-muted">{point.requirement}</p>
+                      {point.narrativeHook && (
+                        <p className="mt-1 text-zo-text-secondary italic">
+                          {point.narrativeHook}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -214,14 +249,24 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
   );
   const [isGenerating, setIsGenerating] = useState(false);
   const [isFullProposalRunning, setIsFullProposalRunning] = useState(false);
+  const [fullProposalProgress, setFullProposalProgress] =
+    useState<FullProposalProgress | null>(null);
   const [isPricingRunning, setIsPricingRunning] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [isReviewRunning, setIsReviewRunning] = useState(false);
+  const [isAutoFixing, setIsAutoFixing] = useState(false);
+  const [autoFixMode, setAutoFixMode] = useState<"quick" | "ai" | null>(null);
+  const autoFixAbortRef = useRef<AbortController | null>(null);
+  const [autoFixNotice, setAutoFixNotice] = useState<string | null>(null);
+  const [presubmitReview, setPresubmitReview] = useState<PreSubmitReview | null>(null);
   const [budget, setBudget] = useState<ProposalBudget | null>(null);
   const [research, setResearch] = useState<ProposalResearch | null>(null);
   const [newSectionTitle, setNewSectionTitle] = useState("");
   const [hydrated, setHydrated] = useState(false);
   const [copied, setCopied] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
+  const [generateNotice, setGenerateNotice] = useState<string | null>(null);
   const [provider, setProvider] = useState<string | null>(null);
   const skipNextSaveRef = useRef(false);
   const editorScrollRef = useRef<HTMLDivElement>(null);
@@ -238,6 +283,20 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
   const selectSection = useCallback((id: string) => {
     setSelectedSectionId(id);
   }, []);
+
+  const handleJumpToSection = useCallback(
+    (sectionId: string) => {
+      setActiveTab("outline");
+      setSelectedSectionId(sectionId);
+      requestAnimationFrame(() => {
+        sectionButtonRefs.current.get(sectionId)?.scrollIntoView({
+          block: "nearest",
+          behavior: "smooth",
+        });
+      });
+    },
+    []
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -258,6 +317,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
       }
       setResearch(r ?? null);
       setBudget(r?.budget ?? null);
+      setPresubmitReview(r?.presubmitReview ?? null);
       setHydrated(true);
     }
 
@@ -281,9 +341,26 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
 
   const stats = useMemo(() => computeDraftStats(outline), [outline]);
   const pageLimit = rfp.pageLimit ?? 30;
+  const pageOverLimit = stats.totalPages > pageLimit;
   const pageProgress = Math.min(100, (stats.totalPages / pageLimit) * 100);
+  const pageOverflowProgress = pageOverLimit
+    ? Math.min(100, ((stats.totalPages - pageLimit) / pageLimit) * 100)
+    : 0;
   const sectionProgress = Math.round(
     (stats.generatedSections / outline.sections.length) * 100
+  );
+
+  const reviewCriticalCount =
+    presubmitReview?.issues.filter((i) => i.severity === "critical").length ?? 0;
+
+  const workspaceTabs = useMemo(
+    () =>
+      baseWorkspaceTabs.map((tab) =>
+        tab.id === "review" && reviewCriticalCount > 0
+          ? { ...tab, count: reviewCriticalCount }
+          : tab
+      ),
+    [reviewCriticalCount]
   );
 
   const selectedSection = outline.sections.find(
@@ -314,7 +391,90 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
   const fullProposalDone = phase3Done;
 
   const anyPipelineRunning =
-    isGenerating || isFullProposalRunning || isPricingRunning;
+    isGenerating || isFullProposalRunning || isPricingRunning || isReviewRunning || isAutoFixing;
+
+  const handleRunReview = useCallback(async () => {
+    setIsReviewRunning(true);
+    setReviewError(null);
+    try {
+      const { review, research: updatedResearch } = await runPhase4PreSubmitReview(
+        rfp.id
+      );
+      setPresubmitReview(review);
+      setResearch(updatedResearch);
+      setActiveTab("review");
+    } catch (error) {
+      setReviewError(
+        error instanceof Error ? error.message : "Pre-submit review failed"
+      );
+    } finally {
+      setIsReviewRunning(false);
+    }
+  }, [rfp.id]);
+
+  const handleAutoFix = useCallback(async () => {
+    autoFixAbortRef.current?.abort();
+    const controller = new AbortController();
+    autoFixAbortRef.current = controller;
+    setIsAutoFixing(true);
+    setAutoFixMode("ai");
+    setReviewError(null);
+    setAutoFixNotice(null);
+    try {
+      const { review, research: updatedResearch, draft, autoFix } =
+        await runPhase4PreSubmitAutoFix(rfp.id, {
+          useLlm: true,
+          signal: controller.signal,
+        });
+      skipNextSaveRef.current = true;
+      setOutline(draft);
+      setPresubmitReview(review);
+      setResearch(updatedResearch);
+      await saveProposalDraft(rfp.id, draft);
+      setAutoFixNotice(
+        `Auto-fix: ${autoFix.issuesBefore} → ${autoFix.issuesAfter} findings · ` +
+          `${autoFix.sectionsPatched} section(s) updated. ` +
+          (autoFix.stoppedReason === "cancelled"
+            ? "Stopped — partial progress was saved."
+            : autoFix.stoppedReason === "ready"
+              ? "Re-check compliance items before upload."
+              : autoFix.issuesAfter > 0
+                ? "Re-run review or edit remaining sections manually."
+                : "All fixable issues resolved.")
+      );
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        const recovered = await recoverProposalDraftIfSaved(rfp.id, {
+          minSectionsWithContent: 3,
+        });
+        if (recovered) {
+          skipNextSaveRef.current = true;
+          setOutline(recovered.draft);
+          if (recovered.research) {
+            setResearch(recovered.research);
+            setPresubmitReview(recovered.research.presubmitReview ?? null);
+          }
+          setAutoFixNotice("Stopped — saved progress loaded.");
+        } else {
+          setReviewError("Auto-fix stopped.");
+        }
+      } else {
+        setReviewError(
+          error instanceof Error ? error.message : "Auto-fix failed"
+        );
+      }
+    } finally {
+      if (autoFixAbortRef.current === controller) {
+        autoFixAbortRef.current = null;
+      }
+      setIsAutoFixing(false);
+      setAutoFixMode(null);
+    }
+  }, [rfp.id]);
+
+  const handleStopAutoFix = useCallback(() => {
+    autoFixAbortRef.current?.abort();
+  }, []);
 
   const handleGeneratePricing = useCallback(async () => {
     if (
@@ -362,10 +522,12 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
       return;
     }
     setIsFullProposalRunning(true);
+    setFullProposalProgress(null);
     setGenerateError(null);
+    setGenerateNotice(null);
     try {
       const { draft, research: updatedResearch } =
-        await generateFullProposalWithResearch(rfp.id);
+        await generateFullProposalStaged(rfp.id, setFullProposalProgress);
       skipNextSaveRef.current = true;
       setOutline(draft);
       if (updatedResearch) {
@@ -377,13 +539,36 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
         draft.sections.find((s) => s.content)?.id ?? draft.sections[0]?.id ?? null
       );
     } catch (error) {
-      setGenerateError(
-        error instanceof Error
-          ? error.message
-          : "Full proposal generation failed"
-      );
+      setFullProposalProgress("recovering");
+      const recovered = await recoverProposalDraftIfSaved(rfp.id, {
+        minSectionsWithContent: 10,
+      });
+      if (recovered) {
+        skipNextSaveRef.current = true;
+        setOutline(recovered.draft);
+        if (recovered.research) {
+          setResearch(recovered.research);
+        }
+        setActiveTab("content");
+        setSelectedSectionId(
+          recovered.draft.sections.find((s) => s.content)?.id ??
+            recovered.draft.sections[0]?.id ??
+            null
+        );
+        setGenerateNotice(
+          "Connection timed out, but your proposal was saved on the server — loaded from draft."
+        );
+        setGenerateError(null);
+      } else {
+        setGenerateError(
+          error instanceof Error
+            ? error.message
+            : "Full proposal generation failed"
+        );
+      }
     } finally {
       setIsFullProposalRunning(false);
+      setFullProposalProgress(null);
     }
   }, [rfp.id, fullProposalDone]);
 
@@ -398,6 +583,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
     }
     setIsGenerating(true);
     setGenerateError(null);
+    setGenerateNotice(null);
     try {
       const generated = await generateProposalSections1to3(rfp.id);
       skipNextSaveRef.current = true;
@@ -526,6 +712,24 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                 {rfp.location || "—"} · Page limit {pageLimit}
                 {provider ? ` · via ${provider}` : ""}
               </p>
+              {fullProposalDone && (
+                <div className="mt-2.5 flex flex-wrap gap-1.5">
+                  <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-800">
+                    Manuscript complete
+                  </span>
+                  {pageOverLimit && (
+                    <span className="rounded-full border border-red-200 bg-red-50 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-800">
+                      Over page limit
+                    </span>
+                  )}
+                  {reviewCriticalCount > 0 && (
+                    <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-900">
+                      {reviewCriticalCount} critical review issue
+                      {reviewCriticalCount === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="proposal-stat-grid">
@@ -536,12 +740,14 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
               <StatCard
                 label="Pages"
                 value={stats.totalPages}
-                sub={`of ${pageLimit} max`}
+                sub={pageOverLimit ? `${stats.totalPages - pageLimit} over limit` : `of ${pageLimit} max`}
+                variant={pageOverLimit ? "danger" : "default"}
               />
               <StatCard
                 label="Sections"
                 value={`${stats.generatedSections}/${outline.sections.length}`}
                 sub={`${sectionProgress}% done`}
+                variant={sectionProgress === 100 ? "success" : "default"}
               />
             </div>
           </div>
@@ -549,34 +755,50 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
           <div className="relative mt-4">
             <div className="mb-2 flex items-center justify-between text-xs font-semibold text-black/65">
               <span>Manuscript progress</span>
-              <span>
+              <span className={pageOverLimit ? "text-red-700" : ""}>
                 {stats.totalPages} / {pageLimit} pages
+                {pageOverLimit ? ` (+${stats.totalPages - pageLimit})` : ""}
               </span>
             </div>
             <div className="proposal-progress-track">
               <div
-                className="proposal-progress-fill"
+                className={`proposal-progress-fill ${pageOverLimit ? "proposal-progress-fill--at-limit" : ""}`}
                 style={{ width: `${pageProgress}%` }}
               />
+              {pageOverLimit && (
+                <div
+                  className="proposal-progress-overflow"
+                  style={{ width: `${pageOverflowProgress}%` }}
+                />
+              )}
             </div>
           </div>
         </div>
       </div>
 
-      <div className="proposal-toolbar sticky top-16 z-10 flex flex-col gap-2.5 border-y sm:flex-row sm:items-center sm:justify-between">
+      {(generateNotice || generateError) && (
+        <div
+          className={`border-b px-4 py-2.5 text-sm md:px-5 ${
+            generateNotice
+              ? "border-amber-200/80 bg-amber-50 text-amber-950"
+              : "border-red-200/80 bg-red-50 text-zo-error"
+          }`}
+        >
+          {generateNotice ?? generateError}
+        </div>
+      )}
+
+      <div className="proposal-toolbar sticky top-16 z-10 flex flex-col gap-4 border-y sm:flex-row sm:items-center sm:justify-between">
         <OutlineTabs
           tabs={workspaceTabs}
           activeTab={activeTab}
           onChange={(id) => setActiveTab(id as WorkspaceTab)}
         />
-        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
-          {generateError && (
-            <p className="w-full text-xs text-zo-error sm:w-auto">{generateError}</p>
-          )}
+        <div className="proposal-toolbar-actions flex w-full flex-wrap items-center gap-4 sm:w-auto sm:justify-end">
           <button
             type="button"
             onClick={handleResetOutline}
-            className="zo-btn secondary !py-2"
+            className="zo-btn secondary"
             disabled={anyPipelineRunning}
           >
             Reset
@@ -585,7 +807,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
             type="button"
             onClick={handleGenerateSections1to3}
             disabled={anyPipelineRunning}
-            className="zo-btn secondary !py-2 disabled:opacity-60"
+            className="zo-btn secondary disabled:opacity-60"
             title="Static zö blocks only: Company Overview, Team, Case Studies"
           >
             {isGenerating ? (
@@ -601,13 +823,21 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
             type="button"
             onClick={handleGenerateFullProposal}
             disabled={anyPipelineRunning}
-            className="zo-btn !py-2 disabled:opacity-60"
+            className="zo-btn disabled:opacity-60"
             title="Static Sections 1–3 + RFP-mapped sections from evidence (full pipeline)"
           >
             {isFullProposalRunning ? (
               <>
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-zo-white/30 border-t-zo-white" />
-                Generating…
+                {fullProposalProgress === "sections-1-3"
+                  ? "Sections 1–3…"
+                  : fullProposalProgress === "phase-2"
+                    ? "Phase 2 research…"
+                    : fullProposalProgress === "phase-3"
+                      ? "Phase 3 drafting…"
+                      : fullProposalProgress === "recovering"
+                        ? "Checking saved draft…"
+                        : "Generating…"}
               </>
             ) : (
               <>
@@ -631,9 +861,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
         </div>
       </div>
 
-      {(activeTab === "outline" || activeTab === "content") &&
-        phase2Done &&
-        research && (
+      {activeTab === "outline" && phase2Done && research && (
         <ResearchStatusPanel
           research={research}
           fullProposalDone={fullProposalDone}
@@ -643,8 +871,9 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
         />
       )}
 
+      <div className="proposal-workspace-body">
       {/* Outline tab */}
-      <TabPanel id="outline" activeTab={activeTab}>
+      <TabPanel id="outline" activeTab={activeTab} className="proposal-workspace-tab">
         <div className="proposal-outline-layout grid gap-0 lg:grid-cols-[260px_minmax(0,1fr)] lg:gap-3 lg:p-3">
           <div className="proposal-section-list flex min-h-0 flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-xl lg:border lg:border-zo-border">
             <div className="flex shrink-0 items-center justify-between border-b border-zo-border/60 px-3 py-2.5">
@@ -898,10 +1127,10 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
       </TabPanel>
 
       {/* Content tab */}
-      <TabPanel id="content" activeTab={activeTab}>
+      <TabPanel id="content" activeTab={activeTab} className="proposal-workspace-tab">
         {outline.sections.some((s) => s.content.trim()) ? (
-          <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(200px,260px)] lg:gap-4 lg:p-3">
-            <div className="custom-scrollbar max-h-[calc(100vh-14rem)] space-y-4 overflow-y-auto p-3 md:p-4 lg:max-h-[calc(100vh-12rem)] lg:py-2 lg:px-2">
+          <div className="proposal-content-scroll custom-scrollbar grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(200px,260px)] lg:gap-4 lg:p-3">
+            <div className="space-y-4 p-3 md:p-4 lg:px-2 lg:py-2">
               {outline.sections.map((section, index) =>
                 section.content ? (
                   <article
@@ -987,8 +1216,8 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
       </TabPanel>
 
       {/* Budget tab — Supermemory pricing KB, RFP-aware */}
-      <TabPanel id="pricing" activeTab={activeTab}>
-        <div className="proposal-tab-panel">
+      <TabPanel id="pricing" activeTab={activeTab} className="proposal-workspace-tab">
+        <div className="proposal-tab-panel proposal-tab-panel-scroll">
           <ProposalBudgetPanel
             budget={budget}
             isRunning={isPricingRunning}
@@ -999,9 +1228,25 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
         </div>
       </TabPanel>
 
+      <TabPanel id="review" activeTab={activeTab} className="proposal-workspace-tab">
+        <ProposalReviewPanel
+            review={presubmitReview}
+            isRunning={isReviewRunning}
+            isAutoFixing={isAutoFixing}
+            autoFixMode={autoFixMode}
+            error={reviewError}
+            autoFixNotice={autoFixNotice}
+            disabled={anyPipelineRunning}
+            onRunReview={() => void handleRunReview()}
+            onAutoFix={() => void handleAutoFix()}
+            onStopAutoFix={handleStopAutoFix}
+            onJumpToSection={handleJumpToSection}
+          />
+      </TabPanel>
+
       {/* Export tab */}
-      <TabPanel id="export" activeTab={activeTab}>
-        <div className="proposal-tab-panel grid gap-5 md:grid-cols-2">
+      <TabPanel id="export" activeTab={activeTab} className="proposal-workspace-tab">
+        <div className="proposal-tab-panel proposal-tab-panel-scroll grid gap-5 md:grid-cols-2">
           <div>
             <h3 className="font-heading text-lg font-bold text-foreground">
               Export manuscript
@@ -1070,6 +1315,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
           </div>
         </div>
       </TabPanel>
+      </div>
     </section>
   );
 }

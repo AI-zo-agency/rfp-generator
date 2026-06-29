@@ -17,6 +17,12 @@ from app.services.proposal_brand_voice import (
     format_register_block,
 )
 from app.services.proposal_loss_lessons import format_avoidance_block
+from app.services.proposal_drafting_prompts import (
+    MODULAR_APPROACH_BLOCK,
+    format_proof_points_block,
+    format_weight_priority_block,
+    is_modular_approach_section,
+)
 from app.services.proposal_voice_enforcement import (
     enforce_narrative_voice,
     is_duplicate_static_rfp_section,
@@ -43,6 +49,9 @@ Rules (strict):
 7. PROCUREMENT sections (register=procurement): formal third-person Vendor/Offeror language is OK for attachments, forms, and compliance tables.
 8. Write complete, submission-ready prose (not bullet outlines unless the RFP requires bullets).
 9. Apply WRITING AVOIDANCES from lost bids/debriefs when provided — do not repeat patterns that caused past losses.
+10. Lead narrative sections with PROOF POINTS — specific case studies tied to requirements ("why we win").
+11. For approach/marketing plan sections, use the MODULAR APPROACH block (Discover → Strategize → Create → Activate).
+12. Highest evaluationWeight sections need the most depth, proof, and word count — match wordTarget.
 
 Return ONLY JSON:
 {
@@ -70,6 +79,7 @@ class DraftingGraphState(TypedDict, total=False):
     zo_sections_context: str
     writing_avoidances: list[str]
     loss_lessons: list[dict[str, Any]]
+    proof_points: list[dict[str, Any]]
     drafted_sections: list[dict[str, Any]]
     provider: str
     error: str | None
@@ -81,8 +91,22 @@ def _word_target(section: dict[str, Any]) -> int:
         return max(400, page_limit * 350)
     weight = section.get("evaluationWeight") or section.get("evaluation_weight")
     if isinstance(weight, (int, float)) and weight > 0:
-        return max(500, int(weight) * 40)
+        w = int(weight)
+        if w >= 30:
+            return max(1400, w * 55)
+        if w >= 20:
+            return max(1000, w * 48)
+        if w >= 10:
+            return max(700, w * 42)
+        return max(500, w * 40)
     return DEFAULT_WORD_TARGET
+
+
+def _section_weight(section: dict[str, Any]) -> int:
+    weight = section.get("evaluationWeight") or section.get("evaluation_weight")
+    if isinstance(weight, (int, float)) and weight > 0:
+        return int(weight)
+    return 0
 
 
 def _evidence_for_section(
@@ -208,6 +232,28 @@ async def _draft_batch(
     )
     if avoid_block:
         user_content += f"{avoid_block}\n\n"
+
+    weight_block = format_weight_priority_block(state.get("rfp_sections") or [])
+    if weight_block:
+        user_content += f"{weight_block}\n\n"
+
+    proof_points = state.get("proof_points") or []
+    if proof_points and narrative_sections:
+        for payload in batch_payload:
+            if payload.get("register") != "narrative":
+                continue
+            block = format_proof_points_block(
+                proof_points,
+                section_id=str(payload.get("sectionId") or ""),
+                section_title=str(payload.get("title") or ""),
+            )
+            if block:
+                user_content += f"{block}\n\n"
+                break
+
+    if any(is_modular_approach_section(str(p.get("title") or "")) for p in batch_payload):
+        user_content += f"{MODULAR_APPROACH_BLOCK}\n\n"
+
     user_content += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
 
     async with _LLM_SEMAPHORE:
@@ -280,6 +326,7 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
         for s in sections
         if not is_duplicate_static_rfp_section(str(s.get("title") or ""))
     ]
+    sections = sorted(sections, key=_section_weight, reverse=True)
     if skipped:
         logger.info(
             "Phase 3 skipping %d RFP sections (duplicate of static Sections 1–3): %s",
@@ -377,6 +424,7 @@ async def run_drafting_graph(
     zo_template_sections: list[ProposalSection] | None = None,
     writing_avoidances: list[str] | None = None,
     loss_lessons: list[LossLesson] | None = None,
+    proof_points: list | None = None,
 ) -> tuple[list[ProposalSection], str]:
     if not llm.is_configured():
         raise LlmError(
@@ -398,6 +446,10 @@ async def run_drafting_graph(
         "writing_avoidances": writing_avoidances or [],
         "loss_lessons": [
             lesson.model_dump(by_alias=True) for lesson in (loss_lessons or [])
+        ],
+        "proof_points": [
+            p.model_dump(by_alias=True) if hasattr(p, "model_dump") else p
+            for p in (proof_points or [])
         ],
         "drafted_sections": [],
     }

@@ -93,6 +93,88 @@ class LossLesson(BaseModel):
     relevance: str = "medium"
 
 
+class ProofPoint(BaseModel):
+    """Maps an RFP requirement to a verified zö case study / proof."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    requirement: str
+    case_study: str = Field(alias="caseStudy")
+    kb_source: str = Field(default="", alias="kbSource")
+    narrative_hook: str = Field(default="", alias="narrativeHook")
+    relevance: str = "high"
+    section_ids: list[str] = Field(default_factory=list, alias="sectionIds")
+    evaluation_weight: int | None = Field(default=None, alias="evaluationWeight")
+
+
+class FeeJustificationMemo(BaseModel):
+    """Internal fee defense memo (not for submission)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    markdown: str
+    pricing_posture: str = Field(default="", alias="pricingPosture")
+    target_vs_cap: str = Field(default="", alias="targetVsCap")
+    role_hours_summary: list[str] = Field(default_factory=list, alias="roleHoursSummary")
+    internal_notes: list[str] = Field(default_factory=list, alias="internalNotes")
+    generated_at: str = Field(alias="generatedAt")
+    provider: str | None = None
+
+
+class PreSubmitIssue(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    severity: Literal["critical", "warning", "info"]
+    category: str
+    message: str
+    section_id: str | None = Field(default=None, alias="sectionId")
+    section_title: str | None = Field(default=None, alias="sectionTitle")
+    excerpt: str | None = None
+
+
+class ComplianceCheckItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    item: str
+    status: Literal["pass", "fail", "manual"]
+    notes: str = ""
+
+
+class PreSubmitReview(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    rfp_id: str = Field(alias="rfpId")
+    issues: list[PreSubmitIssue] = Field(default_factory=list)
+    compliance_checklist: list[ComplianceCheckItem] = Field(
+        default_factory=list, alias="complianceChecklist"
+    )
+    summary: str = ""
+    ready_to_submit: bool = Field(default=False, alias="readyToSubmit")
+    scanned_at: str = Field(alias="scannedAt")
+    provider: str | None = None
+
+
+class SectionAutoFixLog(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    section_title: str = Field(alias="sectionTitle")
+    iteration: int
+    methods: list[str] = Field(default_factory=list)
+    issues_targeted: int = Field(default=0, alias="issuesTargeted")
+
+
+class PreSubmitAutoFixReport(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    iterations_run: int = Field(alias="iterationsRun")
+    issues_before: int = Field(alias="issuesBefore")
+    issues_after: int = Field(alias="issuesAfter")
+    sections_patched: int = Field(alias="sectionsPatched")
+    stopped_reason: str = Field(alias="stoppedReason")
+    section_logs: list[SectionAutoFixLog] = Field(default_factory=list, alias="sectionLogs")
+
+
 class PricingTier(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -130,6 +212,9 @@ class ProposalBudget(BaseModel):
     kb_sources: list[str] = Field(default_factory=list, alias="kbSources")
     kb_buckets_used: list[str] = Field(default_factory=list, alias="kbBucketsUsed")
     confidence: int = 0
+    fee_justification_memo: FeeJustificationMemo | None = Field(
+        default=None, alias="feeJustificationMemo"
+    )
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None
 
@@ -148,6 +233,8 @@ class ProposalResearchCache(BaseModel):
     budget: ProposalBudget | None = None
     loss_lessons: list[LossLesson] = Field(default_factory=list, alias="lossLessons")
     writing_avoidances: list[str] = Field(default_factory=list, alias="writingAvoidances")
+    proof_points: list[ProofPoint] = Field(default_factory=list, alias="proofPoints")
+    presubmit_review: PreSubmitReview | None = Field(default=None, alias="presubmitReview")
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None
 
@@ -226,3 +313,27 @@ class ProposalPricingResponse(BaseModel):
     budget: ProposalBudget
     research: ProposalResearchCache
     draft: ProposalDraft | None = None
+
+
+class ProposalPhase4Response(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    ok: bool = True
+    review: PreSubmitReview
+    research: ProposalResearchCache
+
+
+class ProposalPhase4AutoFixResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    ok: bool = True
+    review: PreSubmitReview
+    research: ProposalResearchCache
+    draft: ProposalDraft
+    auto_fix: PreSubmitAutoFixReport = Field(alias="autoFix")
+
+
+class PreSubmitAutoFixRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    use_llm: bool = Field(default=True, alias="useLlm")
