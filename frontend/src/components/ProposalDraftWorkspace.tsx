@@ -1118,8 +1118,8 @@ export function ProposalDraftWorkspace({
       {/* Content tab */}
       <TabPanel id="content" activeTab={activeTab} className="proposal-workspace-tab">
         {outline.sections.some((s) => s.content.trim()) ? (
-          <div className="proposal-content-scroll custom-scrollbar grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(200px,260px)] lg:gap-4 lg:p-3">
-            <div className="space-y-4 p-3 md:p-4 lg:px-2 lg:py-2">
+          <div className="proposal-content-layout grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(200px,260px)] lg:gap-4 lg:p-3">
+            <div className="proposal-content-scroll custom-scrollbar space-y-4 p-3 md:p-4 lg:px-2 lg:py-2">
               {outline.sections.map((section, index) =>
                 section.content ? (
                   <article
@@ -1156,11 +1156,11 @@ export function ProposalDraftWorkspace({
               )}
             </div>
 
-            <nav className="proposal-on-page-nav hidden lg:block lg:rounded-2xl lg:border lg:border-zo-border/80">
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
+            <nav className="proposal-on-page-nav custom-scrollbar hidden lg:flex lg:min-h-0 lg:flex-col lg:overflow-hidden lg:rounded-2xl lg:border lg:border-zo-border/80">
+              <p className="shrink-0 text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                 On this page
               </p>
-              <ul className="mt-4 space-y-0.5">
+              <ul className="proposal-on-page-list mt-4 min-h-0 flex-1 space-y-0.5 overflow-y-auto">
                 {outline.sections
                   .filter((s) => s.content)
                   .map((section, index) => (
@@ -1169,6 +1169,12 @@ export function ProposalDraftWorkspace({
                         href={`#${section.id}`}
                         className="proposal-on-page-link"
                         title={section.title}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          document
+                            .getElementById(section.id)
+                            ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }}
                       >
                         <span className="proposal-on-page-num">{index + 1}</span>
                         <span className="proposal-on-page-title">{section.title}</span>

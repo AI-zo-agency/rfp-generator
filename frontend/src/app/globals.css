@@ -1445,14 +1445,28 @@ h4 {
 
 
 
+.proposal-content-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+@media (min-width: 1024px) {
+  .proposal-content-layout {
+    max-height: 100%;
+  }
+}
+
 .proposal-on-page-nav {
-  position: sticky;
-  top: 0.75rem;
-  align-self: start;
-  max-height: none;
-  overflow: visible;
   padding: 0.875rem 0.75rem 1rem 0.875rem;
   background: #fafbfc;
+  align-self: stretch;
+}
+
+.proposal-on-page-list {
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .proposal-on-page-link {
