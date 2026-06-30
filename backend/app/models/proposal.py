@@ -149,6 +149,7 @@ class PreSubmitReview(BaseModel):
         default_factory=list, alias="complianceChecklist"
     )
     summary: str = ""
+    issues_markdown: str = Field(default="", alias="issuesMarkdown")
     ready_to_submit: bool = Field(default=False, alias="readyToSubmit")
     scanned_at: str = Field(alias="scannedAt")
     provider: str | None = None
@@ -171,6 +172,7 @@ class PreSubmitAutoFixReport(BaseModel):
     issues_before: int = Field(alias="issuesBefore")
     issues_after: int = Field(alias="issuesAfter")
     sections_patched: int = Field(alias="sectionsPatched")
+    sections_targeted: int = Field(default=0, alias="sectionsTargeted")
     stopped_reason: str = Field(alias="stoppedReason")
     section_logs: list[SectionAutoFixLog] = Field(default_factory=list, alias="sectionLogs")
 
@@ -200,6 +202,8 @@ class ProposalBudget(BaseModel):
     agency_revenue_estimate: float | None = Field(
         default=None, alias="agencyRevenueEstimate"
     )
+    lump_sum_total: float | None = Field(default=None, alias="lumpSumTotal")
+    direct_expenses_total: float | None = Field(default=None, alias="directExpensesTotal")
     commission_model: str | None = Field(default=None, alias="commissionModel")
     pricing_flags: list[str] = Field(default_factory=list, alias="pricingFlags")
     qualifying_language: str = Field(default="", alias="qualifyingLanguage")

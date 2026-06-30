@@ -68,6 +68,7 @@ export type FullProposalProgress =
   | "sections-1-3"
   | "phase-2"
   | "phase-3"
+  | "phase-3-5-budget"
   | "recovering";
 
 export function countSectionsWithContent(outline: ProposalOutline): number {
@@ -102,8 +103,11 @@ export async function generateFullProposalStaged(
   await runPhase2Retrieval(rfpId);
 
   onProgress?.("phase-3");
-  const { draft, research: updatedResearch } = await runPhase3Drafting(rfpId);
-  return { draft, research: updatedResearch };
+  const { draft: drafted, research: afterPhase3 } = await runPhase3Drafting(rfpId);
+
+  onProgress?.("phase-3-5-budget");
+  const { budget, research: afterBudget, draft } = await runPhase3_5Budget(rfpId);
+  return { draft: draft ?? drafted, research: afterBudget };
 }
 
 export async function fetchProposalDraft(rfpId: string): Promise<{
@@ -250,6 +254,41 @@ export async function runPhase3Drafting(
   return {
     draft: apiDraftToOutline(data.draft),
     research: data.research,
+  };
+}
+
+export async function runPhase3_5Budget(
+  rfpId: string
+): Promise<{
+  budget: ProposalBudget;
+  research: ProposalResearch;
+  draft: ProposalOutline | null;
+}> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-3-5-budget`, {
+    ...proposalPostInit(),
+  });
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    budget?: ProposalBudget;
+    research?: ProposalResearch;
+    draft?: Parameters<typeof apiDraftToOutline>[0] | null;
+  };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from server (budget step may have timed out).");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Phase 3.5 budget failed");
+  }
+  if (!data.budget || !data.research) {
+    throw new Error("No budget data returned from server");
+  }
+  return {
+    budget: data.budget,
+    research: data.research,
+    draft: data.draft ? apiDraftToOutline(data.draft) : null,
   };
 }
 

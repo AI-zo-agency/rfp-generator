@@ -10,6 +10,7 @@ from app.models.proposal import (
     PreSubmitIssue,
     PreSubmitReview,
     ProposalDraft,
+    ProposalSection,
     ProposalResearchCache,
 )
 from app.models.rfp import RfpRecord
@@ -49,20 +50,64 @@ def _manuscript_text(draft: ProposalDraft) -> str:
     )
 
 
+def _rfp_context_blob(rfp: RfpRecord) -> str:
+    """Client + title + location for allowlisting geography names in copy-paste scan."""
+    return " ".join(
+        part.strip()
+        for part in (rfp.client, rfp.title, rfp.location or "")
+        if part and part.strip()
+    ).casefold()
+
+
+def _is_stale_client_for_rfp(stale: str, rfp: RfpRecord) -> bool:
+    """True when a portfolio name should be treated as wrong-client paste for this RFP."""
+    client_lower = rfp.client.strip().casefold()
+    context_lower = _rfp_context_blob(rfp)
+    stale_lower = stale.casefold()
+
+    if stale_lower in context_lower:
+        return False
+
+    client_tokens = [t for t in re.split(r"[\s,]+", client_lower) if len(t) > 3]
+    if any(tok in stale_lower for tok in client_tokens):
+        return False
+
+    return True
+
+
+def scan_section_issues(
+    *,
+    section: ProposalSection,
+    rfp: RfpRecord,
+) -> list[PreSubmitIssue]:
+    """Copy-paste + voice findings for a single section (used to gate auto-fix patches)."""
+    mini = ProposalDraft(
+        rfpId=rfp.id,
+        sections=[section],
+        updatedAt=datetime.now(timezone.utc).isoformat(),
+    )
+    issues: list[PreSubmitIssue] = []
+    issues.extend(_scan_copy_paste(draft=mini, rfp=rfp))
+    issues.extend(_scan_voice(draft=mini))
+    return [i for i in issues if i.section_id == section.id]
+
+
+def issue_score(issues: list[PreSubmitIssue]) -> tuple[int, int]:
+    """Lower is better: (critical_count, total_count)."""
+    critical = sum(1 for i in issues if i.severity == "critical")
+    return critical, len(issues)
+
+
 def fix_stale_client_references(content: str, rfp: RfpRecord) -> tuple[str, int]:
     """Replace known portfolio client names with the current RFP client when they appear as stale paste."""
     if not content.strip():
         return content, 0
 
-    client_lower = rfp.client.strip().casefold()
-    client_tokens = [t for t in re.split(r"[\s,]+", client_lower) if len(t) > 3]
     replacements = 0
     text = content
 
     for stale in _STALE_CLIENT_PATTERNS:
-        if stale in client_lower:
-            continue
-        if any(tok in stale for tok in client_tokens):
+        if not _is_stale_client_for_rfp(stale, rfp):
             continue
         pattern = re.compile(re.escape(stale), re.IGNORECASE)
         if pattern.search(text):
@@ -78,8 +123,6 @@ def _scan_copy_paste(
     rfp: RfpRecord,
 ) -> list[PreSubmitIssue]:
     issues: list[PreSubmitIssue] = []
-    client_lower = rfp.client.strip().casefold()
-    client_tokens = [t for t in re.split(r"[\s,]+", client_lower) if len(t) > 3]
 
     for section in draft.sections:
         if not section.content.strip():
@@ -87,20 +130,21 @@ def _scan_copy_paste(
         content_lower = section.content.casefold()
 
         for stale in _STALE_CLIENT_PATTERNS:
-            if stale in content_lower and stale not in client_lower:
-                if not any(tok in stale for tok in client_tokens):
-                    idx = content_lower.find(stale)
-                    excerpt = section.content[max(0, idx - 20) : idx + len(stale) + 40]
-                    issues.append(
-                        PreSubmitIssue(
-                            severity="warning",
-                            category="copy_paste",
-                            message=f"Possible wrong-client reference: '{stale}'",
-                            sectionId=section.id,
-                            sectionTitle=section.title,
-                            excerpt=excerpt.strip(),
-                        )
+            if not _is_stale_client_for_rfp(stale, rfp):
+                continue
+            if stale in content_lower:
+                idx = content_lower.find(stale)
+                excerpt = section.content[max(0, idx - 20) : idx + len(stale) + 40]
+                issues.append(
+                    PreSubmitIssue(
+                        severity="warning",
+                        category="copy_paste",
+                        message=f"Possible wrong-client reference: '{stale}'",
+                        sectionId=section.id,
+                        sectionTitle=section.title,
+                        excerpt=excerpt.strip(),
                     )
+                )
 
         for match in _PLACEHOLDER_RE.finditer(section.content):
             tag = match.group(0)
@@ -260,6 +304,93 @@ def _compliance_checklist(
     return items
 
 
+_CATEGORY_LABELS = {
+    "copy_paste": "Wrong client / copy-paste",
+    "placeholder": "Unfilled placeholders",
+    "voice": "Voice & tone",
+    "compliance": "Compliance",
+}
+
+
+def generate_issues_markdown(
+    *,
+    rfp: RfpRecord,
+    issues: list[PreSubmitIssue],
+    checklist: list[ComplianceCheckItem],
+    summary: str,
+) -> str:
+    """Markdown checklist of findings for auto-fix prompts and copy/export."""
+    lines = [
+        f"# Issues to fix — {rfp.client}",
+        "",
+        f"**RFP:** {rfp.title}",
+        "",
+        summary,
+        "",
+    ]
+
+    if issues:
+        lines.append("## Findings")
+        lines.append("")
+        by_category: dict[str, list[PreSubmitIssue]] = {}
+        for issue in issues:
+            by_category.setdefault(issue.category or "other", []).append(issue)
+
+        for category in (
+            "copy_paste",
+            "placeholder",
+            "voice",
+            "compliance",
+            *sorted(k for k in by_category if k not in _CATEGORY_LABELS),
+        ):
+            cat_issues = by_category.get(category)
+            if not cat_issues:
+                continue
+            label = _CATEGORY_LABELS.get(category, category.replace("_", " ").title())
+            lines.append(f"### {label}")
+            lines.append("")
+            for issue in cat_issues:
+                lines.append(f"- **[{issue.severity.upper()}]** {issue.message}")
+                if issue.section_title:
+                    lines.append(f"  - **Section:** {issue.section_title}")
+                if issue.excerpt:
+                    excerpt = issue.excerpt.replace("\n", " ").strip()[:240]
+                    lines.append(f"  - **Excerpt:** `{excerpt}`")
+            lines.append("")
+    else:
+        lines.extend(["## Findings", "", "_No automated findings._", ""])
+
+    failing = [row for row in checklist if row.status != "pass"]
+    if failing:
+        lines.extend(["## Compliance checklist", ""])
+        for row in failing:
+            lines.append(f"- **[{row.status.upper()}]** {row.item}")
+            if row.notes:
+                lines.append(f"  - {row.notes}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def issues_markdown_for_llm(issues: list[PreSubmitIssue]) -> str:
+    """Compact markdown block for surgical auto-fix LLM prompts."""
+    if not issues:
+        return "_No issues in this section._"
+
+    lines = ["## Issues to fix", ""]
+    for issue in issues[:16]:
+        line = f"- **[{issue.severity}/{issue.category}]** {issue.message}"
+        if issue.section_title:
+            line += f" _(section: {issue.section_title})_"
+        lines.append(line)
+        if issue.excerpt:
+            excerpt = issue.excerpt.replace("\n", " ").strip()[:180]
+            lines.append(f"  - Excerpt: `{excerpt}`")
+    if len(issues) > 16:
+        lines.append(f"- _... and {len(issues) - 16} more_")
+    return "\n".join(lines)
+
+
 def run_presubmit_review(
     *,
     rfp: RfpRecord,
@@ -307,6 +438,12 @@ def run_presubmit_review(
         issues=issues,
         complianceChecklist=checklist,
         summary=summary,
+        issuesMarkdown=generate_issues_markdown(
+            rfp=rfp,
+            issues=issues,
+            checklist=checklist,
+            summary=summary,
+        ),
         readyToSubmit=ready,
         scannedAt=datetime.now(timezone.utc).isoformat(),
     )

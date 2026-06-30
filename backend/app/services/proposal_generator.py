@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from app.models.proposal import (
     PreSubmitReview,
     ProposalBrandVoice,
+    ProposalBudget,
     ProposalDraft,
     ProposalResearchCache,
     ProposalSection,
@@ -30,11 +31,15 @@ from app.services.proposal_repository import (
     save_research_cache,
 )
 from app.services.proposal_drafting_graph import run_drafting_graph
+from app.services.proposal_budget_content import incorporate_budget_into_draft
+from app.services.proposal_budget_sync import align_fee_narrative_with_budget
 from app.services.proposal_fee_justification import generate_fee_justification_memo
 from app.services.proposal_loss_lessons import build_loss_lessons_for_rfp
+from app.services.proposal_pricing_service import generate_proposal_budget
 from app.services.proposal_presubmit_review import run_presubmit_review
 from app.services.proposal_presubmit_autofix import run_presubmit_autofix_loop
 from app.services.proposal_proof_points import build_proof_points_for_rfp
+from app.services.proposal_retrieval_gap_fill import gap_fill_evidence_for_sections
 from app.services.proposal_retrieval_graph import run_retrieval_graph
 from app.services.proposal_sections_graph import run_sections_1_3_graph
 from app.services.rfp_repository import get_rfp
@@ -93,14 +98,7 @@ STATIC_SECTION_IDS = (
 )
 
 
-class ProposalError(Exception):
-    def __init__(self, message: str, status_code: int = 400) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-
-
-def _can_start_proposal(rfp: RfpRecord) -> bool:
-    return rfp.go_no_go in {"go", "review"}
+from app.services.proposal_common import ProposalError, can_start_proposal, load_rfp_for_proposal
 
 
 def _default_sections(page_limit: int | None) -> list[ProposalSection]:
@@ -478,22 +476,7 @@ def _merge_static_with_rfp_sections(
 
 
 def _load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]:
-    rfp = get_rfp(rfp_id)
-    if not rfp:
-        raise ProposalError("RFP not found", status_code=404)
-    if not _can_start_proposal(rfp):
-        raise ProposalError(
-            "RFP must be marked Go or Go With Conditions before generating sections.",
-            status_code=400,
-        )
-    content = _assess_rfp_content(rfp)
-    rfp_context = _build_rfp_context(rfp, content)
-    if content.substantive_chars < 200:
-        raise ProposalError(
-            "Insufficient RFP content. Upload a PDF or add a description.",
-            status_code=400,
-        )
-    return rfp, content, rfp_context
+    return load_rfp_for_proposal(rfp_id)
 
 
 async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
@@ -512,6 +495,14 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         rfp_sector=rfp.sector,
         rfp_location=rfp.location or None,
         rfp_context=rfp_context,
+    )
+
+    evidence_corpus, section_queries, rfp_sections = await gap_fill_evidence_for_sections(
+        rfp_sections=rfp_sections,
+        evidence_corpus=evidence_corpus,
+        section_queries=section_queries,
+        rfp_client=rfp.client,
+        rfp_sector=rfp.sector,
     )
 
     loss_lessons, writing_avoidances, _loss_sources = await build_loss_lessons_for_rfp(
@@ -721,6 +712,43 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
     return draft, updated_research
 
 
+async def run_phase3_5_budget(
+    rfp_id: str,
+) -> tuple[ProposalDraft, ProposalResearchCache, ProposalBudget]:
+    """Phase 3.5: Stage 3 budget from 00_Guide_Pricing, incorporate into manuscript, sync fee narrative."""
+    if not llm.is_configured():
+        raise ProposalError("LLM not configured.", status_code=503)
+
+    draft_existing = get_proposal_draft(rfp_id)
+    if not draft_existing or not any(s.content.strip() for s in draft_existing.sections):
+        raise ProposalError(
+            "Phase 3 manuscript required before budget. Run full proposal or Phase 3 drafting first.",
+            status_code=400,
+        )
+
+    logger.info("Phase 3.5 budget starting for %s", rfp_id)
+    budget, research = await generate_proposal_budget(rfp_id)
+    draft = incorporate_budget_into_draft(rfp_id, budget)
+    if not draft:
+        raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
+
+    draft = await align_fee_narrative_with_budget(
+        rfp_id=rfp_id,
+        draft=draft,
+        budget=budget,
+    )
+    save_proposal_draft(draft)
+
+    logger.info(
+        "Phase 3.5 budget complete for %s: tier=%s, %d line items, revenue=%s",
+        rfp_id,
+        budget.pricing_tier,
+        len(budget.line_items),
+        budget.agency_revenue_estimate,
+    )
+    return draft, research, budget
+
+
 async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, ProposalResearchCache]:
     """Stage 4: pre-submit copy-paste scan + compliance checklist."""
     rfp = get_rfp(rfp_id)
@@ -775,7 +803,7 @@ async def run_phase4_presubmit_autofix(
         run_presubmit_review(rfp=rfp, draft=draft, research=research).issues
     )
 
-    updated_draft, review, section_logs, stopped_reason, iterations_run, updated_research_cache = (
+    updated_draft, review, section_logs, stopped_reason, iterations_run, updated_research_cache, sections_targeted = (
         await run_presubmit_autofix_loop(
             rfp=rfp,
             draft=draft,
@@ -799,6 +827,7 @@ async def run_phase4_presubmit_autofix(
         issues_before=issues_before,
         issues_after=len(review.issues),
         sections_patched=len(section_logs),
+        sections_targeted=sections_targeted,
         stopped_reason=stopped_reason,
         section_logs=section_logs,
     )
@@ -817,7 +846,7 @@ async def run_phase4_presubmit_autofix(
 async def generate_full_proposal(
     rfp_id: str,
 ) -> tuple[ProposalDraft, ProposalBrandVoice, ProposalResearchCache]:
-    """Full pipeline: static Sections 1–3 → Phase 2 retrieval → Phase 3 RFP drafting."""
+    """Full pipeline: Sections 1–3 → Phase 2 retrieval → Phase 3 drafting → Phase 3.5 budget."""
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
@@ -826,14 +855,16 @@ async def generate_full_proposal(
     _draft, brand_voice, _research = await generate_sections_1_3(rfp_id)
     await run_phase2_retrieval(rfp_id)
     draft, research = await run_phase3_drafting(rfp_id)
+    draft, research, _budget = await run_phase3_5_budget(rfp_id)
 
     if brand_voice and not research.brand_voice:
         research = research.model_copy(update={"brand_voice": brand_voice})
         save_research_cache(research)
 
     logger.info(
-        "Full proposal complete for %s: %d sections",
+        "Full proposal complete for %s: %d sections, budget tier=%s",
         rfp_id,
         len(draft.sections),
+        research.budget.pricing_tier if research.budget else "n/a",
     )
     return draft, brand_voice, research

@@ -33,7 +33,7 @@ from app.services.proposal_langchain import _provider_name
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 3
+BATCH_SIZE = 2
 DEFAULT_WORD_TARGET = 800
 _LLM_SEMAPHORE = asyncio.Semaphore(1)
 
@@ -42,7 +42,7 @@ DRAFT_BATCH_PROMPT = """You draft zö agency proposal section content for a gove
 Rules (strict):
 1. Use ONLY facts from the evidence corpus provided. Cite each fact inline as [E1], [E2], etc.
 2. Never invent clients, metrics, certifications, team members, or contract values not in evidence.
-3. For requirements not covered by evidence, write [VERIFY: describe what must be confirmed].
+3. For requirements not covered by evidence, write [VERIFY: describe what must be confirmed] ONLY after checking every evidence excerpt — prefer citing [E#] when any excerpt partially answers the requirement.
 4. For template/layout pulls (zoMode pull/select), include [DESIGNER NOTE: ...] and reference evidence.
 5. Match the BRAND VOICE and REGISTER blocks for each section.
 6. NARRATIVE sections (register=narrative): first person we/our — NEVER "The Vendor", "The Offeror", or third-person agency distance. RFP form language does not apply to narrative prose.
@@ -52,6 +52,8 @@ Rules (strict):
 10. Lead narrative sections with PROOF POINTS — specific case studies tied to requirements ("why we win").
 11. For approach/marketing plan sections, use the MODULAR APPROACH block (Discover → Strategize → Create → Activate).
 12. Highest evaluationWeight sections need the most depth, proof, and word count — match wordTarget.
+13. Do NOT state pricing tier, dollar totals, lump sums, or fee tables in narrative sections — those belong in the Fees/Budget section only. Cross-reference instead.
+14. When RFP requires portfolio, writing samples, or reference contacts, use evidence excerpts with [E#] citations — do not leave passive VERIFY placeholders if evidence contains samples or contacts.
 
 Return ONLY JSON:
 {
@@ -119,8 +121,8 @@ def _evidence_for_section(
         if section_id in (item.get("sectionIds") or item.get("section_ids") or [])
     ]
     if tagged:
-        return tagged[:12]
-    return corpus[:6]
+        return tagged[:20]
+    return corpus[:12]
 
 
 def _format_evidence_block(items: list[dict[str, Any]]) -> str:
@@ -161,6 +163,50 @@ def _extract_kb_refs(content: str, declared: list[str] | None) -> list[str]:
 
 
 async def _draft_batch(
+    batch: list[dict[str, Any]],
+    state: DraftingGraphState,
+) -> tuple[list[dict[str, Any]], str]:
+    try:
+        return await _draft_batch_once(batch, state)
+    except LlmError as exc:
+        if len(batch) <= 1:
+            raise
+        logger.warning(
+            "Phase 3 batch of %d failed (%s) — retrying one section at a time",
+            len(batch),
+            exc,
+        )
+        merged: list[dict[str, Any]] = []
+        provider = state.get("provider") or _provider_name()
+        for section in batch:
+            try:
+                results, batch_provider = await _draft_batch_once([section], state)
+                merged.extend(results)
+                provider = batch_provider
+            except LlmError as single_exc:
+                sid = str(section.get("id") or "")
+                merged.append(
+                    {
+                        "id": sid,
+                        "title": str(section.get("title") or sid),
+                        "pageLimit": section.get("pageLimit"),
+                        "wordTarget": _word_target(section),
+                        "required": True,
+                        "custom": False,
+                        "source": "rfp",
+                        "mode": section.get("zoMode") or "write",
+                        "content": (
+                            f"[VERIFY: Section drafting failed — {single_exc}. "
+                            f"Re-run Phase 3 or draft manually.]"
+                        ),
+                        "status": "outline",
+                        "kbRefs": [],
+                    }
+                )
+        return merged, provider
+
+
+async def _draft_batch_once(
     batch: list[dict[str, Any]],
     state: DraftingGraphState,
 ) -> tuple[list[dict[str, Any]], str]:
@@ -262,7 +308,7 @@ async def _draft_batch(
                 {"role": "system", "content": DRAFT_BATCH_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=4096,
+            max_tokens=3072 if len(batch) == 1 else 4096,
             temperature=0.35,
         )
 

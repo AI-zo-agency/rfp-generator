@@ -64,6 +64,12 @@ def render_budget_markdown(budget: ProposalBudget) -> str:
         summary_rows.append(
             f"- **Agency revenue estimate:** {_usd(budget.agency_revenue_estimate)}"
         )
+    if budget.lump_sum_total is not None:
+        summary_rows.append(f"- **Lump sum (base term):** {_usd(budget.lump_sum_total)}")
+    if budget.direct_expenses_total is not None:
+        summary_rows.append(
+            f"- **Direct expenses:** {_usd(budget.direct_expenses_total)}"
+        )
     if budget.pricing_tier:
         summary_rows.append(f"- **Pricing tier:** {budget.pricing_tier}")
     if budget.fee_structure:

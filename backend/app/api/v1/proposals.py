@@ -18,12 +18,11 @@ from app.services.proposal_generator import (
     generate_full_proposal,
     generate_sections_1_3,
     run_phase2_retrieval,
+    run_phase3_5_budget,
     run_phase3_drafting,
     run_phase4_presubmit_autofix,
     run_phase4_presubmit_review,
 )
-from app.services.proposal_budget_content import incorporate_budget_into_draft
-from app.services.proposal_pricing_service import generate_proposal_budget
 from app.services.proposal_section_editor import improve_proposal_section
 from app.services.proposal_repository import get_proposal_draft, get_research_cache, save_proposal_draft
 from app.services.rfp_repository import get_rfp, rfp_exists
@@ -146,14 +145,32 @@ async def phase3_drafting_endpoint(rfp_id: str) -> ProposalPhase3Response:
 
 
 @router.post(
+    "/{rfp_id}/proposal/phase-3-5-budget",
+    response_model=ProposalPricingResponse,
+)
+async def phase3_5_budget_endpoint(rfp_id: str) -> ProposalPricingResponse:
+    """Phase 3.5: Stage 3 budget + incorporate into manuscript + sync fee narrative."""
+    try:
+        draft, research, budget = await run_phase3_5_budget(rfp_id)
+    except ProposalError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Phase 3.5 budget failed: {exc}",
+        ) from exc
+
+    return ProposalPricingResponse(budget=budget, research=research, draft=draft)
+
+
+@router.post(
     "/{rfp_id}/proposal/pricing/generate",
     response_model=ProposalPricingResponse,
 )
 async def generate_pricing_endpoint(rfp_id: str) -> ProposalPricingResponse:
-    """Build RFP-aware budget from Supermemory pricing KB (05_) — not Google Drive."""
+    """Build RFP-aware budget from Supermemory pricing KB — incorporate + sync fee narrative."""
     try:
-        budget, research = await generate_proposal_budget(rfp_id)
-        draft = incorporate_budget_into_draft(rfp_id, budget)
+        draft, research, budget = await run_phase3_5_budget(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:

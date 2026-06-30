@@ -59,6 +59,14 @@ export function formatBudgetAsSectionContent(budget: ProposalBudget): string {
       `- **Agency revenue estimate:** ${formatUsd(budget.agencyRevenueEstimate)}`,
     );
   }
+  if (budget.lumpSumTotal != null) {
+    lines.push(`- **Lump sum (base term):** ${formatUsd(budget.lumpSumTotal)}`);
+  }
+  if (budget.directExpensesTotal != null) {
+    lines.push(
+      `- **Direct expenses:** ${formatUsd(budget.directExpensesTotal)}`,
+    );
+  }
   if (budget.pricingTier) {
     lines.push(`- **Pricing tier:** ${budget.pricingTier}`);
   }

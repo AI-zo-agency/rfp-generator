@@ -2,10 +2,13 @@
 
 import { useMemo, useState } from "react";
 import type { ComplianceCheckItem, PreSubmitIssue, PreSubmitReview } from "@/types/proposal";
+import { buildIssuesMarkdown } from "@/lib/review-markdown";
 import { MarkdownReportBody } from "./MarkdownReportBody";
 
 interface ProposalReviewPanelProps {
   review: PreSubmitReview | null;
+  rfpClient: string;
+  rfpTitle: string;
   isRunning: boolean;
   isAutoFixing?: boolean;
   autoFixMode?: "quick" | "ai" | null;
@@ -75,6 +78,8 @@ function ComplianceStatusPill({ status }: { status: ComplianceCheckItem["status"
 
 export function ProposalReviewPanel({
   review,
+  rfpClient,
+  rfpTitle,
   isRunning,
   isAutoFixing = false,
   autoFixMode = null,
@@ -91,6 +96,31 @@ export function ProposalReviewPanel({
     null
   );
   const [showPassingCompliance, setShowPassingCompliance] = useState(false);
+  const [showIssuesMarkdown, setShowIssuesMarkdown] = useState(false);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
+
+  const issuesMarkdown = useMemo(() => {
+    if (!review) return "";
+    if (review.issuesMarkdown?.trim()) return review.issuesMarkdown;
+    return buildIssuesMarkdown(
+      rfpClient,
+      rfpTitle,
+      review.summary,
+      review.issues,
+      review.complianceChecklist
+    );
+  }, [review, rfpClient, rfpTitle]);
+
+  const copyIssuesMarkdown = async () => {
+    if (!issuesMarkdown) return;
+    try {
+      await navigator.clipboard.writeText(issuesMarkdown);
+      setCopyNotice("Copied issues markdown");
+      window.setTimeout(() => setCopyNotice(null), 2200);
+    } catch {
+      setCopyNotice("Could not copy — select text manually");
+    }
+  };
 
   const counts = useMemo(() => {
     if (!review) {
@@ -176,7 +206,7 @@ export function ProposalReviewPanel({
               aria-hidden
             />
             <p className="min-w-0 flex-1 text-sm text-foreground">
-              Fixing issues with AI and knowledge-base search across all affected sections…
+              Fixing only sections with review findings…
             </p>
             {onStopAutoFix ? (
               <button
@@ -216,6 +246,10 @@ export function ProposalReviewPanel({
             {autoFixNotice}
           </p>
         )}
+
+        {copyNotice ? (
+          <p className="text-xs font-semibold text-zo-orange">{copyNotice}</p>
+        ) : null}
 
         {error && (
           <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-zo-error">
@@ -301,6 +335,41 @@ export function ProposalReviewPanel({
                 </ul>
               </section>
             )}
+
+            {review.issues.length > 0 && issuesMarkdown ? (
+              <section className="rounded-2xl border border-zo-border bg-white p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-xs font-bold uppercase tracking-[0.12em] text-zo-text-muted">
+                    Issues to fix (markdown)
+                  </h3>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void copyIssuesMarkdown()}
+                      className="text-xs font-semibold text-zo-orange hover:underline"
+                    >
+                      Copy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowIssuesMarkdown((v) => !v)}
+                      className="text-xs font-semibold text-zo-text-muted hover:underline"
+                    >
+                      {showIssuesMarkdown ? "Hide" : "Preview"}
+                    </button>
+                  </div>
+                </div>
+                {showIssuesMarkdown ? (
+                  <div className="proposal-review-markdown-preview custom-scrollbar mt-3 max-h-64 overflow-y-auto rounded-xl border border-zo-border/70 bg-[#fafbfc] p-3">
+                    <MarkdownReportBody body={issuesMarkdown} variant="report" />
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs leading-relaxed text-zo-text-muted">
+                    Generated checklist for auto-fix and handoff. Copy to share with the team or paste into a ticket.
+                  </p>
+                )}
+              </section>
+            ) : null}
           </aside>
 
           {review.issues.length > 0 ? (

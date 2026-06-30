@@ -17,8 +17,8 @@ from app.services.proposal_langchain import _provider_name
 logger = logging.getLogger(__name__)
 
 COVERAGE_THRESHOLD = 85
-MAX_RETRIEVAL_ROUNDS = 2
-QUERIES_PER_SECTION = 3
+MAX_RETRIEVAL_ROUNDS = 3
+QUERIES_PER_SECTION = 5
 SEARCH_LIMIT = 8
 MAX_CHUNKS_PER_SECTION = 30
 EXCERPT_MAX_CHARS = 2_000
@@ -55,7 +55,9 @@ Return ONLY JSON:
 }"""
 
 BATCH_QUERY_PLANNER_PROMPT = """Plan Supermemory search queries for ALL listed proposal sections in one pass.
-Return exactly 2 queries per section (client, sector, location, requirements).
+Return exactly 3 queries per section (client, sector, location, requirements, retrievalFocus).
+Target specific KB buckets when relevant: 02 master template, 03_CS case studies, 04 bios, 
+06_WON, 07_FIN rates, 00_Guide_Pricing, certifications, references, portfolio/writing samples.
 
 Return ONLY JSON:
 {

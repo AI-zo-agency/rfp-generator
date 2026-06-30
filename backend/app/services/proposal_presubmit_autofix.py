@@ -29,7 +29,13 @@ from app.services.proposal_brand_voice import (
     resolve_voice_context,
 )
 from app.services.proposal_loss_lessons import format_avoidance_block
-from app.services.proposal_presubmit_review import fix_stale_client_references, run_presubmit_review
+from app.services.proposal_presubmit_review import (
+    fix_stale_client_references,
+    issue_score,
+    issues_markdown_for_llm,
+    run_presubmit_review,
+    scan_section_issues,
+)
 from app.services.proposal_repository import save_proposal_draft
 from app.services.proposal_retrieval_graph import (
     EXCERPT_MAX_CHARS,
@@ -49,7 +55,7 @@ STATIC_SECTION_IDS = (
 )
 
 MAX_ITERATIONS_DETERMINISTIC = 1
-MAX_ITERATIONS_LLM = 2
+MAX_ITERATIONS_LLM = 1
 _AUTO_FIX_CATEGORIES = frozenset({"copy_paste", "voice", "placeholder"})
 
 _SEV_RANK = {"critical": 0, "warning": 1, "info": 2}
@@ -66,9 +72,23 @@ MANDATORY:
 6. Wrong-client names → use the target client name or remove the stray reference.
 7. Voice issues → never "The Vendor", "The Offeror", or third-person agency distance in narrative prose.
 8. Do NOT invent clients, metrics, certifications, team members, or dates not supported by evidence.
-9. Keep strong existing prose — change only what is needed to clear the listed issues.
+9. Evidence may mention OTHER cities/clients from zö's portfolio — NEVER paste those names into this proposal. Generalize ("a prior municipal client") or omit.
+10. Do NOT add new [VERIFY] tags. Do NOT add new paragraphs unless required to replace a tag.
+11. Keep strong existing prose — change only what is needed to clear the listed issues.
+12. Edit ONLY text related to the listed issues — leave every other sentence unchanged.
 
 Return ONLY JSON: {"content": "full updated section text", "kbRefs": ["E1"]}"""
+
+PROCUREMENT_FIX_PROMPT = """You repair ONE procurement/form proposal section (attachments, certifications, compliance forms).
+
+MANDATORY:
+1. Preserve form structure, field labels, checkboxes, and layout — do NOT add marketing narrative or case studies.
+2. Remove wrong-client / portfolio city names — use only the target client from the prompt.
+3. Replace [VERIFY: ...] ONLY when the answer is explicitly in the section or evidence; otherwise shorten to a minimal [VERIFY: brief note].
+4. Do NOT add new [VERIFY] tags. Do NOT quote other clients from evidence.
+5. Do NOT expand length. Change the minimum text needed.
+
+Return ONLY JSON: {"content": "full updated section text"}"""
 
 _search_semaphore = asyncio.Semaphore(4)
 
@@ -143,13 +163,59 @@ def _apply_deterministic_fixes(
     return content, methods
 
 
-def _issues_summary(issues: list[PreSubmitIssue]) -> str:
-    lines = []
-    for issue in issues[:16]:
-        lines.append(f"- [{issue.severity}/{issue.category}] {issue.message}")
-    if len(issues) > 16:
-        lines.append(f"- ... and {len(issues) - 16} more")
-    return "\n".join(lines)
+def _section_with_content(section: ProposalSection, content: str) -> ProposalSection:
+    return section.model_copy(update={"content": content})
+
+
+def _score_section(section: ProposalSection, content: str, rfp: RfpRecord) -> tuple[int, int]:
+    return issue_score(
+        scan_section_issues(section=_section_with_content(section, content), rfp=rfp)
+    )
+
+
+def _sanitize_after_llm(
+    content: str,
+    *,
+    section: ProposalSection,
+    rfp: RfpRecord,
+) -> str:
+    fixed, _ = fix_stale_client_references(content, rfp)
+    return enforce_narrative_voice(
+        fixed,
+        section_id=section.id,
+        title=section.title,
+        zo_mode=section.mode,
+    )
+
+
+def _should_run_llm(
+    section: ProposalSection,
+    issues: list[PreSubmitIssue],
+) -> bool:
+    """LLM only when placeholders need KB evidence — not for copy-paste/voice alone."""
+    cats = {i.category for i in issues}
+    if not cats:
+        return False
+    if cats <= {"copy_paste"} or cats <= {"voice"} or cats <= {"copy_paste", "voice"}:
+        return False
+
+    register = classify_section_register(
+        section_id=section.id,
+        title=section.title,
+        zo_mode=section.mode,
+    )
+    if register == "procurement" and cats <= {"placeholder"}:
+        return False
+
+    return "placeholder" in cats
+
+
+def _needs_kb_warm(section_ids: list[str], grouped: dict[str, list[PreSubmitIssue]], draft: ProposalDraft) -> bool:
+    for section_id in section_ids:
+        section = next((s for s in draft.sections if s.id == section_id), None)
+        if section and _should_run_llm(section, grouped[section_id]):
+            return True
+    return False
 
 
 def _extract_verify_hints(content: str) -> list[str]:
@@ -413,7 +479,7 @@ Register: {register}
 Word target: {section.word_target}
 
 Issues to fix:
-{_issues_summary(issues)}
+{issues_markdown_for_llm(issues)}
 
 Current section (preserve structure and strong prose):
 {content[:14000]}
@@ -424,17 +490,33 @@ RFP context:
 Evidence corpus:
 {evidence_block}
 """
-    if avoidance_block:
+    if avoidance_block and register == "narrative":
         user_block += f"\n{avoidance_block}\n"
+
+    system_prompt = (
+        PROCUREMENT_FIX_PROMPT if register == "procurement" else SURGICAL_FIX_PROMPT
+    )
+    if register == "procurement":
+        user_block = f"""Target client: {rfp.client}
+RFP: {rfp.title}
+Section: {section.title}
+Register: procurement (form — no marketing narrative)
+
+Issues to fix:
+{issues_markdown_for_llm(issues)}
+
+Current section (minimal edits only):
+{content[:12000]}
+"""
 
     try:
         raw, provider = await llm.chat_json(
             [
-                {"role": "system", "content": SURGICAL_FIX_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_block},
             ],
-            max_tokens=4096,
-            temperature=0.2,
+            max_tokens=2048 if register == "procurement" else 4096,
+            temperature=0.15,
         )
     except LlmError:
         return content, None
@@ -449,6 +531,7 @@ Evidence corpus:
         title=section.title,
         zo_mode=section.mode,
     )
+    new_content = _sanitize_after_llm(new_content, section=section, rfp=rfp)
     return new_content, provider
 
 
@@ -478,8 +561,16 @@ async def run_presubmit_autofix_loop(
     research: ProposalResearchCache | None,
     use_llm: bool = True,
     should_cancel: CancelCheck | None = None,
-) -> tuple[ProposalDraft, PreSubmitReview, list[SectionAutoFixLog], str, int, ProposalResearchCache | None]:
-    """Fix all affected sections — deterministic first, then AI + Supermemory when use_llm."""
+) -> tuple[
+    ProposalDraft,
+    PreSubmitReview,
+    list[SectionAutoFixLog],
+    str,
+    int,
+    ProposalResearchCache | None,
+    int,
+]:
+    """Fix only sections (and issue types) flagged by pre-submit review."""
     working = draft
     working_research = research
     fix_logs: list[SectionAutoFixLog] = []
@@ -504,10 +595,12 @@ async def run_presubmit_autofix_loop(
     if working_research and working_research.writing_avoidances:
         avoidance_block = format_avoidance_block(working_research.writing_avoidances)
 
+    sections_targeted = 0
+
     initial_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
 
     if initial_review.ready_to_submit:
-        return working, initial_review, fix_logs, "ready", 0, working_research
+        return working, initial_review, fix_logs, "ready", 0, working_research, 0
 
     iterations_run = 0
     for iteration in range(1, max_iterations + 1):
@@ -515,7 +608,7 @@ async def run_presubmit_autofix_loop(
             stopped_reason = "cancelled"
             save_proposal_draft(working)
             review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
-            return working, review, fix_logs, stopped_reason, iterations_run, working_research
+            return working, review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
 
         iterations_run = iteration
         review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
@@ -523,16 +616,18 @@ async def run_presubmit_autofix_loop(
 
         if review.ready_to_submit:
             stopped_reason = "ready"
-            return working, review, fix_logs, stopped_reason, iterations_run, working_research
+            return working, review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
 
         if fingerprint == prev_fingerprint:
             stopped_reason = "converged"
-            return working, review, fix_logs, stopped_reason, iterations_run, working_research
+            return working, review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
 
         grouped = _group_issues_by_section(review.issues)
         if not grouped:
             stopped_reason = "no_fixable_issues"
-            return working, review, fix_logs, stopped_reason, iterations_run, working_research
+            return working, review, fix_logs, stopped_reason, iterations_run, working_research, 0
+
+        sections_targeted = len(grouped)
 
         issues_at_start = len(review.issues)
         patched_this_pass = 0
@@ -545,9 +640,15 @@ async def run_presubmit_autofix_loop(
         searched_queries: set[str] = set()
         shared_kb_block = ""
 
-        if use_llm and llm.is_configured() and section_ids:
+        logger.info(
+            "Auto-fix targeting %d section(s) with findings (of %d total)",
+            total_sections,
+            len(working.sections),
+        )
+
+        if use_llm and llm.is_configured() and _needs_kb_warm(section_ids, grouped, working):
             logger.info(
-                "Auto-fix pass %d/%d: warming shared KB search for %d sections",
+                "Auto-fix pass %d/%d: shared KB search for %d section(s) with placeholder issues",
                 iteration,
                 max_iterations,
                 total_sections,
@@ -564,7 +665,7 @@ async def run_presubmit_autofix_loop(
                 stopped_reason = "cancelled"
                 save_proposal_draft(working)
                 review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
-                return working, review, fix_logs, stopped_reason, iterations_run, working_research
+                return working, review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
 
             section = next((s for s in working.sections if s.id == section_id), None)
             if not section or not section.content.strip():
@@ -572,17 +673,29 @@ async def run_presubmit_autofix_loop(
 
             section_issues = grouped[section_id]
             original = section.content
+            baseline_score = _score_section(section, original, rfp)
+            best_content = original
+            best_score = baseline_score
             content, methods = _apply_deterministic_fixes(section, rfp)
-            rfp_section = _find_rfp_section(working_research, section_id)
+            det_score = _score_section(section, content, rfp)
+            if det_score < best_score:
+                best_content = content
+                best_score = det_score
 
-            if use_llm and llm.is_configured():
+            rfp_section = _find_rfp_section(working_research, section_id)
+            run_llm = use_llm and llm.is_configured() and _should_run_llm(section, section_issues)
+
+            if not run_llm and det_score >= baseline_score:
+                continue
+
+            if run_llm:
                 logger.info(
-                    "Auto-fix pass %d: section %d/%d — %s (%d issues)",
-                    iteration,
+                    "Auto-fix: section %d/%d — %s (%d finding(s), score %s)",
                     section_index,
                     total_sections,
                     section.title,
                     len(section_issues),
+                    baseline_score,
                 )
                 evidence, kb_block, working_research, retrieval_methods = (
                     await _enrich_section_evidence(
@@ -612,8 +725,24 @@ async def run_presubmit_autofix_loop(
                     avoidance_block=avoidance_block,
                 )
                 if provider:
-                    methods.append("llm_repair")
-                content = repaired
+                    llm_score = _score_section(section, repaired, rfp)
+                    if llm_score < best_score:
+                        best_content = repaired
+                        best_score = llm_score
+                        methods.append("llm_repair")
+                    else:
+                        logger.info(
+                            "Rejected LLM patch for %s — score %s not better than %s",
+                            section.title,
+                            llm_score,
+                            best_score,
+                        )
+                        methods.append("llm_rejected")
+
+            content = best_content
+
+            if best_score >= baseline_score:
+                continue
 
             if content == original:
                 continue
@@ -635,15 +764,19 @@ async def run_presubmit_autofix_loop(
         review_after = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
         prev_fingerprint = fingerprint
 
+        if len(review_after.issues) > issues_at_start:
+            stopped_reason = "regressed"
+            return working, review_after, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
+
         if len(review_after.issues) >= issues_at_start and patched_this_pass == 0:
             stopped_reason = "no_progress"
-            return working, review_after, fix_logs, stopped_reason, iterations_run, working_research
+            return working, review_after, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
 
         if review_after.ready_to_submit:
             stopped_reason = "ready"
-            return working, review_after, fix_logs, stopped_reason, iterations_run, working_research
+            return working, review_after, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
 
         issues_at_start = len(review_after.issues)
 
     final_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
-    return working, final_review, fix_logs, stopped_reason, iterations_run, working_research
+    return working, final_review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted

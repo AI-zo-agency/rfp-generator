@@ -5,7 +5,10 @@ import {
   buildDefaultOutline,
   computeDraftStats,
   countWords,
+  countSectionsWithContent,
   createCustomSection,
+  isLikelyWipedOutline,
+  rebuildOutlineFromResearch,
 } from "@/lib/proposal-draft";
 import {
   findBudgetSection,
@@ -17,6 +20,7 @@ import {
   generateProposalPricing,
   generateProposalSections1to3,
   recoverProposalDraftIfSaved,
+  runPhase3Drafting,
   runPhase4PreSubmitReview,
   runPhase4PreSubmitAutoFix,
   saveProposalDraft,
@@ -26,7 +30,7 @@ import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch,
 import type { RfpRecord } from "@/types/rfp";
 import { SectionStatusPill } from "./SectionStatusPill";
 import { MarkdownReportBody } from "./MarkdownReportBody";
-import { SectionEditChat } from "./SectionEditChat";
+import { DraftSectionEditor } from "./DraftSectionEditor";
 import { ProposalBudgetPanel } from "./ProposalBudgetPanel";
 import { ProposalReviewPanel } from "./ProposalReviewPanel";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
@@ -77,136 +81,6 @@ function StatCard({
   );
 }
 
-function ResearchStatusPanel({
-  research,
-  fullProposalDone,
-  phase3Done,
-  sectionCount,
-  defaultExpanded,
-}: {
-  research: ProposalResearch;
-  fullProposalDone: boolean;
-  phase3Done: boolean;
-  sectionCount: number;
-  defaultExpanded: boolean;
-}) {
-  const [expanded, setExpanded] = useState(defaultExpanded);
-  const avoidances = research.writingAvoidances ?? [];
-  const statusLabel = fullProposalDone
-    ? "Full proposal ready"
-    : phase3Done
-      ? "RFP sections drafted"
-      : "Research ready";
-
-  return (
-    <div className="mx-3 mb-3 md:mx-4">
-      <div className="overflow-hidden rounded-2xl border border-zo-border/80 bg-white shadow-sm">
-        <button
-          type="button"
-          onClick={() => setExpanded((open) => !open)}
-          className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition-smooth hover:bg-[#fafbfc] md:px-6"
-          aria-expanded={expanded}
-        >
-          <div className="min-w-0">
-            <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-orange">
-              {statusLabel}
-            </p>
-            <p className="mt-1.5 text-sm leading-relaxed text-zo-text-secondary">
-              {research.rfpSections.length} mapped sections ·{" "}
-              {research.evidenceCorpus.length} evidence items
-              {fullProposalDone ? ` · ${sectionCount} in manuscript` : ""}
-            </p>
-          </div>
-          <svg
-            className={`h-5 w-5 shrink-0 text-zo-text-muted transition-transform ${
-              expanded ? "rotate-180" : ""
-            }`}
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-            aria-hidden
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-          </svg>
-        </button>
-
-        {expanded && (
-          <div className="space-y-6 border-t border-zo-border/60 px-5 py-5 md:px-6 md:py-6">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              <div className="rounded-xl bg-[#fafbfc] px-4 py-3">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
-                  Static
-                </p>
-                <p className="mt-1 text-sm text-foreground">
-                  Sections 1–3 — company, team, case studies
-                </p>
-              </div>
-              <div className="rounded-xl bg-[#fafbfc] px-4 py-3">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
-                  RFP-varying
-                </p>
-                <p className="mt-1 text-sm text-foreground">
-                  {research.rfpSections.length} sections from structural map
-                </p>
-              </div>
-              <div className="rounded-xl bg-[#fafbfc] px-4 py-3 sm:col-span-2 lg:col-span-1">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
-                  Retrieval
-                </p>
-                <p className="mt-1 text-sm text-foreground">
-                  {research.retrievalRounds} round
-                  {research.retrievalRounds === 1 ? "" : "s"} ·{" "}
-                  {research.evidenceCorpus.length} KB excerpts
-                </p>
-              </div>
-            </div>
-
-            {avoidances.length > 0 && (
-              <div className="rounded-xl border border-amber-200/80 bg-amber-50/50 px-4 py-4">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-amber-900/70">
-                  Avoid from past losses (08_ / 09_)
-                </p>
-                <ul className="mt-3 space-y-3">
-                  {avoidances.map((item) => (
-                    <li
-                      key={item}
-                      className="text-sm leading-relaxed text-amber-950/85"
-                    >
-                      {item}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {(research.proofPoints?.length ?? 0) > 0 && (
-              <div className="rounded-xl border border-zo-border bg-white px-4 py-4">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-orange">
-                  Proof points (requirement → case study)
-                </p>
-                <ul className="mt-3 space-y-3">
-                  {research.proofPoints!.slice(0, 6).map((point) => (
-                    <li key={`${point.requirement}-${point.caseStudy}`} className="text-sm">
-                      <p className="font-medium text-foreground">{point.caseStudy}</p>
-                      <p className="mt-0.5 text-zo-text-muted">{point.requirement}</p>
-                      {point.narrativeHook && (
-                        <p className="mt-1 text-zo-text-secondary italic">
-                          {point.narrativeHook}
-                        </p>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function IconButton({
   onClick,
   label,
@@ -237,9 +111,15 @@ function IconButton({
 
 interface ProposalDraftWorkspaceProps {
   rfp: RfpRecord;
+  goRfpCount?: number;
+  onOpenGoRfpPicker?: () => void;
 }
 
-export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
+export function ProposalDraftWorkspace({
+  rfp,
+  goRfpCount,
+  onOpenGoRfpPicker,
+}: ProposalDraftWorkspaceProps) {
   const [outline, setOutline] = useState<ProposalOutline>(() =>
     buildDefaultOutline(rfp)
   );
@@ -267,6 +147,8 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
   const [copied, setCopied] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [provider, setProvider] = useState<string | null>(null);
   const skipNextSaveRef = useRef(false);
   const editorScrollRef = useRef<HTMLDivElement>(null);
@@ -302,22 +184,61 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
     let cancelled = false;
 
     async function load() {
-      const { draft, provider: p, research: r } = await fetchProposalDraft(rfp.id);
-      if (cancelled) return;
+      setLoadError(null);
+      setRecoveryNotice(null);
 
-      if (draft) {
+      let draft: ProposalOutline | null = null;
+      let research: ProposalResearch | null = null;
+      let providerName: string | null = null;
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const result = await fetchProposalDraft(rfp.id);
+        if (cancelled) return;
+        draft = result.draft;
+        research = result.research;
+        providerName = result.provider ?? null;
+        if (draft || research) break;
+        await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+      }
+
+      if (!draft && !research) {
+        setLoadError("Could not load your proposal. Refresh the page — do not click Reset.");
+        setHydrated(true);
+        return;
+      }
+
+      setResearch(research);
+      setBudget(research?.budget ?? null);
+      setPresubmitReview(research?.presubmitReview ?? null);
+      setProvider(providerName);
+
+      const contentSections = draft ? countSectionsWithContent(draft) : 0;
+      const researchReady = (research?.rfpSections?.length ?? 0) > 0;
+
+      if (draft && contentSections > 0) {
+        setOutline(draft);
+        setSelectedSectionId(draft.sections[0]?.id ?? null);
+        setActiveTab("content");
+      } else if (researchReady && research && isLikelyWipedOutline(draft ?? buildDefaultOutline(rfp), research)) {
+        const rebuilt = rebuildOutlineFromResearch(rfp, research, draft);
+        skipNextSaveRef.current = true;
+        setOutline(rebuilt);
+        setSelectedSectionId(rebuilt.sections[0]?.id ?? null);
+        setActiveTab("outline");
+        setRecoveryNotice(
+          "Your manuscript text was cleared from the saved draft, but KB research and review findings are still here. " +
+            "Section list restored — click **Re-draft manuscript** to regenerate content from Supermemory (no new Phase 2 needed if evidence is cached)."
+        );
+      } else if (draft) {
         setOutline(draft);
         setSelectedSectionId(draft.sections[0]?.id ?? null);
         setActiveTab(draft.sections.some((s) => s.content) ? "content" : "outline");
-        setProvider(p ?? null);
       } else {
         const defaults = buildDefaultOutline(rfp);
         setOutline(defaults);
         setSelectedSectionId(defaults.sections[0]?.id ?? null);
       }
-      setResearch(r ?? null);
-      setBudget(r?.budget ?? null);
-      setPresubmitReview(r?.presubmitReview ?? null);
+
       setHydrated(true);
     }
 
@@ -328,16 +249,19 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
   }, [rfp]);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated || loadError) return;
     if (skipNextSaveRef.current) {
       skipNextSaveRef.current = false;
+      return;
+    }
+    if (isLikelyWipedOutline(outline, research)) {
       return;
     }
     const timer = setTimeout(() => {
       void saveProposalDraft(rfp.id, outline);
     }, 800);
     return () => clearTimeout(timer);
-  }, [outline, rfp.id, hydrated]);
+  }, [outline, rfp.id, hydrated, loadError, research]);
 
   const stats = useMemo(() => computeDraftStats(outline), [outline]);
   const pageLimit = rfp.pageLimit ?? 30;
@@ -432,13 +356,15 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
       setResearch(updatedResearch);
       await saveProposalDraft(rfp.id, draft);
       setAutoFixNotice(
-        `Auto-fix: ${autoFix.issuesBefore} → ${autoFix.issuesAfter} findings · ` +
-          `${autoFix.sectionsPatched} section(s) updated. ` +
+          `Auto-fix: ${autoFix.issuesBefore} → ${autoFix.issuesAfter} findings · ` +
+            `${autoFix.sectionsPatched} of ${autoFix.sectionsTargeted ?? autoFix.sectionsPatched} flagged section(s) updated. ` +
           (autoFix.stoppedReason === "cancelled"
             ? "Stopped — partial progress was saved."
             : autoFix.stoppedReason === "ready"
               ? "Re-check compliance items before upload."
-              : autoFix.issuesAfter > 0
+                : autoFix.stoppedReason === "regressed"
+                  ? "Some sections were skipped — auto-fix only applies changes that reduce findings."
+                  : autoFix.issuesAfter > 0
                 ? "Re-run review or edit remaining sections manually."
                 : "All fixable issues resolved.")
       );
@@ -532,6 +458,9 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
       setOutline(draft);
       if (updatedResearch) {
         setResearch(updatedResearch);
+        if (updatedResearch.budget) {
+          setBudget(updatedResearch.budget);
+        }
       }
       await saveProposalDraft(rfp.id, draft);
       setActiveTab("content");
@@ -548,6 +477,9 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
         setOutline(recovered.draft);
         if (recovered.research) {
           setResearch(recovered.research);
+          if (recovered.research.budget) {
+            setBudget(recovered.research.budget);
+          }
         }
         setActiveTab("content");
         setSelectedSectionId(
@@ -605,13 +537,59 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
   }, [rfp.id, sections1to3Done]);
 
   const handleResetOutline = () => {
-    if (!confirm("Reset outline and clear all generated content?")) return;
+    if (
+      !confirm(
+        "Reset outline and clear ALL generated content? This cannot be undone. Review findings will also be cleared."
+      )
+    ) {
+      return;
+    }
     const defaults = buildDefaultOutline(rfp);
     setOutline(defaults);
     setSelectedSectionId(defaults.sections[0]?.id ?? null);
+    setPresubmitReview(null);
+    setRecoveryNotice(null);
     void saveProposalDraft(rfp.id, defaults);
     setResearch(null);
   };
+
+  const handleRecoverManuscript = useCallback(async () => {
+    if (!research?.rfpSections?.length) {
+      setGenerateError("No cached research to recover from. Run Generate Full Proposal.");
+      return;
+    }
+    setIsFullProposalRunning(true);
+    setFullProposalProgress("phase-3");
+    setGenerateError(null);
+    setRecoveryNotice(null);
+    try {
+      const rebuilt = rebuildOutlineFromResearch(rfp, research, outline);
+      skipNextSaveRef.current = true;
+      setOutline(rebuilt);
+      await saveProposalDraft(rfp.id, rebuilt);
+
+      setFullProposalProgress("sections-1-3");
+      await generateProposalSections1to3(rfp.id);
+
+      setFullProposalProgress("phase-3");
+      const { draft, research: updatedResearch } = await runPhase3Drafting(rfp.id);
+
+      skipNextSaveRef.current = true;
+      setOutline(draft);
+      setResearch(updatedResearch);
+      setPresubmitReview(updatedResearch.presubmitReview ?? null);
+      await saveProposalDraft(rfp.id, draft);
+      setGenerateNotice("Manuscript re-drafted from cached KB research.");
+      setActiveTab("content");
+    } catch (error) {
+      setGenerateError(
+        error instanceof Error ? error.message : "Manuscript recovery failed"
+      );
+    } finally {
+      setIsFullProposalRunning(false);
+      setFullProposalProgress(null);
+    }
+  }, [research, rfp, outline]);
 
   const updateSection = (id: string, patch: Partial<OutlineSection>) => {
     setOutline((prev) => ({
@@ -698,6 +676,19 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
           <div className="relative grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
+                {onOpenGoRfpPicker && goRfpCount ? (
+                  <button
+                    type="button"
+                    onClick={onOpenGoRfpPicker}
+                    className="proposal-go-picker-btn"
+                  >
+                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                    </svg>
+                    Go RFPs
+                    <span className="proposal-go-picker-count">{goRfpCount}</span>
+                  </button>
+                ) : null}
                 <span className="rounded-full bg-[#ef5018] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">
                   Proposal Draft
                 </span>
@@ -776,6 +767,26 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
         </div>
       </div>
 
+      {loadError ? (
+        <div className="border-b border-red-200/80 bg-red-50 px-4 py-3 text-sm text-zo-error md:px-5">
+          {loadError}
+        </div>
+      ) : null}
+
+      {recoveryNotice ? (
+        <div className="flex flex-col gap-3 border-b border-amber-300/80 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-950 md:flex-row md:items-center md:justify-between md:px-5">
+          <p>{recoveryNotice}</p>
+          <button
+            type="button"
+            onClick={() => void handleRecoverManuscript()}
+            disabled={anyPipelineRunning}
+            className="zo-btn shrink-0 disabled:opacity-60"
+          >
+            {isFullProposalRunning ? "Re-drafting…" : "Re-draft manuscript"}
+          </button>
+        </div>
+      ) : null}
+
       {(generateNotice || generateError) && (
         <div
           className={`border-b px-4 py-2.5 text-sm md:px-5 ${
@@ -824,7 +835,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
             onClick={handleGenerateFullProposal}
             disabled={anyPipelineRunning}
             className="zo-btn disabled:opacity-60"
-            title="Static Sections 1–3 + RFP-mapped sections from evidence (full pipeline)"
+            title="Static Sections 1–3 + RFP sections + budget from 00_Guide_Pricing (full pipeline)"
           >
             {isFullProposalRunning ? (
               <>
@@ -835,7 +846,9 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                     ? "Phase 2 research…"
                     : fullProposalProgress === "phase-3"
                       ? "Phase 3 drafting…"
-                      : fullProposalProgress === "recovering"
+                      : fullProposalProgress === "phase-3-5-budget"
+                        ? "Building budget…"
+                        : fullProposalProgress === "recovering"
                         ? "Checking saved draft…"
                         : "Generating…"}
               </>
@@ -861,20 +874,10 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
         </div>
       </div>
 
-      {activeTab === "outline" && phase2Done && research && (
-        <ResearchStatusPanel
-          research={research}
-          fullProposalDone={fullProposalDone}
-          phase3Done={phase3Done}
-          sectionCount={outline.sections.length}
-          defaultExpanded={activeTab === "outline"}
-        />
-      )}
-
       <div className="proposal-workspace-body">
       {/* Outline tab */}
       <TabPanel id="outline" activeTab={activeTab} className="proposal-workspace-tab">
-        <div className="proposal-outline-layout grid gap-0 lg:grid-cols-[260px_minmax(0,1fr)] lg:gap-3 lg:p-3">
+        <div className="proposal-outline-layout grid min-h-0 flex-1 gap-0 overflow-hidden lg:grid-cols-[200px_minmax(0,1fr)] lg:gap-2 lg:p-2">
           <div className="proposal-section-list flex min-h-0 flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-xl lg:border lg:border-zo-border">
             <div className="flex shrink-0 items-center justify-between border-b border-zo-border/60 px-3 py-2.5">
               <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
@@ -962,10 +965,7 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
           <div className="proposal-editor-pane flex min-h-0 flex-col overflow-hidden rounded-none lg:rounded-xl lg:border lg:border-zo-border">
             {selectedSection ? (
               <>
-                <div
-                  ref={editorScrollRef}
-                  className="custom-scrollbar min-h-0 flex-1 overflow-y-auto proposal-tab-panel"
-                >
+                <div className="shrink-0 border-b border-zo-border/60 proposal-tab-panel">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
@@ -1064,43 +1064,21 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
                     </p>
                   </div>
                 </div>
-
-                <label className="mt-5 block">
-                  <div className="mb-2 flex items-center justify-between gap-4">
-                    <span className="text-xs font-bold uppercase tracking-[0.12em] text-zo-text-muted">
-                      Draft content
-                    </span>
-                    <span className="text-xs font-medium text-zo-text-muted">
-                      {countWords(selectedSection.content)} words
-                      {selectedSection.wordTarget > 0 && (
-                        <span className="text-zo-text-muted/70">
-                          {" "}
-                          / {selectedSection.wordTarget} target
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                  <textarea
-                    value={selectedSection.content}
-                    onChange={(e) =>
-                      updateSection(selectedSection.id, {
-                        content: e.target.value,
-                        status: e.target.value ? "generated" : "outline",
-                      })
-                    }
-                    rows={8}
-                    placeholder="Generate Sections 1–3 or run full proposal to auto-fill, or write manually…"
-                    className="proposal-draft-textarea zo-input w-full px-3 py-3 text-sm leading-[1.7] text-foreground outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
-                  />
-                </label>
                 </div>
 
-                <div className="proposal-section-agent-dock">
-                  <SectionEditChat
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  <DraftSectionEditor
                     rfpId={rfp.id}
                     section={selectedSection}
+                    wordCount={countWords(selectedSection.content)}
                     disabled={anyPipelineRunning}
-                    docked
+                    value={selectedSection.content}
+                    onChange={(content) =>
+                      updateSection(selectedSection.id, {
+                        content,
+                        status: content ? "generated" : "outline",
+                      })
+                    }
                     onSectionUpdated={(updatedDraft, updatedResearch) => {
                       skipNextSaveRef.current = true;
                       setOutline(updatedDraft);
@@ -1231,6 +1209,8 @@ export function ProposalDraftWorkspace({ rfp }: ProposalDraftWorkspaceProps) {
       <TabPanel id="review" activeTab={activeTab} className="proposal-workspace-tab">
         <ProposalReviewPanel
             review={presubmitReview}
+            rfpClient={rfp.client}
+            rfpTitle={rfp.title}
             isRunning={isReviewRunning}
             isAutoFixing={isAutoFixing}
             autoFixMode={autoFixMode}

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -107,6 +108,9 @@ async def _post_chat(
                 f"{provider} API error ({response.status_code}): {detail}",
                 status_code=response.status_code,
             )
+            # Payment/credit errors won't succeed on retry — fail fast to fallback.
+            if response.status_code in (402, 403):
+                break
             break
 
         data = response.json()
@@ -140,7 +144,8 @@ async def chat_json(
     errors: list[str] = []
 
     openrouter_key = _openrouter_key()
-    if openrouter_key:
+    skip_openrouter = settings.llm_prefer_fireworks
+    if openrouter_key and not skip_openrouter:
         try:
             raw = await _post_chat(
                 base_url=settings.openrouter_base_url,
@@ -163,13 +168,16 @@ async def chat_json(
     fireworks_key = _fireworks_key()
     if fireworks_key:
         try:
+            # Scale with caller request — hard cap 8192 (pricing budgets need room).
+            requested = max_tokens or 4096
+            fireworks_tokens = min(requested, 8192)
             raw = await _post_chat(
                 base_url=settings.fireworks_base_url,
                 api_key=fireworks_key,
                 model=settings.fireworks_model,
                 messages=messages,
                 provider="Fireworks",
-                max_tokens=max_tokens,
+                max_tokens=fireworks_tokens,
                 temperature=temperature,
             )
             return _parse_json_response(raw), "fireworks"
@@ -188,12 +196,208 @@ async def chat_json(
     )
 
 
-def _parse_json_response(raw: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise LlmError(f"LLM returned invalid JSON: {raw[:200]}") from exc
+def _strip_code_fence(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped.strip()
 
-    if not isinstance(parsed, dict):
-        raise LlmError("LLM JSON response must be an object")
+
+def _close_truncated_json(text: str) -> str:
+    """Close an unterminated string and trailing brackets/braces."""
+    s = text.strip()
+    in_string = False
+    escape = False
+    for ch in s:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+    if in_string:
+        s += '"'
+    s = s.rstrip().rstrip(",")
+    open_brackets = s.count("[") - s.count("]")
+    open_braces = s.count("{") - s.count("}")
+    if open_brackets > 0:
+        s += "]" * open_brackets
+    if open_braces > 0:
+        s += "}" * open_braces
+    return s
+
+
+def _try_parse_json_object(text: str) -> dict[str, Any] | None:
+    for candidate in (text, _close_truncated_json(text)):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _unwrap_nested_json(parsed: dict[str, Any]) -> dict[str, Any]:
+    for key in ("output", "response", "result", "data"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            inner = _try_parse_json_object(_strip_code_fence(value.strip()))
+            if inner is not None:
+                return inner
+        if isinstance(value, dict):
+            return value
+    return parsed
+
+
+def _salvage_line_items(text: str) -> list[dict[str, Any]]:
+    """Recover complete budget line-item objects from truncated JSON."""
+    items: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r'\{\s*"id"\s*:\s*"([^"]+)"\s*,\s*"category"\s*:\s*"([^"]*)"\s*,'
+        r'\s*"description"\s*:\s*"((?:\\.|[^"\\])*)"\s*,'
+        r'(?:(?:"namedPerson"\s*:\s*(?:"((?:\\.|[^"\\])*)"|null)\s*,\s*)?)?'
+        r'(?:(?:"roleTitle"\s*:\s*(?:"((?:\\.|[^"\\])*)"|null)\s*,\s*)?)?'
+        r'\s*"unit"\s*:\s*"([^"]*)"\s*,\s*"quantity"\s*:\s*(\d+(?:\.\d+)?)\s*,'
+        r'\s*"rate"\s*:\s*(\d+(?:\.\d+)?)\s*,\s*"extended"\s*:\s*(\d+(?:\.\d+)?)',
+        re.DOTALL,
+    )
+    for match in pattern.finditer(text):
+        try:
+            description = json.loads(f'"{match.group(3)}"')
+        except json.JSONDecodeError:
+            description = match.group(3).replace("\\n", "\n").replace('\\"', '"')
+        items.append(
+            {
+                "id": match.group(1),
+                "category": match.group(2) or "labor",
+                "description": description,
+                "namedPerson": match.group(4),
+                "roleTitle": match.group(5),
+                "unit": match.group(6) or "flat",
+                "quantity": float(match.group(7)),
+                "rate": float(match.group(8)),
+                "extended": float(match.group(9)),
+            }
+        )
+    return items
+
+
+def _salvage_budget_payload(text: str) -> dict[str, Any] | None:
+    """Recover budget fields from truncated Stage 3 JSON."""
+    payload: dict[str, Any] = {}
+
+    cap_match = re.search(r'"rfpBudgetCap"\s*:\s*(null|\d+(?:\.\d+)?)', text)
+    if cap_match:
+        cap_val = cap_match.group(1)
+        payload["rfpBudgetCap"] = None if cap_val == "null" else float(cap_val)
+
+    for key, pattern in (
+        ("pricingTier", r'"pricingTier"\s*:\s*"(Low|Average|High)"'),
+        ("budgetFormat", r'"budgetFormat"\s*:\s*"(phased|personnel_loading|service_menu)"'),
+        ("feeStructure", r'"feeStructure"\s*:\s*"((?:\\.|[^"\\])*)"'),
+        ("scopeSummary", r'"scopeSummary"\s*:\s*"((?:\\.|[^"\\])*)"'),
+    ):
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        value = match.group(1)
+        if key != "pricingTier" and key != "budgetFormat":
+            try:
+                value = json.loads(f'"{value}"')
+            except json.JSONDecodeError:
+                value = value.replace("\\n", "\n").replace('\\"', '"')
+        payload[key] = value
+
+    notes_match = re.search(r'"rfpBudgetNotes"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+    if notes_match:
+        try:
+            payload["rfpBudgetNotes"] = json.loads(f'"{notes_match.group(1)}"')
+        except json.JSONDecodeError:
+            payload["rfpBudgetNotes"] = notes_match.group(1)
+
+    line_items = _salvage_line_items(text)
+    if line_items:
+        payload["lineItems"] = line_items
+
+    flags_match = re.search(r'"pricingFlags"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+    if flags_match:
+        flags = re.findall(r'"((?:\\.|[^"\\])*)"', flags_match.group(1))
+        if flags:
+            payload["pricingFlags"] = [
+                f.replace("\\n", "\n").replace('\\"', '"') for f in flags
+            ]
+
+    conf_match = re.search(r'"confidence"\s*:\s*(\d+)', text)
+    if conf_match:
+        payload["confidence"] = int(conf_match.group(1))
+
+    if line_items or payload.get("pricingTier") or payload.get("budgetFormat"):
+        return payload
+    return None
+
+
+def _salvage_sections_payload(text: str) -> dict[str, Any] | None:
+    """Recover complete section objects from truncated model JSON."""
+    sections: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r'\{\s*"sectionId"\s*:\s*"([^"]+)"\s*,\s*"content"\s*:\s*"((?:\\.|[^"\\])*)"',
+        re.DOTALL,
+    )
+    for match in pattern.finditer(text):
+        section_id = match.group(1)
+        raw_content = match.group(2)
+        try:
+            content = json.loads(f'"{raw_content}"')
+        except json.JSONDecodeError:
+            content = (
+                raw_content.replace("\\n", "\n")
+                .replace('\\"', '"')
+                .replace("\\\\", "\\")
+            )
+        if section_id and content:
+            sections.append({"sectionId": section_id, "content": content})
+    if sections:
+        return {"sections": sections}
+    return None
+
+
+def _parse_json_response(raw: str) -> dict[str, Any]:
+    text = _strip_code_fence(raw)
+    parsed = _try_parse_json_object(text)
+    if parsed is None:
+        for salvager, label in (
+            (_salvage_sections_payload, "section(s)"),
+            (_salvage_budget_payload, "budget field(s)"),
+        ):
+            salvaged = salvager(text)
+            if salvaged:
+                count = len(salvaged.get("sections") or salvaged.get("lineItems") or [1])
+                logger.warning(
+                    "Salvaged %d %s from truncated LLM JSON",
+                    count,
+                    label,
+                )
+                return salvaged
+        raise LlmError(f"LLM returned invalid JSON: {raw[:200]}")
+
+    parsed = _unwrap_nested_json(parsed)
+    if "sections" not in parsed and "lineItems" not in parsed:
+        for salvager, label in (
+            (_salvage_sections_payload, "section(s)"),
+            (_salvage_budget_payload, "budget field(s)"),
+        ):
+            salvaged = salvager(text)
+            if salvaged:
+                count = len(salvaged.get("sections") or salvaged.get("lineItems") or [1])
+                logger.warning(
+                    "Salvaged %d %s after unwrap — missing expected keys",
+                    count,
+                    label,
+                )
+                return salvaged
+
     return parsed

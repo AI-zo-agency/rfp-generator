@@ -121,6 +121,17 @@ export function ProposalBudgetPanel({
             </div>
           </div>
 
+          {budget.lumpSumTotal != null && (
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wide text-zo-text-muted">
+                Lump sum (base term)
+              </p>
+              <p className="mt-1 text-lg font-bold text-foreground">
+                {formatUsd(budget.lumpSumTotal)}
+              </p>
+            </div>
+          )}
+
           {budget.confidence < 50 && (
             <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
               <p className="text-sm font-medium text-red-900">

@@ -89,6 +89,7 @@ export interface PreSubmitReview {
   issues: PreSubmitIssue[];
   complianceChecklist: ComplianceCheckItem[];
   summary: string;
+  issuesMarkdown?: string;
   readyToSubmit: boolean;
   scannedAt: string;
   provider?: string | null;
@@ -107,6 +108,7 @@ export interface PreSubmitAutoFixReport {
   issuesBefore: number;
   issuesAfter: number;
   sectionsPatched: number;
+  sectionsTargeted: number;
   stoppedReason: string;
   sectionLogs: SectionAutoFixLog[];
 }
@@ -177,6 +179,8 @@ export interface ProposalBudget {
   tiers: PricingTier[];
   recommendedTierId?: string | null;
   agencyRevenueEstimate?: number | null;
+  lumpSumTotal?: number | null;
+  directExpensesTotal?: number | null;
   commissionModel?: string | null;
   pricingFlags: string[];
   qualifyingLanguage: string;

@@ -1,5 +1,11 @@
-import type { OutlineSection, ProposalOutline } from "@/types/proposal";
+import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
+
+export const STATIC_SECTION_IDS = [
+  "section-1-company-overview",
+  "section-2-team-overview",
+  "section-3-our-work",
+] as const;
 
 const DEFAULT_SECTIONS: (Omit<
   OutlineSection,
@@ -79,6 +85,79 @@ export function buildDefaultOutline(rfp: RfpRecord): ProposalOutline {
 
   return {
     sections,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export function countSectionsWithContent(outline: ProposalOutline): number {
+  return outline.sections.filter((s) => s.content?.trim()).length;
+}
+
+/** Empty 5-section shell saved over a researched manuscript (autosave wipe). */
+export function isLikelyWipedOutline(
+  outline: ProposalOutline,
+  research: ProposalResearch | null
+): boolean {
+  if (countSectionsWithContent(outline) > 0) return false;
+  const mappedSections = research?.rfpSections?.length ?? 0;
+  const evidence = research?.evidenceCorpus?.length ?? 0;
+  const hadManuscriptWork = mappedSections > 5 || evidence > 20;
+  return hadManuscriptWork && outline.sections.length <= 5;
+}
+
+/** Restore section list from Phase 2 research when draft text was cleared. */
+export function rebuildOutlineFromResearch(
+  rfp: RfpRecord,
+  research: ProposalResearch,
+  existingDraft?: ProposalOutline | null
+): ProposalOutline {
+  const defaults = buildDefaultOutline(rfp);
+  const existingById = new Map(
+    (existingDraft?.sections ?? []).map((section) => [section.id, section])
+  );
+
+  const staticSections: OutlineSection[] = STATIC_SECTION_IDS.map((id) => {
+    const fromDraft = existingById.get(id);
+    const fromDefault = defaults.sections.find((s) => s.id === id);
+    const base = fromDraft ?? fromDefault;
+    if (!base) {
+      throw new Error(`Missing static section ${id}`);
+    }
+    return { ...base, content: fromDraft?.content ?? "", status: fromDraft?.content ? "generated" : "outline" };
+  });
+
+  const staticIds = new Set(STATIC_SECTION_IDS);
+  const rfpSections: OutlineSection[] = (research.rfpSections ?? [])
+    .filter((mapped) => !staticIds.has(mapped.id as (typeof STATIC_SECTION_IDS)[number]))
+    .map((mapped) => {
+      const fromDraft = existingById.get(mapped.id);
+      const content = fromDraft?.content ?? "";
+      return {
+        id: mapped.id,
+        title: mapped.title,
+        pageLimit: mapped.pageLimit ?? undefined,
+        wordTarget: mapped.pageLimit
+          ? Math.max(300, mapped.pageLimit * 350)
+          : fromDraft?.wordTarget ?? 800,
+        required: true,
+        custom: false,
+        content,
+        status: content ? "generated" : "outline",
+        source: "rfp" as const,
+        mode: mapped.zoMode ?? "write",
+      };
+    });
+
+  const preservedIds = new Set([
+    ...staticSections.map((s) => s.id),
+    ...rfpSections.map((s) => s.id),
+  ]);
+  const customSections = (existingDraft?.sections ?? []).filter(
+    (section) => !preservedIds.has(section.id)
+  );
+
+  return {
+    sections: [...staticSections, ...rfpSections, ...customSections],
     updatedAt: new Date().toISOString(),
   };
 }

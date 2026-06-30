@@ -15,8 +15,13 @@ from app.models.proposal import (
 )
 from app.models.rfp import RfpRecord
 from app.services import llm, supermemory
+from app.services.llm import LlmError
 from app.services.proposal_fee_justification import generate_fee_justification_memo
-from app.services.proposal_generator import ProposalError, _load_rfp_for_proposal
+from app.services.proposal_budget_validation import (
+    parse_budget_extras,
+    reconcile_proposal_budget,
+)
+from app.services.proposal_common import ProposalError, load_rfp_for_proposal
 from app.services.proposal_knowledge_base_tools import search_knowledge_base
 from app.services.proposal_repository import get_research_cache, save_research_cache
 
@@ -120,8 +125,13 @@ PHASE 5 — Budget page format (match RFP):
 
 PHASE 6 — qualifyingLanguage MUST include all four blocks:
 Investment Framing, Scope Protection, Reimbursable Expenses, Revision Rounds (use KB guide wording when present).
+qualifyingLanguage MUST use the SAME pricingTier selected in PHASE 2 — never mention a different tier as "baseline."
 
-rateSource on each lineItem should cite the guide menu item (e.g. "5.3 — 00_Guide_Pricing Average tier").
+MATH (mandatory):
+- agencyRevenueEstimate MUST equal the sum of all lineItems.extended plus directExpensesTotal (if any).
+- If option-year escalation is listed separately, include it in agencyRevenueEstimate or in optionTermNotes — totals must reconcile.
+
+LUMP SUM: When the RFP requires BOTH a lump sum AND hourly rates by position, set lumpSumTotal to the base-term project total (sum of line items + direct expenses) AND provide hourly breakdown in lineItems/verifiedRates.
 
 Return ONLY JSON:
 {
@@ -131,6 +141,8 @@ Return ONLY JSON:
   "pricingTier": "Low|Average|High",
   "budgetFormat": "phased|personnel_loading|service_menu",
   "commissionModel": "string|null",
+  "lumpSumTotal": number|null,
+  "directExpensesTotal": number|null,
   "verifiedRates": [{"personName","role","hourlyRate","source"}],
   "lineItems": [{"id","category","description","namedPerson","roleTitle","unit","quantity","rate","extended","rateSource","notes"}],
   "tiers": [],
@@ -146,7 +158,9 @@ Return ONLY JSON:
   "confidence": 0-100
 }
 
-lineItems must be a flat array (one row per line). Do not back-fill to the budget ceiling."""
+lineItems must be a flat array (one row per line). Do not back-fill to the budget ceiling.
+
+rateSource on each lineItem should cite the guide menu item (e.g. "5.3 — 00_Guide_Pricing Average tier")."""
 
 
 def _stage_one_text(rfp: RfpRecord) -> tuple[str, bool]:
@@ -315,7 +329,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
-    rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
+    rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
     prior_research = get_research_cache(rfp_id)
 
     stage_one, stage_one_ready = _stage_one_text(rfp)
@@ -334,14 +348,34 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         ]
     )
 
-    raw, provider = await llm.chat_json(
-        [
-            {"role": "system", "content": STAGE3_BUDGET_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        max_tokens=8192,
-        temperature=0.2,
-    )
+    messages = [
+        {"role": "system", "content": STAGE3_BUDGET_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+    try:
+        raw, provider = await llm.chat_json(
+            messages,
+            max_tokens=8192,
+            temperature=0.2,
+        )
+    except LlmError as exc:
+        logger.warning(
+            "Stage 3 budget first pass failed (%s), retrying with compact output",
+            exc,
+        )
+        compact_user = (
+            user_content
+            + "\n\nIMPORTANT: Return COMPACT JSON only. Maximum 20 lineItems. "
+            "Keep rfpBudgetNotes under 500 characters. No markdown or commentary."
+        )
+        raw, provider = await llm.chat_json(
+            [
+                {"role": "system", "content": STAGE3_BUDGET_PROMPT},
+                {"role": "user", "content": compact_user},
+            ],
+            max_tokens=6144,
+            temperature=0.2,
+        )
 
     now = datetime.now(timezone.utc).isoformat()
     flags = [str(f) for f in (raw.get("pricingFlags") or []) if str(f).strip()]
@@ -371,6 +405,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     if guide_text.startswith("(No 00_Guide_Pricing"):
         confidence = min(confidence, 40)
 
+    extras = parse_budget_extras(raw)
     budget = ProposalBudget(
         rfpId=rfp_id,
         rfpBudgetCap=_parse_budget_cap(raw.get("rfpBudgetCap")),
@@ -386,6 +421,8 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             if isinstance(raw.get("agencyRevenueEstimate"), (int, float))
             else None
         ),
+        lumpSumTotal=extras.get("lump_sum_total"),
+        directExpensesTotal=extras.get("direct_expenses_total"),
         commissionModel=raw.get("commissionModel"),
         pricingFlags=flags,
         qualifyingLanguage=_normalize_qualifying_language(raw.get("qualifyingLanguage")),
@@ -402,6 +439,12 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         confidence=confidence,
         updatedAt=now,
         provider=provider,
+    )
+
+    budget = reconcile_proposal_budget(
+        budget,
+        rfp_sections=prior_research.rfp_sections if prior_research else [],
+        rfp_context=rfp_context,
     )
 
     stage_one_text, _ = _stage_one_text(rfp)
