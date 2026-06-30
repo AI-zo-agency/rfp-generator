@@ -37,6 +37,7 @@ from app.services.proposal_presubmit_review import (
     scan_section_issues,
 )
 from app.services.proposal_repository import save_proposal_draft
+from app.services.proposal_evidence_corpus import merge_hits_into_corpus
 from app.services.proposal_retrieval_graph import (
     EXCERPT_MAX_CHARS,
     SEARCH_LIMIT,
@@ -317,48 +318,20 @@ async def _search_hits(query: str) -> list[dict[str, Any]]:
             return []
 
 
-def _next_evidence_id(corpus: list[EvidenceItem]) -> int:
-    max_id = 0
-    for item in corpus:
-        match = re.match(r"E(\d+)$", item.id)
-        if match:
-            max_id = max(max_id, int(match.group(1)))
-    return max_id + 1
-
-
 def _merge_hits_into_corpus(
     corpus: list[EvidenceItem],
     hits: list[dict[str, Any]],
     section_id: str,
 ) -> list[EvidenceItem]:
-    by_key = {item.chunk_key: item for item in corpus if item.chunk_key}
-    counter = _next_evidence_id(corpus)
-    updated = list(corpus)
-
-    for hit in hits:
-        key = _hit_key(hit)
-        if key in by_key:
-            existing = by_key[key]
-            if section_id not in existing.section_ids:
-                new_ids = [*existing.section_ids, section_id]
-                by_key[key] = existing.model_copy(update={"section_ids": new_ids})
-                updated = [
-                    by_key[key] if item.id == existing.id else item for item in updated
-                ]
-            continue
-        eid = f"E{counter}"
-        counter += 1
-        item = EvidenceItem(
-            id=eid,
-            source=_hit_label(hit),
-            excerpt=_hit_excerpt(hit, max_chars=EXCERPT_MAX_CHARS),
-            sectionIds=[section_id],
-            chunkKey=key,
-        )
-        by_key[key] = item
-        updated.append(item)
-
-    return updated
+    return merge_hits_into_corpus(
+        corpus,
+        hits,
+        section_id,
+        hit_key=_hit_key,
+        hit_label=_hit_label,
+        hit_excerpt=_hit_excerpt,
+        excerpt_max_chars=EXCERPT_MAX_CHARS,
+    )
 
 
 def _evidence_for_section(section_id: str, corpus: list[EvidenceItem]) -> list[EvidenceItem]:

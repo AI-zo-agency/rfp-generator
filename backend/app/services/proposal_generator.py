@@ -33,7 +33,7 @@ from app.services.proposal_repository import (
 from app.services.proposal_drafting_graph import run_drafting_graph
 from app.services.proposal_budget_content import incorporate_budget_into_draft
 from app.services.proposal_budget_editor import run_budget_editor_pass
-from app.services.proposal_budget_sync import align_fee_narrative_with_budget
+from app.services.proposal_consistency import self_edit_exhausted_issues
 from app.services.proposal_fee_justification import generate_fee_justification_memo
 from app.services.proposal_loss_lessons import build_loss_lessons_for_rfp
 from app.services.proposal_pricing_service import generate_proposal_budget
@@ -900,12 +900,33 @@ async def generate_full_proposal(
     _draft, brand_voice, _research = await generate_sections_1_3(rfp_id)
     await run_phase2_retrieval(rfp_id)
     draft, research = await run_phase3_drafting(rfp_id)
-    draft, research, _edit = await run_phase3_6_self_edit(rfp_id)
+    draft, research, edit_report = await run_phase3_6_self_edit(rfp_id)
     draft, research, _budget = await run_phase3_5_budget(rfp_id)
 
     if brand_voice and not research.brand_voice:
         research = research.model_copy(update={"brand_voice": brand_voice})
         save_research_cache(research)
+
+    rfp = get_rfp(rfp_id)
+    if rfp:
+        extra_issues = self_edit_exhausted_issues(edit_report.section_logs, draft)
+        review = run_presubmit_review(
+            rfp=rfp,
+            draft=draft,
+            research=research,
+            extra_issues=extra_issues,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        research = research.model_copy(
+            update={"presubmit_review": review, "updated_at": now}
+        )
+        save_research_cache(research)
+        logger.info(
+            "Phase 4 pre-submit review (auto) for %s: %d issues, ready=%s",
+            rfp_id,
+            len(review.issues),
+            review.ready_to_submit,
+        )
 
     logger.info(
         "Full proposal complete for %s: %d sections, budget tier=%s",

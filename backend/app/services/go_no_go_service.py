@@ -16,6 +16,7 @@ from app.models.go_no_go import (
 from app.models.rfp import RfpRecord
 from app.services import llm, supermemory
 from app.services.rfp_content import combine_rfp_text, load_local_rfp_text, resolve_rfp_pdf_path
+from app.services.pdf_text import IMAGE_ONLY_TEXT_THRESHOLD
 from app.services.rfp_repository import get_rfp_pdf_path
 
 EVALUATION_QUESTIONS: list[tuple[str, str]] = [
@@ -252,6 +253,9 @@ class RfpContentInfo:
         pdf_path: str | None,
         pdf_path_recorded: str | None = None,
         pdf_file_missing: bool = False,
+        pdf_exists: bool = False,
+        pdf_page_count: int = 0,
+        pdf_image_only: bool = False,
         pdf_text: str,
         description: str,
         substantive_chars: int,
@@ -260,6 +264,9 @@ class RfpContentInfo:
         self.pdf_path = pdf_path
         self.pdf_path_recorded = pdf_path_recorded
         self.pdf_file_missing = pdf_file_missing
+        self.pdf_exists = pdf_exists
+        self.pdf_page_count = pdf_page_count
+        self.pdf_image_only = pdf_image_only
         self.pdf_text = pdf_text
         self.description = description
         self.substantive_chars = substantive_chars
@@ -267,11 +274,11 @@ class RfpContentInfo:
 
     @property
     def has_pdf(self) -> bool:
-        return bool(self.pdf_path)
+        return self.pdf_exists and not self.pdf_file_missing
 
     @property
     def pdf_extracted(self) -> bool:
-        return len(self.pdf_text) >= 100
+        return len(self.pdf_text) >= IMAGE_ONLY_TEXT_THRESHOLD
 
 
 def _is_metadata_shell(rfp: RfpRecord, substantive_chars: int) -> bool:
@@ -286,7 +293,9 @@ def _is_metadata_shell(rfp: RfpRecord, substantive_chars: int) -> bool:
 
 
 def _assess_rfp_content(rfp: RfpRecord) -> RfpContentInfo:
-    description, pdf_text, pdf_exists, pdf_file_missing = load_local_rfp_text(rfp)
+    description, pdf_text, pdf_exists, pdf_file_missing, page_count, image_only = load_local_rfp_text(
+        rfp
+    )
     pdf_path_recorded = rfp.pdf_path or get_rfp_pdf_path(rfp.id)
     resolved = resolve_rfp_pdf_path(rfp.id, pdf_path_recorded)
     substantive_chars = len(combine_rfp_text(description, pdf_text))
@@ -295,6 +304,9 @@ def _assess_rfp_content(rfp: RfpRecord) -> RfpContentInfo:
         pdf_path=str(resolved) if resolved else None,
         pdf_path_recorded=pdf_path_recorded,
         pdf_file_missing=pdf_file_missing,
+        pdf_exists=pdf_exists,
+        pdf_page_count=page_count,
+        pdf_image_only=image_only,
         pdf_text=pdf_text,
         description=description,
         substantive_chars=substantive_chars,
@@ -317,28 +329,70 @@ def _pending_dimension(message: str) -> GoNoGoDimension:
 
 
 def _default_clarifying_questions(content: RfpContentInfo) -> list[str]:
-    questions = [
-        "Provide the full scope of work, deliverables, and services requested.",
-        "Identify the issuing agency or client (legal name, department, and jurisdiction).",
-        "Include budget or contract value, timeline, and submission deadline details.",
-        "List required certifications, state registrations, insurance limits, and mandatory forms.",
-        "Specify required team roles, staffing, and any specialized expertise.",
-    ]
-    if content.has_pdf and not content.pdf_extracted:
-        questions.insert(
-            0,
-            "The uploaded PDF has little or no extractable text — add a description of the RFP "
-            "scope or upload a text-based PDF.",
+    questions: list[str] = []
+    if content.pdf_image_only:
+        pages = content.pdf_page_count
+        page_note = f" ({pages} pages)" if pages > 0 else ""
+        questions.append(
+            f"The RFP PDF is stored{page_note} but appears to be a scan or image-only file — "
+            "the system cannot read its text. Paste the scope into the description field, "
+            "or re-upload a text-based (selectable-text) PDF."
         )
+    elif content.has_pdf and not content.pdf_extracted:
+        questions.append(
+            "The uploaded PDF has little or no extractable text — add a description of the RFP "
+            "scope or upload a text-based PDF."
+        )
+    questions.extend(
+        [
+            "Provide the full scope of work, deliverables, and services requested.",
+            "Identify the issuing agency or client (legal name, department, and jurisdiction).",
+            "Include budget or contract value, timeline, and submission deadline details.",
+            "List required certifications, state registrations, insurance limits, and mandatory forms.",
+            "Specify required team roles, staffing, and any specialized expertise.",
+        ]
+    )
     return questions
+
+
+def _needs_input_summary(rfp: RfpRecord, content: RfpContentInfo) -> str:
+    if content.pdf_image_only:
+        pages = content.pdf_page_count
+        page_note = f" ({pages} pages in storage)" if pages > 0 else " (in storage)"
+        return (
+            f"'{rfp.title}' has a PDF{page_note}, but it is image-only — no machine-readable text "
+            "could be extracted for Go/No-Go scoring. Paste scope into the description field or "
+            "upload a text-based PDF, then re-run analysis."
+        )
+    if content.pdf_file_missing:
+        return (
+            f"'{rfp.title}' references a PDF that is missing from storage. Re-upload the RFP PDF "
+            "or add a description with the full scope, then re-run analysis."
+        )
+    if content.has_pdf and not content.pdf_extracted:
+        return (
+            f"'{rfp.title}' has a PDF with little extractable text. Add a description with the "
+            "full scope or upload a text-based PDF, then re-run analysis."
+        )
+    return (
+        f"'{rfp.title}' does not include enough substance to run Go/No-Go scoring. "
+        "Add the full RFP scope (via PDF text or description), then re-run analysis."
+    )
 
 
 def _build_needs_input_analysis(rfp: RfpRecord, content: RfpContentInfo) -> GoNoGoAnalysis:
     questions = _default_clarifying_questions(content)
-    pending_msg = (
-        "This record has only basic metadata (title, client, due date) — not enough to score fit "
-        "or issue a Go/No-Go decision."
-    )
+    if content.pdf_image_only:
+        pages = content.pdf_page_count
+        pending_msg = (
+            f"The RFP PDF is in storage ({pages} pages) but is image-only — the viewer can display "
+            "it, yet no text can be extracted for automated scoring."
+        )
+    else:
+        pending_msg = (
+            "This record has only basic metadata (title, client, due date) — not enough to score fit "
+            "or issue a Go/No-Go decision."
+        )
     evaluations = [
         GoNoGoEvaluation(
             id=qid,
@@ -354,10 +408,7 @@ def _build_needs_input_analysis(rfp: RfpRecord, content: RfpContentInfo) -> GoNo
         worthScore=None,
         recommendation=None,
         insufficientData=True,
-        summary=(
-            f"'{rfp.title}' does not include enough substance to run Go/No-Go scoring. "
-            "Add the full RFP scope (via PDF text or description), then re-run analysis."
-        ),
+        summary=_needs_input_summary(rfp, content),
         evaluations=evaluations,
         scopeMatch=_pending_dimension(pending_msg),
         sectorMatch=_pending_dimension("Sector cannot be assessed without a real client or jurisdiction."),
@@ -365,7 +416,7 @@ def _build_needs_input_analysis(rfp: RfpRecord, content: RfpContentInfo) -> GoNo
         teamMatch=_pending_dimension("No team or staffing requirements are present to verify."),
         clarifyingQuestions=questions,
         stageOneReport="",
-        provider="local-fallback",
+        provider="content-gate",
     )
 
 
@@ -708,6 +759,12 @@ def _build_rfp_context(rfp: RfpRecord, content: RfpContentInfo) -> str:
         parts.append(
             "RFP PDF was recorded for this record but the file is missing from storage. "
             "Re-upload the PDF."
+        )
+    elif content.pdf_image_only:
+        pages = content.pdf_page_count
+        parts.append(
+            f"RFP PDF is in storage ({pages} pages) but is image-only — each page is a scan with "
+            "no selectable text layer. Paste scope into the description or upload a text-based PDF."
         )
     elif content.has_pdf:
         parts.append(

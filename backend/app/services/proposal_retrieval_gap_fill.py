@@ -8,6 +8,7 @@ import re
 
 from app.models.proposal import EvidenceItem, RfpSectionMap
 from app.services import supermemory
+from app.services.proposal_evidence_corpus import merge_hits_into_corpus
 from app.services.proposal_retrieval_graph import (
     EXCERPT_MAX_CHARS,
     MAX_CONCURRENT_SUPERMEMORY_SEARCHES,
@@ -130,32 +131,15 @@ def _merge_hits(
     hits: list[dict],
     section_id: str,
 ) -> list[EvidenceItem]:
-    by_key: dict[str, EvidenceItem] = {item.chunk_key or item.id: item for item in corpus if item.chunk_key or item.id}
-    updated = list(corpus)
-    counter = len(corpus) + 1
-
-    for hit in hits:
-        key = _hit_key(hit)
-        if key in by_key:
-            existing = by_key[key]
-            ids = list(existing.section_ids)
-            if section_id not in ids:
-                ids.append(section_id)
-                by_key[key] = existing.model_copy(update={"section_ids": ids})
-                updated = [by_key[key] if i.id == existing.id else i for i in updated]
-            continue
-        eid = f"E{counter}"
-        counter += 1
-        item = EvidenceItem(
-            id=eid,
-            source=_hit_label(hit),
-            excerpt=_hit_excerpt(hit, max_chars=EXCERPT_MAX_CHARS),
-            sectionIds=[section_id],
-            chunkKey=key,
-        )
-        by_key[key] = item
-        updated.append(item)
-    return updated
+    return merge_hits_into_corpus(
+        corpus,
+        hits,
+        section_id,
+        hit_key=_hit_key,
+        hit_label=_hit_label,
+        hit_excerpt=_hit_excerpt,
+        excerpt_max_chars=EXCERPT_MAX_CHARS,
+    )
 
 
 async def gap_fill_evidence_for_sections(

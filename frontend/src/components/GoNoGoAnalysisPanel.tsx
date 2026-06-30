@@ -211,6 +211,17 @@ function DecisionMatrixTable({
   );
 }
 
+function providerLabel(provider: string | undefined): string | null {
+  if (!provider) return null;
+  if (provider === "content-gate") {
+    return "Blocked — PDF text could not be extracted for scoring";
+  }
+  if (provider === "local-fallback") {
+    return "Rules-based response (LLM unavailable)";
+  }
+  return `Analyzed via ${provider}`;
+}
+
 function detectNeedsInput(analysis: GoNoGoAnalysis): boolean {
   if (analysis.insufficientData) return true;
   return (
@@ -252,9 +263,7 @@ export function GoNoGoAnalysisPanel({
           </h2>
           {analysis.provider && (
             <p className="mt-1 text-xs text-zo-text-muted">
-              {analysis.provider === "local-fallback"
-                ? "Local fallback (LLM unavailable)"
-                : `Analyzed via ${analysis.provider}`}
+              {providerLabel(analysis.provider)}
             </p>
           )}
         </div>

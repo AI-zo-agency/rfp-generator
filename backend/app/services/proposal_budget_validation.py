@@ -231,6 +231,54 @@ def reconcile_proposal_budget(
     return merged
 
 
+def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
+    """Return human-readable violations when budget math or flags are unreconciled."""
+    violations: list[str] = []
+    subtotal = sum_line_items_extended(budget)
+    direct = round(float(budget.direct_expenses_total or 0), 2)
+    expected = round(subtotal + direct, 2)
+
+    revenue = budget.agency_revenue_estimate
+    if expected > 0:
+        if revenue is None:
+            violations.append("agencyRevenueEstimate is missing")
+        elif abs(float(revenue) - expected) > 0.01:
+            violations.append(
+                f"agencyRevenueEstimate ({revenue}) != line items ({subtotal}) + direct ({direct})"
+            )
+
+    lump = budget.lump_sum_total
+    if lump is not None and expected > 0 and abs(float(lump) - expected) > max(1.0, expected * 0.01):
+        violations.append(f"lumpSumTotal ({lump}) != verified total ({expected})")
+
+    blob_parts = [
+        budget.fee_structure,
+        budget.qualifying_language,
+        budget.option_term_notes,
+        " ".join(budget.pricing_flags),
+    ]
+    blob = "\n".join(part for part in blob_parts if part)
+    if re.search(
+        r"\bverify\b[^.\n]{0,60}\b(before\s+submission|before\s+submitting|submission)\b",
+        blob,
+        re.I,
+    ):
+        violations.append("budget object still contains verify-before-submission language")
+
+    for flag in budget.pricing_flags:
+        if _STALE_RECONCILIATION_FLAG_RE.search(flag):
+            violations.append(f"stale reconciliation flag remains: {flag[:100]}")
+
+    return violations
+
+
+def assert_budget_invariants(budget: ProposalBudget) -> None:
+    """Raise ValueError when budget fails post-reconcile invariants."""
+    violations = collect_budget_invariant_violations(budget)
+    if violations:
+        raise ValueError("; ".join(violations))
+
+
 def parse_budget_extras(raw: dict[str, Any]) -> dict[str, Any]:
     """Extract optional lump-sum / direct-expense fields from LLM JSON."""
     extras: dict[str, Any] = {}

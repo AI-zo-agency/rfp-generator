@@ -29,6 +29,10 @@ from app.services.proposal_voice_enforcement import (
 )
 from app.services import llm
 from app.services.llm import LlmError
+from app.services.proposal_draft_llm import (
+    SECTION_DRAFT_FAILURE_PLACEHOLDER,
+    chat_json_with_repair,
+)
 from app.services.proposal_langchain import _provider_name
 
 logger = logging.getLogger(__name__)
@@ -195,13 +199,15 @@ async def _draft_batch(
                         "custom": False,
                         "source": "rfp",
                         "mode": section.get("zoMode") or "write",
-                        "content": (
-                            f"[VERIFY: Section drafting failed — {single_exc}. "
-                            f"Re-run Phase 3 or draft manually.]"
-                        ),
+                        "content": SECTION_DRAFT_FAILURE_PLACEHOLDER,
                         "status": "outline",
                         "kbRefs": [],
                     }
+                )
+                logger.warning(
+                    "Phase 3 section %s draft failed after JSON repair: %s",
+                    sid,
+                    single_exc,
                 )
         return merged, provider
 
@@ -303,7 +309,7 @@ async def _draft_batch_once(
     user_content += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
 
     async with _LLM_SEMAPHORE:
-        raw, provider = await llm.chat_json(
+        raw, provider = await chat_json_with_repair(
             [
                 {"role": "system", "content": DRAFT_BATCH_PROMPT},
                 {"role": "user", "content": user_content},
@@ -424,14 +430,17 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
                         "custom": False,
                         "source": "rfp",
                         "mode": section.get("zoMode") or "write",
-                        "content": (
-                            f"[VERIFY: Section drafting failed — {exc}. "
-                            f"Re-run Phase 3 or draft manually.]"
-                        ),
+                        "content": SECTION_DRAFT_FAILURE_PLACEHOLDER,
                         "status": "outline",
                         "kbRefs": [],
                     }
                 )
+            logger.warning(
+                "Phase 3 batch %d failed for %s after repair: %s",
+                index,
+                state.get("rfp_id"),
+                exc,
+            )
 
     return {"drafted_sections": all_drafted, "provider": provider}
 

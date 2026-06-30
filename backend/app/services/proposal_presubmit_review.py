@@ -15,6 +15,7 @@ from app.models.proposal import (
 )
 from app.models.rfp import RfpRecord
 from app.services.proposal_brand_voice import classify_section_register
+from app.services.proposal_consistency import scan_manuscript_consistency
 from app.services.proposal_voice_enforcement import contains_vendor_language
 
 # Common stale client names from zö portfolio (copy-paste scan)
@@ -309,6 +310,8 @@ _CATEGORY_LABELS = {
     "placeholder": "Unfilled placeholders",
     "voice": "Voice & tone",
     "compliance": "Compliance",
+    "consistency": "Internal consistency",
+    "self_edit": "Self-edit incomplete",
 }
 
 
@@ -340,6 +343,8 @@ def generate_issues_markdown(
             "copy_paste",
             "placeholder",
             "voice",
+            "consistency",
+            "self_edit",
             "compliance",
             *sorted(k for k in by_category if k not in _CATEGORY_LABELS),
         ):
@@ -396,10 +401,14 @@ def run_presubmit_review(
     rfp: RfpRecord,
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
+    extra_issues: list[PreSubmitIssue] | None = None,
 ) -> PreSubmitReview:
     issues: list[PreSubmitIssue] = []
     issues.extend(_scan_copy_paste(draft=draft, rfp=rfp))
     issues.extend(_scan_voice(draft=draft))
+    issues.extend(scan_manuscript_consistency(draft=draft, research=research, rfp=rfp))
+    if extra_issues:
+        issues.extend(extra_issues)
 
     empty_narrative = [
         s
