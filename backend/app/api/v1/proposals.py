@@ -19,6 +19,8 @@ from app.services.proposal_generator import (
     generate_sections_1_3,
     run_phase2_retrieval,
     run_phase3_5_budget,
+    run_phase3_5_budget_reconcile,
+    run_phase3_6_self_edit,
     run_phase3_drafting,
     run_phase4_presubmit_autofix,
     run_phase4_presubmit_review,
@@ -145,6 +147,27 @@ async def phase3_drafting_endpoint(rfp_id: str) -> ProposalPhase3Response:
 
 
 @router.post(
+    "/{rfp_id}/proposal/phase-3-6-self-edit",
+    response_model=ProposalPhase3Response,
+)
+async def phase3_6_self_edit_endpoint(rfp_id: str) -> ProposalPhase3Response:
+    """Phase 3.6: senior-editor self-edit loop — gap-fill KB and patch weak sections."""
+    try:
+        draft, research, _report = await run_phase3_6_self_edit(rfp_id)
+    except ProposalError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Self-edit loop failed: {exc}",
+        ) from exc
+
+    if not research:
+        raise HTTPException(status_code=500, detail="Research cache missing after self-edit")
+    return ProposalPhase3Response(draft=draft, research=research)
+
+
+@router.post(
     "/{rfp_id}/proposal/phase-3-5-budget",
     response_model=ProposalPricingResponse,
 )
@@ -158,6 +181,25 @@ async def phase3_5_budget_endpoint(rfp_id: str) -> ProposalPricingResponse:
         raise HTTPException(
             status_code=502,
             detail=f"Phase 3.5 budget failed: {exc}",
+        ) from exc
+
+    return ProposalPricingResponse(budget=budget, research=research, draft=draft)
+
+
+@router.post(
+    "/{rfp_id}/proposal/phase-3-5-budget-reconcile",
+    response_model=ProposalPricingResponse,
+)
+async def phase3_5_budget_reconcile_endpoint(rfp_id: str) -> ProposalPricingResponse:
+    """Reconcile cached budget line-item math and sync totals through manuscript (no LLM regen)."""
+    try:
+        draft, research, budget = await run_phase3_5_budget_reconcile(rfp_id)
+    except ProposalError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Budget reconcile failed: {exc}",
         ) from exc
 
     return ProposalPricingResponse(budget=budget, research=research, draft=draft)

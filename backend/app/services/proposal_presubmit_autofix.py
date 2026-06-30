@@ -510,16 +510,28 @@ Current section (minimal edits only):
 """
 
     try:
-        raw, provider = await llm.chat_json(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_block},
-            ],
-            max_tokens=2048 if register == "procurement" else 4096,
-            temperature=0.15,
+        from app.services.proposal_langchain_agents import AgentRole, redraft_section_agent
+
+        raw, provider, _tools = await redraft_section_agent(
+            role=AgentRole.SURGICAL_FIX,
+            rfp_id=rfp.id,
+            rfp_title=rfp.title,
+            rfp_client=rfp.client,
+            user_content=user_block,
         )
-    except LlmError:
-        return content, None
+    except Exception as exc:
+        logger.warning("Surgical Fix agent failed, falling back to chat_json: %s", exc)
+        try:
+            raw, provider = await llm.chat_json(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_block},
+                ],
+                max_tokens=2048 if register == "procurement" else 4096,
+                temperature=0.15,
+            )
+        except LlmError:
+            return content, None
 
     new_content = raw.get("content")
     if not isinstance(new_content, str) or not new_content.strip():

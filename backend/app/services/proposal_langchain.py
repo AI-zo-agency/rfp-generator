@@ -15,14 +15,37 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ROUNDS = 4
 
 
-def get_chat_model() -> ChatOpenAI:
+def _use_fireworks_primary() -> bool:
+    return bool(settings.llm_prefer_fireworks and _fireworks_key())
+
+
+def get_chat_model(
+    *,
+    temperature: float = 0.2,
+    max_tokens: int = 4096,
+    force_fireworks: bool = False,
+) -> ChatOpenAI:
+    """LangChain chat model — respects LLM_PREFER_FIREWORKS like chat_json."""
+    if force_fireworks or _use_fireworks_primary():
+        if not _fireworks_key():
+            raise LlmError(
+                "FIREWORKS_API_KEY required when LLM_PREFER_FIREWORKS is set.",
+                status_code=503,
+            )
+        return ChatOpenAI(
+            model=settings.fireworks_model,
+            api_key=_fireworks_key(),
+            base_url=settings.fireworks_base_url.rstrip("/"),
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
     if _openrouter_key():
         return ChatOpenAI(
             model=settings.openrouter_model,
             api_key=_openrouter_key(),
             base_url=settings.openrouter_base_url.rstrip("/"),
-            temperature=0.2,
-            max_tokens=4096,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
     if not _fireworks_key():
         raise LlmError(
@@ -33,12 +56,121 @@ def get_chat_model() -> ChatOpenAI:
         model=settings.fireworks_model,
         api_key=_fireworks_key(),
         base_url=settings.fireworks_base_url.rstrip("/"),
-        temperature=0.2,
-        max_tokens=4096,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
 
-def _provider_name() -> str:
+async def run_tool_agent_loop(
+    *,
+    system_prompt: str,
+    user_content: str,
+    tools: list[StructuredTool],
+    temperature: float,
+    max_tokens: int,
+    max_rounds: int,
+    agent_label: str,
+    rfp_id: str = "",
+) -> tuple[str, str, list[str]]:
+    """Generic LangChain tool-calling loop. Falls back to Fireworks on OpenRouter failure."""
+    try:
+        return await _run_tool_agent_loop_once(
+            system_prompt=system_prompt,
+            user_content=user_content,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_rounds=max_rounds,
+            agent_label=agent_label,
+            rfp_id=rfp_id,
+            force_fireworks=_use_fireworks_primary(),
+        )
+    except Exception as exc:
+        if _fireworks_key() and not _use_fireworks_primary():
+            logger.warning(
+                "%s agent primary LLM failed (%s) — retrying via Fireworks",
+                agent_label,
+                exc,
+            )
+            return await _run_tool_agent_loop_once(
+                system_prompt=system_prompt,
+                user_content=user_content,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_rounds=max_rounds,
+                agent_label=agent_label,
+                rfp_id=rfp_id,
+                force_fireworks=True,
+            )
+        raise
+
+
+async def _run_tool_agent_loop_once(
+    *,
+    system_prompt: str,
+    user_content: str,
+    tools: list[StructuredTool],
+    temperature: float,
+    max_tokens: int,
+    max_rounds: int,
+    agent_label: str,
+    rfp_id: str,
+    force_fireworks: bool,
+) -> tuple[str, str, list[str]]:
+    """Single provider attempt for tool-calling loop."""
+    tool_map = {t.name: t for t in tools}
+    llm = get_chat_model(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        force_fireworks=force_fireworks,
+    ).bind_tools(tools)
+    messages: list[Any] = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_content),
+    ]
+    tool_log: list[str] = []
+
+    for round_num in range(max_rounds):
+        response = await llm.ainvoke(messages)
+        if not getattr(response, "tool_calls", None):
+            messages.append(response)
+            break
+
+        messages.append(response)
+        for call in response.tool_calls:
+            name = call["name"]
+            tool_log.append(name)
+            tool = tool_map.get(name)
+            if not tool:
+                result = f"Unknown tool: {name}"
+            else:
+                result = await tool.ainvoke(call["args"])
+            messages.append(
+                ToolMessage(content=str(result)[:12000], tool_call_id=call["id"])
+            )
+        logger.info(
+            "%s agent round %d for %s: tools=%s provider=%s",
+            agent_label,
+            round_num + 1,
+            rfp_id or "n/a",
+            response.tool_calls,
+            _provider_name(force_fireworks=force_fireworks),
+        )
+
+    final = messages[-1]
+    content = final.content if hasattr(final, "content") else str(final)
+    if isinstance(content, list):
+        content = "".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in content
+        )
+    return str(content), _provider_name(force_fireworks=force_fireworks), tool_log
+
+
+def _provider_name(*, force_fireworks: bool = False) -> str:
+    if force_fireworks or _use_fireworks_primary():
+        return "fireworks"
     return "openrouter" if _openrouter_key() else "fireworks"
 
 
@@ -120,10 +252,6 @@ async def run_tool_research_agent(
     rfp_excerpt: str,
     questions: list[dict[str, str]],
 ) -> tuple[list[dict[str, Any]], str]:
-    tools = build_proposal_tools(rfp_id, title, client)
-    tool_map = {t.name: t for t in tools}
-    llm = get_chat_model().bind_tools(tools)
-
     system = """You are a proposal research agent for zö agency.
 Use the provided tools to answer each research question using ONLY verified knowledge-base and RFP content.
 Call tools selectively — batch related questions when possible to save tokens.
@@ -138,48 +266,23 @@ Research questions:
 {json.dumps(questions, indent=2)}
 """
 
-    messages: list[Any] = [
-        SystemMessage(content=system),
-        HumanMessage(content=user),
-    ]
-
-    for round_num in range(MAX_TOOL_ROUNDS):
-        response = await llm.ainvoke(messages)
-        if not getattr(response, "tool_calls", None):
-            messages.append(response)
-            break
-
-        messages.append(response)
-        for call in response.tool_calls:
-            name = call["name"]
-            tool = tool_map.get(name)
-            if not tool:
-                result = f"Unknown tool: {name}"
-            else:
-                result = await tool.ainvoke(call["args"])
-            messages.append(
-                ToolMessage(content=str(result)[:12000], tool_call_id=call["id"])
-            )
-        logger.info(
-            "Proposal research agent round %d for %s: %d tool calls",
-            round_num + 1,
-            rfp_id,
-            len(response.tool_calls),
-        )
-
-    final = messages[-1]
-    content = final.content if hasattr(final, "content") else str(final)
-    if isinstance(content, list):
-        content = "".join(
-            block.get("text", "") if isinstance(block, dict) else str(block)
-            for block in content
-        )
+    tools = build_proposal_tools(rfp_id, title, client)
+    final_text, provider, _tool_log = await run_tool_agent_loop(
+        system_prompt=system,
+        user_content=user,
+        tools=tools,
+        temperature=0.2,
+        max_tokens=4096,
+        max_rounds=MAX_TOOL_ROUNDS,
+        agent_label="Research",
+        rfp_id=rfp_id,
+    )
 
     try:
-        parsed = json.loads(str(content))
+        parsed = json.loads(final_text)
         answers = parsed.get("answers", [])
         if isinstance(answers, list):
-            return answers, _provider_name()
+            return answers, provider
     except json.JSONDecodeError:
         pass
 
@@ -188,8 +291,8 @@ Research questions:
             {"role": "system", "content": "Convert the research into JSON answers array only."},
             {
                 "role": "user",
-                "content": f"Questions: {json.dumps(questions)}\n\nResearch:\n{content[:15000]}",
+                "content": f"Questions: {json.dumps(questions)}\n\nResearch:\n{final_text[:15000]}",
             },
         ]
     )
-    return structured.get("answers", []), _provider_name()
+    return structured.get("answers", []), provider

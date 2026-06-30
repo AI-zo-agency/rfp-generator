@@ -340,26 +340,68 @@ def _salvage_budget_payload(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _unescape_json_string(raw: str) -> str:
+    try:
+        return json.loads(f'"{raw}"')
+    except json.JSONDecodeError:
+        return (
+            raw.replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace('\\"', '"')
+            .replace("\\\\", "\\")
+        )
+
+
+def _extract_json_string_value(chunk: str, *, allow_partial: bool) -> str:
+    """Read a JSON string value from chunk (starts after opening quote)."""
+    buf: list[str] = []
+    i = 0
+    while i < len(chunk):
+        ch = chunk[i]
+        if ch == "\\" and i + 1 < len(chunk):
+            buf.append(chunk[i : i + 2])
+            i += 2
+            continue
+        if ch == '"':
+            raw = "".join(buf)
+            return _unescape_json_string(raw)
+        buf.append(ch)
+        i += 1
+    if not allow_partial:
+        return ""
+    raw = "".join(buf)
+    return _unescape_json_string(raw) if raw else ""
+
+
+_SECTION_HEADER_RE = re.compile(
+    r'\{\s*"sectionId"\s*:\s*"([^"]+)"\s*,\s*'
+    r'(?:"title"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*)?'
+    r'"content"\s*:\s*"',
+    re.DOTALL,
+)
+
+
 def _salvage_sections_payload(text: str) -> dict[str, Any] | None:
-    """Recover complete section objects from truncated model JSON."""
+    """Recover section objects from truncated Phase 3 JSON (title field + partial content)."""
+    matches = list(_SECTION_HEADER_RE.finditer(text))
+    if not matches:
+        return None
+
     sections: list[dict[str, Any]] = []
-    pattern = re.compile(
-        r'\{\s*"sectionId"\s*:\s*"([^"]+)"\s*,\s*"content"\s*:\s*"((?:\\.|[^"\\])*)"',
-        re.DOTALL,
-    )
-    for match in pattern.finditer(text):
+    for idx, match in enumerate(matches):
         section_id = match.group(1)
-        raw_content = match.group(2)
-        try:
-            content = json.loads(f'"{raw_content}"')
-        except json.JSONDecodeError:
-            content = (
-                raw_content.replace("\\n", "\n")
-                .replace('\\"', '"')
-                .replace("\\\\", "\\")
-            )
-        if section_id and content:
-            sections.append({"sectionId": section_id, "content": content})
+        content_start = match.end()
+        next_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        chunk = text[content_start:next_start]
+        is_last = idx == len(matches) - 1
+        content = _extract_json_string_value(chunk, allow_partial=is_last)
+        if section_id and content.strip() and len(content.strip()) > 40:
+            entry: dict[str, Any] = {"sectionId": section_id, "content": content}
+            title = match.group(2)
+            if title:
+                entry["title"] = _unescape_json_string(title)
+            sections.append(entry)
+
     if sections:
         return {"sections": sections}
     return None

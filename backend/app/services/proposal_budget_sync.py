@@ -28,22 +28,30 @@ FEE_SYNC_PROMPT = """You align proposal narrative sections with the CANONICAL bu
 Rules:
 1. Remove or rewrite any pricing tier, dollar total, or fee structure that contradicts the canonical budget.
 2. Do NOT invent new dollar amounts — use only values from the canonical budget block.
-3. If a section needs to reference pricing, use cross-reference language ("see Fees/Budget section") 
-   OR restate the EXACT tier and totals from the canonical budget.
-4. qualifyingLanguage-style blocks must use the SAME pricingTier as the budget — never cite a different tier.
-5. Preserve all non-pricing content (statutory citations, team, approach, compliance).
-6. Never add [VERIFY] tags — leave factual gaps unchanged if not in the budget.
+3. verifiedAgencyRevenue and agencyRevenueEstimate are the SAME number — use it everywhere (Budget Summary, Option Terms, fee narrative).
+4. If option-year math appears (e.g. "3 × $X"), X MUST equal verifiedAgencyRevenue / base-year amount — recalculate multiples from the canonical base.
+5. qualifyingLanguage-style blocks must use the SAME pricingTier as the budget — never cite a different tier.
+6. Preserve all non-pricing content (statutory citations, team, approach, compliance).
+7. Never add [VERIFY] tags — leave factual gaps unchanged if not in the budget.
+8. Never add pricing reconciliation flags or "verify before submission" notes — math is already verified.
 
 Return ONLY JSON:
 {"sections":[{"sectionId":"...","content":"full updated section prose"}]}"""
 
 
 def _canonical_budget_facts(budget: ProposalBudget) -> str:
+    from app.services.proposal_budget_validation import sum_line_items_extended
+
+    line_subtotal = sum_line_items_extended(budget)
+    direct = float(budget.direct_expenses_total or 0)
+    verified_total = line_subtotal + direct
     lines = [
         f"pricingTier: {budget.pricing_tier or 'Average'}",
-        f"agencyRevenueEstimate: {budget.agency_revenue_estimate}",
-        f"lumpSumTotal: {budget.lump_sum_total}",
-        f"directExpensesTotal: {budget.direct_expenses_total}",
+        f"lineItemsSubtotal: {line_subtotal}",
+        f"directExpensesTotal: {direct}",
+        f"verifiedAgencyRevenue (line items + direct): {verified_total}",
+        f"agencyRevenueEstimate (USE THIS EXACT VALUE): {budget.agency_revenue_estimate}",
+        f"lumpSumTotal (USE THIS EXACT VALUE): {budget.lump_sum_total}",
         f"feeStructure: {budget.fee_structure}",
         f"budgetFormat: {budget.budget_format}",
     ]

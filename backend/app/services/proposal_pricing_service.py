@@ -17,6 +17,7 @@ from app.models.rfp import RfpRecord
 from app.services import llm, supermemory
 from app.services.llm import LlmError
 from app.services.proposal_fee_justification import generate_fee_justification_memo
+from app.services.proposal_budget_editor import run_budget_editor_pass
 from app.services.proposal_budget_validation import (
     parse_budget_extras,
     reconcile_proposal_budget,
@@ -127,11 +128,14 @@ PHASE 6 — qualifyingLanguage MUST include all four blocks:
 Investment Framing, Scope Protection, Reimbursable Expenses, Revision Rounds (use KB guide wording when present).
 qualifyingLanguage MUST use the SAME pricingTier selected in PHASE 2 — never mention a different tier as "baseline."
 
-MATH (mandatory):
-- agencyRevenueEstimate MUST equal the sum of all lineItems.extended plus directExpensesTotal (if any).
-- If option-year escalation is listed separately, include it in agencyRevenueEstimate or in optionTermNotes — totals must reconcile.
-
-LUMP SUM: When the RFP requires BOTH a lump sum AND hourly rates by position, set lumpSumTotal to the base-term project total (sum of line items + direct expenses) AND provide hourly breakdown in lineItems/verifiedRates.
+MATH (mandatory — verify before returning):
+1. For EACH lineItem: extended MUST equal rate × quantity (recalculate if needed).
+2. Sum every lineItems.extended row explicitly — that subtotal is ground truth.
+3. agencyRevenueEstimate MUST equal line-item subtotal plus directExpensesTotal (if any).
+4. lumpSumTotal MUST equal agencyRevenueEstimate when RFP requires lump sum + hourly (table is the cost build).
+5. optionTermNotes MUST use agencyRevenueEstimate as the base-year figure for all multi-year math.
+6. Do NOT leave pricingFlags describing math discrepancies — fix the numbers instead.
+7. pricingFlags are ONLY for items requiring Sonja/human review (out-of-guide scope, missing KB, incomplete stages).
 
 Return ONLY JSON:
 {
@@ -441,7 +445,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         provider=provider,
     )
 
-    budget = reconcile_proposal_budget(
+    budget = run_budget_editor_pass(
         budget,
         rfp_sections=prior_research.rfp_sections if prior_research else [],
         rfp_context=rfp_context,
@@ -476,5 +480,33 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         budget.pricing_tier,
         budget.budget_format,
         budget.confidence,
+    )
+    return budget, research
+
+
+def reconcile_cached_budget(rfp_id: str) -> tuple[ProposalBudget, ProposalResearchCache]:
+    """Re-run deterministic budget editor on cached budget (no LLM regen)."""
+    _rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
+    research = get_research_cache(rfp_id)
+    if not research or not research.budget:
+        raise ProposalError(
+            "No cached budget to reconcile. Run Phase 3.5 budget generation first.",
+            status_code=400,
+        )
+
+    budget = run_budget_editor_pass(
+        research.budget,
+        rfp_sections=research.rfp_sections,
+        rfp_context=rfp_context,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    research = research.model_copy(update={"budget": budget, "updated_at": now})
+    save_research_cache(research)
+    logger.info(
+        "Budget reconciled for %s: revenue=%s, lump=%s, %d line items",
+        rfp_id,
+        budget.agency_revenue_estimate,
+        budget.lump_sum_total,
+        len(budget.line_items),
     )
     return budget, research

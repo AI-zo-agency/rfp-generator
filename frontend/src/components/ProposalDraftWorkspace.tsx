@@ -21,6 +21,8 @@ import {
   generateProposalSections1to3,
   recoverProposalDraftIfSaved,
   runPhase3Drafting,
+  runPhase3_5Budget,
+  runPhase3_6SelfEdit,
   runPhase4PreSubmitReview,
   runPhase4PreSubmitAutoFix,
   saveProposalDraft,
@@ -572,13 +574,20 @@ export function ProposalDraftWorkspace({
       await generateProposalSections1to3(rfp.id);
 
       setFullProposalProgress("phase-3");
-      const { draft, research: updatedResearch } = await runPhase3Drafting(rfp.id);
+      const { draft: drafted, research: afterPhase3 } = await runPhase3Drafting(rfp.id);
+
+      setFullProposalProgress("phase-3-6-self-edit");
+      const { draft: polished, research: afterEdit } = await runPhase3_6SelfEdit(rfp.id);
+
+      setFullProposalProgress("phase-3-5-budget");
+      const { draft, research: updatedResearch, budget } = await runPhase3_5Budget(rfp.id);
 
       skipNextSaveRef.current = true;
-      setOutline(draft);
-      setResearch(updatedResearch);
+      setOutline(draft ?? polished ?? drafted);
+      setResearch(updatedResearch ?? afterEdit ?? afterPhase3);
+      if (budget) setBudget(budget);
       setPresubmitReview(updatedResearch.presubmitReview ?? null);
-      await saveProposalDraft(rfp.id, draft);
+      await saveProposalDraft(rfp.id, draft ?? polished ?? drafted);
       setGenerateNotice("Manuscript re-drafted from cached KB research.");
       setActiveTab("content");
     } catch (error) {
@@ -846,11 +855,13 @@ export function ProposalDraftWorkspace({
                     ? "Phase 2 research…"
                     : fullProposalProgress === "phase-3"
                       ? "Phase 3 drafting…"
-                      : fullProposalProgress === "phase-3-5-budget"
+                      : fullProposalProgress === "phase-3-6-self-edit"
+                        ? "Senior editor polish…"
+                        : fullProposalProgress === "phase-3-5-budget"
                         ? "Building budget…"
                         : fullProposalProgress === "recovering"
-                        ? "Checking saved draft…"
-                        : "Generating…"}
+                          ? "Checking saved draft…"
+                          : "Generating…"}
               </>
             ) : (
               <>

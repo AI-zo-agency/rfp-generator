@@ -33,7 +33,7 @@ from app.services.proposal_langchain import _provider_name
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 2
+BATCH_SIZE = 1
 DEFAULT_WORD_TARGET = 800
 _LLM_SEMAPHORE = asyncio.Semaphore(1)
 
@@ -308,7 +308,7 @@ async def _draft_batch_once(
                 {"role": "system", "content": DRAFT_BATCH_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=3072 if len(batch) == 1 else 4096,
+            max_tokens=6144,
             temperature=0.35,
         )
 

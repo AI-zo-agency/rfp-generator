@@ -13,13 +13,14 @@ from app.models.rfp import RfpRecord
 from app.services import llm, proposal_knowledge_base_tools, supermemory
 from app.services.go_no_go_service import RfpContentInfo, _assess_rfp_content, _build_rfp_context
 from app.services.llm import LlmError
-from app.services.proposal_generator import (
-    ProposalError,
-    STATIC_SECTION_IDS,
-    _load_rfp_for_proposal,
-    _static_sections_from_draft,
-)
+from app.services.proposal_common import ProposalError, load_rfp_for_proposal
+from app.services.proposal_presubmit_autofix import STATIC_SECTION_IDS
 from app.services.proposal_langchain import _provider_name
+from app.services.proposal_section_quality import (
+    prior_content_for_redraft,
+    redraft_is_inadequate,
+    word_count,
+)
 from app.services.proposal_brand_voice import (
     classify_section_register,
     format_brand_voice_block,
@@ -184,8 +185,24 @@ async def _plan_refined_queries(
     user_message: str,
     current_content: str,
 ) -> list[str]:
+    from app.services.proposal_langchain_agents import AgentRole, plan_section_queries_agent
+
     requirements = rfp_section.requirements if rfp_section else []
     retrieval_focus = rfp_section.retrieval_focus if rfp_section else []
+
+    planned = await plan_section_queries_agent(
+        role=AgentRole.USER_REVISE,
+        rfp_client=rfp.client,
+        rfp_sector=rfp.sector,
+        section_title=section.title,
+        requirements=requirements,
+        retrieval_focus=retrieval_focus,
+        prior_queries=prior_queries,
+        user_message=user_message,
+        current_content=current_content,
+    )
+    if planned:
+        return planned
 
     raw, _ = await llm.chat_json(
         [
@@ -247,38 +264,92 @@ async def _redraft_rfp_section(
         rfp_client=rfp.client,
         register=register,
     )
-    raw, provider = await llm.chat_json(
-        [
-            {"role": "system", "content": SECTION_REDRAFT_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"BRAND VOICE (mandatory — maintain throughout):\n{voice_block}\n\n"
-                    f"Client: {rfp.client}\n"
-                    f"Sector: {rfp.sector}\n"
-                    f"RFP: {rfp.title}\n"
-                    f"Section: {section.title}\n"
-                    f"Word target: {section.word_target}\n"
-                    f"Requirements:\n"
-                    + "\n".join(f"- {r}" for r in requirements)
-                    + f"\n\nUser edit request:\n{user_message}\n\n"
-                    f"Previous draft (preserve zö voice while improving):\n{prior_content[:3000]}\n\n"
-                    f"RFP excerpt:\n{rfp_context[:4000]}\n\n"
-                    f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
-                    + (f"{avoidance_block}\n\n" if avoidance_block else "")
-                    + (f"zö Sections 1–3 reference:\n{zo_context[:3000]}\n" if zo_context else "")
-                ),
-            },
-        ],
-        max_tokens=4096,
-        temperature=0.4,
+
+    original_content = (section.content or "").strip()
+    prior_for_agent, full_rewrite = prior_content_for_redraft(section)
+    rewrite_note = ""
+    if full_rewrite:
+        rewrite_note = (
+            "\n\nIMPORTANT: Prior draft is below the word target or not marked generated. "
+            "Write the COMPLETE section for every listed requirement from evidence and KB tools. "
+            "Do not return stubs, error text, or unchanged placeholder content.\n"
+        )
+
+    user_block = (
+        f"BRAND VOICE (mandatory — maintain throughout):\n{voice_block}\n\n"
+        f"Client: {rfp.client}\n"
+        f"Sector: {rfp.sector}\n"
+        f"RFP: {rfp.title}\n"
+        f"Section: {section.title}\n"
+        f"Word target: {section.word_target}\n"
+        f"Requirements:\n"
+        + "\n".join(f"- {r}" for r in requirements)
+        + rewrite_note
+        + f"\n\nUser edit request:\n{user_message}\n\n"
+        f"Previous draft:\n{prior_for_agent[:3000] if prior_for_agent else '(none — write from scratch)'}\n\n"
+        f"RFP excerpt:\n{rfp_context[:4000]}\n\n"
+        f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
+        + (f"{avoidance_block}\n\n" if avoidance_block else "")
+        + (f"zö Sections 1–3 reference:\n{zo_context[:3000]}\n" if zo_context else "")
     )
+
+    max_tokens = 8192 if section.word_target >= 1500 else 6144
+
+    try:
+        from app.services.proposal_langchain_agents import AgentRole, redraft_section_agent
+
+        raw, provider, _tools = await redraft_section_agent(
+            role=AgentRole.USER_REVISE,
+            rfp_id=rfp.id,
+            rfp_title=rfp.title,
+            rfp_client=rfp.client,
+            user_content=user_block,
+        )
+    except Exception as exc:
+        logger.warning("User Revise agent failed, falling back to chat_json: %s", exc)
+        raw, provider = await llm.chat_json(
+            [
+                {"role": "system", "content": SECTION_REDRAFT_PROMPT},
+                {"role": "user", "content": user_block},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.4,
+        )
+
     content = enforce_narrative_voice(
         str(raw.get("content", "")).strip(),
         section_id=section.id,
         title=section.title,
         zo_mode=section.mode,
     )
+
+    if redraft_is_inadequate(section, content, original_content=original_content):
+        logger.warning(
+            "User Revise output too short for %s (%d words) — retrying chat_json",
+            section.id,
+            word_count(content),
+        )
+        raw, provider = await llm.chat_json(
+            [
+                {"role": "system", "content": SECTION_REDRAFT_PROMPT},
+                {"role": "user", "content": user_block},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.35,
+        )
+        content = enforce_narrative_voice(
+            str(raw.get("content", "")).strip(),
+            section_id=section.id,
+            title=section.title,
+            zo_mode=section.mode,
+        )
+
+    if redraft_is_inadequate(section, content, original_content=original_content):
+        raise ProposalError(
+            f"Section revise did not produce enough content ({word_count(content)} words). "
+            "Try a more specific instruction or re-run Phase 3 for this section.",
+            status_code=422,
+        )
     kb_refs = raw.get("kbRefs") or raw.get("kb_refs") or []
     if not isinstance(kb_refs, list):
         kb_refs = []
@@ -288,9 +359,9 @@ async def _redraft_rfp_section(
 
     updated = section.model_copy(
         update={
-            "content": content or prior_content,
+            "content": content,
             "designer_note": raw.get("designerNote") or raw.get("designer_note"),
-            "status": "generated" if content else section.status,
+            "status": "generated",
             "kb_refs": sorted(refs, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0),
         }
     )
@@ -382,7 +453,7 @@ async def improve_proposal_section(
     if not user_message.strip():
         raise ProposalError("Edit message is required.", status_code=400)
 
-    rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
+    rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
     draft = get_proposal_draft(rfp_id)
     if not draft:
         raise ProposalError("No proposal draft found. Generate a proposal first.", status_code=400)
@@ -495,6 +566,8 @@ async def improve_proposal_section(
         evidence_added = len(corpus) - prior_corpus_len
         section_evidence = _evidence_for_section(section_id, corpus)
 
+        from app.services.proposal_generator import _static_sections_from_draft
+
         static = _static_sections_from_draft(draft, rfp.page_limit)
         zo_context = "\n\n".join(
             f"### {s.title}\n{s.content[:1500]}"
@@ -560,24 +633,24 @@ async def improve_proposal_section(
     save_proposal_draft(updated_draft)
     save_research_cache(research)
 
-    word_count = len(updated_section.content.split())
+    word_count_result = word_count(updated_section.content)
     if is_static:
         assistant_message = (
             f"Re-searched the knowledge base with {query_count} new detailed queries "
-            f"and rewrote **{section.title}** ({word_count} words). "
+            f"and rewrote **{section.title}** ({word_count_result} words). "
             f"Review citations and [DESIGNER NOTE] blocks."
         )
     else:
         assistant_message = (
             f"Ran {query_count} new Supermemory queries (different from prior searches), "
             f"added {evidence_added} evidence item(s) to the corpus, and rewrote "
-            f"**{section.title}** ({word_count} words). Check [E#] citations."
+            f"**{section.title}** ({word_count_result} words). Check [E#] citations."
         )
 
     logger.info(
         "Section improve complete for %s / %s (%d words)",
         rfp_id,
         section_id,
-        word_count,
+        word_count_result,
     )
     return updated_section, updated_draft, research, provider, assistant_message

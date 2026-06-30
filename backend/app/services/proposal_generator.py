@@ -32,6 +32,7 @@ from app.services.proposal_repository import (
 )
 from app.services.proposal_drafting_graph import run_drafting_graph
 from app.services.proposal_budget_content import incorporate_budget_into_draft
+from app.services.proposal_budget_editor import run_budget_editor_pass
 from app.services.proposal_budget_sync import align_fee_narrative_with_budget
 from app.services.proposal_fee_justification import generate_fee_justification_memo
 from app.services.proposal_loss_lessons import build_loss_lessons_for_rfp
@@ -41,6 +42,7 @@ from app.services.proposal_presubmit_autofix import run_presubmit_autofix_loop
 from app.services.proposal_proof_points import build_proof_points_for_rfp
 from app.services.proposal_retrieval_gap_fill import gap_fill_evidence_for_sections
 from app.services.proposal_retrieval_graph import run_retrieval_graph
+from app.services.proposal_self_edit_loop import run_self_edit_loop
 from app.services.proposal_sections_graph import run_sections_1_3_graph
 from app.services.rfp_repository import get_rfp
 
@@ -712,6 +714,38 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
     return draft, updated_research
 
 
+async def run_phase3_6_self_edit(rfp_id: str):
+    """Phase 3.6: senior-editor self-edit loop (section-wise KB repair)."""
+    return await run_self_edit_loop(rfp_id)
+
+
+async def run_phase3_5_budget_reconcile(
+    rfp_id: str,
+) -> tuple[ProposalDraft, ProposalResearchCache, ProposalBudget]:
+    """Reconcile cached budget math, re-render budget section, sync fee narrative (no LLM regen)."""
+    from app.services.proposal_pricing_service import reconcile_cached_budget
+
+    budget, research = reconcile_cached_budget(rfp_id)
+    draft = incorporate_budget_into_draft(rfp_id, budget)
+    if not draft:
+        raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
+
+    draft = await align_fee_narrative_with_budget(
+        rfp_id=rfp_id,
+        draft=draft,
+        budget=budget,
+    )
+    save_proposal_draft(draft)
+    incorporate_budget_into_draft(rfp_id, budget)
+    logger.info(
+        "Budget reconcile complete for %s: revenue=%s, lump=%s",
+        rfp_id,
+        budget.agency_revenue_estimate,
+        budget.lump_sum_total,
+    )
+    return draft, research, budget
+
+
 async def run_phase3_5_budget(
     rfp_id: str,
 ) -> tuple[ProposalDraft, ProposalResearchCache, ProposalBudget]:
@@ -738,6 +772,17 @@ async def run_phase3_5_budget(
         budget=budget,
     )
     save_proposal_draft(draft)
+
+    # Re-render budget section after fee sync so narrative totals stay aligned
+    budget = run_budget_editor_pass(
+        budget,
+        rfp_sections=research.rfp_sections if research else [],
+        rfp_context=load_rfp_for_proposal(rfp_id)[2][:28_000],
+    )
+    if research:
+        research = research.model_copy(update={"budget": budget})
+        save_research_cache(research)
+    incorporate_budget_into_draft(rfp_id, budget)
 
     logger.info(
         "Phase 3.5 budget complete for %s: tier=%s, %d line items, revenue=%s",
@@ -855,6 +900,7 @@ async def generate_full_proposal(
     _draft, brand_voice, _research = await generate_sections_1_3(rfp_id)
     await run_phase2_retrieval(rfp_id)
     draft, research = await run_phase3_drafting(rfp_id)
+    draft, research, _edit = await run_phase3_6_self_edit(rfp_id)
     draft, research, _budget = await run_phase3_5_budget(rfp_id)
 
     if brand_voice and not research.brand_voice:

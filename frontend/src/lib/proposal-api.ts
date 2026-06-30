@@ -68,6 +68,7 @@ export type FullProposalProgress =
   | "sections-1-3"
   | "phase-2"
   | "phase-3"
+  | "phase-3-6-self-edit"
   | "phase-3-5-budget"
   | "recovering";
 
@@ -105,9 +106,12 @@ export async function generateFullProposalStaged(
   onProgress?.("phase-3");
   const { draft: drafted, research: afterPhase3 } = await runPhase3Drafting(rfpId);
 
+  onProgress?.("phase-3-6-self-edit");
+  const { draft: polished, research: afterEdit } = await runPhase3_6SelfEdit(rfpId);
+
   onProgress?.("phase-3-5-budget");
   const { budget, research: afterBudget, draft } = await runPhase3_5Budget(rfpId);
-  return { draft: draft ?? drafted, research: afterBudget };
+  return { draft: draft ?? polished ?? drafted, research: afterBudget };
 }
 
 export async function fetchProposalDraft(rfpId: string): Promise<{
@@ -257,6 +261,35 @@ export async function runPhase3Drafting(
   };
 }
 
+export async function runPhase3_6SelfEdit(
+  rfpId: string
+): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-3-6-self-edit`, {
+    ...proposalPostInit(),
+  });
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    draft?: Parameters<typeof apiDraftToOutline>[0];
+    research?: ProposalResearch;
+  };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from server (self-edit may have timed out).");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Self-edit loop failed");
+  }
+  if (!data.draft || !data.research) {
+    throw new Error("No draft returned from self-edit");
+  }
+  return {
+    draft: apiDraftToOutline(data.draft),
+    research: data.research,
+  };
+}
+
 export async function runPhase3_5Budget(
   rfpId: string
 ): Promise<{
@@ -284,6 +317,42 @@ export async function runPhase3_5Budget(
   }
   if (!data.budget || !data.research) {
     throw new Error("No budget data returned from server");
+  }
+  return {
+    budget: data.budget,
+    research: data.research,
+    draft: data.draft ? apiDraftToOutline(data.draft) : null,
+  };
+}
+
+export async function runPhase3_5BudgetReconcile(
+  rfpId: string
+): Promise<{
+  budget: ProposalBudget;
+  research: ProposalResearch;
+  draft: ProposalOutline | null;
+}> {
+  const res = await fetch(
+    `/api/rfps/${rfpId}/proposal/phase-3-5-budget-reconcile`,
+    { ...proposalPostInit() }
+  );
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    budget?: ProposalBudget;
+    research?: ProposalResearch;
+    draft?: Parameters<typeof apiDraftToOutline>[0] | null;
+  };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from server (budget reconcile failed).");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Budget reconcile failed");
+  }
+  if (!data.budget || !data.research) {
+    throw new Error("No budget data returned from reconcile");
   }
   return {
     budget: data.budget,

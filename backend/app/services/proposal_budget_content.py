@@ -107,6 +107,7 @@ def render_budget_markdown(budget: ProposalBudget) -> str:
         lines.append("")
         lines.append("| Category | Description | Qty | Unit | Rate | Extended |")
         lines.append("| --- | --- | ---: | --- | ---: | ---: |")
+        subtotal = 0.0
         for item in budget.line_items:
             desc = item.description
             if item.named_person:
@@ -121,8 +122,17 @@ def render_budget_markdown(budget: ProposalBudget) -> str:
             )
             rate = _usd(item.rate) if item.rate is not None else "—"
             extended = _usd(item.extended) if item.extended is not None else "—"
+            if isinstance(item.extended, (int, float)):
+                subtotal += float(item.extended)
             lines.append(
                 f"| {item.category} | {desc} | {qty} | {item.unit} | {rate} | {extended} |"
+            )
+        direct = float(budget.direct_expenses_total or 0)
+        lines.append(f"| **Subtotal** | *Sum of line items* | | | | **{_usd(subtotal)}** |")
+        if direct > 0:
+            lines.append(f"| **Direct expenses** | | | | | **{_usd(direct)}** |")
+            lines.append(
+                f"| **Total (agency revenue)** | *Line items + direct expenses* | | | | **{_usd(subtotal + direct)}** |"
             )
         lines.append("")
 
