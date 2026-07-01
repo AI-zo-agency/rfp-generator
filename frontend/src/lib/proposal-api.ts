@@ -202,6 +202,8 @@ export async function runPhase3_6SelfEditWithRecovery(
 
 const STAGE_POLL_INTERVAL_MS = 12_000;
 const STAGE_POLL_MAX_MS = 22 * 60 * 1000;
+/** If checkpoint says in-flight but timestamps never move, backend was killed — don't block resume. */
+const IN_FLIGHT_STALE_MS = 90_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -421,10 +423,29 @@ async function waitForInFlightPhase(
 
   onProgress?.("recovering");
   const startedAt = await captureProposalTimestamps(rfpId);
-  await pollForBackendStageSave(rfpId, startedAt, {
-    minSections: phase === "sections-1-3" ? 3 : 10,
-    requireBudget: phase === "phase-3-5-budget",
-  });
+  const staleDeadline = Date.now() + IN_FLIGHT_STALE_MS;
+
+  while (Date.now() < staleDeadline) {
+    await sleep(STAGE_POLL_INTERVAL_MS);
+    const snapshot = await fetchProposalDraft(rfpId);
+    const currentCp = snapshot.research?.pipelineCheckpoint;
+    if (currentCp?.inProgressPhase !== phase) {
+      return;
+    }
+    const { draft, research } = snapshot;
+    if (!draft || !research) continue;
+    const advanced =
+      draft.updatedAt > startedAt.draftAt ||
+      research.updatedAt > startedAt.researchAt;
+    if (advanced) {
+      await pollForBackendStageSave(rfpId, startedAt, {
+        minSections: phase === "sections-1-3" ? 3 : 10,
+        requireBudget: phase === "phase-3-5-budget",
+      });
+      return;
+    }
+  }
+  // Stale in-progress checkpoint (uvicorn killed, browser disconnected) — start fresh.
 }
 
 export async function fetchProposalDraft(rfpId: string): Promise<{
@@ -685,6 +706,43 @@ export async function runPhase3_5BudgetReconcile(
     research: data.research,
     draft: data.draft ? apiDraftToOutline(data.draft) : null,
   };
+}
+
+export async function runPhase3_5BudgetReconcileWithRecovery(
+  rfpId: string
+): Promise<{
+  budget: ProposalBudget;
+  research: ProposalResearch;
+  draft: ProposalOutline | null;
+  recoveredFromDraft: boolean;
+}> {
+  const startedAt = await captureProposalTimestamps(rfpId);
+  try {
+    const result = await runPhase3_5BudgetReconcile(rfpId);
+    return { ...result, recoveredFromDraft: false };
+  } catch (error) {
+    const polled = await pollForBackendStageSave(rfpId, startedAt, {
+      requireBudget: true,
+    });
+    if (polled?.research.budget) {
+      return {
+        budget: polled.research.budget,
+        research: polled.research,
+        draft: polled.draft,
+        recoveredFromDraft: true,
+      };
+    }
+    const recovered = await fetchProposalDraft(rfpId);
+    if (recovered.research?.budget && recovered.draft) {
+      return {
+        budget: recovered.research.budget,
+        research: recovered.research,
+        draft: recovered.draft,
+        recoveredFromDraft: true,
+      };
+    }
+    throw error;
+  }
 }
 
 export async function generateProposalPricing(

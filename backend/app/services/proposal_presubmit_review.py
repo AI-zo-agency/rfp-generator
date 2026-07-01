@@ -476,6 +476,16 @@ def run_presubmit_review(
     issues.extend(_scan_grammar(draft=draft))
     issues.extend(_scan_subcontractor_narrative(draft=draft, research=research))
     issues.extend(scan_manuscript_consistency(draft=draft, research=research, rfp=rfp))
+    from app.services.proposal_rfp_compliance import (
+        compliance_gaps_to_presubmit_issues,
+        scan_rfp_compliance_gaps,
+    )
+
+    issues.extend(
+        compliance_gaps_to_presubmit_issues(
+            scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
+        )
+    )
     if extra_issues:
         issues.extend(extra_issues)
 

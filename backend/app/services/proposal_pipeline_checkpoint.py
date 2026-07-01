@@ -69,7 +69,46 @@ def _save_checkpoint(rfp_id: str, checkpoint: ProposalPipelineCheckpoint) -> Pro
     return updated
 
 
+def _checkpoint_age_sec(checkpoint: ProposalPipelineCheckpoint) -> float | None:
+    try:
+        updated = datetime.fromisoformat(checkpoint.updated_at.replace("Z", "+00:00"))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - updated).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+_IN_PROGRESS_STALE_SEC = 600
+
+
+def clear_stale_in_progress_checkpoint(rfp_id: str) -> bool:
+    """Mark abandoned in-progress phases failed after server kill or disconnect."""
+    research = get_research_cache(rfp_id)
+    if not research or not research.pipeline_checkpoint:
+        return False
+    cp = research.pipeline_checkpoint
+    if not cp.in_progress_phase:
+        return False
+    age = _checkpoint_age_sec(cp)
+    if age is None or age < _IN_PROGRESS_STALE_SEC:
+        return False
+    record_phase_failed(
+        rfp_id,
+        cp.in_progress_phase,
+        "Phase interrupted (server or connection lost). Resume to retry.",
+    )
+    logger.warning(
+        "Pipeline checkpoint: %s cleared stale in-progress %s (age=%.0fs)",
+        rfp_id,
+        cp.in_progress_phase,
+        age,
+    )
+    return True
+
+
 def record_phase_started(rfp_id: str, phase: str) -> None:
+    clear_stale_in_progress_checkpoint(rfp_id)
     research = _ensure_research(rfp_id)
     prior = research.pipeline_checkpoint
     checkpoint = ProposalPipelineCheckpoint(
@@ -252,6 +291,10 @@ def build_pipeline_status(
 
     if draft is None:
         draft = get_proposal_draft(rfp_id)
+    if research is None:
+        research = get_research_cache(rfp_id)
+
+    clear_stale_in_progress_checkpoint(rfp_id)
     if research is None:
         research = get_research_cache(rfp_id)
 

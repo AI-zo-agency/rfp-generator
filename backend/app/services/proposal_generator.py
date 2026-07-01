@@ -741,12 +741,25 @@ async def run_phase3_5_budget_reconcile(
         budget=budget,
     )
     save_proposal_draft(draft)
-    incorporate_budget_into_draft(rfp_id, budget)
+
+    budget = run_budget_editor_pass(
+        budget,
+        rfp_sections=research.rfp_sections if research else [],
+        rfp_context=load_rfp_for_proposal(rfp_id)[2][:28_000],
+    )
+    research = research.model_copy(update={"budget": budget})
+    save_research_cache(research)
+    final_draft = incorporate_budget_into_draft(rfp_id, budget)
+    if final_draft:
+        draft = final_draft
+        save_proposal_draft(draft)
+
     logger.info(
-        "Budget reconcile complete for %s: revenue=%s, lump=%s",
+        "Budget reconcile complete for %s: revenue=%s, passthrough=%s, invoicing=%s",
         rfp_id,
         budget.agency_revenue_estimate,
-        budget.lump_sum_total,
+        budget.client_media_passthrough,
+        budget.total_client_invoicing,
     )
     return draft, research, budget
 

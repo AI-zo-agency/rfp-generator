@@ -53,6 +53,7 @@ ALWAYS flag these senior-editor priorities when present:
 - Subject-verb disagreement after "We were …, and is …" (cover letter / entity description)
 - Malformed possessives: "of we", "across we", "sole owner of we" — must use our firm / zö agency / our studio
 - Subcontractor inconsistency: Company Background claiming "no subcontractors" while cost proposal lists translation partners — align narrative with budget
+- RFP compliance: reference contact names/phones, workforce diversity %, staff hours in budget, PSA acknowledgments (insurance, living wage, MacBride, Title VI) — never defer to unnamed attachments
 
 Do NOT rewrite the section yourself — write patch instructions for the Section Repair agent.
 Return ONLY JSON when done researching:
@@ -70,7 +71,8 @@ Rules:
 6. SUBMISSION POLISH tasks: fix ONLY the listed defects; preserve all other sentences verbatim.
 7. Grammar: "We were established …, and is …" must become "and are …" or be rephrased.
 8. Subcontractors: if cost proposal lists translation partners, Company Background must align — zö self-performs marketing/communications; translation partners are scoped separately.
-9. When done researching, respond with ONLY JSON:
+9. RFP compliance: reference contacts with phones, workforce diversity %, budget hours, PSA acks — from KB only; never defer to unnamed attachments.
+10. When done researching, respond with ONLY JSON:
 {"content":"full section prose","kbRefs":["E1"],"designerNote":null}"""
 
 USER_REVISE_SYSTEM = """You are zö agency's User Revise agent (editor chat / Revise content flow).

@@ -50,6 +50,34 @@ _GAP_TOPICS: list[tuple[re.Pattern[str], list[str]]] = [
         ],
     ),
     (
+        re.compile(
+            r"\b(divers\w*|minorit\w*|female|eeo|workforce\s+data|headcount)\b",
+            re.I,
+        ),
+        [
+            "zö agency workforce diversity EEO employee count minority female percentage",
+            "zö agency HR employee demographics total employees",
+        ],
+    ),
+    (
+        re.compile(r"\b(staff\s+hours|hours\s+per\s+task|billing\s+rates)\b", re.I),
+        [
+            "zö agency project staffing hours estimate by task role deliverable",
+            "00_Guide_Pricing personnel hours by scope task",
+        ],
+    ),
+    (
+        re.compile(
+            r"\b(macbride|living\s+wage|workers['\u2019\s]*compensation|title\s*vi|"
+            r"independent\s+contractor|audit\s+rights?)\b",
+            re.I,
+        ),
+        [
+            "zö agency insurance workers compensation general liability NY admitted",
+            "zö agency compliance certifications contract acknowledgments",
+        ],
+    ),
+    (
         re.compile(r"\b(office\s+location|headquarters|regional|on[\s-]*site)\b", re.I),
         [
             "zö agency office location headquarters Bend Oregon regional presence",

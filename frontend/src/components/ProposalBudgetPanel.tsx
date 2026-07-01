@@ -15,18 +15,25 @@ function formatUsd(value: number | null | undefined): string {
 interface ProposalBudgetPanelProps {
   budget: ProposalBudget | null;
   isRunning: boolean;
+  isRefining: boolean;
   error: string | null;
+  refineError: string | null;
   disabled?: boolean;
   onGenerate: () => void;
+  onRefine: () => void;
 }
 
 export function ProposalBudgetPanel({
   budget,
   isRunning,
+  isRefining,
   error,
+  refineError,
   disabled,
   onGenerate,
+  onRefine,
 }: ProposalBudgetPanelProps) {
+  const busy = isRunning || isRefining;
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -36,26 +43,47 @@ export function ProposalBudgetPanel({
           </h2>
           <p className="mt-1 max-w-2xl text-sm text-zo-text-muted">
             Stage 3 budget: Stage 1 tier + Stage 2 scope + 00_Guide_Pricing from
-            Supermemory. Run Go/No-Go and generate proposal (Phase 2) first for best results.
+            Supermemory. Use <strong>Budget refinery</strong> to reconcile math,
+            re-render the cost proposal, and sync dollar figures across sections
+            (no full LLM regen).
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onGenerate}
-          disabled={disabled || isRunning}
-          className="zo-btn !py-2 disabled:opacity-50"
-        >
-          {isRunning
-            ? "Building budget…"
-            : budget
-              ? "Regenerate budget"
-              : "Generate budget"}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {budget ? (
+            <button
+              type="button"
+              onClick={onRefine}
+              disabled={disabled || busy}
+              className="zo-btn secondary !py-2 disabled:opacity-50"
+              title="Reconcile line items, fix agency vs pass-through totals, sync narrative"
+            >
+              {isRefining ? "Refining budget…" : "Budget refinery"}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={onGenerate}
+            disabled={disabled || busy}
+            className="zo-btn !py-2 disabled:opacity-50"
+          >
+            {isRunning
+              ? "Building budget…"
+              : budget
+                ? "Regenerate budget"
+                : "Generate budget"}
+          </button>
+        </div>
       </div>
 
       {error && (
         <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-zo-error">
           {error}
+        </p>
+      )}
+
+      {refineError && (
+        <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          {refineError}
         </p>
       )}
 
@@ -81,12 +109,32 @@ export function ProposalBudgetPanel({
             </div>
             <div className="proposal-stat-card">
               <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
-                Agency revenue est.
+                Agency revenue (zö fee)
               </p>
               <p className="font-heading mt-1.5 text-2xl font-bold tabular-nums">
                 {formatUsd(budget.agencyRevenueEstimate)}
               </p>
             </div>
+            {budget.clientMediaPassthrough != null && budget.clientMediaPassthrough > 0 ? (
+              <div className="proposal-stat-card">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
+                  Media pass-through
+                </p>
+                <p className="font-heading mt-1.5 text-2xl font-bold tabular-nums">
+                  {formatUsd(budget.clientMediaPassthrough)}
+                </p>
+              </div>
+            ) : null}
+            {budget.totalClientInvoicing != null && budget.totalClientInvoicing > 0 ? (
+              <div className="proposal-stat-card">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
+                  Total client invoicing
+                </p>
+                <p className="font-heading mt-1.5 text-2xl font-bold tabular-nums">
+                  {formatUsd(budget.totalClientInvoicing)}
+                </p>
+              </div>
+            ) : null}
             <div className="proposal-stat-card">
               <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                 Pricing tier

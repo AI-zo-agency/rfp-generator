@@ -58,6 +58,11 @@ Rules (strict):
 12. Highest evaluationWeight sections need the most depth, proof, and word count — match wordTarget.
 13. Do NOT state pricing tier, dollar totals, lump sums, or fee tables in narrative sections — those belong in the Fees/Budget section only. Cross-reference instead.
 14. When RFP requires portfolio, writing samples, or reference contacts, use evidence excerpts with [E#] citations — do not leave passive VERIFY placeholders if evidence contains samples or contacts.
+15. NEVER defer required submission data to unnamed attachments or "upon request" — include reference phones, workforce %, hours tables, or PSA acknowledgments in the proposal body.
+16. References: when RFP requires contact names and phone numbers, include them inline (from KB) or [VERIFY: specific contact field].
+17. Personnel: when RFP requires workforce diversity data, state headcount and minority/female percentages (from KB) or [VERIFY].
+18. Budget: when RFP requires staff hours per task, add hours table OR commission-model explanation with transparency estimates.
+19. PSA/contract items in the RFP (insurance, living wage, MacBride, Title VI, audit rights, etc.) need brief acknowledgment sentences in the proposal.
 
 Return ONLY JSON:
 {

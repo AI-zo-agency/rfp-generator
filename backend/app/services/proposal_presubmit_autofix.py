@@ -57,7 +57,14 @@ STATIC_SECTION_IDS = (
 
 MAX_ITERATIONS_DETERMINISTIC = 1
 MAX_ITERATIONS_LLM = 1
-_AUTO_FIX_CATEGORIES = frozenset({"copy_paste", "voice", "placeholder", "grammar", "consistency"})
+_AUTO_FIX_CATEGORIES = frozenset({
+    "copy_paste",
+    "voice",
+    "placeholder",
+    "grammar",
+    "consistency",
+    "compliance",
+})
 
 _SEV_RANK = {"critical": 0, "warning": 1, "info": 2}
 _CAT_RANK = {"placeholder": 0, "copy_paste": 1, "grammar": 2, "voice": 3, "consistency": 4, "compliance": 5}
@@ -210,7 +217,7 @@ def _should_run_llm(
     if register == "procurement" and cats <= {"placeholder"}:
         return False
 
-    return bool(cats & {"placeholder", "grammar", "consistency"})
+    return bool(cats & {"placeholder", "grammar", "consistency", "compliance"})
 
 
 def _needs_kb_warm(section_ids: list[str], grouped: dict[str, list[PreSubmitIssue]], draft: ProposalDraft) -> bool:
@@ -585,6 +592,7 @@ async def run_presubmit_autofix_loop(
     sections_targeted = 0
 
     from app.services.proposal_submission_polish import run_submission_polish_pass
+    from app.services.proposal_rfp_compliance import run_rfp_compliance_polish_pass
 
     try:
         working, polish_logs = await run_submission_polish_pass(
@@ -598,6 +606,19 @@ async def run_presubmit_autofix_loop(
             sections_targeted += len(polish_logs)
     except Exception as exc:
         logger.warning("Pre-submit submission polish skipped: %s", exc)
+
+    try:
+        working, compliance_logs = await run_rfp_compliance_polish_pass(
+            rfp.id,
+            rfp=rfp,
+            draft=working,
+            research=working_research,
+        )
+        if compliance_logs:
+            save_proposal_draft(working)
+            sections_targeted += len(compliance_logs)
+    except Exception as exc:
+        logger.warning("Pre-submit RFP compliance polish skipped: %s", exc)
 
     initial_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
 

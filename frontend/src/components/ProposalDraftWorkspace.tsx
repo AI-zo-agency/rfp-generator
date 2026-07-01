@@ -25,6 +25,7 @@ import {
   recoverProposalDraftIfSaved,
   runPhase3Drafting,
   runPhase3_5BudgetWithRecovery,
+  runPhase3_5BudgetReconcileWithRecovery,
   runPhase3_6SelfEditWithRecovery,
   runPhase4PreSubmitReview,
   runPhase4PreSubmitAutoFix,
@@ -138,7 +139,9 @@ export function ProposalDraftWorkspace({
   const [fullProposalProgress, setFullProposalProgress] =
     useState<FullProposalProgress | null>(null);
   const [isPricingRunning, setIsPricingRunning] = useState(false);
+  const [isRefiningBudget, setIsRefiningBudget] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
+  const [refineBudgetError, setRefineBudgetError] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [isReviewRunning, setIsReviewRunning] = useState(false);
   const [isAutoFixing, setIsAutoFixing] = useState(false);
@@ -328,7 +331,12 @@ export function ProposalDraftWorkspace({
   const fullProposalDone = phase3Done;
 
   const anyPipelineRunning =
-    isGenerating || isFullProposalRunning || isPricingRunning || isReviewRunning || isAutoFixing;
+    isGenerating ||
+    isFullProposalRunning ||
+    isPricingRunning ||
+    isRefiningBudget ||
+    isReviewRunning ||
+    isAutoFixing;
 
   const handleRunReview = useCallback(async () => {
     setIsReviewRunning(true);
@@ -448,6 +456,40 @@ export function ProposalDraftWorkspace({
       );
     } finally {
       setIsPricingRunning(false);
+    }
+  }, [rfp.id, budget, outline]);
+
+  const handleRefineBudget = useCallback(async () => {
+    if (!budget) {
+      setRefineBudgetError("Generate a budget first, then run Budget refinery.");
+      return;
+    }
+    setIsRefiningBudget(true);
+    setRefineBudgetError(null);
+    try {
+      const { budget: refined, research: updatedResearch, draft } =
+        await runPhase3_5BudgetReconcileWithRecovery(rfp.id);
+      setBudget(refined);
+      setResearch(updatedResearch);
+
+      const mergedOutline = draft ?? mergeBudgetIntoOutline(outline, refined);
+      skipNextSaveRef.current = true;
+      setOutline(mergedOutline);
+      await saveProposalDraft(rfp.id, mergedOutline);
+
+      const budgetSection = findBudgetSection(mergedOutline.sections);
+      if (budgetSection) {
+        setSelectedSectionId(budgetSection.id);
+        setActiveTab("content");
+      } else {
+        setActiveTab("pricing");
+      }
+    } catch (error) {
+      setRefineBudgetError(
+        error instanceof Error ? error.message : "Budget refinery failed"
+      );
+    } finally {
+      setIsRefiningBudget(false);
     }
   }, [rfp.id, budget, outline]);
 
@@ -1241,25 +1283,27 @@ export function ProposalDraftWorkspace({
             </div>
 
             <nav className="proposal-on-page-nav hidden lg:block lg:rounded-2xl lg:border lg:border-zo-border/80">
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
+              <p className="shrink-0 text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                 On this page
               </p>
-              <ul className="mt-4 space-y-0.5">
-                {outline.sections
-                  .filter((s) => s.content)
-                  .map((section, index) => (
-                    <li key={section.id}>
-                      <a
-                        href={`#${section.id}`}
-                        className="proposal-on-page-link"
-                        title={section.title}
-                      >
-                        <span className="proposal-on-page-num">{index + 1}</span>
-                        <span className="proposal-on-page-title">{section.title}</span>
-                      </a>
-                    </li>
-                  ))}
-              </ul>
+              <div className="proposal-on-page-nav-scroll custom-scrollbar">
+                <ul className="space-y-0.5">
+                  {outline.sections
+                    .filter((s) => s.content)
+                    .map((section, index) => (
+                      <li key={section.id}>
+                        <a
+                          href={`#${section.id}`}
+                          className="proposal-on-page-link"
+                          title={section.title}
+                        >
+                          <span className="proposal-on-page-num">{index + 1}</span>
+                          <span className="proposal-on-page-title">{section.title}</span>
+                        </a>
+                      </li>
+                    ))}
+                </ul>
+              </div>
             </nav>
           </div>
         ) : (
@@ -1294,9 +1338,12 @@ export function ProposalDraftWorkspace({
           <ProposalBudgetPanel
             budget={budget}
             isRunning={isPricingRunning}
+            isRefining={isRefiningBudget}
             error={pricingError}
+            refineError={refineBudgetError}
             disabled={anyPipelineRunning}
             onGenerate={() => void handleGeneratePricing()}
+            onRefine={() => void handleRefineBudget()}
           />
         </div>
       </TabPanel>

@@ -51,8 +51,8 @@ def run_budget_editor_pass(
             assert_budget_invariants(finalized)
         except ValueError as exc:
             raise ProposalError(
-                f"Budget editor failed: {exc}. "
-                "Re-run Phase 3.5 budget generation or reconcile manually.",
+                f"BUDGET EDITOR FAILED — pipeline halted: {exc}. "
+                "Re-run Phase 3.5 budget generation or fix line items before proceeding.",
                 status_code=422,
             ) from exc
 

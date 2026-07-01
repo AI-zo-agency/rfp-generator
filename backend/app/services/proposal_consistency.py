@@ -17,6 +17,7 @@ from app.services.proposal_budget_validation import (
     _STALE_RECONCILIATION_FLAG_RE,
     _USD_IN_TEXT_RE,
     sum_line_items_extended,
+    validate_budget_canonical,
 )
 from app.services.proposal_section_quality import is_strict_improvement
 
@@ -51,16 +52,28 @@ def allowed_budget_amounts(budget: ProposalBudget) -> set[float]:
     amounts: set[float] = set()
     subtotal = sum_line_items_extended(budget)
     direct = round(float(budget.direct_expenses_total or 0), 2)
-    verified = round(subtotal + direct, 2)
+    agency_fee = round(float(budget.agency_fee_subtotal or subtotal), 2)
+    passthrough = round(float(budget.client_media_passthrough or 0), 2)
 
-    for value in (subtotal, direct, verified):
-        if value > 0:
-            amounts.add(value)
+    for value in (
+        subtotal,
+        direct,
+        agency_fee,
+        passthrough,
+        budget.line_item_sum,
+        budget.agency_revenue_estimate,
+        budget.lump_sum_total,
+        budget.total_client_invoicing,
+    ):
+        if isinstance(value, (int, float)) and float(value) > 0:
+            amounts.add(round(float(value), 2))
 
     if budget.agency_revenue_estimate is not None and budget.agency_revenue_estimate > 0:
-        amounts.add(round(float(budget.agency_revenue_estimate), 2))
-    if budget.lump_sum_total is not None and budget.lump_sum_total > 0:
-        amounts.add(round(float(budget.lump_sum_total), 2))
+        rev = round(float(budget.agency_revenue_estimate), 2)
+        amounts.add(rev)
+        # Multi-year agency projections from option terms
+        for years in (2, 3, 4, 5):
+            amounts.add(round(rev * years, 2))
 
     for item in budget.line_items:
         for field in (item.extended, item.rate):
@@ -326,6 +339,16 @@ def scan_manuscript_consistency(
                         message=f"Stale budget reconciliation flag: {flag[:120]}",
                     )
                 )
+
+    if budget:
+        for err in validate_budget_canonical(budget):
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="consistency",
+                    message=f"Budget canonical validation: {err}",
+                )
+            )
 
     mapped_ids = {s.id for s in (research.rfp_sections if research else [])}
     for section in draft.sections:

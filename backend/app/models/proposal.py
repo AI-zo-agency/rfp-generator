@@ -6,6 +6,7 @@ ProposalSectionMode = Literal["pull", "select", "write"]
 ProposalSectionSource = Literal["template", "rfp", "generated"]
 ProposalSectionStatus = Literal["empty", "outline", "generated", "reviewed"]
 ZoSectionMode = Literal["pull", "select", "write"]
+BudgetLineItemType = Literal["agency_fee", "client_passthrough", "direct_expense"]
 
 
 class RfpSectionMap(BaseModel):
@@ -70,6 +71,7 @@ class BudgetLineItem(BaseModel):
     rate_source: str = Field(default="", alias="rateSource")
     extended: float | None = None
     notes: str | None = None
+    line_item_type: BudgetLineItemType | None = Field(default=None, alias="lineItemType")
 
 
 class VerifiedRate(BaseModel):
@@ -202,6 +204,15 @@ class ProposalBudget(BaseModel):
     agency_revenue_estimate: float | None = Field(
         default=None, alias="agencyRevenueEstimate"
     )
+    line_item_sum: float | None = Field(default=None, alias="lineItemSum")
+    agency_fee_subtotal: float | None = Field(default=None, alias="agencyFeeSubtotal")
+    client_media_passthrough: float | None = Field(
+        default=None, alias="clientMediaPassthrough"
+    )
+    total_client_invoicing: float | None = Field(
+        default=None, alias="totalClientInvoicing"
+    )
+    commission_rate: float | None = Field(default=None, alias="commissionRate")
     lump_sum_total: float | None = Field(default=None, alias="lumpSumTotal")
     direct_expenses_total: float | None = Field(default=None, alias="directExpensesTotal")
     commission_model: str | None = Field(default=None, alias="commissionModel")

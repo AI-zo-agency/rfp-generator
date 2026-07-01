@@ -88,6 +88,17 @@ Category 05 — Digital Marketing
 
 Category 06 — Media Planning & Placement
 - 6.1 Traditional Media: 85/15 commission (85% placements, 15% zö). Client invoiced at net.
+  For commission-model RFPs: tag media placement rows lineItemType=client_passthrough;
+  tag agency commission / PM / strategy rows lineItemType=agency_fee.
+  agencyRevenueEstimate = ONLY agency_fee rows + directExpensesTotal — NEVER include pass-through media.
+
+PHASE 3b — Commission / pass-through model (when RFP uses media commission or net invoicing):
+- clientMediaPassthrough = sum of lineItems where lineItemType=client_passthrough
+- agencyFeeSubtotal = sum of lineItems where lineItemType=agency_fee
+- agencyRevenueEstimate = agencyFeeSubtotal + directExpensesTotal (zö's actual income)
+- totalClientInvoicing = lineItemSum + directExpensesTotal (what client pays in total)
+- Budget Summary MUST label these separately — never call pass-through media "agency revenue"
+- optionTermNotes multi-year math uses agencyRevenueEstimate base only, not totalClientInvoicing
 
 Category 07 — Implementation & Launch
 - 7.1 Pilot Social Media Campaign (Avg: $6,000–$9,000)
@@ -130,12 +141,15 @@ qualifyingLanguage MUST use the SAME pricingTier selected in PHASE 2 — never m
 
 MATH (mandatory — verify before returning):
 1. For EACH lineItem: extended MUST equal rate × quantity (recalculate if needed).
-2. Sum every lineItems.extended row explicitly — that subtotal is ground truth.
-3. agencyRevenueEstimate MUST equal line-item subtotal plus directExpensesTotal (if any).
-4. lumpSumTotal MUST equal agencyRevenueEstimate when RFP requires lump sum + hourly (table is the cost build).
-5. optionTermNotes MUST use agencyRevenueEstimate as the base-year figure for all multi-year math.
-6. Do NOT leave pricingFlags describing math discrepancies — fix the numbers instead.
-7. pricingFlags are ONLY for items requiring Sonja/human review (out-of-guide scope, missing KB, incomplete stages).
+2. Sum every lineItems.extended row explicitly — that subtotal is lineItemSum (ground truth).
+3. Tag each lineItem with lineItemType: agency_fee | client_passthrough | direct_expense.
+4. agencyRevenueEstimate = agency fee income ONLY (agency_fee rows + directExpensesTotal).
+   For commission models: NEVER include client_passthrough rows in agencyRevenueEstimate.
+5. totalClientInvoicing = lineItemSum + directExpensesTotal when pass-through media is present.
+6. lumpSumTotal MUST equal agencyRevenueEstimate when RFP requires lump sum + hourly.
+7. optionTermNotes MUST use agencyRevenueEstimate as the base-year agency fee figure.
+8. Do NOT leave pricingFlags describing math discrepancies — fix the numbers instead.
+9. pricingFlags are ONLY for items requiring Sonja/human review (out-of-guide scope, missing KB).
 
 Return ONLY JSON:
 {
@@ -145,10 +159,15 @@ Return ONLY JSON:
   "pricingTier": "Low|Average|High",
   "budgetFormat": "phased|personnel_loading|service_menu",
   "commissionModel": "string|null",
+  "commissionRate": number|null,
   "lumpSumTotal": number|null,
   "directExpensesTotal": number|null,
+  "lineItemSum": number|null,
+  "agencyFeeSubtotal": number|null,
+  "clientMediaPassthrough": number|null,
+  "totalClientInvoicing": number|null,
   "verifiedRates": [{"personName","role","hourlyRate","source"}],
-  "lineItems": [{"id","category","description","namedPerson","roleTitle","unit","quantity","rate","extended","rateSource","notes"}],
+  "lineItems": [{"id","category","description","lineItemType","namedPerson","roleTitle","unit","quantity","rate","extended","rateSource","notes"}],
   "tiers": [],
   "recommendedTierId": null,
   "agencyRevenueEstimate": number|null,
@@ -425,6 +444,11 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             if isinstance(raw.get("agencyRevenueEstimate"), (int, float))
             else None
         ),
+        lineItemSum=extras.get("line_item_sum"),
+        agencyFeeSubtotal=extras.get("agency_fee_subtotal"),
+        clientMediaPassthrough=extras.get("client_media_passthrough"),
+        totalClientInvoicing=extras.get("total_client_invoicing"),
+        commissionRate=extras.get("commission_rate"),
         lumpSumTotal=extras.get("lump_sum_total"),
         directExpensesTotal=extras.get("direct_expenses_total"),
         commissionModel=raw.get("commissionModel"),

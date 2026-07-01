@@ -184,6 +184,11 @@ export interface ProposalBudget {
   tiers: PricingTier[];
   recommendedTierId?: string | null;
   agencyRevenueEstimate?: number | null;
+  lineItemSum?: number | null;
+  agencyFeeSubtotal?: number | null;
+  clientMediaPassthrough?: number | null;
+  totalClientInvoicing?: number | null;
+  commissionRate?: number | null;
   lumpSumTotal?: number | null;
   directExpensesTotal?: number | null;
   commissionModel?: string | null;
