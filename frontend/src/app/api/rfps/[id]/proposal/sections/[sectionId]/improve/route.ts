@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
+import { longRunningFetch } from "@/lib/long-running-fetch";
+import { PROPOSAL_STAGE_TIMEOUT_MS } from "@/lib/proposal-stage-timeout";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
-const IMPROVE_TIMEOUT_MS = 8 * 60 * 1000;
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  process.env.BACKEND_URL ||
+  "http://localhost:8001";
+
+export const maxDuration = 900;
+export const runtime = "nodejs";
 
 export async function POST(
   request: Request,
@@ -19,13 +26,13 @@ export async function POST(
   }
 
   try {
-    const res = await fetch(
+    const res = await longRunningFetch(
       `${BACKEND_URL}/api/v1/rfps/${id}/proposal/sections/${sectionId}/improve`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: body.message }),
-        signal: AbortSignal.timeout(IMPROVE_TIMEOUT_MS),
+        timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS,
       }
     );
     const text = await res.text();

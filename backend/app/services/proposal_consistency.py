@@ -125,9 +125,24 @@ def patch_improves_section(
     budget: ProposalBudget | None = None,
 ) -> bool:
     from app.services.proposal_presubmit_review import issue_score, scan_section_issues
+    from app.services.proposal_section_quality import verify_count
+    from app.services.proposal_manuscript_cleanup import has_grammar_glitches
 
     if regression_vs_prior(before, after):
         return False
+
+    before_verify = verify_count(before.content or "")
+    after_verify = verify_count(after.content or "")
+    if before_verify > 0 and after_verify < before_verify and after.content.strip():
+        if budget and introduces_unauthorized_dollars(after.content, budget):
+            return False
+        return True
+
+    if has_grammar_glitches(before.content or "") and not has_grammar_glitches(
+        after.content or ""
+    ):
+        return True
+
     if not is_strict_improvement(before, after):
         return False
 

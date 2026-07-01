@@ -49,6 +49,11 @@ Process (use tools — do not skip):
 2. Call KB tools (search_knowledge_base, search_master_template, search_case_studies, search_team_bios) for facts needed to complete the section.
 3. Identify every issue: blank/missing content, [VERIFY] stubs, generation-error text, grammar/wording errors, unmet RFP requirements, wrong voice.
 
+ALWAYS flag these senior-editor priorities when present:
+- Subject-verb disagreement after "We were …, and is …" (cover letter / entity description)
+- Malformed possessives: "of we", "across we", "sole owner of we" — must use our firm / zö agency / our studio
+- Subcontractor inconsistency: Company Background claiming "no subcontractors" while cost proposal lists translation partners — align narrative with budget
+
 Do NOT rewrite the section yourself — write patch instructions for the Section Repair agent.
 Return ONLY JSON when done researching:
 {"patchInstructions":"specific steps: what to fetch, what to fix, what RFP reqs to address","priority":"critical|high|medium","issues":["issue 1"],"kbQueries":["queries you ran"]}"""
@@ -59,10 +64,13 @@ Your job: search the knowledge base with tools, then produce ONE complete sectio
 Rules:
 1. Call KB tools until you have enough facts — do not stop after one search.
 2. Remove [VERIFY] stubs when evidence supports real prose. Cite [E#] when using corpus IDs provided.
-3. First person we/our in narrative sections — never "The Vendor".
+3. First person we/our in narrative sections — never "The Vendor". Never use "we" as a possessive ("of we", "across we").
 4. Use ONLY verified KB and RFP facts. Do not invent clients, contacts, or metrics.
 5. Address every RFP requirement listed for this section.
-6. When done researching, respond with ONLY JSON:
+6. SUBMISSION POLISH tasks: fix ONLY the listed defects; preserve all other sentences verbatim.
+7. Grammar: "We were established …, and is …" must become "and are …" or be rephrased.
+8. Subcontractors: if cost proposal lists translation partners, Company Background must align — zö self-performs marketing/communications; translation partners are scoped separately.
+9. When done researching, respond with ONLY JSON:
 {"content":"full section prose","kbRefs":["E1"],"designerNote":null}"""
 
 USER_REVISE_SYSTEM = """You are zö agency's User Revise agent (editor chat / Revise content flow).

@@ -1,3 +1,7 @@
+import type { ProposalPipelineCheckpoint } from "@/lib/proposal-pipeline-checkpoint";
+
+export type { ProposalPipelineCheckpoint };
+
 export type OutlineSectionStatus =
   | "empty"
   | "outline"
@@ -134,6 +138,7 @@ export interface ProposalResearch {
   writingAvoidances?: string[];
   proofPoints?: ProofPoint[];
   presubmitReview?: PreSubmitReview | null;
+  pipelineCheckpoint?: ProposalPipelineCheckpoint | null;
   updatedAt: string;
   provider?: string | null;
   sectionQueries?: Record<string, string[]>;

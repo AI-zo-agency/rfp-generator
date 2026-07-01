@@ -13,6 +13,12 @@ from app.models.proposal import (
     PreSubmitAutoFixRequest,
     SectionImproveRequest,
 )
+from app.services.proposal_api_slim import slim_research_for_api
+from app.services.proposal_pipeline_checkpoint import (
+    build_pipeline_status,
+    clear_pipeline_checkpoint,
+    pipeline_phase,
+)
 from app.services.proposal_generator import (
     ProposalError,
     generate_full_proposal,
@@ -32,6 +38,12 @@ from app.services.rfp_repository import get_rfp, rfp_exists
 router = APIRouter(prefix="/rfps", tags=["proposals"])
 
 
+def _slim_research(research: ProposalResearchCache | None) -> ProposalResearchCache | None:
+    if not research:
+        return None
+    return slim_research_for_api(research)
+
+
 @router.get("/{rfp_id}/proposal")
 def get_proposal(rfp_id: str) -> dict[str, object]:
     if not rfp_exists(rfp_id):
@@ -41,6 +53,7 @@ def get_proposal(rfp_id: str) -> dict[str, object]:
     return {
         "draft": draft.model_dump(by_alias=True) if draft else None,
         "research": research.model_dump(by_alias=True) if research else None,
+        "pipelineStatus": build_pipeline_status(rfp_id, draft=draft, research=research),
     }
 
 
@@ -67,7 +80,11 @@ async def generate_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
             detail=f"Full proposal generation failed: {exc}",
         ) from exc
 
-    return ProposalGenerateResponse(draft=draft, brandVoice=brand_voice, research=research)
+    return ProposalGenerateResponse(
+        draft=draft,
+        brandVoice=brand_voice,
+        research=_slim_research(research) or research,
+    )
 
 
 @router.post(
@@ -86,7 +103,11 @@ async def generate_full_proposal_endpoint(rfp_id: str) -> ProposalGenerateRespon
             detail=f"Full proposal generation failed: {exc}",
         ) from exc
 
-    return ProposalGenerateResponse(draft=draft, brandVoice=brand_voice, research=research)
+    return ProposalGenerateResponse(
+        draft=draft,
+        brandVoice=brand_voice,
+        research=_slim_research(research) or research,
+    )
 
 
 @router.post(
@@ -96,7 +117,8 @@ async def generate_full_proposal_endpoint(rfp_id: str) -> ProposalGenerateRespon
 async def generate_sections_1_3_endpoint(rfp_id: str) -> ProposalGenerateResponse:
     """Generate static Sections 1–3 only (Phase 2 retrieval is a separate endpoint)."""
     try:
-        draft, brand_voice, research = await generate_sections_1_3(rfp_id)
+        async with pipeline_phase(rfp_id, "sections-1-3"):
+            draft, brand_voice, research = await generate_sections_1_3(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -105,7 +127,11 @@ async def generate_sections_1_3_endpoint(rfp_id: str) -> ProposalGenerateRespons
             detail=f"Sections 1–3 generation failed: {exc}",
         ) from exc
 
-    return ProposalGenerateResponse(draft=draft, brandVoice=brand_voice, research=research)
+    return ProposalGenerateResponse(
+        draft=draft,
+        brandVoice=brand_voice,
+        research=_slim_research(research) or research,
+    )
 
 
 @router.post(
@@ -115,7 +141,8 @@ async def generate_sections_1_3_endpoint(rfp_id: str) -> ProposalGenerateRespons
 async def phase2_retrieval_endpoint(rfp_id: str) -> ProposalPhase2Response:
     """Phase 2 only: map RFP sections, per-section Supermemory retrieval, coverage, evidence corpus."""
     try:
-        research = await run_phase2_retrieval(rfp_id)
+        async with pipeline_phase(rfp_id, "phase-2"):
+            research = await run_phase2_retrieval(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -124,7 +151,7 @@ async def phase2_retrieval_endpoint(rfp_id: str) -> ProposalPhase2Response:
             detail=f"Phase 2 retrieval failed: {exc}",
         ) from exc
 
-    return ProposalPhase2Response(research=research)
+    return ProposalPhase2Response(research=_slim_research(research) or research)
 
 
 @router.post(
@@ -134,7 +161,8 @@ async def phase2_retrieval_endpoint(rfp_id: str) -> ProposalPhase2Response:
 async def phase3_drafting_endpoint(rfp_id: str) -> ProposalPhase3Response:
     """Phase 3: draft all RFP sections from evidence corpus with [E#] citations."""
     try:
-        draft, research = await run_phase3_drafting(rfp_id)
+        async with pipeline_phase(rfp_id, "phase-3"):
+            draft, research = await run_phase3_drafting(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -143,7 +171,8 @@ async def phase3_drafting_endpoint(rfp_id: str) -> ProposalPhase3Response:
             detail=f"Phase 3 drafting failed: {exc}",
         ) from exc
 
-    return ProposalPhase3Response(draft=draft, research=research)
+    slim = _slim_research(research) or research
+    return ProposalPhase3Response(draft=draft, research=slim)
 
 
 @router.post(
@@ -153,7 +182,8 @@ async def phase3_drafting_endpoint(rfp_id: str) -> ProposalPhase3Response:
 async def phase3_6_self_edit_endpoint(rfp_id: str) -> ProposalPhase3Response:
     """Phase 3.6: senior-editor self-edit loop — gap-fill KB and patch weak sections."""
     try:
-        draft, research, _report = await run_phase3_6_self_edit(rfp_id)
+        async with pipeline_phase(rfp_id, "phase-3-6-self-edit"):
+            draft, research, _report = await run_phase3_6_self_edit(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -164,7 +194,8 @@ async def phase3_6_self_edit_endpoint(rfp_id: str) -> ProposalPhase3Response:
 
     if not research:
         raise HTTPException(status_code=500, detail="Research cache missing after self-edit")
-    return ProposalPhase3Response(draft=draft, research=research)
+    slim = _slim_research(research) or research
+    return ProposalPhase3Response(draft=draft, research=slim)
 
 
 @router.post(
@@ -174,7 +205,8 @@ async def phase3_6_self_edit_endpoint(rfp_id: str) -> ProposalPhase3Response:
 async def phase3_5_budget_endpoint(rfp_id: str) -> ProposalPricingResponse:
     """Phase 3.5: Stage 3 budget + incorporate into manuscript + sync fee narrative."""
     try:
-        draft, research, budget = await run_phase3_5_budget(rfp_id)
+        async with pipeline_phase(rfp_id, "phase-3-5-budget"):
+            draft, research, budget = await run_phase3_5_budget(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -183,7 +215,8 @@ async def phase3_5_budget_endpoint(rfp_id: str) -> ProposalPricingResponse:
             detail=f"Phase 3.5 budget failed: {exc}",
         ) from exc
 
-    return ProposalPricingResponse(budget=budget, research=research, draft=draft)
+    slim = _slim_research(research) or research
+    return ProposalPricingResponse(budget=budget, research=slim, draft=draft)
 
 
 @router.post(
@@ -202,7 +235,8 @@ async def phase3_5_budget_reconcile_endpoint(rfp_id: str) -> ProposalPricingResp
             detail=f"Budget reconcile failed: {exc}",
         ) from exc
 
-    return ProposalPricingResponse(budget=budget, research=research, draft=draft)
+    slim = _slim_research(research) or research
+    return ProposalPricingResponse(budget=budget, research=slim, draft=draft)
 
 
 @router.post(
@@ -221,7 +255,8 @@ async def generate_pricing_endpoint(rfp_id: str) -> ProposalPricingResponse:
             detail=f"Pricing generation failed: {exc}",
         ) from exc
 
-    return ProposalPricingResponse(budget=budget, research=research, draft=draft)
+    slim = _slim_research(research) or research
+    return ProposalPricingResponse(budget=budget, research=slim, draft=draft)
 
 
 @router.post(
@@ -251,7 +286,7 @@ async def improve_section_endpoint(
     return ProposalSectionImproveResponse(
         section=section,
         draft=draft,
-        research=research,
+        research=_slim_research(research) or research,
         assistantMessage=assistant_message,
     )
 
@@ -263,7 +298,8 @@ async def improve_section_endpoint(
 async def phase4_presubmit_review_endpoint(rfp_id: str) -> ProposalPhase4Response:
     """Stage 4: pre-submit copy-paste scan + compliance checklist."""
     try:
-        review, research = await run_phase4_presubmit_review(rfp_id)
+        async with pipeline_phase(rfp_id, "phase-4-review"):
+            review, research = await run_phase4_presubmit_review(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -272,7 +308,8 @@ async def phase4_presubmit_review_endpoint(rfp_id: str) -> ProposalPhase4Respons
             detail=f"Pre-submit review failed: {exc}",
         ) from exc
 
-    return ProposalPhase4Response(review=review, research=research)
+    slim = _slim_research(research) or research
+    return ProposalPhase4Response(review=review, research=slim)
 
 
 @router.post(
@@ -304,9 +341,10 @@ async def phase4_presubmit_autofix_endpoint(
             detail=f"Pre-submit auto-fix failed: {exc}",
         ) from exc
 
+    slim = _slim_research(research) or research
     return ProposalPhase4AutoFixResponse(
         review=review,
-        research=research,
+        research=slim,
         draft=draft,
         auto_fix=auto_fix,
     )

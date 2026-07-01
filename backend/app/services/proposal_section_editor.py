@@ -419,6 +419,8 @@ async def improve_proposal_section(
     rfp_id: str,
     section_id: str,
     user_message: str,
+    *,
+    persist: bool = True,
 ) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache, str, str]:
     """Re-query KB with new detailed queries, expand evidence, re-draft one section only."""
     if not llm.is_configured():
@@ -603,8 +605,9 @@ async def improve_proposal_section(
             "provider": provider,
         }
     )
-    save_proposal_draft(updated_draft)
-    save_research_cache(research)
+    if persist:
+        save_proposal_draft(updated_draft)
+        save_research_cache(research)
 
     word_count_result = word_count(updated_section.content)
     if is_static:

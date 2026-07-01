@@ -100,7 +100,7 @@ async def search_rfp_document(
     if not rfp:
         return "(RFP not found.)", []
 
-    description, pdf_text, _, _ = load_local_rfp_text(rfp, max_chars=12_000)
+    description, pdf_text, _, _, _, _ = load_local_rfp_text(rfp, max_chars=12_000)
     text = combine_rfp_text(description, pdf_text, max_chars=12_000)
     if not text:
         return "(No local RFP PDF or description found.)", []

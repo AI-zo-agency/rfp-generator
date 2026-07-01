@@ -223,6 +223,17 @@ class ProposalBudget(BaseModel):
     provider: str | None = None
 
 
+class ProposalPipelineCheckpoint(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    last_completed_phase: str | None = Field(default=None, alias="lastCompletedPhase")
+    in_progress_phase: str | None = Field(default=None, alias="inProgressPhase")
+    last_failed_phase: str | None = Field(default=None, alias="lastFailedPhase")
+    last_error: str | None = Field(default=None, alias="lastError")
+    resume_from_phase: str | None = Field(default=None, alias="resumeFromPhase")
+    updated_at: str = Field(alias="updatedAt")
+
+
 class ProposalResearchCache(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -239,6 +250,9 @@ class ProposalResearchCache(BaseModel):
     writing_avoidances: list[str] = Field(default_factory=list, alias="writingAvoidances")
     proof_points: list[ProofPoint] = Field(default_factory=list, alias="proofPoints")
     presubmit_review: PreSubmitReview | None = Field(default=None, alias="presubmitReview")
+    pipeline_checkpoint: ProposalPipelineCheckpoint | None = Field(
+        default=None, alias="pipelineCheckpoint"
+    )
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None
 

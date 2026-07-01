@@ -33,9 +33,11 @@ from app.services.proposal_repository import (
 from app.services.proposal_drafting_graph import run_drafting_graph
 from app.services.proposal_budget_content import incorporate_budget_into_draft
 from app.services.proposal_budget_editor import run_budget_editor_pass
+from app.services.proposal_budget_sync import align_fee_narrative_with_budget
 from app.services.proposal_consistency import self_edit_exhausted_issues
 from app.services.proposal_fee_justification import generate_fee_justification_memo
 from app.services.proposal_loss_lessons import build_loss_lessons_for_rfp
+from app.services.proposal_pipeline_status import assert_manuscript_ready
 from app.services.proposal_pricing_service import generate_proposal_budget
 from app.services.proposal_presubmit_review import run_presubmit_review
 from app.services.proposal_presubmit_autofix import run_presubmit_autofix_loop
@@ -516,6 +518,7 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         rfp=rfp,
         rfp_context=rfp_context,
         rfp_sections=rfp_sections,
+        evidence_corpus=evidence_corpus,
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -533,6 +536,7 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         proofPoints=proof_points,
         budget=prior_research.budget if prior_research else None,
         presubmitReview=prior_research.presubmit_review if prior_research else None,
+        pipelineCheckpoint=prior_research.pipeline_checkpoint if prior_research else None,
         updatedAt=now,
         provider=provider,
     )
@@ -611,6 +615,7 @@ async def generate_sections_1_3(
         evidenceCorpus=prior_research.evidence_corpus if prior_research else [],
         retrievalRounds=prior_research.retrieval_rounds if prior_research else 0,
         coverageThreshold=prior_research.coverage_threshold if prior_research else 85,
+        pipelineCheckpoint=prior_research.pipeline_checkpoint if prior_research else None,
         updatedAt=now,
         provider=provider,
     )
@@ -774,15 +779,26 @@ async def run_phase3_5_budget(
     save_proposal_draft(draft)
 
     # Re-render budget section after fee sync so narrative totals stay aligned
-    budget = run_budget_editor_pass(
-        budget,
-        rfp_sections=research.rfp_sections if research else [],
-        rfp_context=load_rfp_for_proposal(rfp_id)[2][:28_000],
-    )
+    try:
+        budget = run_budget_editor_pass(
+            budget,
+            rfp_sections=research.rfp_sections if research else [],
+            rfp_context=load_rfp_for_proposal(rfp_id)[2][:28_000],
+        )
+    except Exception as exc:
+        logger.exception("Budget editor pass after fee sync failed for %s: %s", rfp_id, exc)
+        raise ProposalError(
+            f"Budget editor pass failed after fee sync: {exc}",
+            status_code=502,
+        ) from exc
+
     if research:
         research = research.model_copy(update={"budget": budget})
         save_research_cache(research)
-    incorporate_budget_into_draft(rfp_id, budget)
+    final_draft = incorporate_budget_into_draft(rfp_id, budget)
+    if final_draft:
+        draft = final_draft
+        save_proposal_draft(draft)
 
     logger.info(
         "Phase 3.5 budget complete for %s: tier=%s, %d line items, revenue=%s",
@@ -927,6 +943,13 @@ async def generate_full_proposal(
             len(review.issues),
             review.ready_to_submit,
         )
+
+    assert_manuscript_ready(
+        draft=draft,
+        research=research,
+        rfp=rfp,
+        require_budget=True,
+    )
 
     logger.info(
         "Full proposal complete for %s: %d sections, budget tier=%s",

@@ -27,14 +27,19 @@ from app.services.proposal_section_quality import (
 
 logger = logging.getLogger(__name__)
 
-MAX_SELF_EDIT_ITERATIONS = 2
-SELF_EDIT_TIME_BUDGET_SEC = 480
+MAX_SELF_EDIT_ITERATIONS = 3
+SELF_EDIT_TIME_BUDGET_SEC = 720
 SELF_EDIT_PARALLEL = 4
 
 AUTO_REPAIR_MESSAGE = """This section is incomplete or still has [VERIFY] placeholders from the first draft pass.
 Run a deep knowledge-base search and write full submission-ready prose for every RFP requirement in this section.
 Remove [VERIFY] when evidence supports the answer. Use [E#] citations. Keep zö first-person narrative voice (we/our).
-Do not return the same placeholder text."""
+Do not return the same placeholder text.
+
+Senior editor priorities (fix if present):
+1. Grammar: "We were established …, and is organized" → use "and are organized" or "organized as …"
+2. Pronouns: never "of we" or "across we" — use "our firm", "zö agency", or "our studio"
+3. Subcontractors: if cost proposal lists translation partners, Company Background must NOT claim "no subcontractors" — zö self-performs marketing/communications; translation partners are scoped separately"""
 
 
 @dataclass
@@ -54,8 +59,15 @@ async def _senior_editor_instructions(
     rfp_client: str,
     rfp_title: str,
     requirements: list[str],
+    draft: ProposalDraft | None = None,
+    research: ProposalResearchCache | None = None,
+    budget: object | None = None,
 ) -> str:
     from app.services.proposal_langchain_agents import senior_editor_patch_instructions
+    from app.services.proposal_manuscript_cleanup import (
+        build_submission_repair_brief,
+        scan_submission_blockers,
+    )
 
     patch = await senior_editor_patch_instructions(
         rfp_id=rfp_id,
@@ -66,6 +78,20 @@ async def _senior_editor_instructions(
         rfp_title=rfp_title,
         requirements=requirements,
     )
+    section_blockers = []
+    if draft:
+        section_blockers = [
+            b
+            for b in scan_submission_blockers(draft=draft, research=research)
+            if b.section_id == section.id
+        ]
+    if section_blockers:
+        brief = build_submission_repair_brief(
+            section_blockers,
+            draft=draft or ProposalDraft(rfpId=rfp_id, sections=[section]),
+            research=research,
+        )
+        return f"{brief}\n\nSenior editor agent notes:\n{patch or '(see defects above)'}"
     if patch:
         return f"{AUTO_REPAIR_MESSAGE}\n\nSenior editor patch notes:\n{patch}"
     return AUTO_REPAIR_MESSAGE
@@ -80,6 +106,7 @@ async def _repair_one_section(
     rfp_client: str,
     rfp_title: str,
     budget: object | None,
+    repair_message: str | None = None,
 ) -> tuple[str, bool, str]:
     """Section Repair LangChain agent (KB tools + patch JSON)."""
     from app.models.proposal import ProposalBudget
@@ -104,15 +131,21 @@ async def _repair_one_section(
                 break
 
     requirements = (rfp_section.requirements if rfp_section else []) or []
-    message = AUTO_REPAIR_MESSAGE
-    if use_senior_editor:
+    if repair_message:
+        message = repair_message
+    elif use_senior_editor:
         message = await _senior_editor_instructions(
             rfp_id=rfp_id,
             section=before,
             rfp_client=rfp_client,
             rfp_title=rfp_title,
             requirements=requirements,
+            draft=draft,
+            research=research,
+            budget=budget,
         )
+    else:
+        message = AUTO_REPAIR_MESSAGE
 
     evidence_block = ""
     if research and research.evidence_corpus:
@@ -154,16 +187,20 @@ async def _repair_one_section(
         try:
             from app.services.proposal_section_editor import improve_proposal_section
 
-            _section, updated_draft, _research, provider, _msg = await improve_proposal_section(
+            _section, updated_draft, updated_research, provider, _msg = await improve_proposal_section(
                 rfp_id,
                 section_id,
                 failure_prefix + message,
+                persist=False,
             )
             after = next(
                 (s for s in updated_draft.sections if s.id == section_id),
                 before,
             )
             if patch_improves_section(before, after, rfp=rfp, budget=typed_budget):
+                save_proposal_draft(updated_draft)
+                if updated_research:
+                    save_research_cache(updated_research)
                 return (
                     section_id,
                     True,
@@ -177,7 +214,16 @@ async def _repair_one_section(
     if not content:
         return section_id, False, "empty agent response"
 
+    from app.services.proposal_manuscript_cleanup import scan_submission_blockers
     from app.services.proposal_voice_enforcement import enforce_narrative_voice
+
+    before_blockers = len(
+        [
+            b
+            for b in scan_submission_blockers(draft=draft, research=research)
+            if b.section_id == section_id
+        ]
+    )
 
     content = enforce_narrative_voice(
         content,
@@ -204,6 +250,22 @@ async def _repair_one_section(
             True,
             f"verify {verify_count(before.content)}→{verify_count(after.content)} "
             f"words {word_count(before.content)}→{word_count(after.content)}{tools_note}",
+        )
+
+    after_draft = updated_draft
+    after_blockers = len(
+        [
+            b
+            for b in scan_submission_blockers(draft=after_draft, research=research)
+            if b.section_id == section_id
+        ]
+    )
+    if repair_message and after_blockers < before_blockers:
+        save_proposal_draft(updated_draft)
+        return (
+            section_id,
+            True,
+            f"submission blockers {before_blockers}→{after_blockers}",
         )
 
     return section_id, False, "reverted (no improvement)"
@@ -240,6 +302,8 @@ async def run_self_edit_loop(
     deadline = time.monotonic() + time_budget_sec
     sem = asyncio.Semaphore(parallel)
 
+    from app.services.proposal_manuscript_cleanup import sections_with_submission_blockers
+
     async def _run_one(sid: str, use_senior: bool) -> tuple[str, bool, str]:
         async with sem:
             return await _repair_one_section(
@@ -258,7 +322,12 @@ async def run_self_edit_loop(
             break
 
         draft = get_proposal_draft(rfp_id) or draft
-        weak = [s for s in draft.sections if is_weak_section(s)]
+        blocker_ids = sections_with_submission_blockers(draft, research)
+        weak = [
+            s
+            for s in draft.sections
+            if is_weak_section(s) or s.id in blocker_ids
+        ]
         if not weak:
             report.stopped_reason = "all_sections_ok"
             break
@@ -303,7 +372,52 @@ async def run_self_edit_loop(
         )
 
         if improved_this_round == 0:
-            report.stopped_reason = "no_improvement"
+            draft = get_proposal_draft(rfp_id) or draft
+            if not any(verify_count(s.content or "") > 0 for s in draft.sections):
+                report.stopped_reason = "no_improvement"
+                break
+
+    # Dedicated VERIFY loop — keep going while placeholders remain
+    verify_round = 0
+    while time.monotonic() < deadline and verify_round < 5:
+        draft = get_proposal_draft(rfp_id) or draft
+        verify_sections = [
+            s for s in draft.sections if verify_count(s.content or "") > 0
+        ]
+        if not verify_sections:
+            if report.stopped_reason == "no_improvement":
+                report.stopped_reason = "all_sections_ok"
+            break
+
+        verify_round += 1
+        logger.info(
+            "Self-edit VERIFY round %d for %s: %d sections with placeholders",
+            verify_round,
+            rfp_id,
+            len(verify_sections),
+        )
+        verify_sections.sort(key=weakness_score, reverse=True)
+        results = await asyncio.gather(
+            *[_run_one(s.id, True) for s in verify_sections]
+        )
+        improved_verify = 0
+        for sid, improved, detail in results:
+            report.section_logs.append(
+                {
+                    "sectionId": sid,
+                    "iteration": f"verify-{verify_round}",
+                    "detail": detail,
+                    "status": "" if improved else "self_edit_exhausted",
+                }
+            )
+            if improved:
+                improved_verify += 1
+                report.sections_improved += 1
+            else:
+                report.sections_unchanged += 1
+
+        if improved_verify == 0:
+            report.stopped_reason = "verify_exhausted"
             break
 
     if not report.stopped_reason:
@@ -311,6 +425,22 @@ async def run_self_edit_loop(
 
     draft = get_proposal_draft(rfp_id) or draft
     research = get_research_cache(rfp_id)
+
+    from app.services.proposal_submission_polish import run_submission_polish_pass
+
+    try:
+        draft, polish_logs = await run_submission_polish_pass(
+            rfp_id,
+            rfp=rfp,
+            draft=draft,
+            research=research,
+        )
+        for line in polish_logs:
+            report.section_logs.append(
+                {"sectionId": "", "iteration": "submission-polish", "detail": line}
+            )
+    except Exception as exc:
+        logger.warning("Submission polish pass failed for %s: %s", rfp_id, exc)
 
     if research and research.budget:
         try:
@@ -321,6 +451,12 @@ async def run_self_edit_loop(
             logger.info("Post-self-edit budget reconcile complete for %s", rfp_id)
         except ProposalError as exc:
             logger.warning("Post-self-edit budget reconcile skipped for %s: %s", rfp_id, exc)
+        except Exception as exc:
+            logger.warning(
+                "Post-self-edit budget reconcile skipped for %s: %s",
+                rfp_id,
+                exc,
+            )
 
     if research:
         research = research.model_copy(

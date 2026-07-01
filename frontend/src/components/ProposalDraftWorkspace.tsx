@@ -15,18 +15,22 @@ import {
   mergeBudgetIntoOutline,
 } from "@/lib/proposal-budget-content";
 import {
+  buildPipelineStatus,
   fetchProposalDraft,
   generateFullProposalStaged,
   generateProposalPricing,
   generateProposalSections1to3,
+  pipelineResumeMessage,
+  PIPELINE_PHASE_LABELS,
   recoverProposalDraftIfSaved,
   runPhase3Drafting,
-  runPhase3_5Budget,
-  runPhase3_6SelfEdit,
+  runPhase3_5BudgetWithRecovery,
+  runPhase3_6SelfEditWithRecovery,
   runPhase4PreSubmitReview,
   runPhase4PreSubmitAutoFix,
   saveProposalDraft,
   type FullProposalProgress,
+  type ProposalPipelineStatus,
 } from "@/lib/proposal-api";
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
@@ -152,6 +156,8 @@ export function ProposalDraftWorkspace({
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [provider, setProvider] = useState<string | null>(null);
+  const [pipelineStatus, setPipelineStatus] =
+    useState<ProposalPipelineStatus | null>(null);
   const skipNextSaveRef = useRef(false);
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const sectionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
@@ -192,6 +198,7 @@ export function ProposalDraftWorkspace({
       let draft: ProposalOutline | null = null;
       let research: ProposalResearch | null = null;
       let providerName: string | null = null;
+      let status: ProposalPipelineStatus | null = null;
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const result = await fetchProposalDraft(rfp.id);
@@ -199,6 +206,7 @@ export function ProposalDraftWorkspace({
         draft = result.draft;
         research = result.research;
         providerName = result.provider ?? null;
+        status = result.pipelineStatus;
         if (draft || research) break;
         await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
       }
@@ -213,6 +221,9 @@ export function ProposalDraftWorkspace({
       setBudget(research?.budget ?? null);
       setPresubmitReview(research?.presubmitReview ?? null);
       setProvider(providerName);
+      setPipelineStatus(
+        status ?? buildPipelineStatus(draft, research)
+      );
 
       const contentSections = draft ? countSectionsWithContent(draft) : 0;
       const researchReady = (research?.rfpSections?.length ?? 0) > 0;
@@ -441,7 +452,26 @@ export function ProposalDraftWorkspace({
   }, [rfp.id, budget, outline]);
 
   const handleGenerateFullProposal = useCallback(async () => {
+    const canResume = pipelineStatus?.canResume ?? false;
+    const resumeLabel = pipelineStatus
+      ? PIPELINE_PHASE_LABELS[pipelineStatus.resumeFromPhase]
+      : null;
+
     if (
+      canResume &&
+      !fullProposalDone
+    ) {
+      // Resume without confirmation when manuscript is incomplete.
+    } else if (
+      canResume &&
+      fullProposalDone &&
+      !confirm(
+        `Resume pipeline from ${resumeLabel}? Completed phases will be skipped.`
+      )
+    ) {
+      return;
+    } else if (
+      !canResume &&
       fullProposalDone &&
       !confirm(
         "Proposal already generated. Re-run full pipeline anyway? (Uses LLM tokens.)"
@@ -449,19 +479,27 @@ export function ProposalDraftWorkspace({
     ) {
       return;
     }
+
     setIsFullProposalRunning(true);
     setFullProposalProgress(null);
     setGenerateError(null);
     setGenerateNotice(null);
     try {
       const { draft, research: updatedResearch } =
-        await generateFullProposalStaged(rfp.id, setFullProposalProgress);
+        await generateFullProposalStaged(rfp.id, setFullProposalProgress, {
+          startFrom: canResume ? pipelineStatus?.resumeFromPhase : undefined,
+          forceRestart: !canResume && fullProposalDone,
+        });
       skipNextSaveRef.current = true;
       setOutline(draft);
       if (updatedResearch) {
         setResearch(updatedResearch);
+        setPipelineStatus(buildPipelineStatus(draft, updatedResearch));
         if (updatedResearch.budget) {
           setBudget(updatedResearch.budget);
+        }
+        if (updatedResearch.presubmitReview) {
+          setPresubmitReview(updatedResearch.presubmitReview);
         }
       }
       await saveProposalDraft(rfp.id, draft);
@@ -469,8 +507,13 @@ export function ProposalDraftWorkspace({
       setSelectedSectionId(
         draft.sections.find((s) => s.content)?.id ?? draft.sections[0]?.id ?? null
       );
+      if (canResume) {
+        setGenerateNotice("Pipeline resumed and completed from the last checkpoint.");
+      }
     } catch (error) {
       setFullProposalProgress("recovering");
+      const errMsg =
+        error instanceof Error ? error.message : "Full proposal generation failed";
       const recovered = await recoverProposalDraftIfSaved(rfp.id, {
         minSectionsWithContent: 10,
       });
@@ -479,8 +522,13 @@ export function ProposalDraftWorkspace({
         setOutline(recovered.draft);
         if (recovered.research) {
           setResearch(recovered.research);
+          const status = buildPipelineStatus(recovered.draft, recovered.research);
+          setPipelineStatus(status);
           if (recovered.research.budget) {
             setBudget(recovered.research.budget);
+          }
+          if (recovered.research.presubmitReview) {
+            setPresubmitReview(recovered.research.presubmitReview);
           }
         }
         setActiveTab("content");
@@ -489,22 +537,22 @@ export function ProposalDraftWorkspace({
             recovered.draft.sections[0]?.id ??
             null
         );
+        const status = buildPipelineStatus(
+          recovered.draft,
+          recovered.research
+        );
         setGenerateNotice(
-          "Connection timed out, but your proposal was saved on the server — loaded from draft."
+          `Step failed, but progress is saved. ${pipelineResumeMessage(status, { blocker: errMsg })}`
         );
         setGenerateError(null);
       } else {
-        setGenerateError(
-          error instanceof Error
-            ? error.message
-            : "Full proposal generation failed"
-        );
+        setGenerateError(errMsg);
       }
     } finally {
       setIsFullProposalRunning(false);
       setFullProposalProgress(null);
     }
-  }, [rfp.id, fullProposalDone]);
+  }, [rfp.id, fullProposalDone, pipelineStatus]);
 
   const handleGenerateSections1to3 = useCallback(async () => {
     if (
@@ -577,16 +625,21 @@ export function ProposalDraftWorkspace({
       const { draft: drafted, research: afterPhase3 } = await runPhase3Drafting(rfp.id);
 
       setFullProposalProgress("phase-3-6-self-edit");
-      const { draft: polished, research: afterEdit } = await runPhase3_6SelfEdit(rfp.id);
+      const { draft: polished, research: afterEdit } =
+        await runPhase3_6SelfEditWithRecovery(rfp.id);
 
       setFullProposalProgress("phase-3-5-budget");
-      const { draft, research: updatedResearch, budget } = await runPhase3_5Budget(rfp.id);
+      const { draft, research: updatedResearch, budget } =
+        await runPhase3_5BudgetWithRecovery(rfp.id);
+
+      setFullProposalProgress("phase-4-review");
+      const { research: reviewedResearch } = await runPhase4PreSubmitReview(rfp.id);
 
       skipNextSaveRef.current = true;
       setOutline(draft ?? polished ?? drafted);
-      setResearch(updatedResearch ?? afterEdit ?? afterPhase3);
+      setResearch(reviewedResearch ?? updatedResearch ?? afterEdit ?? afterPhase3);
       if (budget) setBudget(budget);
-      setPresubmitReview(updatedResearch.presubmitReview ?? null);
+      setPresubmitReview(reviewedResearch.presubmitReview ?? null);
       await saveProposalDraft(rfp.id, draft ?? polished ?? drafted);
       setGenerateNotice("Manuscript re-drafted from cached KB research.");
       setActiveTab("content");
@@ -796,6 +849,33 @@ export function ProposalDraftWorkspace({
         </div>
       ) : null}
 
+      {pipelineStatus?.canResume && !pipelineStatus.isComplete ? (
+        <div className="flex flex-col gap-2 border-b border-sky-200/80 bg-sky-50 px-4 py-3 text-sm text-sky-950 md:flex-row md:items-center md:justify-between md:px-5">
+          <div>
+            <p className="font-semibold">Pipeline checkpoint</p>
+            <p className="mt-0.5 leading-relaxed">
+              {pipelineResumeMessage(pipelineStatus)}
+              {pipelineStatus.completedPhases.length > 0 ? (
+                <span className="mt-1 block text-xs text-sky-800/90">
+                  Done:{" "}
+                  {pipelineStatus.completedPhases
+                    .map((p) => PIPELINE_PHASE_LABELS[p])
+                    .join(" · ")}
+                </span>
+              ) : null}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleGenerateFullProposal()}
+            disabled={anyPipelineRunning}
+            className="zo-btn shrink-0 disabled:opacity-60"
+          >
+            {isFullProposalRunning ? "Resuming…" : "Resume pipeline"}
+          </button>
+        </div>
+      ) : null}
+
       {(generateNotice || generateError) && (
         <div
           className={`border-b px-4 py-2.5 text-sm md:px-5 ${
@@ -859,6 +939,8 @@ export function ProposalDraftWorkspace({
                         ? "Senior editor polish…"
                         : fullProposalProgress === "phase-3-5-budget"
                         ? "Building budget…"
+                        : fullProposalProgress === "phase-4-review"
+                          ? "Pre-submit review…"
                         : fullProposalProgress === "recovering"
                           ? "Checking saved draft…"
                           : "Generating…"}
@@ -878,7 +960,9 @@ export function ProposalDraftWorkspace({
                     d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"
                   />
                 </svg>
-                Generate Full Proposal
+                {pipelineStatus?.canResume && !pipelineStatus.isComplete
+                  ? "Resume pipeline"
+                  : "Generate Full Proposal"}
               </>
             )}
           </button>

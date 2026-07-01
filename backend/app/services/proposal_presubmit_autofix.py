@@ -57,10 +57,10 @@ STATIC_SECTION_IDS = (
 
 MAX_ITERATIONS_DETERMINISTIC = 1
 MAX_ITERATIONS_LLM = 1
-_AUTO_FIX_CATEGORIES = frozenset({"copy_paste", "voice", "placeholder"})
+_AUTO_FIX_CATEGORIES = frozenset({"copy_paste", "voice", "placeholder", "grammar", "consistency"})
 
 _SEV_RANK = {"critical": 0, "warning": 1, "info": 2}
-_CAT_RANK = {"placeholder": 0, "copy_paste": 1, "voice": 2, "compliance": 3}
+_CAT_RANK = {"placeholder": 0, "copy_paste": 1, "grammar": 2, "voice": 3, "consistency": 4, "compliance": 5}
 
 SURGICAL_FIX_PROMPT = """You repair ONE proposal section to resolve ALL listed pre-submit review issues.
 
@@ -72,11 +72,13 @@ MANDATORY:
 5. Keep a short [VERIFY: ...] ONLY for requirements still missing from evidence after search.
 6. Wrong-client names → use the target client name or remove the stray reference.
 7. Voice issues → never "The Vendor", "The Offeror", or third-person agency distance in narrative prose.
-8. Do NOT invent clients, metrics, certifications, team members, or dates not supported by evidence.
-9. Evidence may mention OTHER cities/clients from zö's portfolio — NEVER paste those names into this proposal. Generalize ("a prior municipal client") or omit.
-10. Do NOT add new [VERIFY] tags. Do NOT add new paragraphs unless required to replace a tag.
-11. Keep strong existing prose — change only what is needed to clear the listed issues.
-12. Edit ONLY text related to the listed issues — leave every other sentence unchanged.
+8. Grammar: fix "We were …, and is …" → "and are"; never "of we" or "across we" — use our firm / zö agency / our studio.
+9. Subcontractors: if cost proposal lists translation partners, do NOT claim "no subcontractors" — zö self-performs marketing/communications; partners are scoped separately.
+10. Do NOT invent clients, metrics, certifications, team members, or dates not supported by evidence.
+11. Evidence may mention OTHER cities/clients from zö's portfolio — NEVER paste those names into this proposal. Generalize ("a prior municipal client") or omit.
+12. Do NOT add new [VERIFY] tags. Do NOT add new paragraphs unless required to replace a tag.
+13. Keep strong existing prose — change only what is needed to clear the listed issues.
+14. Edit ONLY text related to the listed issues — leave every other sentence unchanged.
 
 Return ONLY JSON: {"content": "full updated section text", "kbRefs": ["E1"]}"""
 
@@ -208,7 +210,7 @@ def _should_run_llm(
     if register == "procurement" and cats <= {"placeholder"}:
         return False
 
-    return "placeholder" in cats
+    return bool(cats & {"placeholder", "grammar", "consistency"})
 
 
 def _needs_kb_warm(section_ids: list[str], grouped: dict[str, list[PreSubmitIssue]], draft: ProposalDraft) -> bool:
@@ -581,6 +583,21 @@ async def run_presubmit_autofix_loop(
         avoidance_block = format_avoidance_block(working_research.writing_avoidances)
 
     sections_targeted = 0
+
+    from app.services.proposal_submission_polish import run_submission_polish_pass
+
+    try:
+        working, polish_logs = await run_submission_polish_pass(
+            rfp.id,
+            rfp=rfp,
+            draft=working,
+            research=working_research,
+        )
+        if polish_logs:
+            save_proposal_draft(working)
+            sections_targeted += len(polish_logs)
+    except Exception as exc:
+        logger.warning("Pre-submit submission polish skipped: %s", exc)
 
     initial_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
 

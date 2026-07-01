@@ -16,6 +16,11 @@ from app.models.proposal import (
 from app.models.rfp import RfpRecord
 from app.services.proposal_brand_voice import classify_section_register
 from app.services.proposal_consistency import scan_manuscript_consistency
+from app.services.proposal_manuscript_cleanup import (
+    GRAMMAR_GLITCH_RE,
+    budget_mentions_subcontractors,
+    deny_subcontractors_claimed,
+)
 from app.services.proposal_voice_enforcement import contains_vendor_language
 
 # Common stale client names from zö portfolio (copy-paste scan)
@@ -197,6 +202,68 @@ def _scan_voice(draft: ProposalDraft) -> list[PreSubmitIssue]:
                     sectionTitle=section.title,
                 )
             )
+    return issues
+
+
+def _scan_grammar(draft: ProposalDraft) -> list[PreSubmitIssue]:
+    issues: list[PreSubmitIssue] = []
+    for section in draft.sections:
+        content = section.content or ""
+        if not content.strip():
+            continue
+        for match in GRAMMAR_GLITCH_RE.finditer(content):
+            start = max(0, match.start() - 30)
+            end = min(len(content), match.end() + 40)
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="grammar",
+                    message=(
+                        "Grammar or pronoun error (e.g. 'of we', 'across we', "
+                        "or 'We were …, and is …')"
+                    ),
+                    sectionId=section.id,
+                    sectionTitle=section.title,
+                    excerpt=content[start:end].strip(),
+                )
+            )
+            break
+    return issues
+
+
+def _scan_subcontractor_narrative(
+    *,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+) -> list[PreSubmitIssue]:
+    budget = research.budget if research else None
+    if not budget_mentions_subcontractors(budget, draft):
+        return []
+
+    issues: list[PreSubmitIssue] = []
+    for section in draft.sections:
+        content = section.content or ""
+        if not content.strip():
+            continue
+        if not deny_subcontractors_claimed(content):
+            continue
+        title_lower = section.title.casefold()
+        if "company background" not in title_lower and "company overview" not in title_lower:
+            if "self-perform all work" not in content.casefold():
+                continue
+        issues.append(
+            PreSubmitIssue(
+                severity="critical",
+                category="consistency",
+                message=(
+                    "Company narrative claims no subcontractors but cost proposal / "
+                    "cultural competency sections document translation partners"
+                ),
+                sectionId=section.id,
+                sectionTitle=section.title,
+                excerpt=content[:200],
+            )
+        )
     return issues
 
 
@@ -406,6 +473,8 @@ def run_presubmit_review(
     issues: list[PreSubmitIssue] = []
     issues.extend(_scan_copy_paste(draft=draft, rfp=rfp))
     issues.extend(_scan_voice(draft=draft))
+    issues.extend(_scan_grammar(draft=draft))
+    issues.extend(_scan_subcontractor_narrative(draft=draft, research=research))
     issues.extend(scan_manuscript_consistency(draft=draft, research=research, rfp=rfp))
     if extra_issues:
         issues.extend(extra_issues)

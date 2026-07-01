@@ -6,16 +6,15 @@ import re
 
 from app.models.proposal import ProposalSection
 
+from app.services.proposal_manuscript_cleanup import GRAMMAR_GLITCH_RE
+
 _VERIFY_RE = re.compile(r"\[VERIFY:", re.I)
 _STUB_RE = re.compile(
     r"insufficient evidence in corpus|section drafting failed|generation failed|"
     r"error generating|failed to generate|drafting error",
     re.I,
 )
-_GRAMMAR_GLITCH_RE = re.compile(
-    r"\bbeing we\b|\bwe we\b|\bthe the\b|\bcall back\b.*\bwe\b",
-    re.I,
-)
+_GRAMMAR_GLITCH_RE = GRAMMAR_GLITCH_RE
 MIN_WORDS_RATIO = 0.2
 
 
@@ -90,6 +89,11 @@ def weakness_score(section: ProposalSection) -> int:
 
 
 def is_weak_section(section: ProposalSection) -> bool:
+    content = section.content or ""
+    if verify_count(content) > 0:
+        return True
+    if _GRAMMAR_GLITCH_RE.search(content):
+        return True
     return weakness_score(section) >= 30
 
 
