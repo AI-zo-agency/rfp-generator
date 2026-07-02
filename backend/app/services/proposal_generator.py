@@ -23,8 +23,15 @@ from app.services.go_no_go_service import (
 )
 from app.services.proposal_brand_voice import format_register_block
 from app.services.proposal_langchain import run_tool_research_agent
-from app.services.proposal_voice_enforcement import enforce_narrative_voice
+from app.services.proposal_voice_enforcement import (
+    enforce_narrative_voice,
+    is_duplicate_static_rfp_section,
+)
 from app.services.proposal_repository import (
+    aget_proposal_draft,
+    aget_research_cache,
+    asave_proposal_draft,
+    asave_research_cache,
     get_proposal_draft,
     get_research_cache,
     save_proposal_draft,
@@ -100,6 +107,17 @@ STATIC_SECTION_IDS = (
     "section-2-team-overview",
     "section-3-our-work",
 )
+
+
+def static_sections_1_3_have_content(draft: ProposalDraft | None) -> bool:
+    """True when all three zö template sections have body text (by id, not outline order)."""
+    if not draft:
+        return False
+    by_id = {section.id: section for section in draft.sections}
+    return all(
+        sid in by_id and (by_id[sid].content or "").strip()
+        for sid in STATIC_SECTION_IDS
+    )
 
 
 from app.services.proposal_common import ProposalError, can_start_proposal, load_rfp_for_proposal
@@ -479,6 +497,128 @@ def _merge_static_with_rfp_sections(
     return [*static_sections, *rfp_only]
 
 
+async def _persist_sections_1_3_partial(
+    rfp_id: str,
+    sections_1_3: list[ProposalSection],
+    provider: str,
+    *,
+    brand_voice: ProposalBrandVoice | None = None,
+) -> None:
+    """Save sections 1–3 as each completes so the UI can show progress immediately."""
+    rfp = get_rfp(rfp_id)
+    page_limit = rfp.page_limit if rfp else 30
+    existing = await aget_proposal_draft(rfp_id)
+    if existing and len(existing.sections) >= 3:
+        merged = _merge_sections_into_draft(existing.sections, sections_1_3)
+    else:
+        merged = _merge_sections_into_draft(_default_sections(page_limit), sections_1_3)
+
+    merged = [
+        section.model_copy(
+            update={
+                "content": enforce_narrative_voice(
+                    section.content,
+                    section_id=section.id,
+                    title=section.title,
+                    zo_mode=section.mode,
+                    register="narrative",
+                )
+            }
+        )
+        if section.content.strip()
+        else section
+        for section in merged
+    ]
+
+    now = datetime.now(timezone.utc).isoformat()
+    draft = ProposalDraft(
+        rfpId=rfp_id,
+        sections=merged,
+        updatedAt=now,
+        generatedAt=now,
+        provider=provider,
+    )
+    await asave_proposal_draft(draft)
+
+    if brand_voice is not None:
+        prior_research = await aget_research_cache(rfp_id)
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            rfpSections=prior_research.rfp_sections if prior_research else [],
+            questions=prior_research.questions if prior_research else [],
+            brandVoice=brand_voice,
+            evidenceCorpus=prior_research.evidence_corpus if prior_research else [],
+            retrievalRounds=prior_research.retrieval_rounds if prior_research else 0,
+            coverageThreshold=prior_research.coverage_threshold if prior_research else 85,
+            pipelineCheckpoint=prior_research.pipeline_checkpoint if prior_research else None,
+            updatedAt=now,
+            provider=provider,
+        )
+        await asave_research_cache(research)
+
+
+async def _persist_phase3_partial(
+    rfp_id: str,
+    *,
+    static_sections: list[ProposalSection],
+    drafted_rfp_sections: list[ProposalSection],
+    rfp_sections: list[RfpSectionMap],
+    provider: str,
+) -> None:
+    """Save each drafted RFP section immediately; remaining slots stay as outline stubs."""
+    drafted_ids = {section.id for section in drafted_rfp_sections}
+    stubs: list[ProposalSection] = []
+    for mapped in rfp_sections:
+        if mapped.id in drafted_ids:
+            continue
+        if is_duplicate_static_rfp_section(mapped.title):
+            continue
+        stubs.append(
+            ProposalSection(
+                id=mapped.id,
+                title=mapped.title,
+                pageLimit=mapped.page_limit,
+                wordTarget=800,
+                required=True,
+                custom=False,
+                source="rfp",
+                mode=mapped.zo_mode or "write",
+                content="",
+                status="outline",
+            )
+        )
+
+    merged_sections = _merge_static_with_rfp_sections(
+        static_sections,
+        [*drafted_rfp_sections, *stubs],
+    )
+    merged_sections = [
+        section.model_copy(
+            update={
+                "content": enforce_narrative_voice(
+                    section.content,
+                    section_id=section.id,
+                    title=section.title,
+                    zo_mode=section.mode,
+                )
+            }
+        )
+        if section.content.strip()
+        else section
+        for section in merged_sections
+    ]
+
+    now = datetime.now(timezone.utc).isoformat()
+    draft = ProposalDraft(
+        rfpId=rfp_id,
+        sections=merged_sections,
+        updatedAt=now,
+        generatedAt=now,
+        provider=provider,
+    )
+    await asave_proposal_draft(draft)
+
+
 def _load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]:
     return load_rfp_for_proposal(rfp_id)
 
@@ -563,6 +703,18 @@ async def generate_sections_1_3(
 
     logger.info("Sections 1–3 generation (LangGraph) starting for %s", rfp_id)
 
+    async def _on_sections_partial(
+        partial: list[ProposalSection],
+        provider: str,
+        brand_voice: ProposalBrandVoice | None,
+    ) -> None:
+        await _persist_sections_1_3_partial(
+            rfp_id,
+            partial,
+            provider,
+            brand_voice=brand_voice,
+        )
+
     sections_1_3, brand_voice, provider = await run_sections_1_3_graph(
         rfp_id=rfp.id,
         rfp_title=rfp.title,
@@ -571,7 +723,63 @@ async def generate_sections_1_3(
         rfp_location=rfp.location or None,
         rfp_context=rfp_context,
         page_limit=rfp.page_limit,
+        on_sections_partial=_on_sections_partial,
     )
+
+    empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
+    if empty_ids:
+        logger.warning(
+            "Sections 1–3 first pass left empty %s for %s — retrying graph once",
+            empty_ids,
+            rfp_id,
+        )
+        sections_1_3, brand_voice, provider = await run_sections_1_3_graph(
+            rfp_id=rfp.id,
+            rfp_title=rfp.title,
+            rfp_client=rfp.client,
+            rfp_sector=rfp.sector,
+            rfp_location=rfp.location or None,
+            rfp_context=rfp_context,
+            page_limit=rfp.page_limit,
+            on_sections_partial=_on_sections_partial,
+        )
+        empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
+        if empty_ids:
+            from app.services.proposal_section_editor import improve_proposal_section
+
+            logger.warning(
+                "Sections 1–3 graph still empty %s for %s — targeted improve pass",
+                empty_ids,
+                rfp_id,
+            )
+            for sid in empty_ids:
+                section = next((s for s in sections_1_3 if s.id == sid), None)
+                if not section:
+                    continue
+                try:
+                    improved, _, _, _, _ = await improve_proposal_section(
+                        rfp_id,
+                        sid,
+                        "Generate the full section from the knowledge base. "
+                        "Use [E#] citations. Meet the word target. No placeholders.",
+                        persist=True,
+                    )
+                    if (improved.content or "").strip():
+                        sections_1_3 = [
+                            improved if s.id == sid else s for s in sections_1_3
+                        ]
+                except Exception as exc:
+                    logger.warning(
+                        "Targeted improve failed for %s (%s): %s", rfp_id, sid, exc
+                    )
+            empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
+            if empty_ids:
+                titles = [s.title for s in sections_1_3 if s.id in empty_ids]
+                raise ProposalError(
+                    "Sections 1–3 generation produced empty content for: "
+                    f"{', '.join(titles)}. Check KB (02_ company overview, 04 bios, 03_CS) and retry.",
+                    status_code=502,
+                )
 
     now = datetime.now(timezone.utc).isoformat()
     existing = get_proposal_draft(rfp_id)
@@ -658,6 +866,26 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         len(research.evidence_corpus),
     )
 
+    async def _on_phase3_batch(
+        drafted_sections: list[ProposalSection],
+        batch_provider: str,
+    ) -> None:
+        await _persist_phase3_partial(
+            rfp_id,
+            static_sections=static_sections,
+            drafted_rfp_sections=drafted_sections,
+            rfp_sections=research.rfp_sections,
+            provider=batch_provider,
+        )
+
+    await _persist_phase3_partial(
+        rfp_id,
+        static_sections=static_sections,
+        drafted_rfp_sections=[],
+        rfp_sections=research.rfp_sections,
+        provider="phase-3",
+    )
+
     drafted_rfp_sections, provider = await run_drafting_graph(
         rfp_id=rfp.id,
         rfp_title=rfp.title,
@@ -672,6 +900,7 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         writing_avoidances=research.writing_avoidances,
         loss_lessons=research.loss_lessons,
         proof_points=research.proof_points,
+        on_sections_drafted=_on_phase3_batch,
     )
 
     merged_sections = _merge_static_with_rfp_sections(
@@ -837,7 +1066,11 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         )
 
     research = get_research_cache(rfp_id)
-    review = run_presubmit_review(rfp=rfp, draft=draft, research=research)
+    from app.services.proposal_presubmit_review import run_presubmit_review_with_manual_flags
+
+    review = run_presubmit_review_with_manual_flags(
+        rfp=rfp, draft=draft, research=research, finalized=False
+    )
 
     now = datetime.now(timezone.utc).isoformat()
     updated_research = (research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)).model_copy(
@@ -915,6 +1148,63 @@ async def run_phase4_presubmit_autofix(
         stopped_reason,
     )
     return review, updated_research, updated_draft, report
+
+
+async def run_phase4_finalize_gaps(
+    rfp_id: str,
+) -> tuple[PreSubmitReview, ProposalResearchCache, ProposalDraft]:
+    """Final editor: Supermemory gap-fill + owner-assigned MANUAL FILL flags."""
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise ProposalError("RFP not found", status_code=404)
+
+    draft = get_proposal_draft(rfp_id)
+    if not draft or not any(s.content.strip() for s in draft.sections):
+        raise ProposalError(
+            "No proposal content to finalize. Generate proposal sections first.",
+            status_code=400,
+        )
+
+    research = get_research_cache(rfp_id)
+    from app.services.proposal_submission_gap_finalizer import (
+        attach_manual_fill_flags_to_review,
+        run_submission_gap_finalize_pass,
+    )
+    from app.services.proposal_presubmit_review import run_presubmit_review
+
+    updated_draft, logs, updated_research = await run_submission_gap_finalize_pass(
+        rfp_id,
+        rfp=rfp,
+        draft=draft,
+        research=research,
+    )
+    if logs:
+        logger.info("Phase 4 finalize gaps for %s: %s", rfp_id, "; ".join(logs[:5]))
+
+    review = run_presubmit_review(rfp=rfp, draft=updated_draft, research=updated_research)
+    review = attach_manual_fill_flags_to_review(
+        review,
+        draft=updated_draft,
+        research=updated_research,
+        rfp=rfp,
+        kb_searched=True,
+        finalized=True,
+    )
+
+    now = datetime.now(timezone.utc).isoformat()
+    saved_research = (
+        updated_research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)
+    ).model_copy(update={"presubmit_review": review, "updated_at": now})
+    save_research_cache(saved_research)
+    save_proposal_draft(updated_draft)
+
+    logger.info(
+        "Phase 4 finalize gaps for %s: %d manual fill flag(s), ready=%s",
+        rfp_id,
+        len(review.manual_fill_flags),
+        review.ready_to_submit,
+    )
+    return review, saved_research, updated_draft
 
 
 async def generate_full_proposal(

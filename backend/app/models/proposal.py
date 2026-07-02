@@ -142,6 +142,29 @@ class ComplianceCheckItem(BaseModel):
     notes: str = ""
 
 
+class ManualFillFlag(BaseModel):
+    """Submission gap flagged for human completion after KB + final editor pass."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    section_title: str = Field(alias="sectionTitle")
+    kind: Literal[
+        "verify",
+        "placeholder",
+        "manual_fill",
+        "compliance",
+        "budget",
+        "consistency",
+        "other",
+    ] = "other"
+    tag: str
+    highlight_text: str | None = Field(default=None, alias="highlightText")
+    owner: str | None = None
+    finalized: bool = False
+    kb_searched: bool = Field(default=False, alias="kbSearched")
+
+
 class PreSubmitReview(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -149,6 +172,9 @@ class PreSubmitReview(BaseModel):
     issues: list[PreSubmitIssue] = Field(default_factory=list)
     compliance_checklist: list[ComplianceCheckItem] = Field(
         default_factory=list, alias="complianceChecklist"
+    )
+    manual_fill_flags: list[ManualFillFlag] = Field(
+        default_factory=list, alias="manualFillFlags"
     )
     summary: str = ""
     issues_markdown: str = Field(default="", alias="issuesMarkdown")
@@ -325,6 +351,9 @@ class SectionImproveRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     message: str = Field(min_length=1, max_length=4000)
+    selection_start: int | None = Field(default=None, alias="selectionStart", ge=0)
+    selection_end: int | None = Field(default=None, alias="selectionEnd", ge=0)
+    selection_text: str | None = Field(default=None, alias="selectionText", max_length=8000)
 
 
 class ProposalPhase3Response(BaseModel):
@@ -350,6 +379,7 @@ class ProposalPhase4Response(BaseModel):
     ok: bool = True
     review: PreSubmitReview
     research: ProposalResearchCache
+    draft: ProposalDraft | None = None
 
 
 class ProposalPhase4AutoFixResponse(BaseModel):

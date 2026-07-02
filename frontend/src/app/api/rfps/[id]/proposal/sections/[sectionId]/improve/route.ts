@@ -15,7 +15,12 @@ export async function POST(
   { params }: { params: Promise<{ id: string; sectionId: string }> }
 ) {
   const { id, sectionId } = await params;
-  let body: { message?: string };
+  let body: {
+    message?: string;
+    selectionStart?: number;
+    selectionEnd?: number;
+    selectionText?: string;
+  };
   try {
     body = await request.json();
   } catch {
@@ -31,7 +36,12 @@ export async function POST(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: body.message }),
+        body: JSON.stringify({
+          message: body.message,
+          selectionStart: body.selectionStart,
+          selectionEnd: body.selectionEnd,
+          selectionText: body.selectionText,
+        }),
         timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS,
       }
     );

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from app.models.rfp import RfpRecord
 from app.services.go_no_go_service import RfpContentInfo, _assess_rfp_content, _build_rfp_context
 from app.services.rfp_repository import get_rfp
@@ -34,3 +36,8 @@ def load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]:
             status_code=400,
         )
     return rfp, content, rfp_context
+
+
+async def aload_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]:
+    """Load RFP + PDF text off the event loop (Supabase PDF fetch is blocking)."""
+    return await asyncio.to_thread(load_rfp_for_proposal, rfp_id)

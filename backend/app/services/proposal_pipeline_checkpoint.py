@@ -11,6 +11,7 @@ from app.models.proposal import (
     ProposalPipelineCheckpoint,
     ProposalResearchCache,
 )
+from app.services.proposal_generator import static_sections_1_3_have_content
 from app.services.proposal_pipeline_status import count_verify_tags
 from app.services.proposal_repository import get_research_cache, save_research_cache
 
@@ -79,12 +80,37 @@ def _checkpoint_age_sec(checkpoint: ProposalPipelineCheckpoint) -> float | None:
         return None
 
 
-_IN_PROGRESS_STALE_SEC = 600
+_IN_PROGRESS_STALE_SEC = 90
 
 
-def clear_stale_in_progress_checkpoint(rfp_id: str) -> bool:
+def _self_edit_considered_complete(
+    *,
+    draft: ProposalDraft | None,
+    research: ProposalResearchCache | None,
+) -> bool:
+    """Self-edit is done when checkpoint says so — leftover VERIFY/MANUAL FILL is handoff, not re-polish."""
+    if not research:
+        return False
+    cp = research.pipeline_checkpoint
+    if not cp:
+        return False
+    if cp.last_failed_phase == "phase-3-6-self-edit":
+        err = (cp.last_error or "").lower()
+        if "verify" in err or "placeholder" in err:
+            return phase_is_complete(draft=draft, research=research, phase="phase-3")
+    if cp.last_completed_phase:
+        return _phase_index(cp.last_completed_phase) >= _phase_index("phase-3-6-self-edit")
+    return False
+
+
+def clear_stale_in_progress_checkpoint(
+    rfp_id: str,
+    *,
+    research: ProposalResearchCache | None = None,
+) -> bool:
     """Mark abandoned in-progress phases failed after server kill or disconnect."""
-    research = get_research_cache(rfp_id)
+    if research is None:
+        research = get_research_cache(rfp_id)
     if not research or not research.pipeline_checkpoint:
         return False
     cp = research.pipeline_checkpoint
@@ -96,7 +122,7 @@ def clear_stale_in_progress_checkpoint(rfp_id: str) -> bool:
     record_phase_failed(
         rfp_id,
         cp.in_progress_phase,
-        "Phase interrupted (server or connection lost). Resume to retry.",
+        "Phase interrupted (connection lost or laptop sleep). Resume to continue.",
     )
     logger.warning(
         "Pipeline checkpoint: %s cleared stale in-progress %s (age=%.0fs)",
@@ -131,6 +157,18 @@ def _next_phase_after(completed_phase: str) -> str:
 
 
 def record_phase_completed(rfp_id: str, phase: str) -> None:
+    if phase == "sections-1-3":
+        from app.services.proposal_repository import get_proposal_draft
+
+        draft = get_proposal_draft(rfp_id)
+        if not static_sections_1_3_have_content(draft):
+            record_phase_failed(
+                rfp_id,
+                phase,
+                "Sections 1–3 incomplete — one or more static sections (Company, Team, Case Studies) has no content",
+            )
+            return
+
     if phase == "phase-3-6-self-edit":
         from app.services.proposal_repository import get_proposal_draft
 
@@ -138,12 +176,11 @@ def record_phase_completed(rfp_id: str, phase: str) -> None:
         if draft:
             remaining = count_verify_tags(draft)
             if remaining > 0:
-                record_phase_failed(
+                logger.info(
+                    "Pipeline checkpoint: %s self-edit done with %d VERIFY tag(s) — manual handoff, not blocking",
                     rfp_id,
-                    phase,
-                    f"{remaining} unresolved [VERIFY] placeholder(s) remain after self-edit",
+                    remaining,
                 )
-                return
 
     next_phase = _next_phase_after(phase)
     checkpoint = ProposalPipelineCheckpoint(
@@ -201,9 +238,7 @@ def phase_is_complete(
     phase: str,
 ) -> bool:
     if phase == "sections-1-3":
-        if not draft or len(draft.sections) < 3:
-            return False
-        return all(section.content.strip() for section in draft.sections[:3])
+        return static_sections_1_3_have_content(draft)
 
     if not research:
         return False
@@ -225,13 +260,14 @@ def phase_is_complete(
         return filled >= max(1, int(len(mapped_ids) * 0.85))
 
     if phase == "phase-3-6-self-edit":
-        if draft and count_verify_tags(draft) > 0:
-            return False
+        if _self_edit_considered_complete(draft=draft, research=research):
+            return True
         cp = research.pipeline_checkpoint
         if cp and cp.last_failed_phase == phase:
+            err = (cp.last_error or "").lower()
+            if "verify" in err and phase_is_complete(draft=draft, research=research, phase="phase-3"):
+                return True
             return False
-        if cp and cp.last_completed_phase:
-            return _phase_index(cp.last_completed_phase) >= _phase_index(phase)
         return False
 
     if phase == "phase-3-5-budget":
@@ -258,9 +294,18 @@ def resolve_resume_phase(
     if research is None:
         research = get_research_cache(rfp_id)
 
+    if draft is not None and not static_sections_1_3_have_content(draft):
+        return "sections-1-3"
+
     cp = research.pipeline_checkpoint if research else None
     if cp:
         if cp.last_failed_phase and cp.last_failed_phase in PIPELINE_PHASES:
+            if cp.last_failed_phase == "phase-3-6-self-edit":
+                err = (cp.last_error or "").lower()
+                if ("verify" in err or "placeholder" in err) and not phase_is_complete(
+                    draft=draft, research=research, phase="phase-3-5-budget"
+                ):
+                    return "phase-3-5-budget"
             return cp.last_failed_phase
         if cp.in_progress_phase and cp.in_progress_phase in PIPELINE_PHASES:
             return cp.in_progress_phase
@@ -272,8 +317,6 @@ def resolve_resume_phase(
         if not phase_is_complete(draft=draft, research=research, phase=phase):
             return phase
     if draft and research:
-        if count_verify_tags(draft) > 0:
-            return "phase-3-6-self-edit"
         if not research.presubmit_review:
             return "phase-4-review"
         if not research.proof_points:
@@ -294,7 +337,7 @@ def build_pipeline_status(
     if research is None:
         research = get_research_cache(rfp_id)
 
-    clear_stale_in_progress_checkpoint(rfp_id)
+    clear_stale_in_progress_checkpoint(rfp_id, research=research)
     if research is None:
         research = get_research_cache(rfp_id)
 

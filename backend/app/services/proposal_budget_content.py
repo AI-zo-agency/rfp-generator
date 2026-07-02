@@ -193,11 +193,7 @@ def render_budget_markdown(budget: ProposalBudget) -> str:
             lines.append(f"- {note}")
         lines.append("")
 
-    if budget.pricing_flags:
-        lines.append("## Pricing Flags")
-        for flag in budget.pricing_flags:
-            lines.append(f"- {flag}")
-        lines.append("")
+    # pricing_flags stay on ProposalBudget for internal review — not in submission manuscript
 
     if budget.design_brief.strip():
         lines.append(

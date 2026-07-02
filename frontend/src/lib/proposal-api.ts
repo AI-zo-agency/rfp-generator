@@ -64,6 +64,7 @@ import {
   type PipelinePhase,
   type ProposalPipelineStatus,
 } from "./proposal-pipeline-checkpoint";
+import { staticSections1to3Complete } from "./proposal-draft";
 import { PROPOSAL_STAGE_TIMEOUT_MS } from "./proposal-stage-timeout";
 
 export type { PipelinePhase, ProposalPipelineStatus };
@@ -98,10 +99,6 @@ export function validateStagedProposalComplete(
   draft: ProposalOutline,
   research: ProposalResearch
 ): string | null {
-  const verifyCount = countVerifyTagsInOutline(draft);
-  if (verifyCount > 0) {
-    return `Manuscript still has ${verifyCount} unresolved [VERIFY] placeholder(s). Re-run self-edit or fix sections manually.`;
-  }
   if (!research.evidenceCorpus?.length) {
     return "Phase 2 incomplete — no evidence corpus.";
   }
@@ -113,6 +110,10 @@ export function validateStagedProposalComplete(
   }
   if (!research.presubmitReview) {
     return "Phase 4 incomplete — pre-submit review not run.";
+  }
+  const verifyCount = countVerifyTagsInOutline(draft);
+  if (verifyCount > 0) {
+    return `Manuscript still has ${verifyCount} unresolved [VERIFY] placeholder(s). Use Finalize gaps or fix manually before upload.`;
   }
   return null;
 }
@@ -128,6 +129,54 @@ export type FullProposalProgress =
 
 export function countSectionsWithContent(outline: ProposalOutline): number {
   return outline.sections.filter((s) => s.content?.trim()).length;
+}
+
+/** Poll saved draft while a long backend phase runs — surfaces each section as it lands. */
+export function startLiveDraftPolling(
+  rfpId: string,
+  onDraftUpdate: (draft: ProposalOutline) => void
+): () => void {
+  let lastUpdatedAt = "";
+  let stopped = false;
+
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const snapshot = await fetchProposalDraft(rfpId);
+      if (
+        snapshot.draft &&
+        snapshot.draft.updatedAt &&
+        snapshot.draft.updatedAt !== lastUpdatedAt
+      ) {
+        lastUpdatedAt = snapshot.draft.updatedAt;
+        onDraftUpdate(snapshot.draft);
+      }
+    } catch {
+      // Ignore transient poll errors during long runs.
+    }
+  };
+
+  void poll();
+  const timer = setInterval(() => {
+    void poll();
+  }, LIVE_DRAFT_POLL_INTERVAL_MS);
+
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
+function withLiveDraftPolling<T>(
+  rfpId: string,
+  onDraftUpdate: ((draft: ProposalOutline) => void) | undefined,
+  run: () => Promise<T>
+): Promise<T> {
+  if (!onDraftUpdate) {
+    return run();
+  }
+  const stop = startLiveDraftPolling(rfpId, onDraftUpdate);
+  return run().finally(stop);
 }
 
 /** Load draft from DB when HTTP failed but backend may have finished saving. */
@@ -202,6 +251,7 @@ export async function runPhase3_6SelfEditWithRecovery(
 
 const STAGE_POLL_INTERVAL_MS = 12_000;
 const STAGE_POLL_MAX_MS = 22 * 60 * 1000;
+const LIVE_DRAFT_POLL_INTERVAL_MS = 3_000;
 /** If checkpoint says in-flight but timestamps never move, backend was killed — don't block resume. */
 const IN_FLIGHT_STALE_MS = 90_000;
 
@@ -224,18 +274,25 @@ async function captureProposalTimestamps(rfpId: string): Promise<{
 async function pollForBackendStageSave(
   rfpId: string,
   startedAt: { draftAt: string; researchAt: string },
-  options?: { minSections?: number; requireBudget?: boolean }
+  options?: { minSections?: number; requireBudget?: boolean; requireStaticSections1to3?: boolean }
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch } | null> {
   const minSections = options?.minSections ?? 10;
   const deadline = Date.now() + STAGE_POLL_MAX_MS;
   let lastResearchAt = "";
   let stablePolls = 0;
 
+  const sectionsReady = (draft: ProposalOutline) => {
+    if (options?.requireStaticSections1to3) {
+      return staticSections1to3Complete(draft);
+    }
+    return countSectionsWithContent(draft) >= minSections;
+  };
+
   while (Date.now() < deadline) {
     await sleep(STAGE_POLL_INTERVAL_MS);
     const snapshot = await fetchProposalDraft(rfpId);
     const { draft, research } = snapshot;
-    if (!draft || !research || countSectionsWithContent(draft) < minSections) {
+    if (!draft || !research || !sectionsReady(draft)) {
       continue;
     }
     if (options?.requireBudget && !research.budget) {
@@ -264,7 +321,7 @@ async function pollForBackendStageSave(
   if (
     finalSnapshot.draft &&
     finalSnapshot.research &&
-    countSectionsWithContent(finalSnapshot.draft) >= minSections &&
+    sectionsReady(finalSnapshot.draft) &&
     (!options?.requireBudget || finalSnapshot.research.budget)
   ) {
     return {
@@ -286,6 +343,7 @@ export async function generateFullProposalStaged(
   options?: {
     startFrom?: PipelinePhase;
     forceRestart?: boolean;
+    onDraftUpdate?: (draft: ProposalOutline) => void;
   }
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
   const snapshot = await fetchProposalDraft(rfpId);
@@ -297,6 +355,10 @@ export async function generateFullProposalStaged(
     : (options?.startFrom ??
       snapshot.pipelineStatus?.resumeFromPhase ??
       resolveResumePhase(draft, research));
+
+  if (draft && !staticSections1to3Complete(draft)) {
+    resumeFrom = "sections-1-3";
+  }
 
   if (draft && research) {
     const blocker = validateStagedProposalComplete(draft, research);
@@ -322,7 +384,9 @@ export async function generateFullProposalStaged(
   if (run("sections-1-3")) {
     if (!(await skipIfPhaseAlreadyFinished("sections-1-3"))) {
       onProgress?.("sections-1-3");
-      draft = await generateProposalSections1to3(rfpId);
+      draft = await withLiveDraftPolling(rfpId, options?.onDraftUpdate, () =>
+        generateProposalSections1to3(rfpId)
+      );
       ({ draft, research } = await refreshProposalSnapshot(rfpId));
     }
   }
@@ -338,7 +402,9 @@ export async function generateFullProposalStaged(
   if (run("phase-3")) {
     if (!(await skipIfPhaseAlreadyFinished("phase-3"))) {
       onProgress?.("phase-3");
-      const phase3 = await runPhase3Drafting(rfpId);
+      const phase3 = await withLiveDraftPolling(rfpId, options?.onDraftUpdate, () =>
+        runPhase3Drafting(rfpId)
+      );
       draft = phase3.draft;
       research = phase3.research;
     }
@@ -347,7 +413,9 @@ export async function generateFullProposalStaged(
   if (run("phase-3-6-self-edit")) {
     if (!(await skipIfPhaseAlreadyFinished("phase-3-6-self-edit"))) {
       onProgress?.("phase-3-6-self-edit");
-      const edited = await runPhase3_6SelfEditWithRecovery(rfpId);
+      const edited = await withLiveDraftPolling(rfpId, options?.onDraftUpdate, () =>
+        runPhase3_6SelfEditWithRecovery(rfpId)
+      );
       draft = edited.draft;
       research = edited.research;
     }
@@ -377,11 +445,11 @@ export async function generateFullProposalStaged(
 
   const blocker = validateStagedProposalComplete(draft, research);
   if (blocker) {
-    // VERIFY-only blockers: one more self-edit pass before giving up
-    if (
-      blocker.toLowerCase().includes("verify") &&
-      !options?.forceRestart
-    ) {
+    const lower = blocker.toLowerCase();
+    if (lower.includes("verify") && research.budget && research.presubmitReview) {
+      return { draft, research };
+    }
+    if (lower.includes("verify") && !options?.forceRestart) {
       onProgress?.("phase-3-6-self-edit");
       const retry = await runPhase3_6SelfEditWithRecovery(rfpId);
       draft = retry.draft;
@@ -389,7 +457,7 @@ export async function generateFullProposalStaged(
       ({ draft, research } = await refreshProposalSnapshot(rfpId));
       const retryBlocker =
         draft && research ? validateStagedProposalComplete(draft, research) : blocker;
-      if (!retryBlocker) {
+      if (!retryBlocker || retryBlocker.toLowerCase().includes("verify")) {
         return { draft: draft!, research: research! };
       }
       throw new Error(retryBlocker);
@@ -440,6 +508,7 @@ async function waitForInFlightPhase(
     if (advanced) {
       await pollForBackendStageSave(rfpId, startedAt, {
         minSections: phase === "sections-1-3" ? 3 : 10,
+        requireStaticSections1to3: phase === "sections-1-3",
         requireBudget: phase === "phase-3-5-budget",
       });
       return;
@@ -454,32 +523,49 @@ export async function fetchProposalDraft(rfpId: string): Promise<{
   provider?: string | null;
   pipelineStatus: ProposalPipelineStatus | null;
 }> {
-  const res = await fetch(`/api/rfps/${rfpId}/proposal`, { cache: "no-store" });
-  if (!res.ok) {
-    return { draft: null, research: null, pipelineStatus: null };
-  }
-  const data = (await res.json()) as {
-    draft: ApiProposalDraft | null;
-    research: ProposalResearch | null;
-    pipelineStatus?: ProposalPipelineStatus | null;
+  const empty = {
+    draft: null as ProposalOutline | null,
+    research: null as ProposalResearch | null,
+    pipelineStatus: null as ProposalPipelineStatus | null,
   };
-  if (!data.draft?.sections?.length) {
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = await fetch(`/api/rfps/${rfpId}/proposal`, { cache: "no-store" });
+    if (res.status === 503 || res.status === 502) {
+      if (attempt < 3) {
+        await sleep(500 * (attempt + 1));
+        continue;
+      }
+      return empty;
+    }
+    if (!res.ok) {
+      return empty;
+    }
+    const data = (await res.json()) as {
+      draft: ApiProposalDraft | null;
+      research: ProposalResearch | null;
+      pipelineStatus?: ProposalPipelineStatus | null;
+    };
+    if (!data.draft?.sections?.length) {
+      return {
+        draft: null,
+        research: data.research ?? null,
+        pipelineStatus: data.pipelineStatus ?? null,
+      };
+    }
+    const draft = apiDraftToOutline(data.draft);
+    const research = data.research ?? null;
     return {
-      draft: null,
-      research: data.research ?? null,
-      pipelineStatus: data.pipelineStatus ?? null,
+      draft,
+      research,
+      provider: data.draft.provider,
+      pipelineStatus:
+        data.pipelineStatus ??
+        buildPipelineStatus(draft, research),
     };
   }
-  const draft = apiDraftToOutline(data.draft);
-  const research = data.research ?? null;
-  return {
-    draft,
-    research,
-    provider: data.draft.provider,
-    pipelineStatus:
-      data.pipelineStatus ??
-      buildPipelineStatus(draft, research),
-  };
+
+  return empty;
 }
 
 export async function saveProposalDraft(
@@ -806,6 +892,41 @@ export async function runPhase4PreSubmitReview(
   return { review: data.review, research: data.research };
 }
 
+export async function runPhase4FinalizeGaps(
+  rfpId: string
+): Promise<{
+  review: PreSubmitReview;
+  research: ProposalResearch;
+  draft: ProposalOutline | null;
+}> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-4-finalize-gaps`, {
+    ...proposalPostInit(),
+  });
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    review?: PreSubmitReview;
+    research?: ProposalResearch;
+    draft?: ApiProposalDraft | null;
+  };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from finalize gaps.");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Finalize gaps failed");
+  }
+  if (!data.review || !data.research) {
+    throw new Error("No finalize gaps data returned");
+  }
+  return {
+    review: data.review,
+    research: data.research,
+    draft: data.draft ? apiDraftToOutline(data.draft) : null,
+  };
+}
+
 export async function runPhase4PreSubmitAutoFix(
   rfpId: string,
   options?: { useLlm?: boolean; signal?: AbortSignal }
@@ -856,7 +977,10 @@ export async function runPhase4PreSubmitAutoFix(
 export async function improveProposalSection(
   rfpId: string,
   sectionId: string,
-  message: string
+  message: string,
+  options?: {
+    selection?: { start: number; end: number; text: string };
+  }
 ): Promise<{
   section: OutlineSection;
   draft: ProposalOutline;
@@ -868,7 +992,16 @@ export async function improveProposalSection(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({
+        message,
+        ...(options?.selection
+          ? {
+              selectionStart: options.selection.start,
+              selectionEnd: options.selection.end,
+              selectionText: options.selection.text,
+            }
+          : {}),
+      }),
     }
   );
   const text = await res.text();

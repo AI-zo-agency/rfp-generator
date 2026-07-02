@@ -36,7 +36,7 @@ from app.services.proposal_presubmit_review import (
     run_presubmit_review,
     scan_section_issues,
 )
-from app.services.proposal_repository import save_proposal_draft
+from app.services.proposal_repository import asave_proposal_draft
 from app.services.proposal_evidence_corpus import merge_hits_into_corpus
 from app.services.proposal_retrieval_graph import (
     EXCERPT_MAX_CHARS,
@@ -602,7 +602,7 @@ async def run_presubmit_autofix_loop(
             research=working_research,
         )
         if polish_logs:
-            save_proposal_draft(working)
+            await asave_proposal_draft(working)
             sections_targeted += len(polish_logs)
     except Exception as exc:
         logger.warning("Pre-submit submission polish skipped: %s", exc)
@@ -615,7 +615,7 @@ async def run_presubmit_autofix_loop(
             research=working_research,
         )
         if compliance_logs:
-            save_proposal_draft(working)
+            await asave_proposal_draft(working)
             sections_targeted += len(compliance_logs)
     except Exception as exc:
         logger.warning("Pre-submit RFP compliance polish skipped: %s", exc)
@@ -629,7 +629,7 @@ async def run_presubmit_autofix_loop(
     for iteration in range(1, max_iterations + 1):
         if await _cancelled(should_cancel):
             stopped_reason = "cancelled"
-            save_proposal_draft(working)
+            await asave_proposal_draft(working)
             review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
             return working, review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
 
@@ -686,7 +686,7 @@ async def run_presubmit_autofix_loop(
         for section_index, section_id in enumerate(section_ids, start=1):
             if await _cancelled(should_cancel):
                 stopped_reason = "cancelled"
-                save_proposal_draft(working)
+                await asave_proposal_draft(working)
                 review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
                 return working, review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
 
@@ -782,7 +782,7 @@ async def run_presubmit_autofix_loop(
                 )
             )
 
-        save_proposal_draft(working)
+        await asave_proposal_draft(working)
 
         review_after = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
         prev_fingerprint = fingerprint
@@ -802,4 +802,40 @@ async def run_presubmit_autofix_loop(
         issues_at_start = len(review_after.issues)
 
     final_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
+
+    from app.services.proposal_submission_gap_finalizer import (
+        attach_manual_fill_flags_to_review,
+        run_submission_gap_finalize_pass,
+    )
+
+    try:
+        working, finalize_logs, working_research = await run_submission_gap_finalize_pass(
+            rfp.id,
+            rfp=rfp,
+            draft=working,
+            research=working_research,
+        )
+        if finalize_logs:
+            await asave_proposal_draft(working)
+            sections_targeted += len(finalize_logs)
+        final_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
+        final_review = attach_manual_fill_flags_to_review(
+            final_review,
+            draft=working,
+            research=working_research,
+            rfp=rfp,
+            kb_searched=True,
+            finalized=True,
+        )
+    except Exception as exc:
+        logger.warning("Final gap finalize pass skipped: %s", exc)
+        final_review = attach_manual_fill_flags_to_review(
+            final_review,
+            draft=working,
+            research=working_research,
+            rfp=rfp,
+            kb_searched=False,
+            finalized=False,
+        )
+
     return working, final_review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted

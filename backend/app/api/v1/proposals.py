@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request
+import httpx
 
 from app.models.proposal import (
     ProposalDraft,
@@ -30,9 +31,14 @@ from app.services.proposal_generator import (
     run_phase3_drafting,
     run_phase4_presubmit_autofix,
     run_phase4_presubmit_review,
+    run_phase4_finalize_gaps,
 )
 from app.services.proposal_section_editor import improve_proposal_section
 from app.services.proposal_repository import get_proposal_draft, get_research_cache, save_proposal_draft
+from app.services.proposal_job_runner import (
+    get_proposal_job,
+    proposal_job_to_dict,
+)
 from app.services.rfp_repository import get_rfp, rfp_exists
 
 router = APIRouter(prefix="/rfps", tags=["proposals"])
@@ -45,16 +51,50 @@ def _slim_research(research: ProposalResearchCache | None) -> ProposalResearchCa
 
 
 @router.get("/{rfp_id}/proposal")
-def get_proposal(rfp_id: str) -> dict[str, object]:
-    if not rfp_exists(rfp_id):
+async def get_proposal(rfp_id: str) -> dict[str, object]:
+    import asyncio
+
+    from app.services.proposal_repository import aget_proposal_draft, aget_research_cache
+
+    draft = None
+    research = None
+    last_exc: httpx.HTTPError | None = None
+    for attempt in range(3):
+        try:
+            draft = await aget_proposal_draft(rfp_id)
+            research = await aget_research_cache(rfp_id)
+            last_exc = None
+            break
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            if attempt >= 2:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Temporary data-store connection issue. Please retry.",
+                ) from exc
+            await asyncio.sleep(0.4 * (attempt + 1))
+    if last_exc is not None:
+        raise HTTPException(
+            status_code=503,
+            detail="Temporary data-store connection issue. Please retry.",
+        ) from last_exc
+    if draft is None and research is None and not rfp_exists(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
-    draft = get_proposal_draft(rfp_id)
-    research = get_research_cache(rfp_id)
+    job = await get_proposal_job(rfp_id)
     return {
         "draft": draft.model_dump(by_alias=True) if draft else None,
         "research": research.model_dump(by_alias=True) if research else None,
         "pipelineStatus": build_pipeline_status(rfp_id, draft=draft, research=research),
+        "proposalJob": proposal_job_to_dict(job),
     }
+
+
+@router.get("/{rfp_id}/proposal/job-status")
+async def get_proposal_job_status(rfp_id: str) -> dict[str, object]:
+    if not rfp_exists(rfp_id):
+        raise HTTPException(status_code=404, detail="RFP not found")
+    job = await get_proposal_job(rfp_id)
+    return {"job": proposal_job_to_dict(job)}
 
 
 @router.put("/{rfp_id}/proposal")
@@ -274,6 +314,9 @@ async def improve_section_endpoint(
             rfp_id,
             section_id,
             body.message,
+            selection_start=body.selection_start,
+            selection_end=body.selection_end,
+            selection_text=body.selection_text,
         )
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -348,3 +391,24 @@ async def phase4_presubmit_autofix_endpoint(
         draft=draft,
         auto_fix=auto_fix,
     )
+
+
+@router.post(
+    "/{rfp_id}/proposal/phase-4-finalize-gaps",
+    response_model=ProposalPhase4Response,
+)
+async def phase4_finalize_gaps_endpoint(rfp_id: str) -> ProposalPhase4Response:
+    """Final editor: Supermemory gap-fill, then owner-assigned MANUAL FILL flags."""
+    try:
+        review, research, draft = await run_phase4_finalize_gaps(rfp_id)
+    except ProposalError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gap finalize failed: {exc}",
+        ) from exc
+
+    save_proposal_draft(draft)
+    slim = _slim_research(research) or research
+    return ProposalPhase4Response(review=review, research=slim, draft=draft)

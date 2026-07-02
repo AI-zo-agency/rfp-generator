@@ -9,6 +9,7 @@ import {
   createCustomSection,
   isLikelyWipedOutline,
   rebuildOutlineFromResearch,
+  staticSections1to3Complete,
 } from "@/lib/proposal-draft";
 import {
   findBudgetSection,
@@ -29,6 +30,7 @@ import {
   runPhase3_6SelfEditWithRecovery,
   runPhase4PreSubmitReview,
   runPhase4PreSubmitAutoFix,
+  runPhase4FinalizeGaps,
   saveProposalDraft,
   type FullProposalProgress,
   type ProposalPipelineStatus,
@@ -40,7 +42,18 @@ import { MarkdownReportBody } from "./MarkdownReportBody";
 import { DraftSectionEditor } from "./DraftSectionEditor";
 import { ProposalBudgetPanel } from "./ProposalBudgetPanel";
 import { ProposalReviewPanel } from "./ProposalReviewPanel";
+import { ProposalManualFlagsPanel } from "./ProposalManualFlagsPanel";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
+import {
+  scanSubmissionFlags,
+  mergeSubmissionFlags,
+  resolveFlagHighlight,
+  sectionManualFillCount,
+  summarizeManualFillFlags,
+  type FlagHighlightRange,
+  type ManualFillFlag,
+} from "@/lib/proposal-manual-flags";
+import { phaseIsComplete } from "@/lib/proposal-pipeline-checkpoint";
 
 type WorkspaceTab = "outline" | "content" | "pricing" | "review" | "export";
 
@@ -134,10 +147,13 @@ export function ProposalDraftWorkspace({
   const [selectedSectionId, setSelectedSectionId] = useState<string | null>(
     null
   );
-  const [isGenerating, setIsGenerating] = useState(false);
   const [isFullProposalRunning, setIsFullProposalRunning] = useState(false);
   const [fullProposalProgress, setFullProposalProgress] =
     useState<FullProposalProgress | null>(null);
+  const [liveGeneratedCount, setLiveGeneratedCount] = useState(0);
+  const [liveLatestSectionTitle, setLiveLatestSectionTitle] = useState<string | null>(
+    null
+  );
   const [isPricingRunning, setIsPricingRunning] = useState(false);
   const [isRefiningBudget, setIsRefiningBudget] = useState(false);
   const [pricingError, setPricingError] = useState<string | null>(null);
@@ -145,10 +161,18 @@ export function ProposalDraftWorkspace({
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [isReviewRunning, setIsReviewRunning] = useState(false);
   const [isAutoFixing, setIsAutoFixing] = useState(false);
+  const [isFinalizingGaps, setIsFinalizingGaps] = useState(false);
+  const [gapResolveNotice, setGapResolveNotice] = useState<string | null>(null);
+  const [gapResolveError, setGapResolveError] = useState<string | null>(null);
   const [autoFixMode, setAutoFixMode] = useState<"quick" | "ai" | null>(null);
   const autoFixAbortRef = useRef<AbortController | null>(null);
   const [autoFixNotice, setAutoFixNotice] = useState<string | null>(null);
   const [presubmitReview, setPresubmitReview] = useState<PreSubmitReview | null>(null);
+  const [showManualFlags, setShowManualFlags] = useState(false);
+  const [highlightedSectionId, setHighlightedSectionId] = useState<string | null>(null);
+  const [activeSubmissionFlag, setActiveSubmissionFlag] = useState<ManualFillFlag | null>(null);
+  const [showSectionMeta, setShowSectionMeta] = useState(false);
+  const [editorFocusMode, setEditorFocusMode] = useState(false);
   const [budget, setBudget] = useState<ProposalBudget | null>(null);
   const [research, setResearch] = useState<ProposalResearch | null>(null);
   const [newSectionTitle, setNewSectionTitle] = useState("");
@@ -156,8 +180,6 @@ export function ProposalDraftWorkspace({
   const [copied, setCopied] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
-  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [provider, setProvider] = useState<string | null>(null);
   const [pipelineStatus, setPipelineStatus] =
     useState<ProposalPipelineStatus | null>(null);
@@ -175,6 +197,9 @@ export function ProposalDraftWorkspace({
 
   const selectSection = useCallback((id: string) => {
     setSelectedSectionId(id);
+    setActiveSubmissionFlag((current) =>
+      current && current.sectionId !== id ? null : current
+    );
   }, []);
 
   const handleJumpToSection = useCallback(
@@ -191,13 +216,38 @@ export function ProposalDraftWorkspace({
     []
   );
 
+  const handleJumpToManualFlag = useCallback(
+    (flag: ManualFillFlag) => {
+      setShowManualFlags(false);
+      setHighlightedSectionId(flag.sectionId);
+      setActiveSubmissionFlag(flag);
+      setActiveTab("outline");
+      setSelectedSectionId(flag.sectionId);
+      requestAnimationFrame(() => {
+        sectionButtonRefs.current.get(flag.sectionId)?.scrollIntoView({
+          block: "nearest",
+          behavior: "smooth",
+        });
+        editorScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      });
+      window.setTimeout(() => setHighlightedSectionId(null), 4000);
+    },
+    []
+  );
+
+  const activeFlagHighlight = useMemo((): FlagHighlightRange | null => {
+    if (!activeSubmissionFlag || activeSubmissionFlag.sectionId !== selectedSectionId) {
+      return null;
+    }
+    const section = outline.sections.find((s) => s.id === selectedSectionId);
+    if (!section) return null;
+    return resolveFlagHighlight(activeSubmissionFlag, section.content ?? "");
+  }, [activeSubmissionFlag, selectedSectionId, outline.sections]);
+
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      setLoadError(null);
-      setRecoveryNotice(null);
-
       let draft: ProposalOutline | null = null;
       let research: ProposalResearch | null = null;
       let providerName: string | null = null;
@@ -215,7 +265,9 @@ export function ProposalDraftWorkspace({
       }
 
       if (!draft && !research) {
-        setLoadError("Could not load your proposal. Refresh the page — do not click Reset.");
+        const defaults = buildDefaultOutline(rfp);
+        setOutline(defaults);
+        setSelectedSectionId(defaults.sections[0]?.id ?? null);
         setHydrated(true);
         return;
       }
@@ -241,9 +293,8 @@ export function ProposalDraftWorkspace({
         setOutline(rebuilt);
         setSelectedSectionId(rebuilt.sections[0]?.id ?? null);
         setActiveTab("outline");
-        setRecoveryNotice(
-          "Your manuscript text was cleared from the saved draft, but KB research and review findings are still here. " +
-            "Section list restored — click **Re-draft manuscript** to regenerate content from Supermemory (no new Phase 2 needed if evidence is cached)."
+        setGenerateNotice(
+          "Section list restored from cached research — use Generate proposal to re-draft content."
         );
       } else if (draft) {
         setOutline(draft);
@@ -265,7 +316,7 @@ export function ProposalDraftWorkspace({
   }, [rfp]);
 
   useEffect(() => {
-    if (!hydrated || loadError) return;
+    if (!hydrated) return;
     if (skipNextSaveRef.current) {
       skipNextSaveRef.current = false;
       return;
@@ -277,9 +328,40 @@ export function ProposalDraftWorkspace({
       void saveProposalDraft(rfp.id, outline);
     }, 800);
     return () => clearTimeout(timer);
-  }, [outline, rfp.id, hydrated, loadError, research]);
+  }, [outline, rfp.id, hydrated, research]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      void fetchProposalDraft(rfp.id).then((snap) => {
+        if (snap.pipelineStatus) setPipelineStatus(snap.pipelineStatus);
+        if (snap.research) setResearch(snap.research);
+      });
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [rfp.id, hydrated]);
 
   const stats = useMemo(() => computeDraftStats(outline), [outline]);
+  const manualFillFlags = useMemo(
+    () =>
+      mergeSubmissionFlags(
+        scanSubmissionFlags(outline, {
+          budget,
+          rfpTitle: rfp.title,
+          rfpClient: rfp.client,
+          rfpSections: research?.rfpSections,
+        }),
+        presubmitReview?.manualFillFlags
+      ),
+    [outline, budget, rfp.title, rfp.client, research?.rfpSections, presubmitReview?.manualFillFlags]
+  );
+  const manualFillCount = manualFillFlags.length;
+  const manualFillSummary = useMemo(
+    () => summarizeManualFillFlags(manualFillFlags),
+    [manualFillFlags]
+  );
   const pageLimit = rfp.pageLimit ?? 30;
   const pageOverLimit = stats.totalPages > pageLimit;
   const pageProgress = Math.min(100, (stats.totalPages / pageLimit) * 100);
@@ -295,12 +377,16 @@ export function ProposalDraftWorkspace({
 
   const workspaceTabs = useMemo(
     () =>
-      baseWorkspaceTabs.map((tab) =>
-        tab.id === "review" && reviewCriticalCount > 0
-          ? { ...tab, count: reviewCriticalCount }
-          : tab
-      ),
-    [reviewCriticalCount]
+      baseWorkspaceTabs.map((tab) => {
+        if (tab.id === "review" && reviewCriticalCount > 0) {
+          return { ...tab, count: reviewCriticalCount };
+        }
+        if (tab.id === "content" && manualFillCount > 0) {
+          return { ...tab, count: manualFillCount };
+        }
+        return tab;
+      }),
+    [reviewCriticalCount, manualFillCount]
   );
 
   const selectedSection = outline.sections.find(
@@ -308,11 +394,8 @@ export function ProposalDraftWorkspace({
   );
 
   const sections1to3Done = useMemo(
-    () =>
-      outline.sections
-        .slice(0, 3)
-        .every((section) => section.content.trim().length > 0),
-    [outline.sections]
+    () => staticSections1to3Complete(outline),
+    [outline]
   );
 
   const phase2Done = (research?.evidenceCorpus?.length ?? 0) > 0;
@@ -328,15 +411,31 @@ export function ProposalDraftWorkspace({
     [outline.sections, phase2Done, sections1to3Done]
   );
 
-  const fullProposalDone = phase3Done;
+  const selfEditDone = useMemo(
+    () => phaseIsComplete(outline, research, "phase-3-6-self-edit"),
+    [outline, research]
+  );
+
+  const fullProposalDone = phase3Done && selfEditDone;
+
+  const manuscriptRecoveryNeeded = useMemo(
+    () =>
+      hydrated &&
+      (research?.rfpSections?.length ?? 0) > 0 &&
+      isLikelyWipedOutline(outline, research),
+    [hydrated, outline, research]
+  );
+
+  const canResumePipeline =
+    Boolean(pipelineStatus?.canResume) && !pipelineStatus?.isComplete;
 
   const anyPipelineRunning =
-    isGenerating ||
     isFullProposalRunning ||
     isPricingRunning ||
     isRefiningBudget ||
     isReviewRunning ||
-    isAutoFixing;
+    isAutoFixing ||
+    isFinalizingGaps;
 
   const handleRunReview = useCallback(async () => {
     setIsReviewRunning(true);
@@ -356,6 +455,50 @@ export function ProposalDraftWorkspace({
       setIsReviewRunning(false);
     }
   }, [rfp.id]);
+
+  const handleFinalizeGaps = useCallback(
+    async (options?: { stayOnTab?: boolean }) => {
+      setIsFinalizingGaps(true);
+      setReviewError(null);
+      setAutoFixNotice(null);
+      setGapResolveError(null);
+      setGapResolveNotice(null);
+      try {
+        const { review, research: updatedResearch, draft } =
+          await runPhase4FinalizeGaps(rfp.id);
+        setPresubmitReview(review);
+        setResearch(updatedResearch);
+        if (draft) {
+          skipNextSaveRef.current = true;
+          setOutline(draft);
+          await saveProposalDraft(rfp.id, draft);
+        }
+        const flagCount = review.manualFillFlags?.length ?? 0;
+        const beforeCount = manualFillCount;
+        const notice =
+          flagCount > 0
+            ? `KB filled what it could — ${beforeCount} → ${flagCount} item(s) for Sonja/Ella.`
+            : "KB resolved all submission gaps.";
+        setAutoFixNotice(
+          flagCount > 0
+            ? `Final editor pass complete — ${flagCount} item(s) assigned to Sonja/Ella via MANUAL FILL tags. Open manual fill-ins on the Outline tab.`
+            : "Final editor pass complete — KB resolved all submission gaps."
+        );
+        setGapResolveNotice(notice);
+        if (!options?.stayOnTab) {
+          setActiveTab("review");
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Finalize gaps failed";
+        setReviewError(message);
+        setGapResolveError(message);
+      } finally {
+        setIsFinalizingGaps(false);
+      }
+    },
+    [rfp.id, manualFillCount]
+  );
 
   const handleAutoFix = useCallback(async () => {
     autoFixAbortRef.current?.abort();
@@ -493,22 +636,33 @@ export function ProposalDraftWorkspace({
     }
   }, [rfp.id, budget, outline]);
 
+  const handleLiveDraftUpdate = useCallback((draft: ProposalOutline) => {
+    skipNextSaveRef.current = true;
+    setOutline(draft);
+    setActiveTab("content");
+    const withContent = draft.sections.filter((s) => s.content?.trim());
+    setLiveGeneratedCount(withContent.length);
+    const latest = withContent[withContent.length - 1];
+    if (latest) {
+      setLiveLatestSectionTitle(latest.title);
+      setSelectedSectionId(latest.id);
+    }
+  }, []);
+
   const handleGenerateFullProposal = useCallback(async () => {
     const canResume = pipelineStatus?.canResume ?? false;
-    const resumeLabel = pipelineStatus
-      ? PIPELINE_PHASE_LABELS[pipelineStatus.resumeFromPhase]
-      : null;
+    const resumePhase = pipelineStatus?.resumeFromPhase;
+    const forwardOnlyResume =
+      resumePhase === "phase-3-5-budget" || resumePhase === "phase-4-review";
 
-    if (
-      canResume &&
-      !fullProposalDone
-    ) {
+    if (canResume && !fullProposalDone) {
       // Resume without confirmation when manuscript is incomplete.
     } else if (
       canResume &&
       fullProposalDone &&
+      !forwardOnlyResume &&
       !confirm(
-        `Resume pipeline from ${resumeLabel}? Completed phases will be skipped.`
+        `Resume pipeline from ${resumePhase ? PIPELINE_PHASE_LABELS[resumePhase] : "checkpoint"}? Completed phases will be skipped.`
       )
     ) {
       return;
@@ -524,6 +678,8 @@ export function ProposalDraftWorkspace({
 
     setIsFullProposalRunning(true);
     setFullProposalProgress(null);
+    setLiveGeneratedCount(countSectionsWithContent(outline));
+    setLiveLatestSectionTitle(null);
     setGenerateError(null);
     setGenerateNotice(null);
     try {
@@ -531,6 +687,7 @@ export function ProposalDraftWorkspace({
         await generateFullProposalStaged(rfp.id, setFullProposalProgress, {
           startFrom: canResume ? pipelineStatus?.resumeFromPhase : undefined,
           forceRestart: !canResume && fullProposalDone,
+          onDraftUpdate: handleLiveDraftUpdate,
         });
       skipNextSaveRef.current = true;
       setOutline(draft);
@@ -593,40 +750,9 @@ export function ProposalDraftWorkspace({
     } finally {
       setIsFullProposalRunning(false);
       setFullProposalProgress(null);
+      setLiveLatestSectionTitle(null);
     }
-  }, [rfp.id, fullProposalDone, pipelineStatus]);
-
-  const handleGenerateSections1to3 = useCallback(async () => {
-    if (
-      sections1to3Done &&
-      !confirm(
-        "Sections 1–3 already have content. Re-generate anyway? (Uses LLM tokens.)"
-      )
-    ) {
-      return;
-    }
-    setIsGenerating(true);
-    setGenerateError(null);
-    setGenerateNotice(null);
-    try {
-      const generated = await generateProposalSections1to3(rfp.id);
-      skipNextSaveRef.current = true;
-      setOutline(generated);
-      await saveProposalDraft(rfp.id, generated);
-      setActiveTab("content");
-      setSelectedSectionId(
-        generated.sections.find((s) => s.content)?.id ??
-          generated.sections[0]?.id ??
-          null
-      );
-    } catch (error) {
-      setGenerateError(
-        error instanceof Error ? error.message : "Sections 1–3 generation failed"
-      );
-    } finally {
-      setIsGenerating(false);
-    }
-  }, [rfp.id, sections1to3Done]);
+  }, [rfp.id, fullProposalDone, pipelineStatus, outline, handleLiveDraftUpdate]);
 
   const handleResetOutline = () => {
     if (
@@ -640,7 +766,6 @@ export function ProposalDraftWorkspace({
     setOutline(defaults);
     setSelectedSectionId(defaults.sections[0]?.id ?? null);
     setPresubmitReview(null);
-    setRecoveryNotice(null);
     void saveProposalDraft(rfp.id, defaults);
     setResearch(null);
   };
@@ -653,7 +778,6 @@ export function ProposalDraftWorkspace({
     setIsFullProposalRunning(true);
     setFullProposalProgress("phase-3");
     setGenerateError(null);
-    setRecoveryNotice(null);
     try {
       const rebuilt = rebuildOutlineFromResearch(rfp, research, outline);
       skipNextSaveRef.current = true;
@@ -694,6 +818,53 @@ export function ProposalDraftWorkspace({
       setFullProposalProgress(null);
     }
   }, [research, rfp, outline]);
+
+  const handlePrimaryPipeline = useCallback(async () => {
+    if (manuscriptRecoveryNeeded) {
+      await handleRecoverManuscript();
+      return;
+    }
+    await handleGenerateFullProposal();
+  }, [manuscriptRecoveryNeeded, handleRecoverManuscript, handleGenerateFullProposal]);
+
+  const primaryPipelineLabel = useMemo(() => {
+    if (isFullProposalRunning) {
+      const totalSections = outline.sections.length;
+      const showLiveCount =
+        liveGeneratedCount > 0 &&
+        (fullProposalProgress === "sections-1-3" ||
+          fullProposalProgress === "phase-3" ||
+          fullProposalProgress === "phase-3-6-self-edit");
+      if (showLiveCount) {
+        const title = liveLatestSectionTitle
+          ? ` — ${liveLatestSectionTitle.slice(0, 36)}${liveLatestSectionTitle.length > 36 ? "…" : ""}`
+          : "";
+        return `Section ${liveGeneratedCount}/${totalSections}${title}…`;
+      }
+      if (fullProposalProgress === "sections-1-3") return "Drafting sections 1–3…";
+      if (fullProposalProgress === "phase-2") return "Researching RFP…";
+      if (fullProposalProgress === "phase-3") return "Drafting sections…";
+      if (fullProposalProgress === "phase-3-6-self-edit") {
+        return manualFillCount > 0
+          ? `Senior editor — ${manualFillCount} flags…`
+          : "Senior editor polishing…";
+      }
+      if (fullProposalProgress === "phase-3-5-budget") return "Building budget…";
+      if (fullProposalProgress === "phase-4-review") return "Pre-submit review…";
+      if (fullProposalProgress === "recovering") return "Checking saved draft…";
+      return "Working…";
+    }
+    if (canResumePipeline) return "Continue proposal";
+    return "Generate proposal";
+  }, [
+    isFullProposalRunning,
+    fullProposalProgress,
+    canResumePipeline,
+    liveGeneratedCount,
+    liveLatestSectionTitle,
+    manualFillCount,
+    outline.sections.length,
+  ]);
 
   const updateSection = (id: string, patch: Partial<OutlineSection>) => {
     setOutline((prev) => ({
@@ -823,6 +994,12 @@ export function ProposalDraftWorkspace({
                       {reviewCriticalCount === 1 ? "" : "s"}
                     </span>
                   )}
+                  {manualFillCount > 0 && (
+                    <span className="rounded-full border border-red-200 bg-red-50 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-800">
+                      {manualFillCount} manual fill-in
+                      {manualFillCount === 1 ? "" : "s"}
+                    </span>
+                  )}
                 </div>
               )}
             </div>
@@ -871,53 +1048,6 @@ export function ProposalDraftWorkspace({
         </div>
       </div>
 
-      {loadError ? (
-        <div className="border-b border-red-200/80 bg-red-50 px-4 py-3 text-sm text-zo-error md:px-5">
-          {loadError}
-        </div>
-      ) : null}
-
-      {recoveryNotice ? (
-        <div className="flex flex-col gap-3 border-b border-amber-300/80 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-950 md:flex-row md:items-center md:justify-between md:px-5">
-          <p>{recoveryNotice}</p>
-          <button
-            type="button"
-            onClick={() => void handleRecoverManuscript()}
-            disabled={anyPipelineRunning}
-            className="zo-btn shrink-0 disabled:opacity-60"
-          >
-            {isFullProposalRunning ? "Re-drafting…" : "Re-draft manuscript"}
-          </button>
-        </div>
-      ) : null}
-
-      {pipelineStatus?.canResume && !pipelineStatus.isComplete ? (
-        <div className="flex flex-col gap-2 border-b border-sky-200/80 bg-sky-50 px-4 py-3 text-sm text-sky-950 md:flex-row md:items-center md:justify-between md:px-5">
-          <div>
-            <p className="font-semibold">Pipeline checkpoint</p>
-            <p className="mt-0.5 leading-relaxed">
-              {pipelineResumeMessage(pipelineStatus)}
-              {pipelineStatus.completedPhases.length > 0 ? (
-                <span className="mt-1 block text-xs text-sky-800/90">
-                  Done:{" "}
-                  {pipelineStatus.completedPhases
-                    .map((p) => PIPELINE_PHASE_LABELS[p])
-                    .join(" · ")}
-                </span>
-              ) : null}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => void handleGenerateFullProposal()}
-            disabled={anyPipelineRunning}
-            className="zo-btn shrink-0 disabled:opacity-60"
-          >
-            {isFullProposalRunning ? "Resuming…" : "Resume pipeline"}
-          </button>
-        </div>
-      ) : null}
-
       {(generateNotice || generateError) && (
         <div
           className={`border-b px-4 py-2.5 text-sm md:px-5 ${
@@ -939,6 +1069,33 @@ export function ProposalDraftWorkspace({
         <div className="proposal-toolbar-actions flex w-full flex-wrap items-center gap-4 sm:w-auto sm:justify-end">
           <button
             type="button"
+            onClick={() => setShowManualFlags((open) => !open)}
+            className={`zo-btn secondary ${
+              manualFillCount > 0
+                ? "!border-amber-300 !bg-amber-50 !text-amber-950"
+                : ""
+            }`}
+            title="Regex scan: VERIFY tags, budget $0, reference contacts, hours table, PSA acks, MWBE consistency — no AI"
+          >
+            <svg
+              className="h-4 w-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+              aria-hidden
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 009.69-1.51M3 15l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 009.69-1.51M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
+            </svg>
+            Flag submission gaps
+            {manualFillCount > 0 ? ` (${manualFillCount})` : ""}
+          </button>
+          <button
+            type="button"
             onClick={handleResetOutline}
             className="zo-btn secondary"
             disabled={anyPipelineRunning}
@@ -947,45 +1104,21 @@ export function ProposalDraftWorkspace({
           </button>
           <button
             type="button"
-            onClick={handleGenerateSections1to3}
-            disabled={anyPipelineRunning}
-            className="zo-btn secondary disabled:opacity-60"
-            title="Static zö blocks only: Company Overview, Team, Case Studies"
-          >
-            {isGenerating ? (
-              <>
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-zo-orange/30 border-t-zo-orange" />
-                Sections 1–3…
-              </>
-            ) : (
-              "Sections 1–3 only"
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={handleGenerateFullProposal}
+            onClick={() => void handlePrimaryPipeline()}
             disabled={anyPipelineRunning}
             className="zo-btn disabled:opacity-60"
-            title="Static Sections 1–3 + RFP sections + budget from 00_Guide_Pricing (full pipeline)"
+            title={
+              manuscriptRecoveryNeeded
+                ? "Re-draft all sections from cached KB research"
+                : canResumePipeline
+                  ? pipelineResumeMessage(pipelineStatus!)
+                  : "Sections 1–3, RFP drafting, budget, and pre-submit review"
+            }
           >
             {isFullProposalRunning ? (
               <>
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-zo-white/30 border-t-zo-white" />
-                {fullProposalProgress === "sections-1-3"
-                  ? "Sections 1–3…"
-                  : fullProposalProgress === "phase-2"
-                    ? "Phase 2 research…"
-                    : fullProposalProgress === "phase-3"
-                      ? "Phase 3 drafting…"
-                      : fullProposalProgress === "phase-3-6-self-edit"
-                        ? "Senior editor polish…"
-                        : fullProposalProgress === "phase-3-5-budget"
-                        ? "Building budget…"
-                        : fullProposalProgress === "phase-4-review"
-                          ? "Pre-submit review…"
-                        : fullProposalProgress === "recovering"
-                          ? "Checking saved draft…"
-                          : "Generating…"}
+                {primaryPipelineLabel}
               </>
             ) : (
               <>
@@ -1002,19 +1135,30 @@ export function ProposalDraftWorkspace({
                     d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"
                   />
                 </svg>
-                {pipelineStatus?.canResume && !pipelineStatus.isComplete
-                  ? "Resume pipeline"
-                  : "Generate Full Proposal"}
+                {primaryPipelineLabel}
               </>
             )}
           </button>
         </div>
       </div>
 
+      <ProposalManualFlagsPanel
+        open={showManualFlags}
+        flags={manualFillFlags}
+        summary={manualFillSummary}
+        activeSectionId={selectedSectionId ?? highlightedSectionId}
+        onJumpToFlag={handleJumpToManualFlag}
+        onClose={() => setShowManualFlags(false)}
+        onResolveAll={() => void handleFinalizeGaps({ stayOnTab: true })}
+        isResolving={isFinalizingGaps}
+        resolveNotice={gapResolveNotice}
+        resolveError={gapResolveError}
+      />
+
       <div className="proposal-workspace-body">
       {/* Outline tab */}
       <TabPanel id="outline" activeTab={activeTab} className="proposal-workspace-tab">
-        <div className="proposal-outline-layout grid min-h-0 flex-1 gap-0 overflow-hidden lg:grid-cols-[200px_minmax(0,1fr)] lg:gap-2 lg:p-2">
+          <div className={`proposal-outline-layout grid min-h-0 flex-1 gap-0 overflow-hidden lg:grid-cols-[200px_minmax(0,1fr)] lg:gap-2 lg:p-2 ${editorFocusMode ? "is-editor-focus" : ""}`}>
           <div className="proposal-section-list flex min-h-0 flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-xl lg:border lg:border-zo-border">
             <div className="flex shrink-0 items-center justify-between border-b border-zo-border/60 px-3 py-2.5">
               <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
@@ -1028,6 +1172,7 @@ export function ProposalDraftWorkspace({
               {outline.sections.map((section, index) => {
                 const active = selectedSectionId === section.id;
                 const hasContent = Boolean(section.content);
+                const flagCount = sectionManualFillCount(section.id, manualFillFlags);
                 return (
                   <li key={section.id}>
                     <button
@@ -1039,7 +1184,7 @@ export function ProposalDraftWorkspace({
                       onClick={() => selectSection(section.id)}
                       className={`proposal-section-list-item ${
                         active ? "is-active" : ""
-                      }`}
+                      } ${highlightedSectionId === section.id ? "is-flag-target" : ""}`}
                     >
                       <span
                         className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
@@ -1060,6 +1205,14 @@ export function ProposalDraftWorkspace({
                         </p>
                         <div className="mt-1 flex flex-wrap items-center gap-1">
                           <SectionStatusPill status={section.status} />
+                          {flagCount > 0 ? (
+                            <span
+                              className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-900"
+                              title={`${flagCount} manual fill-in tag(s)`}
+                            >
+                              {flagCount} fill-in{flagCount === 1 ? "" : "s"}
+                            </span>
+                          ) : null}
                           {section.custom ? (
                             <span className="text-[9px] font-bold uppercase text-zo-orange">
                               Custom
@@ -1102,12 +1255,11 @@ export function ProposalDraftWorkspace({
           <div className="proposal-editor-pane flex min-h-0 flex-col overflow-hidden rounded-none lg:rounded-xl lg:border lg:border-zo-border">
             {selectedSection ? (
               <>
-                <div className="shrink-0 border-b border-zo-border/60 proposal-tab-panel">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
-                      Editing section {outline.sections.findIndex((s) => s.id === selectedSection.id) + 1}
-                    </p>
+                <div className="proposal-editor-chrome">
+                  <div className="flex items-center gap-2">
+                    <span className="shrink-0 text-[10px] font-bold tabular-nums text-zo-text-muted">
+                      §{outline.sections.findIndex((s) => s.id === selectedSection.id) + 1}
+                    </span>
                     <input
                       type="text"
                       value={selectedSection.title}
@@ -1116,100 +1268,122 @@ export function ProposalDraftWorkspace({
                           title: e.target.value,
                         })
                       }
-                      className="font-heading mt-2 w-full border-b-2 border-transparent bg-transparent text-xl font-bold text-foreground outline-none transition-smooth focus:border-zo-orange md:text-2xl"
+                      className="proposal-editor-chrome-title min-w-0 flex-1"
+                      aria-label="Section title"
                     />
-                  </div>
-                  <div className="flex gap-1.5">
-                    <IconButton
-                      onClick={() => moveSection(selectedSection.id, -1)}
-                      label="Move up"
+                    <button
+                      type="button"
+                      onClick={() => setShowSectionMeta((open) => !open)}
+                      className="proposal-editor-focus-toggle"
+                      aria-expanded={showSectionMeta}
                     >
-                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5" />
-                      </svg>
-                    </IconButton>
-                    <IconButton
-                      onClick={() => moveSection(selectedSection.id, 1)}
-                      label="Move down"
+                      {showSectionMeta ? "Hide limits" : "Limits"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditorFocusMode((on) => !on)}
+                      className={`proposal-editor-focus-toggle ${editorFocusMode ? "is-active" : ""}`}
+                      title="Hide section list for a taller editor"
                     >
-                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-                      </svg>
-                    </IconButton>
-                    {selectedSection.custom && (
+                      {editorFocusMode ? "Show list" : "Focus"}
+                    </button>
+                    <div className="flex shrink-0 gap-1">
                       <IconButton
-                        onClick={() => removeSection(selectedSection.id)}
-                        label="Remove section"
-                        variant="danger"
+                        onClick={() => moveSection(selectedSection.id, -1)}
+                        label="Move up"
                       >
                         <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5" />
                         </svg>
                       </IconButton>
-                    )}
+                      <IconButton
+                        onClick={() => moveSection(selectedSection.id, 1)}
+                        label="Move down"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                        </svg>
+                      </IconButton>
+                      {selectedSection.custom ? (
+                        <IconButton
+                          onClick={() => removeSection(selectedSection.id)}
+                          label="Remove section"
+                          variant="danger"
+                        >
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </IconButton>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
 
-                <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                  <label className="block">
-                    <span className="text-xs font-semibold text-zo-text-muted">
-                      Page limit
-                    </span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={selectedSection.pageLimit ?? ""}
-                      onChange={(e) =>
-                        updateSection(selectedSection.id, {
-                          pageLimit: e.target.value
-                            ? Number(e.target.value)
-                            : undefined,
-                        })
-                      }
-                      className="zo-input mt-1.5 w-full px-3 py-2.5 text-sm outline-none focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="text-xs font-semibold text-zo-text-muted">
-                      Word target
-                    </span>
-                    <input
-                      type="number"
-                      min={100}
-                      value={selectedSection.wordTarget}
-                      onChange={(e) =>
-                        updateSection(selectedSection.id, {
-                          wordTarget: Number(e.target.value) || 500,
-                        })
-                      }
-                      className="zo-input mt-1.5 w-full px-3 py-2.5 text-sm outline-none focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
-                    />
-                  </label>
-                  <div>
-                    <span className="text-xs font-semibold text-zo-text-muted">
-                      Source
-                    </span>
-                    <p className="mt-2.5 flex items-center gap-2">
-                      <span className="rounded-lg bg-zo-warm-gray/60 px-2.5 py-1 text-xs font-semibold capitalize text-zo-text-secondary">
-                        {selectedSection.source}
-                      </span>
-                      {selectedSection.required && (
-                        <span className="text-xs font-medium text-zo-teal">
-                          Required
+                {showSectionMeta ? (
+                  <div className="proposal-editor-meta proposal-editor-meta-compact">
+                    <div className="proposal-editor-meta-grid">
+                      <label className="block">
+                        <span className="text-xs font-semibold text-zo-text-muted">
+                          Page limit
                         </span>
-                      )}
-                    </p>
+                        <input
+                          type="number"
+                          min={1}
+                          value={selectedSection.pageLimit ?? ""}
+                          onChange={(e) =>
+                            updateSection(selectedSection.id, {
+                              pageLimit: e.target.value
+                                ? Number(e.target.value)
+                                : undefined,
+                            })
+                          }
+                          className="zo-input mt-1 w-full px-3 py-2 text-sm outline-none focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="text-xs font-semibold text-zo-text-muted">
+                          Word target
+                        </span>
+                        <input
+                          type="number"
+                          min={100}
+                          value={selectedSection.wordTarget}
+                          onChange={(e) =>
+                            updateSection(selectedSection.id, {
+                              wordTarget: Number(e.target.value) || 500,
+                            })
+                          }
+                          className="zo-input mt-1 w-full px-3 py-2 text-sm outline-none focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
+                        />
+                      </label>
+                      <div>
+                        <span className="text-xs font-semibold text-zo-text-muted">
+                          Source
+                        </span>
+                        <p className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          <span className="rounded-lg bg-zo-warm-gray/60 px-2 py-0.5 text-[11px] font-semibold capitalize text-zo-text-secondary">
+                            {selectedSection.source}
+                          </span>
+                          {selectedSection.required ? (
+                            <span className="text-[11px] font-medium text-zo-teal">
+                              Required
+                            </span>
+                          ) : null}
+                        </p>
+                      </div>
+                    </div>
                   </div>
-                </div>
-                </div>
+                ) : null}
 
-                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                <div ref={editorScrollRef} className="proposal-editor-body">
                   <DraftSectionEditor
                     rfpId={rfp.id}
                     section={selectedSection}
                     wordCount={countWords(selectedSection.content)}
                     disabled={anyPipelineRunning}
                     value={selectedSection.content}
+                    highlightRange={activeFlagHighlight}
+                    onUserEditStart={() => setActiveSubmissionFlag(null)}
                     onChange={(content) =>
                       updateSection(selectedSection.id, {
                         content,
@@ -1251,7 +1425,9 @@ export function ProposalDraftWorkspace({
                   <article
                     key={section.id}
                     id={section.id}
-                    className="proposal-content-article scroll-mt-28"
+                    className={`proposal-content-article scroll-mt-32 ${
+                      highlightedSectionId === section.id ? "is-flag-target" : ""
+                    }`}
                   >
                     {/* Section card header */}
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1266,6 +1442,12 @@ export function ProposalDraftWorkspace({
                           <p className="mt-0.5 text-[11px] text-zo-text-muted">
                             {countWords(section.content).toLocaleString()} words
                             {section.pageLimit ? ` · ~${section.pageLimit} pages` : ""}
+                            {sectionManualFillCount(section.id, manualFillFlags) > 0 ? (
+                              <span className="ml-1 font-semibold text-amber-800">
+                                · {sectionManualFillCount(section.id, manualFillFlags)} manual fill-in
+                                {sectionManualFillCount(section.id, manualFillFlags) === 1 ? "" : "s"}
+                              </span>
+                            ) : null}
                           </p>
                         </div>
                       </div>
@@ -1275,7 +1457,15 @@ export function ProposalDraftWorkspace({
                     <div className="my-5 h-px bg-zo-border/60" />
                     {/* Section body: parsed markdown */}
                     <div className="proposal-prose">
-                      <MarkdownReportBody body={section.content} variant="document" />
+                      <MarkdownReportBody
+                        body={section.content}
+                        variant="document"
+                        highlightTexts={
+                          activeSubmissionFlag?.sectionId === section.id && activeFlagHighlight
+                            ? [activeFlagHighlight.text]
+                            : []
+                        }
+                      />
                     </div>
                   </article>
                 ) : null
@@ -1355,12 +1545,14 @@ export function ProposalDraftWorkspace({
             rfpTitle={rfp.title}
             isRunning={isReviewRunning}
             isAutoFixing={isAutoFixing}
+            isFinalizingGaps={isFinalizingGaps}
             autoFixMode={autoFixMode}
             error={reviewError}
             autoFixNotice={autoFixNotice}
             disabled={anyPipelineRunning}
             onRunReview={() => void handleRunReview()}
             onAutoFix={() => void handleAutoFix()}
+            onFinalizeGaps={() => void handleFinalizeGaps()}
             onStopAutoFix={handleStopAutoFix}
             onJumpToSection={handleJumpToSection}
           />

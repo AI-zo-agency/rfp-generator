@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 _client = None
 
 
+def reset_supabase_client() -> None:
+    """Drop cached client so the next request opens a fresh HTTP connection."""
+    global _client
+    _client = None
+
+
 class SupabaseDbError(Exception):
     def __init__(self, message: str, *, status_code: int = 502) -> None:
         super().__init__(message)

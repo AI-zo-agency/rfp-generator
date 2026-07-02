@@ -62,3 +62,17 @@ export function getTextareaCaretViewportRect(
     left: markerRect.left + markerRect.width / 2,
   };
 }
+
+/** Scroll a textarea so the given range is visible and select it. */
+export function scrollTextareaToRange(
+  textarea: HTMLTextAreaElement,
+  start: number,
+  end: number
+): void {
+  const topCaret = getTextareaCaretViewportRect(textarea, start);
+  const taRect = textarea.getBoundingClientRect();
+  const relativeTop = topCaret.top - taRect.top + textarea.scrollTop;
+  textarea.scrollTop = Math.max(0, relativeTop - textarea.clientHeight / 3);
+  textarea.focus({ preventScroll: true });
+  textarea.setSelectionRange(start, end);
+}

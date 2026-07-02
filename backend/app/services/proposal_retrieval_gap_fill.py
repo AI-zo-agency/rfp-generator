@@ -91,6 +91,37 @@ _GAP_TOPICS: list[tuple[re.Pattern[str], list[str]]] = [
             "zö agency 07_FIN burdened hourly rates fee schedule",
         ],
     ),
+    (
+        re.compile(
+            r"\b(?:ACORD|certificate of insurance|COI|professional liability|umbrella|cyber)\b",
+            re.I,
+        ),
+        [
+            "zö agency insurance policy ACORD certificate limits general liability E&O umbrella",
+            "zö agency Next Insurance workers compensation certificate",
+        ],
+    ),
+    (
+        re.compile(
+            r"\b(?:questionnaire|vendor information|FEIN|EIN|DUNS|CAGE|tax\s+id)\b",
+            re.I,
+        ),
+        [
+            "zö agency FEIN EIN tax ID business phone email vendor questionnaire",
+            "zö agency 02 master template business entity disclosure",
+        ],
+    ),
+    (
+        re.compile(
+            r"\bnew\s+jersey\b.*(?:reference|college|public)|"
+            r"\bNJ\b.{0,40}(?:reference|college|community college)",
+            re.I,
+        ),
+        [
+            "zö agency client references government college university contact phone email",
+            "zö agency 06_WON 07_FIN reference letters public sector",
+        ],
+    ),
 ]
 
 

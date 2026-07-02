@@ -1,4 +1,5 @@
 import type { ProposalOutline, ProposalResearch } from "@/types/proposal";
+import { staticSections1to3Complete } from "@/lib/proposal-draft";
 
 export type PipelinePhase =
   | "sections-1-3"
@@ -60,18 +61,38 @@ function countVerifyTags(draft: ProposalOutline | null): number {
 
 export function inferResumePhaseFromBlocker(blocker: string): PipelinePhase {
   const lower = blocker.toLowerCase();
-  if (lower.includes("verify")) return "phase-3-6-self-edit";
-  if (lower.includes("proof point") || lower.includes("evidence corpus")) {
-    return "phase-2";
-  }
   if (lower.includes("budget") || lower.includes("phase 3.5")) {
     return "phase-3-5-budget";
   }
   if (lower.includes("pre-submit") || lower.includes("phase 4")) {
     return "phase-4-review";
   }
+  if (lower.includes("proof point") || lower.includes("evidence corpus")) {
+    return "phase-2";
+  }
   if (lower.includes("phase 3")) return "phase-3";
-  return "phase-3-6-self-edit";
+  if (lower.includes("verify") || lower.includes("placeholder")) {
+    return "phase-3-6-self-edit";
+  }
+  return "phase-3-5-budget";
+}
+
+function selfEditConsideredComplete(
+  draft: ProposalOutline | null,
+  research: ProposalResearch | null
+): boolean {
+  if (!research?.pipelineCheckpoint) return false;
+  const cp = research.pipelineCheckpoint;
+  if (cp.lastFailedPhase === "phase-3-6-self-edit") {
+    const err = (cp.lastError ?? "").toLowerCase();
+    if (err.includes("verify") || err.includes("placeholder")) {
+      return phaseIsComplete(draft, research, "phase-3");
+    }
+  }
+  if (cp.lastCompletedPhase) {
+    return phaseIndex(cp.lastCompletedPhase) >= phaseIndex("phase-3-6-self-edit");
+  }
+  return false;
 }
 
 function phaseIndex(phase: PipelinePhase): number {
@@ -85,8 +106,7 @@ export function phaseIsComplete(
   phase: PipelinePhase
 ): boolean {
   if (phase === "sections-1-3") {
-    if (!draft || draft.sections.length < 3) return false;
-    return draft.sections.slice(0, 3).every((s) => s.content?.trim());
+    return staticSections1to3Complete(draft);
   }
   if (!research) return false;
 
@@ -102,11 +122,17 @@ export function phaseIsComplete(
     return filled >= Math.max(1, Math.floor(mappedIds.size * 0.85));
   }
   if (phase === "phase-3-6-self-edit") {
-    if (countVerifyTags(draft) > 0) return false;
+    if (selfEditConsideredComplete(draft, research)) return true;
     const cp = research.pipelineCheckpoint;
-    if (cp?.lastFailedPhase === phase) return false;
-    if (cp?.lastCompletedPhase) {
-      return phaseIndex(cp.lastCompletedPhase) >= phaseIndex("phase-3-6-self-edit");
+    if (cp?.lastFailedPhase === phase) {
+      const err = (cp.lastError ?? "").toLowerCase();
+      if (
+        (err.includes("verify") || err.includes("placeholder")) &&
+        phaseIsComplete(draft, research, "phase-3")
+      ) {
+        return true;
+      }
+      return false;
     }
     return false;
   }
@@ -123,8 +149,21 @@ export function resolveResumePhase(
   draft: ProposalOutline | null,
   research: ProposalResearch | null
 ): PipelinePhase {
+  if (!staticSections1to3Complete(draft)) {
+    return "sections-1-3";
+  }
+
   const cp = research?.pipelineCheckpoint;
   if (cp?.lastFailedPhase && PIPELINE_PHASE_ORDER.includes(cp.lastFailedPhase)) {
+    if (cp.lastFailedPhase === "phase-3-6-self-edit") {
+      const err = (cp.lastError ?? "").toLowerCase();
+      if (
+        (err.includes("verify") || err.includes("placeholder")) &&
+        !phaseIsComplete(draft, research, "phase-3-5-budget")
+      ) {
+        return "phase-3-5-budget";
+      }
+    }
     return cp.lastFailedPhase;
   }
   if (cp?.inProgressPhase && PIPELINE_PHASE_ORDER.includes(cp.inProgressPhase)) {
@@ -141,7 +180,6 @@ export function resolveResumePhase(
     }
   }
   if (draft && research) {
-    if (countVerifyTags(draft) > 0) return "phase-3-6-self-edit";
     if (!research.presubmitReview) return "phase-4-review";
     if (!research.proofPoints?.length) return "phase-2";
   }

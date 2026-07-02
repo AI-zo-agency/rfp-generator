@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -41,6 +42,9 @@ BATCH_SIZE = 1
 DEFAULT_WORD_TARGET = 800
 _LLM_SEMAPHORE = asyncio.Semaphore(1)
 
+SectionDraftedCallback = Callable[[list["ProposalSection"], str], Awaitable[None]]
+_SECTION_DRAFT_CALLBACKS: dict[str, SectionDraftedCallback] = {}
+
 DRAFT_BATCH_PROMPT = """You draft zö agency proposal section content for a government/commercial RFP response.
 
 Rules (strict):
@@ -63,6 +67,14 @@ Rules (strict):
 17. Personnel: when RFP requires workforce diversity data, state headcount and minority/female percentages (from KB) or [VERIFY].
 18. Budget: when RFP requires staff hours per task, add hours table OR commission-model explanation with transparency estimates.
 19. PSA/contract items in the RFP (insurance, living wage, MacBride, Title VI, audit rights, etc.) need brief acknowledgment sentences in the proposal.
+20. References: NEVER "contact on request", "upon request", or "through the Bureau" — include name, title, organization, phone, and email from KB or [VERIFY: specific contact fields].
+21. Workforce: MWBE/diversity and Project Personnel sections must use identical headcount and % female/minority — one precise figure from HR/KB.
+22. Do NOT write Budget Summary dollar totals ($0 or otherwise) in narrative sections before Phase 3.5 — cross-reference the Fees/Budget section. Never cite $0 agency revenue anywhere.
+23. Insurance RFPs: include a limits table (RFP requires | current policy | gap | bind-before-execution action) with ACORD fields when specified.
+24. Vendor/contractor questionnaires: complete every field — FEIN, phones, email, DUNS/CAGE or N/A — from KB; never leave TBD or blank underscores.
+25. NJ or geography-specific reference RFPs: use verified KB contacts; if no in-state client exists, disclose geography honestly — never [PLACEHOLDER] reference rows.
+26. Project management fees must stay within 5–8% of agency fees — do not leave unresolved PM ratio flags in budget prose.
+27. Address every Phase 2 uncovered requirement explicitly — compliance tables, forms, or narrative; do not assume a titled section alone satisfies the RFP.
 
 Return ONLY JSON:
 {
@@ -416,6 +428,12 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
                 state.get("rfp_id"),
                 len(batch_results),
             )
+            callback = _SECTION_DRAFT_CALLBACKS.get(str(state.get("rfp_id") or ""))
+            if callback:
+                drafted_sections = [
+                    ProposalSection.model_validate(item) for item in all_drafted
+                ]
+                await callback(drafted_sections, provider)
         except LlmError as exc:
             logger.warning(
                 "Phase 3 batch %d failed for %s: %s",
@@ -485,6 +503,7 @@ async def run_drafting_graph(
     writing_avoidances: list[str] | None = None,
     loss_lessons: list[LossLesson] | None = None,
     proof_points: list | None = None,
+    on_sections_drafted: SectionDraftedCallback | None = None,
 ) -> tuple[list[ProposalSection], str]:
     if not llm.is_configured():
         raise LlmError(
@@ -514,8 +533,15 @@ async def run_drafting_graph(
         "drafted_sections": [],
     }
 
+    if on_sections_drafted:
+        _SECTION_DRAFT_CALLBACKS[rfp_id] = on_sections_drafted
+
     logger.info("Phase 3 drafting graph starting for rfp_id=%s", rfp_id)
-    final = await _DRAFTING_GRAPH.ainvoke(initial)
+    try:
+        final = await _DRAFTING_GRAPH.ainvoke(initial)
+    finally:
+        if on_sections_drafted:
+            _SECTION_DRAFT_CALLBACKS.pop(rfp_id, None)
 
     if final.get("error"):
         raise LlmError(str(final["error"]), status_code=400)

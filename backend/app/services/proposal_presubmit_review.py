@@ -16,6 +16,11 @@ from app.models.proposal import (
 from app.models.rfp import RfpRecord
 from app.services.proposal_brand_voice import classify_section_register
 from app.services.proposal_consistency import scan_manuscript_consistency
+from app.services.proposal_rfp_compliance import (
+    compliance_gaps_to_presubmit_issues,
+    requirement_likely_covered,
+    scan_rfp_compliance_gaps,
+)
 from app.services.proposal_manuscript_cleanup import (
     GRAMMAR_GLITCH_RE,
     budget_mentions_subcontractors,
@@ -298,13 +303,33 @@ def _compliance_checklist(
                         )
                     )
                 elif has_content:
-                    items.append(
-                        ComplianceCheckItem(
-                            item=req[:120],
-                            status="pass",
-                            notes=f"Draft section: {mapped_section.title}",
+                    uncovered = mapped_section.uncovered_requirements or []
+                    still_open = [
+                        req
+                        for req in uncovered[:4]
+                        if not requirement_likely_covered(
+                            req, draft_match.content if draft_match else ""
                         )
-                    )
+                    ]
+                    if still_open:
+                        items.append(
+                            ComplianceCheckItem(
+                                item=req[:120],
+                                status="fail",
+                                notes=(
+                                    f"Phase 2 uncovered requirement may still be missing in "
+                                    f"{mapped_section.title}: {still_open[0][:80]}"
+                                ),
+                            )
+                        )
+                    else:
+                        items.append(
+                            ComplianceCheckItem(
+                                item=req[:120],
+                                status="pass",
+                                notes=f"Draft section: {mapped_section.title}",
+                            )
+                        )
                 else:
                     items.append(
                         ComplianceCheckItem(
@@ -476,11 +501,6 @@ def run_presubmit_review(
     issues.extend(_scan_grammar(draft=draft))
     issues.extend(_scan_subcontractor_narrative(draft=draft, research=research))
     issues.extend(scan_manuscript_consistency(draft=draft, research=research, rfp=rfp))
-    from app.services.proposal_rfp_compliance import (
-        compliance_gaps_to_presubmit_issues,
-        scan_rfp_compliance_gaps,
-    )
-
     issues.extend(
         compliance_gaps_to_presubmit_issues(
             scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
@@ -534,4 +554,37 @@ def run_presubmit_review(
         ),
         readyToSubmit=ready,
         scannedAt=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def run_presubmit_review_with_manual_flags(
+    *,
+    rfp: RfpRecord,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    extra_issues: list[PreSubmitIssue] | None = None,
+    kb_searched: bool = False,
+    finalized: bool = False,
+) -> PreSubmitReview:
+    """Pre-submit review plus structured manual-fill flags for the UI."""
+    from app.services.proposal_manual_flags import build_presubmit_manual_fill_flags
+    from app.services.proposal_submission_gap_finalizer import attach_manual_fill_flags_to_review
+
+    review = run_presubmit_review(
+        rfp=rfp,
+        draft=draft,
+        research=research,
+        extra_issues=extra_issues,
+    )
+    if not build_presubmit_manual_fill_flags(
+        draft=draft, research=research, rfp=rfp, kb_searched=kb_searched, finalized=finalized
+    ):
+        return review.model_copy(update={"manual_fill_flags": []})
+    return attach_manual_fill_flags_to_review(
+        review,
+        draft=draft,
+        research=research,
+        rfp=rfp,
+        kb_searched=kb_searched,
+        finalized=finalized,
     )

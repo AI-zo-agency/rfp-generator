@@ -10,13 +10,13 @@ from datetime import datetime, timezone
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
 from app.models.rfp import RfpRecord
-from app.services.proposal_common import ProposalError, load_rfp_for_proposal
+from app.services.proposal_common import ProposalError, aload_rfp_for_proposal
 from app.services.proposal_consistency import patch_improves_section, self_edit_exhausted_issues
 from app.services.proposal_repository import (
-    get_proposal_draft,
-    get_research_cache,
-    save_proposal_draft,
-    save_research_cache,
+    aget_proposal_draft,
+    aget_research_cache,
+    asave_proposal_draft,
+    asave_research_cache,
 )
 from app.services.proposal_section_quality import (
     is_weak_section,
@@ -27,10 +27,12 @@ from app.services.proposal_section_quality import (
 
 logger = logging.getLogger(__name__)
 
-MAX_SELF_EDIT_ITERATIONS = 3
-SELF_EDIT_TIME_BUDGET_SEC = 900
-SELF_EDIT_PARALLEL = 4
-MAX_ZERO_IMPROVEMENT_ITERATIONS = 2
+MAX_SELF_EDIT_ITERATIONS = 4
+SELF_EDIT_TIME_BUDGET_SEC = 480
+SELF_EDIT_PARALLEL = 2
+MAX_ZERO_IMPROVEMENT_ITERATIONS = 1
+MAX_WEAK_SECTIONS_PER_ITERATION = 3
+TARGET_FLAG_COUNT = 10
 
 AUTO_REPAIR_MESSAGE = """This section is incomplete or still has [VERIFY] placeholders from the first draft pass.
 Run a deep knowledge-base search and write full submission-ready prose for every RFP requirement in this section.
@@ -41,7 +43,10 @@ Senior editor priorities (fix if present):
 1. Grammar: "We were established …, and is organized" → use "and are organized" or "organized as …"
 2. Pronouns: never "of we" or "across we" — use "our firm", "zö agency", or "our studio"
 3. Subcontractors: if cost proposal lists translation partners, Company Background must NOT claim "no subcontractors" — zö self-performs marketing/communications; translation partners are scoped separately
-4. RFP compliance: reference contact phones, workforce diversity %, budget hours, PSA acknowledgments — never defer to unnamed attachments or "upon request"
+4. RFP compliance: reference contact phones and emails, workforce diversity %, budget hours table, PSA acknowledgments — never defer to unnamed attachments or "upon request"
+5. Budget: never $0 agency revenue when commission applies — agencyRevenueEstimate must equal commission rate × pass-through or agency_fee line items
+6. MWBE and Personnel: use identical workforce % — one HR-verified figure
+7. References: full contact block (name, title, phone, email) — not "contact on request"
 """
 
 
@@ -143,14 +148,30 @@ async def _repair_one_section(
         redraft_section_agent,
     )
 
-    draft = get_proposal_draft(rfp_id)
+    draft = await aget_proposal_draft(rfp_id)
     if not draft:
         return section_id, False, "no draft"
     before = next((s for s in draft.sections if s.id == section_id), None)
     if not before:
         return section_id, False, "missing section"
 
-    research = get_research_cache(rfp_id)
+    if not (before.content or "").strip():
+        generate_msg = (
+            "This section has no draft body yet. Search the knowledge base and write "
+            "full submission-ready prose for every RFP requirement. Use [E#] citations. "
+            "Do not return placeholders or an empty response."
+        )
+        return await _fallback_improve_section(
+            rfp_id=rfp_id,
+            section_id=section_id,
+            before=before,
+            message=generate_msg,
+            rfp=rfp,
+            budget=budget,
+            reason="Empty section — generate instead of repair",
+        )
+
+    research = await aget_research_cache(rfp_id)
     rfp_section = None
     if research:
         for mapped in research.rfp_sections:
@@ -236,6 +257,7 @@ async def _repair_one_section(
         )
 
     from app.services.proposal_manuscript_cleanup import scan_submission_blockers
+    from app.services.proposal_rfp_compliance import scan_rfp_compliance_gaps
     from app.services.proposal_voice_enforcement import enforce_narrative_voice
 
     before_blockers = len(
@@ -244,6 +266,9 @@ async def _repair_one_section(
             for b in scan_submission_blockers(draft=draft, research=research)
             if b.section_id == section_id
         ]
+    )
+    before_compliance = len(
+        [g for g in scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp) if g.section_id == section_id]
     )
 
     content = enforce_narrative_voice(
@@ -264,7 +289,7 @@ async def _repair_one_section(
     )
 
     if patch_improves_section(before, after, rfp=rfp, budget=typed_budget):
-        save_proposal_draft(updated_draft)
+        await asave_proposal_draft(updated_draft)
         tools_note = f" tools={','.join(tool_log[:4])}" if tool_log else ""
         return (
             section_id,
@@ -281,12 +306,35 @@ async def _repair_one_section(
             if b.section_id == section_id
         ]
     )
-    if repair_message and after_blockers < before_blockers:
-        save_proposal_draft(updated_draft)
+    after_compliance = len(
+        [
+            g
+            for g in scan_rfp_compliance_gaps(draft=after_draft, research=research, rfp=rfp)
+            if g.section_id == section_id
+        ]
+    )
+    if after_blockers < before_blockers:
+        await asave_proposal_draft(updated_draft)
         return (
             section_id,
             True,
             f"submission blockers {before_blockers}→{after_blockers}",
+        )
+    if after_compliance < before_compliance:
+        await asave_proposal_draft(updated_draft)
+        return (
+            section_id,
+            True,
+            f"compliance gaps {before_compliance}→{after_compliance}",
+        )
+    before_weakness = weakness_score(before)
+    after_weakness = weakness_score(after)
+    if after_weakness < before_weakness:
+        await asave_proposal_draft(updated_draft)
+        return (
+            section_id,
+            True,
+            f"weakness score {before_weakness}→{after_weakness}",
         )
 
     return section_id, False, "reverted (no improvement)"
@@ -322,9 +370,9 @@ async def _fallback_improve_section(
             before,
         )
         if patch_improves_section(before, after, rfp=rfp, budget=typed_budget):
-            save_proposal_draft(updated_draft)
+            await asave_proposal_draft(updated_draft)
             if updated_research:
-                save_research_cache(updated_research)
+                await asave_research_cache(updated_research)
             return (
                 section_id,
                 True,
@@ -335,6 +383,19 @@ async def _fallback_improve_section(
         return section_id, False, f"fallback failed: {fallback_exc}"
 
 
+def _total_manuscript_flags(
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    rfp: RfpRecord,
+) -> int:
+    from app.services.proposal_manuscript_cleanup import scan_submission_blockers
+    from app.services.proposal_rfp_compliance import scan_rfp_compliance_gaps
+
+    return len(scan_submission_blockers(draft=draft, research=research)) + len(
+        scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
+    )
+
+
 async def run_self_edit_loop(
     rfp_id: str,
     *,
@@ -343,16 +404,35 @@ async def run_self_edit_loop(
     parallel: int = SELF_EDIT_PARALLEL,
 ) -> tuple[ProposalDraft, ProposalResearchCache | None, SelfEditReport]:
     """KB gap-fill + section-wise patches with strict improvement gate."""
-    draft = get_proposal_draft(rfp_id)
+    draft = await aget_proposal_draft(rfp_id)
     if not draft:
         raise ProposalError("No proposal draft for self-edit.", status_code=400)
 
-    research = get_research_cache(rfp_id)
+    from app.services.proposal_generator import (
+        generate_sections_1_3,
+        static_sections_1_3_have_content,
+    )
+
+    if not static_sections_1_3_have_content(draft):
+        logger.warning(
+            "Self-edit preflight: sections 1–3 incomplete for %s — generating before polish",
+            rfp_id,
+        )
+        await generate_sections_1_3(rfp_id)
+        draft = await aget_proposal_draft(rfp_id)
+        if not draft or not static_sections_1_3_have_content(draft):
+            raise ProposalError(
+                "Sections 1–3 must be generated before senior editor polish. "
+                "Section 3 (Case Studies) is still empty — check KB and retry.",
+                status_code=400,
+            )
+
+    research = await aget_research_cache(rfp_id)
     rfp: RfpRecord | None = None
     rfp_client = ""
     rfp_title = ""
     try:
-        rfp, _, _ = load_rfp_for_proposal(rfp_id)
+        rfp, _, _ = await aload_rfp_for_proposal(rfp_id)
         rfp_client = rfp.client
         rfp_title = rfp.title
     except ProposalError:
@@ -366,6 +446,17 @@ async def run_self_edit_loop(
     deadline = time.monotonic() + time_budget_sec
     sem = asyncio.Semaphore(parallel)
     zero_improve_streak = 0
+    zero_flag_streak = 0
+    flags_at_start = _total_manuscript_flags(draft, research, rfp)
+    if flags_at_start <= TARGET_FLAG_COUNT:
+        report.stopped_reason = "flag_target_met"
+        logger.info(
+            "Self-edit skipped for %s: %d flags already at target (≤%d)",
+            rfp_id,
+            flags_at_start,
+            TARGET_FLAG_COUNT,
+        )
+        return draft, research, report
 
     def _time_left() -> bool:
         return time.monotonic() < deadline
@@ -390,7 +481,7 @@ async def run_self_edit_loop(
             report.stopped_reason = "time_budget"
             break
 
-        draft = get_proposal_draft(rfp_id) or draft
+        draft = await aget_proposal_draft(rfp_id) or draft
         blocker_ids = sections_with_submission_blockers(draft, research)
         compliance_ids = sections_with_compliance_gaps(draft, research, rfp)
         weak = [
@@ -403,14 +494,22 @@ async def run_self_edit_loop(
             break
 
         weak.sort(key=weakness_score, reverse=True)
+        if len(weak) > MAX_WEAK_SECTIONS_PER_ITERATION:
+            weak = weak[:MAX_WEAK_SECTIONS_PER_ITERATION]
         report.iterations_run = iteration
         report.sections_targeted += len(weak)
 
+        flags_before = _total_manuscript_flags(draft, research, rfp)
+        if flags_before <= TARGET_FLAG_COUNT:
+            report.stopped_reason = "flag_target_met"
+            break
+
         logger.info(
-            "Self-edit iteration %d for %s: %d weak sections (parallel=%d)",
+            "Self-edit iteration %d for %s: %d weak sections, %d flags (parallel=%d)",
             iteration,
             rfp_id,
             len(weak),
+            flags_before,
             parallel,
         )
 
@@ -434,32 +533,55 @@ async def run_self_edit_loop(
             else:
                 report.sections_unchanged += 1
 
+        draft = await aget_proposal_draft(rfp_id) or draft
+        research = await aget_research_cache(rfp_id) or research
+        flags_after = _total_manuscript_flags(draft, research, rfp)
+
         logger.info(
-            "Self-edit iteration %d done: %d improved, %d unchanged",
+            "Self-edit iteration %d done: %d improved, %d unchanged, flags %d→%d",
             iteration,
             improved_this_round,
             len(weak) - improved_this_round,
+            flags_before,
+            flags_after,
         )
+
+        if flags_after <= TARGET_FLAG_COUNT:
+            report.stopped_reason = "flag_target_met"
+            break
+
+        if flags_after >= flags_before:
+            zero_flag_streak += 1
+            if zero_flag_streak >= MAX_ZERO_IMPROVEMENT_ITERATIONS:
+                report.stopped_reason = "flags_stalled"
+                logger.info(
+                    "Self-edit stopping for %s: flag count stalled at %d",
+                    rfp_id,
+                    flags_after,
+                )
+                break
+        else:
+            zero_flag_streak = 0
 
         if improved_this_round == 0:
             zero_improve_streak += 1
-            draft = get_proposal_draft(rfp_id) or draft
             if not any(verify_count(s.content or "") > 0 for s in draft.sections):
                 report.stopped_reason = "no_improvement"
                 break
             if zero_improve_streak >= MAX_ZERO_IMPROVEMENT_ITERATIONS:
                 logger.info(
-                    "Self-edit stopping main loop after %d zero-improvement iterations (VERIFY remain)",
+                    "Self-edit stopping main loop after %d zero-improvement iterations",
                     zero_improve_streak,
                 )
+                report.stopped_reason = "no_improvement"
                 break
         else:
             zero_improve_streak = 0
 
     # Dedicated VERIFY loop — skip senior editor (faster); stop after one failed round
     verify_round = 0
-    while _time_left() and verify_round < 2:
-        draft = get_proposal_draft(rfp_id) or draft
+    while _time_left() and verify_round < 1:
+        draft = await aget_proposal_draft(rfp_id) or draft
         verify_sections = [
             s for s in draft.sections if verify_count(s.content or "") > 0
         ]
@@ -476,6 +598,7 @@ async def run_self_edit_loop(
             len(verify_sections),
         )
         verify_sections.sort(key=weakness_score, reverse=True)
+        verify_sections = verify_sections[:MAX_WEAK_SECTIONS_PER_ITERATION]
         results = await asyncio.gather(
             *[_run_one(s.id, False) for s in verify_sections]
         )
@@ -502,14 +625,28 @@ async def run_self_edit_loop(
     if not report.stopped_reason:
         report.stopped_reason = "max_iterations"
 
-    draft = get_proposal_draft(rfp_id) or draft
-    research = get_research_cache(rfp_id)
+    draft = await aget_proposal_draft(rfp_id) or draft
+    research = await aget_research_cache(rfp_id)
 
-    if not _time_left():
-        logger.warning(
-            "Self-edit for %s: skipping polish passes (time budget exhausted)",
-            rfp_id,
-        )
+    skip_polish = report.stopped_reason in {
+        "flag_target_met",
+        "flags_stalled",
+        "no_improvement",
+        "time_budget",
+    }
+
+    if not _time_left() or skip_polish:
+        if skip_polish:
+            logger.info(
+                "Self-edit for %s: skipping polish passes (stopped=%s)",
+                rfp_id,
+                report.stopped_reason,
+            )
+        else:
+            logger.warning(
+                "Self-edit for %s: skipping polish passes (time budget exhausted)",
+                rfp_id,
+            )
     else:
         from app.services.proposal_submission_polish import run_submission_polish_pass
         from app.services.proposal_rfp_compliance import run_rfp_compliance_polish_pass
@@ -563,7 +700,7 @@ async def run_self_edit_loop(
         research = research.model_copy(
             update={"updated_at": datetime.now(timezone.utc).isoformat()}
         )
-        save_research_cache(research)
+        await asave_research_cache(research)
 
     logger.info(
         "Self-edit for %s: %d iterations, %d improved, stopped=%s",

@@ -7,6 +7,14 @@ export const STATIC_SECTION_IDS = [
   "section-3-our-work",
 ] as const;
 
+export function staticSections1to3Complete(
+  draft: ProposalOutline | null
+): boolean {
+  if (!draft) return false;
+  const byId = new Map(draft.sections.map((section) => [section.id, section]));
+  return STATIC_SECTION_IDS.every((id) => Boolean(byId.get(id)?.content?.trim()));
+}
+
 const DEFAULT_SECTIONS: (Omit<
   OutlineSection,
   "content" | "status"
@@ -346,8 +354,9 @@ function generateSectionContent(
           `This project is the closest parallel to ${title} in scope and audience.`
         ),
         paragraph(
-          `Additional references are available upon request.`,
-          `We can arrange reference calls with municipal clients who have worked with zö within the past 24 months.`
+          `**Reference contacts (required in proposal body)**`,
+          `Include three references with name, title, organization, phone, and email from KB (06_WON, reference letters).`,
+          `If the RFP requires geography-specific references not in KB, use the closest verified public-sector contacts with honest disclosure — never "upon request" or [PLACEHOLDER] rows.`
         ),
       ].join("\n\n");
 

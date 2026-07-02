@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -15,6 +16,11 @@ from app.services.proposal_voice_enforcement import enforce_narrative_voice
 from app.services.proposal_langchain import _provider_name
 
 logger = logging.getLogger(__name__)
+
+SectionsPartialCallback = Callable[
+    [list[ProposalSection], str, ProposalBrandVoice | None],
+    Awaitable[None],
+]
 
 
 class SectionsGraphState(TypedDict, total=False):
@@ -359,6 +365,7 @@ async def run_sections_1_3_graph(
     rfp_location: str | None,
     rfp_context: str,
     page_limit: int | None,
+    on_sections_partial: SectionsPartialCallback | None = None,
 ) -> tuple[list[ProposalSection], ProposalBrandVoice, str]:
     if not llm.is_configured():
         raise LlmError(
@@ -378,7 +385,25 @@ async def run_sections_1_3_graph(
     }
 
     logger.info("LangGraph sections 1–3 starting for rfp_id=%s", rfp_id)
-    final = await _SECTIONS_GRAPH.ainvoke(initial)
+    final: dict[str, Any] = dict(initial)
+    async for event in _SECTIONS_GRAPH.astream(initial):
+        for node_name, update in event.items():
+            if isinstance(update, dict):
+                final.update(update)
+            if node_name not in ("build_section_1", "build_section_2", "build_section_3"):
+                continue
+            if not on_sections_partial:
+                continue
+            raw_sections = final.get("sections") or []
+            sections = [ProposalSection.model_validate(item) for item in raw_sections]
+            brand_voice_raw = final.get("brand_voice")
+            brand_voice = (
+                ProposalBrandVoice.model_validate(brand_voice_raw)
+                if isinstance(brand_voice_raw, dict)
+                else None
+            )
+            provider = str(final.get("provider") or _provider_name())
+            await on_sections_partial(sections, provider, brand_voice)
 
     if final.get("error"):
         raise LlmError(str(final["error"]), status_code=502)

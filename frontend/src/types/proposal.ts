@@ -82,6 +82,24 @@ export interface PreSubmitIssue {
   excerpt?: string | null;
 }
 
+export interface ManualFillFlag {
+  sectionId: string;
+  sectionTitle: string;
+  kind:
+    | "verify"
+    | "placeholder"
+    | "manual_fill"
+    | "compliance"
+    | "budget"
+    | "consistency"
+    | "other";
+  tag: string;
+  highlightText?: string;
+  owner?: string | null;
+  finalized?: boolean;
+  kbSearched?: boolean;
+}
+
 export interface ComplianceCheckItem {
   item: string;
   status: "pass" | "fail" | "manual";
@@ -92,6 +110,7 @@ export interface PreSubmitReview {
   rfpId: string;
   issues: PreSubmitIssue[];
   complianceChecklist: ComplianceCheckItem[];
+  manualFillFlags?: ManualFillFlag[];
   summary: string;
   issuesMarkdown?: string;
   readyToSubmit: boolean;

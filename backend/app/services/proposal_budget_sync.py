@@ -36,6 +36,9 @@ Rules:
 7. Preserve all non-pricing content (statutory citations, team, approach, compliance, MWBE, living wage).
 8. Never add [VERIFY] tags or "verify before submission" reconciliation notes.
 9. Change only pricing-related sentences — preserve strong existing prose elsewhere.
+10. NEVER write $0 for agency revenue, annual commission, or "zö fee income" when canonical agencyRevenueEstimate is a positive number — replace every $0 fee line with the canonical amount.
+11. NEVER contradict canonical budget: if narrative says $37,500/year commission, Budget Summary and Investment Framing must all match agencyRevenueEstimate exactly.
+12. Do not defer reference contacts, workforce %, PSA acknowledgments, or hours tables — those are separate compliance rules; only fix fee/pricing sentences here.
 
 Return ONLY JSON:
 {"sections":[{"sectionId":"...","content":"full updated section prose"}]}"""
@@ -74,6 +77,12 @@ def _canonical_budget_facts(budget: ProposalBudget) -> str:
         lines.append(f"qualifyingLanguage:\n{budget.qualifying_language[:2000]}")
     if budget.media_spend_notes.strip():
         lines.append(f"mediaSpendNotes:\n{budget.media_spend_notes[:800]}")
+    revenue = float(budget.agency_revenue_estimate or 0)
+    if revenue <= 0:
+        lines.append(
+            "CRITICAL: agencyRevenueEstimate is ZERO — do NOT write $0 in narrative; "
+            "run budget reconcile or set commissionRate × clientMediaPassthrough first."
+        )
     return "\n".join(lines)
 
 

@@ -129,13 +129,7 @@ export function formatBudgetAsSectionContent(budget: ProposalBudget): string {
     lines.push("");
   }
 
-  if (budget.pricingFlags.length > 0) {
-    lines.push("## Pricing Flags");
-    for (const flag of budget.pricingFlags) {
-      lines.push(`- ${flag}`);
-    }
-    lines.push("");
-  }
+  // pricingFlags remain on ProposalBudget for internal review — not in submission manuscript
 
   if (budget.designBrief?.trim()) {
     lines.push(`[DESIGNER NOTE: ${budget.designBrief.trim()}]`);

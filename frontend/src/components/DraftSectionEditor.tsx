@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { improveProposalSection } from "@/lib/proposal-api";
-import { getTextareaCaretViewportRect } from "@/lib/textarea-selection";
+import { getTextareaCaretViewportRect, scrollTextareaToRange } from "@/lib/textarea-selection";
+import type { FlagHighlightRange } from "@/lib/proposal-manual-flags";
 import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import { SectionRevisionCompare } from "./SectionRevisionCompare";
 
@@ -23,6 +24,9 @@ interface DraftSectionEditorProps {
   value: string;
   onChange: (content: string) => void;
   onSectionUpdated: (draft: ProposalOutline, research: ProposalResearch | null) => void;
+  compact?: boolean;
+  highlightRange?: FlagHighlightRange | null;
+  onUserEditStart?: () => void;
 }
 
 const SECTION_PROMPTS = [
@@ -39,9 +43,15 @@ export function DraftSectionEditor({
   value,
   onChange,
   onSectionUpdated,
+  compact = false,
+  highlightRange = null,
+  onUserEditStart,
 }: DraftSectionEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const selectionRafRef = useRef<number | null>(null);
+  const programmaticSelectionRef = useRef(false);
+  const frozenSelectionRef = useRef<TextSelection | null>(null);
+  const appliedHighlightKeyRef = useRef<string | null>(null);
   const [selection, setSelection] = useState<TextSelection | null>(null);
   const [textareaFocused, setTextareaFocused] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -59,12 +69,37 @@ export function DraftSectionEditor({
 
   useEffect(() => {
     setSelection(null);
+    frozenSelectionRef.current = null;
     setDialogOpen(false);
     setInstruction("");
     setError(null);
     setRevisionCompare(null);
     setRevisionDrawerOpen(false);
+    appliedHighlightKeyRef.current = null;
   }, [section.id]);
+
+  useEffect(() => {
+    if (!highlightRange || !textareaRef.current || dialogOpen || isRunning) return;
+    const ta = textareaRef.current;
+    const { start, end } = highlightRange;
+    if (start < 0 || end <= start || end > ta.value.length) return;
+
+    const highlightKey = `${section.id}:${start}:${end}:${highlightRange.text}`;
+    if (appliedHighlightKeyRef.current === highlightKey) return;
+    appliedHighlightKeyRef.current = highlightKey;
+
+    const applyHighlight = () => {
+      programmaticSelectionRef.current = true;
+      scrollTextareaToRange(ta, start, end);
+      window.requestAnimationFrame(() => {
+        programmaticSelectionRef.current = false;
+      });
+    };
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(applyHighlight);
+    });
+  }, [dialogOpen, highlightRange, isRunning, section.id]);
 
   const clearSelection = useCallback(() => {
     if (selectionRafRef.current !== null) {
@@ -75,6 +110,7 @@ export function DraftSectionEditor({
   }, []);
 
   const captureSelection = useCallback(() => {
+    if (programmaticSelectionRef.current) return;
     if (selectionRafRef.current !== null) {
       window.cancelAnimationFrame(selectionRafRef.current);
     }
@@ -143,6 +179,13 @@ export function DraftSectionEditor({
   }, [section.id, captureSelection]);
 
   const openDialog = (mode: "selection" | "section") => {
+    onUserEditStart?.();
+    appliedHighlightKeyRef.current = null;
+    if (mode === "selection" && selection) {
+      frozenSelectionRef.current = { ...selection };
+    } else {
+      frozenSelectionRef.current = null;
+    }
     setDialogMode(mode);
     setInstruction("");
     setError(null);
@@ -152,6 +195,7 @@ export function DraftSectionEditor({
   const closeDialog = () => {
     if (isRunning) return;
     setDialogOpen(false);
+    frozenSelectionRef.current = null;
     clearSelection();
   };
 
@@ -160,29 +204,46 @@ export function DraftSectionEditor({
 
   const buildMessage = useCallback(() => {
     const trimmed = instruction.trim();
-    if (dialogMode === "selection" && selection) {
-      return (
-        `Revise ONLY the following excerpt within this section. ` +
-        `Keep all other paragraphs, headings, and structure unchanged. Preserve zö voice.\n\n` +
-        `Excerpt:\n"""${selection.text}"""\n\nInstructions: ${trimmed}`
-      );
+    if (dialogMode === "selection" && frozenSelectionRef.current) {
+      return trimmed;
     }
     return trimmed;
-  }, [dialogMode, instruction, selection]);
+  }, [dialogMode, instruction]);
 
   const applyRevision = useCallback(async () => {
     const trimmed = instruction.trim();
     if (!trimmed || isRunning) return;
+
+    const activeSelection =
+      dialogMode === "selection" ? frozenSelectionRef.current : null;
+    if (dialogMode === "selection" && !activeSelection) {
+      setError("Selection was lost — re-highlight the excerpt and try again.");
+      return;
+    }
 
     setIsRunning(true);
     setError(null);
     const contentBefore = value;
 
     try {
-      const result = await improveProposalSection(rfpId, section.id, buildMessage());
+      const result = await improveProposalSection(
+        rfpId,
+        section.id,
+        buildMessage(),
+        activeSelection
+          ? {
+              selection: {
+                start: activeSelection.start,
+                end: activeSelection.end,
+                text: activeSelection.text,
+              },
+            }
+          : undefined
+      );
       onSectionUpdated(result.draft, result.research);
       const contentAfter = result.section.content ?? contentBefore;
-      if (contentBefore !== contentAfter) {
+      const didChange = contentBefore !== contentAfter;
+      if (didChange) {
         setRevisionCompare({
           before: contentBefore,
           after: contentAfter,
@@ -190,30 +251,48 @@ export function DraftSectionEditor({
           instruction: trimmed,
         });
         setRevisionDrawerOpen(true);
+      } else if (dialogMode === "selection") {
+        setError(
+          "No change was applied to the selected excerpt. Try a more specific instruction."
+        );
+        return;
       }
       setDialogOpen(false);
+      frozenSelectionRef.current = null;
       setSelection(null);
+      appliedHighlightKeyRef.current = null;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Revision failed");
     } finally {
       setIsRunning(false);
     }
-  }, [buildMessage, instruction, isRunning, onSectionUpdated, rfpId, section.id, value]);
+  }, [
+    buildMessage,
+    dialogMode,
+    instruction,
+    isRunning,
+    onSectionUpdated,
+    rfpId,
+    section.id,
+    value,
+  ]);
+
+  const dialogSelection = frozenSelectionRef.current;
 
   const selectionPreview =
-    dialogMode === "selection" && selection
-      ? selection.text
+    dialogMode === "selection" && dialogSelection
+      ? dialogSelection.text
       : value.slice(0, 280) + (value.length > 280 ? "…" : "");
 
   return (
     <>
       <div className="proposal-draft-layout">
-        <div className="proposal-draft-main">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <span className="text-xs font-bold uppercase tracking-[0.12em] text-zo-text-muted">
+        <div className={`proposal-draft-main ${compact ? "is-compact" : ""}`}>
+          <div className="proposal-draft-toolbar mb-1.5 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-zo-text-muted">
               Draft content
             </span>
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
               {revisionCompare && !revisionDrawerOpen ? (
                 <button
                   type="button"
@@ -227,11 +306,11 @@ export function DraftSectionEditor({
                 type="button"
                 disabled={disabled || isRunning}
                 onClick={() => openDialog("section")}
-                className="text-xs font-semibold text-zo-orange transition-smooth hover:underline disabled:opacity-50"
+                className="text-[11px] font-semibold text-zo-orange transition-smooth hover:underline disabled:opacity-50"
               >
                 Improve full section
               </button>
-              <span className="text-xs font-medium text-zo-text-muted">
+              <span className="text-[11px] font-medium text-zo-text-muted">
                 {wordCount.toLocaleString()} words
                 {section.wordTarget > 0 ? (
                   <span className="text-zo-text-muted/70">
@@ -243,15 +322,19 @@ export function DraftSectionEditor({
             </div>
           </div>
 
-          <p className="mb-2 text-[11px] text-zo-text-muted">
-            Highlight text — a <strong>Revise content</strong> button appears on the selection.
-          </p>
+          {!compact ? (
+            <p className="proposal-draft-hint mb-2 text-[11px] text-zo-text-muted">
+              Highlight text — a <strong>Revise content</strong> button appears on the selection.
+            </p>
+          ) : null}
 
           <div className="proposal-draft-textarea-shell">
             <textarea
               ref={textareaRef}
               value={value}
               onChange={(e) => {
+                onUserEditStart?.();
+                appliedHighlightKeyRef.current = null;
                 onChange(e.target.value);
                 setSelection(null);
                 setRevisionCompare(null);

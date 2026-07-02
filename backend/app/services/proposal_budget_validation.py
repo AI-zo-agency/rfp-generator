@@ -48,6 +48,11 @@ _AGENCY_FEE_LINE_RE = re.compile(
     r"\bresearch\b|\breporting\b|\bcreative\b|\bdesign\b|\baccount\s+management\b",
     re.I,
 )
+_PM_LINE_RE = re.compile(
+    r"\bproject\s+management\b|\baccount\s+management\b|\bprogram\s+management\b",
+    re.I,
+)
+_PRICING_FLAG_ADVISORY_RE = re.compile(r"PRICING\s+FLAG", re.I)
 
 
 def _usd(value: float) -> str:
@@ -112,6 +117,41 @@ def split_line_item_totals(
     return round(agency + passthrough, 2), agency, passthrough
 
 
+def collect_pm_ratio_violations(budget: ProposalBudget) -> list[str]:
+    """Flag when PM line items fall outside the 5–8% agency-fee guide."""
+    _, agency_fee, _ = split_line_item_totals(budget.line_items)
+    base = budget.agency_fee_subtotal
+    if base is None:
+        base = agency_fee
+    base = float(base or 0)
+    if base <= 0:
+        return []
+
+    pm_total = 0.0
+    for item in budget.line_items:
+        blob = " ".join(
+            part
+            for part in (item.category, item.description, item.role_title or "")
+            if part
+        )
+        if _PM_LINE_RE.search(blob):
+            pm_total += float(item.extended or 0)
+
+    if pm_total <= 0:
+        return []
+
+    ratio = pm_total / base
+    if 0.05 <= ratio <= 0.08:
+        return []
+
+    return [
+        (
+            f"project management lines (${pm_total:,.0f}) are {ratio * 100:.1f}% of agency fees "
+            f"— pricing guide targets 5–8%. Adjust rates or scope with Sonja before submission."
+        )
+    ]
+
+
 def is_commission_style_budget(budget: ProposalBudget) -> bool:
     if budget.commission_model and _COMMISSION_MODEL_RE.search(budget.commission_model):
         return True
@@ -119,6 +159,20 @@ def is_commission_style_budget(budget: ProposalBudget) -> bool:
         return True
     _, _, passthrough = split_line_item_totals(budget.line_items)
     return passthrough > 0
+
+
+def derive_commission_agency_revenue(budget: ProposalBudget) -> float | None:
+    """Annual agency fee from commission rate × client media pass-through when line items are empty."""
+    rate = budget.commission_rate
+    passthrough = budget.client_media_passthrough
+    if rate is None or not passthrough or float(passthrough) <= 0:
+        return None
+    r = float(rate)
+    if r > 1:
+        r = r / 100.0
+    if r <= 0:
+        return None
+    return round(float(passthrough) * r, 2)
 
 
 def render_budget_markdown_for_validation(budget: ProposalBudget) -> str:
@@ -276,6 +330,18 @@ def reconcile_proposal_budget(
         agency_fee = round(line_sum, 2)
         passthrough = 0.0
 
+    if commission_style and agency_revenue <= 0:
+        derived = derive_commission_agency_revenue(budget)
+        if derived is None and budget.lump_sum_total and float(budget.lump_sum_total) > 0:
+            derived = round(float(budget.lump_sum_total), 2)
+        if derived and derived > 0:
+            agency_revenue = round(derived + direct, 2)
+            agency_fee = derived
+            if passthrough <= 0 and budget.client_media_passthrough:
+                passthrough = round(float(budget.client_media_passthrough), 2)
+            if passthrough > 0:
+                total_invoicing = round(passthrough + agency_revenue, 2)
+
     updates: dict[str, Any] = {
         "line_items": line_items,
         "line_item_sum": line_sum,
@@ -375,6 +441,13 @@ def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
     for flag in budget.pricing_flags:
         if _STALE_RECONCILIATION_FLAG_RE.search(flag):
             violations.append(f"stale reconciliation flag remains: {flag[:100]}")
+        elif _PRICING_FLAG_ADVISORY_RE.search(flag):
+            # Advisory — surfaced in budget panel / manual flags; Sonja resolves pre-submit.
+            continue
+        elif flag.strip():
+            violations.append(f"unresolved budget flag: {flag[:120]}")
+
+    violations.extend(collect_pm_ratio_violations(budget))
 
     return violations
 

@@ -106,6 +106,22 @@ async def run_tool_agent_loop(
         raise
 
 
+_SYNTHESIS_NUDGE = (
+    "KB search rounds are complete. Write the full section now using the evidence above. "
+    'Return ONLY valid JSON with a non-empty "content" field — no more tool calls.'
+)
+
+
+def _message_text(message: Any) -> str:
+    content = message.content if hasattr(message, "content") else str(message)
+    if isinstance(content, list):
+        return "".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in content
+        )
+    return str(content)
+
+
 async def _run_tool_agent_loop_once(
     *,
     system_prompt: str,
@@ -120,11 +136,12 @@ async def _run_tool_agent_loop_once(
 ) -> tuple[str, str, list[str]]:
     """Single provider attempt for tool-calling loop."""
     tool_map = {t.name: t for t in tools}
-    llm = get_chat_model(
+    base_llm = get_chat_model(
         temperature=temperature,
         max_tokens=max_tokens,
         force_fireworks=force_fireworks,
-    ).bind_tools(tools)
+    )
+    tool_llm = base_llm.bind_tools(tools)
     messages: list[Any] = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_content),
@@ -132,7 +149,7 @@ async def _run_tool_agent_loop_once(
     tool_log: list[str] = []
 
     for round_num in range(max_rounds):
-        response = await llm.ainvoke(messages)
+        response = await tool_llm.ainvoke(messages)
         if not getattr(response, "tool_calls", None):
             messages.append(response)
             break
@@ -158,14 +175,35 @@ async def _run_tool_agent_loop_once(
             _provider_name(force_fireworks=force_fireworks),
         )
 
+        if round_num == max_rounds - 1:
+            messages.append(HumanMessage(content=_SYNTHESIS_NUDGE))
+            synthesis = await base_llm.ainvoke(messages)
+            messages.append(synthesis)
+            logger.info(
+                "%s agent synthesis for %s after %d tool round(s) provider=%s",
+                agent_label,
+                rfp_id or "n/a",
+                max_rounds,
+                _provider_name(force_fireworks=force_fireworks),
+            )
+
     final = messages[-1]
-    content = final.content if hasattr(final, "content") else str(final)
-    if isinstance(content, list):
-        content = "".join(
-            block.get("text", "") if isinstance(block, dict) else str(block)
-            for block in content
+    if getattr(final, "tool_calls", None):
+        logger.warning(
+            "%s agent for %s ended on tool_calls without synthesis — forcing JSON turn",
+            agent_label,
+            rfp_id or "n/a",
         )
-    return str(content), _provider_name(force_fireworks=force_fireworks), tool_log
+        messages.append(HumanMessage(content=_SYNTHESIS_NUDGE))
+        synthesis = await base_llm.ainvoke(messages)
+        messages.append(synthesis)
+        final = synthesis
+
+    return (
+        _message_text(final),
+        _provider_name(force_fireworks=force_fireworks),
+        tool_log,
+    )
 
 
 def _provider_name(*, force_fireworks: bool = False) -> str:
