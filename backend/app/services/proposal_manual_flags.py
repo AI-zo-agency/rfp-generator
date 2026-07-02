@@ -183,6 +183,210 @@ def apply_corpus_snippet_fills(
     return draft.model_copy(update={"sections": updated_sections, "updated_at": now})
 
 
+_PERCENT_RE = re.compile(r"\b(\d{1,2}(?:\.\d+)?)\s*%")
+_DOLLAR_LIMIT_RE = re.compile(
+    r"\$[\d,]+(?:\.\d+)?\s*(?:million|mil|M)\b|\$[\d,]+(?:\.\d+)?",
+    re.I,
+)
+
+
+def _section_corpus_blob(corpus: list, section_id: str, *, max_items: int = 40) -> str:
+    from app.models.proposal import EvidenceItem
+
+    tagged = [
+        e
+        for e in corpus
+        if isinstance(e, EvidenceItem) and section_id in (e.section_ids or [])
+    ]
+    pool = tagged if tagged else [e for e in corpus if isinstance(e, EvidenceItem)]
+    return "\n".join((e.excerpt or "")[:3000] for e in pool[:max_items])
+
+
+def _replace_verify_tags_from_blob(content: str, blob: str) -> tuple[str, int]:
+    """Swap [VERIFY: …] tags for KB facts when the tag field clearly matches extracted data."""
+    if not content.strip() or not VERIFY_TAG_RE.search(content):
+        return content, 0
+
+    fein = _FEIN_RE.search(blob)
+    fein_val = fein.group(0) if fein else None
+    emails = _EMAIL_RE.findall(blob)
+    phones = _PHONE_RE.findall(blob)
+    percents = [float(m.group(1)) for m in _PERCENT_RE.finditer(blob)]
+    female_pct = next((p for p in percents if 0 < p <= 100), None)
+    dollar_limits = [m.group(0) for m in _DOLLAR_LIMIT_RE.finditer(blob)]
+
+    def email_for_field(field: str) -> str | None:
+        names = _person_names_from_field(field)
+        near = _value_near_name(blob, names, _EMAIL_RE)
+        if near:
+            return near
+        lowered = field.casefold()
+        for email in emails:
+            local = email.split("@", 1)[0].casefold()
+            if any(token in lowered for token in local.replace(".", " ").split()):
+                return email
+        return next(
+            (e for e in emails if "zo" in e.casefold()),
+            emails[0] if emails else None,
+        )
+
+    def phone_for_field(field: str) -> str | None:
+        names = _person_names_from_field(field)
+        near = _value_near_name(blob, names, _PHONE_RE)
+        if near:
+            return near
+        person_key = _normalize_person_key(field)
+        if person_key:
+            for name in (person_key, person_key.split()[0]):
+                idx = blob.casefold().find(name)
+                if idx >= 0:
+                    window = blob[max(0, idx - 120) : idx + 400]
+                    near_phones = _PHONE_RE.findall(window)
+                    if near_phones:
+                        return near_phones[0]
+        return phones[0] if phones else None
+
+    fills = 0
+    updated = content
+
+    def sub_if_keywords(
+        keywords: tuple[str, ...],
+        value: str | None,
+        text: str,
+        *,
+        field_resolver: object | None = None,
+    ) -> tuple[str, int]:
+        count = 0
+
+        def repl(match: re.Match[str]) -> str:
+            nonlocal count
+            field = (match.group(1) or "").casefold()
+            if not any(k in field for k in keywords):
+                return match.group(0)
+            replacement = value
+            if callable(field_resolver):
+                replacement = field_resolver(match.group(1) or "")
+            if not replacement or replacement in text:
+                return match.group(0)
+            count += 1
+            return replacement
+
+        return VERIFY_TAG_RE.sub(repl, text), count
+
+    updated, n = sub_if_keywords(
+        ("fein", "ein", "tax id", "federal employer"), fein_val, updated
+    )
+    fills += n
+    updated, n = sub_if_keywords(("email", "e-mail"), None, updated, field_resolver=email_for_field)
+    fills += n
+    updated, n = sub_if_keywords(
+        ("phone", "telephone", "fax", "direct line", "line"),
+        None,
+        updated,
+        field_resolver=phone_for_field,
+    )
+    fills += n
+    updated, n = sub_if_keywords(
+        ("female", "woman", "women", "diversity", "minority", "workforce", "eeo"),
+        f"{female_pct:g}%" if female_pct is not None else None,
+        updated,
+    )
+    fills += n
+
+    if dollar_limits:
+
+        def insurance_repl(match: re.Match[str]) -> str:
+            nonlocal fills
+            field = (match.group(1) or "").casefold()
+            if any(k in field for k in ("insurance", "liability", "umbrella", "coverage", "limit")):
+                fills += 1
+                return dollar_limits[0]
+            return match.group(0)
+
+        updated = VERIFY_TAG_RE.sub(insurance_repl, updated)
+
+    return updated, fills
+
+
+def _normalize_person_key(name: str) -> str:
+    return re.sub(r"[^a-z\s]", "", name.casefold()).strip()
+
+
+def _person_names_from_field(field: str) -> list[str]:
+    """Names to search for in KB text when a VERIFY field mentions a person."""
+    lowered = field.casefold()
+    names: list[str] = []
+    if "sonja" in lowered:
+        names.extend(["sonja m. anderson", "sonja m anderson", "sonja anderson", "sonja"])
+    if "todd" in lowered:
+        names.extend(["todd anderson", "todd"])
+    if "ella" in lowered:
+        names.extend(["ella", "ella curt"])
+    if "curt" in lowered:
+        names.extend(["curt", "ella curt"])
+    first = _normalize_person_key(field).split()
+    if first and first[0] not in {n.split()[0] for n in names}:
+        names.append(first[0])
+    return names
+
+
+def _value_near_name(blob: str, names: list[str], pattern: re.Pattern[str]) -> str | None:
+    blob_lower = blob.casefold()
+    for name in names:
+        idx = blob_lower.find(name.casefold())
+        if idx < 0:
+            continue
+        window = blob[max(0, idx - 160) : idx + 600]
+        matches = pattern.findall(window)
+        if matches:
+            return matches[0]
+    return None
+
+
+def apply_section_evidence_fills(
+    section_id: str,
+    section_title: str,
+    content: str,
+    corpus: list,
+) -> tuple[str, int]:
+    """Apply Supermemory corpus facts to VERIFY tags in one section — no LLM."""
+    blob = _section_corpus_blob(corpus, section_id)
+    if not blob.strip():
+        return content, 0
+
+    updated, fills = _replace_verify_tags_from_blob(content, blob)
+
+    # Questionnaire-style append only when tag swap did not already place the fact.
+    title = section_title.casefold()
+    is_questionnaire = any(
+        p in title
+        for p in (
+            "questionnaire",
+            "vendor",
+            "contractor",
+            "offeror",
+            "business entity",
+            "administrative",
+            "compliance and administrative",
+        )
+    )
+    if is_questionnaire:
+        fein = _FEIN_RE.search(blob)
+        if fein and fein.group(0) not in updated:
+            updated = f"{updated.rstrip()}\n\n**Federal EIN (FEIN):** {fein.group(0)}"
+            fills += 1
+        emails = _EMAIL_RE.findall(blob)
+        email = next(
+            (e for e in emails if "zo" in e.casefold() or "sonja" in e.casefold()),
+            emails[0] if emails else None,
+        )
+        if email and email not in updated:
+            updated = f"{updated.rstrip()}\n\n**Primary business email:** {email}"
+            fills += 1
+
+    return updated, fills
+
+
 def apply_finalize_handoff_to_draft(
     draft: ProposalDraft,
     gaps: list[ComplianceGap],
@@ -198,9 +402,17 @@ def apply_finalize_handoff_to_draft(
     updated_sections = []
     for section in draft.sections:
         content = convert_verify_tags_to_manual_fill(section.content or "")
+        existing_lower = content.casefold()
         for tag in tags_by_section.get(section.id, []):
-            if tag.casefold() not in content.casefold():
-                content = f"{content.rstrip()}\n\n{tag}"
+            tag_lower = tag.casefold()
+            if tag_lower in existing_lower:
+                continue
+            # Skip if an equivalent MANUAL FILL for the same field already exists.
+            field_hint = tag.split("—", 1)[-1].strip().casefold() if "—" in tag else ""
+            if field_hint and field_hint in existing_lower:
+                continue
+            content = f"{content.rstrip()}\n\n{tag}"
+            existing_lower = content.casefold()
         updated_sections.append(section.model_copy(update={"content": content}))
 
     return draft.model_copy(

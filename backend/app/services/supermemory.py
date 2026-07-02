@@ -1,3 +1,13 @@
+"""Supermemory client.
+
+API split (Supermemory platform — not our choice):
+  - v4/search  → query KB (hybrid = memories + document chunks; use hybrid by default)
+  - v3/documents* → ingest only (batch upload, file upload, list) — no v4 write API exists
+  - v3/connections* → Google Drive OAuth/sync only
+
+All proposal retrieval uses v4 search. Ingest scripts use v3 batch upload.
+"""
+
 import json
 import logging
 from typing import Any
@@ -209,12 +219,14 @@ async def search_documents(
     filters: dict[str, Any] | None = None,
     search_mode: str = "hybrid",
 ) -> list[dict[str, Any]]:
+    """Query KB via POST /v4/search (always v4 — never v3 for reads)."""
     body: dict[str, Any] = {
         "q": query,
         "limit": limit,
         "containerTag": container_tag(),
         "searchMode": search_mode,
         "rerank": True,
+        "threshold": 0.45,
     }
     if include_full_docs:
         body["include"] = {
@@ -235,24 +247,80 @@ async def search_documents(
     return hits
 
 
-def _normalize_search_results(data: Any) -> list[dict[str, Any]]:
-    raw = _extract_search_results(data)
-    return [_normalize_search_hit(hit) for hit in raw]
+async def search_hybrid(
+    *,
+    query: str,
+    limit: int = 8,
+    include_full_docs: bool = False,
+    filters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """v4 hybrid — memories + document chunks (default retrieval mode)."""
+    return await search_documents(
+        query=query,
+        limit=limit,
+        include_full_docs=include_full_docs,
+        filters=filters,
+        search_mode="hybrid",
+    )
+
+
+async def search_document_chunks(
+    *,
+    query: str,
+    limit: int = 8,
+    filters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """v4 documents mode — raw PDF/DOCX chunks (phones/emails live here, not in memory summaries)."""
+    return await search_documents(
+        query=query,
+        limit=limit,
+        include_full_docs=True,
+        filters=filters,
+        search_mode="documents",
+    )
+
+
+def merge_search_hits(
+    hit_groups: list[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for hits in hit_groups:
+        for hit in hits:
+            key = str(hit.get("id") or hit.get("customId") or id(hit))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(hit)
+    return merged
+
+
+def hit_text(hit: dict[str, Any]) -> str:
+    """Best available text from a v4 search hit — prefer document chunks over memory summaries."""
+    documents = hit.get("documents")
+    if isinstance(documents, list):
+        for document in documents:
+            if not isinstance(document, dict):
+                continue
+            for key in ("chunk", "content", "text"):
+                value = document.get(key)
+                if value:
+                    return str(value).strip()
+
+    for key in ("chunk", "content", "memory", "text", "summary", "documentSummary"):
+        value = hit.get(key)
+        if value:
+            if isinstance(value, list):
+                return "\n".join(str(item) for item in value).strip()
+            return str(value).strip()
+    return ""
 
 
 def _normalize_search_hit(hit: dict[str, Any]) -> dict[str, Any]:
     """Map v4 memory/chunk results onto the shape used by format_search_hits."""
     normalized = dict(hit)
-    content = (
-        hit.get("memory")
-        or hit.get("chunk")
-        or hit.get("content")
-        or hit.get("text")
-        or hit.get("summary")
-        or hit.get("documentSummary")
-        or ""
-    )
-    if content and not normalized.get("content"):
+    content = hit_text(hit)
+    if content:
         normalized["content"] = content
 
     documents = hit.get("documents")
@@ -260,12 +328,13 @@ def _normalize_search_hit(hit: dict[str, Any]) -> dict[str, Any]:
         document = documents[0] if isinstance(documents[0], dict) else {}
         normalized.setdefault("customId", document.get("customId"))
         normalized.setdefault("title", document.get("title"))
-        if not normalized.get("content"):
-            document_content = document.get("content") or document.get("text") or ""
-            if document_content:
-                normalized["content"] = document_content
 
     return normalized
+
+
+def _normalize_search_results(data: Any) -> list[dict[str, Any]]:
+    raw = _extract_search_results(data)
+    return [_normalize_search_hit(hit) for hit in raw]
 
 
 def _extract_search_results(data: Any) -> list[dict[str, Any]]:
@@ -292,18 +361,7 @@ def format_search_hits(hits: list[dict[str, Any]], *, max_chars: int = 12_000) -
             or hit.get("customId")
             or f"Result {index}"
         )
-        content = (
-            hit.get("content")
-            or hit.get("memory")
-            or hit.get("chunk")
-            or hit.get("text")
-            or hit.get("summary")
-            or hit.get("documentSummary")
-            or ""
-        )
-        if isinstance(content, list):
-            content = "\n".join(str(item) for item in content)
-        content = str(content).strip()
+        content = hit_text(hit)
         if not content:
             continue
 
@@ -319,8 +377,89 @@ def format_search_hits(hits: list[dict[str, Any]], *, max_chars: int = 12_000) -
     return "\n\n".join(parts).strip()
 
 
-async def ingest_knowledge_base_file(
+def _hit_label(hit: dict[str, Any]) -> str:
+    metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+    return str(
+        hit.get("title")
+        or metadata.get("fileName")
+        or hit.get("customId")
+        or hit.get("id")
+        or "document"
+    )
+
+
+def _contact_doc_priority(hit: dict[str, Any]) -> int:
+    label = _hit_label(hit).casefold()
+    body = hit_text(hit).casefold()
+    if "companyfacts" in label or "01_company" in label:
+        return 0
+    if "companyoverview" in label or "company overview" in label:
+        return 1
+    if "mastertemplate_intro" in label or "mastertemplate intro" in label:
+        return 2
+    if "04_bio" in label or "bio_sonja" in label or "bio sonja" in label:
+        return 3
+    if "bio" in label or "mastertemplate" in label:
+        return 4
+    if "phone" in body or "email" in body or "contact" in body:
+        return 5
+    return 9
+
+
+async def fetch_hits_fact_text(
+    hits: list[dict[str, Any]],
     *,
+    max_hits: int = 12,
+    max_chars: int = 32_000,
+) -> str:
+    """Build a fact blob from v4 search chunks (no v3 document GET)."""
+    ranked = sorted(hits, key=_contact_doc_priority)
+    parts: list[str] = []
+    total = 0
+
+    for hit in ranked[:max_hits]:
+        content = hit_text(hit)
+        if not content:
+            continue
+        block = f"### {_hit_label(hit)}\n{content}"
+        remaining = max_chars - total
+        if remaining <= 0:
+            break
+        if len(block) > remaining:
+            block = block[:remaining]
+        parts.append(block)
+        total += len(block)
+
+    return "\n\n".join(parts).strip()
+
+
+async def batch_add_documents(
+    documents: list[dict[str, Any]],
+    *,
+    dreaming: str = "instant",
+) -> dict[str, Any]:
+    """POST /v3/documents/batch — ingest many docs in one call (content = text or URL)."""
+    if not documents:
+        return {"results": []}
+    body: dict[str, Any] = {
+        "containerTag": container_tag(),
+        "dreaming": dreaming,
+        "documents": documents,
+    }
+    result = await _request("POST", "/v3/documents/batch", json_body=body)
+    return result if isinstance(result, dict) else {"results": []}
+
+
+async def trigger_google_drive_import() -> dict[str, Any]:
+    """Kick off Supermemory Google Drive import (async on their side)."""
+    return await _request(
+        "POST",
+        "/v3/connections/google-drive/import",
+        json_body={"containerTags": [container_tag()]},
+    )
+
+
+async def ingest_knowledge_base_file(
     document_id: str,
     title: str,
     category: str,

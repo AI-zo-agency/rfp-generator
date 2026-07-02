@@ -346,10 +346,12 @@ function scanBudgetHoursFlags(
 
   if (!commissionHint) return [];
 
+  // Anchor near where the table belongs — not a random commission sentence (that prose can be fine).
   const highlight =
     lineContaining(content, /##\s*Budget Summary/i) ??
+    lineContaining(content, /##\s*(?:Staff|Hours|Billing|Labor|Rate|Compensation|Fee)/i) ??
     lineContaining(content, /\[DESIGNER NOTE/i) ??
-    firstRegexMatch(content, /\bcommission\b[^\n]{0,80}/i);
+    content.split("\n").find((line) => /^##\s/.test(line.trim()))?.trim();
 
   return [
     flag(
@@ -777,14 +779,28 @@ export function mergeSubmissionFlags(
     kbSearched: f.kbSearched ?? true,
   }));
 
-  if (reviewFlags.some((f) => f.finalized)) {
-    const budgetExtras = scanned.filter(
-      (f) => f.kind === "budget" || f.kind === "consistency"
-    );
-    return dedupeFlags([...reviewFlags, ...budgetExtras]);
+  if (!reviewFlags.length) {
+    return dedupeFlags(scanned);
   }
 
-  return dedupeFlags([...reviewFlags, ...scanned]);
+  // Live scan is always source of truth — stale Phase 4 flags drop when content is fixed.
+  const reviewByKey = new Map(
+    reviewFlags.map((f) => [`${f.sectionId}::${f.kind}::${f.tag}`, f])
+  );
+
+  return dedupeFlags(
+    scanned.map((sf) => {
+      const rev = reviewByKey.get(`${sf.sectionId}::${sf.kind}::${sf.tag}`);
+      if (!rev) return sf;
+      return {
+        ...sf,
+        owner: rev.owner ?? sf.owner,
+        finalized: rev.finalized,
+        kbSearched: rev.kbSearched,
+        highlightText: rev.highlightText ?? sf.highlightText,
+      };
+    })
+  );
 }
 
 /**
@@ -849,6 +865,25 @@ export function resolveFlagHighlight(
   if (flag.kind === "compliance" && /reference/i.test(flag.tag)) {
     const defer = firstRegexMatch(content, DEFER_RE);
     if (defer) return toRange(defer);
+  }
+
+  if (
+    flag.kind === "compliance" &&
+    /staff hours|billing rates/i.test(flag.tag)
+  ) {
+    const budgetSummary = lineContaining(content, /##\s*Budget Summary/i);
+    if (budgetSummary) return toRange(budgetSummary);
+    const hoursHeading = lineContaining(
+      content,
+      /##\s*(?:Staff|Hours|Billing|Labor|Rate|Compensation|Fee)/i
+    );
+    if (hoursHeading) return toRange(hoursHeading);
+    const firstHeading = content
+      .split("\n")
+      .find((line) => /^##\s/.test(line.trim()))
+      ?.trim();
+    if (firstHeading) return toRange(firstHeading);
+    return null;
   }
 
   if (flag.kind === "budget") {

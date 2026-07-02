@@ -2,51 +2,33 @@
 """
 Ingest every file in a Google Drive folder into Supermemory (zo-agency container).
 
-Files are downloaded in memory only — nothing is written to localhost.
-
-Filename → category mapping (ZO filing prefixes):
-  00_  Guides & System        → reference
-  01_  Verified Facts        → verified_facts
-  02_  Master Template       → reference
-  03_CS_ Case Studies         → case_study
-  04_  Team Bios             → team_bio
-  05_  Pricing               → pricing
-  06_WON_ Won Proposals       → won_proposal
-  07_FIN_ Finalist Proposals  → finalist_proposal
-  08_  Lost + FOIA           → lost_proposal
-  09_  Scoring & Debriefs    → scoring_debrief
-  10_  Active RFPs           → active_rfp
-  11_REF_ Reference Archive   → reference
-  zo_*  Agency guides         → reference
+Fast path (default): POST /v3/documents/batch — ingest/write API only (Supermemory has no v4 upload).
+KB reads everywhere else use POST /v4/search (hybrid).
 
 Setup (backend/.env):
   SUPERMEMORY_API_KEY=...
   SUPERMEMORY_CONTAINER_TAG=zo-agency
   GOOGLE_CLIENT_ID=....apps.googleusercontent.com
   GOOGLE_CLIENT_SECRET=...
-  GOOGLE_REFRESH_TOKEN=...        # from scripts/google_oauth_setup.py (one-time)
-
-Your Google account (OAuth) must have access to the folder.
+  GOOGLE_REFRESH_TOKEN=...
 
 Usage:
-  cd backend
-  source .venv/bin/activate
+  cd backend && source .venv/bin/activate
 
-  # By folder ID (from Drive URL: .../folders/FOLDER_ID)
   python scripts/ingest_drive_folder_to_supermemory.py \\
-    --folder-id "1abc...xyz"
+    --folder-id "1-Zfo5aJVrDiV3fAlwYoAv2KtQejuqH_q"
 
-  # By folder name (searches My Drive + all shared drives)
   python scripts/ingest_drive_folder_to_supermemory.py \\
     --folder-name "6. RFP CLAUDE Specialis"
 
-  # Preview only — no uploads
-  python scripts/ingest_drive_folder_to_supermemory.py \\
-    --folder-id "1-Zfo5aJVrDiV3fAlwYoAv2KtQejuqH_q" --dry-run
+  # Supermemory native Drive import (one API call — requires Drive connection in SM)
+  python scripts/ingest_drive_folder_to_supermemory.py --drive-import
 
-  # Limit batch size
+  # Fallback: parallel file uploads (no URL fetch)
   python scripts/ingest_drive_folder_to_supermemory.py \\
-    --folder-id "1abc...xyz" --limit 5
+    --folder-id "1abc..." --mode upload --workers 8
+
+  python scripts/ingest_drive_folder_to_supermemory.py --folder-id "..." --dry-run
 """
 
 from __future__ import annotations
@@ -55,18 +37,16 @@ import argparse
 import asyncio
 import io
 import logging
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# Allow `python scripts/ingest_...py` from backend/
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
-from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
 from app.core.config import settings
@@ -77,8 +57,8 @@ from app.services import supermemory
 logger = logging.getLogger("ingest_drive_folder")
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
+BATCH_SIZE = 100
 
-# Numeric prefix → knowledge-base category (matches knowledge_base_document_types / ZO filing guide)
 PREFIX_TO_CATEGORY: dict[str, str] = {
     "00": "reference",
     "01": "verified_facts",
@@ -94,7 +74,6 @@ PREFIX_TO_CATEGORY: dict[str, str] = {
     "11": "reference",
 }
 
-# Optional code token overrides (e.g. 03_CS_, 06_WON_, 07_FIN_, 11_REF_)
 CODE_TO_CATEGORY: dict[str, str] = {
     "CS": "case_study",
     "WON": "won_proposal",
@@ -106,13 +85,6 @@ CODE_TO_CATEGORY: dict[str, str] = {
     "RFP": "active_rfp",
 }
 
-STANDARD_NAME = re.compile(
-    r"^(?P<prefix>\d{2})_(?:(?P<code>[A-Z]+)_)?(?P<body>.+?)(?:\.[^.]+)?$",
-    re.IGNORECASE,
-)
-
-YEAR_IN_NAME = re.compile(r"(20\d{2})")
-
 SUPPORTED_EXPORTS: dict[str, str] = {
     "application/vnd.google-apps.document": "application/pdf",
     "application/vnd.google-apps.spreadsheet": (
@@ -121,7 +93,28 @@ SUPPORTED_EXPORTS: dict[str, str] = {
     "application/vnd.google-apps.presentation": "application/pdf",
 }
 
+# When Google Docs PDF export hits size limits, try smaller export formats.
+GOOGLE_DOC_EXPORT_FALLBACKS: tuple[tuple[str, str], ...] = (
+    ("application/pdf", ".pdf"),
+    (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".docx",
+    ),
+    ("text/plain", ".txt"),
+)
+
+GOOGLE_SLIDES_EXPORT_FALLBACKS: tuple[tuple[str, str], ...] = (
+    ("application/pdf", ".pdf"),
+    ("text/plain", ".txt"),
+    (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".pptx",
+    ),
+)
+
 SKIP_MIMES = {FOLDER_MIME, "application/vnd.google-apps.shortcut"}
+
+PRICING_HINTS = ("pricing", "price", "rate")
 
 
 @dataclass
@@ -145,17 +138,48 @@ class DriveFile:
     web_view_link: str | None
 
 
+def _extract_year(text: str) -> str | None:
+    for token in text.replace("-", "_").split("_"):
+        if len(token) == 4 and token.isdigit() and token.startswith("20"):
+            return token
+    return None
+
+
+def _humanize(value: str) -> str:
+    return value.replace("_", " ").strip()
+
+
+def _split_body(body: str) -> tuple[str | None, str | None]:
+    parts = [part for part in body.split("_") if part]
+    if not parts:
+        return None, None
+    if parts[-1].isdigit() and len(parts[-1]) == 4:
+        parts = parts[:-1]
+    if len(parts) == 1:
+        return None, parts[0]
+    client = parts[0]
+    doc_kind = "_".join(parts[1:]) if len(parts) > 1 else None
+    if client and client[0].islower():
+        return None, "_".join(parts)
+    return client, doc_kind
+
+
+def _build_title(client: str | None, doc_kind: str | None, body: str) -> str:
+    if client and doc_kind:
+        return f"{_humanize(client)} — {_humanize(doc_kind)}"
+    return _humanize(body)
+
+
 def parse_filename(filename: str) -> ParsedFilename:
-    """Derive Supermemory metadata from a ZO-style Drive filename."""
+    """Derive Supermemory metadata from a ZO-style Drive filename (no regex)."""
     stem = Path(filename).stem
     lower = stem.lower()
 
     if lower.startswith("zo_"):
-        category = "reference"
         title = stem.replace("_", " ")
         return ParsedFilename(
-            category=category,
-            category_title=category_title(category),
+            category="reference",
+            category_title=category_title("reference"),
             title=title,
             client=None,
             doc_kind="guide",
@@ -164,28 +188,29 @@ def parse_filename(filename: str) -> ParsedFilename:
             code=None,
         )
 
-    match = STANDARD_NAME.match(stem)
-    if not match:
-        category = "reference"
-        return ParsedFilename(
-            category=category,
-            category_title=category_title(category),
-            title=stem.replace("_", " "),
-            client=None,
-            doc_kind=None,
-            year=_extract_year(stem),
-            prefix=None,
-            code=None,
-        )
+    parts = stem.split("_")
+    prefix: str | None = None
+    code: str | None = None
+    body_parts = parts
 
-    prefix = match.group("prefix")
-    code = (match.group("code") or "").upper()
-    body = match.group("body")
+    if parts and len(parts[0]) == 2 and parts[0].isdigit():
+        prefix = parts[0]
+        body_parts = parts[1:]
+        if (
+            body_parts
+            and body_parts[0].isalpha()
+            and body_parts[0].upper() == body_parts[0]
+            and len(body_parts[0]) <= 6
+        ):
+            code = body_parts[0].upper()
+            body_parts = body_parts[1:]
 
-    category = CODE_TO_CATEGORY.get(code) or PREFIX_TO_CATEGORY.get(prefix, "reference")
-    # 00_Guide_Pricing etc. — pricing rules, not generic reference
-    if prefix == "00" and re.search(r"pricing|price|rate", body, re.I):
+    body = "_".join(body_parts)
+    category = CODE_TO_CATEGORY.get(code or "") or PREFIX_TO_CATEGORY.get(prefix or "", "reference")
+    body_lower = body.lower()
+    if prefix == "00" and any(hint in body_lower for hint in PRICING_HINTS):
         category = "pricing"
+
     client, doc_kind = _split_body(body)
     title = _build_title(client, doc_kind, body)
 
@@ -197,50 +222,8 @@ def parse_filename(filename: str) -> ParsedFilename:
         doc_kind=doc_kind,
         year=_extract_year(body),
         prefix=prefix,
-        code=code or None,
+        code=code,
     )
-
-
-def _extract_year(text: str) -> str | None:
-    match = YEAR_IN_NAME.search(text)
-    return match.group(1) if match else None
-
-
-def _split_body(body: str) -> tuple[str | None, str | None]:
-    """
-  Examples:
-    CityofSanLeandro_winner_2026 → client, winner
-    MaricopaCounty_Proposal_2025 → client, Proposal
-    CaseStudyMaster_2025 → None, CaseStudyMaster
-    """
-    parts = [part for part in body.split("_") if part]
-    if not parts:
-        return None, None
-
-    if parts[-1].isdigit() and len(parts[-1]) == 4:
-        parts = parts[:-1]
-
-    if len(parts) == 1:
-        return None, parts[0]
-
-    # Heuristic: first token is client (CityofX), rest is doc kind
-    client = parts[0]
-    doc_kind = "_".join(parts[1:]) if len(parts) > 1 else None
-    if client and client[0].islower():
-        client = None
-        doc_kind = "_".join(parts)
-    return client, doc_kind
-
-
-def _build_title(client: str | None, doc_kind: str | None, body: str) -> str:
-    if client and doc_kind:
-        return f"{_humanize(client)} — {_humanize(doc_kind)}"
-    return _humanize(body)
-
-
-def _humanize(value: str) -> str:
-    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", value)
-    return spaced.replace("_", " ").strip()
 
 
 def _drive_service():
@@ -323,39 +306,28 @@ def list_folder_files(service: Any, folder_id: str) -> list[DriveFile]:
     return files
 
 
-def download_file_bytes(service: Any, drive_file: DriveFile) -> tuple[bytes, str]:
-    """Download file into memory. Returns (bytes, upload_filename)."""
-    export_mime = SUPPORTED_EXPORTS.get(drive_file.mime_type)
-
-    if export_mime:
-        request = service.files().export_media(
-            fileId=drive_file.id,
-            mimeType=export_mime,
+def drive_content_url(drive_file: DriveFile) -> str:
+    """URL Supermemory batch ingest fetches — export link for Google native types."""
+    if drive_file.mime_type == "application/vnd.google-apps.document":
+        return f"https://docs.google.com/document/d/{drive_file.id}/export?format=pdf"
+    if drive_file.mime_type == "application/vnd.google-apps.spreadsheet":
+        return (
+            f"https://docs.google.com/spreadsheets/d/{drive_file.id}/export"
+            "?format=xlsx"
         )
-        ext = ".pdf" if export_mime == "application/pdf" else ".xlsx"
-        upload_name = f"{Path(drive_file.name).stem}{ext}"
-    else:
-        request = service.files().get_media(fileId=drive_file.id)
-        upload_name = drive_file.name
-
-    buffer = io.BytesIO()
-    downloader = MediaIoBaseDownload(buffer, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-
-    return buffer.getvalue(), upload_name
+    if drive_file.mime_type == "application/vnd.google-apps.presentation":
+        return f"https://docs.google.com/presentation/d/{drive_file.id}/export/pdf"
+    if drive_file.web_view_link:
+        return drive_file.web_view_link
+    return f"https://drive.google.com/file/d/{drive_file.id}/view"
 
 
-async def ingest_file(
+def build_metadata(
     drive_file: DriveFile,
     parsed: ParsedFilename,
     *,
     folder_id: str,
-    dry_run: bool,
-) -> dict[str, Any] | None:
-    custom_id = f"drive:{drive_file.id}"
-
+) -> dict[str, str | int | bool]:
     metadata: dict[str, str | int | bool] = {
         "type": "knowledge_base",
         "title": parsed.title,
@@ -378,30 +350,228 @@ async def ingest_file(
         metadata["filingCode"] = parsed.code
     if drive_file.web_view_link:
         metadata["driveUrl"] = drive_file.web_view_link
+    return metadata
+
+
+def _export_media_bytes(
+    service: Any,
+    file_id: str,
+    export_mime: str,
+) -> bytes:
+    request = service.files().export_media(fileId=file_id, mimeType=export_mime)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request, chunksize=4 * 1024 * 1024)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buffer.getvalue()
+
+
+def download_file_bytes(service: Any, drive_file: DriveFile) -> tuple[bytes, str]:
+    stem = Path(drive_file.name).stem
+
+    if drive_file.mime_type == "application/vnd.google-apps.document":
+        return _download_with_export_fallbacks(
+            service,
+            drive_file,
+            GOOGLE_DOC_EXPORT_FALLBACKS,
+            stem,
+        )
+
+    if drive_file.mime_type == "application/vnd.google-apps.presentation":
+        return _download_with_export_fallbacks(
+            service,
+            drive_file,
+            GOOGLE_SLIDES_EXPORT_FALLBACKS,
+            stem,
+        )
+
+    export_mime = SUPPORTED_EXPORTS.get(drive_file.mime_type)
+
+    if export_mime:
+        ext = ".pdf" if export_mime == "application/pdf" else ".xlsx"
+        upload_name = f"{stem}{ext}"
+        return _export_media_bytes(service, drive_file.id, export_mime), upload_name
+
+    request = service.files().get_media(fileId=drive_file.id)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buffer.getvalue(), drive_file.name
+
+
+def _download_with_export_fallbacks(
+    service: Any,
+    drive_file: DriveFile,
+    fallbacks: tuple[tuple[str, str], ...],
+    stem: str,
+) -> tuple[bytes, str]:
+    last_error: Exception | None = None
+    for export_mime, ext in fallbacks:
+        upload_name = f"{stem}{ext}"
+        try:
+            logger.info("Exporting %s as %s", drive_file.name, export_mime)
+            file_bytes = _export_media_bytes(service, drive_file.id, export_mime)
+            if not file_bytes:
+                raise RuntimeError(f"Empty export for {drive_file.name}")
+            logger.info(
+                "Exported %s → %s (%d bytes)",
+                drive_file.name,
+                upload_name,
+                len(file_bytes),
+            )
+            return file_bytes, upload_name
+        except HttpError as exc:
+            last_error = exc
+            logger.warning(
+                "Export %s failed for %s: %s",
+                export_mime,
+                drive_file.name,
+                exc,
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Export %s failed for %s: %s",
+                export_mime,
+                drive_file.name,
+                exc,
+            )
+    raise RuntimeError(f"All export formats failed for {drive_file.name}") from last_error
+
+
+async def ingest_batch_urls(
+    drive_files: list[DriveFile],
+    *,
+    folder_id: str,
+    dry_run: bool,
+    batch_size: int,
+) -> tuple[int, int]:
+    """One or few batch API calls — Supermemory fetches each Drive URL."""
+    ok = 0
+    failed = 0
+    documents: list[dict[str, Any]] = []
+
+    for drive_file in drive_files:
+        parsed = parse_filename(drive_file.name)
+        documents.append(
+            {
+                "customId": f"drive:{drive_file.id}",
+                "content": drive_content_url(drive_file),
+                "metadata": build_metadata(drive_file, parsed, folder_id=folder_id),
+            }
+        )
 
     if dry_run:
-        return {
-            "dryRun": True,
-            "customId": custom_id,
-            "fileName": drive_file.name,
-            "category": parsed.category,
-            "title": parsed.title,
-        }
+        for doc in documents:
+            logger.info(
+                "dry-run batch: %s → %s | %s",
+                doc["metadata"]["fileName"],
+                doc["metadata"]["category"],
+                doc["content"][:80],
+            )
+        return len(documents), 0
 
+    for start in range(0, len(documents), batch_size):
+        chunk = documents[start : start + batch_size]
+        batch_num = start // batch_size + 1
+        logger.info(
+            "Batch %d: submitting %d document URL(s) to Supermemory",
+            batch_num,
+            len(chunk),
+        )
+        try:
+            result = await supermemory.batch_add_documents(chunk, dreaming="instant")
+            results = result.get("results") or []
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                custom_id = item.get("customId") or item.get("id")
+                status = str(item.get("status") or "unknown")
+                file_name = next(
+                    (
+                        doc["metadata"]["fileName"]
+                        for doc in chunk
+                        if doc.get("customId") == custom_id
+                    ),
+                    custom_id,
+                )
+                if status == "error":
+                    failed += 1
+                    logger.error("  ERROR: %s customId=%s", file_name, custom_id)
+                else:
+                    ok += 1
+                    logger.info("  %s: %s customId=%s", status, file_name, custom_id)
+            if not results:
+                ok += len(chunk)
+        except Exception as exc:
+            failed += len(chunk)
+            logger.error("Batch %d failed: %s", batch_num, exc)
+
+    return ok, failed
+
+
+async def ingest_parallel_uploads(
+    drive_files: list[DriveFile],
+    *,
+    folder_id: str,
+    dry_run: bool,
+    workers: int,
+) -> tuple[int, int]:
+    """Fallback: download + parallel file upload when URL batch is not suitable."""
+    semaphore = asyncio.Semaphore(max(1, workers))
     service = _drive_service()
-    file_bytes, upload_name = download_file_bytes(service, drive_file)
 
-    return await supermemory.upload_file_document(
-        file_bytes=file_bytes,
-        filename=upload_name,
-        custom_id=custom_id,
-        metadata=metadata,
+    async def one_file(drive_file: DriveFile) -> bool:
+        parsed = parse_filename(drive_file.name)
+        custom_id = f"drive:{drive_file.id}"
+        metadata = build_metadata(drive_file, parsed, folder_id=folder_id)
+
+        if dry_run:
+            logger.info("dry-run upload: %s → %s", drive_file.name, parsed.category)
+            return True
+
+        async with semaphore:
+            file_bytes, upload_name = await asyncio.to_thread(
+                download_file_bytes,
+                service,
+                drive_file,
+            )
+            logger.info("Uploading %s (%d bytes)", upload_name, len(file_bytes))
+            await supermemory.upload_file_document(
+                file_bytes=file_bytes,
+                filename=upload_name,
+                custom_id=custom_id,
+                metadata=metadata,
+            )
+        return True
+
+    results = await asyncio.gather(
+        *[one_file(df) for df in drive_files],
+        return_exceptions=True,
     )
+    ok = sum(1 for r in results if r is True)
+    failed = len(results) - ok
+    for drive_file, result in zip(drive_files, results):
+        if isinstance(result, Exception):
+            logger.error("FAILED %s: %s", drive_file.name, result)
+    return ok, failed
 
 
 async def run(args: argparse.Namespace) -> int:
     if not supermemory.is_configured():
         raise SystemExit("SUPERMEMORY_API_KEY is not set in backend/.env")
+
+    if args.drive_import:
+        if args.dry_run:
+            logger.info("dry-run: would call Supermemory Google Drive import")
+            return 0
+        logger.info("Triggering Supermemory Google Drive import for %s", settings.resolved_container_tag)
+        result = await supermemory.trigger_google_drive_import()
+        logger.info("Drive import accepted: %s", result)
+        return 0
 
     service = _drive_service()
 
@@ -412,9 +582,19 @@ async def run(args: argparse.Namespace) -> int:
             raise SystemExit(f"Folder not found: {args.folder_name!r}")
 
     if not folder_id:
-        raise SystemExit("Provide --folder-id or --folder-name")
+        raise SystemExit("Provide --folder-id or --folder-name (or --drive-import)")
 
     drive_files = list_folder_files(service, folder_id)
+
+    if args.drive_ids:
+        wanted = {part.strip() for part in args.drive_ids.split(",") if part.strip()}
+        drive_files = [f for f in drive_files if f.id in wanted]
+        if not drive_files:
+            raise SystemExit(f"No folder files matched --drive-ids: {', '.join(sorted(wanted))}")
+        if args.mode == "batch":
+            logger.info("--drive-ids set: using upload mode (batch URL failed for these files)")
+            args.mode = "upload"
+
     if args.limit:
         drive_files = drive_files[: args.limit]
 
@@ -423,46 +603,28 @@ async def run(args: argparse.Namespace) -> int:
         return 0
 
     logger.info(
-        "Container tag: %s | Folder: %s | Files: %d | dry_run=%s",
+        "Container: %s | Folder: %s | Files: %d | mode=%s | dry_run=%s",
         settings.resolved_container_tag,
         folder_id,
         len(drive_files),
+        args.mode,
         args.dry_run,
     )
 
-    ok = 0
-    failed = 0
-
-    for index, drive_file in enumerate(drive_files, start=1):
-        parsed = parse_filename(drive_file.name)
-        logger.info(
-            "[%d/%d] %s → %s (%s)",
-            index,
-            len(drive_files),
-            drive_file.name,
-            parsed.category,
-            parsed.title,
+    if args.mode == "upload":
+        ok, failed = await ingest_parallel_uploads(
+            drive_files,
+            folder_id=folder_id,
+            dry_run=args.dry_run,
+            workers=args.workers,
         )
-
-        try:
-            result = await ingest_file(
-                drive_file,
-                parsed,
-                folder_id=folder_id,
-                dry_run=args.dry_run,
-            )
-            if args.dry_run:
-                logger.info("  dry-run: %s", result)
-            else:
-                logger.info(
-                    "  uploaded: id=%s status=%s",
-                    (result or {}).get("id"),
-                    (result or {}).get("status"),
-                )
-            ok += 1
-        except Exception as exc:
-            failed += 1
-            logger.error("  FAILED %s: %s", drive_file.name, exc)
+    else:
+        ok, failed = await ingest_batch_urls(
+            drive_files,
+            folder_id=folder_id,
+            dry_run=args.dry_run,
+            batch_size=args.batch_size,
+        )
 
     logger.info("Done. success=%d failed=%d", ok, failed)
     return 1 if failed else 0
@@ -470,33 +632,40 @@ async def run(args: argparse.Namespace) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Ingest a Google Drive folder into Supermemory (zo-agency)."
+        description="Ingest a Google Drive folder into Supermemory (fast batch URL mode)."
+    )
+    parser.add_argument("--folder-id", help="Google Drive folder ID")
+    parser.add_argument("--folder-name", help='Folder name, e.g. "6. RFP CLAUDE Specialis"')
+    parser.add_argument(
+        "--drive-ids",
+        help="Comma-separated Drive file IDs to ingest only (e.g. id1,id2,id3)",
     )
     parser.add_argument(
-        "--folder-id",
-        help="Google Drive folder ID (from the folder URL)",
+        "--mode",
+        choices=("batch", "upload"),
+        default="batch",
+        help="batch = URL batch API (default, fastest); upload = parallel file uploads",
     )
     parser.add_argument(
-        "--folder-name",
-        help='Folder name to search, e.g. "6. RFP CLAUDE Specialis"',
-    )
-    parser.add_argument(
-        "--dry-run",
+        "--drive-import",
         action="store_true",
-        help="Parse and log categorization only — no downloads or uploads",
+        help="Use Supermemory native Google Drive import (requires SM Drive connection)",
     )
+    parser.add_argument("--dry-run", action="store_true", help="Parse and log only")
+    parser.add_argument("--limit", type=int, default=0, help="Max files (0 = all)")
     parser.add_argument(
-        "--limit",
+        "--batch-size",
         type=int,
-        default=0,
-        help="Max number of files to process (0 = all)",
+        default=BATCH_SIZE,
+        help=f"Documents per batch request (max 600, default {BATCH_SIZE})",
     )
     parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Debug logging",
+        "--workers",
+        type=int,
+        default=8,
+        help="Parallel uploads when --mode upload",
     )
+    parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(

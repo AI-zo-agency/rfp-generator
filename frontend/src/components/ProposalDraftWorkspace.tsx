@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   buildDefaultOutline,
   computeDraftStats,
@@ -39,7 +40,8 @@ import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch,
 import type { RfpRecord } from "@/types/rfp";
 import { SectionStatusPill } from "./SectionStatusPill";
 import { MarkdownReportBody } from "./MarkdownReportBody";
-import { DraftSectionEditor } from "./DraftSectionEditor";
+import { DraftSectionEditor, type SectionRevisionRecord } from "./DraftSectionEditor";
+import { SectionRevisionCompare } from "./SectionRevisionCompare";
 import { ProposalBudgetPanel } from "./ProposalBudgetPanel";
 import { ProposalReviewPanel } from "./ProposalReviewPanel";
 import { ProposalManualFlagsPanel } from "./ProposalManualFlagsPanel";
@@ -56,6 +58,37 @@ import {
 import { phaseIsComplete } from "@/lib/proposal-pipeline-checkpoint";
 
 type WorkspaceTab = "outline" | "content" | "pricing" | "review" | "export";
+
+type SectionRevisionMap = Record<string, SectionRevisionRecord>;
+
+function revisionsStorageKey(rfpId: string): string {
+  return `zo-proposal-section-revisions:${rfpId}`;
+}
+
+function loadStoredRevisions(rfpId: string): SectionRevisionMap {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = sessionStorage.getItem(revisionsStorageKey(rfpId));
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as SectionRevisionMap;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistStoredRevisions(rfpId: string, revisions: SectionRevisionMap): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (Object.keys(revisions).length === 0) {
+      sessionStorage.removeItem(revisionsStorageKey(rfpId));
+      return;
+    }
+    sessionStorage.setItem(revisionsStorageKey(rfpId), JSON.stringify(revisions));
+  } catch {
+    // ignore quota errors
+  }
+}
 
 const baseWorkspaceTabs = [
   { id: "outline", label: "Outline" },
@@ -184,8 +217,57 @@ export function ProposalDraftWorkspace({
   const [pipelineStatus, setPipelineStatus] =
     useState<ProposalPipelineStatus | null>(null);
   const skipNextSaveRef = useRef(false);
+  const saveGenerationRef = useRef(0);
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const sectionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const [sectionRevisions, setSectionRevisions] = useState<SectionRevisionMap>({});
+  const [revisionDrawerSectionId, setRevisionDrawerSectionId] = useState<string | null>(
+    null
+  );
+
+  const applyOutlineFromServer = useCallback((draft: ProposalOutline) => {
+    saveGenerationRef.current += 1;
+    skipNextSaveRef.current = true;
+    setOutline(draft);
+  }, []);
+
+  const recordSectionRevision = useCallback(
+    (sectionId: string, revision: SectionRevisionRecord) => {
+      setSectionRevisions((prev) => {
+        const next = { ...prev, [sectionId]: revision };
+        persistStoredRevisions(rfp.id, next);
+        return next;
+      });
+    },
+    [rfp.id]
+  );
+
+  const dismissSectionRevision = useCallback(
+    (sectionId: string) => {
+      setSectionRevisions((prev) => {
+        const next = { ...prev };
+        delete next[sectionId];
+        persistStoredRevisions(rfp.id, next);
+        return next;
+      });
+      setRevisionDrawerSectionId((current) => (current === sectionId ? null : current));
+    },
+    [rfp.id]
+  );
+
+  useEffect(() => {
+    setSectionRevisions(loadStoredRevisions(rfp.id));
+    setRevisionDrawerSectionId(null);
+  }, [rfp.id]);
+
+  const activeRevision =
+    revisionDrawerSectionId && sectionRevisions[revisionDrawerSectionId]
+      ? sectionRevisions[revisionDrawerSectionId]
+      : null;
+
+  const revisionDrawerSection = revisionDrawerSectionId
+    ? outline.sections.find((s) => s.id === revisionDrawerSectionId) ?? null
+    : null;
 
   useEffect(() => {
     if (!selectedSectionId) return;
@@ -216,33 +298,32 @@ export function ProposalDraftWorkspace({
     []
   );
 
-  const handleJumpToManualFlag = useCallback(
-    (flag: ManualFillFlag) => {
-      setShowManualFlags(false);
-      setHighlightedSectionId(flag.sectionId);
-      setActiveSubmissionFlag(flag);
-      setActiveTab("outline");
-      setSelectedSectionId(flag.sectionId);
-      requestAnimationFrame(() => {
-        sectionButtonRefs.current.get(flag.sectionId)?.scrollIntoView({
-          block: "nearest",
-          behavior: "smooth",
-        });
-        editorScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-      });
-      window.setTimeout(() => setHighlightedSectionId(null), 4000);
-    },
-    []
-  );
+  const handleJumpToManualFlag = useCallback((flag: ManualFillFlag) => {
+    setShowManualFlags(false);
+    setHighlightedSectionId(flag.sectionId);
+    setActiveSubmissionFlag(flag);
+    setActiveTab("content");
+    window.setTimeout(() => setHighlightedSectionId(null), 4000);
+  }, []);
 
   const activeFlagHighlight = useMemo((): FlagHighlightRange | null => {
-    if (!activeSubmissionFlag || activeSubmissionFlag.sectionId !== selectedSectionId) {
-      return null;
-    }
-    const section = outline.sections.find((s) => s.id === selectedSectionId);
+    if (!activeSubmissionFlag) return null;
+    const section = outline.sections.find((s) => s.id === activeSubmissionFlag.sectionId);
     if (!section) return null;
     return resolveFlagHighlight(activeSubmissionFlag, section.content ?? "");
-  }, [activeSubmissionFlag, selectedSectionId, outline.sections]);
+  }, [activeSubmissionFlag, outline.sections]);
+
+  useEffect(() => {
+    if (activeTab !== "content" || !activeSubmissionFlag) return;
+    const sectionId = activeSubmissionFlag.sectionId;
+    const frame = requestAnimationFrame(() => {
+      document.getElementById(sectionId)?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeTab, activeSubmissionFlag]);
 
   useEffect(() => {
     let cancelled = false;
@@ -283,13 +364,15 @@ export function ProposalDraftWorkspace({
       const contentSections = draft ? countSectionsWithContent(draft) : 0;
       const researchReady = (research?.rfpSections?.length ?? 0) > 0;
 
+      saveGenerationRef.current += 1;
+      skipNextSaveRef.current = true;
+
       if (draft && contentSections > 0) {
         setOutline(draft);
         setSelectedSectionId(draft.sections[0]?.id ?? null);
         setActiveTab("content");
       } else if (researchReady && research && isLikelyWipedOutline(draft ?? buildDefaultOutline(rfp), research)) {
         const rebuilt = rebuildOutlineFromResearch(rfp, research, draft);
-        skipNextSaveRef.current = true;
         setOutline(rebuilt);
         setSelectedSectionId(rebuilt.sections[0]?.id ?? null);
         setActiveTab("outline");
@@ -324,7 +407,9 @@ export function ProposalDraftWorkspace({
     if (isLikelyWipedOutline(outline, research)) {
       return;
     }
+    const generation = saveGenerationRef.current;
     const timer = setTimeout(() => {
+      if (generation !== saveGenerationRef.current) return;
       void saveProposalDraft(rfp.id, outline);
     }, 800);
     return () => clearTimeout(timer);
@@ -469,8 +554,7 @@ export function ProposalDraftWorkspace({
         setPresubmitReview(review);
         setResearch(updatedResearch);
         if (draft) {
-          skipNextSaveRef.current = true;
-          setOutline(draft);
+          applyOutlineFromServer(draft);
           await saveProposalDraft(rfp.id, draft);
         }
         const flagCount = review.manualFillFlags?.length ?? 0;
@@ -514,8 +598,7 @@ export function ProposalDraftWorkspace({
           useLlm: true,
           signal: controller.signal,
         });
-      skipNextSaveRef.current = true;
-      setOutline(draft);
+      applyOutlineFromServer(draft);
       setPresubmitReview(review);
       setResearch(updatedResearch);
       await saveProposalDraft(rfp.id, draft);
@@ -538,8 +621,7 @@ export function ProposalDraftWorkspace({
           minSectionsWithContent: 3,
         });
         if (recovered) {
-          skipNextSaveRef.current = true;
-          setOutline(recovered.draft);
+          applyOutlineFromServer(recovered.draft);
           if (recovered.research) {
             setResearch(recovered.research);
             setPresubmitReview(recovered.research.presubmitReview ?? null);
@@ -582,8 +664,7 @@ export function ProposalDraftWorkspace({
       setResearch(updatedResearch);
 
       const mergedOutline = draft ?? mergeBudgetIntoOutline(outline, generated);
-      skipNextSaveRef.current = true;
-      setOutline(mergedOutline);
+      applyOutlineFromServer(mergedOutline);
       await saveProposalDraft(rfp.id, mergedOutline);
 
       const budgetSection = findBudgetSection(mergedOutline.sections);
@@ -616,8 +697,7 @@ export function ProposalDraftWorkspace({
       setResearch(updatedResearch);
 
       const mergedOutline = draft ?? mergeBudgetIntoOutline(outline, refined);
-      skipNextSaveRef.current = true;
-      setOutline(mergedOutline);
+      applyOutlineFromServer(mergedOutline);
       await saveProposalDraft(rfp.id, mergedOutline);
 
       const budgetSection = findBudgetSection(mergedOutline.sections);
@@ -637,8 +717,7 @@ export function ProposalDraftWorkspace({
   }, [rfp.id, budget, outline]);
 
   const handleLiveDraftUpdate = useCallback((draft: ProposalOutline) => {
-    skipNextSaveRef.current = true;
-    setOutline(draft);
+    applyOutlineFromServer(draft);
     setActiveTab("content");
     const withContent = draft.sections.filter((s) => s.content?.trim());
     setLiveGeneratedCount(withContent.length);
@@ -647,7 +726,7 @@ export function ProposalDraftWorkspace({
       setLiveLatestSectionTitle(latest.title);
       setSelectedSectionId(latest.id);
     }
-  }, []);
+  }, [applyOutlineFromServer]);
 
   const handleGenerateFullProposal = useCallback(async () => {
     const canResume = pipelineStatus?.canResume ?? false;
@@ -689,8 +768,7 @@ export function ProposalDraftWorkspace({
           forceRestart: !canResume && fullProposalDone,
           onDraftUpdate: handleLiveDraftUpdate,
         });
-      skipNextSaveRef.current = true;
-      setOutline(draft);
+      applyOutlineFromServer(draft);
       if (updatedResearch) {
         setResearch(updatedResearch);
         setPipelineStatus(buildPipelineStatus(draft, updatedResearch));
@@ -717,8 +795,7 @@ export function ProposalDraftWorkspace({
         minSectionsWithContent: 10,
       });
       if (recovered) {
-        skipNextSaveRef.current = true;
-        setOutline(recovered.draft);
+        applyOutlineFromServer(recovered.draft);
         if (recovered.research) {
           setResearch(recovered.research);
           const status = buildPipelineStatus(recovered.draft, recovered.research);
@@ -763,7 +840,12 @@ export function ProposalDraftWorkspace({
       return;
     }
     const defaults = buildDefaultOutline(rfp);
+    saveGenerationRef.current += 1;
+    skipNextSaveRef.current = true;
     setOutline(defaults);
+    setSectionRevisions({});
+    persistStoredRevisions(rfp.id, {});
+    setRevisionDrawerSectionId(null);
     setSelectedSectionId(defaults.sections[0]?.id ?? null);
     setPresubmitReview(null);
     void saveProposalDraft(rfp.id, defaults);
@@ -780,8 +862,7 @@ export function ProposalDraftWorkspace({
     setGenerateError(null);
     try {
       const rebuilt = rebuildOutlineFromResearch(rfp, research, outline);
-      skipNextSaveRef.current = true;
-      setOutline(rebuilt);
+      applyOutlineFromServer(rebuilt);
       await saveProposalDraft(rfp.id, rebuilt);
 
       setFullProposalProgress("sections-1-3");
@@ -801,12 +882,12 @@ export function ProposalDraftWorkspace({
       setFullProposalProgress("phase-4-review");
       const { research: reviewedResearch } = await runPhase4PreSubmitReview(rfp.id);
 
-      skipNextSaveRef.current = true;
-      setOutline(draft ?? polished ?? drafted);
+      const finalDraft = draft ?? polished ?? drafted;
+      applyOutlineFromServer(finalDraft);
       setResearch(reviewedResearch ?? updatedResearch ?? afterEdit ?? afterPhase3);
       if (budget) setBudget(budget);
       setPresubmitReview(reviewedResearch.presubmitReview ?? null);
-      await saveProposalDraft(rfp.id, draft ?? polished ?? drafted);
+      await saveProposalDraft(rfp.id, finalDraft);
       setGenerateNotice("Manuscript re-drafted from cached KB research.");
       setActiveTab("content");
     } catch (error) {
@@ -1146,7 +1227,9 @@ export function ProposalDraftWorkspace({
         open={showManualFlags}
         flags={manualFillFlags}
         summary={manualFillSummary}
-        activeSectionId={selectedSectionId ?? highlightedSectionId}
+        activeSectionId={
+          activeSubmissionFlag?.sectionId ?? selectedSectionId ?? highlightedSectionId
+        }
         onJumpToFlag={handleJumpToManualFlag}
         onClose={() => setShowManualFlags(false)}
         onResolveAll={() => void handleFinalizeGaps({ stayOnTab: true })}
@@ -1173,6 +1256,7 @@ export function ProposalDraftWorkspace({
                 const active = selectedSectionId === section.id;
                 const hasContent = Boolean(section.content);
                 const flagCount = sectionManualFillCount(section.id, manualFillFlags);
+                const hasRevision = Boolean(sectionRevisions[section.id]);
                 return (
                   <li key={section.id}>
                     <button
@@ -1212,6 +1296,20 @@ export function ProposalDraftWorkspace({
                             >
                               {flagCount} fill-in{flagCount === 1 ? "" : "s"}
                             </span>
+                          ) : null}
+                          {hasRevision ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                selectSection(section.id);
+                                setRevisionDrawerSectionId(section.id);
+                              }}
+                              className="rounded bg-teal-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-teal-900 hover:bg-teal-200"
+                              title="View what changed in this section"
+                            >
+                              Updated
+                            </button>
                           ) : null}
                           {section.custom ? (
                             <span className="text-[9px] font-bold uppercase text-zo-orange">
@@ -1382,7 +1480,11 @@ export function ProposalDraftWorkspace({
                     wordCount={countWords(selectedSection.content)}
                     disabled={anyPipelineRunning}
                     value={selectedSection.content}
-                    highlightRange={activeFlagHighlight}
+                    highlightRange={
+                      activeSubmissionFlag?.sectionId === selectedSectionId
+                        ? activeFlagHighlight
+                        : null
+                    }
                     onUserEditStart={() => setActiveSubmissionFlag(null)}
                     onChange={(content) =>
                       updateSection(selectedSection.id, {
@@ -1391,8 +1493,7 @@ export function ProposalDraftWorkspace({
                       })
                     }
                     onSectionUpdated={(updatedDraft, updatedResearch) => {
-                      skipNextSaveRef.current = true;
-                      setOutline(updatedDraft);
+                      applyOutlineFromServer(updatedDraft);
                       if (updatedResearch) {
                         setResearch(updatedResearch);
                         if (updatedResearch.budget) {
@@ -1401,6 +1502,17 @@ export function ProposalDraftWorkspace({
                       }
                       void saveProposalDraft(rfp.id, updatedDraft);
                     }}
+                    storedRevision={
+                      selectedSection ? sectionRevisions[selectedSection.id] ?? null : null
+                    }
+                    revisionDrawerOpen={revisionDrawerSectionId === selectedSection?.id}
+                    onRevisionRecorded={(revision) =>
+                      recordSectionRevision(selectedSection.id, revision)
+                    }
+                    onRevisionDrawerOpenChange={(open) =>
+                      setRevisionDrawerSectionId(open ? selectedSection.id : null)
+                    }
+                    onRevisionDismiss={() => dismissSectionRevision(selectedSection.id)}
                   />
                 </div>
               </>
@@ -1636,6 +1748,41 @@ export function ProposalDraftWorkspace({
         </div>
       </TabPanel>
       </div>
+
+      {typeof document !== "undefined" && activeRevision && revisionDrawerSectionId
+        ? createPortal(
+            <>
+              <button
+                type="button"
+                className="proposal-revision-drawer-backdrop"
+                aria-label="Close revision summary"
+                onClick={() => setRevisionDrawerSectionId(null)}
+              />
+              <div
+                className="proposal-revision-drawer"
+                role="dialog"
+                aria-labelledby="proposal-revision-drawer-title"
+              >
+                {revisionDrawerSection ? (
+                  <p
+                    id="proposal-revision-drawer-title"
+                    className="shrink-0 border-b border-zo-border/70 px-4 py-2.5 text-sm font-semibold text-foreground"
+                  >
+                    {revisionDrawerSection.title}
+                  </p>
+                ) : null}
+                <SectionRevisionCompare
+                  before={activeRevision.before}
+                  after={activeRevision.after}
+                  summary={activeRevision.summary}
+                  instruction={activeRevision.instruction}
+                  onDismiss={() => dismissSectionRevision(revisionDrawerSectionId)}
+                />
+              </div>
+            </>,
+            document.body
+          )
+        : null}
     </section>
   );
 }

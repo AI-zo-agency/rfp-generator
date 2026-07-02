@@ -99,7 +99,8 @@ export function ProposalManualFlagsPanel({
               {summary}
             </p>
             <p className="mt-1 text-[11px] text-amber-800/75">
-              Click a row to jump and highlight the exact passage in Outline.
+              Click a row to jump and highlight the exact passage in Content. Resolve queries
+              Supermemory only (no AI rewrite) — fills tags when KB has facts, else MANUAL FILL.
             </p>
           </div>
           <button

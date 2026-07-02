@@ -34,6 +34,13 @@ from app.services.proposal_repository import (
     asave_proposal_draft,
     asave_research_cache,
 )
+from app.services.proposal_manual_flags import (
+    VERIFY_TAG_RE,
+    _EMAIL_RE,
+    _PHONE_RE,
+    _replace_verify_tags_from_blob,
+    _section_corpus_blob,
+)
 from app.services.proposal_evidence_corpus import merge_hits_into_corpus
 from app.services.proposal_retrieval_graph import (
     EXCERPT_MAX_CHARS,
@@ -91,7 +98,24 @@ Rules:
 7. Return ONLY JSON: {"replacement": "revised excerpt text only"}
 8. Budget/pricing excerpts: NEVER change agency revenue or commission lines to $0 — use commission rate × pass-through or canonical fee from section context; if unknown use [VERIFY: Sonja confirm commission rate and annual media estimate].
 9. Reference excerpts: include name, title, phone, and email — never "contact on request" or deferral language.
-10. PSA/compliance excerpts: add specific acknowledgment language when user asks — cover insurance, living wage, MacBride, Title VI, Chapter 63, audit rights as applicable."""
+10. PSA/compliance excerpts: add specific acknowledgment language when user asks — cover insurance, living wage, MacBride, Title VI, Chapter 63, audit rights as applicable.
+11. NEVER shorten the excerpt. Preserve every paragraph, heading, list item, and sentence the user did not ask to change.
+12. When the user asks to fill gaps, placeholders, or [VERIFY] tags: ONLY replace those tags with KB facts — do not rewrite or summarize the surrounding prose."""
+
+SELECTION_KB_PLAN_PROMPT = """You plan a surgical edit to ONE highlighted excerpt inside a zö agency proposal section.
+
+Read the user's instruction and the selected excerpt. Understand what they want changed.
+
+Return ONLY JSON:
+{
+  "editorInstruction": "One clear instruction for the editor. If they want gaps/VERIFY tags filled, say to replace only those tags from KB and preserve every other sentence verbatim.",
+  "kbQueries": ["2-5 targeted Supermemory queries for missing facts — use names, fields, and doc hints like 04 bio, 01 companyfacts"],
+  "preserveFullExcerpt": true
+}
+
+Rules:
+- preserveFullExcerpt must be true when the selection is long or the user wants gaps/placeholders filled — the editor must NOT shorten or summarize.
+- kbQueries must target the specific missing facts in the excerpt, not repeat the user's chat message verbatim."""
 
 STATIC_SECTION_REDRAFT_PROMPT = """Improve ONE static zö proposal section (company overview, team bios, or case studies).
 
@@ -110,21 +134,181 @@ Return ONLY JSON:
 
 _search_semaphore = asyncio.Semaphore(4)
 
+_NEAR_FULL_SELECTION_RATIO = 0.85
+_MIN_EXCERPT_WORDS_FOR_REGRESSION_GUARD = 40
+_MAX_EXCERPT_WORD_LOSS_RATIO = 0.12
+
+
+def _gap_fields_from_text(text: str) -> list[str]:
+    seen: set[str] = set()
+    fields: list[str] = []
+    for match in VERIFY_TAG_RE.finditer(text):
+        field = match.group(1).strip()
+        key = field.casefold()
+        if key and key not in seen:
+            seen.add(key)
+            fields.append(field)
+    return fields
+
+
+def _draft_supplemental_blob(draft: ProposalDraft) -> str:
+    """Reuse contact/firm facts already drafted in static sections — not hardcoded."""
+    parts: list[str] = []
+    for section in draft.sections:
+        if section.id in STATIC_SECTION_IDS and (section.content or "").strip():
+            parts.append(section.content[:8000])
+    return "\n\n".join(parts)
+
+
+def _selection_covers_most_of_section(content: str, start: int, end: int) -> bool:
+    if not content:
+        return False
+    return (end - start) / max(len(content), 1) >= _NEAR_FULL_SELECTION_RATIO
+
+
+def _selection_replacement_regressed(excerpt: str, replacement: str) -> bool:
+    excerpt_words = word_count(excerpt)
+    replacement_words = word_count(replacement)
+    if excerpt_words < _MIN_EXCERPT_WORDS_FOR_REGRESSION_GUARD:
+        return replacement_words < max(8, int(excerpt_words * 0.65))
+    min_words = int(excerpt_words * (1 - _MAX_EXCERPT_WORD_LOSS_RATIO))
+    return replacement_words < min_words
+
+
+async def _plan_selection_edit(
+    *,
+    section: ProposalSection,
+    rfp: RfpRecord,
+    user_message: str,
+    excerpt: str,
+    full_content: str,
+    selection_start: int,
+    selection_end: int,
+) -> tuple[str, list[str]]:
+    """LLM understands user intent and plans KB queries + editor instruction."""
+    near_full = _selection_covers_most_of_section(full_content, selection_start, selection_end)
+    raw, _ = await llm.chat_json(
+        [
+            {"role": "system", "content": SELECTION_KB_PLAN_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Client: {rfp.client}\n"
+                    f"Section: {section.title}\n"
+                    f"User instruction:\n{user_message.strip()}\n\n"
+                    f"Selected excerpt ({word_count(excerpt)} words, "
+                    f"{'near-full section' if near_full else 'partial'}):\n"
+                    f"\"\"\"{excerpt[:6000]}\"\"\"\n\n"
+                    f"Full section length: {word_count(full_content)} words\n"
+                    f"VERIFY tags in excerpt: {_gap_fields_from_text(excerpt) or '(none)'}"
+                ),
+            },
+        ],
+        max_tokens=1024,
+        temperature=0.2,
+    )
+    editor_instruction = str(raw.get("editorInstruction") or user_message).strip()
+    queries_raw = raw.get("kbQueries") or raw.get("queries") or []
+    queries = [str(q).strip()[:240] for q in queries_raw if str(q).strip()][:5]
+    if not queries:
+        gap_hint = _gap_fields_from_text(excerpt)[:1]
+        queries = [
+            f"zö agency {section.title} {rfp.client} {gap_hint[0] if gap_hint else user_message}"[
+                :240
+            ],
+        ]
+    if near_full:
+        editor_instruction = (
+            f"{editor_instruction}\n\n"
+            "CRITICAL: The user selected most or all of this section. Preserve ALL existing "
+            "paragraphs, headings, and prose. Change ONLY what the instruction requires — never "
+            "replace the section with a short summary or contact block."
+        )
+    return editor_instruction, queries
+
+
+async def _fetch_kb_blob_for_selection(
+    queries: list[str],
+    *,
+    evidence_blob: str = "",
+    supplemental_blob: str = "",
+) -> tuple[str, str]:
+    """Return (llm_context_blob, contact_fact_blob). All KB reads via v4 search."""
+    llm_parts: list[str] = []
+    if evidence_blob.strip():
+        llm_parts.append(evidence_blob)
+    if supplemental_blob.strip():
+        llm_parts.append(supplemental_blob)
+
+    async def _hits_for_query(query: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        async with _search_semaphore:
+            hybrid, chunks = await asyncio.gather(
+                supermemory.search_hybrid(
+                    query=query,
+                    limit=SEARCH_LIMIT,
+                    include_full_docs=True,
+                    filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
+                ),
+                supermemory.search_document_chunks(
+                    query=query,
+                    limit=SEARCH_LIMIT,
+                    filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
+                ),
+            )
+            kb_filter = supermemory.is_knowledge_base_hit
+            return (
+                [h for h in hybrid if kb_filter(h)],
+                [h for h in chunks if kb_filter(h)],
+            )
+
+    query_results = await asyncio.gather(*[_hits_for_query(q) for q in queries])
+    hybrid_hits = supermemory.merge_search_hits([h for h, _ in query_results])
+    chunk_hits = supermemory.merge_search_hits([c for _, c in query_results])
+
+    chunk_fact_text = ""
+    if chunk_hits:
+        chunk_fact_text = await supermemory.fetch_hits_fact_text(
+            chunk_hits,
+            max_hits=12,
+            max_chars=32_000,
+        )
+
+    hybrid_text = ""
+    if hybrid_hits:
+        hybrid_text = supermemory.format_search_hits(hybrid_hits, max_chars=12_000)
+
+    if chunk_fact_text.strip():
+        llm_parts.append(chunk_fact_text)
+    elif hybrid_text.strip():
+        llm_parts.append(hybrid_text)
+
+    if not hybrid_hits and not chunk_hits:
+        for query in queries:
+            text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
+                query,
+                limit=8,
+                max_chars=8_000,
+            )
+            if text.strip():
+                llm_parts.append(text[:8000])
+
+    fact_parts = [part for part in (supplemental_blob, chunk_fact_text) if part.strip()]
+    return "\n\n".join(llm_parts), "\n\n".join(fact_parts)
+
 
 async def _search_hits(query: str) -> list[dict[str, Any]]:
     if not supermemory.is_configured():
         return []
-    async with _search_semaphore:
-        try:
-            hits = await supermemory.search_documents(
-                query=query,
-                limit=SEARCH_LIMIT,
-                include_full_docs=True,
-                filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
-            )
-            return [hit for hit in hits if supermemory.is_knowledge_base_hit(hit)]
-        except supermemory.SupermemoryError:
-            return []
+    try:
+        hits = await supermemory.search_hybrid(
+            query=query,
+            limit=SEARCH_LIMIT,
+            include_full_docs=True,
+            filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
+        )
+        return [hit for hit in hits if supermemory.is_knowledge_base_hit(hit)]
+    except supermemory.SupermemoryError:
+        return []
 
 
 def _merge_hits_into_corpus(
@@ -208,8 +392,10 @@ async def _improve_section_selection(
     kb_zo_voice: str,
     evidence: list[EvidenceItem] | None = None,
     kb_block: str = "",
+    fact_blob: str = "",
     avoidance_block: str = "",
-) -> tuple[ProposalSection, str]:
+    working_excerpt: str | None = None,
+) -> tuple[ProposalSection, str, int]:
     """Surgical excerpt edit — full section context, splice replacement only."""
     content = section.content or ""
     if not _selection_bounds_valid(
@@ -223,7 +409,8 @@ async def _improve_section_selection(
             status_code=400,
         )
 
-    excerpt = content[selection_start:selection_end]
+    excerpt = working_excerpt if working_excerpt is not None else content[selection_start:selection_end]
+    blob_for_facts = fact_blob or kb_block
     register = classify_section_register(
         section_id=section.id,
         title=section.title,
@@ -270,6 +457,43 @@ async def _improve_section_selection(
             status_code=422,
         )
 
+    kb_fills = 0
+    if blob_for_facts.strip() and VERIFY_TAG_RE.search(replacement):
+        replacement, kb_fills = _replace_verify_tags_from_blob(replacement, blob_for_facts)
+
+    if _selection_replacement_regressed(excerpt, replacement):
+        raise ProposalError(
+            "Selection edit would remove too much content — rejected to protect the section. "
+            "Try selecting only the passage with [VERIFY] tags, or ask to fill a specific gap.",
+            status_code=422,
+        )
+    if replacement.strip() == excerpt.strip() and kb_fills == 0:
+        remaining_gaps = _gap_fields_from_text(replacement)
+        if remaining_gaps:
+            blob_has_phones = bool(_PHONE_RE.search(blob_for_facts))
+            blob_has_emails = bool(_EMAIL_RE.search(blob_for_facts))
+            needs_phone = any(
+                any(k in g.casefold() for k in ("phone", "line", "fax", "telephone"))
+                for g in remaining_gaps
+            )
+            needs_email = any("email" in g.casefold() or "e-mail" in g.casefold() for g in remaining_gaps)
+            if (needs_phone and blob_has_phones) or (needs_email and blob_has_emails):
+                raise ProposalError(
+                    "KB returned contact facts but could not map them to the [VERIFY] tags. "
+                    f"Still missing: {', '.join(remaining_gaps)}. "
+                    "Try selecting only the contact line with the tag.",
+                    status_code=422,
+                )
+            raise ProposalError(
+                "Knowledge base did not contain verified values for: "
+                f"{', '.join(remaining_gaps)}. Add the fact to Supermemory or enter it manually.",
+                status_code=422,
+            )
+        raise ProposalError(
+            "Selection edit did not change the excerpt. Try a more specific instruction.",
+            status_code=422,
+        )
+
     replacement = enforce_narrative_voice(
         replacement,
         section_id=section.id,
@@ -306,7 +530,7 @@ async def _improve_section_selection(
             "status": "generated",
         }
     )
-    return updated, provider
+    return updated, provider, kb_fills
 
 
 async def _plan_refined_queries(
@@ -634,29 +858,116 @@ async def improve_proposal_section(
             selection_end,
             user_message[:80],
         )
-        kb_block = ""
-        evidence: list[EvidenceItem] = []
+        excerpt = (section.content or "")[selection_start:selection_end]
+        full_content = section.content or ""
+        gap_fields = _gap_fields_from_text(excerpt)
+        editor_instruction, kb_queries = await _plan_selection_edit(
+            section=section,
+            rfp=rfp,
+            user_message=user_message,
+            excerpt=excerpt,
+            full_content=full_content,
+            selection_start=selection_start,
+            selection_end=selection_end,
+        )
+        evidence_blob = ""
         avoidance_block = ""
+        evidence: list[EvidenceItem] = []
         if research:
             avoidance_block = format_avoidance_block(
                 research.writing_avoidances,
                 research.loss_lessons,
             )
             evidence = _evidence_for_section(section_id, research.evidence_corpus or [])
-        excerpt_hint = (selection_text or (section.content or "")[selection_start:selection_end])[
-            :160
-        ]
-        kb_text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
-            f"zö agency {user_message[:120]} {excerpt_hint} {rfp.client}"[:240],
-            limit=5,
-        )
-        kb_block = kb_text or ""
+            if research.evidence_corpus:
+                evidence_blob = _section_corpus_blob(research.evidence_corpus, section_id)
 
-        updated_section, provider = await _improve_section_selection(
+        logger.info(
+            "Selection KB plan for %s / %s gaps=%r queries=%r",
+            rfp_id,
+            section_id,
+            gap_fields,
+            kb_queries,
+        )
+        supplemental = _draft_supplemental_blob(draft)
+        kb_block, contact_fact_blob = await _fetch_kb_blob_for_selection(
+            kb_queries,
+            evidence_blob=evidence_blob,
+            supplemental_blob=supplemental,
+        )
+        fact_blob = "\n\n".join(
+            part for part in (full_content, contact_fact_blob) if part.strip()
+        )
+
+        logger.info(
+            "Selection fact blob for %s / %s: %d chars, phones=%s emails=%s",
+            rfp_id,
+            section_id,
+            len(fact_blob),
+            bool(_PHONE_RE.search(fact_blob)),
+            bool(_EMAIL_RE.search(fact_blob)),
+        )
+
+        working_excerpt, pre_fills = _replace_verify_tags_from_blob(excerpt, fact_blob)
+        if pre_fills > 0 and not _gap_fields_from_text(working_excerpt):
+            new_content = enforce_narrative_voice(
+                _splice_selection(
+                    full_content,
+                    start=selection_start,
+                    end=selection_end,
+                    replacement=working_excerpt,
+                ),
+                section_id=section.id,
+                title=section.title,
+                zo_mode=section.mode,
+            )
+            updated_section = section.model_copy(
+                update={"content": new_content, "status": "generated"}
+            )
+            provider = "kb-fill"
+            if research is None:
+                research = ProposalResearchCache(
+                    rfpId=rfp_id,
+                    updatedAt=datetime.now(timezone.utc).isoformat(),
+                    provider=provider,
+                )
+            else:
+                research = research.model_copy(update={"provider": provider})
+            merged_sections = [
+                updated_section if s.id == section_id else s for s in draft.sections
+            ]
+            now = datetime.now(timezone.utc).isoformat()
+            updated_draft = draft.model_copy(
+                update={
+                    "sections": merged_sections,
+                    "updated_at": now,
+                    "provider": provider,
+                }
+            )
+            if persist:
+                await asave_proposal_draft(updated_draft)
+                await asave_research_cache(research)
+            before_words = word_count(before_section.content or "")
+            after_words = word_count(updated_section.content or "")
+            filled_labels = ", ".join(gap_fields) if gap_fields else "missing fields"
+            assistant_message = (
+                f"Filled **{pre_fills}** verified fact(s) in the selected excerpt of "
+                f"**{section.title}** from the knowledge base ({filled_labels}). "
+                f"({before_words} → {after_words} words)."
+            )
+            logger.info(
+                "Section selection KB fill for %s / %s: %d tag(s)",
+                rfp_id,
+                section_id,
+                pre_fills,
+            )
+            return updated_section, updated_draft, research, provider, assistant_message
+
+        updated_section, provider, kb_fills = await _improve_section_selection(
             section=section,
             rfp=rfp,
             rfp_context=rfp_context,
-            user_message=user_message,
+            user_message=editor_instruction,
             selection_start=selection_start,
             selection_end=selection_end,
             selection_text=selection_text,
@@ -664,7 +975,9 @@ async def improve_proposal_section(
             kb_zo_voice=kb_zo_voice,
             evidence=evidence,
             kb_block=kb_block,
+            fact_blob=fact_blob,
             avoidance_block=avoidance_block,
+            working_excerpt=working_excerpt if pre_fills > 0 else None,
         )
         if research is None:
             research = ProposalResearchCache(
@@ -696,6 +1009,11 @@ async def improve_proposal_section(
             f"Updated the selected excerpt in **{section.title}** "
             f"({before_words} → {after_words} words). Surrounding text unchanged."
         )
+        if kb_fills > 0:
+            assistant_message = (
+                f"Filled **{kb_fills}** verified fact(s) and updated the selected excerpt in "
+                f"**{section.title}** ({before_words} → {after_words} words)."
+            )
         logger.info(
             "Section selection edit complete for %s / %s (%d → %d words)",
             rfp_id,

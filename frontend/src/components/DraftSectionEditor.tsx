@@ -6,7 +6,14 @@ import { improveProposalSection } from "@/lib/proposal-api";
 import { getTextareaCaretViewportRect, scrollTextareaToRange } from "@/lib/textarea-selection";
 import type { FlagHighlightRange } from "@/lib/proposal-manual-flags";
 import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
-import { SectionRevisionCompare } from "./SectionRevisionCompare";
+
+export interface SectionRevisionRecord {
+  before: string;
+  after: string;
+  summary: string;
+  instruction: string;
+  updatedAt: number;
+}
 
 interface TextSelection {
   text: string;
@@ -27,6 +34,11 @@ interface DraftSectionEditorProps {
   compact?: boolean;
   highlightRange?: FlagHighlightRange | null;
   onUserEditStart?: () => void;
+  storedRevision?: SectionRevisionRecord | null;
+  revisionDrawerOpen?: boolean;
+  onRevisionRecorded?: (revision: SectionRevisionRecord) => void;
+  onRevisionDrawerOpenChange?: (open: boolean) => void;
+  onRevisionDismiss?: () => void;
 }
 
 const SECTION_PROMPTS = [
@@ -46,6 +58,11 @@ export function DraftSectionEditor({
   compact = false,
   highlightRange = null,
   onUserEditStart,
+  storedRevision = null,
+  revisionDrawerOpen = false,
+  onRevisionRecorded,
+  onRevisionDrawerOpenChange,
+  onRevisionDismiss,
 }: DraftSectionEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const selectionRafRef = useRef<number | null>(null);
@@ -59,13 +76,6 @@ export function DraftSectionEditor({
   const [instruction, setInstruction] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [revisionCompare, setRevisionCompare] = useState<{
-    before: string;
-    after: string;
-    summary: string;
-    instruction: string;
-  } | null>(null);
-  const [revisionDrawerOpen, setRevisionDrawerOpen] = useState(false);
 
   useEffect(() => {
     setSelection(null);
@@ -73,8 +83,6 @@ export function DraftSectionEditor({
     setDialogOpen(false);
     setInstruction("");
     setError(null);
-    setRevisionCompare(null);
-    setRevisionDrawerOpen(false);
     appliedHighlightKeyRef.current = null;
   }, [section.id]);
 
@@ -244,13 +252,14 @@ export function DraftSectionEditor({
       const contentAfter = result.section.content ?? contentBefore;
       const didChange = contentBefore !== contentAfter;
       if (didChange) {
-        setRevisionCompare({
+        onRevisionRecorded?.({
           before: contentBefore,
           after: contentAfter,
           summary: result.assistantMessage,
           instruction: trimmed,
+          updatedAt: Date.now(),
         });
-        setRevisionDrawerOpen(true);
+        onRevisionDrawerOpenChange?.(true);
       } else if (dialogMode === "selection") {
         setError(
           "No change was applied to the selected excerpt. Try a more specific instruction."
@@ -271,6 +280,8 @@ export function DraftSectionEditor({
     dialogMode,
     instruction,
     isRunning,
+    onRevisionRecorded,
+    onRevisionDrawerOpenChange,
     onSectionUpdated,
     rfpId,
     section.id,
@@ -293,10 +304,10 @@ export function DraftSectionEditor({
               Draft content
             </span>
             <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-              {revisionCompare && !revisionDrawerOpen ? (
+              {storedRevision && !revisionDrawerOpen ? (
                 <button
                   type="button"
-                  onClick={() => setRevisionDrawerOpen(true)}
+                  onClick={() => onRevisionDrawerOpenChange?.(true)}
                   className="proposal-revision-reopen-btn"
                 >
                   View what changed
@@ -337,8 +348,6 @@ export function DraftSectionEditor({
                 appliedHighlightKeyRef.current = null;
                 onChange(e.target.value);
                 setSelection(null);
-                setRevisionCompare(null);
-                setRevisionDrawerOpen(false);
               }}
               onSelect={captureSelection}
               onMouseUp={captureSelection}
@@ -372,32 +381,6 @@ export function DraftSectionEditor({
           </div>
         </div>
       </div>
-
-      {revisionCompare && revisionDrawerOpen && typeof document !== "undefined"
-        ? createPortal(
-            <>
-              <button
-                type="button"
-                className="proposal-revision-drawer-backdrop"
-                aria-label="Close revision compare"
-                onClick={() => setRevisionDrawerOpen(false)}
-              />
-              <aside className="proposal-revision-drawer" aria-label="Revision changes">
-                <SectionRevisionCompare
-                  before={revisionCompare.before}
-                  after={revisionCompare.after}
-                  summary={revisionCompare.summary}
-                  instruction={revisionCompare.instruction}
-                  onDismiss={() => {
-                    setRevisionDrawerOpen(false);
-                    setRevisionCompare(null);
-                  }}
-                />
-              </aside>
-            </>,
-            document.body
-          )
-        : null}
 
       {dialogOpen &&
         typeof document !== "undefined" &&
@@ -454,7 +437,7 @@ export function DraftSectionEditor({
                     disabled={isRunning}
                     rows={4}
                     autoFocus
-                    placeholder="e.g. shorten this paragraph, add a local reference, make the tone warmer, resolve the VERIFY tag from KB…"
+                    placeholder="e.g. fill Sonja's phone and email from KB, shorten this paragraph, resolve VERIFY tags…"
                     className="proposal-revise-input zo-input mt-2 w-full px-3 py-2.5 text-sm leading-relaxed outline-none focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
                   />
                 </label>
