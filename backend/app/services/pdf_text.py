@@ -1,6 +1,29 @@
+from io import BytesIO
 from pathlib import Path
 
 from pypdf import PdfReader
+
+IMAGE_ONLY_TEXT_THRESHOLD = 100
+
+
+def pdf_page_count(content: bytes) -> int:
+    if not content or not content.startswith(b"%PDF"):
+        return 0
+    try:
+        return len(PdfReader(BytesIO(content)).pages)
+    except Exception:
+        return 0
+
+
+def is_image_only_pdf(content: bytes, *, extracted_text: str = "") -> bool:
+    """True when a PDF has pages but almost no machine-readable text (typical scan)."""
+    pages = pdf_page_count(content)
+    if pages == 0:
+        return False
+    text_len = len(extracted_text.strip()) if extracted_text else len(
+        extract_pdf_text_from_bytes(content, max_chars=IMAGE_ONLY_TEXT_THRESHOLD + 1)
+    )
+    return text_len < IMAGE_ONLY_TEXT_THRESHOLD
 
 
 def extract_pdf_text(pdf_path: str, *, max_chars: int = 120_000) -> str:
@@ -13,8 +36,6 @@ def extract_pdf_text(pdf_path: str, *, max_chars: int = 120_000) -> str:
 def extract_pdf_text_from_bytes(content: bytes, *, max_chars: int = 120_000) -> str:
     if not content or not content.startswith(b"%PDF"):
         return ""
-
-    from io import BytesIO
 
     reader = PdfReader(BytesIO(content))
     parts: list[str] = []

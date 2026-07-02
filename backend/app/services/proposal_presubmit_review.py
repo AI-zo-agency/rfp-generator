@@ -15,6 +15,17 @@ from app.models.proposal import (
 )
 from app.models.rfp import RfpRecord
 from app.services.proposal_brand_voice import classify_section_register
+from app.services.proposal_consistency import scan_manuscript_consistency
+from app.services.proposal_rfp_compliance import (
+    compliance_gaps_to_presubmit_issues,
+    requirement_likely_covered,
+    scan_rfp_compliance_gaps,
+)
+from app.services.proposal_manuscript_cleanup import (
+    GRAMMAR_GLITCH_RE,
+    budget_mentions_subcontractors,
+    deny_subcontractors_claimed,
+)
 from app.services.proposal_voice_enforcement import contains_vendor_language
 
 # Common stale client names from zö portfolio (copy-paste scan)
@@ -199,6 +210,68 @@ def _scan_voice(draft: ProposalDraft) -> list[PreSubmitIssue]:
     return issues
 
 
+def _scan_grammar(draft: ProposalDraft) -> list[PreSubmitIssue]:
+    issues: list[PreSubmitIssue] = []
+    for section in draft.sections:
+        content = section.content or ""
+        if not content.strip():
+            continue
+        for match in GRAMMAR_GLITCH_RE.finditer(content):
+            start = max(0, match.start() - 30)
+            end = min(len(content), match.end() + 40)
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="grammar",
+                    message=(
+                        "Grammar or pronoun error (e.g. 'of we', 'across we', "
+                        "or 'We were …, and is …')"
+                    ),
+                    sectionId=section.id,
+                    sectionTitle=section.title,
+                    excerpt=content[start:end].strip(),
+                )
+            )
+            break
+    return issues
+
+
+def _scan_subcontractor_narrative(
+    *,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+) -> list[PreSubmitIssue]:
+    budget = research.budget if research else None
+    if not budget_mentions_subcontractors(budget, draft):
+        return []
+
+    issues: list[PreSubmitIssue] = []
+    for section in draft.sections:
+        content = section.content or ""
+        if not content.strip():
+            continue
+        if not deny_subcontractors_claimed(content):
+            continue
+        title_lower = section.title.casefold()
+        if "company background" not in title_lower and "company overview" not in title_lower:
+            if "self-perform all work" not in content.casefold():
+                continue
+        issues.append(
+            PreSubmitIssue(
+                severity="critical",
+                category="consistency",
+                message=(
+                    "Company narrative claims no subcontractors but cost proposal / "
+                    "cultural competency sections document translation partners"
+                ),
+                sectionId=section.id,
+                sectionTitle=section.title,
+                excerpt=content[:200],
+            )
+        )
+    return issues
+
+
 def _compliance_checklist(
     *,
     draft: ProposalDraft,
@@ -230,13 +303,33 @@ def _compliance_checklist(
                         )
                     )
                 elif has_content:
-                    items.append(
-                        ComplianceCheckItem(
-                            item=req[:120],
-                            status="pass",
-                            notes=f"Draft section: {mapped_section.title}",
+                    uncovered = mapped_section.uncovered_requirements or []
+                    still_open = [
+                        req
+                        for req in uncovered[:4]
+                        if not requirement_likely_covered(
+                            req, draft_match.content if draft_match else ""
                         )
-                    )
+                    ]
+                    if still_open:
+                        items.append(
+                            ComplianceCheckItem(
+                                item=req[:120],
+                                status="fail",
+                                notes=(
+                                    f"Phase 2 uncovered requirement may still be missing in "
+                                    f"{mapped_section.title}: {still_open[0][:80]}"
+                                ),
+                            )
+                        )
+                    else:
+                        items.append(
+                            ComplianceCheckItem(
+                                item=req[:120],
+                                status="pass",
+                                notes=f"Draft section: {mapped_section.title}",
+                            )
+                        )
                 else:
                     items.append(
                         ComplianceCheckItem(
@@ -309,6 +402,8 @@ _CATEGORY_LABELS = {
     "placeholder": "Unfilled placeholders",
     "voice": "Voice & tone",
     "compliance": "Compliance",
+    "consistency": "Internal consistency",
+    "self_edit": "Self-edit incomplete",
 }
 
 
@@ -340,6 +435,8 @@ def generate_issues_markdown(
             "copy_paste",
             "placeholder",
             "voice",
+            "consistency",
+            "self_edit",
             "compliance",
             *sorted(k for k in by_category if k not in _CATEGORY_LABELS),
         ):
@@ -396,10 +493,21 @@ def run_presubmit_review(
     rfp: RfpRecord,
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
+    extra_issues: list[PreSubmitIssue] | None = None,
 ) -> PreSubmitReview:
     issues: list[PreSubmitIssue] = []
     issues.extend(_scan_copy_paste(draft=draft, rfp=rfp))
     issues.extend(_scan_voice(draft=draft))
+    issues.extend(_scan_grammar(draft=draft))
+    issues.extend(_scan_subcontractor_narrative(draft=draft, research=research))
+    issues.extend(scan_manuscript_consistency(draft=draft, research=research, rfp=rfp))
+    issues.extend(
+        compliance_gaps_to_presubmit_issues(
+            scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
+        )
+    )
+    if extra_issues:
+        issues.extend(extra_issues)
 
     empty_narrative = [
         s
@@ -446,4 +554,37 @@ def run_presubmit_review(
         ),
         readyToSubmit=ready,
         scannedAt=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def run_presubmit_review_with_manual_flags(
+    *,
+    rfp: RfpRecord,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    extra_issues: list[PreSubmitIssue] | None = None,
+    kb_searched: bool = False,
+    finalized: bool = False,
+) -> PreSubmitReview:
+    """Pre-submit review plus structured manual-fill flags for the UI."""
+    from app.services.proposal_manual_flags import build_presubmit_manual_fill_flags
+    from app.services.proposal_submission_gap_finalizer import attach_manual_fill_flags_to_review
+
+    review = run_presubmit_review(
+        rfp=rfp,
+        draft=draft,
+        research=research,
+        extra_issues=extra_issues,
+    )
+    if not build_presubmit_manual_fill_flags(
+        draft=draft, research=research, rfp=rfp, kb_searched=kb_searched, finalized=finalized
+    ):
+        return review.model_copy(update={"manual_fill_flags": []})
+    return attach_manual_fill_flags_to_review(
+        review,
+        draft=draft,
+        research=research,
+        rfp=rfp,
+        kb_searched=kb_searched,
+        finalized=finalized,
     )

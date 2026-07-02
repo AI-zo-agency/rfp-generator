@@ -11,12 +11,14 @@ interface ProposalReviewPanelProps {
   rfpTitle: string;
   isRunning: boolean;
   isAutoFixing?: boolean;
+  isFinalizingGaps?: boolean;
   autoFixMode?: "quick" | "ai" | null;
   error: string | null;
   autoFixNotice?: string | null;
   disabled?: boolean;
   onRunReview: () => void;
   onAutoFix?: () => void;
+  onFinalizeGaps?: () => void;
   onStopAutoFix?: () => void;
   onJumpToSection?: (sectionId: string) => void;
 }
@@ -82,12 +84,14 @@ export function ProposalReviewPanel({
   rfpTitle,
   isRunning,
   isAutoFixing = false,
+  isFinalizingGaps = false,
   autoFixMode = null,
   error,
   autoFixNotice,
   disabled,
   onRunReview,
   onAutoFix,
+  onFinalizeGaps,
   onStopAutoFix,
   onJumpToSection,
 }: ProposalReviewPanelProps) {
@@ -199,16 +203,18 @@ export function ProposalReviewPanel({
           </p>
         </div>
 
-        {isAutoFixing ? (
+        {isAutoFixing || isFinalizingGaps ? (
           <div className="proposal-review-running flex items-center gap-5 rounded-xl border border-zo-border bg-[#fafbfc] px-5 py-4">
             <span
               className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-zo-orange/30 border-t-zo-orange"
               aria-hidden
             />
             <p className="min-w-0 flex-1 text-sm text-foreground">
-              Fixing only sections with review findings…
+              {isFinalizingGaps
+                ? "Final editor: Supermemory gap-fill, then MANUAL FILL handoff…"
+                : "Fixing only sections with review findings…"}
             </p>
-            {onStopAutoFix ? (
+            {onStopAutoFix && isAutoFixing ? (
               <button
                 type="button"
                 onClick={onStopAutoFix}
@@ -236,6 +242,17 @@ export function ProposalReviewPanel({
                 className="zo-btn"
               >
                 Auto-fix issues
+              </button>
+            ) : null}
+            {onFinalizeGaps ? (
+              <button
+                type="button"
+                onClick={() => onFinalizeGaps()}
+                disabled={disabled || isRunning}
+                className="zo-btn secondary"
+                title="Last editor pass: search KB for gap data, then assign Sonja/Ella MANUAL FILL tags for anything KB cannot supply"
+              >
+                Finalize gaps
               </button>
             ) : null}
           </div>
@@ -293,6 +310,11 @@ export function ProposalReviewPanel({
                 <span className="rounded-lg bg-zo-warm-gray/70 px-4 py-2 text-xs font-bold text-zo-text-secondary">
                   {review.issues.length} total
                 </span>
+                {(review.manualFillFlags?.length ?? 0) > 0 && (
+                  <span className="rounded-lg bg-violet-100 px-4 py-2 text-xs font-bold text-violet-900">
+                    {review.manualFillFlags!.length} manual fill
+                  </span>
+                )}
               </div>
             </div>
 

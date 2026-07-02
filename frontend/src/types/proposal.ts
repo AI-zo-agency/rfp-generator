@@ -1,3 +1,7 @@
+import type { ProposalPipelineCheckpoint } from "@/lib/proposal-pipeline-checkpoint";
+
+export type { ProposalPipelineCheckpoint };
+
 export type OutlineSectionStatus =
   | "empty"
   | "outline"
@@ -78,6 +82,24 @@ export interface PreSubmitIssue {
   excerpt?: string | null;
 }
 
+export interface ManualFillFlag {
+  sectionId: string;
+  sectionTitle: string;
+  kind:
+    | "verify"
+    | "placeholder"
+    | "manual_fill"
+    | "compliance"
+    | "budget"
+    | "consistency"
+    | "other";
+  tag: string;
+  highlightText?: string;
+  owner?: string | null;
+  finalized?: boolean;
+  kbSearched?: boolean;
+}
+
 export interface ComplianceCheckItem {
   item: string;
   status: "pass" | "fail" | "manual";
@@ -88,6 +110,7 @@ export interface PreSubmitReview {
   rfpId: string;
   issues: PreSubmitIssue[];
   complianceChecklist: ComplianceCheckItem[];
+  manualFillFlags?: ManualFillFlag[];
   summary: string;
   issuesMarkdown?: string;
   readyToSubmit: boolean;
@@ -134,6 +157,7 @@ export interface ProposalResearch {
   writingAvoidances?: string[];
   proofPoints?: ProofPoint[];
   presubmitReview?: PreSubmitReview | null;
+  pipelineCheckpoint?: ProposalPipelineCheckpoint | null;
   updatedAt: string;
   provider?: string | null;
   sectionQueries?: Record<string, string[]>;
@@ -179,6 +203,11 @@ export interface ProposalBudget {
   tiers: PricingTier[];
   recommendedTierId?: string | null;
   agencyRevenueEstimate?: number | null;
+  lineItemSum?: number | null;
+  agencyFeeSubtotal?: number | null;
+  clientMediaPassthrough?: number | null;
+  totalClientInvoicing?: number | null;
+  commissionRate?: number | null;
   lumpSumTotal?: number | null;
   directExpensesTotal?: number | null;
   commissionModel?: string | null;

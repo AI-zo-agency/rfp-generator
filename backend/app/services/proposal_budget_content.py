@@ -62,8 +62,28 @@ def render_budget_markdown(budget: ProposalBudget) -> str:
         summary_rows.append(f"- **RFP budget cap:** {_usd(budget.rfp_budget_cap)}")
     if budget.agency_revenue_estimate is not None:
         summary_rows.append(
-            f"- **Agency revenue estimate:** {_usd(budget.agency_revenue_estimate)}"
+            f"- **Agency revenue estimate (zö fee income only):** "
+            f"{_usd(budget.agency_revenue_estimate)}"
         )
+    if budget.agency_fee_subtotal is not None and budget.client_media_passthrough:
+        summary_rows.append(
+            f"- **Agency fee subtotal (excl. pass-through):** {_usd(budget.agency_fee_subtotal)}"
+        )
+    if budget.client_media_passthrough is not None and budget.client_media_passthrough > 0:
+        summary_rows.append(
+            f"- **Client media pass-through (at net, not agency revenue):** "
+            f"{_usd(budget.client_media_passthrough)}"
+        )
+    if budget.commission_rate is not None and budget.commission_rate > 0:
+        pct = budget.commission_rate * 100 if budget.commission_rate <= 1 else budget.commission_rate
+        summary_rows.append(f"- **Commission rate:** {pct:g}%")
+    if budget.total_client_invoicing is not None and budget.client_media_passthrough:
+        summary_rows.append(
+            f"- **Total estimated client invoicing (media + agency fees):** "
+            f"{_usd(budget.total_client_invoicing)}"
+        )
+    if budget.line_item_sum is not None:
+        summary_rows.append(f"- **Line item table total:** {_usd(budget.line_item_sum)}")
     if budget.lump_sum_total is not None:
         summary_rows.append(f"- **Lump sum (base term):** {_usd(budget.lump_sum_total)}")
     if budget.direct_expenses_total is not None:
@@ -131,8 +151,19 @@ def render_budget_markdown(budget: ProposalBudget) -> str:
         lines.append(f"| **Subtotal** | *Sum of line items* | | | | **{_usd(subtotal)}** |")
         if direct > 0:
             lines.append(f"| **Direct expenses** | | | | | **{_usd(direct)}** |")
+        if budget.client_media_passthrough and budget.client_media_passthrough > 0:
+            agency_only = float(budget.agency_fee_subtotal or (subtotal - budget.client_media_passthrough))
             lines.append(
-                f"| **Total (agency revenue)** | *Line items + direct expenses* | | | | **{_usd(subtotal + direct)}** |"
+                f"| **Agency fee subtotal** | *Excludes client pass-through* | | | | **{_usd(agency_only)}** |"
+            )
+            lines.append(
+                f"| **Total agency revenue** | *Agency fees + direct expenses* | | | | "
+                f"**{_usd(budget.agency_revenue_estimate or agency_only + direct)}** |"
+            )
+        else:
+            lines.append(
+                f"| **Total (agency revenue)** | *Line items + direct expenses* | | | | "
+                f"**{_usd(subtotal + direct)}** |"
             )
         lines.append("")
 
@@ -162,11 +193,7 @@ def render_budget_markdown(budget: ProposalBudget) -> str:
             lines.append(f"- {note}")
         lines.append("")
 
-    if budget.pricing_flags:
-        lines.append("## Pricing Flags")
-        for flag in budget.pricing_flags:
-            lines.append(f"- {flag}")
-        lines.append("")
+    # pricing_flags stay on ProposalBudget for internal review — not in submission manuscript
 
     if budget.design_brief.strip():
         lines.append(

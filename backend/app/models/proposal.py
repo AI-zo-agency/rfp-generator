@@ -6,6 +6,7 @@ ProposalSectionMode = Literal["pull", "select", "write"]
 ProposalSectionSource = Literal["template", "rfp", "generated"]
 ProposalSectionStatus = Literal["empty", "outline", "generated", "reviewed"]
 ZoSectionMode = Literal["pull", "select", "write"]
+BudgetLineItemType = Literal["agency_fee", "client_passthrough", "direct_expense"]
 
 
 class RfpSectionMap(BaseModel):
@@ -70,6 +71,7 @@ class BudgetLineItem(BaseModel):
     rate_source: str = Field(default="", alias="rateSource")
     extended: float | None = None
     notes: str | None = None
+    line_item_type: BudgetLineItemType | None = Field(default=None, alias="lineItemType")
 
 
 class VerifiedRate(BaseModel):
@@ -140,6 +142,29 @@ class ComplianceCheckItem(BaseModel):
     notes: str = ""
 
 
+class ManualFillFlag(BaseModel):
+    """Submission gap flagged for human completion after KB + final editor pass."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    section_title: str = Field(alias="sectionTitle")
+    kind: Literal[
+        "verify",
+        "placeholder",
+        "manual_fill",
+        "compliance",
+        "budget",
+        "consistency",
+        "other",
+    ] = "other"
+    tag: str
+    highlight_text: str | None = Field(default=None, alias="highlightText")
+    owner: str | None = None
+    finalized: bool = False
+    kb_searched: bool = Field(default=False, alias="kbSearched")
+
+
 class PreSubmitReview(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -147,6 +172,9 @@ class PreSubmitReview(BaseModel):
     issues: list[PreSubmitIssue] = Field(default_factory=list)
     compliance_checklist: list[ComplianceCheckItem] = Field(
         default_factory=list, alias="complianceChecklist"
+    )
+    manual_fill_flags: list[ManualFillFlag] = Field(
+        default_factory=list, alias="manualFillFlags"
     )
     summary: str = ""
     issues_markdown: str = Field(default="", alias="issuesMarkdown")
@@ -202,6 +230,15 @@ class ProposalBudget(BaseModel):
     agency_revenue_estimate: float | None = Field(
         default=None, alias="agencyRevenueEstimate"
     )
+    line_item_sum: float | None = Field(default=None, alias="lineItemSum")
+    agency_fee_subtotal: float | None = Field(default=None, alias="agencyFeeSubtotal")
+    client_media_passthrough: float | None = Field(
+        default=None, alias="clientMediaPassthrough"
+    )
+    total_client_invoicing: float | None = Field(
+        default=None, alias="totalClientInvoicing"
+    )
+    commission_rate: float | None = Field(default=None, alias="commissionRate")
     lump_sum_total: float | None = Field(default=None, alias="lumpSumTotal")
     direct_expenses_total: float | None = Field(default=None, alias="directExpensesTotal")
     commission_model: str | None = Field(default=None, alias="commissionModel")
@@ -223,6 +260,17 @@ class ProposalBudget(BaseModel):
     provider: str | None = None
 
 
+class ProposalPipelineCheckpoint(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    last_completed_phase: str | None = Field(default=None, alias="lastCompletedPhase")
+    in_progress_phase: str | None = Field(default=None, alias="inProgressPhase")
+    last_failed_phase: str | None = Field(default=None, alias="lastFailedPhase")
+    last_error: str | None = Field(default=None, alias="lastError")
+    resume_from_phase: str | None = Field(default=None, alias="resumeFromPhase")
+    updated_at: str = Field(alias="updatedAt")
+
+
 class ProposalResearchCache(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -239,6 +287,9 @@ class ProposalResearchCache(BaseModel):
     writing_avoidances: list[str] = Field(default_factory=list, alias="writingAvoidances")
     proof_points: list[ProofPoint] = Field(default_factory=list, alias="proofPoints")
     presubmit_review: PreSubmitReview | None = Field(default=None, alias="presubmitReview")
+    pipeline_checkpoint: ProposalPipelineCheckpoint | None = Field(
+        default=None, alias="pipelineCheckpoint"
+    )
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None
 
@@ -300,6 +351,9 @@ class SectionImproveRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     message: str = Field(min_length=1, max_length=4000)
+    selection_start: int | None = Field(default=None, alias="selectionStart", ge=0)
+    selection_end: int | None = Field(default=None, alias="selectionEnd", ge=0)
+    selection_text: str | None = Field(default=None, alias="selectionText", max_length=8000)
 
 
 class ProposalPhase3Response(BaseModel):
@@ -325,6 +379,7 @@ class ProposalPhase4Response(BaseModel):
     ok: bool = True
     review: PreSubmitReview
     research: ProposalResearchCache
+    draft: ProposalDraft | None = None
 
 
 class ProposalPhase4AutoFixResponse(BaseModel):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
@@ -49,6 +50,15 @@ Process (use tools — do not skip):
 2. Call KB tools (search_knowledge_base, search_master_template, search_case_studies, search_team_bios) for facts needed to complete the section.
 3. Identify every issue: blank/missing content, [VERIFY] stubs, generation-error text, grammar/wording errors, unmet RFP requirements, wrong voice.
 
+ALWAYS flag these senior-editor priorities when present:
+- Subject-verb disagreement after "We were …, and is …" (cover letter / entity description)
+- Malformed possessives: "of we", "across we", "sole owner of we" — must use our firm / zö agency / our studio
+- Subcontractor inconsistency: Company Background claiming "no subcontractors" while cost proposal lists translation partners — align narrative with budget
+- RFP compliance: reference contact names/phones/emails, workforce diversity %, staff hours in budget, PSA acknowledgments (insurance, living wage, MacBride, Title VI) — never defer to unnamed attachments
+- Budget: flag agency revenue estimate showing $0 when commission or fees apply — must match commission rate × pass-through
+- References: flag "contact on request" or missing phone/email
+- Workforce: flag inconsistent % female/minority between MWBE and Personnel sections
+
 Do NOT rewrite the section yourself — write patch instructions for the Section Repair agent.
 Return ONLY JSON when done researching:
 {"patchInstructions":"specific steps: what to fetch, what to fix, what RFP reqs to address","priority":"critical|high|medium","issues":["issue 1"],"kbQueries":["queries you ran"]}"""
@@ -59,10 +69,16 @@ Your job: search the knowledge base with tools, then produce ONE complete sectio
 Rules:
 1. Call KB tools until you have enough facts — do not stop after one search.
 2. Remove [VERIFY] stubs when evidence supports real prose. Cite [E#] when using corpus IDs provided.
-3. First person we/our in narrative sections — never "The Vendor".
+3. First person we/our in narrative sections — never "The Vendor". Never use "we" as a possessive ("of we", "across we").
 4. Use ONLY verified KB and RFP facts. Do not invent clients, contacts, or metrics.
 5. Address every RFP requirement listed for this section.
-6. When done researching, respond with ONLY JSON:
+6. SUBMISSION POLISH tasks: fix ONLY the listed defects; preserve all other sentences verbatim.
+7. Grammar: "We were established …, and is …" must become "and are …" or be rephrased.
+8. Subcontractors: if cost proposal lists translation partners, Company Background must align — zö self-performs marketing/communications; translation partners are scoped separately.
+9. RFP compliance: reference contacts with phones and emails, workforce diversity %, budget hours table, PSA acks — from KB only; never defer to unnamed attachments or "upon request".
+10. Budget section: agency revenue / commission must be positive dollars matching canonical budget — never $0 when commission model applies.
+11. MWBE and Personnel must use the same workforce percentages — align to one HR-verified figure.
+10. When done researching, respond with ONLY JSON:
 {"content":"full section prose","kbRefs":["E1"],"designerNote":null}"""
 
 USER_REVISE_SYSTEM = """You are zö agency's User Revise agent (editor chat / Revise content flow).
@@ -73,7 +89,9 @@ Rules:
 2. Call tools for deeper KB search — more specific than the first draft pass.
 3. Improve substantially — never return the same [VERIFY] placeholder if tools found support.
 4. Preserve zö BRAND VOICE (first person we/our, warm, proof-led).
-5. Return ONLY JSON: {"content":"...","kbRefs":["E1"],"designerNote":null}"""
+5. Budget/fee edits: never output $0 agency revenue when commission applies — use rate × pass-through or [VERIFY: Sonja confirm rate].
+6. Reference edits: full contact block (name, title, phone, email) — never defer to "on request".
+7. Return ONLY JSON: {"content":"...","kbRefs":["E1"],"designerNote":null}"""
 
 SURGICAL_FIX_SYSTEM = """You are zö agency's Surgical Fix agent (pre-submit review auto-fix).
 Patch ONE section to clear listed review issues — minimal diff, preserve strong prose.
@@ -105,7 +123,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         label="Section Repair",
         temperature=0.3,
         max_tokens=4096,
-        max_tool_rounds=4,
+        max_tool_rounds=2,
         system_prompt=SECTION_REPAIR_SYSTEM,
     ),
     AgentRole.USER_REVISE: AgentProfile(
@@ -139,6 +157,60 @@ def get_profile(role: AgentRole) -> AgentProfile:
     return AGENT_PROFILES[role]
 
 
+_CONTENT_KEY_RE = re.compile(
+    r'"(?:content|sectionContent|section_content)"\s*:\s*"',
+    re.IGNORECASE,
+)
+
+
+def _unescape_json_fragment(raw: str) -> str:
+    try:
+        return json.loads(f'"{raw}"')
+    except json.JSONDecodeError:
+        return (
+            raw.replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace('\\"', '"')
+            .replace("\\\\", "\\")
+        )
+
+
+def _salvage_content_string(text: str) -> str:
+    """Pull section prose from agent output when JSON parsing leaves content empty."""
+    match = _CONTENT_KEY_RE.search(text)
+    if not match:
+        return ""
+    chunk = text[match.end() :]
+    buf: list[str] = []
+    i = 0
+    while i < len(chunk):
+        ch = chunk[i]
+        if ch == "\\" and i + 1 < len(chunk):
+            buf.append(chunk[i : i + 2])
+            i += 2
+            continue
+        if ch == '"':
+            return _unescape_json_fragment("".join(buf)).strip()
+        buf.append(ch)
+        i += 1
+    return _unescape_json_fragment("".join(buf)).strip()
+
+
+def content_from_agent_payload(parsed: dict[str, Any], raw_text: str = "") -> str:
+    """Normalize agent JSON to section prose."""
+    for key in ("content", "sectionContent", "section_content", "text", "prose"):
+        val = parsed.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    salvaged = _salvage_content_string(raw_text)
+    if salvaged:
+        return salvaged
+    stripped = raw_text.strip()
+    if stripped and not stripped.startswith("{"):
+        return stripped
+    return ""
+
+
 async def _parse_json_from_agent_text(text: str) -> dict[str, Any]:
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -149,6 +221,9 @@ async def _parse_json_from_agent_text(text: str) -> dict[str, Any]:
     try:
         parsed = json.loads(stripped)
         if isinstance(parsed, dict):
+            content = content_from_agent_payload(parsed, stripped)
+            if content and not str(parsed.get("content") or "").strip():
+                parsed = {**parsed, "content": content}
             return parsed
     except json.JSONDecodeError:
         pass
@@ -160,7 +235,15 @@ async def _parse_json_from_agent_text(text: str) -> dict[str, Any]:
         max_tokens=4096,
         temperature=0.0,
     )
-    return structured if isinstance(structured, dict) else {}
+    if isinstance(structured, dict):
+        content = content_from_agent_payload(structured, text)
+        if content and not str(structured.get("content") or "").strip():
+            structured = {**structured, "content": content}
+        return structured
+    salvaged = _salvage_content_string(text)
+    if salvaged:
+        return {"content": salvaged, "kbRefs": []}
+    return {}
 
 
 async def run_json_agent(
@@ -225,6 +308,14 @@ async def run_tool_json_agent(
         rfp_id=rfp_id,
     )
     parsed = await _parse_json_from_agent_text(final_text)
+    if not str(parsed.get("content") or "").strip():
+        logger.warning(
+            "%s agent empty content for %s after %d tool call(s) (final_chars=%d)",
+            profile.label,
+            rfp_id,
+            len(tool_log),
+            len(final_text),
+        )
     return parsed, provider, tool_log
 
 

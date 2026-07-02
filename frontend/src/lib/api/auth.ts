@@ -18,18 +18,33 @@ export async function signupUser(email: string, password: string, redirectUrl?: 
 }
 
 export async function loginUser(email: string, password: string) {
-  const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ email, password }),
-  });
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email, password }),
+      signal: AbortSignal.timeout(30_000),
+    });
 
-  if (!res.ok) {
-    const errorData = await res.json().catch(() => null);
-    throw new Error(errorData?.detail || 'Login failed');
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => null);
+      throw new Error(errorData?.detail || 'Login failed');
+    }
+
+    return res.json();
+  } catch (err: unknown) {
+    throw new Error(loginFetchError(err));
   }
+}
 
-  return res.json();
+function loginFetchError(err: unknown): string {
+  if (err instanceof DOMException && err.name === 'TimeoutError') {
+    return 'Login timed out — the server may be busy running a proposal. Try again in a moment.';
+  }
+  if (err instanceof Error && err.name === 'TimeoutError') {
+    return 'Login timed out — the server may be busy running a proposal. Try again in a moment.';
+  }
+  return err instanceof Error ? err.message : 'Login failed';
 }

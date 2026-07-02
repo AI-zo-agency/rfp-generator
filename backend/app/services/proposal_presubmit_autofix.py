@@ -36,7 +36,8 @@ from app.services.proposal_presubmit_review import (
     run_presubmit_review,
     scan_section_issues,
 )
-from app.services.proposal_repository import save_proposal_draft
+from app.services.proposal_repository import asave_proposal_draft
+from app.services.proposal_evidence_corpus import merge_hits_into_corpus
 from app.services.proposal_retrieval_graph import (
     EXCERPT_MAX_CHARS,
     SEARCH_LIMIT,
@@ -56,10 +57,17 @@ STATIC_SECTION_IDS = (
 
 MAX_ITERATIONS_DETERMINISTIC = 1
 MAX_ITERATIONS_LLM = 1
-_AUTO_FIX_CATEGORIES = frozenset({"copy_paste", "voice", "placeholder"})
+_AUTO_FIX_CATEGORIES = frozenset({
+    "copy_paste",
+    "voice",
+    "placeholder",
+    "grammar",
+    "consistency",
+    "compliance",
+})
 
 _SEV_RANK = {"critical": 0, "warning": 1, "info": 2}
-_CAT_RANK = {"placeholder": 0, "copy_paste": 1, "voice": 2, "compliance": 3}
+_CAT_RANK = {"placeholder": 0, "copy_paste": 1, "grammar": 2, "voice": 3, "consistency": 4, "compliance": 5}
 
 SURGICAL_FIX_PROMPT = """You repair ONE proposal section to resolve ALL listed pre-submit review issues.
 
@@ -71,11 +79,13 @@ MANDATORY:
 5. Keep a short [VERIFY: ...] ONLY for requirements still missing from evidence after search.
 6. Wrong-client names → use the target client name or remove the stray reference.
 7. Voice issues → never "The Vendor", "The Offeror", or third-person agency distance in narrative prose.
-8. Do NOT invent clients, metrics, certifications, team members, or dates not supported by evidence.
-9. Evidence may mention OTHER cities/clients from zö's portfolio — NEVER paste those names into this proposal. Generalize ("a prior municipal client") or omit.
-10. Do NOT add new [VERIFY] tags. Do NOT add new paragraphs unless required to replace a tag.
-11. Keep strong existing prose — change only what is needed to clear the listed issues.
-12. Edit ONLY text related to the listed issues — leave every other sentence unchanged.
+8. Grammar: fix "We were …, and is …" → "and are"; never "of we" or "across we" — use our firm / zö agency / our studio.
+9. Subcontractors: if cost proposal lists translation partners, do NOT claim "no subcontractors" — zö self-performs marketing/communications; partners are scoped separately.
+10. Do NOT invent clients, metrics, certifications, team members, or dates not supported by evidence.
+11. Evidence may mention OTHER cities/clients from zö's portfolio — NEVER paste those names into this proposal. Generalize ("a prior municipal client") or omit.
+12. Do NOT add new [VERIFY] tags. Do NOT add new paragraphs unless required to replace a tag.
+13. Keep strong existing prose — change only what is needed to clear the listed issues.
+14. Edit ONLY text related to the listed issues — leave every other sentence unchanged.
 
 Return ONLY JSON: {"content": "full updated section text", "kbRefs": ["E1"]}"""
 
@@ -207,7 +217,7 @@ def _should_run_llm(
     if register == "procurement" and cats <= {"placeholder"}:
         return False
 
-    return "placeholder" in cats
+    return bool(cats & {"placeholder", "grammar", "consistency", "compliance"})
 
 
 def _needs_kb_warm(section_ids: list[str], grouped: dict[str, list[PreSubmitIssue]], draft: ProposalDraft) -> bool:
@@ -317,48 +327,20 @@ async def _search_hits(query: str) -> list[dict[str, Any]]:
             return []
 
 
-def _next_evidence_id(corpus: list[EvidenceItem]) -> int:
-    max_id = 0
-    for item in corpus:
-        match = re.match(r"E(\d+)$", item.id)
-        if match:
-            max_id = max(max_id, int(match.group(1)))
-    return max_id + 1
-
-
 def _merge_hits_into_corpus(
     corpus: list[EvidenceItem],
     hits: list[dict[str, Any]],
     section_id: str,
 ) -> list[EvidenceItem]:
-    by_key = {item.chunk_key: item for item in corpus if item.chunk_key}
-    counter = _next_evidence_id(corpus)
-    updated = list(corpus)
-
-    for hit in hits:
-        key = _hit_key(hit)
-        if key in by_key:
-            existing = by_key[key]
-            if section_id not in existing.section_ids:
-                new_ids = [*existing.section_ids, section_id]
-                by_key[key] = existing.model_copy(update={"section_ids": new_ids})
-                updated = [
-                    by_key[key] if item.id == existing.id else item for item in updated
-                ]
-            continue
-        eid = f"E{counter}"
-        counter += 1
-        item = EvidenceItem(
-            id=eid,
-            source=_hit_label(hit),
-            excerpt=_hit_excerpt(hit, max_chars=EXCERPT_MAX_CHARS),
-            sectionIds=[section_id],
-            chunkKey=key,
-        )
-        by_key[key] = item
-        updated.append(item)
-
-    return updated
+    return merge_hits_into_corpus(
+        corpus,
+        hits,
+        section_id,
+        hit_key=_hit_key,
+        hit_label=_hit_label,
+        hit_excerpt=_hit_excerpt,
+        excerpt_max_chars=EXCERPT_MAX_CHARS,
+    )
 
 
 def _evidence_for_section(section_id: str, corpus: list[EvidenceItem]) -> list[EvidenceItem]:
@@ -609,6 +591,35 @@ async def run_presubmit_autofix_loop(
 
     sections_targeted = 0
 
+    from app.services.proposal_submission_polish import run_submission_polish_pass
+    from app.services.proposal_rfp_compliance import run_rfp_compliance_polish_pass
+
+    try:
+        working, polish_logs = await run_submission_polish_pass(
+            rfp.id,
+            rfp=rfp,
+            draft=working,
+            research=working_research,
+        )
+        if polish_logs:
+            await asave_proposal_draft(working)
+            sections_targeted += len(polish_logs)
+    except Exception as exc:
+        logger.warning("Pre-submit submission polish skipped: %s", exc)
+
+    try:
+        working, compliance_logs = await run_rfp_compliance_polish_pass(
+            rfp.id,
+            rfp=rfp,
+            draft=working,
+            research=working_research,
+        )
+        if compliance_logs:
+            await asave_proposal_draft(working)
+            sections_targeted += len(compliance_logs)
+    except Exception as exc:
+        logger.warning("Pre-submit RFP compliance polish skipped: %s", exc)
+
     initial_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
 
     if initial_review.ready_to_submit:
@@ -618,7 +629,7 @@ async def run_presubmit_autofix_loop(
     for iteration in range(1, max_iterations + 1):
         if await _cancelled(should_cancel):
             stopped_reason = "cancelled"
-            save_proposal_draft(working)
+            await asave_proposal_draft(working)
             review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
             return working, review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
 
@@ -675,7 +686,7 @@ async def run_presubmit_autofix_loop(
         for section_index, section_id in enumerate(section_ids, start=1):
             if await _cancelled(should_cancel):
                 stopped_reason = "cancelled"
-                save_proposal_draft(working)
+                await asave_proposal_draft(working)
                 review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
                 return working, review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted
 
@@ -771,7 +782,7 @@ async def run_presubmit_autofix_loop(
                 )
             )
 
-        save_proposal_draft(working)
+        await asave_proposal_draft(working)
 
         review_after = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
         prev_fingerprint = fingerprint
@@ -791,4 +802,40 @@ async def run_presubmit_autofix_loop(
         issues_at_start = len(review_after.issues)
 
     final_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
+
+    from app.services.proposal_submission_gap_finalizer import (
+        attach_manual_fill_flags_to_review,
+        run_submission_gap_finalize_pass,
+    )
+
+    try:
+        working, finalize_logs, working_research = await run_submission_gap_finalize_pass(
+            rfp.id,
+            rfp=rfp,
+            draft=working,
+            research=working_research,
+        )
+        if finalize_logs:
+            await asave_proposal_draft(working)
+            sections_targeted += len(finalize_logs)
+        final_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
+        final_review = attach_manual_fill_flags_to_review(
+            final_review,
+            draft=working,
+            research=working_research,
+            rfp=rfp,
+            kb_searched=True,
+            finalized=True,
+        )
+    except Exception as exc:
+        logger.warning("Final gap finalize pass skipped: %s", exc)
+        final_review = attach_manual_fill_flags_to_review(
+            final_review,
+            draft=working,
+            research=working_research,
+            rfp=rfp,
+            kb_searched=False,
+            finalized=False,
+        )
+
     return working, final_review, fix_logs, stopped_reason, iterations_run, working_research, sections_targeted

@@ -88,6 +88,33 @@ Category 05 — Digital Marketing
 
 Category 06 — Media Planning & Placement
 - 6.1 Traditional Media: 85/15 commission (85% placements, 15% zö). Client invoiced at net.
+  For commission-model RFPs: tag media placement rows lineItemType=client_passthrough;
+  tag agency commission / PM / strategy rows lineItemType=agency_fee.
+  agencyRevenueEstimate = ONLY agency_fee rows + directExpensesTotal — NEVER include pass-through media.
+
+PHASE 3b — Commission / pass-through model (when RFP uses media commission or net invoicing):
+- clientMediaPassthrough = sum of lineItems where lineItemType=client_passthrough
+- agencyFeeSubtotal = sum of lineItems where lineItemType=agency_fee
+- agencyRevenueEstimate = agencyFeeSubtotal + directExpensesTotal (zö's actual income)
+- totalClientInvoicing = lineItemSum + directExpensesTotal (what client pays in total)
+- Budget Summary MUST label these separately — never call pass-through media "agency revenue"
+- optionTermNotes multi-year math uses agencyRevenueEstimate base only, not totalClientInvoicing
+- Example (85/15): $250,000 annual media at 15% → clientMediaPassthrough=250000, commissionRate=0.15,
+  agencyFeeSubtotal=37500, agencyRevenueEstimate=37500 (NOT zero, NOT equal to pass-through total)
+- Populate commissionRate AND clientMediaPassthrough whenever commission applies — reconcile math depends on them
+
+ZERO-DOLLAR PROHIBITION (submission disqualifier):
+- NEVER return agencyRevenueEstimate = 0 or null when commission or agency fees apply.
+- NEVER show "$0" for "Agency revenue estimate" or "Line item table total" when the RFP is commission-based —
+  the commission dollar amount IS the agency revenue (rate × pass-through or sum of agency_fee rows).
+- lineItemSum may be large (mostly pass-through media); agencyRevenueEstimate is still the fee income only.
+- lumpSumTotal and optionTermNotes MUST cite the same positive annual agency fee as agencyRevenueEstimate.
+- If estimated annual media spend is in RFP/Stage 1, use it for clientMediaPassthrough and compute commission.
+
+STAFF HOURS (when RFP Section D requires hours and billing rates):
+- Add a "## Staff Hours" table: Role | Task/Scope line | Hours/year | Loaded rate | Extended
+- Use verifiedRates from KB when available; otherwise [PRICING FLAG: Sonja to approve burdened rates]
+- Commission-model RFPs STILL need this transparency table — commission is total compensation but evaluators require hours
 
 Category 07 — Implementation & Launch
 - 7.1 Pilot Social Media Campaign (Avg: $6,000–$9,000)
@@ -130,12 +157,16 @@ qualifyingLanguage MUST use the SAME pricingTier selected in PHASE 2 — never m
 
 MATH (mandatory — verify before returning):
 1. For EACH lineItem: extended MUST equal rate × quantity (recalculate if needed).
-2. Sum every lineItems.extended row explicitly — that subtotal is ground truth.
-3. agencyRevenueEstimate MUST equal line-item subtotal plus directExpensesTotal (if any).
-4. lumpSumTotal MUST equal agencyRevenueEstimate when RFP requires lump sum + hourly (table is the cost build).
-5. optionTermNotes MUST use agencyRevenueEstimate as the base-year figure for all multi-year math.
-6. Do NOT leave pricingFlags describing math discrepancies — fix the numbers instead.
-7. pricingFlags are ONLY for items requiring Sonja/human review (out-of-guide scope, missing KB, incomplete stages).
+2. Sum every lineItems.extended row explicitly — that subtotal is lineItemSum (ground truth).
+3. Tag each lineItem with lineItemType: agency_fee | client_passthrough | direct_expense.
+4. agencyRevenueEstimate = agency fee income ONLY (agency_fee rows + directExpensesTotal).
+   For commission models: NEVER include client_passthrough rows in agencyRevenueEstimate.
+5. totalClientInvoicing = lineItemSum + directExpensesTotal when pass-through media is present.
+6. lumpSumTotal MUST equal agencyRevenueEstimate when RFP requires lump sum + hourly.
+7. optionTermNotes MUST use agencyRevenueEstimate as the base-year agency fee figure.
+8. Do NOT leave pricingFlags describing math discrepancies — fix the numbers instead.
+9. pricingFlags are ONLY for items requiring Sonja/human review (out-of-guide scope, missing KB).
+10. Final check: agencyRevenueEstimate > 0 whenever commissionRate or agency_fee line items exist — reject your own output if zero.
 
 Return ONLY JSON:
 {
@@ -145,10 +176,15 @@ Return ONLY JSON:
   "pricingTier": "Low|Average|High",
   "budgetFormat": "phased|personnel_loading|service_menu",
   "commissionModel": "string|null",
+  "commissionRate": number|null,
   "lumpSumTotal": number|null,
   "directExpensesTotal": number|null,
+  "lineItemSum": number|null,
+  "agencyFeeSubtotal": number|null,
+  "clientMediaPassthrough": number|null,
+  "totalClientInvoicing": number|null,
   "verifiedRates": [{"personName","role","hourlyRate","source"}],
-  "lineItems": [{"id","category","description","namedPerson","roleTitle","unit","quantity","rate","extended","rateSource","notes"}],
+  "lineItems": [{"id","category","description","lineItemType","namedPerson","roleTitle","unit","quantity","rate","extended","rateSource","notes"}],
   "tiers": [],
   "recommendedTierId": null,
   "agencyRevenueEstimate": number|null,
@@ -370,7 +406,8 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         compact_user = (
             user_content
             + "\n\nIMPORTANT: Return COMPACT JSON only. Maximum 20 lineItems. "
-            "Keep rfpBudgetNotes under 500 characters. No markdown or commentary."
+            "Keep rfpBudgetNotes under 500 characters. No markdown or commentary. "
+            "agencyRevenueEstimate MUST be > 0 for commission RFPs (rate × pass-through). Never return $0 agency revenue."
         )
         raw, provider = await llm.chat_json(
             [
@@ -425,6 +462,11 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             if isinstance(raw.get("agencyRevenueEstimate"), (int, float))
             else None
         ),
+        lineItemSum=extras.get("line_item_sum"),
+        agencyFeeSubtotal=extras.get("agency_fee_subtotal"),
+        clientMediaPassthrough=extras.get("client_media_passthrough"),
+        totalClientInvoicing=extras.get("total_client_invoicing"),
+        commissionRate=extras.get("commission_rate"),
         lumpSumTotal=extras.get("lump_sum_total"),
         directExpensesTotal=extras.get("direct_expenses_total"),
         commissionModel=raw.get("commissionModel"),
@@ -450,6 +492,19 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         rfp_sections=prior_research.rfp_sections if prior_research else [],
         rfp_context=rfp_context,
     )
+
+    revenue = float(budget.agency_revenue_estimate or 0)
+    if revenue <= 0 and (
+        budget.commission_rate
+        or budget.client_media_passthrough
+        or budget.commission_model
+    ):
+        flags = list(budget.pricing_flags)
+        flags.append(
+            "[PRICING FLAG: agencyRevenueEstimate is $0 but commission model applies — "
+            "set commissionRate × clientMediaPassthrough or agency_fee line items before submission]"
+        )
+        budget = budget.model_copy(update={"pricing_flags": flags})
 
     stage_one_text, _ = _stage_one_text(rfp)
     fee_memo = await generate_fee_justification_memo(

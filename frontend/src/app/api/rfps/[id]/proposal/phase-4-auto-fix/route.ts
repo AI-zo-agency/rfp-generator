@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
+import { longRunningFetch } from "@/lib/long-running-fetch";
+import { PROPOSAL_STAGE_TIMEOUT_MS } from "@/lib/proposal-stage-timeout";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
-const AUTO_FIX_TIMEOUT_MS = 20 * 60 * 1000;
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  process.env.BACKEND_URL ||
+  "http://localhost:8001";
 
+export const runtime = "nodejs";
 export const maxDuration = 900;
 
 export async function POST(
@@ -22,17 +27,21 @@ export async function POST(
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), AUTO_FIX_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), PROPOSAL_STAGE_TIMEOUT_MS);
     const onClientAbort = () => controller.abort();
     request.signal.addEventListener("abort", onClientAbort);
 
-    const res = await fetch(
+    const res = await longRunningFetch(
       `${BACKEND_URL}/api/v1/rfps/${id}/proposal/phase-4-auto-fix`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
         body: JSON.stringify({ useLlm: body.useLlm ?? true }),
         signal: controller.signal,
+        timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS,
       }
     );
     clearTimeout(timeout);

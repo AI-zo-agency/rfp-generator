@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 _FEE_CONTENT_RE = re.compile(
     r"\b("
     r"pricing\s+tier|low\s+tier|average\s+tier|high\s+tier|"
-    r"agency\s+revenue|lump\s*sum|investment\s+reflects|fee\s+structure|"
+    r"agency\s+revenue|commission|pass[\s-]*through|lump\s*sum|"
+    r"investment\s+reflects|fee\s+structure|option\s+year|"
     r"\$[\d,]+"
     r")\b",
     re.I,
@@ -26,14 +27,18 @@ _FEE_CONTENT_RE = re.compile(
 FEE_SYNC_PROMPT = """You align proposal narrative sections with the CANONICAL budget (single source of truth).
 
 Rules:
-1. Remove or rewrite any pricing tier, dollar total, or fee structure that contradicts the canonical budget.
-2. Do NOT invent new dollar amounts — use only values from the canonical budget block.
-3. verifiedAgencyRevenue and agencyRevenueEstimate are the SAME number — use it everywhere (Budget Summary, Option Terms, fee narrative).
-4. If option-year math appears (e.g. "3 × $X"), X MUST equal verifiedAgencyRevenue / base-year amount — recalculate multiples from the canonical base.
-5. qualifyingLanguage-style blocks must use the SAME pricingTier as the budget — never cite a different tier.
-6. Preserve all non-pricing content (statutory citations, team, approach, compliance).
-7. Never add [VERIFY] tags — leave factual gaps unchanged if not in the budget.
-8. Never add pricing reconciliation flags or "verify before submission" notes — math is already verified.
+1. Use ONLY dollar values from the canonical budget block — do not invent amounts.
+2. agencyRevenueEstimate / agencyFeeSubtotal = zö's actual fee income ONLY — never pass-through client media.
+3. clientMediaPassthrough and totalClientInvoicing are separate — use when narrative discusses media spend vs agency commission.
+4. Opening paragraphs, Option Terms, Investment Framing, and Section 1 commission statements must cite agencyRevenueEstimate (fee), NOT totalClientInvoicing.
+5. Multi-year math (e.g. "3 × $X") must use agencyRevenueEstimate as the annual agency fee base — never multiply pass-through media into "agency revenue."
+6. qualifyingLanguage must use the SAME pricingTier as the budget.
+7. Preserve all non-pricing content (statutory citations, team, approach, compliance, MWBE, living wage).
+8. Never add [VERIFY] tags or "verify before submission" reconciliation notes.
+9. Change only pricing-related sentences — preserve strong existing prose elsewhere.
+10. NEVER write $0 for agency revenue, annual commission, or "zö fee income" when canonical agencyRevenueEstimate is a positive number — replace every $0 fee line with the canonical amount.
+11. NEVER contradict canonical budget: if narrative says $37,500/year commission, Budget Summary and Investment Framing must all match agencyRevenueEstimate exactly.
+12. Do not defer reference contacts, workforce %, PSA acknowledgments, or hours tables — those are separate compliance rules; only fix fee/pricing sentences here.
 
 Return ONLY JSON:
 {"sections":[{"sectionId":"...","content":"full updated section prose"}]}"""
@@ -44,21 +49,40 @@ def _canonical_budget_facts(budget: ProposalBudget) -> str:
 
     line_subtotal = sum_line_items_extended(budget)
     direct = float(budget.direct_expenses_total or 0)
-    verified_total = line_subtotal + direct
+    agency_fee = float(budget.agency_fee_subtotal or line_subtotal)
+    passthrough = float(budget.client_media_passthrough or 0)
     lines = [
         f"pricingTier: {budget.pricing_tier or 'Average'}",
-        f"lineItemsSubtotal: {line_subtotal}",
+        f"lineItemSum (all table rows): {budget.line_item_sum or line_subtotal}",
+        f"agencyFeeSubtotal (zö fee rows only): {budget.agency_fee_subtotal or agency_fee}",
+        f"clientMediaPassthrough (NOT agency revenue): {passthrough or 0}",
         f"directExpensesTotal: {direct}",
-        f"verifiedAgencyRevenue (line items + direct): {verified_total}",
-        f"agencyRevenueEstimate (USE THIS EXACT VALUE): {budget.agency_revenue_estimate}",
-        f"lumpSumTotal (USE THIS EXACT VALUE): {budget.lump_sum_total}",
+        (
+            "agencyRevenueEstimate (USE FOR 'agency revenue' / commission / fee income): "
+            f"{budget.agency_revenue_estimate}"
+        ),
+        (
+            "totalClientInvoicing (media pass-through + agency fees — NOT agency revenue): "
+            f"{budget.total_client_invoicing or (line_subtotal + direct)}"
+        ),
+        f"commissionRate: {budget.commission_rate}",
+        f"lumpSumTotal: {budget.lump_sum_total}",
         f"feeStructure: {budget.fee_structure}",
         f"budgetFormat: {budget.budget_format}",
+        f"commissionModel: {budget.commission_model or '(none)'}",
     ]
     if budget.option_term_notes.strip():
-        lines.append(f"optionTermNotes: {budget.option_term_notes[:800]}")
+        lines.append(f"optionTermNotes (canonical):\n{budget.option_term_notes[:1200]}")
     if budget.qualifying_language.strip():
-        lines.append(f"qualifyingLanguage (use this tier language only):\n{budget.qualifying_language[:2000]}")
+        lines.append(f"qualifyingLanguage:\n{budget.qualifying_language[:2000]}")
+    if budget.media_spend_notes.strip():
+        lines.append(f"mediaSpendNotes:\n{budget.media_spend_notes[:800]}")
+    revenue = float(budget.agency_revenue_estimate or 0)
+    if revenue <= 0:
+        lines.append(
+            "CRITICAL: agencyRevenueEstimate is ZERO — do NOT write $0 in narrative; "
+            "run budget reconcile or set commissionRate × clientMediaPassthrough first."
+        )
     return "\n".join(lines)
 
 
@@ -76,7 +100,7 @@ async def align_fee_narrative_with_budget(
     draft: ProposalDraft,
     budget: ProposalBudget,
 ) -> ProposalDraft:
-    """Rewrite non-budget sections that mention fees/tiers so they match the budget."""
+    """Rewrite ALL non-budget sections that mention fees/tiers/dollars to match canonical budget."""
     sections = list(draft.sections)
     budget_idx = find_budget_section_index(sections)
     targets: list[tuple[int, ProposalSection]] = []
@@ -93,51 +117,65 @@ async def align_fee_narrative_with_budget(
         return draft
     content = _assess_rfp_content(rfp)
     rfp_context = _build_rfp_context(rfp, content)
-    payload = [
-        {
-            "sectionId": section.id,
-            "title": section.title,
-            "content": section.content[:6000],
-        }
-        for _, section in targets[:6]
-    ]
+    canonical = _canonical_budget_facts(budget)
 
-    try:
-        raw, _provider = await llm.chat_json(
-            [
-                {"role": "system", "content": FEE_SYNC_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"RFP: {rfp.title}\nClient: {rfp.client}\n\n"
-                        f"=== CANONICAL BUDGET (only source for tiers and totals) ===\n"
-                        f"{_canonical_budget_facts(budget)}\n\n"
-                        f"=== SECTIONS TO ALIGN ===\n"
-                        f"{payload}\n\n"
-                        f"RFP fee excerpt:\n{rfp_context[:4000]}"
-                    ),
-                },
-            ],
-            max_tokens=6144,
-            temperature=0.2,
-        )
-    except LlmError as exc:
-        logger.warning("Fee narrative sync skipped for %s: %s", rfp_id, exc)
-        return draft
-
-    updates = raw.get("sections") or []
-    if not isinstance(updates, list):
-        return draft
-
-    by_id = {str(item.get("sectionId") or item.get("id") or ""): item for item in updates if isinstance(item, dict)}
-
-    for index, section in targets:
-        item = by_id.get(section.id)
-        if not item:
+    updated_sections = list(sections)
+    batch_size = 6
+    for batch_start in range(0, len(targets), batch_size):
+        batch = targets[batch_start : batch_start + batch_size]
+        payload = [
+            {
+                "sectionId": section.id,
+                "title": section.title,
+                "content": section.content[:6000],
+            }
+            for _, section in batch
+        ]
+        try:
+            raw, _provider = await llm.chat_json(
+                [
+                    {"role": "system", "content": FEE_SYNC_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"RFP: {rfp.title}\nClient: {rfp.client}\n\n"
+                            f"=== CANONICAL BUDGET (only source for tiers and totals) ===\n"
+                            f"{canonical}\n\n"
+                            f"=== SECTIONS TO ALIGN ({len(payload)} sections) ===\n"
+                            f"{payload}\n\n"
+                            f"RFP fee excerpt:\n{rfp_context[:4000]}"
+                        ),
+                    },
+                ],
+                max_tokens=8192,
+                temperature=0.2,
+            )
+        except LlmError as exc:
+            logger.warning(
+                "Fee narrative sync batch %d skipped for %s: %s",
+                batch_start // batch_size + 1,
+                rfp_id,
+                exc,
+            )
             continue
-        content = str(item.get("content") or "").strip()
-        if content:
-            sections[index] = section.model_copy(update={"content": content})
-            logger.info("Fee sync updated section %s (%s)", section.id, section.title)
 
-    return draft.model_copy(update={"sections": sections})
+        updates = raw.get("sections") or []
+        if not isinstance(updates, list):
+            continue
+
+        by_id = {
+            str(item.get("sectionId") or item.get("id") or ""): item
+            for item in updates
+            if isinstance(item, dict)
+        }
+
+        for index, section in batch:
+            item = by_id.get(section.id)
+            if not item:
+                continue
+            new_content = str(item.get("content") or "").strip()
+            if new_content:
+                updated_sections[index] = section.model_copy(update={"content": new_content})
+                logger.info("Fee sync updated section %s (%s)", section.id, section.title)
+
+    return draft.model_copy(update={"sections": updated_sections})

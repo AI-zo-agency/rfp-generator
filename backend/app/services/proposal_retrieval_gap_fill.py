@@ -8,6 +8,7 @@ import re
 
 from app.models.proposal import EvidenceItem, RfpSectionMap
 from app.services import supermemory
+from app.services.proposal_evidence_corpus import merge_hits_into_corpus
 from app.services.proposal_retrieval_graph import (
     EXCERPT_MAX_CHARS,
     MAX_CONCURRENT_SUPERMEMORY_SEARCHES,
@@ -49,6 +50,34 @@ _GAP_TOPICS: list[tuple[re.Pattern[str], list[str]]] = [
         ],
     ),
     (
+        re.compile(
+            r"\b(divers\w*|minorit\w*|female|eeo|workforce\s+data|headcount)\b",
+            re.I,
+        ),
+        [
+            "zö agency workforce diversity EEO employee count minority female percentage",
+            "zö agency HR employee demographics total employees",
+        ],
+    ),
+    (
+        re.compile(r"\b(staff\s+hours|hours\s+per\s+task|billing\s+rates)\b", re.I),
+        [
+            "zö agency project staffing hours estimate by task role deliverable",
+            "00_Guide_Pricing personnel hours by scope task",
+        ],
+    ),
+    (
+        re.compile(
+            r"\b(macbride|living\s+wage|workers['\u2019\s]*compensation|title\s*vi|"
+            r"independent\s+contractor|audit\s+rights?)\b",
+            re.I,
+        ),
+        [
+            "zö agency insurance workers compensation general liability NY admitted",
+            "zö agency compliance certifications contract acknowledgments",
+        ],
+    ),
+    (
         re.compile(r"\b(office\s+location|headquarters|regional|on[\s-]*site)\b", re.I),
         [
             "zö agency office location headquarters Bend Oregon regional presence",
@@ -60,6 +89,37 @@ _GAP_TOPICS: list[tuple[re.Pattern[str], list[str]]] = [
         [
             "00_Guide_Pricing tier Low Average High personnel loading lump sum",
             "zö agency 07_FIN burdened hourly rates fee schedule",
+        ],
+    ),
+    (
+        re.compile(
+            r"\b(?:ACORD|certificate of insurance|COI|professional liability|umbrella|cyber)\b",
+            re.I,
+        ),
+        [
+            "zö agency insurance policy ACORD certificate limits general liability E&O umbrella",
+            "zö agency Next Insurance workers compensation certificate",
+        ],
+    ),
+    (
+        re.compile(
+            r"\b(?:questionnaire|vendor information|FEIN|EIN|DUNS|CAGE|tax\s+id)\b",
+            re.I,
+        ),
+        [
+            "zö agency FEIN EIN tax ID business phone email vendor questionnaire",
+            "zö agency 02 master template business entity disclosure",
+        ],
+    ),
+    (
+        re.compile(
+            r"\bnew\s+jersey\b.*(?:reference|college|public)|"
+            r"\bNJ\b.{0,40}(?:reference|college|community college)",
+            re.I,
+        ),
+        [
+            "zö agency client references government college university contact phone email",
+            "zö agency 06_WON 07_FIN reference letters public sector",
         ],
     ),
 ]
@@ -130,32 +190,15 @@ def _merge_hits(
     hits: list[dict],
     section_id: str,
 ) -> list[EvidenceItem]:
-    by_key: dict[str, EvidenceItem] = {item.chunk_key or item.id: item for item in corpus if item.chunk_key or item.id}
-    updated = list(corpus)
-    counter = len(corpus) + 1
-
-    for hit in hits:
-        key = _hit_key(hit)
-        if key in by_key:
-            existing = by_key[key]
-            ids = list(existing.section_ids)
-            if section_id not in ids:
-                ids.append(section_id)
-                by_key[key] = existing.model_copy(update={"section_ids": ids})
-                updated = [by_key[key] if i.id == existing.id else i for i in updated]
-            continue
-        eid = f"E{counter}"
-        counter += 1
-        item = EvidenceItem(
-            id=eid,
-            source=_hit_label(hit),
-            excerpt=_hit_excerpt(hit, max_chars=EXCERPT_MAX_CHARS),
-            sectionIds=[section_id],
-            chunkKey=key,
-        )
-        by_key[key] = item
-        updated.append(item)
-    return updated
+    return merge_hits_into_corpus(
+        corpus,
+        hits,
+        section_id,
+        hit_key=_hit_key,
+        hit_label=_hit_label,
+        hit_excerpt=_hit_excerpt,
+        excerpt_max_chars=EXCERPT_MAX_CHARS,
+    )
 
 
 async def gap_fill_evidence_for_sections(

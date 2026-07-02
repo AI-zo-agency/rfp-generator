@@ -1,14 +1,56 @@
+import asyncio
 import json
+import logging
 import sqlite3
+import time
 from datetime import datetime, timezone
+from typing import Callable, TypeVar
+
+import httpx
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache
 from app.services import supabase_db as sb
 from app.services.rfp_repository import _connect, init_db as init_rfp_db
 
+logger = logging.getLogger(__name__)
+T = TypeVar("T")
+_SUPABASE_READ_RETRIES = 6
+_SUPABASE_WRITE_RETRIES = 6
+_RETRY_BACKOFF_SEC = (0.25, 0.6, 1.2, 2.0, 3.0, 4.5)
+_TRANSIENT_EXC = (httpx.HTTPError, OSError, ConnectionError, TimeoutError)
+
 
 def _use_supabase() -> bool:
     return sb.use_supabase_db()
+
+
+def _with_supabase_retry(
+    op_name: str,
+    fn: Callable[[], T],
+    *,
+    retries: int,
+) -> T:
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return fn()
+        except _TRANSIENT_EXC as exc:
+            last_exc = exc
+            if attempt >= retries - 1:
+                raise
+            if _use_supabase():
+                sb.reset_supabase_client()
+            delay = _RETRY_BACKOFF_SEC[min(attempt, len(_RETRY_BACKOFF_SEC) - 1)]
+            logger.warning(
+                "Supabase transient failure in %s (attempt %d/%d): %s",
+                op_name,
+                attempt + 1,
+                retries,
+                exc,
+            )
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 def init_proposal_db() -> None:
@@ -34,7 +76,11 @@ def init_proposal_db() -> None:
 
 def get_research_cache(rfp_id: str) -> ProposalResearchCache | None:
     if _use_supabase():
-        return sb.get_research_cache(rfp_id)
+        return _with_supabase_retry(
+            "get_research_cache",
+            lambda: sb.get_research_cache(rfp_id),
+            retries=_SUPABASE_READ_RETRIES,
+        )
     with _connect() as conn:
         row = conn.execute(
             "SELECT payload FROM proposal_research WHERE rfp_id = ?",
@@ -47,7 +93,11 @@ def get_research_cache(rfp_id: str) -> ProposalResearchCache | None:
 
 def save_research_cache(cache: ProposalResearchCache) -> None:
     if _use_supabase():
-        sb.save_research_cache(cache)
+        _with_supabase_retry(
+            "save_research_cache",
+            lambda: sb.save_research_cache(cache),
+            retries=_SUPABASE_WRITE_RETRIES,
+        )
         return
     now = datetime.now(timezone.utc).isoformat()
     cache.updated_at = now
@@ -66,7 +116,11 @@ def save_research_cache(cache: ProposalResearchCache) -> None:
 
 def get_proposal_draft(rfp_id: str) -> ProposalDraft | None:
     if _use_supabase():
-        return sb.get_proposal_draft(rfp_id)
+        return _with_supabase_retry(
+            "get_proposal_draft",
+            lambda: sb.get_proposal_draft(rfp_id),
+            retries=_SUPABASE_READ_RETRIES,
+        )
     with _connect() as conn:
         row = conn.execute(
             "SELECT payload FROM proposal_drafts WHERE rfp_id = ?",
@@ -79,7 +133,11 @@ def get_proposal_draft(rfp_id: str) -> ProposalDraft | None:
 
 def save_proposal_draft(draft: ProposalDraft) -> None:
     if _use_supabase():
-        sb.save_proposal_draft(draft)
+        _with_supabase_retry(
+            "save_proposal_draft",
+            lambda: sb.save_proposal_draft(draft),
+            retries=_SUPABASE_WRITE_RETRIES,
+        )
         return
     now = datetime.now(timezone.utc).isoformat()
     draft.updated_at = now
@@ -94,3 +152,19 @@ def save_proposal_draft(draft: ProposalDraft) -> None:
             """,
             (draft.rfp_id, draft.model_dump_json(by_alias=True), now),
         )
+
+
+async def aget_research_cache(rfp_id: str) -> ProposalResearchCache | None:
+    return await asyncio.to_thread(get_research_cache, rfp_id)
+
+
+async def asave_research_cache(cache: ProposalResearchCache) -> None:
+    await asyncio.to_thread(save_research_cache, cache)
+
+
+async def aget_proposal_draft(rfp_id: str) -> ProposalDraft | None:
+    return await asyncio.to_thread(get_proposal_draft, rfp_id)
+
+
+async def asave_proposal_draft(draft: ProposalDraft) -> None:
+    await asyncio.to_thread(save_proposal_draft, draft)

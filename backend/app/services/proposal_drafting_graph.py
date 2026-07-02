@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -29,6 +30,10 @@ from app.services.proposal_voice_enforcement import (
 )
 from app.services import llm
 from app.services.llm import LlmError
+from app.services.proposal_draft_llm import (
+    SECTION_DRAFT_FAILURE_PLACEHOLDER,
+    chat_json_with_repair,
+)
 from app.services.proposal_langchain import _provider_name
 
 logger = logging.getLogger(__name__)
@@ -36,6 +41,9 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 1
 DEFAULT_WORD_TARGET = 800
 _LLM_SEMAPHORE = asyncio.Semaphore(1)
+
+SectionDraftedCallback = Callable[[list["ProposalSection"], str], Awaitable[None]]
+_SECTION_DRAFT_CALLBACKS: dict[str, SectionDraftedCallback] = {}
 
 DRAFT_BATCH_PROMPT = """You draft zö agency proposal section content for a government/commercial RFP response.
 
@@ -54,6 +62,19 @@ Rules (strict):
 12. Highest evaluationWeight sections need the most depth, proof, and word count — match wordTarget.
 13. Do NOT state pricing tier, dollar totals, lump sums, or fee tables in narrative sections — those belong in the Fees/Budget section only. Cross-reference instead.
 14. When RFP requires portfolio, writing samples, or reference contacts, use evidence excerpts with [E#] citations — do not leave passive VERIFY placeholders if evidence contains samples or contacts.
+15. NEVER defer required submission data to unnamed attachments or "upon request" — include reference phones, workforce %, hours tables, or PSA acknowledgments in the proposal body.
+16. References: when RFP requires contact names and phone numbers, include them inline (from KB) or [VERIFY: specific contact field].
+17. Personnel: when RFP requires workforce diversity data, state headcount and minority/female percentages (from KB) or [VERIFY].
+18. Budget: when RFP requires staff hours per task, add hours table OR commission-model explanation with transparency estimates.
+19. PSA/contract items in the RFP (insurance, living wage, MacBride, Title VI, audit rights, etc.) need brief acknowledgment sentences in the proposal.
+20. References: NEVER "contact on request", "upon request", or "through the Bureau" — include name, title, organization, phone, and email from KB or [VERIFY: specific contact fields].
+21. Workforce: MWBE/diversity and Project Personnel sections must use identical headcount and % female/minority — one precise figure from HR/KB.
+22. Do NOT write Budget Summary dollar totals ($0 or otherwise) in narrative sections before Phase 3.5 — cross-reference the Fees/Budget section. Never cite $0 agency revenue anywhere.
+23. Insurance RFPs: include a limits table (RFP requires | current policy | gap | bind-before-execution action) with ACORD fields when specified.
+24. Vendor/contractor questionnaires: complete every field — FEIN, phones, email, DUNS/CAGE or N/A — from KB; never leave TBD or blank underscores.
+25. NJ or geography-specific reference RFPs: use verified KB contacts; if no in-state client exists, disclose geography honestly — never [PLACEHOLDER] reference rows.
+26. Project management fees must stay within 5–8% of agency fees — do not leave unresolved PM ratio flags in budget prose.
+27. Address every Phase 2 uncovered requirement explicitly — compliance tables, forms, or narrative; do not assume a titled section alone satisfies the RFP.
 
 Return ONLY JSON:
 {
@@ -195,13 +216,15 @@ async def _draft_batch(
                         "custom": False,
                         "source": "rfp",
                         "mode": section.get("zoMode") or "write",
-                        "content": (
-                            f"[VERIFY: Section drafting failed — {single_exc}. "
-                            f"Re-run Phase 3 or draft manually.]"
-                        ),
+                        "content": SECTION_DRAFT_FAILURE_PLACEHOLDER,
                         "status": "outline",
                         "kbRefs": [],
                     }
+                )
+                logger.warning(
+                    "Phase 3 section %s draft failed after JSON repair: %s",
+                    sid,
+                    single_exc,
                 )
         return merged, provider
 
@@ -303,7 +326,7 @@ async def _draft_batch_once(
     user_content += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
 
     async with _LLM_SEMAPHORE:
-        raw, provider = await llm.chat_json(
+        raw, provider = await chat_json_with_repair(
             [
                 {"role": "system", "content": DRAFT_BATCH_PROMPT},
                 {"role": "user", "content": user_content},
@@ -405,6 +428,12 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
                 state.get("rfp_id"),
                 len(batch_results),
             )
+            callback = _SECTION_DRAFT_CALLBACKS.get(str(state.get("rfp_id") or ""))
+            if callback:
+                drafted_sections = [
+                    ProposalSection.model_validate(item) for item in all_drafted
+                ]
+                await callback(drafted_sections, provider)
         except LlmError as exc:
             logger.warning(
                 "Phase 3 batch %d failed for %s: %s",
@@ -424,14 +453,17 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
                         "custom": False,
                         "source": "rfp",
                         "mode": section.get("zoMode") or "write",
-                        "content": (
-                            f"[VERIFY: Section drafting failed — {exc}. "
-                            f"Re-run Phase 3 or draft manually.]"
-                        ),
+                        "content": SECTION_DRAFT_FAILURE_PLACEHOLDER,
                         "status": "outline",
                         "kbRefs": [],
                     }
                 )
+            logger.warning(
+                "Phase 3 batch %d failed for %s after repair: %s",
+                index,
+                state.get("rfp_id"),
+                exc,
+            )
 
     return {"drafted_sections": all_drafted, "provider": provider}
 
@@ -471,6 +503,7 @@ async def run_drafting_graph(
     writing_avoidances: list[str] | None = None,
     loss_lessons: list[LossLesson] | None = None,
     proof_points: list | None = None,
+    on_sections_drafted: SectionDraftedCallback | None = None,
 ) -> tuple[list[ProposalSection], str]:
     if not llm.is_configured():
         raise LlmError(
@@ -500,8 +533,15 @@ async def run_drafting_graph(
         "drafted_sections": [],
     }
 
+    if on_sections_drafted:
+        _SECTION_DRAFT_CALLBACKS[rfp_id] = on_sections_drafted
+
     logger.info("Phase 3 drafting graph starting for rfp_id=%s", rfp_id)
-    final = await _DRAFTING_GRAPH.ainvoke(initial)
+    try:
+        final = await _DRAFTING_GRAPH.ainvoke(initial)
+    finally:
+        if on_sections_drafted:
+            _SECTION_DRAFT_CALLBACKS.pop(rfp_id, None)
 
     if final.get("error"):
         raise LlmError(str(final["error"]), status_code=400)

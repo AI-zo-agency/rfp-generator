@@ -105,9 +105,47 @@ function parseBlocks(body: string): Block[] {
   return blocks;
 }
 
-function renderInline(text: string) {
-  const parts = text.split(/(\*\*[^*]+\*\*|\[VERIFY\]|\[FLAG[^\]]*\])/gi);
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildInlinePattern(highlightTexts: string[]): RegExp {
+  const tagPattern = String.raw`\*\*[^*]+\*\*|\[(?:VERIFY|FLAG|DESIGNER NOTE|TBD|INSERT|PLACEHOLDER)[^\]]*\]`;
+  const unique = [...new Set(highlightTexts.map((h) => h.trim()).filter(Boolean))].sort(
+    (a, b) => b.length - a.length
+  );
+  if (unique.length === 0) {
+    return new RegExp(`(${tagPattern})`, "gi");
+  }
+  const highlights = unique.map(escapeRegex).join("|");
+  return new RegExp(`(${highlights}|${tagPattern})`, "gi");
+}
+
+function renderInline(text: string, highlightTexts: string[] = []) {
+  let markAssigned = false;
+  const parts = text.split(buildInlinePattern(highlightTexts));
+  const normalizedHighlights = new Set(
+    highlightTexts.map((h) => h.trim()).filter(Boolean)
+  );
+
   return parts.map((part, index) => {
+    if (!part) return null;
+
+    if (normalizedHighlights.has(part.trim()) || normalizedHighlights.has(part)) {
+      const assignRef = !markAssigned;
+      markAssigned = true;
+      return (
+        <mark
+          key={index}
+          ref={assignRef ? (node) => node?.scrollIntoView({ behavior: "smooth", block: "center" }) : undefined}
+          className="proposal-flag-inline-highlight"
+          title="Flagged for submission review"
+        >
+          {part}
+        </mark>
+      );
+    }
+
     if (part.startsWith("**") && part.endsWith("**")) {
       return (
         <strong key={index} className="font-semibold text-foreground">
@@ -115,17 +153,29 @@ function renderInline(text: string) {
         </strong>
       );
     }
-    if (/^\[VERIFY\]$/i.test(part)) {
+    if (/^\[VERIFY/i.test(part)) {
       return (
         <span
           key={index}
-          className="rounded bg-zo-orange/15 px-1.5 py-0.5 text-xs font-semibold text-zo-orange"
+          className="rounded bg-red-100 px-1.5 py-0.5 text-xs font-semibold text-red-800"
+          title="Needs manual confirmation before submit"
         >
-          [VERIFY]
+          {part}
         </span>
       );
     }
-    if (/^\[FLAG/i.test(part)) {
+    if (/^\[PLACEHOLDER/i.test(part) || /^\[INSERT/i.test(part) || /^\[TBD/i.test(part)) {
+      return (
+        <span
+          key={index}
+          className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-semibold text-amber-900"
+          title="Fill in before submit"
+        >
+          {part}
+        </span>
+      );
+    }
+    if (/^\[FLAG/i.test(part) || /^\[DESIGNER NOTE/i.test(part)) {
       return (
         <span
           key={index}
@@ -142,21 +192,24 @@ function renderInline(text: string) {
 export function MarkdownReportBody({
   body,
   variant = "report",
+  highlightTexts = [],
 }: {
   body: string;
   variant?: "report" | "document";
+  highlightTexts?: string[];
 }) {
   const blocks = parseBlocks(body);
+  const highlights = highlightTexts.filter((h) => h?.trim());
 
   if (variant === "document") {
     return (
       <div>
         {blocks.map((block, index) => {
           if (block.type === "heading") {
-            if (block.level === 1) return <h1 key={index}>{renderInline(block.text)}</h1>;
-            if (block.level === 2) return <h2 key={index}>{renderInline(block.text)}</h2>;
-            if (block.level === 3) return <h3 key={index}>{renderInline(block.text)}</h3>;
-            return <h4 key={index}>{renderInline(block.text)}</h4>;
+            if (block.level === 1) return <h1 key={index}>{renderInline(block.text, highlights)}</h1>;
+            if (block.level === 2) return <h2 key={index}>{renderInline(block.text, highlights)}</h2>;
+            if (block.level === 3) return <h3 key={index}>{renderInline(block.text, highlights)}</h3>;
+            return <h4 key={index}>{renderInline(block.text, highlights)}</h4>;
           }
 
           if (block.type === "table") {
@@ -165,9 +218,9 @@ export function MarkdownReportBody({
                 <table className="w-full min-w-[520px] text-left text-[13px]">
                   <thead>
                     <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-xs uppercase tracking-wide text-zo-text-muted">
-                      {block.headers.map((header) => (
-                        <th key={header} className="px-4 py-2.5 font-bold">
-                          {renderInline(header)}
+                      {block.headers.map((header, headerIndex) => (
+                        <th key={`${index}-h-${headerIndex}`} className="px-4 py-2.5 font-bold">
+                          {renderInline(header, highlights)}
                         </th>
                       ))}
                     </tr>
@@ -177,7 +230,7 @@ export function MarkdownReportBody({
                       <tr key={rowIndex} className="border-b border-zo-border/60 align-top last:border-0">
                         {row.map((cell, cellIndex) => (
                           <td key={cellIndex} className="px-4 py-3">
-                            {renderInline(cell)}
+                            {renderInline(cell, highlights)}
                           </td>
                         ))}
                       </tr>
@@ -192,14 +245,14 @@ export function MarkdownReportBody({
             const ListTag = block.ordered ? "ol" : "ul";
             return (
               <ListTag key={index}>
-                {block.items.map((item) => (
-                  <li key={item}>{renderInline(item)}</li>
+                {block.items.map((item, itemIndex) => (
+                  <li key={`${index}-li-${itemIndex}`}>{renderInline(item, highlights)}</li>
                 ))}
               </ListTag>
             );
           }
 
-          return <p key={index}>{renderInline(block.text)}</p>;
+          return <p key={index}>{renderInline(block.text, highlights)}</p>;
         })}
       </div>
     );
@@ -215,7 +268,7 @@ export function MarkdownReportBody({
               : "text-sm font-bold text-foreground";
           return (
             <h5 key={index} className={className}>
-              {renderInline(block.text)}
+              {renderInline(block.text, highlights)}
             </h5>
           );
         }
@@ -226,9 +279,9 @@ export function MarkdownReportBody({
               <table className="w-full min-w-[520px] text-left text-sm">
                 <thead>
                   <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-xs uppercase tracking-wide text-zo-text-muted">
-                    {block.headers.map((header) => (
-                      <th key={header} className="px-3 py-2 font-bold">
-                        {renderInline(header)}
+                    {block.headers.map((header, headerIndex) => (
+                      <th key={`${index}-h-${headerIndex}`} className="px-3 py-2 font-bold">
+                        {renderInline(header, highlights)}
                       </th>
                     ))}
                   </tr>
@@ -244,7 +297,7 @@ export function MarkdownReportBody({
                           key={cellIndex}
                           className="px-3 py-2.5 text-zo-text-secondary"
                         >
-                          {renderInline(cell)}
+                          {renderInline(cell, highlights)}
                         </td>
                       ))}
                     </tr>
@@ -264,15 +317,15 @@ export function MarkdownReportBody({
                 block.ordered ? "list-decimal" : "list-disc"
               }`}
             >
-              {block.items.map((item) => (
-                <li key={item}>{renderInline(item)}</li>
+              {block.items.map((item, itemIndex) => (
+                <li key={`${index}-li-${itemIndex}`}>{renderInline(item, highlights)}</li>
               ))}
             </ListTag>
           );
         }
 
         return (
-          <p key={index}>{renderInline(block.text)}</p>
+          <p key={index}>{renderInline(block.text, highlights)}</p>
         );
       })}
     </div>

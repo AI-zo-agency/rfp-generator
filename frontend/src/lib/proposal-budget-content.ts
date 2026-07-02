@@ -56,7 +56,22 @@ export function formatBudgetAsSectionContent(budget: ProposalBudget): string {
   }
   if (budget.agencyRevenueEstimate != null) {
     lines.push(
-      `- **Agency revenue estimate:** ${formatUsd(budget.agencyRevenueEstimate)}`,
+      `- **Agency revenue estimate (zö fee income only):** ${formatUsd(budget.agencyRevenueEstimate)}`,
+    );
+  }
+  if (budget.agencyFeeSubtotal != null && budget.clientMediaPassthrough) {
+    lines.push(
+      `- **Agency fee subtotal:** ${formatUsd(budget.agencyFeeSubtotal)}`,
+    );
+  }
+  if (budget.clientMediaPassthrough != null && budget.clientMediaPassthrough > 0) {
+    lines.push(
+      `- **Client media pass-through (not agency revenue):** ${formatUsd(budget.clientMediaPassthrough)}`,
+    );
+  }
+  if (budget.totalClientInvoicing != null && budget.clientMediaPassthrough) {
+    lines.push(
+      `- **Total estimated client invoicing:** ${formatUsd(budget.totalClientInvoicing)}`,
     );
   }
   if (budget.lumpSumTotal != null) {
@@ -114,13 +129,7 @@ export function formatBudgetAsSectionContent(budget: ProposalBudget): string {
     lines.push("");
   }
 
-  if (budget.pricingFlags.length > 0) {
-    lines.push("## Pricing Flags");
-    for (const flag of budget.pricingFlags) {
-      lines.push(`- ${flag}`);
-    }
-    lines.push("");
-  }
+  // pricingFlags remain on ProposalBudget for internal review — not in submission manuscript
 
   if (budget.designBrief?.trim()) {
     lines.push(`[DESIGNER NOTE: ${budget.designBrief.trim()}]`);
