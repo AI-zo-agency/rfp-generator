@@ -69,8 +69,6 @@ const HOURS_TABLE_RE =
 const FEMALE_PCT_RE =
   /(?:female|women).{0,50}?(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%\s*(?:female|women)/gi;
 
-const USD_NARRATIVE_RE = /\$\s*([\d,]+(?:\.\d{2})?)(?:\s*\/\s*year)?/gi;
-
 const PSA_ACK_TERMS: Array<{ label: string; pattern: RegExp }> = [
   { label: "MacBride Principles", pattern: /\bmacbride\b/i },
   {
@@ -195,12 +193,6 @@ function extractFemalePercents(text: string): number[] {
   return values;
 }
 
-function parseUsdNarrative(token: string): number | null {
-  const cleaned = token.replace(/[$,\s]/g, "");
-  const n = Number.parseFloat(cleaned);
-  return Number.isNaN(n) ? null : Math.round(n * 100) / 100;
-}
-
 function isCommissionStyleBudget(budget: ProposalBudget): boolean {
   if (budget.commissionModel?.trim()) return true;
   if (budget.commissionRate != null && budget.commissionRate > 0) return true;
@@ -279,17 +271,47 @@ export function scanManualFillFlags(outline: ProposalOutline): ManualFillFlag[] 
   );
 }
 
-function scanReferenceContactFlags(outline: ProposalOutline): ManualFillFlag[] {
-  const section = sectionByTitlePatterns(
-    outline,
-    "qualification",
-    "reference",
-    "past performance",
-    "experience"
+function rfpRequiresStaffHoursTable(options?: SubmissionFlagScanOptions): boolean {
+  const blob = rfpBlob(options).toLowerCase();
+  return /\b(?:staff\s+hours|hours\s+per\s+task|itemized\s+hours|hours\s+by\s+task|billing\s+rates?\s+by\s+role|hours\s+and\s+rates|labor\s+hours)\b/.test(
+    blob
   );
-  if (!section?.content?.trim()) return [];
+}
 
-  const content = section.content;
+/** Fee section already documents compensation — no extra hours table required. */
+function feeStructureHasBillingDetail(content: string): boolean {
+  if (HOURS_RE.test(content) || HOURS_TABLE_RE.test(content)) return true;
+  if (
+    /\b(?:hourly|blended)\s+rate|\brate\s+card\b|\bfee\s+schedule\b|\bbilling\s+rates?\b/i.test(
+      content
+    )
+  ) {
+    return true;
+  }
+  if (/\|[^\n]*(?:hour|hrs|rate|role)[^\n]*\|/i.test(content)) return true;
+  // Commission-model transparency (rate split + %) satisfies many RFPs without an hours grid.
+  if (/\bcommission\b/i.test(content) && /\d+\s*%/i.test(content)) return true;
+  return false;
+}
+
+function feeSectionShowsAgencyCompensation(content: string): boolean {
+  if (feeStructureHasBillingDetail(content)) return true;
+  return (
+    /\$\s*[\d,]+(?:\.\d{2})?/.test(content) &&
+    /\b(?:agency|commission|fee|management|revenue)\b/i.test(content)
+  );
+}
+
+function manuscriptShowsZeroAgencyRevenue(content: string): boolean {
+  if (/\bAgency revenue estimate\b[^\n]*\$0\b/i.test(content)) return true;
+  if (/##\s*Budget Summary[\s\S]{0,500}\$0\b/i.test(content)) return true;
+  return false;
+}
+
+function scanReferenceContactsInSection(
+  section: { id: string; title: string },
+  content: string
+): ManualFillFlag[] {
   const placeholder = firstRegexMatch(content, PLACEHOLDER_TAG_RE);
   if (placeholder) {
     return [
@@ -301,6 +323,8 @@ function scanReferenceContactFlags(outline: ProposalOutline): ManualFillFlag[] {
       ),
     ];
   }
+
+  if (MANUAL_FILL_TAG_RE.test(content)) return [];
 
   const hasPhone = PHONE_RE.test(content);
   const hasEmail = EMAIL_RE.test(content);
@@ -330,23 +354,34 @@ function scanReferenceContactFlags(outline: ProposalOutline): ManualFillFlag[] {
   ];
 }
 
+function scanReferenceContactFlags(outline: ProposalOutline): ManualFillFlag[] {
+  const dedicated = sectionByTitlePatterns(outline, "reference");
+  if (dedicated?.content?.trim()) {
+    return scanReferenceContactsInSection(dedicated, dedicated.content);
+  }
+
+  const fallback = sectionByTitlePatterns(
+    outline,
+    "qualification",
+    "past performance",
+    "experience"
+  );
+  if (!fallback?.content?.trim()) return [];
+  return scanReferenceContactsInSection(fallback, fallback.content);
+}
+
 function scanBudgetHoursFlags(
   outline: ProposalOutline,
-  budget?: ProposalBudget | null
+  options?: SubmissionFlagScanOptions
 ): ManualFillFlag[] {
+  if (!rfpRequiresStaffHoursTable(options)) return [];
+
   const section = findBudgetSection(outline.sections);
   if (!section?.content?.trim()) return [];
 
   const content = section.content;
-  if (HOURS_RE.test(content) || HOURS_TABLE_RE.test(content)) return [];
+  if (feeStructureHasBillingDetail(content)) return [];
 
-  const commissionHint =
-    (budget != null && isCommissionStyleBudget(budget)) ||
-    /\bcommission\b/i.test(content);
-
-  if (!commissionHint) return [];
-
-  // Anchor near where the table belongs — not a random commission sentence (that prose can be fine).
   const highlight =
     lineContaining(content, /##\s*Budget Summary/i) ??
     lineContaining(content, /##\s*(?:Staff|Hours|Billing|Labor|Rate|Compensation|Fee)/i) ??
@@ -357,7 +392,7 @@ function scanBudgetHoursFlags(
     flag(
       section,
       "compliance",
-      "Budget: missing staff hours / billing rates table (RFP Section D requires itemized hours by task)",
+      "Budget: missing staff hours / billing rates table (RFP requires itemized hours by task)",
       highlight
     ),
   ];
@@ -370,60 +405,34 @@ function scanBudgetRevenueFlags(
   const section = findBudgetSection(outline.sections);
   if (!section) return [];
 
+  const sectionContent = section.content ?? "";
+
+  // Manuscript already states agency compensation — don't flag internal refinery field drift.
+  if (feeSectionShowsAgencyCompensation(sectionContent)) return [];
+
   const revenue = budget?.agencyRevenueEstimate ?? 0;
   const derived = budget ? deriveCommissionRevenue(budget) : null;
   if (revenue > 0 || (derived != null && derived > 0 && Math.abs(revenue - derived) < 1)) {
     return [];
   }
 
-  const narrativeFees: number[] = [];
-  for (const sec of outline.sections) {
-    const re = new RegExp(USD_NARRATIVE_RE.source, USD_NARRATIVE_RE.flags);
-    for (const match of sec.content?.matchAll(re) ?? []) {
-      const amount = parseUsdNarrative(match[1] ?? "");
-      if (amount != null && amount >= 1_000) narrativeFees.push(amount);
-    }
-  }
-
   const commission = budget ? isCommissionStyleBudget(budget) : false;
   const lump = budget?.lumpSumTotal ?? 0;
-  if (!narrativeFees.length && !commission && lump <= 0) return [];
+  if (!commission && lump <= 0) return [];
 
-  const sectionContent = section.content ?? "";
-
-  if (narrativeFees.length > 0) {
-    const sample = narrativeFees[0];
-    const highlight =
-      lineContaining(sectionContent, /\$0/) ??
-      lineContaining(sectionContent, /Agency revenue estimate/i) ??
-      firstRegexMatch(sectionContent, /\$[\d,]+(?:\s*\/\s*year)?/i) ??
-      firstRegexMatch(
-        outline.sections.map((s) => s.content ?? "").join("\n"),
-        /\$[\d,]+(?:\s*\/\s*year)?/i
-      );
-    return [
-      flag(
-        section,
-        "budget",
-        `Budget Summary shows $0 agency revenue but narrative cites $${sample.toLocaleString()} — reconcile canonical budget fields`,
-        highlight
-      ),
-    ];
-  }
+  // Only flag when the manuscript budget summary itself shows $0 agency revenue.
+  if (!manuscriptShowsZeroAgencyRevenue(sectionContent)) return [];
 
   const highlight =
     lineContaining(sectionContent, /##\s*Budget Summary/i) ??
     lineContaining(sectionContent, /Agency revenue estimate/i) ??
     lineContaining(sectionContent, /\$0/);
 
-  return [
-    flag(
-      section,
-      "budget",
-      "Budget Summary shows $0 agency revenue for commission model — set agencyRevenueEstimate from rate × pass-through",
-      highlight
-    ),
-  ];
+  const message = commission
+    ? "Budget Summary shows $0 agency revenue for commission model — set agencyRevenueEstimate from rate × pass-through"
+    : "Budget Summary shows $0 agency revenue — reconcile agencyRevenueEstimate with budget line items";
+
+  return [flag(section, "budget", message, highlight)];
 }
 
 function scanWorkforceConsistencyFlags(outline: ProposalOutline): ManualFillFlag[] {
@@ -667,6 +676,8 @@ function scanUncoveredRequirementFlags(
     if (!section) continue;
 
     const content = section.content ?? "";
+    if (MANUAL_FILL_TAG_RE.test(content)) continue;
+
     for (const req of uncovered.slice(0, 3)) {
       if (requirementLikelyCovered(req, content) || requirementLikelyCovered(req, manuscript)) {
         continue;
@@ -819,7 +830,7 @@ export function scanSubmissionFlags(
       ...scanInsuranceFlags(outline, options),
       ...scanQuestionnaireFlags(outline, options),
       ...scanUncoveredRequirementFlags(outline, options),
-      ...scanBudgetHoursFlags(outline, options?.budget),
+      ...scanBudgetHoursFlags(outline, options),
       ...scanBudgetRevenueFlags(outline, options?.budget),
       ...scanPricingFlagManuscript(outline, options?.budget),
       ...scanPmRatioFlags(outline, options?.budget),
