@@ -34,7 +34,13 @@ from app.services.proposal_generator import (
     run_phase4_finalize_gaps,
 )
 from app.services.proposal_section_editor import improve_proposal_section
-from app.services.proposal_repository import get_proposal_draft, get_research_cache, save_proposal_draft
+from app.services.proposal_repository import (
+    get_proposal_draft,
+    get_research_cache,
+    save_proposal_draft,
+    delete_proposal_draft,
+    delete_research_cache,
+)
 from app.services.proposal_job_runner import (
     get_proposal_job,
     proposal_job_to_dict,
@@ -105,6 +111,25 @@ def upsert_proposal(rfp_id: str, draft: ProposalDraft) -> dict[str, object]:
         raise HTTPException(status_code=400, detail="rfpId mismatch")
     save_proposal_draft(draft)
     return {"ok": True, "draft": draft.model_dump(by_alias=True)}
+
+
+@router.post("/{rfp_id}/proposal/reset")
+async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
+    """Hard-reset: wipe draft AND pipeline checkpoint from DB so generation starts completely fresh."""
+    if not rfp_exists(rfp_id):
+        raise HTTPException(status_code=404, detail="RFP not found")
+    try:
+        delete_proposal_draft(rfp_id)
+    except Exception as exc:
+        # Ignore errors if draft didn't exist
+        pass
+    try:
+        delete_research_cache(rfp_id)
+    except Exception as exc:
+        # Ignore errors if research didn't exist
+        pass
+    clear_pipeline_checkpoint(rfp_id)
+    return {"ok": True, "message": "Proposal draft and all checkpoints cleared from database."}
 
 
 @router.post("/{rfp_id}/proposal/generate", response_model=ProposalGenerateResponse)

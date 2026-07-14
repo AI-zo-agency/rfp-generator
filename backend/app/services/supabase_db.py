@@ -397,6 +397,20 @@ def save_proposal_draft(draft: ProposalDraft) -> None:
     ).execute()
 
 
+def delete_proposal_draft(rfp_id: str) -> None:
+    """Hard-delete the proposal draft row from Supabase for a fresh start."""
+    client = _get_client()
+    client.table("proposal_drafts").delete().eq("rfp_id", rfp_id).execute()
+
+
+def delete_research_cache(rfp_id: str) -> None:
+    """Hard-delete the research cache (including pipeline checkpoint) from Supabase."""
+    client = _get_client()
+    client.table("proposal_research").delete().eq("rfp_id", rfp_id).execute()
+
+
+
+
 def create_sync_job(job_id: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
     client = _get_client()

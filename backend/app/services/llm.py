@@ -407,12 +407,28 @@ def _salvage_sections_payload(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _salvage_simple_content_payload(text: str) -> dict[str, Any] | None:
+    """Recover content field from a single-section payload if LLM JSON is truncated/invalid."""
+    match = re.search(r'"content"\s*:\s*"', text)
+    if not match:
+        return None
+    content_start = match.end()
+    chunk = text[content_start:]
+    content = _extract_json_string_value(chunk, allow_partial=True)
+    if content.strip():
+        # Clean up any trailing closed quotes, braces, brackets
+        clean_content = content.rstrip('}" \t\n\r')
+        return {"content": clean_content}
+    return None
+
+
 def _parse_json_response(raw: str) -> dict[str, Any]:
     text = _strip_code_fence(raw)
     parsed = _try_parse_json_object(text)
     if parsed is None:
         for salvager, label in (
             (_salvage_sections_payload, "section(s)"),
+            (_salvage_simple_content_payload, "simple content"),
             (_salvage_budget_payload, "budget field(s)"),
         ):
             salvaged = salvager(text)

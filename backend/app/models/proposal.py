@@ -55,6 +55,8 @@ class ProposalBrandVoice(BaseModel):
     client_expectations: str = Field(default="", alias="clientExpectations")
     zo_core_voice: str = Field(default="", alias="zoCoreVoice")
     rfp_adaptation_notes: str = Field(default="", alias="rfpAdaptationNotes")
+    kb_zo_voice: str = Field(default="", alias="kbZoVoice")
+
 
 
 class BudgetLineItem(BaseModel):

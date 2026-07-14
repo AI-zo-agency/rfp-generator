@@ -1,6 +1,14 @@
 import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
 
+// Prefix-based section detection — subsections like section-1-who-we-are, section-2-bio-sonja, section-3-work-01-...
+export const STATIC_SECTION_PREFIXES = [
+  "section-1-",
+  "section-2-bio-",
+  "section-3-work-",
+] as const;
+
+// Legacy IDs kept for backwards compat with saved drafts
 export const STATIC_SECTION_IDS = [
   "section-1-company-overview",
   "section-2-team-overview",
@@ -11,39 +19,97 @@ export function staticSections1to3Complete(
   draft: ProposalOutline | null
 ): boolean {
   if (!draft) return false;
-  const byId = new Map(draft.sections.map((section) => [section.id, section]));
-  return STATIC_SECTION_IDS.every((id) => Boolean(byId.get(id)?.content?.trim()));
+  // Check if we have at least one generated section for each of the 3 groups
+  const hasSection1 = draft.sections.some(
+    (s) =>
+      (s.id.startsWith("section-1-") || s.id === "section-1-company-overview") &&
+      s.content?.trim()
+  );
+  const hasSection2 = draft.sections.some(
+    (s) =>
+      (s.id.startsWith("section-2-") || s.id === "section-2-team-overview") &&
+      s.content?.trim()
+  );
+  const hasSection3 = draft.sections.some(
+    (s) =>
+      (s.id.startsWith("section-3-") || s.id === "section-3-our-work") &&
+      s.content?.trim()
+  );
+  return hasSection1 && hasSection2 && hasSection3;
 }
 
 const DEFAULT_SECTIONS: (Omit<
   OutlineSection,
   "content" | "status"
 >)[] = [
+  // Section 1 — Company Overview subsections
   {
-    id: "section-1-company-overview",
-    title: "Section 1 — Company Overview",
-    pageLimit: 3,
-    wordTarget: 900,
+    id: "section-1-who-we-are",
+    title: "1.1 — Who We Are",
+    pageLimit: 1,
+    wordTarget: 600,
     required: true,
     custom: false,
     source: "template",
     mode: "pull",
   },
   {
-    id: "section-2-team-overview",
-    title: "Section 2 — Team Overview",
-    pageLimit: 4,
-    wordTarget: 1200,
+    id: "section-1-org-structure",
+    title: "1.2 — Organizational Structure",
+    pageLimit: 1,
+    wordTarget: 600,
+    required: true,
+    custom: false,
+    source: "template",
+    mode: "pull",
+  },
+  {
+    id: "section-1-business-info",
+    title: "1.3 — Business Information",
+    pageLimit: 1,
+    wordTarget: 400,
+    required: true,
+    custom: false,
+    source: "template",
+    mode: "pull",
+  },
+  {
+    id: "section-1-certifications",
+    title: "1.4 — Certifications",
+    pageLimit: 1,
+    wordTarget: 400,
+    required: true,
+    custom: false,
+    source: "template",
+    mode: "pull",
+  },
+  {
+    id: "section-1-insurance",
+    title: "1.5 — Insurance Information",
+    pageLimit: 1,
+    wordTarget: 400,
+    required: true,
+    custom: false,
+    source: "template",
+    mode: "pull",
+  },
+  // Section 2 — Team Bios (placeholder; subsections generated dynamically)
+  {
+    id: "section-2-bio-placeholder",
+    title: "2.x — Team Bios (generated per member)",
+    pageLimit: 2,
+    wordTarget: 500,
     required: true,
     custom: false,
     source: "template",
     mode: "select",
   },
+  // Section 3 — Our Work (placeholder; subsections generated dynamically)
   {
-    id: "section-3-our-work",
-    title: "Section 3 — Our Work (Case Studies)",
-    pageLimit: 5,
-    wordTarget: 1500,
+    id: "section-3-work-placeholder",
+    title: "3.x — Our Work (generated per example)",
+    pageLimit: 2,
+    wordTarget: 600,
     required: true,
     custom: false,
     source: "template",

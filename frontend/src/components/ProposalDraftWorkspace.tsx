@@ -33,6 +33,7 @@ import {
   runPhase4PreSubmitAutoFix,
   runPhase4FinalizeGaps,
   saveProposalDraft,
+  startLiveDraftPolling,
   type FullProposalProgress,
   type ProposalPipelineStatus,
 } from "@/lib/proposal-api";
@@ -831,14 +832,23 @@ export function ProposalDraftWorkspace({
     }
   }, [rfp.id, fullProposalDone, pipelineStatus, outline, handleLiveDraftUpdate]);
 
-  const handleResetOutline = () => {
+  const handleResetOutline = async () => {
     if (
       !confirm(
-        "Reset outline and clear ALL generated content? This cannot be undone. Review findings will also be cleared."
+        "Reset outline and clear ALL generated content?\n\nThis will permanently delete:\n• All generated sections (Sections 1–3, RFP sections)\n• All pipeline checkpoints from the database\n• Research cache and evidence corpus\n\nThis cannot be undone."
       )
     ) {
       return;
     }
+
+    // 1. Hard-delete from DB (draft + checkpoint + research cache)
+    try {
+      await fetch(`/api/rfps/${rfp.id}/proposal/reset`, { method: "POST" });
+    } catch {
+      // Non-fatal — proceed with local reset anyway
+    }
+
+    // 2. Reset local state to defaults
     const defaults = buildDefaultOutline(rfp);
     saveGenerationRef.current += 1;
     skipNextSaveRef.current = true;
@@ -848,9 +858,12 @@ export function ProposalDraftWorkspace({
     setRevisionDrawerSectionId(null);
     setSelectedSectionId(defaults.sections[0]?.id ?? null);
     setPresubmitReview(null);
-    void saveProposalDraft(rfp.id, defaults);
     setResearch(null);
+    setGenerateError(null);
+    setFullProposalProgress(null);
+    setLiveLatestSectionTitle(null);
   };
+
 
   const handleRecoverManuscript = useCallback(async () => {
     if (!research?.rfpSections?.length) {
@@ -899,6 +912,35 @@ export function ProposalDraftWorkspace({
       setFullProposalProgress(null);
     }
   }, [research, rfp, outline]);
+
+  const handleDraftSections1to3 = useCallback(async () => {
+    setIsFullProposalRunning(true);
+    setFullProposalProgress("sections-1-3");
+    setGenerateError(null);
+    setGenerateNotice(null);
+    setLiveGeneratedCount(countSectionsWithContent(outline));
+    setLiveLatestSectionTitle(null);
+    const stopPolling = startLiveDraftPolling(rfp.id, handleLiveDraftUpdate);
+    try {
+      const draft = await generateProposalSections1to3(rfp.id);
+      applyOutlineFromServer(draft);
+      await saveProposalDraft(rfp.id, draft);
+      setActiveTab("content");
+      setSelectedSectionId(
+        draft.sections.find((s) => s.content)?.id ?? draft.sections[0]?.id ?? null
+      );
+      setGenerateNotice("Sections 1–3 successfully drafted.");
+    } catch (error) {
+      setGenerateError(
+        error instanceof Error ? error.message : "Sections 1–3 generation failed"
+      );
+    } finally {
+      stopPolling();
+      setIsFullProposalRunning(false);
+      setFullProposalProgress(null);
+      setLiveLatestSectionTitle(null);
+    }
+  }, [rfp.id, outline, applyOutlineFromServer, handleLiveDraftUpdate]);
 
   const handlePrimaryPipeline = useCallback(async () => {
     if (manuscriptRecoveryNeeded) {
@@ -1185,6 +1227,37 @@ export function ProposalDraftWorkspace({
           </button>
           <button
             type="button"
+            onClick={() => void handleDraftSections1to3()}
+            disabled={anyPipelineRunning}
+            className="zo-btn secondary disabled:opacity-60"
+            title="Draft Sections 1–3 from the knowledge base"
+          >
+            {isFullProposalRunning && fullProposalProgress === "sections-1-3" ? (
+              <>
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-zo-teal/30 border-t-zo-teal" />
+                Drafting sections 1–3…
+              </>
+            ) : (
+              <>
+                <svg
+                  className="h-4 w-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"
+                  />
+                </svg>
+                Draft Sections 1–3
+              </>
+            )}
+          </button>
+          <button
+            type="button"
             onClick={() => void handlePrimaryPipeline()}
             disabled={anyPipelineRunning}
             className="zo-btn disabled:opacity-60"
@@ -1196,7 +1269,7 @@ export function ProposalDraftWorkspace({
                   : "Sections 1–3, RFP drafting, budget, and pre-submit review"
             }
           >
-            {isFullProposalRunning ? (
+            {isFullProposalRunning && fullProposalProgress !== "sections-1-3" ? (
               <>
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-zo-white/30 border-t-zo-white" />
                 {primaryPipelineLabel}
@@ -1625,17 +1698,26 @@ export function ProposalDraftWorkspace({
               No content generated yet
             </p>
             <p className="mt-2 max-w-sm text-sm leading-relaxed text-zo-text-muted">
-              Generate the full proposal (static Sections 1–3 plus RFP-specific
-              sections) or run each phase separately.
+              Draft Sections 1–3 from the knowledge base, or generate the full proposal (including RFP-specific sections).
             </p>
-            <button
-              type="button"
-              onClick={handleGenerateFullProposal}
-              disabled={isFullProposalRunning}
-              className="zo-btn mt-6 disabled:opacity-60"
-            >
-              Generate Full Proposal
-            </button>
+            <div className="mt-6 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={handleDraftSections1to3}
+                disabled={isFullProposalRunning}
+                className="zo-btn disabled:opacity-60"
+              >
+                Draft Sections 1–3
+              </button>
+              <button
+                type="button"
+                onClick={handleGenerateFullProposal}
+                disabled={isFullProposalRunning}
+                className="zo-btn secondary disabled:opacity-60"
+              >
+                Generate Full Proposal
+              </button>
+            </div>
           </div>
         )}
       </TabPanel>

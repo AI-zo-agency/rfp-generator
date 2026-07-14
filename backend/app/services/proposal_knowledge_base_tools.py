@@ -11,14 +11,15 @@ from app.services.rfp_repository import get_rfp
 
 logger = logging.getLogger(__name__)
 
-SEARCH_CHARACTER_LIMIT = 6_000
-PROPOSAL_KB_SEARCH_LIMIT = 8
+SEARCH_CHARACTER_LIMIT = 500_000
+PROPOSAL_KB_SEARCH_LIMIT = 50
 PROPOSAL_BUCKET_CHAR_LIMITS = {
-    "zo_voice": 8_000,
-    "company": 14_000,
-    "bios": 14_000,
-    "case_studies": 16_000,
+    "zo_voice": 500_000,
+    "company": 500_000,
+    "bios": 500_000,
+    "case_studies": 500_000,
 }
+
 
 PROPOSAL_KB_BUCKETS = ("zo_voice", "company", "bios", "case_studies")
 
@@ -129,6 +130,17 @@ def _rfp_topic_queries(rfp_client: str, rfp_sector: str, rfp_context: str) -> di
         "bios": [],
         "case_studies": [],
     }
+    
+    # Broad fallbacks to ensure full retrieval of all KB documents
+    extras["case_studies"].extend([
+        "zö agency case studies 03_CS_",
+        "zö agency past completed projects case study",
+    ])
+    extras["bios"].extend([
+        "zö agency team bios 02_MasterTemplate_AllTeamBios.pdf 04_Bio_",
+        "zö agency team member professional resume",
+    ])
+
     if rfp_client.strip():
         extras["case_studies"].append(
             f"zö agency {rfp_client} case study proposal reference"
@@ -250,10 +262,19 @@ async def _gather_bucket(
     bucket: str,
     queries: list[str],
 ) -> tuple[str, list[str]]:
+    """Fetch Supermemory results for all queries in a bucket sequentially (one-by-one),
+    then merge unique hits. The 4 buckets themselves run in parallel via asyncio.gather."""
     if not queries:
         return "(No queries for this bucket.)", []
-    results = await asyncio.gather(*(_search_hits(query) for query in queries))
-    hits = _merge_hits(results)
+    all_hits: list[list[dict[str, Any]]] = []
+    for i, query in enumerate(queries, 1):
+        logger.info(
+            "  [%s] query %d/%d: %s", bucket, i, len(queries), query[:80]
+        )
+        hits = await _search_hits(query)  # One at a time — no flooding
+        all_hits.append(hits)
+    hits = _merge_hits(all_hits)
+    logger.info("  [%s] merged %d unique hits", bucket, len(hits))
     return _hits_to_bundle(hits, max_chars=PROPOSAL_BUCKET_CHAR_LIMITS[bucket])
 
 
@@ -300,6 +321,9 @@ async def gather_proposal_kb_for_sections(
         total_queries,
     )
 
+    # All 4 buckets run in parallel (asyncio.gather), but within each bucket
+    # the individual queries run sequentially one-by-one for complete, ordered retrieval.
+    logger.info("Gathering all 4 KB buckets in parallel (per-bucket queries are sequential)...")
     zo_voice, company, bios, case_studies = await asyncio.gather(
         _gather_bucket("zo_voice", bucket_queries["zo_voice"]),
         _gather_bucket("company", bucket_queries["company"]),

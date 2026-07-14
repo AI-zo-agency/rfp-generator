@@ -58,32 +58,64 @@ from app.services.rfp_repository import get_rfp
 logger = logging.getLogger(__name__)
 
 ZO_SECTIONS: list[dict[str, object]] = [
+    # Section 1 — Company Overview subsections
     {
-        "id": "section-1-company-overview",
-        "title": "Section 1 — Company Overview",
+        "id": "section-1-who-we-are",
+        "title": "1.1 — Who We Are",
         "mode": "pull",
         "source": "template",
-        "word_target": 900,
-        "knowledge_base_query": "zö agency 02 master template company overview certifications WBENC WOSB insurance organizational structure",
-        "designer_note": "PULL FROM MASTER TEMPLATE — Section 1. No edits needed.",
+        "word_target": 600,
+        "designer_note": "Section 1 subsection: 1.1 — Who We Are.",
     },
     {
-        "id": "section-2-team-overview",
-        "title": "Section 2 — Team Overview",
-        "mode": "select",
+        "id": "section-1-org-structure",
+        "title": "1.2 — Organizational Structure",
+        "mode": "pull",
         "source": "template",
-        "word_target": 1200,
-        "knowledge_base_query": "04 bio team zö agency project manager creative director brand strategist approved bios",
-        "designer_note": "Select bio layout based on page budget (full page, 3–5 per page, or team overview). Do not rewrite bios.",
+        "word_target": 600,
+        "designer_note": "Section 1 subsection: 1.2 — Organizational Structure.",
     },
     {
-        "id": "section-3-our-work",
-        "title": "Section 3 — Our Work (Case Studies)",
+        "id": "section-1-business-info",
+        "title": "1.3 — Business Information",
+        "mode": "pull",
+        "source": "template",
+        "word_target": 400,
+        "designer_note": "Section 1 subsection: 1.3 — Business Information.",
+    },
+    {
+        "id": "section-1-certifications",
+        "title": "1.4 — Certifications",
+        "mode": "pull",
+        "source": "template",
+        "word_target": 400,
+        "designer_note": "Section 1 subsection: 1.4 — Certifications.",
+    },
+    {
+        "id": "section-1-insurance",
+        "title": "1.5 — Insurance Information",
+        "mode": "pull",
+        "source": "template",
+        "word_target": 400,
+        "designer_note": "Section 1 subsection: 1.5 — Insurance Information.",
+    },
+    # Section 2 — Team Bios (placeholder; subsections generated dynamically)
+    {
+        "id": "section-2-bio-placeholder",
+        "title": "2.x — Team Bios (generated per member)",
         "mode": "select",
         "source": "template",
-        "word_target": 1500,
-        "knowledge_base_query": "03 case study CS zö agency verified outcomes municipal government higher education",
-        "designer_note": "Select 2–4 verified 03_CS_ case studies by sector and scope match. Do not write new case studies.",
+        "word_target": 500,
+        "designer_note": "Team bios template. Generated dynamically per member.",
+    },
+    # Section 3 — Our Work (placeholder; subsections generated dynamically)
+    {
+        "id": "section-3-work-placeholder",
+        "title": "3.x — Our Work (generated per example)",
+        "mode": "select",
+        "source": "template",
+        "word_target": 600,
+        "designer_note": "Our Work examples. Generated dynamically.",
     },
     {
         "id": "section-4-project-approach",
@@ -110,14 +142,26 @@ STATIC_SECTION_IDS = (
 
 
 def static_sections_1_3_have_content(draft: ProposalDraft | None) -> bool:
-    """True when all three zö template sections have body text (by id, not outline order)."""
+    """True when all three zö template sections have body text (checks new subsection prefixes)."""
     if not draft:
         return False
-    by_id = {section.id: section for section in draft.sections}
-    return all(
-        sid in by_id and (by_id[sid].content or "").strip()
-        for sid in STATIC_SECTION_IDS
+    has_section1 = any(
+        (s.id.startswith("section-1-") or s.id == "section-1-company-overview")
+        and (s.content or "").strip()
+        for s in draft.sections
     )
+    has_section2 = any(
+        (s.id.startswith("section-2-") or s.id == "section-2-team-overview")
+        and (s.content or "").strip()
+        for s in draft.sections
+    )
+    has_section3 = any(
+        (s.id.startswith("section-3-") or s.id == "section-3-our-work")
+        and (s.content or "").strip()
+        for s in draft.sections
+    )
+    return has_section1 and has_section2 and has_section3
+
 
 
 from app.services.proposal_common import ProposalError, can_start_proposal, load_rfp_for_proposal
@@ -458,33 +502,24 @@ def _static_sections_from_draft(
     draft: ProposalDraft | None,
     page_limit: int | None,
 ) -> list[ProposalSection]:
-    """Always keep zö Sections 1–3 (company, team, case studies) at the front."""
+    """Always keep zö static Sections 1–3 (company subsections, team bios, our work examples) at the front."""
     defaults = _default_sections(page_limit)
-    default_by_id = {section.id: section for section in defaults}
     if not draft:
-        return defaults[:3]
+        return [s for s in defaults if s.id.startswith(("section-1-", "section-2-", "section-3-"))]
 
-    by_id = {section.id: section for section in draft.sections}
     static: list[ProposalSection] = []
-    for sid in STATIC_SECTION_IDS:
-        if sid in by_id:
-            static.append(by_id[sid])
-        elif sid in default_by_id:
-            static.append(default_by_id[sid])
+    for s in draft.sections:
+        is_static_1_3 = (
+            s.id.startswith(("section-1-", "section-2-bio-", "section-3-work-"))
+            or s.id in {"section-1-company-overview", "section-2-team-overview", "section-3-our-work"}
+        )
+        if is_static_1_3:
+            static.append(s)
 
-    if len(static) >= 3:
-        return static[:3]
+    if not static:
+        return [s for s in defaults if s.id.startswith(("section-1-", "section-2-", "section-3-"))]
 
-    for section in draft.sections:
-        key = _section_merge_key(section)
-        if key in {"1", "2", "3"} and section not in static:
-            static.append(section)
-        if len(static) >= 3:
-            break
-
-    while len(static) < 3:
-        static.append(defaults[len(static)])
-    return static[:3]
+    return static
 
 
 def _merge_static_with_rfp_sections(
@@ -508,10 +543,27 @@ async def _persist_sections_1_3_partial(
     rfp = get_rfp(rfp_id)
     page_limit = rfp.page_limit if rfp else 30
     existing = await aget_proposal_draft(rfp_id)
-    if existing and len(existing.sections) >= 3:
-        merged = _merge_sections_into_draft(existing.sections, sections_1_3)
+
+    # Filter out any old static section variants to prevent duplicate/stale lists.
+    base_sections = []
+    if existing:
+        for s in existing.sections:
+            is_static_1_3 = (
+                s.id.startswith(("section-1-", "section-2-", "section-3-"))
+                or s.id in {"section-1-company-overview", "section-2-team-overview", "section-3-our-work"}
+            )
+            if not is_static_1_3:
+                base_sections.append(s)
     else:
-        merged = _merge_sections_into_draft(_default_sections(page_limit), sections_1_3)
+        for s in _default_sections(page_limit):
+            is_static_1_3 = (
+                s.id.startswith(("section-1-", "section-2-", "section-3-"))
+                or s.id in {"section-1-company-overview", "section-2-team-overview", "section-3-our-work"}
+            )
+            if not is_static_1_3:
+                base_sections.append(s)
+
+    merged = [*sections_1_3, *base_sections]
 
     merged = [
         section.model_copy(
@@ -783,10 +835,26 @@ async def generate_sections_1_3(
 
     now = datetime.now(timezone.utc).isoformat()
     existing = get_proposal_draft(rfp_id)
-    if existing and len(existing.sections) >= 3:
-        merged = _merge_sections_into_draft(existing.sections, sections_1_3)
+    base_sections = []
+    if existing:
+        for s in existing.sections:
+            is_static_1_3 = (
+                s.id.startswith(("section-1-", "section-2-", "section-3-"))
+                or s.id in {"section-1-company-overview", "section-2-team-overview", "section-3-our-work"}
+            )
+            if not is_static_1_3:
+                base_sections.append(s)
     else:
-        merged = _merge_sections_into_draft(_default_sections(rfp.page_limit), sections_1_3)
+        for s in _default_sections(rfp.page_limit):
+            is_static_1_3 = (
+                s.id.startswith(("section-1-", "section-2-", "section-3-"))
+                or s.id in {"section-1-company-overview", "section-2-team-overview", "section-3-our-work"}
+            )
+            if not is_static_1_3:
+                base_sections.append(s)
+
+    merged = [*sections_1_3, *base_sections]
+
 
     merged = [
         section.model_copy(
