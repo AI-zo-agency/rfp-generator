@@ -80,6 +80,32 @@ async def delete_rfp_endpoint(rfp_id: str) -> dict[str, object]:
     return {"ok": True, "deletedId": rfp.id}
 
 
+@router.post("/extract-due-date")
+async def extract_due_date_from_pdf(request: Request) -> dict[str, str | None]:
+    """Parse an uploaded solicitation PDF and return a detected due date (ISO)."""
+    content_type = request.headers.get("content-type", "")
+    content: bytes | None = None
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        pdf_file = form.get("pdf")
+        if pdf_file and hasattr(pdf_file, "read"):
+            content = await pdf_file.read()
+    else:
+        content = await request.body()
+
+    if not content:
+        raise HTTPException(status_code=400, detail="PDF file is required")
+
+    if not content.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    from app.services.rfp_due_date import extract_due_date_from_pdf_bytes
+
+    due_date = extract_due_date_from_pdf_bytes(content)
+    return {"dueDate": due_date}
+
+
 @router.post("", response_model=RfpRecord, status_code=201)
 async def create_manual_rfp(request: Request) -> RfpRecord:
     content_type = request.headers.get("content-type", "")

@@ -760,7 +760,7 @@ h4 {
 
 .proposal-stat-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.5rem;
   width: 100%;
 }
@@ -1429,6 +1429,56 @@ h4 {
     transparent 72%
   );
   box-shadow: inset 3px 0 0 var(--zo-primary);
+}
+
+.proposal-section-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.proposal-section-tree-group {
+  border-bottom: 1px solid rgba(17, 24, 39, 0.08);
+}
+
+.proposal-section-tree-group-header {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  background: rgba(17, 24, 39, 0.03);
+  transition: background 0.2s var(--ease-smooth);
+}
+
+.proposal-section-tree-group-header:hover {
+  background: var(--zo-hover-bg);
+}
+
+.proposal-section-tree-chevron {
+  display: inline-flex;
+  width: 1rem;
+  justify-content: center;
+  font-size: 0.75rem;
+  color: var(--zo-text-muted);
+  transition: transform 0.2s var(--ease-smooth);
+}
+
+.proposal-section-tree-chevron.is-collapsed {
+  transform: rotate(-90deg);
+}
+
+.proposal-section-tree-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-left: 2px solid rgba(239, 80, 24, 0.2);
+  margin-left: 0.875rem;
+}
+
+.proposal-section-list-item--child {
+  border-left: none;
 }
 
 .proposal-toolbar {

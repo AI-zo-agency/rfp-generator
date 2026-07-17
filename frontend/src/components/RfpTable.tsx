@@ -3,24 +3,28 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { motion } from "motion/react";
-import { computeOverallGoScore, daysUntil, formatCurrency, formatDate } from "@/lib/format";
+import { computeOverallGoScore, daysUntil, formatDate } from "@/lib/format";
 import { expoOutEase } from "@/lib/motion";
-import { STAGE_LABELS } from "@/lib/rfp-process";
+import {
+  isNewIntake,
+  isProposalInProgress,
+  needsGoNoGoDecision,
+  STAGE_LABELS,
+} from "@/lib/rfp-process";
 import type { RfpRecord } from "@/types/rfp";
 import { DeleteRfpButton } from "./DeleteRfpButton";
 import { GoSign } from "./GoSign";
-import { GoNoGoBadge, PriorityBadge, StatusBadge } from "./StatusBadge";
+import { GoNoGoBadge, PriorityBadge } from "./StatusBadge";
 import { IconChevron } from "./ui/icons";
 import { OutlineTabs } from "./ui/OutlineTabs";
 
-type FilterTab = "all" | "go" | "pending" | "in_progress" | "urgent" | "new";
+type FilterTab = "all" | "go" | "pending" | "in_progress" | "new";
 
 const filterTabs: { id: FilterTab; label: string }[] = [
   { id: "all", label: "All" },
   { id: "go", label: "Go RFPs" },
-  { id: "pending", label: "Pending Approval" },
-  { id: "in_progress", label: "In Progress" },
-  { id: "urgent", label: "Urgent" },
+  { id: "pending", label: "Needs Decision" },
+  { id: "in_progress", label: "Drafting" },
   { id: "new", label: "New Intake" },
 ];
 
@@ -38,24 +42,17 @@ function filterRfps(rfps: RfpRecord[], tab: FilterTab): RfpRecord[] {
     case "go":
       return rfps.filter((r) => r.goNoGo === "go");
     case "pending":
-      return rfps.filter((r) => r.status === "pending_approval");
+      return rfps.filter(needsGoNoGoDecision);
     case "in_progress":
-      return rfps.filter((r) =>
-        ["in_progress", "active", "review"].includes(r.status),
-      );
-    case "urgent":
-      return rfps.filter(
-        (r) => r.priority === "critical" || daysUntil(r.dueDate).urgent,
-      );
+      return rfps.filter(isProposalInProgress);
     case "new":
-      return rfps.filter((r) => r.status === "new");
+      return rfps.filter(isNewIntake);
     default:
       return rfps;
   }
 }
 
 function RfpRowMeta({ rfp }: { rfp: RfpRecord }) {
-  const due = daysUntil(rfp.dueDate);
   const goScore = computeOverallGoScore(
     rfp.fitScore,
     rfp.worthScore,
@@ -95,14 +92,9 @@ function RfpRowMeta({ rfp }: { rfp: RfpRecord }) {
           <span className="font-semibold text-foreground">Due:</span>{" "}
           {formatDate(rfp.dueDate)}
         </span>
-        <span>
-          <span className="font-semibold text-foreground">Value:</span>{" "}
-          {formatCurrency(rfp.estimatedValue)}
-        </span>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 lg:hidden">
         {rfp.goNoGo === "go" ? <GoSign /> : <GoNoGoBadge recommendation={rfp.goNoGo} />}
-        <StatusBadge status={rfp.status} />
         {goScore !== null ? (
           <span className="text-xs font-semibold text-zo-text-secondary">
             Score {scale5 ? `${goScore}/5` : goScore}
@@ -201,7 +193,7 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
 
       {/* Desktop table */}
       <div className="custom-scrollbar hidden overflow-x-auto lg:block">
-        <table className="w-full min-w-[1024px] text-left">
+        <table className="w-full min-w-[880px] text-left">
           <thead>
             <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-[11px] font-bold uppercase tracking-[0.12em] text-zo-text-secondary">
               <th className="px-6 py-4 lg:px-8">RFP</th>
@@ -210,8 +202,6 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
               <th className="px-4 py-4">Due</th>
               <th className="px-4 py-4">Go Score</th>
               <th className="px-4 py-4">Go/No-Go</th>
-              <th className="px-4 py-4">Status</th>
-              <th className="px-4 py-4">Value</th>
               <th className="w-24 px-4 py-4 text-right">Actions</th>
             </tr>
           </thead>
@@ -227,7 +217,7 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
             {filtered.length === 0 ? (
               <tr>
                 <td
-                  colSpan={9}
+                  colSpan={7}
                   className="px-8 py-16 text-center text-sm text-zo-text-muted"
                 >
                   No RFPs match this filter.
@@ -269,11 +259,6 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                     </td>
                     <td className="px-4 py-5 align-top">
                       <p className="font-medium text-zo-text-secondary">{rfp.client}</p>
-                      {rfp.externalId ? (
-                        <p className="mt-1 font-mono text-[11px] text-zo-text-muted">
-                          {rfp.externalId}
-                        </p>
-                      ) : null}
                     </td>
                     <td className="px-4 py-5 align-top">
                       <span className="text-sm font-semibold text-foreground">
@@ -319,14 +304,6 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                       ) : (
                         <GoNoGoBadge recommendation={rfp.goNoGo} />
                       )}
-                    </td>
-                    <td className="px-4 py-5 align-top">
-                      <StatusBadge status={rfp.status} />
-                    </td>
-                    <td className="px-4 py-5 align-top">
-                      <p className="font-heading text-sm font-bold text-foreground">
-                        {formatCurrency(rfp.estimatedValue)}
-                      </p>
                     </td>
                     <td className="px-4 py-5 align-top">
                       <div className="flex items-center justify-end gap-1 opacity-80 transition-opacity duration-200 group-hover:opacity-100">

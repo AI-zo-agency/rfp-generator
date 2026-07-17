@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -27,6 +28,12 @@ from app.services.proposal_manuscript_cleanup import (
     deny_subcontractors_claimed,
 )
 from app.services.proposal_voice_enforcement import contains_vendor_language
+from app.services.proposal_hallucination_detector import (
+    detect_hallucinations,
+    filter_high_severity_hallucinations,
+)
+
+logger = logging.getLogger(__name__)
 
 # Common stale client names from zö portfolio (copy-paste scan)
 _STALE_CLIENT_PATTERNS = (
@@ -397,6 +404,49 @@ def _compliance_checklist(
     return items
 
 
+def _scan_hallucinations(draft: ProposalDraft) -> list[PreSubmitIssue]:
+    """Detect fabricated facts, unverified claims, and hallucinated content."""
+    issues: list[PreSubmitIssue] = []
+    
+    for section in draft.sections:
+        content = section.content or ""
+        if not content.strip():
+            continue
+        
+        # Detect hallucinations in this section
+        hallucination_findings = detect_hallucinations(content, section.title)
+        
+        # Convert high-severity hallucinations to PreSubmitIssues
+        high_severity = filter_high_severity_hallucinations(hallucination_findings)
+        
+        for finding in high_severity:
+            # Map hallucination type to appropriate category
+            if finding["type"] in ("hallucination", "unverified_certification", "zero_revenue_claim"):
+                severity = "critical"
+                category = "fabricated_fact"
+            else:
+                severity = "warning"
+                category = "unverified_claim"
+            
+            issues.append(
+                PreSubmitIssue(
+                    severity=severity,
+                    category=category,
+                    message=finding["pattern"],
+                    sectionId=section.id,
+                    sectionTitle=section.title,
+                    excerpt=finding["matched_text"][:200],
+                )
+            )
+    
+    if issues:
+        logger.warning(
+            f"🔴 HALLUCINATION DETECTION: Found {len(issues)} fabricated/unverified claims in proposal"
+        )
+    
+    return issues
+
+
 _CATEGORY_LABELS = {
     "copy_paste": "Wrong client / copy-paste",
     "placeholder": "Unfilled placeholders",
@@ -404,6 +454,8 @@ _CATEGORY_LABELS = {
     "compliance": "Compliance",
     "consistency": "Internal consistency",
     "self_edit": "Self-edit incomplete",
+    "fabricated_fact": "🔴 Fabricated/Hallucinated Facts",
+    "unverified_claim": "⚠️ Unverified Claims",
 }
 
 
@@ -432,6 +484,8 @@ def generate_issues_markdown(
             by_category.setdefault(issue.category or "other", []).append(issue)
 
         for category in (
+            "fabricated_fact",
+            "unverified_claim",
             "copy_paste",
             "placeholder",
             "voice",
@@ -506,6 +560,10 @@ def run_presubmit_review(
             scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
         )
     )
+    
+    # CRITICAL: Scan for hallucinated/fabricated facts
+    issues.extend(_scan_hallucinations(draft=draft))
+    
     if extra_issues:
         issues.extend(extra_issues)
 

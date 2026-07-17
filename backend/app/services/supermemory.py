@@ -10,6 +10,7 @@ All proposal retrieval uses v4 search. Ingest scripts use v3 batch upload.
 
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -17,6 +18,9 @@ import httpx
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+_DOC_LIST_CACHE_TTL_SECONDS = 60.0
+_doc_list_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 # v4 hybrid search does not match type=knowledge_base filters; exclude intake RFP docs instead.
 KNOWLEDGE_BASE_SEARCH_FILTERS: dict[str, Any] = {
@@ -54,6 +58,7 @@ async def _request(
     path: str,
     *,
     json_body: dict[str, Any] | None = None,
+    allow_status: set[int] | None = None,
 ) -> Any:
     url = f"{settings.supermemory_base_url.rstrip('/')}{path}"
     async with httpx.AsyncClient(timeout=120.0) as client:
@@ -63,6 +68,11 @@ async def _request(
             headers=_auth_headers(),
             json=json_body,
         )
+
+    if response.status_code in (allow_status or set()):
+        if not response.content:
+            return {}
+        return response.json()
 
     if response.status_code >= 400:
         detail = response.text.strip() or response.reason_phrase
@@ -76,20 +86,82 @@ async def _request(
     return response.json()
 
 
+def is_fetchable_document_key(key: str) -> bool:
+    """v3 GET only accepts ingest customIds (drive:/kb:), not v4 memory/chunk ids."""
+    normalized = key.strip()
+    return normalized.startswith("drive:") or normalized.startswith("kb:")
+
+
+def document_fetch_key(doc: dict[str, Any]) -> str:
+    custom_id = str(doc.get("customId") or "").strip()
+    if is_fetchable_document_key(custom_id):
+        return custom_id
+    return ""
+
+
 def is_configured() -> bool:
     return bool(settings.supermemory_api_key.strip())
 
 
-async def list_container_memories(*, limit: int = 100) -> list[dict[str, Any]]:
+async def list_container_memories(
+    *,
+    limit: int = 100,
+    force_refresh: bool = False,
+) -> list[dict[str, Any]]:
+    global _doc_list_cache
+
+    now = time.monotonic()
+    if (
+        not force_refresh
+        and _doc_list_cache is not None
+        and now - _doc_list_cache[0] < _DOC_LIST_CACHE_TTL_SECONDS
+    ):
+        cached = _doc_list_cache[1]
+        return cached[:limit]
+
     body = {"containerTag": container_tag(), "limit": limit}
     data = await _request("POST", "/v3/documents/list", json_body=body)
     if isinstance(data, dict):
         memories = data.get("memories") or data.get("documents") or data.get("items")
         if isinstance(memories, list):
-            return [item for item in memories if isinstance(item, dict)]
+            docs = [item for item in memories if isinstance(item, dict)]
+            _doc_list_cache = (now, docs)
+            return docs[:limit]
     if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
+        docs = [item for item in data if isinstance(item, dict)]
+        _doc_list_cache = (now, docs)
+        return docs[:limit]
+    _doc_list_cache = (now, [])
     return []
+
+
+async def get_document_content(
+    *,
+    document_id: str | None = None,
+    custom_id: str | None = None,
+) -> str:
+    """Fetch full indexed document text (all chunks) via v3 GET — search often returns one chunk only."""
+    key = (custom_id or document_id or "").strip()
+    if not key or not is_fetchable_document_key(key):
+        return ""
+    data = await _request("GET", f"/v3/documents/{key}", allow_status={404})
+    if not isinstance(data, dict):
+        return ""
+    content = data.get("content") or data.get("text") or ""
+    return str(content).strip()
+
+
+async def find_document_by_file_name(file_name: str) -> dict[str, Any] | None:
+    """Find a container document whose metadata.fileName matches exactly."""
+    target = file_name.strip().casefold()
+    if not target:
+        return None
+    docs = await list_container_memories(limit=1000)
+    for doc in docs:
+        metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        if str(metadata.get("fileName") or "").strip().casefold() == target:
+            return doc
+    return None
 
 
 async def list_connections() -> list[dict[str, Any]]:
@@ -314,6 +386,62 @@ def hit_text(hit: dict[str, Any]) -> str:
                 return "\n".join(str(item) for item in value).strip()
             return str(value).strip()
     return ""
+
+
+def hit_custom_id(hit: dict[str, Any]) -> str:
+    documents = hit.get("documents")
+    if isinstance(documents, list):
+        for document in documents:
+            if isinstance(document, dict):
+                custom_id = str(document.get("customId") or "").strip()
+                if is_fetchable_document_key(custom_id):
+                    return custom_id
+    custom_id = str(hit.get("customId") or "").strip()
+    if is_fetchable_document_key(custom_id):
+        return custom_id
+    return ""
+
+
+def hit_file_name(hit: dict[str, Any]) -> str:
+    metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+    return str(
+        metadata.get("fileName")
+        or hit.get("title")
+        or hit.get("customId")
+        or ""
+    )
+
+
+def document_dedupe_key(hit: dict[str, Any]) -> str:
+    """Stable per-document key for deduping search hits."""
+    file_name = hit_file_name(hit).strip().casefold()
+    if file_name:
+        return file_name
+    return hit_custom_id(hit).strip()
+
+
+async def resolve_hit_document_content(hit: dict[str, Any]) -> str:
+    """Return full indexed document text for a search hit, falling back to chunk text."""
+    custom_id = hit_custom_id(hit)
+    if custom_id:
+        content = await get_document_content(custom_id=custom_id)
+        if content:
+            return content
+
+    file_name = hit_file_name(hit).strip()
+    if file_name:
+        try:
+            doc = await find_document_by_file_name(file_name)
+            if doc:
+                doc_key = document_fetch_key(doc)
+                if doc_key:
+                    content = await get_document_content(custom_id=doc_key)
+                    if content:
+                        return content
+        except SupermemoryError:
+            pass
+
+    return hit_text(hit)
 
 
 def _normalize_search_hit(hit: dict[str, Any]) -> dict[str, Any]:

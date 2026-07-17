@@ -183,7 +183,9 @@ async def generate_sections_1_3_endpoint(rfp_id: str) -> ProposalGenerateRespons
     """Generate static Sections 1–3 only (Phase 2 retrieval is a separate endpoint)."""
     try:
         async with pipeline_phase(rfp_id, "sections-1-3"):
-            draft, brand_voice, research = await generate_sections_1_3(rfp_id)
+            draft, brand_voice, research = await generate_sections_1_3(
+                rfp_id, force_regenerate=True
+            )
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:

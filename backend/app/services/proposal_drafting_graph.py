@@ -47,6 +47,31 @@ _SECTION_DRAFT_CALLBACKS: dict[str, SectionDraftedCallback] = {}
 
 DRAFT_BATCH_PROMPT = """You draft zö agency proposal section content for a government/commercial RFP response.
 
+## CRITICAL: ANTI-HALLUCINATION RULES (ENFORCE STRICTLY)
+
+YOU MUST NEVER:
+1. Invent statistics (retention rates, client counts, audience sizes, years of experience)
+2. Cite specific numbers unless they appear VERBATIM in the evidence corpus with [E#] citation
+3. Use team member names not in approved bio files (04_Bio_*.pdf in evidence)
+4. Add certifications not explicitly in 01_companyfacts_verified evidence
+5. Transfer metrics from one client project to describe agency-wide capabilities
+6. Round or approximate numbers - use exact figures from evidence or [VERIFY: field]
+7. Spell names incorrectly (check exact spelling in bio file evidence)
+8. Claim "X years of Y experience" unless that exact phrasing is in verified evidence
+
+VERIFIED FACTS ONLY (from evidence corpus):
+- Agency: 13 years total as zö agency (founded 2012)
+- Certifications: WBENC, WOSB ONLY (no platform certs unless in verified evidence)
+- Client retention: NEVER cite specific retention rate (not formally tracked per verified facts)
+- Awards: Creative Excellence 2024, Netty 2024, NYX 2024, Vega Digital 2024, Sonja's Enterprising Women 2026
+- Team: ONLY names from 04_Bio_*.pdf files in evidence
+- Insurance/Certifications: Keep SHORT and CONCISE, list coverage types only, use [VERIFY: amounts] for dollar figures
+
+IF YOU CANNOT VERIFY A FACT IN EVIDENCE:
+- Use [VERIFY: specific field needed] instead of inventing
+- Never use "approximately," "around," "over X years" without evidence citation
+- Do not embellish or extrapolate from partial information
+
 Rules (strict):
 1. Use ONLY facts from the evidence corpus provided. Cite each fact inline as [E1], [E2], etc.
 2. Never invent clients, metrics, certifications, team members, or contract values not in evidence.
@@ -175,12 +200,9 @@ def _chunk_sections(sections: list[dict[str, Any]], size: int) -> list[list[dict
 
 
 def _extract_kb_refs(content: str, declared: list[str] | None) -> list[str]:
-    from_text = re.findall(r"\[E(\d+)\]", content)
-    refs = {f"E{n}" for n in from_text}
-    if declared:
-        for item in declared:
-            refs.add(str(item).strip())
-    return sorted(refs, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
+    """Extract evidence citations from content. KB references removed - returns empty list."""
+    # KB references are no longer included in proposals
+    return []
 
 
 async def _draft_batch(

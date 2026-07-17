@@ -136,19 +136,24 @@ export function startLiveDraftPolling(
   rfpId: string,
   onDraftUpdate: (draft: ProposalOutline) => void
 ): () => void {
-  let lastUpdatedAt = "";
+  let lastFingerprint = "";
   let stopped = false;
+
+  const fingerprint = (draft: ProposalOutline) => {
+    const parts = draft.sections.map(
+      (s) => `${s.id}:${s.status}:${(s.content || "").length}:${(s.content || "").slice(0, 40)}`
+    );
+    return `${draft.updatedAt}|${parts.join("|")}`;
+  };
 
   const poll = async () => {
     if (stopped) return;
     try {
       const snapshot = await fetchProposalDraft(rfpId);
-      if (
-        snapshot.draft &&
-        snapshot.draft.updatedAt &&
-        snapshot.draft.updatedAt !== lastUpdatedAt
-      ) {
-        lastUpdatedAt = snapshot.draft.updatedAt;
+      if (!snapshot.draft) return;
+      const next = fingerprint(snapshot.draft);
+      if (next !== lastFingerprint) {
+        lastFingerprint = next;
         onDraftUpdate(snapshot.draft);
       }
     } catch {
@@ -251,7 +256,7 @@ export async function runPhase3_6SelfEditWithRecovery(
 
 const STAGE_POLL_INTERVAL_MS = 12_000;
 const STAGE_POLL_MAX_MS = 22 * 60 * 1000;
-const LIVE_DRAFT_POLL_INTERVAL_MS = 3_000;
+const LIVE_DRAFT_POLL_INTERVAL_MS = 1_500;
 /** If checkpoint says in-flight but timestamps never move, backend was killed — don't block resume. */
 const IN_FLIGHT_STALE_MS = 90_000;
 

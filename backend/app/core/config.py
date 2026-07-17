@@ -43,11 +43,19 @@ class Settings(BaseSettings):
     openrouter_model: str = "anthropic/claude-sonnet-4"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.0-flash-exp"
+    
     fireworks_api_key: str = ""
     fireworks_model: str = "accounts/fireworks/models/llama-v3p3-70b-instruct"
     fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
-    # When true, skip OpenRouter (e.g. out of credits) and use Fireworks directly.
+    # When true, skip OpenRouter and Gemini - use Fireworks directly as primary.
     llm_prefer_fireworks: bool = False
+    # When true, skip Gemini - use OpenRouter as primary (before Fireworks).
+    llm_prefer_openrouter: bool = False
+
+    # Phase 1: decision-first Company Qualification Layer for Section 1.
+    use_company_qualification_s1: bool = False
 
     supabase_url: str = ""
     supabase_service_role_key: str = ""

@@ -72,8 +72,8 @@ ZO_SECTIONS: list[dict[str, object]] = [
         "title": "1.2 — Organizational Structure",
         "mode": "pull",
         "source": "template",
-        "word_target": 600,
-        "designer_note": "Section 1 subsection: 1.2 — Organizational Structure.",
+        "word_target": 800,
+        "designer_note": "Full org chart from Master Team Roster — every person by department.",
     },
     {
         "id": "section-1-business-info",
@@ -302,7 +302,8 @@ async def _fill_static_section(
             f"Rationale: {rationale}\n\n"
             f"--- KB excerpts ---\n{text[:3000]}"
         )
-        section.kb_refs = [str(s) for s in selected] if isinstance(selected, list) else []
+        # KB references removed - not included in proposals
+        section.kb_refs = []
     else:
         selection, _ = await llm.chat_json(
             [
@@ -330,11 +331,13 @@ async def _fill_static_section(
             f"Bios to include: {', '.join(bios) if isinstance(bios, list) else bios}\n\n"
             f"--- KB excerpts (use exact bio text at layout stage) ---\n{text[:3000]}"
         )
-        section.kb_refs = [str(b) for b in bios] if isinstance(bios, list) else []
+        # KB references removed - not included in proposals
+        section.kb_refs = []
 
     section.content = body.strip()
     section.status = "generated"
-    section.kb_refs = list(dict.fromkeys([*section.kb_refs, *sources[:5]]))
+    # KB references removed - not included in proposals
+    section.kb_refs = []
     return section
 
 
@@ -532,6 +535,25 @@ def _merge_static_with_rfp_sections(
     return [*static_sections, *rfp_only]
 
 
+def _is_static_1_3_section_id(section_id: str) -> bool:
+    return section_id.startswith(("section-1-", "section-2-", "section-3-")) or section_id in {
+        "section-1-company-overview",
+        "section-2-team-overview",
+        "section-3-our-work",
+    }
+
+
+def _prefer_richer_section(current: ProposalSection, incoming: ProposalSection) -> ProposalSection:
+    """Never let an empty parallel-track emit wipe content already saved by another track."""
+    current_has = bool(current.content and current.content.strip())
+    incoming_has = bool(incoming.content and incoming.content.strip())
+    if incoming_has:
+        return incoming
+    if current_has:
+        return current
+    return incoming
+
+
 async def _persist_sections_1_3_partial(
     rfp_id: str,
     sections_1_3: list[ProposalSection],
@@ -539,28 +561,64 @@ async def _persist_sections_1_3_partial(
     *,
     brand_voice: ProposalBrandVoice | None = None,
 ) -> None:
-    """Save sections 1–3 as each completes so the UI can show progress immediately."""
+    """Save sections 1–3 as each completes so the UI can show progress immediately.
+
+    Parallel S1 / S2 / S3 tracks emit independently — merge with the existing draft so
+    one track never blanks another track's already-generated subsections.
+    """
     rfp = get_rfp(rfp_id)
     page_limit = rfp.page_limit if rfp else 30
     existing = await aget_proposal_draft(rfp_id)
 
-    # Filter out any old static section variants to prevent duplicate/stale lists.
-    base_sections = []
+    template_1_3 = [
+        s
+        for s in _default_sections(page_limit)
+        if s.id.startswith(("section-1-", "section-2-", "section-3-"))
+    ]
+
+    by_id: dict[str, ProposalSection] = {s.id: s for s in template_1_3}
+    # Keep any previously persisted 1–3 content (other parallel track).
+    if existing:
+        for section in existing.sections:
+            if _is_static_1_3_section_id(section.id):
+                by_id[section.id] = section
+    # Apply this emit — only overwrite when incoming has real content (or new ids).
+    for section in sections_1_3:
+        prior = by_id.get(section.id)
+        by_id[section.id] = (
+            _prefer_richer_section(prior, section) if prior is not None else section
+        )
+
+    ordered: list[ProposalSection] = []
+    seen: set[str] = set()
+    for section in template_1_3:
+        ordered.append(by_id[section.id])
+        seen.add(section.id)
+    # Preserve dynamic bios / case studies already in draft, then new ones from this emit.
+    dynamic_order: list[str] = []
+    if existing:
+        for section in existing.sections:
+            if section.id not in seen and _is_static_1_3_section_id(section.id):
+                dynamic_order.append(section.id)
+    for section in sections_1_3:
+        if section.id not in seen and section.id not in dynamic_order:
+            dynamic_order.append(section.id)
+    for sid in dynamic_order:
+        if sid in by_id:
+            ordered.append(by_id[sid])
+            seen.add(sid)
+
+    sections_1_3 = ordered
+
+    # Non–Sections-1–3 content stays as-is.
+    base_sections: list[ProposalSection] = []
     if existing:
         for s in existing.sections:
-            is_static_1_3 = (
-                s.id.startswith(("section-1-", "section-2-", "section-3-"))
-                or s.id in {"section-1-company-overview", "section-2-team-overview", "section-3-our-work"}
-            )
-            if not is_static_1_3:
+            if not _is_static_1_3_section_id(s.id):
                 base_sections.append(s)
     else:
         for s in _default_sections(page_limit):
-            is_static_1_3 = (
-                s.id.startswith(("section-1-", "section-2-", "section-3-"))
-                or s.id in {"section-1-company-overview", "section-2-team-overview", "section-3-our-work"}
-            )
-            if not is_static_1_3:
+            if not _is_static_1_3_section_id(s.id):
                 base_sections.append(s)
 
     merged = [*sections_1_3, *base_sections]
@@ -747,12 +805,94 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
 
 async def generate_sections_1_3(
     rfp_id: str,
+    *,
+    force_regenerate: bool = False,
 ) -> tuple[ProposalDraft, ProposalBrandVoice, ProposalResearchCache]:
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
     rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
 
+    existing_draft = get_proposal_draft(rfp_id)
+    existing_sections_1_3: list[ProposalSection] = []
+    has_section1 = has_section2 = has_section3 = False
+    existing_section1: list[ProposalSection] = []
+    existing_section2: list[ProposalSection] = []
+    existing_section3: list[ProposalSection] = []
+
+    if force_regenerate:
+        logger.info(
+            "Force-regenerating sections 1–3 for %s (explicit draft request)",
+            rfp_id,
+        )
+    elif existing_draft:
+        # Check if we already have COMPLETE sections 1-3 with content
+        existing_sections_1_3 = [
+            s for s in existing_draft.sections
+            if s.id.startswith(("section-1-", "section-2-", "section-3-"))
+        ]
+
+        # Check if all three section groups are present and have content
+        has_section1 = any(
+            s.id.startswith("section-1-") and s.content.strip()
+            for s in existing_sections_1_3
+        )
+        has_section2 = any(
+            s.id.startswith("section-2-") and s.content.strip()
+            for s in existing_sections_1_3
+        )
+        has_section3 = any(
+            s.id.startswith("section-3-") and s.content.strip()
+            for s in existing_sections_1_3
+        )
+
+        if has_section1 and has_section2 and has_section3:
+            logger.info(
+                "Sections 1–3 already complete for %s — using cached version. "
+                "Use RESET to regenerate.",
+                rfp_id,
+            )
+            research = get_research_cache(rfp_id)
+            brand_voice = (
+                research.brand_voice
+                if research and research.brand_voice
+                else ProposalBrandVoice(
+                    tone="professional", style="narrative", voice="first_person"
+                )
+            )
+            return existing_draft, brand_voice, research or ProposalResearchCache(
+                rfp_id=rfp_id
+            )
+
+        missing = []
+        if not has_section1:
+            missing.append("Section 1 (Company)")
+        if not has_section2:
+            missing.append("Section 2 (Team)")
+        if not has_section3:
+            missing.append("Section 3 (Our Work)")
+        logger.info(
+            "Sections 1–3 incomplete for %s (missing: %s) — will preserve existing and regenerate missing",
+            rfp_id,
+            ", ".join(missing),
+        )
+        existing_section1 = (
+            [s for s in existing_sections_1_3 if s.id.startswith("section-1-")]
+            if has_section1
+            else []
+        )
+        existing_section2 = (
+            [s for s in existing_sections_1_3 if s.id.startswith("section-2-")]
+            if has_section2
+            else []
+        )
+        existing_section3 = (
+            [s for s in existing_sections_1_3 if s.id.startswith("section-3-")]
+            if has_section3
+            else []
+        )
+
+    preserve_existing = bool(existing_draft and not force_regenerate)
     logger.info("Sections 1–3 generation (LangGraph) starting for %s", rfp_id)
 
     async def _on_sections_partial(
@@ -767,7 +907,25 @@ async def generate_sections_1_3(
             brand_voice=brand_voice,
         )
 
-    sections_1_3, brand_voice, provider = await run_sections_1_3_graph(
+    # Seed Section 1 stubs immediately so the UI can show 1.1–1.5 while agents run.
+    if not (preserve_existing and has_section1):
+        stub_sections = [
+            s
+            for s in _default_sections(rfp.page_limit)
+            if s.id.startswith("section-1-")
+        ]
+        await _persist_sections_1_3_partial(
+            rfp_id,
+            stub_sections,
+            "pending",
+            brand_voice=None,
+        )
+
+    existing_sections_for_graph = existing_sections_1_3 if preserve_existing else []
+    skip_section_1 = preserve_existing and has_section1
+    skip_section_2 = preserve_existing and has_section2
+    skip_section_3 = preserve_existing and has_section3
+    sections_1_3, brand_voice, provider, section1_editorial = await run_sections_1_3_graph(
         rfp_id=rfp.id,
         rfp_title=rfp.title,
         rfp_client=rfp.client,
@@ -776,16 +934,91 @@ async def generate_sections_1_3(
         rfp_context=rfp_context,
         page_limit=rfp.page_limit,
         on_sections_partial=_on_sections_partial,
+        existing_sections=existing_sections_for_graph,
+        skip_section_1=skip_section_1,
+        skip_section_2=skip_section_2,
+        skip_section_3=skip_section_3,
     )
 
-    empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
-    if empty_ids:
-        logger.warning(
-            "Sections 1–3 first pass left empty %s for %s — retrying graph once",
-            empty_ids,
-            rfp_id,
+    # Merge with existing sections if any were already complete
+    if preserve_existing and (existing_section1 or existing_section2 or existing_section3):
+        # Replace newly generated sections with existing ones that were already complete
+        merged_sections = []
+        for section in sections_1_3:
+            # If this is a section 1 and we already had good section 1, use the existing one
+            if section.id.startswith("section-1-") and existing_section1:
+                # Check if we already added sections from existing_section1
+                if not any(s.id == section.id for s in merged_sections):
+                    # Find matching existing section or use new one
+                    existing = next((s for s in existing_section1 if s.id == section.id), None)
+                    merged_sections.append(existing if existing else section)
+            elif section.id.startswith("section-2-") and existing_section2:
+                existing = next((s for s in existing_section2 if s.id == section.id), None)
+                merged_sections.append(existing if existing else section)
+            elif section.id.startswith("section-3-") and existing_section3:
+                existing = next((s for s in existing_section3 if s.id == section.id), None)
+                merged_sections.append(existing if existing else section)
+            else:
+                merged_sections.append(section)
+        
+        # Add any existing sections that weren't in the newly generated list
+        for section in existing_section1 + existing_section2 + existing_section3:
+            if not any(s.id == section.id for s in merged_sections):
+                merged_sections.append(section)
+        
+        if merged_sections:
+            logger.info(
+                "Merged %d existing sections with %d newly generated sections",
+                len(existing_section1 + existing_section2 + existing_section3),
+                len(sections_1_3)
+            )
+            sections_1_3 = merged_sections
+
+    # Parallel tracks persist via partial callbacks; the graph return can still
+    # omit a track if stream accumulation fails. Fold richer draft content back in.
+    draft_after_graph = get_proposal_draft(rfp_id)
+    if draft_after_graph:
+        by_id = {s.id: s for s in sections_1_3}
+        for section in draft_after_graph.sections:
+            if not _is_static_1_3_section_id(section.id):
+                continue
+            prior = by_id.get(section.id)
+            by_id[section.id] = (
+                _prefer_richer_section(prior, section) if prior is not None else section
+            )
+        ordered_ids: list[str] = []
+        for section in sections_1_3:
+            if section.id not in ordered_ids:
+                ordered_ids.append(section.id)
+        for section in draft_after_graph.sections:
+            if _is_static_1_3_section_id(section.id) and section.id not in ordered_ids:
+                ordered_ids.append(section.id)
+        sections_1_3 = [by_id[sid] for sid in ordered_ids if sid in by_id]
+
+    def _group_has_content(prefix: str) -> bool:
+        return any(
+            s.id.startswith(prefix) and (s.content or "").strip() for s in sections_1_3
         )
-        sections_1_3, brand_voice, provider = await run_sections_1_3_graph(
+
+    missing_groups = [
+        label
+        for label, prefix, has in (
+            ("Section 1 (Company)", "section-1-", _group_has_content("section-1-")),
+            ("Section 2 (Team)", "section-2-", _group_has_content("section-2-")),
+            ("Section 3 (Our Work)", "section-3-", _group_has_content("section-3-")),
+        )
+        if not has
+    ]
+
+    empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
+    if empty_ids or missing_groups:
+        logger.warning(
+            "Sections 1–3 first pass incomplete for %s (empty=%s missing_groups=%s) — retrying graph once",
+            rfp_id,
+            empty_ids,
+            missing_groups,
+        )
+        sections_1_3, brand_voice, provider, section1_editorial = await run_sections_1_3_graph(
             rfp_id=rfp.id,
             rfp_title=rfp.title,
             rfp_client=rfp.client,
@@ -794,8 +1027,43 @@ async def generate_sections_1_3(
             rfp_context=rfp_context,
             page_limit=rfp.page_limit,
             on_sections_partial=_on_sections_partial,
+            existing_sections=existing_sections_for_graph,
+            skip_section_1=skip_section_1 or _group_has_content("section-1-"),
+            skip_section_2=skip_section_2 or _group_has_content("section-2-"),
+            skip_section_3=skip_section_3 or _group_has_content("section-3-"),
         )
+        # Re-fold draft after retry
+        draft_after_retry = get_proposal_draft(rfp_id)
+        if draft_after_retry:
+            by_id = {s.id: s for s in sections_1_3}
+            for section in draft_after_retry.sections:
+                if not _is_static_1_3_section_id(section.id):
+                    continue
+                prior = by_id.get(section.id)
+                by_id[section.id] = (
+                    _prefer_richer_section(prior, section) if prior is not None else section
+                )
+            ordered_ids = []
+            for section in sections_1_3:
+                if section.id not in ordered_ids:
+                    ordered_ids.append(section.id)
+            for section in draft_after_retry.sections:
+                if _is_static_1_3_section_id(section.id) and section.id not in ordered_ids:
+                    ordered_ids.append(section.id)
+            sections_1_3 = [by_id[sid] for sid in ordered_ids if sid in by_id]
+
         empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
+        still_missing = [
+            label
+            for label, prefix in (
+                ("Section 1 (Company)", "section-1-"),
+                ("Section 2 (Team)", "section-2-"),
+                ("Section 3 (Our Work)", "section-3-"),
+            )
+            if not any(
+                s.id.startswith(prefix) and (s.content or "").strip() for s in sections_1_3
+            )
+        ]
         if empty_ids:
             from app.services.proposal_section_editor import improve_proposal_section
 
@@ -825,6 +1093,18 @@ async def generate_sections_1_3(
                         "Targeted improve failed for %s (%s): %s", rfp_id, sid, exc
                     )
             empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
+            still_missing = [
+                label
+                for label, prefix in (
+                    ("Section 1 (Company)", "section-1-"),
+                    ("Section 2 (Team)", "section-2-"),
+                    ("Section 3 (Our Work)", "section-3-"),
+                )
+                if not any(
+                    s.id.startswith(prefix) and (s.content or "").strip()
+                    for s in sections_1_3
+                )
+            ]
             if empty_ids:
                 titles = [s.title for s in sections_1_3 if s.id in empty_ids]
                 raise ProposalError(
@@ -832,6 +1112,12 @@ async def generate_sections_1_3(
                     f"{', '.join(titles)}. Check KB (02_ company overview, 04 bios, 03_CS) and retry.",
                     status_code=502,
                 )
+        if still_missing:
+            raise ProposalError(
+                "Sections 1–3 incomplete after generation — missing: "
+                f"{', '.join(still_missing)}. Click Reset, then Draft Sections 1–3 again.",
+                status_code=502,
+            )
 
     now = datetime.now(timezone.utc).isoformat()
     existing = get_proposal_draft(rfp_id)
@@ -891,6 +1177,9 @@ async def generate_sections_1_3(
         evidenceCorpus=prior_research.evidence_corpus if prior_research else [],
         retrievalRounds=prior_research.retrieval_rounds if prior_research else 0,
         coverageThreshold=prior_research.coverage_threshold if prior_research else 85,
+        section1EditorialReview=section1_editorial or (
+            prior_research.section1_editorial_review if prior_research else None
+        ),
         pipelineCheckpoint=prior_research.pipeline_checkpoint if prior_research else None,
         updatedAt=now,
         provider=provider,

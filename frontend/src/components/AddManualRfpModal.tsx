@@ -3,14 +3,11 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import type { RfpPriority } from "@/types/rfp";
 
 interface AddManualRfpModalProps {
   open: boolean;
   onClose: () => void;
 }
-
-const PRIORITIES: RfpPriority[] = ["critical", "high", "medium", "low"];
 
 const defaultDueDate = (): string => {
   const date = new Date();
@@ -26,10 +23,16 @@ export function AddManualRfpModal({ open, onClose }: AddManualRfpModalProps) {
   const [mounted, setMounted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dueDate, setDueDate] = useState(defaultDueDate);
+  const [dueDateHint, setDueDateHint] = useState<string | null>(null);
+  const [extractingDate, setExtractingDate] = useState(false);
 
   const resetForm = useCallback(() => {
     setError(null);
     setSubmitting(false);
+    setDueDate(defaultDueDate());
+    setDueDateHint(null);
+    setExtractingDate(false);
   }, []);
 
   useEffect(() => {
@@ -52,6 +55,42 @@ export function AddManualRfpModal({ open, onClose }: AddManualRfpModalProps) {
     };
   }, [open, onClose, resetForm]);
 
+  async function handlePdfChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      setDueDateHint(null);
+      return;
+    }
+
+    setExtractingDate(true);
+    setDueDateHint(null);
+
+    const formData = new FormData();
+    formData.append("pdf", file);
+
+    try {
+      const response = await fetch("/api/rfps/extract-due-date", {
+        method: "POST",
+        body: formData,
+      });
+      const data = (await response.json()) as {
+        dueDate?: string | null;
+        error?: string;
+      };
+
+      if (response.ok && data.dueDate) {
+        setDueDate(data.dueDate);
+        setDueDateHint("Due date detected from PDF");
+      } else {
+        setDueDateHint("No due date found in PDF — enter manually");
+      }
+    } catch {
+      setDueDateHint("Could not read PDF — enter due date manually");
+    } finally {
+      setExtractingDate(false);
+    }
+  }
+
   if (!open || !mounted) return null;
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -61,6 +100,7 @@ export function AddManualRfpModal({ open, onClose }: AddManualRfpModalProps) {
 
     const form = event.currentTarget;
     const formData = new FormData(form);
+    formData.set("dueDate", dueDate);
 
     try {
       const response = await fetch("/api/rfps", {
@@ -80,6 +120,7 @@ export function AddManualRfpModal({ open, onClose }: AddManualRfpModalProps) {
 
       onClose();
       form.reset();
+      resetForm();
       router.refresh();
       if (data.rfp?.id) {
         router.push(`/rfps/${data.rfp.id}`);
@@ -117,8 +158,8 @@ export function AddManualRfpModal({ open, onClose }: AddManualRfpModalProps) {
               Add New RFP
             </h2>
             <p className="mt-2 text-sm leading-relaxed text-zo-text-secondary">
-              Enter opportunity details and optionally attach the solicitation
-              PDF.
+              Enter opportunity details and attach the solicitation PDF. Due date
+              is auto-detected from the PDF when possible.
             </p>
           </div>
           <button
@@ -169,9 +210,20 @@ export function AddManualRfpModal({ open, onClose }: AddManualRfpModalProps) {
                   type="date"
                   name="dueDate"
                   required
-                  defaultValue={defaultDueDate()}
+                  value={dueDate}
+                  onChange={(event) => {
+                    setDueDate(event.target.value);
+                    setDueDateHint(null);
+                  }}
                   className={fieldClass}
                 />
+                {(extractingDate || dueDateHint) && (
+                  <p className="mt-1.5 text-xs text-zo-text-muted">
+                    {extractingDate
+                      ? "Reading due date from PDF…"
+                      : dueDateHint}
+                  </p>
+                )}
               </label>
 
               <label className="block">
@@ -196,64 +248,6 @@ export function AddManualRfpModal({ open, onClose }: AddManualRfpModalProps) {
                 />
               </label>
 
-              <label className="block">
-                <span className="text-sm font-medium text-foreground">
-                  Priority
-                </span>
-                <select
-                  name="priority"
-                  defaultValue="medium"
-                  className={fieldClass}
-                >
-                  {PRIORITIES.map((priority) => (
-                    <option key={priority} value={priority}>
-                      {priority.charAt(0).toUpperCase() + priority.slice(1)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="block">
-                <span className="text-sm font-medium text-foreground">
-                  Page limit
-                </span>
-                <input
-                  type="number"
-                  name="pageLimit"
-                  min={1}
-                  placeholder="Optional"
-                  className={fieldClass}
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-sm font-medium text-foreground">
-                  Est. value (USD)
-                </span>
-                <input
-                  type="number"
-                  name="estimatedValue"
-                  min={0}
-                  step={1000}
-                  placeholder="Optional"
-                  className={fieldClass}
-                />
-              </label>
-
-              <div className="hidden sm:block" aria-hidden="true" />
-
-              <label className="block sm:col-span-2">
-                <span className="text-sm font-medium text-foreground">
-                  Description / notes
-                </span>
-                <textarea
-                  name="description"
-                  rows={3}
-                  placeholder="Scope summary, submission requirements, or internal notes"
-                  className={`${fieldClass} resize-y`}
-                />
-              </label>
-
               <label className="block sm:col-span-2">
                 <span className="text-sm font-medium text-foreground">
                   Solicitation PDF
@@ -262,6 +256,7 @@ export function AddManualRfpModal({ open, onClose }: AddManualRfpModalProps) {
                   type="file"
                   name="pdf"
                   accept="application/pdf,.pdf"
+                  onChange={handlePdfChange}
                   className={`${fieldClass} file:mr-3 file:rounded-md file:border-0 file:bg-zo-orange file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-white`}
                 />
               </label>
@@ -285,7 +280,7 @@ export function AddManualRfpModal({ open, onClose }: AddManualRfpModalProps) {
             </button>
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || extractingDate}
               className="zo-btn w-full sm:w-auto disabled:opacity-60"
             >
               {submitting ? "Saving…" : "Add RFP"}

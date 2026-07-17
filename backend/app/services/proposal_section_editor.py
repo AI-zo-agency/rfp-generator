@@ -712,19 +712,14 @@ async def _redraft_rfp_section(
             "Try a more specific instruction or re-run Phase 3 for this section.",
             status_code=422,
         )
-    kb_refs = raw.get("kbRefs") or raw.get("kb_refs") or []
-    if not isinstance(kb_refs, list):
-        kb_refs = []
-    from_text = re.findall(r"\[E(\d+)\]", content)
-    refs = {f"E{n}" for n in from_text}
-    refs.update(str(r) for r in kb_refs if str(r).strip())
-
+    # KB references removed - not included in proposals
+    
     updated = section.model_copy(
         update={
             "content": content,
             "designer_note": raw.get("designerNote") or raw.get("designer_note"),
             "status": "generated",
-            "kb_refs": sorted(refs, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0),
+            "kb_refs": [],
         }
     )
     return updated, provider
@@ -792,13 +787,13 @@ async def _improve_static_section(
         title=section.title,
         register="narrative",
     )
-    kb_refs = raw.get("kbRefs") or sources[:8]
+    # KB references removed - not included in proposals
     updated = section.model_copy(
         update={
             "content": content or section.content,
             "designer_note": raw.get("designerNote") or section.designer_note,
             "status": "generated",
-            "kb_refs": [str(r) for r in kb_refs] if isinstance(kb_refs, list) else sources[:8],
+            "kb_refs": [],
         }
     )
     return updated, provider

@@ -23,11 +23,16 @@ PROPOSAL_BUCKET_CHAR_LIMITS = {
 
 PROPOSAL_KB_BUCKETS = ("zo_voice", "company", "bios", "case_studies")
 
+# Referenced in prompts — retrieval itself is search-driven, not hardcoded to this file.
+MASTER_TEAM_ROSTER_DOC = "02_MasterTemplate_OrgStructure_AllTeamBios.pdf"
+MASTER_TEAM_ROSTER_CHAR_LIMIT = 500_000
+
 PROPOSAL_QUERY_PLANNER_PROMPT = """You plan targeted Supermemory knowledge-base searches for zö agency proposal Sections 1–3.
 Given the RFP excerpt, return 10–14 specific queries to retrieve:
 - zö brand voice / proposal writing tone (zoVoiceQueries)
 - company overview, certifications, insurance, org facts for Section 1 (companyQueries)
 - team bios 04_Bio_ and roles the RFP requires (bioQueries)
+- master team roster 02_MasterTemplate_OrgStructure_AllTeamBios.pdf for org structure (bioQueries)
 - case studies 03_CS_ and won proposals 06_ matching sector/client/scope (caseStudyQueries)
 
 Use client name, location, sector, and specific deliverables from the RFP in queries.
@@ -49,10 +54,8 @@ async def search_knowledge_base(
     category: str | None = None,
     max_chars: int | None = None,
 ) -> tuple[str, list[str]]:
-    if not supermemory.is_configured():
-        return "(Supermemory not configured.)", []
-
-    filters: dict[str, Any] = dict(supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS)
+    """Search Supermemory and return full indexed documents (not single chunks)."""
+    filters: dict[str, Any] | None = None
     if category:
         filters = {
             "AND": [
@@ -60,33 +63,62 @@ async def search_knowledge_base(
                 {"key": "category", "value": category},
             ]
         }
-
-    try:
-        hits = await supermemory.search_documents(
-            query=query,
-            limit=limit,
-            include_full_docs=True,
-            filters=filters,
-        )
-        hits = [hit for hit in hits if supermemory.is_knowledge_base_hit(hit)]
-    except supermemory.SupermemoryError:
-        return "(Supermemory search failed.)", []
-
-    sources: list[str] = []
-    for hit in hits:
-        metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
-        label = (
-            hit.get("customId")
-            or metadata.get("fileName")
-            or metadata.get("title")
-            or hit.get("id")
-            or "document"
-        )
-        sources.append(str(label))
-
-    text = supermemory.format_search_hits(
-        hits, max_chars=max_chars or SEARCH_CHARACTER_LIMIT
+    return await search_and_fetch_full(
+        query,
+        limit=limit,
+        max_chars=max_chars or SEARCH_CHARACTER_LIMIT,
+        filters=filters,
     )
+
+
+async def search_and_fetch_full(
+    query: str,
+    *,
+    limit: int = PROPOSAL_KB_SEARCH_LIMIT,
+    max_chars: int = SEARCH_CHARACTER_LIMIT,
+    filters: dict[str, Any] | None = None,
+) -> tuple[str, list[str]]:
+    """Run hybrid search, then load each matching document's full indexed text."""
+    if not supermemory.is_configured():
+        return "(Supermemory not configured.)", []
+
+    hits = await _search_hits_all_modes(query, limit=limit, filters=filters)
+    return await fetch_full_documents_for_hits(hits, max_chars=max_chars)
+
+
+async def fetch_full_documents_for_hits(
+    hits: list[dict[str, Any]],
+    *,
+    max_chars: int,
+) -> tuple[str, list[str]]:
+    """For each unique search hit, load the complete document via v3 GET."""
+    seen_docs: set[str] = set()
+    parts: list[str] = []
+    sources: list[str] = []
+    total = 0
+
+    for hit in hits:
+        doc_key = supermemory.document_dedupe_key(hit)
+        if not doc_key or doc_key in seen_docs:
+            continue
+        seen_docs.add(doc_key)
+
+        content = await supermemory.resolve_hit_document_content(hit)
+        if not content:
+            continue
+
+        label = supermemory.hit_file_name(hit) or doc_key
+        remaining = max_chars - total
+        if remaining <= 0:
+            break
+        block = f"### {label}\n{content}"
+        if len(block) > remaining:
+            block = block[:remaining]
+        parts.append(block)
+        sources.append(label)
+        total += len(block)
+
+    text = "\n\n".join(parts).strip()
     return text or "(No matching knowledge-base content.)", sources
 
 
@@ -137,8 +169,8 @@ def _rfp_topic_queries(rfp_client: str, rfp_sector: str, rfp_context: str) -> di
         "zö agency past completed projects case study",
     ])
     extras["bios"].extend([
-        "zö agency team bios 02_MasterTemplate_AllTeamBios.pdf 04_Bio_",
-        "zö agency team member professional resume",
+        f"zö agency team bios {MASTER_TEAM_ROSTER_DOC} 04_Bio_",
+        "zö agency team member professional resume 04_Bio_",
     ])
 
     if rfp_client.strip():
@@ -212,17 +244,49 @@ async def _plan_proposal_kb_queries(
         return empty
 
 
+async def _search_hits_all_modes(
+    query: str,
+    *,
+    limit: int,
+    filters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    active_filters = filters or supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+
+    for search_fn in (supermemory.search_documents, supermemory.search_document_chunks):
+        try:
+            if search_fn is supermemory.search_documents:
+                hits = await search_fn(
+                    query=query,
+                    limit=limit,
+                    include_full_docs=True,
+                    search_mode="hybrid",
+                    filters=active_filters,
+                )
+            else:
+                hits = await search_fn(
+                    query=query,
+                    limit=limit,
+                    filters=active_filters,
+                )
+        except supermemory.SupermemoryError:
+            continue
+
+        for hit in hits:
+            if not supermemory.is_knowledge_base_hit(hit):
+                continue
+            key = supermemory.document_dedupe_key(hit) or str(hit.get("id") or id(hit))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(hit)
+
+    return merged
+
+
 async def _search_hits(query: str) -> list[dict[str, Any]]:
-    try:
-        hits = await supermemory.search_documents(
-            query=query,
-            limit=PROPOSAL_KB_SEARCH_LIMIT,
-            include_full_docs=True,
-            filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
-        )
-        return [hit for hit in hits if supermemory.is_knowledge_base_hit(hit)]
-    except supermemory.SupermemoryError:
-        return []
+    return await _search_hits_all_modes(query, limit=PROPOSAL_KB_SEARCH_LIMIT)
 
 
 def _merge_hits(hits_by_query: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -230,7 +294,7 @@ def _merge_hits(hits_by_query: list[list[dict[str, Any]]]) -> list[dict[str, Any
     merged: list[dict[str, Any]] = []
     for hits in hits_by_query:
         for hit in hits:
-            key = str(hit.get("id") or hit.get("customId") or id(hit))
+            key = supermemory.document_dedupe_key(hit) or str(hit.get("id") or id(hit))
             if key in seen:
                 continue
             seen.add(key)
@@ -238,24 +302,83 @@ def _merge_hits(hits_by_query: list[list[dict[str, Any]]]) -> list[dict[str, Any
     return merged
 
 
-def _hits_to_bundle(
-    hits: list[dict[str, Any]],
+async def fetch_case_study_candidates_jit(
     *,
-    max_chars: int,
+    rfp_client: str,
+    rfp_sector: str,
+    rfp_context: str = "",
+    max_chars: int = 400_000,
 ) -> tuple[str, list[str]]:
+    """JIT case-study index for Evidence Selection — no bulk upfront retrieval."""
+    # Sector/service cues only — NEVER the current RFP client (that is not past work).
+    sector = (rfp_sector or "government").strip()
+    queries = [
+        f"03_CS_ {sector} case study project outcomes",
+        f"06_WON_ {sector} proposal past performance",
+        "03_CS_ government municipal digital campaign results",
+        "03_CS_ state agency media outdoor recreation campaign",
+    ]
+    del rfp_client, rfp_context, max_chars
+
+    seen_sources: set[str] = set()
+    parts: list[str] = []
     sources: list[str] = []
-    for hit in hits:
-        metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
-        label = (
-            hit.get("customId")
-            or metadata.get("fileName")
-            or metadata.get("title")
-            or hit.get("id")
-            or "document"
+    total = 0
+    char_cap = 80_000
+
+    for i, query in enumerate(queries, 1):
+        logger.info(
+            "  └─ [Evidence Selection] JIT query %d/%d: %s",
+            i,
+            len(queries),
+            query[:100],
         )
-        sources.append(str(label))
-    text = supermemory.format_search_hits(hits, max_chars=max_chars)
-    return text or "(No matching knowledge-base content.)", sources
+        text, srcs = await search_knowledge_base(query, limit=4, max_chars=40_000)
+        if not text.strip():
+            continue
+        for src in srcs:
+            if src not in seen_sources:
+                seen_sources.add(src)
+                sources.append(src)
+        remaining = char_cap - total
+        if remaining <= 0:
+            break
+        block = text[:remaining]
+        parts.append(block)
+        total += len(block)
+
+    return "\n\n".join(parts), sources
+
+
+async def fetch_master_team_roster(
+    *,
+    rfp_client: str = "",
+    rfp_sector: str = "",
+    rfp_context: str = "",
+) -> tuple[str, list[str]]:
+    """Fetch the exact Master Team Roster document used for team strategy."""
+    del rfp_client, rfp_sector, rfp_context
+
+    try:
+        document = await supermemory.find_document_by_file_name(MASTER_TEAM_ROSTER_DOC)
+        if document:
+            custom_id = supermemory.document_fetch_key(document)
+            if custom_id:
+                content = await supermemory.get_document_content(custom_id=custom_id)
+                if content.strip():
+                    logger.info(
+                        "  └─ [Team Selection] exact roster: %s (%d chars)",
+                        MASTER_TEAM_ROSTER_DOC,
+                        len(content),
+                    )
+                    return content[:MASTER_TEAM_ROSTER_CHAR_LIMIT], [MASTER_TEAM_ROSTER_DOC]
+    except supermemory.SupermemoryError as exc:
+        logger.warning("Exact Master Team Roster fetch failed: %s", exc)
+
+    # Fallback only when the exact document cannot be fetched.
+    query = f"{MASTER_TEAM_ROSTER_DOC} organizational structure team roster"
+    logger.info("  └─ [Team Selection] fallback roster query: %s", query)
+    return await search_and_fetch_full(query, limit=4, max_chars=MASTER_TEAM_ROSTER_CHAR_LIMIT)
 
 
 async def _gather_bucket(
@@ -269,13 +392,16 @@ async def _gather_bucket(
     all_hits: list[list[dict[str, Any]]] = []
     for i, query in enumerate(queries, 1):
         logger.info(
-            "  [%s] query %d/%d: %s", bucket, i, len(queries), query[:80]
+            "  └─ [Knowledge Base Retriever] [%s] query %d/%d: %s", bucket, i, len(queries), query[:80]
         )
         hits = await _search_hits(query)  # One at a time — no flooding
         all_hits.append(hits)
     hits = _merge_hits(all_hits)
     logger.info("  [%s] merged %d unique hits", bucket, len(hits))
-    return _hits_to_bundle(hits, max_chars=PROPOSAL_BUCKET_CHAR_LIMITS[bucket])
+    return await fetch_full_documents_for_hits(
+        hits,
+        max_chars=PROPOSAL_BUCKET_CHAR_LIMITS[bucket],
+    )
 
 
 async def gather_proposal_kb_for_sections(
@@ -285,8 +411,13 @@ async def gather_proposal_kb_for_sections(
     rfp_sector: str,
     rfp_location: str | None,
     rfp_context: str,
+    skip_company: bool = False,
 ) -> dict[str, tuple[str, list[str]]]:
-    """Run 18–25 targeted Supermemory queries grouped for Sections 1–3."""
+    """Run targeted Supermemory queries grouped for Sections 1–3.
+
+    When skip_company=True (Company Qualification S1 path), the company bucket is
+    omitted — Section 1 uses JIT Company Truth retrieval instead.
+    """
     if not supermemory.is_configured():
         empty = "(Supermemory not configured.)", []
         return {key: empty for key in PROPOSAL_KB_BUCKETS}
@@ -300,9 +431,15 @@ async def gather_proposal_kb_for_sections(
     )
     topic = _rfp_topic_queries(rfp_client, rfp_sector, rfp_context)
 
+    active_buckets = (
+        ("zo_voice", "bios", "case_studies")
+        if skip_company
+        else PROPOSAL_KB_BUCKETS
+    )
+
     bucket_queries: dict[str, list[str]] = {}
     total_queries = 0
-    for bucket in PROPOSAL_KB_BUCKETS:
+    for bucket in active_buckets:
         merged = _unique_queries(planned.get(bucket, []), topic.get(bucket, []))
         if not merged:
             merged = [
@@ -315,21 +452,33 @@ async def gather_proposal_kb_for_sections(
         total_queries += len(bucket_queries[bucket])
 
     logger.info(
-        "Proposal KB search for %s / %s: %d queries across 4 buckets",
+        "Proposal KB search for %s / %s: %d queries across %d buckets%s",
         rfp_client,
         rfp_sector,
         total_queries,
+        len(active_buckets),
+        " (company skipped — CQ S1 JIT)" if skip_company else "",
     )
 
-    # All 4 buckets run in parallel (asyncio.gather), but within each bucket
-    # the individual queries run sequentially one-by-one for complete, ordered retrieval.
-    logger.info("Gathering all 4 KB buckets in parallel (per-bucket queries are sequential)...")
-    zo_voice, company, bios, case_studies = await asyncio.gather(
-        _gather_bucket("zo_voice", bucket_queries["zo_voice"]),
-        _gather_bucket("company", bucket_queries["company"]),
-        _gather_bucket("bios", bucket_queries["bios"]),
-        _gather_bucket("case_studies", bucket_queries["case_studies"]),
+    # Buckets run in parallel; within each bucket queries run sequentially.
+    logger.info(
+        "Gathering %d KB buckets in parallel (per-bucket queries are sequential)...",
+        len(active_buckets),
     )
+    if skip_company:
+        zo_voice, bios, case_studies = await asyncio.gather(
+            _gather_bucket("zo_voice", bucket_queries["zo_voice"]),
+            _gather_bucket("bios", bucket_queries["bios"]),
+            _gather_bucket("case_studies", bucket_queries["case_studies"]),
+        )
+        company = ("", [])
+    else:
+        zo_voice, company, bios, case_studies = await asyncio.gather(
+            _gather_bucket("zo_voice", bucket_queries["zo_voice"]),
+            _gather_bucket("company", bucket_queries["company"]),
+            _gather_bucket("bios", bucket_queries["bios"]),
+            _gather_bucket("case_studies", bucket_queries["case_studies"]),
+        )
 
     logger.info(
         "Proposal KB gathered for %s: voice=%d co=%d bio=%d cs=%d chars",
@@ -346,3 +495,84 @@ async def gather_proposal_kb_for_sections(
         "bios": bios,
         "case_studies": case_studies,
     }
+
+
+def _is_case_study_source(file_name: str) -> bool:
+    lowered = file_name.strip().casefold()
+    return lowered.startswith("03_cs") or "03_cs_" in lowered or "case study" in lowered
+
+
+async def search_evidence_candidate_index(
+    *,
+    rfp_client: str,
+    rfp_sector: str,
+    rfp_context: str = "",
+    limit_per_query: int = 5,
+) -> list[dict[str, str]]:
+    """Lightweight evidence index — search hit titles/snippets only, no full doc fetch."""
+    from app.services.company_qualification.schemas import EvidenceCandidate
+
+    if not supermemory.is_configured():
+        return []
+
+    # Sector cues only — never current client name or raw RFP title (not past performance).
+    sector = (rfp_sector or "government").strip()
+    queries = [
+        f"03_CS_ {sector} case study project outcomes",
+        "03_CS_ government municipal digital campaign results",
+        "03_CS_ state agency media outdoor recreation campaign",
+        f"03_CS_ {sector} past performance outcomes",
+    ]
+    del rfp_client, rfp_context
+
+    seen_titles: set[str] = set()
+    candidates: list[dict[str, str]] = []
+
+    for i, query in enumerate(queries, 1):
+        logger.info(
+            "  └─ [Evidence Selection] index query %d/%d: %s",
+            i,
+            len(queries),
+            query[:100],
+        )
+        try:
+            hits = await supermemory.search_documents(
+                query=query,
+                limit=limit_per_query,
+                include_full_docs=False,
+                search_mode="hybrid",
+                filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
+            )
+        except supermemory.SupermemoryError:
+            continue
+
+        for hit in hits:
+            if not supermemory.is_knowledge_base_hit(hit):
+                continue
+            title = supermemory.hit_file_name(hit).strip()
+            if not title or not _is_case_study_source(title):
+                continue
+            key = title.casefold()
+            if key in seen_titles:
+                continue
+            seen_titles.add(key)
+            snippet = supermemory.hit_text(hit)[:500]
+            candidates.append(
+                EvidenceCandidate(title=title, snippet=snippet, source=title).model_dump(
+                    by_alias=True
+                )
+            )
+
+    logger.info("Evidence candidate index: %d unique case studies", len(candidates))
+    return candidates
+
+
+async def fetch_single_case_study(
+    study_title: str,
+    *,
+    max_chars: int = 120_000,
+) -> tuple[str, list[str]]:
+    """JIT full retrieval for one selected case study."""
+    query = f"03_CS_ {study_title}"
+    logger.info("  └─ [Case Study Builder] fetching: %s", study_title[:80])
+    return await search_and_fetch_full(query, max_chars=max_chars)

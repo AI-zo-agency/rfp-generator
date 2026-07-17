@@ -4,7 +4,6 @@ import Link from "next/link";
 import { formatDate } from "@/lib/format";
 import { STAGE_LABELS } from "@/lib/rfp-process";
 import type { RfpRecord } from "@/types/rfp";
-import { StatusBadge } from "./StatusBadge";
 
 interface RecentRfpsTableProps {
   rfps: RfpRecord[];
@@ -41,7 +40,6 @@ export function RecentRfpsTable({ rfps, limit = 6 }: RecentRfpsTableProps) {
               <th className="px-5 py-4">Role</th>
               <th className="px-5 py-4">Sector</th>
               <th className="px-5 py-4">Stage</th>
-              <th className="px-5 py-4">Status</th>
               <th className="px-5 py-4" />
             </tr>
           </thead>
@@ -93,9 +91,6 @@ export function RecentRfpsTable({ rfps, limit = 6 }: RecentRfpsTableProps) {
                 </td>
                 <td className="px-5 py-5 text-sm font-medium text-foreground">
                   {STAGE_LABELS[rfp.stage]}
-                </td>
-                <td className="px-5 py-5">
-                  <StatusBadge status={rfp.status} />
                 </td>
                 <td className="px-5 py-5">
                   <button

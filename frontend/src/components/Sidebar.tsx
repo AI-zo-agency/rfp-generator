@@ -7,7 +7,6 @@ import {
   IconAnalytics,
   IconDashboard,
   IconKnowledge,
-  IconPipeline,
   IconProposal,
   IconRfp,
 } from "./ui/icons";
@@ -17,11 +16,8 @@ const workspaceNav = [
   { href: "/rfps", label: "RFPs", Icon: IconRfp, prefetch: false },
   { href: "/proposals", label: "Proposals", Icon: IconProposal, prefetch: false },
   { href: "/knowledge-base", label: "Knowledge Base", Icon: IconKnowledge },
-  { href: "/pipeline", label: "Pipeline", Icon: IconPipeline },
   { href: "/analytics", label: "Analytics", Icon: IconAnalytics },
 ];
-
-const adminNav = [{ href: "/analytics", label: "Settings", Icon: IconAnalytics }];
 
 interface SidebarProps {
   collapsed: boolean;
@@ -71,22 +67,6 @@ export function Sidebar({ collapsed }: SidebarProps) {
               </Link>
             );
           })}
-        </div>
-
-        <p className="sidebar-section-label mb-3 mt-8 px-3 text-[10px] uppercase tracking-[0.28em] text-zo-text-muted">
-          Administration
-        </p>
-        <div className="space-y-1">
-          {adminNav.map((item) => (
-            <Link
-              key={item.label}
-              href={item.href}
-              className="shell-nav-link flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-normal transition-smooth"
-            >
-              <item.Icon className="h-5 w-5 shrink-0" />
-              <span className="sidebar-text">{item.label}</span>
-            </Link>
-          ))}
         </div>
       </nav>
 

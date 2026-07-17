@@ -1,4 +1,4 @@
-import type { RfpStage } from "@/types/rfp";
+import type { RfpRecord, RfpStage } from "@/types/rfp";
 
 export interface ProcessStep {
   id: RfpStage;
@@ -78,3 +78,35 @@ export const STAGE_LABELS: Record<RfpStage, string> = {
   lost: "Lost",
   passed: "Passed",
 };
+
+const PROPOSAL_STAGES: RfpStage[] = [
+  "compliance",
+  "sections_1_3",
+  "sections_4_5",
+  "pricing",
+  "review",
+  "export",
+];
+
+/** Go/No-Go analysis is done but a human has not confirmed Go yet. */
+export function needsGoNoGoDecision(rfp: RfpRecord): boolean {
+  if (rfp.goNoGo === "go" || rfp.goNoGo === "no_go" || rfp.stage === "passed") {
+    return false;
+  }
+  const analysis = rfp.goNoGoAnalysis;
+  return Boolean(analysis && !analysis.insufficientData);
+}
+
+/** Marked Go and actively in the proposal drafting pipeline. */
+export function isProposalInProgress(rfp: RfpRecord): boolean {
+  return rfp.goNoGo === "go" && PROPOSAL_STAGES.includes(rfp.stage);
+}
+
+/** Newly synced or manual intake — analysis not run yet. */
+export function isNewIntake(rfp: RfpRecord): boolean {
+  if (rfp.stage !== "intake" && rfp.stage !== "go_no_go") {
+    return false;
+  }
+  const analysis = rfp.goNoGoAnalysis;
+  return !analysis || Boolean(analysis.insufficientData);
+}

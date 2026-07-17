@@ -25,6 +25,9 @@ class LlmError(Exception):
 
 
 def is_configured() -> bool:
+    gemini_key = settings.gemini_api_key.strip()
+    if gemini_key and not _is_placeholder_key(gemini_key):
+        return True
     return bool(_openrouter_key() or _fireworks_key())
 
 
@@ -46,6 +49,61 @@ def _is_placeholder_key(key: str) -> bool:
     return lowered.startswith("your_") or lowered.startswith("paste_")
 
 
+async def _post_gemini_chat(
+    *,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    max_tokens: int | None = None,
+    temperature: float = 0.2,
+    json_mode: bool = True,
+) -> str:
+    """Call Gemini API directly."""
+    # Use v1beta for JSON mode support, but don't prefix model name with "models/"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    
+    # Convert messages to Gemini format
+    contents = []
+    for msg in messages:
+        role = "user" if msg["role"] in ("user", "system") else "model"
+        contents.append({
+            "role": role,
+            "parts": [{"text": msg["content"]}]
+        })
+    
+    generation_config: dict[str, Any] = {"temperature": temperature}
+    if json_mode:
+        generation_config["response_mime_type"] = "application/json"
+    body: dict[str, Any] = {
+        "contents": contents,
+        "generationConfig": generation_config,
+    }
+    if max_tokens:
+        body["generationConfig"]["maxOutputTokens"] = max_tokens
+    
+    logger.info("LLM request: provider=Gemini model=%s messages=%d", model, len(messages))
+    
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(url, json=body)
+    
+    if response.status_code >= 400:
+        detail = response.text.strip() or response.reason_phrase
+        logger.warning("LLM error: provider=Gemini model=%s status=%s detail=%s", model, response.status_code, detail[:300])
+        raise LlmError(f"Gemini API error ({response.status_code}): {detail}", status_code=response.status_code)
+    
+    data = response.json()
+    try:
+        content = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise LlmError(f"Gemini returned an unexpected response shape") from exc
+    
+    if not isinstance(content, str) or not content.strip():
+        raise LlmError(f"Gemini returned empty content")
+    
+    logger.info("LLM success: provider=Gemini model=%s response_chars=%d", model, len(content))
+    return content.strip()
+
+
 async def _post_chat(
     *,
     base_url: str,
@@ -56,6 +114,7 @@ async def _post_chat(
     extra_headers: dict[str, str] | None = None,
     max_tokens: int | None = None,
     temperature: float = 0.2,
+    json_mode: bool = True,
 ) -> str:
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
@@ -67,8 +126,9 @@ async def _post_chat(
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "response_format": {"type": "json_object"},
     }
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
 
@@ -122,6 +182,21 @@ async def _post_chat(
         if not isinstance(content, str) or not content.strip():
             raise LlmError(f"{provider} returned empty content")
 
+        # Check if response looks truncated (suspiciously short for a JSON response)
+        if len(content) < 30 and '"content":' in content:
+            logger.warning(
+                "LLM response appears truncated: provider=%s model=%s chars=%d content=%s",
+                provider,
+                model,
+                len(content),
+                content[:200],
+            )
+            # Check if this was due to token limits in the response
+            usage = data.get("usage", {})
+            if usage:
+                logger.info(f"Token usage: {usage}")
+            raise LlmError(f"{provider} returned truncated response (only {len(content)} chars)")
+
         logger.info(
             "LLM success: provider=%s model=%s response_chars=%d",
             provider,
@@ -143,6 +218,23 @@ async def chat_json(
 ) -> tuple[dict[str, Any], str]:
     errors: list[str] = []
 
+    # Try Gemini first if API key is configured and not skipped by preferences
+    gemini_key = settings.gemini_api_key.strip()
+    skip_gemini = settings.llm_prefer_openrouter or settings.llm_prefer_fireworks
+    if gemini_key and not _is_placeholder_key(gemini_key) and not skip_gemini:
+        try:
+            raw = await _post_gemini_chat(
+                api_key=gemini_key,
+                model=settings.gemini_model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return _parse_json_response(raw), "gemini"
+        except LlmError as exc:
+            errors.append(str(exc))
+            logger.info("Gemini failed: %s", str(exc)[:200])
+
     openrouter_key = _openrouter_key()
     skip_openrouter = settings.llm_prefer_fireworks
     if openrouter_key and not skip_openrouter:
@@ -163,7 +255,11 @@ async def chat_json(
             return _parse_json_response(raw), "openrouter"
         except LlmError as exc:
             errors.append(str(exc))
-            logger.info("OpenRouter failed, trying Fireworks fallback")
+            logger.info("OpenRouter failed: %s", str(exc)[:200])
+            # If OpenRouter response was truncated, likely due to model limits
+            # Don't bother trying Fireworks fallback as it will likely hit same issue
+            if "truncated" in str(exc).lower() or len(str(exc)) < 100:
+                logger.info("OpenRouter returned truncated response, retrying without Fireworks fallback")
 
     fireworks_key = _fireworks_key()
     if fireworks_key:
@@ -182,11 +278,94 @@ async def chat_json(
             )
             return _parse_json_response(raw), "fireworks"
         except LlmError as exc:
-            errors.append(str(exc))
+            # If Fireworks account is suspended (412), don't count it as a provider failure
+            if exc.status_code == 412:
+                logger.warning("Fireworks account suspended - skipping for future calls")
+            else:
+                errors.append(str(exc))
 
     if not errors:
         raise LlmError(
             "No LLM API key configured. Set OPENROUTER_API_KEY (primary) or FIREWORKS_API_KEY (fallback).",
+            status_code=503,
+        )
+
+    raise LlmError(
+        "All configured LLM providers failed: " + "; ".join(errors),
+        status_code=502,
+    )
+
+
+async def chat_text(
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int | None = None,
+    temperature: float = 0.2,
+) -> tuple[str, str]:
+    """Plain-text chat completion (no JSON response format)."""
+    errors: list[str] = []
+
+    gemini_key = settings.gemini_api_key.strip()
+    skip_gemini = settings.llm_prefer_openrouter or settings.llm_prefer_fireworks
+    if gemini_key and not _is_placeholder_key(gemini_key) and not skip_gemini:
+        try:
+            raw = await _post_gemini_chat(
+                api_key=gemini_key,
+                model=settings.gemini_model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                json_mode=False,
+            )
+            return raw, "gemini"
+        except LlmError as exc:
+            errors.append(str(exc))
+
+    openrouter_key = _openrouter_key()
+    skip_openrouter = settings.llm_prefer_fireworks
+    if openrouter_key and not skip_openrouter:
+        try:
+            raw = await _post_chat(
+                base_url=settings.openrouter_base_url,
+                api_key=openrouter_key,
+                model=settings.openrouter_model,
+                messages=messages,
+                provider="OpenRouter",
+                extra_headers={
+                    "HTTP-Referer": settings.app_url,
+                    "X-Title": settings.app_name,
+                },
+                max_tokens=max_tokens,
+                temperature=temperature,
+                json_mode=False,
+            )
+            return raw, "openrouter"
+        except LlmError as exc:
+            errors.append(str(exc))
+
+    fireworks_key = _fireworks_key()
+    if fireworks_key:
+        try:
+            requested = max_tokens or 4096
+            fireworks_tokens = min(requested, 8192)
+            raw = await _post_chat(
+                base_url=settings.fireworks_base_url,
+                api_key=fireworks_key,
+                model=settings.fireworks_model,
+                messages=messages,
+                provider="Fireworks",
+                max_tokens=fireworks_tokens,
+                temperature=temperature,
+                json_mode=False,
+            )
+            return raw, "fireworks"
+        except LlmError as exc:
+            if exc.status_code != 412:
+                errors.append(str(exc))
+
+    if not errors:
+        raise LlmError(
+            "No LLM API key configured. Set GEMINI_API_KEY, OPENROUTER_API_KEY, or FIREWORKS_API_KEY.",
             status_code=503,
         )
 
@@ -202,6 +381,24 @@ def _strip_code_fence(text: str) -> str:
         stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
         stripped = re.sub(r"\s*```$", "", stripped)
     return stripped.strip()
+
+
+def _extract_json_from_text(text: str) -> str:
+    """Extract JSON from text that may have explanatory prefixes or markdown formatting."""
+    text = text.strip()
+    
+    # Try to find JSON object starting with {
+    brace_start = text.find('{')
+    if brace_start > 0:
+        # There's text before the JSON, extract from the first {
+        text = text[brace_start:]
+    
+    # Also try to find JSON array starting with [
+    bracket_start = text.find('[')
+    if bracket_start >= 0 and (brace_start < 0 or bracket_start < brace_start):
+        text = text[bracket_start:]
+    
+    return _strip_code_fence(text)
 
 
 def _close_truncated_json(text: str) -> str:
@@ -422,18 +619,82 @@ def _salvage_simple_content_payload(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _salvage_recommendations_payload(text: str) -> dict[str, Any] | None:
+    """Recover complete recommendation objects from a truncated editorial-review JSON."""
+    start = text.find('"recommendations"')
+    if start == -1:
+        return None
+    bracket = text.find("[", start)
+    if bracket == -1:
+        return None
+
+    recs: list[dict[str, Any]] = []
+    i = bracket + 1
+    n = len(text)
+    while i < n:
+        while i < n and text[i] in " \t\r\n,":
+            i += 1
+        if i >= n or text[i] == "]":
+            break
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        in_str = False
+        escape = False
+        obj_start = i
+        j = i
+        closed = False
+        while j < n:
+            ch = text[j]
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = not in_str
+            elif not in_str:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        closed = True
+                        j += 1
+                        break
+            j += 1
+        if not closed:
+            break
+        try:
+            recs.append(json.loads(text[obj_start:j]))
+        except json.JSONDecodeError:
+            pass
+        i = j
+
+    if recs:
+        return {"recommendations": recs}
+    return None
+
+
 def _parse_json_response(raw: str) -> dict[str, Any]:
-    text = _strip_code_fence(raw)
+    # First try to extract JSON from any surrounding text
+    text = _extract_json_from_text(raw)
     parsed = _try_parse_json_object(text)
     if parsed is None:
         for salvager, label in (
             (_salvage_sections_payload, "section(s)"),
+            (_salvage_recommendations_payload, "recommendation(s)"),
             (_salvage_simple_content_payload, "simple content"),
             (_salvage_budget_payload, "budget field(s)"),
         ):
             salvaged = salvager(text)
             if salvaged:
-                count = len(salvaged.get("sections") or salvaged.get("lineItems") or [1])
+                count = len(
+                    salvaged.get("sections")
+                    or salvaged.get("recommendations")
+                    or salvaged.get("lineItems")
+                    or [1]
+                )
                 logger.warning(
                     "Salvaged %d %s from truncated LLM JSON",
                     count,

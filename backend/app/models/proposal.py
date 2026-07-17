@@ -273,6 +273,27 @@ class ProposalPipelineCheckpoint(BaseModel):
     updated_at: str = Field(alias="updatedAt")
 
 
+class Section1EditorialRecommendation(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    section_title: str = Field(alias="sectionTitle")
+    issue_type: str = Field(alias="issueType")
+    issue: str
+    recommendation: str
+    confidence: float = 0.0
+    suggested_replacement: str | None = Field(default=None, alias="suggestedReplacement")
+    status: Literal["pending", "approved", "rejected"] = "pending"
+
+
+class Section1EditorialReview(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    reviewed_at: str = Field(alias="reviewedAt")
+    recommendations: list[Section1EditorialRecommendation] = Field(default_factory=list)
+    provider: str | None = None
+
+
 class ProposalResearchCache(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -289,6 +310,9 @@ class ProposalResearchCache(BaseModel):
     writing_avoidances: list[str] = Field(default_factory=list, alias="writingAvoidances")
     proof_points: list[ProofPoint] = Field(default_factory=list, alias="proofPoints")
     presubmit_review: PreSubmitReview | None = Field(default=None, alias="presubmitReview")
+    section1_editorial_review: Section1EditorialReview | None = Field(
+        default=None, alias="section1EditorialReview"
+    )
     pipeline_checkpoint: ProposalPipelineCheckpoint | None = Field(
         default=None, alias="pipelineCheckpoint"
     )
