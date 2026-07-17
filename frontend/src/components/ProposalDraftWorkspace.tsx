@@ -11,6 +11,7 @@ import {
   isLikelyWipedOutline,
   rebuildOutlineFromResearch,
   staticSections1to3Complete,
+  stripLegacyMonolithSections,
 } from "@/lib/proposal-draft";
 import {
   findBudgetSection,
@@ -223,7 +224,7 @@ export function ProposalDraftWorkspace({
   const applyOutlineFromServer = useCallback((draft: ProposalOutline) => {
     saveGenerationRef.current += 1;
     skipNextSaveRef.current = true;
-    setOutline(draft);
+    setOutline(stripLegacyMonolithSections(draft));
   }, []);
 
   const recordSectionRevision = useCallback(
@@ -374,11 +375,13 @@ export function ProposalDraftWorkspace({
       skipNextSaveRef.current = true;
 
       if (draft && contentSections > 0) {
-        setOutline(draft);
+        setOutline(stripLegacyMonolithSections(draft));
         setSelectedSectionId(draft.sections[0]?.id ?? null);
         setActiveTab("content");
       } else if (researchReady && research && isLikelyWipedOutline(draft ?? buildDefaultOutline(rfp), research)) {
-        const rebuilt = rebuildOutlineFromResearch(rfp, research, draft);
+        const rebuilt = stripLegacyMonolithSections(
+          rebuildOutlineFromResearch(rfp, research, draft)
+        );
         setOutline(rebuilt);
         setSelectedSectionId(rebuilt.sections[0]?.id ?? null);
         setActiveTab("outline");
@@ -386,7 +389,7 @@ export function ProposalDraftWorkspace({
           "Section list restored from cached research — use Generate proposal to re-draft content."
         );
       } else if (draft) {
-        setOutline(draft);
+        setOutline(stripLegacyMonolithSections(draft));
         setSelectedSectionId(draft.sections[0]?.id ?? null);
         setActiveTab(draft.sections.some((s) => s.content) ? "content" : "outline");
       } else {
@@ -830,11 +833,21 @@ export function ProposalDraftWorkspace({
     setFullProposalProgress(null);
     setLiveLatestSectionTitle(null);
 
-    // 3. Wipe again after a beat — in case a late budget save raced past the first reset
+    // 3. Persist empty shell so a late autosave / race cannot resurrect old monolith sections
+    try {
+      await saveProposalDraft(rfp.id, defaults);
+    } catch {
+      // Non-fatal — DB reset already cleared content
+    }
+
+    // 4. Wipe again after a beat — only if generation has not started yet
+    const resetToken = saveGenerationRef.current;
     window.setTimeout(() => {
-      void fetch(`/api/rfps/${rfp.id}/proposal/reset`, { method: "POST" }).catch(
-        () => undefined
-      );
+      if (fullProposalAbortRef.current) return; // generation in flight — do not wipe
+      if (saveGenerationRef.current !== resetToken) return;
+      void fetch(`/api/rfps/${rfp.id}/proposal/reset`, { method: "POST" })
+        .then(() => saveProposalDraft(rfp.id, defaults))
+        .catch(() => undefined);
     }, 2500);
   };
 

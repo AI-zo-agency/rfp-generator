@@ -24,7 +24,9 @@ SECTION_SPECS: tuple[tuple[str, str, str], ...] = (
         "section-1-who-we-are",
         "1.1 — Who We Are",
         "Structure: ## Who We Are and ## Our Promise. Lead with primary capabilities only. "
-        "No client-specific pitch. No omit-tier capabilities. No certifications or insurance.",
+        "No client-specific pitch. No omit-tier capabilities. No certifications or insurance. "
+        "Address ONLY the RFP client named in the prompt — never name other clients "
+        "(including prior proposal clients like HCCC or other agencies).",
     ),
     (
         "section-1-org-structure",

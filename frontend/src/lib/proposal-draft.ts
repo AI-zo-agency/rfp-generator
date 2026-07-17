@@ -15,24 +15,45 @@ export const STATIC_SECTION_IDS = [
   "section-3-our-work",
 ] as const;
 
+export const LEGACY_MONOLITH_SECTION_IDS = new Set([
+  "section-1-company-overview",
+  "section-2-team-overview",
+  "section-3-our-work",
+]);
+
+/** Drop pre-subsection monoliths so wrong-client copy cannot reappear in the UI. */
+export function stripLegacyMonolithSections(
+  draft: ProposalOutline
+): ProposalOutline {
+  const sections = draft.sections.filter(
+    (s) => !LEGACY_MONOLITH_SECTION_IDS.has(s.id)
+  );
+  if (sections.length === draft.sections.length) return draft;
+  return { ...draft, sections };
+}
+
 export function staticSections1to3Complete(
   draft: ProposalOutline | null
 ): boolean {
   if (!draft) return false;
-  // Check if we have at least one generated section for each of the 3 groups
+  // Modern subsections only — legacy monoliths (company-overview / team-overview / our-work)
+  // must not count as complete or they keep resurfacing wrong-client copy after reset.
   const hasSection1 = draft.sections.some(
     (s) =>
-      (s.id.startsWith("section-1-") || s.id === "section-1-company-overview") &&
+      s.id.startsWith("section-1-") &&
+      s.id !== "section-1-company-overview" &&
       s.content?.trim()
   );
   const hasSection2 = draft.sections.some(
     (s) =>
-      (s.id.startsWith("section-2-") || s.id === "section-2-team-overview") &&
+      s.id.startsWith("section-2-bio-") &&
+      s.id !== "section-2-bio-placeholder" &&
       s.content?.trim()
   );
   const hasSection3 = draft.sections.some(
     (s) =>
-      (s.id.startsWith("section-3-") || s.id === "section-3-our-work") &&
+      s.id.startsWith("section-3-work-") &&
+      s.id !== "section-3-work-placeholder" &&
       s.content?.trim()
   );
   return hasSection1 && hasSection2 && hasSection3;

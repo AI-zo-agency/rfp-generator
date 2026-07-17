@@ -140,23 +140,44 @@ STATIC_SECTION_IDS = (
     "section-3-our-work",
 )
 
+# Pre-subsection monoliths — never keep these once 1.1–1.5 / bios / work cards exist.
+LEGACY_MONOLITH_SECTION_IDS = frozenset(STATIC_SECTION_IDS)
+
+
+def _is_legacy_monolith_section_id(section_id: str) -> bool:
+    return section_id in LEGACY_MONOLITH_SECTION_IDS
+
+
+def _strip_legacy_monolith_sections(
+    sections: list[ProposalSection],
+) -> list[ProposalSection]:
+    """Drop old single-block Sections 1–3 so stale client pitches cannot reappear."""
+    return [s for s in sections if not _is_legacy_monolith_section_id(s.id)]
+
 
 def static_sections_1_3_have_content(draft: ProposalDraft | None) -> bool:
-    """True when all three zö template sections have body text (checks new subsection prefixes)."""
+    """True when all three zö template sections have body text (modern subsections only)."""
     if not draft:
         return False
     has_section1 = any(
-        (s.id.startswith("section-1-") or s.id == "section-1-company-overview")
+        s.id.startswith("section-1-")
+        and not _is_legacy_monolith_section_id(s.id)
         and (s.content or "").strip()
         for s in draft.sections
     )
     has_section2 = any(
-        (s.id.startswith("section-2-") or s.id == "section-2-team-overview")
+        (
+            (s.id.startswith("section-2-bio-") and s.id != "section-2-bio-placeholder")
+            or s.id == "section-2-team-overview"
+        )
         and (s.content or "").strip()
         for s in draft.sections
     )
     has_section3 = any(
-        (s.id.startswith("section-3-") or s.id == "section-3-our-work")
+        (
+            (s.id.startswith("section-3-work-") and s.id != "section-3-work-placeholder")
+            or s.id == "section-3-our-work"
+        )
         and (s.content or "").strip()
         for s in draft.sections
     )
@@ -512,10 +533,9 @@ def _static_sections_from_draft(
 
     static: list[ProposalSection] = []
     for s in draft.sections:
-        is_static_1_3 = (
-            s.id.startswith(("section-1-", "section-2-bio-", "section-3-work-"))
-            or s.id in {"section-1-company-overview", "section-2-team-overview", "section-3-our-work"}
-        )
+        if _is_legacy_monolith_section_id(s.id):
+            continue
+        is_static_1_3 = s.id.startswith(("section-1-", "section-2-bio-", "section-3-work-"))
         if is_static_1_3:
             static.append(s)
 
@@ -536,11 +556,9 @@ def _merge_static_with_rfp_sections(
 
 
 def _is_static_1_3_section_id(section_id: str) -> bool:
-    return section_id.startswith(("section-1-", "section-2-", "section-3-")) or section_id in {
-        "section-1-company-overview",
-        "section-2-team-overview",
-        "section-3-our-work",
-    }
+    if _is_legacy_monolith_section_id(section_id):
+        return False
+    return section_id.startswith(("section-1-", "section-2-", "section-3-"))
 
 
 def _prefer_richer_section(current: ProposalSection, incoming: ProposalSection) -> ProposalSection:
@@ -578,12 +596,15 @@ async def _persist_sections_1_3_partial(
 
     by_id: dict[str, ProposalSection] = {s.id: s for s in template_1_3}
     # Keep any previously persisted 1–3 content (other parallel track).
+    # Never resurrect legacy monoliths (e.g. HCCC-era "Section 1 — Company Overview").
     if existing:
         for section in existing.sections:
             if _is_static_1_3_section_id(section.id):
                 by_id[section.id] = section
     # Apply this emit — only overwrite when incoming has real content (or new ids).
     for section in sections_1_3:
+        if _is_legacy_monolith_section_id(section.id):
+            continue
         prior = by_id.get(section.id)
         by_id[section.id] = (
             _prefer_richer_section(prior, section) if prior is not None else section
@@ -621,7 +642,7 @@ async def _persist_sections_1_3_partial(
             if not _is_static_1_3_section_id(s.id):
                 base_sections.append(s)
 
-    merged = [*sections_1_3, *base_sections]
+    merged = _strip_legacy_monolith_sections([*sections_1_3, *base_sections])
 
     merged = [
         section.model_copy(
@@ -845,17 +866,23 @@ async def generate_sections_1_3(
             if s.id.startswith(("section-1-", "section-2-", "section-3-"))
         ]
 
-        # Check if all three section groups are present and have content
+        # Modern subsections only — a leftover company-overview monolith is NOT "complete".
         has_section1 = any(
-            s.id.startswith("section-1-") and s.content.strip()
+            s.id.startswith("section-1-")
+            and not _is_legacy_monolith_section_id(s.id)
+            and s.content.strip()
             for s in existing_sections_1_3
         )
         has_section2 = any(
-            s.id.startswith("section-2-") and s.content.strip()
+            s.id.startswith("section-2-bio-")
+            and s.id != "section-2-bio-placeholder"
+            and s.content.strip()
             for s in existing_sections_1_3
         )
         has_section3 = any(
-            s.id.startswith("section-3-") and s.content.strip()
+            s.id.startswith("section-3-work-")
+            and s.id != "section-3-work-placeholder"
+            and s.content.strip()
             for s in existing_sections_1_3
         )
 
@@ -989,11 +1016,18 @@ async def generate_sections_1_3(
 
     # Parallel tracks persist via partial callbacks; the graph return can still
     # omit a track if stream accumulation fails. Fold richer draft content back in.
+    # Never fold legacy monoliths back in after a regenerate.
     draft_after_graph = get_proposal_draft(rfp_id)
     if draft_after_graph:
-        by_id = {s.id: s for s in sections_1_3}
+        by_id = {
+            s.id: s
+            for s in sections_1_3
+            if not _is_legacy_monolith_section_id(s.id)
+        }
         for section in draft_after_graph.sections:
             if not _is_static_1_3_section_id(section.id):
+                continue
+            if _is_legacy_monolith_section_id(section.id):
                 continue
             prior = by_id.get(section.id)
             by_id[section.id] = (
@@ -1001,10 +1035,16 @@ async def generate_sections_1_3(
             )
         ordered_ids: list[str] = []
         for section in sections_1_3:
+            if _is_legacy_monolith_section_id(section.id):
+                continue
             if section.id not in ordered_ids:
                 ordered_ids.append(section.id)
         for section in draft_after_graph.sections:
-            if _is_static_1_3_section_id(section.id) and section.id not in ordered_ids:
+            if (
+                _is_static_1_3_section_id(section.id)
+                and not _is_legacy_monolith_section_id(section.id)
+                and section.id not in ordered_ids
+            ):
                 ordered_ids.append(section.id)
         sections_1_3 = [by_id[sid] for sid in ordered_ids if sid in by_id]
 
@@ -1045,12 +1085,18 @@ async def generate_sections_1_3(
             skip_section_2=skip_section_2 or _group_has_content("section-2-"),
             skip_section_3=skip_section_3 or _group_has_content("section-3-"),
         )
-        # Re-fold draft after retry
+        # Re-fold draft after retry — still never resurrect legacy monoliths
         draft_after_retry = get_proposal_draft(rfp_id)
         if draft_after_retry:
-            by_id = {s.id: s for s in sections_1_3}
+            by_id = {
+                s.id: s
+                for s in sections_1_3
+                if not _is_legacy_monolith_section_id(s.id)
+            }
             for section in draft_after_retry.sections:
                 if not _is_static_1_3_section_id(section.id):
+                    continue
+                if _is_legacy_monolith_section_id(section.id):
                     continue
                 prior = by_id.get(section.id)
                 by_id[section.id] = (
@@ -1058,10 +1104,16 @@ async def generate_sections_1_3(
                 )
             ordered_ids = []
             for section in sections_1_3:
+                if _is_legacy_monolith_section_id(section.id):
+                    continue
                 if section.id not in ordered_ids:
                     ordered_ids.append(section.id)
             for section in draft_after_retry.sections:
-                if _is_static_1_3_section_id(section.id) and section.id not in ordered_ids:
+                if (
+                    _is_static_1_3_section_id(section.id)
+                    and not _is_legacy_monolith_section_id(section.id)
+                    and section.id not in ordered_ids
+                ):
                     ordered_ids.append(section.id)
             sections_1_3 = [by_id[sid] for sid in ordered_ids if sid in by_id]
 
@@ -1137,22 +1189,15 @@ async def generate_sections_1_3(
     base_sections = []
     if existing:
         for s in existing.sections:
-            is_static_1_3 = (
-                s.id.startswith(("section-1-", "section-2-", "section-3-"))
-                or s.id in {"section-1-company-overview", "section-2-team-overview", "section-3-our-work"}
-            )
-            if not is_static_1_3:
+            if not _is_static_1_3_section_id(s.id) and not _is_legacy_monolith_section_id(s.id):
                 base_sections.append(s)
     else:
         for s in _default_sections(rfp.page_limit):
-            is_static_1_3 = (
-                s.id.startswith(("section-1-", "section-2-", "section-3-"))
-                or s.id in {"section-1-company-overview", "section-2-team-overview", "section-3-our-work"}
-            )
-            if not is_static_1_3:
+            if not _is_static_1_3_section_id(s.id) and not _is_legacy_monolith_section_id(s.id):
                 base_sections.append(s)
 
-    merged = [*sections_1_3, *base_sections]
+    sections_1_3 = _strip_legacy_monolith_sections(sections_1_3)
+    merged = _strip_legacy_monolith_sections([*sections_1_3, *base_sections])
 
 
     merged = [
