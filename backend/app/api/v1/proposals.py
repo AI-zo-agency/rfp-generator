@@ -34,7 +34,13 @@ from app.services.proposal_generator import (
     run_phase4_finalize_gaps,
 )
 from app.services.proposal_section_editor import improve_proposal_section
-from app.services.proposal_repository import get_proposal_draft, get_research_cache, save_proposal_draft
+from app.services.proposal_repository import (
+    get_proposal_draft,
+    get_research_cache,
+    save_proposal_draft,
+    delete_proposal_draft,
+    delete_research_cache,
+)
 from app.services.proposal_job_runner import (
     get_proposal_job,
     proposal_job_to_dict,
@@ -107,6 +113,25 @@ def upsert_proposal(rfp_id: str, draft: ProposalDraft) -> dict[str, object]:
     return {"ok": True, "draft": draft.model_dump(by_alias=True)}
 
 
+@router.post("/{rfp_id}/proposal/reset")
+async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
+    """Hard-reset: wipe draft AND pipeline checkpoint from DB so generation starts completely fresh."""
+    if not rfp_exists(rfp_id):
+        raise HTTPException(status_code=404, detail="RFP not found")
+    try:
+        delete_proposal_draft(rfp_id)
+    except Exception as exc:
+        # Ignore errors if draft didn't exist
+        pass
+    try:
+        delete_research_cache(rfp_id)
+    except Exception as exc:
+        # Ignore errors if research didn't exist
+        pass
+    clear_pipeline_checkpoint(rfp_id)
+    return {"ok": True, "message": "Proposal draft and all checkpoints cleared from database."}
+
+
 @router.post("/{rfp_id}/proposal/generate", response_model=ProposalGenerateResponse)
 async def generate_proposal_endpoint(rfp_id: str) -> ProposalGenerateResponse:
     """Generate full proposal: static Sections 1–3 + RFP-mapped sections from evidence."""
@@ -158,7 +183,9 @@ async def generate_sections_1_3_endpoint(rfp_id: str) -> ProposalGenerateRespons
     """Generate static Sections 1–3 only (Phase 2 retrieval is a separate endpoint)."""
     try:
         async with pipeline_phase(rfp_id, "sections-1-3"):
-            draft, brand_voice, research = await generate_sections_1_3(rfp_id)
+            draft, brand_voice, research = await generate_sections_1_3(
+                rfp_id, force_regenerate=True
+            )
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:

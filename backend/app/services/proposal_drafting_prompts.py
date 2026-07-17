@@ -4,6 +4,40 @@ from __future__ import annotations
 
 from typing import Any
 
+# Anti-hallucination rules - CRITICAL for all proposal generation
+ANTI_HALLUCINATION_RULES = """
+## CRITICAL: ANTI-HALLUCINATION RULES
+
+YOU MUST NEVER:
+1. Invent statistics (retention rates, client counts, audience sizes, years of experience)
+2. Cite specific numbers unless they appear VERBATIM in the evidence corpus with [E#] citation
+3. Use team member names that are not in approved bio files (04_Bio_*.pdf)
+4. Add certifications not explicitly listed in 01_companyfacts_verified
+5. Transfer metrics from one client project to describe agency-wide capabilities
+6. Round or approximate numbers - use exact figures from KB or use [VERIFY: specific field]
+7. Spell names incorrectly (check exact spelling in bio file names)
+8. Claim "X years of Y experience" unless that exact phrasing is in verified facts
+
+VERIFIED FACTS ONLY:
+- Agency founded: 2012 (13 years total as zö agency)
+- Certifications: WBENC, WOSB (ONLY these two are verified)
+- Client retention: DO NOT cite a specific average retention rate (not formally tracked)
+- Awards: Creative Excellence 2024, Netty 2024, NYX 2024, Vega Digital 2024, Sonja's Enterprising Women 2026
+- Team: ONLY use names from approved 04_Bio_*.pdf files in KB
+- Insurance: Use [VERIFY: insurance field] for all coverage amounts and details except what's explicit in KB
+
+IF YOU CANNOT VERIFY A FACT:
+- Use [VERIFY: specific field needed] instead of inventing
+- Never use phrases like "approximately," "around," "over X years" without KB evidence
+- Do not embellish or extrapolate from partial information
+
+CERTIFICATIONS & INSURANCE:
+- Keep these sections SHORT and CONCISE
+- List only verified certifications (WBENC, WOSB)
+- For insurance: state coverage types only, use [VERIFY: amounts] for dollar figures
+- Do not add platform certifications (Google Ads, Meta, etc.) unless they appear in verified KB
+"""
+
 MODULAR_APPROACH_BLOCK = """## MODULAR TECHNICAL APPROACH (use for approach / marketing plan / work plan sections)
 
 Structure the section in four swappable phases — each phase is a standalone block evaluators can scan:

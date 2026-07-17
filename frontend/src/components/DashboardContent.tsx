@@ -2,18 +2,13 @@
 
 import { useMemo, useState } from "react";
 import type {
-  ActivityItem,
   DashboardStats,
   RfpRecord,
-  TeamMember,
 } from "@/types/rfp";
 import { HeroBanner } from "./HeroBanner";
-import { ProcessPipeline } from "./ProcessPipeline";
 import { RecentRfpsTable } from "./RecentRfpsTable";
 import { RfpTable } from "./RfpTable";
 import { SummaryCards } from "./SummaryCards";
-import { TeamWorkload } from "./TeamWorkload";
-import { ActivityFeed } from "./ActivityFeed";
 import { KnowledgeBasePreview } from "./KnowledgeBasePreview";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
 import { FadeIn } from "./ui/FadeIn";
@@ -22,13 +17,10 @@ interface DashboardContentProps {
   rfps: RfpRecord[];
   allRfps: RfpRecord[];
   stats: DashboardStats;
-  activity: ActivityItem[];
-  team: TeamMember[];
 }
 
 const sectionTabs = [
   { id: "recent", label: "Recent" },
-  { id: "pipeline", label: "Pipeline" },
   { id: "all", label: "All RFPs" },
 ];
 
@@ -36,8 +28,6 @@ export function DashboardContent({
   rfps,
   allRfps,
   stats,
-  activity,
-  team,
 }: DashboardContentProps) {
   const [activeTab, setActiveTab] = useState("recent");
 
@@ -87,23 +77,8 @@ export function DashboardContent({
       </FadeIn>
 
       <TabPanel id="recent" activeTab={activeTab}>
-        <FadeIn className="space-y-8 sm:space-y-10">
+        <FadeIn>
           <RecentRfpsTable rfps={rfps} />
-          <div className="grid gap-8 lg:grid-cols-5">
-            <div className="lg:col-span-3">
-              <ActivityFeed items={activity} />
-            </div>
-            <div className="lg:col-span-2">
-              <TeamWorkload team={team} />
-            </div>
-          </div>
-        </FadeIn>
-      </TabPanel>
-
-      <TabPanel id="pipeline" activeTab={activeTab}>
-        <FadeIn className="space-y-8 sm:space-y-10">
-          <ProcessPipeline rfps={rfps} />
-          <TeamWorkload team={team} />
         </FadeIn>
       </TabPanel>
 

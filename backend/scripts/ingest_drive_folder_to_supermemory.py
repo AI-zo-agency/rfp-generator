@@ -2,8 +2,12 @@
 """
 Ingest every file in a Google Drive folder into Supermemory (zo-agency container).
 
-Fast path (default): POST /v3/documents/batch — ingest/write API only (Supermemory has no v4 upload).
-KB reads everywhere else use POST /v4/search (hybrid).
+ENHANCED: Downloads and uploads files directly to ensure proper content extraction.
+This avoids Google Drive permission issues and ensures PDFs are properly indexed.
+
+Modes:
+  - upload (default, RECOMMENDED): Download + upload all files (most reliable, proper extraction)
+  - batch: URL-based ingestion (faster but often fails with Drive permissions)
 
 Setup (backend/.env):
   SUPERMEMORY_API_KEY=...
@@ -15,20 +19,22 @@ Setup (backend/.env):
 Usage:
   cd backend && source .venv/bin/activate
 
-  python scripts/ingest_drive_folder_to_supermemory.py \\
+  # RECOMMENDED: Upload mode (downloads and uploads files directly)
+  python scripts/ingest_drive_folder_to_supermemory.py \
     --folder-id "1-Zfo5aJVrDiV3fAlwYoAv2KtQejuqH_q"
 
-  python scripts/ingest_drive_folder_to_supermemory.py \\
+  # By folder name
+  python scripts/ingest_drive_folder_to_supermemory.py \
     --folder-name "6. RFP CLAUDE Specialis"
 
-  # Supermemory native Drive import (one API call — requires Drive connection in SM)
-  python scripts/ingest_drive_folder_to_supermemory.py --drive-import
+  # Increase parallelism (if no errors)
+  python scripts/ingest_drive_folder_to_supermemory.py \
+    --folder-id "..." --workers 3
 
-  # Fallback: parallel file uploads (no URL fetch)
-  python scripts/ingest_drive_folder_to_supermemory.py \\
-    --folder-id "1abc..." --mode upload --workers 8
-
+  # Dry run to see what would be ingested
   python scripts/ingest_drive_folder_to_supermemory.py --folder-id "..." --dry-run
+  
+Note: Files larger than 50MB will be skipped (Supermemory has file size limits)
 """
 
 from __future__ import annotations
@@ -115,6 +121,15 @@ GOOGLE_SLIDES_EXPORT_FALLBACKS: tuple[tuple[str, str], ...] = (
 SKIP_MIMES = {FOLDER_MIME, "application/vnd.google-apps.shortcut"}
 
 PRICING_HINTS = ("pricing", "price", "rate")
+
+# PDF mime types that need upload mode (not batch URL mode)
+PDF_MIMES = {
+    "application/pdf",
+}
+
+# File size limits (bytes)
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB - Supermemory likely has limits around here
+WARN_FILE_SIZE = 20 * 1024 * 1024  # 20 MB - warn for large files
 
 
 @dataclass
@@ -520,11 +535,17 @@ async def ingest_parallel_uploads(
     dry_run: bool,
     workers: int,
 ) -> tuple[int, int]:
-    """Fallback: download + parallel file upload when URL batch is not suitable."""
+    """
+    Download files + parallel upload to Supermemory.
+    Supermemory handles text extraction (including OCR) on their end.
+    """
     semaphore = asyncio.Semaphore(max(1, workers))
-    service = _drive_service()
+    
+    # Create a new Drive service for each batch to avoid memory issues
+    def get_fresh_service():
+        return _drive_service()
 
-    async def one_file(drive_file: DriveFile) -> bool:
+    async def one_file(drive_file: DriveFile, retry_count: int = 3) -> bool:
         parsed = parse_filename(drive_file.name)
         custom_id = f"drive:{drive_file.id}"
         metadata = build_metadata(drive_file, parsed, folder_id=folder_id)
@@ -534,29 +555,98 @@ async def ingest_parallel_uploads(
             return True
 
         async with semaphore:
-            file_bytes, upload_name = await asyncio.to_thread(
-                download_file_bytes,
-                service,
-                drive_file,
-            )
-            logger.info("Uploading %s (%d bytes)", upload_name, len(file_bytes))
-            await supermemory.upload_file_document(
-                file_bytes=file_bytes,
-                filename=upload_name,
-                custom_id=custom_id,
-                metadata=metadata,
-            )
-        return True
+            for attempt in range(1, retry_count + 1):
+                try:
+                    # Use fresh service to avoid memory corruption
+                    service = get_fresh_service()
+                    
+                    file_bytes, upload_name = await asyncio.to_thread(
+                        download_file_bytes,
+                        service,
+                        drive_file,
+                    )
+                    
+                    file_size = len(file_bytes)
+                    
+                    # Check file size limits
+                    if file_size > MAX_FILE_SIZE:
+                        logger.error(
+                            "❌ SKIPPING %s: File too large (%d MB > %d MB limit). "
+                            "Supermemory may not support files this large.",
+                            upload_name, file_size // (1024*1024), MAX_FILE_SIZE // (1024*1024)
+                        )
+                        logger.info("   💡 TIP: Try compressing this PDF or splitting it into smaller files")
+                        del file_bytes
+                        del service
+                        return False
+                    
+                    if file_size > WARN_FILE_SIZE:
+                        logger.warning(
+                            "⚠️  %s is large (%d MB) - upload may take a while or fail",
+                            upload_name, file_size // (1024*1024)
+                        )
+                    
+                    logger.info("⬆️  Uploading %s (%d MB) [attempt %d/%d]", 
+                               upload_name, file_size // (1024*1024), attempt, retry_count)
+                    
+                    await supermemory.upload_file_document(
+                        file_bytes=file_bytes,
+                        filename=upload_name,
+                        custom_id=custom_id,
+                        metadata=metadata,
+                    )
+                    
+                    logger.info("✅ Uploaded %s", upload_name)
+                    
+                    # Clean up to free memory
+                    del file_bytes
+                    del service
+                    
+                    # No delay - upload as fast as possible
+                    
+                    return True
+                    
+                except Exception as exc:
+                    error_msg = str(exc)
+                    
+                    # Check if it's a retryable error
+                    is_retryable = any(code in error_msg for code in ["503", "502", "504", "429"])
+                    
+                    # Don't retry if it's likely a file size issue
+                    if "503" in error_msg and "file_size" in locals() and file_size > WARN_FILE_SIZE:
+                        logger.error(
+                            "❌ %s failed with 503 - likely TOO LARGE (%d MB). "
+                            "Consider compressing or splitting this file.",
+                            drive_file.name, file_size // (1024*1024)
+                        )
+                        return False
+                    
+                    if attempt < retry_count and is_retryable:
+                        wait_time = 1  # Faster retry - just 1 second
+                        logger.warning(
+                            "⚠️  %s failed (attempt %d/%d): %s - retrying in %ds...", 
+                            drive_file.name, attempt, retry_count, error_msg, wait_time
+                        )
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error("❌ Failed to upload %s after %d attempts: %s", 
+                                   drive_file.name, attempt, error_msg)
+                        return False
+            
+            return False
 
     results = await asyncio.gather(
         *[one_file(df) for df in drive_files],
         return_exceptions=True,
     )
+    
     ok = sum(1 for r in results if r is True)
     failed = len(results) - ok
+    
     for drive_file, result in zip(drive_files, results):
         if isinstance(result, Exception):
-            logger.error("FAILED %s: %s", drive_file.name, result)
+            logger.error("❌ EXCEPTION for %s: %s", drive_file.name, result)
+    
     return ok, failed
 
 
@@ -602,37 +692,96 @@ async def run(args: argparse.Namespace) -> int:
         logger.info("No ingestible files in folder %s", folder_id)
         return 0
 
+    # Check what's already uploaded to avoid duplicates
+    logger.info("Checking existing documents in Supermemory...")
+    existing_docs = await supermemory.list_container_memories(limit=1000)
+    existing_drive_ids = {
+        doc.get("customId", "").replace("drive:", "")
+        for doc in existing_docs
+        if doc.get("customId", "").startswith("drive:")
+    }
+    
+    # Filter out already uploaded files
+    files_to_upload = [f for f in drive_files if f.id not in existing_drive_ids]
+    skipped = len(drive_files) - len(files_to_upload)
+    
     logger.info(
-        "Container: %s | Folder: %s | Files: %d | mode=%s | dry_run=%s",
+        "Container: %s | Folder: %s | Total files: %d | mode=%s | dry_run=%s",
         settings.resolved_container_tag,
         folder_id,
         len(drive_files),
         args.mode,
         args.dry_run,
     )
+    
+    if skipped > 0:
+        logger.info("⏭️  Skipping %d already uploaded files", skipped)
+    
+    logger.info("📝 To upload: %d files", len(files_to_upload))
+    
+    if not files_to_upload:
+        logger.info("✅ All files already uploaded!")
+        return 0
+    
+    # Separate large files that will be skipped
+    large_files = [f for f in files_to_upload if f.mime_type in PDF_MIMES]  # Will check size during upload
+    
+    ok = 0
+    failed = 0
 
+    # Upload mode: download + upload all files (most reliable)
     if args.mode == "upload":
-        ok, failed = await ingest_parallel_uploads(
-            drive_files,
-            folder_id=folder_id,
-            dry_run=args.dry_run,
-            workers=args.workers,
-        )
+        logger.info("\n=== Processing %d files with upload mode ===", len(files_to_upload))
+        logger.info("📦 This ensures proper content extraction and avoids Drive permission issues")
+        try:
+            ok, failed = await ingest_parallel_uploads(
+                files_to_upload,
+                folder_id=folder_id,
+                dry_run=args.dry_run,
+                workers=args.workers,
+            )
+            logger.info("Upload batch complete: %d success, %d failed", ok, failed)
+        except Exception as exc:
+            logger.error("Upload batch crashed: %s", exc)
+            logger.error("Progress saved - some files may have uploaded before crash")
+    
+    # Batch mode: URL-based (faster but often fails)
     else:
-        ok, failed = await ingest_batch_urls(
-            drive_files,
-            folder_id=folder_id,
-            dry_run=args.dry_run,
-            batch_size=args.batch_size,
-        )
+        logger.info("\n=== Processing %d files with batch mode ===", len(files_to_upload))
+        logger.warning("⚠️  Batch mode often fails due to Drive permissions. Use --mode upload for reliability.")
+        try:
+            ok, failed = await ingest_batch_urls(
+                files_to_upload,
+                folder_id=folder_id,
+                dry_run=args.dry_run,
+                batch_size=args.batch_size,
+            )
+            logger.info("Batch upload complete: %d success, %d failed", ok, failed)
+            
+            if failed > 0:
+                logger.warning("💡 TIP: Retry failed files with: --mode upload")
+        except Exception as exc:
+            logger.error("Batch upload crashed: %s", exc)
 
-    logger.info("Done. success=%d failed=%d", ok, failed)
+    logger.info("\n" + "="*60)
+    logger.info("✅ DONE: success=%d failed=%d", ok, failed)
+    
+    total_expected = len([f for f in drive_files if f.id not in existing_drive_ids]) if 'existing_drive_ids' in locals() else len(drive_files)
+    if ok + failed < total_expected:
+        logger.warning("⚠️  Script may have crashed before completing all uploads")
+        logger.warning("   Uploaded: %d, Failed: %d, Expected: %d", ok, failed, total_expected)
+        logger.warning("   Run the script again - it will skip already uploaded files")
+    elif failed > 0:
+        logger.warning("⚠️  Some files failed - check logs above for details")
+    else:
+        logger.info("🎉 All files successfully ingested!")
+    
     return 1 if failed else 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Ingest a Google Drive folder into Supermemory (fast batch URL mode)."
+        description="Ingest a Google Drive folder into Supermemory with smart PDF handling."
     )
     parser.add_argument("--folder-id", help="Google Drive folder ID")
     parser.add_argument("--folder-name", help='Folder name, e.g. "6. RFP CLAUDE Specialis"')
@@ -642,9 +791,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=("batch", "upload"),
-        default="batch",
-        help="batch = URL batch API (default, fastest); upload = parallel file uploads",
+        choices=("upload", "batch"),
+        default="upload",
+        help=(
+            "upload = download + upload all files (RECOMMENDED, most reliable); "
+            "batch = URL batch API (faster but often fails with Drive permissions)"
+        ),
     )
     parser.add_argument(
         "--drive-import",
@@ -662,8 +814,8 @@ def main() -> None:
     parser.add_argument(
         "--workers",
         type=int,
-        default=8,
-        help="Parallel uploads when --mode upload",
+        default=10,
+        help="Parallel uploads when using upload mode (default: 10 for speed)",
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()

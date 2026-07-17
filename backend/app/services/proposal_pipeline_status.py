@@ -28,8 +28,19 @@ def collect_manuscript_blockers(
 ) -> list[str]:
     blockers: list[str] = []
 
-    if not research or not research.evidence_corpus:
-        blockers.append("Phase 2 incomplete — no evidence corpus (run retrieval).")
+    if not research:
+        blockers.append("Phase 2 incomplete — no research cache.")
+    else:
+        plan = research.proposal_execution_plan
+        plan_ready = False
+        if plan is not None and hasattr(plan, "validation"):
+            plan_ready = plan.validation.readiness_status == "ready"
+        elif isinstance(plan, dict):
+            plan_ready = (plan.get("validation") or {}).get("readinessStatus") == "ready"
+        if not plan_ready and not research.evidence_corpus:
+            blockers.append(
+                "Phase 2 incomplete — Proposal Execution Plan not ready."
+            )
 
     mapped = research.rfp_sections if research else []
     mapped_ids = {s.id for s in mapped}

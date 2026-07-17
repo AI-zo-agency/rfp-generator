@@ -1,6 +1,9 @@
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+if TYPE_CHECKING:
+    from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
 
 ProposalSectionMode = Literal["pull", "select", "write"]
 ProposalSectionSource = Literal["template", "rfp", "generated"]
@@ -55,6 +58,8 @@ class ProposalBrandVoice(BaseModel):
     client_expectations: str = Field(default="", alias="clientExpectations")
     zo_core_voice: str = Field(default="", alias="zoCoreVoice")
     rfp_adaptation_notes: str = Field(default="", alias="rfpAdaptationNotes")
+    kb_zo_voice: str = Field(default="", alias="kbZoVoice")
+
 
 
 class BudgetLineItem(BaseModel):
@@ -271,6 +276,27 @@ class ProposalPipelineCheckpoint(BaseModel):
     updated_at: str = Field(alias="updatedAt")
 
 
+class Section1EditorialRecommendation(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    section_title: str = Field(alias="sectionTitle")
+    issue_type: str = Field(alias="issueType")
+    issue: str
+    recommendation: str
+    confidence: float = 0.0
+    suggested_replacement: str | None = Field(default=None, alias="suggestedReplacement")
+    status: Literal["pending", "approved", "rejected"] = "pending"
+
+
+class Section1EditorialReview(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    reviewed_at: str = Field(alias="reviewedAt")
+    recommendations: list[Section1EditorialRecommendation] = Field(default_factory=list)
+    provider: str | None = None
+
+
 class ProposalResearchCache(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -287,11 +313,28 @@ class ProposalResearchCache(BaseModel):
     writing_avoidances: list[str] = Field(default_factory=list, alias="writingAvoidances")
     proof_points: list[ProofPoint] = Field(default_factory=list, alias="proofPoints")
     presubmit_review: PreSubmitReview | None = Field(default=None, alias="presubmitReview")
+    section1_editorial_review: Section1EditorialReview | None = Field(
+        default=None, alias="section1EditorialReview"
+    )
     pipeline_checkpoint: ProposalPipelineCheckpoint | None = Field(
         default=None, alias="pipelineCheckpoint"
     )
+    proposal_execution_plan: Any | None = Field(
+        default=None, alias="proposalExecutionPlan"
+    )
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None
+
+    @field_validator("proposal_execution_plan", mode="before")
+    @classmethod
+    def _coerce_execution_plan(cls, value: Any) -> Any:
+        if value is None or hasattr(value, "model_dump"):
+            return value
+        if isinstance(value, dict):
+            from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
+
+            return ProposalExecutionPlan.model_validate(value)
+        return value
 
 
 class ProposalSection(BaseModel):

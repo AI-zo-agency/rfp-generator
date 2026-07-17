@@ -53,6 +53,10 @@ _PM_LINE_RE = re.compile(
     re.I,
 )
 _PRICING_FLAG_ADVISORY_RE = re.compile(r"PRICING\s+FLAG", re.I)
+_MISPLACED_VERIFY_FLAG_RE = re.compile(r"^\[VERIFY:", re.I)
+_PM_RATIO_MIN = 0.05
+_PM_RATIO_MAX = 0.08
+_PM_RATIO_TARGET = 0.065
 
 
 def _usd(value: float) -> str:
@@ -129,12 +133,7 @@ def collect_pm_ratio_violations(budget: ProposalBudget) -> list[str]:
 
     pm_total = 0.0
     for item in budget.line_items:
-        blob = " ".join(
-            part
-            for part in (item.category, item.description, item.role_title or "")
-            if part
-        )
-        if _PM_LINE_RE.search(blob):
+        if _is_pm_line_item(item):
             pm_total += float(item.extended or 0)
 
     if pm_total <= 0:
@@ -300,6 +299,77 @@ def _strip_stale_reconciliation_flags(flags: list[str]) -> list[str]:
     return [flag for flag in flags if not _STALE_RECONCILIATION_FLAG_RE.search(flag)]
 
 
+def _strip_misplaced_verify_flags(flags: list[str]) -> list[str]:
+    """Drop compliance [VERIFY: …] tags from pricing_flags — they belong in manuscript sections."""
+    return [flag for flag in flags if not _MISPLACED_VERIFY_FLAG_RE.match(flag.strip())]
+
+
+def _is_pm_line_item(item: BudgetLineItem) -> bool:
+    desc_blob = " ".join(
+        part for part in (item.description, item.role_title or "") if part
+    )
+    if _PM_LINE_RE.search(desc_blob):
+        return True
+    cat = (item.category or "").strip()
+    if not cat:
+        return False
+    if re.fullmatch(r"account\s*&\s*project\s*management", cat, re.I):
+        return False
+    return bool(_PM_LINE_RE.search(cat))
+
+
+def adjust_pm_line_items_to_guide(
+    line_items: list[BudgetLineItem],
+    agency_base: float,
+) -> tuple[list[BudgetLineItem], str | None]:
+    """Scale PM / account-management lines into the 5–8% agency-fee guide when out of range."""
+    base = float(agency_base or 0)
+    if base <= 0:
+        return line_items, None
+
+    pm_indices: list[int] = []
+    pm_total = 0.0
+    for index, item in enumerate(line_items):
+        if _is_pm_line_item(item):
+            pm_indices.append(index)
+            pm_total += float(item.extended or 0)
+
+    if pm_total <= 0 or not pm_indices:
+        return line_items, None
+
+    ratio = pm_total / base
+    if _PM_RATIO_MIN <= ratio <= _PM_RATIO_MAX:
+        return line_items, None
+
+    target_ratio = _PM_RATIO_TARGET if ratio > _PM_RATIO_MAX else _PM_RATIO_MIN
+    target_pm = round(base * target_ratio, 2)
+    scale = target_pm / pm_total
+
+    adjusted: list[BudgetLineItem] = []
+    for index, item in enumerate(line_items):
+        if index not in pm_indices:
+            adjusted.append(item)
+            continue
+        new_ext = round(float(item.extended or 0) * scale, 2)
+        rate, qty = item.rate, item.quantity
+        if rate is not None and qty is not None and float(qty) > 0:
+            adjusted.append(
+                item.model_copy(
+                    update={"extended": new_ext, "rate": round(new_ext / float(qty), 2)}
+                )
+            )
+        elif rate is not None:
+            adjusted.append(item.model_copy(update={"extended": new_ext, "rate": new_ext}))
+        else:
+            adjusted.append(item.model_copy(update={"extended": new_ext}))
+
+    return adjusted, (
+        f"[PRICING FLAG: Project management lines auto-scaled from {ratio * 100:.1f}% "
+        f"to {target_ratio * 100:.1f}% of agency fees ({_usd(pm_total)} → {_usd(target_pm)}) "
+        f"per 00_Guide_Pricing — Sonja confirm before submission]"
+    )
+
+
 def reconcile_proposal_budget(
     budget: ProposalBudget,
     *,
@@ -314,9 +384,19 @@ def reconcile_proposal_budget(
     4. Rebuild option-term math from verified base
     5. Remove stale reconciliation flags — never leave open math-discrepancy flags
     """
-    flags = _strip_stale_reconciliation_flags(list(budget.pricing_flags))
+    flags = _strip_misplaced_verify_flags(
+        _strip_stale_reconciliation_flags(list(budget.pricing_flags))
+    )
 
     line_items = fix_line_item_extended_values(budget.line_items)
+    _, agency_fee_seed, _ = split_line_item_totals(line_items)
+    agency_base = budget.agency_fee_subtotal
+    if agency_base is None:
+        agency_base = agency_fee_seed
+    line_items, pm_note = adjust_pm_line_items_to_guide(line_items, float(agency_base or 0))
+    if pm_note:
+        flags.append(pm_note)
+
     line_sum, agency_fee, passthrough = split_line_item_totals(line_items)
     direct = round(float(budget.direct_expenses_total or 0), 2)
     commission_style = is_commission_style_budget(budget) or passthrough > 0

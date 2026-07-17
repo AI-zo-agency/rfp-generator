@@ -57,7 +57,6 @@ export function outlineToApiDraft(
 import {
   buildPipelineStatus,
   inferResumePhaseFromBlocker,
-  PIPELINE_PHASE_LABELS,
   phaseIsComplete,
   resolveResumePhase,
   shouldRunPhase,
@@ -79,11 +78,23 @@ export {
 /** Long timeout for staged proposal generation (browser → Next API route). */
 const PROPOSAL_STAGE_TIMEOUT_MS_LOCAL = PROPOSAL_STAGE_TIMEOUT_MS;
 
-function proposalPostInit(): RequestInit {
+function proposalPostInit(signal?: AbortSignal): RequestInit {
+  const timeout = AbortSignal.timeout(PROPOSAL_STAGE_TIMEOUT_MS_LOCAL);
+  const combined =
+    signal && typeof AbortSignal.any === "function"
+      ? AbortSignal.any([signal, timeout])
+      : signal ?? timeout;
   return {
     method: "POST",
-    signal: AbortSignal.timeout(PROPOSAL_STAGE_TIMEOUT_MS_LOCAL),
+    signal: combined,
   };
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    const err = new DOMException("Proposal generation aborted", "AbortError");
+    throw err;
+  }
 }
 
 const VERIFY_TAG_RE = /\[VERIFY:/gi;
@@ -99,10 +110,15 @@ export function validateStagedProposalComplete(
   draft: ProposalOutline,
   research: ProposalResearch
 ): string | null {
-  if (!research.evidenceCorpus?.length) {
-    return "Phase 2 incomplete — no evidence corpus.";
+  const planReady =
+    research.proposalExecutionPlan?.validation?.readinessStatus === "ready";
+  if (!planReady && !research.evidenceCorpus?.length) {
+    return "Phase 2 incomplete — Proposal Execution Plan not ready.";
   }
-  if (!research.proofPoints?.length) {
+  if (!research.rfpSections?.length) {
+    return "Phase 2 incomplete — no proposal sections planned.";
+  }
+  if (!research.proofPoints?.length && !planReady) {
     return "Phase 2 incomplete — no proof points matched (check case-study KB).";
   }
   if (!research.budget) {
@@ -136,19 +152,24 @@ export function startLiveDraftPolling(
   rfpId: string,
   onDraftUpdate: (draft: ProposalOutline) => void
 ): () => void {
-  let lastUpdatedAt = "";
+  let lastFingerprint = "";
   let stopped = false;
+
+  const fingerprint = (draft: ProposalOutline) => {
+    const parts = draft.sections.map(
+      (s) => `${s.id}:${s.status}:${(s.content || "").length}:${(s.content || "").slice(0, 40)}`
+    );
+    return `${draft.updatedAt}|${parts.join("|")}`;
+  };
 
   const poll = async () => {
     if (stopped) return;
     try {
       const snapshot = await fetchProposalDraft(rfpId);
-      if (
-        snapshot.draft &&
-        snapshot.draft.updatedAt &&
-        snapshot.draft.updatedAt !== lastUpdatedAt
-      ) {
-        lastUpdatedAt = snapshot.draft.updatedAt;
+      if (!snapshot.draft) return;
+      const next = fingerprint(snapshot.draft);
+      if (next !== lastFingerprint) {
+        lastFingerprint = next;
         onDraftUpdate(snapshot.draft);
       }
     } catch {
@@ -193,18 +214,32 @@ export async function recoverProposalDraftIfSaved(
 }
 
 export async function runPhase3_5BudgetWithRecovery(
-  rfpId: string
+  rfpId: string,
+  signal?: AbortSignal
 ): Promise<{
   budget: ProposalBudget;
   research: ProposalResearch;
   draft: ProposalOutline | null;
   recoveredFromDraft: boolean;
 }> {
+  throwIfAborted(signal);
   const startedAt = await captureProposalTimestamps(rfpId);
   try {
-    const result = await runPhase3_5Budget(rfpId);
+    const result = await runPhase3_5Budget(rfpId, signal);
     return { ...result, recoveredFromDraft: false };
   } catch (error) {
+    if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    // Hard validation / business-rule failures will never recover by polling.
+    const hardFail =
+      /BUDGET VALIDATION FAILED|BUDGET EDITOR FAILED|project management lines|Unprocessable|422/i.test(
+        message
+      );
+    if (hardFail) {
+      throw error;
+    }
     const polled = await pollForBackendStageSave(rfpId, startedAt, {
       requireBudget: true,
     });
@@ -230,17 +265,22 @@ export async function runPhase3_5BudgetWithRecovery(
 }
 
 export async function runPhase3_6SelfEditWithRecovery(
-  rfpId: string
+  rfpId: string,
+  signal?: AbortSignal
 ): Promise<{
   draft: ProposalOutline;
   research: ProposalResearch;
   recoveredFromDraft: boolean;
 }> {
+  throwIfAborted(signal);
   const startedAt = await captureProposalTimestamps(rfpId);
   try {
-    const result = await runPhase3_6SelfEdit(rfpId);
+    const result = await runPhase3_6SelfEdit(rfpId, signal);
     return { ...result, recoveredFromDraft: false };
   } catch (error) {
+    if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+      throw error;
+    }
     const polled = await pollForBackendStageSave(rfpId, startedAt);
     if (polled) {
       return { ...polled, recoveredFromDraft: true };
@@ -251,7 +291,7 @@ export async function runPhase3_6SelfEditWithRecovery(
 
 const STAGE_POLL_INTERVAL_MS = 12_000;
 const STAGE_POLL_MAX_MS = 22 * 60 * 1000;
-const LIVE_DRAFT_POLL_INTERVAL_MS = 3_000;
+const LIVE_DRAFT_POLL_INTERVAL_MS = 1_500;
 /** If checkpoint says in-flight but timestamps never move, backend was killed — don't block resume. */
 const IN_FLIGHT_STALE_MS = 90_000;
 
@@ -343,13 +383,20 @@ export async function generateFullProposalStaged(
   options?: {
     startFrom?: PipelinePhase;
     forceRestart?: boolean;
+    /** Re-run startFrom and every later phase even if previously complete. */
+    forceRerunFromStart?: boolean;
     onDraftUpdate?: (draft: ProposalOutline) => void;
+    signal?: AbortSignal;
   }
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
+  const signal = options?.signal;
+  throwIfAborted(signal);
+
   const snapshot = await fetchProposalDraft(rfpId);
   let draft = snapshot.draft;
   let research = snapshot.research;
 
+  // Always start from Sections 1–3 when forceRestart is set.
   let resumeFrom: PipelinePhase = options?.forceRestart
     ? "sections-1-3"
     : (options?.startFrom ??
@@ -360,7 +407,9 @@ export async function generateFullProposalStaged(
     resumeFrom = "sections-1-3";
   }
 
-  if (draft && research) {
+  // forceRestart / explicit startFrom must not be redirected to a later phase by
+  // validate blockers (e.g. "budget missing" → jump to phase-3-5).
+  if (!options?.forceRestart && !options?.startFrom && draft && research) {
     const blocker = validateStagedProposalComplete(draft, research);
     if (!blocker && resumeFrom === "complete") {
       return { draft, research };
@@ -374,6 +423,16 @@ export async function generateFullProposalStaged(
     options?.forceRestart || shouldRunPhase(phase, resumeFrom);
 
   async function skipIfPhaseAlreadyFinished(phase: PipelinePhase): Promise<boolean> {
+    throwIfAborted(signal);
+    if (options?.forceRestart) return false;
+    // "Start after Sections 1–3" must re-run Phase 2+ even when prior runs completed.
+    if (
+      options?.forceRerunFromStart &&
+      options.startFrom &&
+      shouldRunPhase(phase, options.startFrom)
+    ) {
+      return false;
+    }
     await waitForInFlightPhase(rfpId, phase, onProgress);
     const snap = await refreshProposalSnapshot(rfpId);
     draft = snap.draft ?? draft;
@@ -383,9 +442,10 @@ export async function generateFullProposalStaged(
 
   if (run("sections-1-3")) {
     if (!(await skipIfPhaseAlreadyFinished("sections-1-3"))) {
+      throwIfAborted(signal);
       onProgress?.("sections-1-3");
       draft = await withLiveDraftPolling(rfpId, options?.onDraftUpdate, () =>
-        generateProposalSections1to3(rfpId)
+        generateProposalSections1to3(rfpId, signal)
       );
       ({ draft, research } = await refreshProposalSnapshot(rfpId));
     }
@@ -393,17 +453,19 @@ export async function generateFullProposalStaged(
 
   if (run("phase-2")) {
     if (!(await skipIfPhaseAlreadyFinished("phase-2"))) {
+      throwIfAborted(signal);
       onProgress?.("phase-2");
-      research = await runPhase2Retrieval(rfpId);
+      research = await runPhase2Retrieval(rfpId, signal);
       ({ draft, research } = await refreshProposalSnapshot(rfpId));
     }
   }
 
   if (run("phase-3")) {
     if (!(await skipIfPhaseAlreadyFinished("phase-3"))) {
+      throwIfAborted(signal);
       onProgress?.("phase-3");
       const phase3 = await withLiveDraftPolling(rfpId, options?.onDraftUpdate, () =>
-        runPhase3Drafting(rfpId)
+        runPhase3Drafting(rfpId, signal)
       );
       draft = phase3.draft;
       research = phase3.research;
@@ -412,9 +474,10 @@ export async function generateFullProposalStaged(
 
   if (run("phase-3-6-self-edit")) {
     if (!(await skipIfPhaseAlreadyFinished("phase-3-6-self-edit"))) {
+      throwIfAborted(signal);
       onProgress?.("phase-3-6-self-edit");
       const edited = await withLiveDraftPolling(rfpId, options?.onDraftUpdate, () =>
-        runPhase3_6SelfEditWithRecovery(rfpId)
+        runPhase3_6SelfEditWithRecovery(rfpId, signal)
       );
       draft = edited.draft;
       research = edited.research;
@@ -423,8 +486,9 @@ export async function generateFullProposalStaged(
 
   if (run("phase-3-5-budget")) {
     if (!(await skipIfPhaseAlreadyFinished("phase-3-5-budget"))) {
+      throwIfAborted(signal);
       onProgress?.("phase-3-5-budget");
-      const budgeted = await runPhase3_5BudgetWithRecovery(rfpId);
+      const budgeted = await runPhase3_5BudgetWithRecovery(rfpId, signal);
       research = budgeted.research;
       if (budgeted.draft) draft = budgeted.draft;
     }
@@ -432,11 +496,14 @@ export async function generateFullProposalStaged(
 
   if (run("phase-4-review")) {
     if (!(await skipIfPhaseAlreadyFinished("phase-4-review"))) {
+      throwIfAborted(signal);
       onProgress?.("phase-4-review");
-      const reviewed = await runPhase4PreSubmitReview(rfpId);
+      const reviewed = await runPhase4PreSubmitReview(rfpId, signal);
       research = reviewed.research;
     }
   }
+
+  throwIfAborted(signal);
 
   ({ draft, research } = await refreshProposalSnapshot(rfpId));
   if (!draft || !research) {
@@ -450,8 +517,9 @@ export async function generateFullProposalStaged(
       return { draft, research };
     }
     if (lower.includes("verify") && !options?.forceRestart) {
+      throwIfAborted(signal);
       onProgress?.("phase-3-6-self-edit");
-      const retry = await runPhase3_6SelfEditWithRecovery(rfpId);
+      const retry = await runPhase3_6SelfEditWithRecovery(rfpId, signal);
       draft = retry.draft;
       research = retry.research;
       ({ draft, research } = await refreshProposalSnapshot(rfpId));
@@ -621,11 +689,12 @@ export async function generateProposalDraft(rfpId: string): Promise<ProposalOutl
 }
 
 export async function generateProposalSections1to3(
-  rfpId: string
+  rfpId: string,
+  signal?: AbortSignal
 ): Promise<ProposalOutline> {
   const res = await fetch(
     `/api/rfps/${rfpId}/proposal/generate/sections-1-3`,
-    proposalPostInit()
+    proposalPostInit(signal)
   );
   const text = await res.text();
   let data: { detail?: string; draft?: ApiProposalDraft };
@@ -644,10 +713,11 @@ export async function generateProposalSections1to3(
 }
 
 export async function runPhase2Retrieval(
-  rfpId: string
+  rfpId: string,
+  signal?: AbortSignal
 ): Promise<ProposalResearch> {
   const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-2-retrieval`, {
-    ...proposalPostInit(),
+    ...proposalPostInit(signal),
   });
   const text = await res.text();
   let data: { detail?: string; research?: ProposalResearch };
@@ -666,10 +736,11 @@ export async function runPhase2Retrieval(
 }
 
 export async function runPhase3Drafting(
-  rfpId: string
+  rfpId: string,
+  signal?: AbortSignal
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
   const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-3-drafting`, {
-    ...proposalPostInit(),
+    ...proposalPostInit(signal),
   });
   const text = await res.text();
   let data: {
@@ -695,10 +766,11 @@ export async function runPhase3Drafting(
 }
 
 export async function runPhase3_6SelfEdit(
-  rfpId: string
+  rfpId: string,
+  signal?: AbortSignal
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
   const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-3-6-self-edit`, {
-    ...proposalPostInit(),
+    ...proposalPostInit(signal),
   });
   const text = await res.text();
   let data: {
@@ -724,14 +796,15 @@ export async function runPhase3_6SelfEdit(
 }
 
 export async function runPhase3_5Budget(
-  rfpId: string
+  rfpId: string,
+  signal?: AbortSignal
 ): Promise<{
   budget: ProposalBudget;
   research: ProposalResearch;
   draft: ProposalOutline | null;
 }> {
   const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-3-5-budget`, {
-    ...proposalPostInit(),
+    ...proposalPostInit(signal),
   });
   const text = await res.text();
   let data: {
@@ -867,10 +940,11 @@ export async function generateProposalPricing(
 }
 
 export async function runPhase4PreSubmitReview(
-  rfpId: string
+  rfpId: string,
+  signal?: AbortSignal
 ): Promise<{ review: PreSubmitReview; research: ProposalResearch }> {
   const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-4-review`, {
-    ...proposalPostInit(),
+    ...proposalPostInit(signal),
   });
   const text = await res.text();
   let data: {

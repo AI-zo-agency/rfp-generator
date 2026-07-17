@@ -28,7 +28,7 @@ PIPELINE_PHASES: tuple[str, ...] = (
 
 PHASE_LABELS: dict[str, str] = {
     "sections-1-3": "Sections 1–3",
-    "phase-2": "Phase 2 research",
+    "phase-2": "Phase 2 intelligence",
     "phase-3": "Phase 3 drafting",
     "phase-3-6-self-edit": "Senior editor polish",
     "phase-3-5-budget": "Budget build",
@@ -244,6 +244,16 @@ def phase_is_complete(
         return False
 
     if phase == "phase-2":
+        plan = research.proposal_execution_plan
+        if plan is not None:
+            if hasattr(plan, "validation"):
+                return plan.validation.readiness_status == "ready" and bool(
+                    research.rfp_sections
+                )
+            if isinstance(plan, dict):
+                status = (plan.get("validation") or {}).get("readinessStatus")
+                return status == "ready" and bool(research.rfp_sections)
+        # Legacy caches created before intelligence layer
         return bool(research.evidence_corpus and research.rfp_sections)
 
     if phase == "phase-3":

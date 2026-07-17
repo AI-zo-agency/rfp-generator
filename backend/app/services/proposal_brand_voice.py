@@ -14,20 +14,22 @@ NARRATIVE_REGISTER_BLOCK = """## NARRATIVE REGISTER (MANDATORY for this section)
 Write as zö agency speaking directly to the client — NOT as a legal brief describing a vendor.
 
 REQUIRED:
-- First person: "we", "our", "us" — zö is the author who did/will do the work
+- **Zö Tone & Style**: Write with modern agency energy, bold creativity, and high-impact language. Keep it fresh, human, and engaging — NEVER sound boring, dry, academic, or like generic corporate boilerplate.
+- First person: "we", "our", "us" — zö is the author who did/will do the work.
 - Active voice and concrete verbs: "We built...", "We led...", "Our team designed..."
-- Outcome-focused: what changed for the client, not abstract capability claims
-- Specific to THIS client's challenge — tie proof points to their goals
+- Outcome-focused: what changed for the client, not abstract capability claims.
+- Specific to THIS client's challenge — tie proof points directly to their goals.
 
 FORBIDDEN in narrative sections (never use):
-- "The Vendor", "The Offeror", "The Proposer", "The Respondent", "The Contractor"
-- Third-person agency distance: "The agency delivers...", "zö agency brings...", "The firm has experience..."
-- Passive procurement boilerplate: "services will be provided", "experience includes..."
-- Compliance-form tone in scored narrative sections
+- Dry, boring, or generic corporate filler phrasing.
+- "The Vendor", "The Offeror", "The Proposer", "The Respondent", "The Contractor".
+- Third-person agency distance: "The agency delivers...", "zö agency brings...", "The firm has experience...".
+- Passive procurement boilerplate: "services will be provided", "experience includes...".
+- Compliance-form tone in scored narrative sections.
 
 EXAMPLE — same fact, wrong vs right:
-WRONG: "The Vendor's environmental and sustainability subject matter experience includes the City of Bend WaterWise conservation campaign, which advanced measurable behavior change in residential water use."
-RIGHT: "We built the WaterWise campaign for the City of Bend's conservation office from the ground up — brand, toolkits, messaging — and designed it specifically to change how residents think about water use, not just inform them."
+- WRONG & BORING: "The Vendor's environmental and sustainability subject matter experience includes the City of Bend WaterWise conservation campaign, which advanced measurable behavior change in residential water use."
+- RIGHT & EXCITING (ZÖ VOICE): "We built the WaterWise campaign for the City of Bend's conservation office from the ground up — brand, toolkits, messaging — and designed it specifically to change how residents think about water use, not just inform them."
 
 Note: RFP instructions may say "Vendor" — that is form language. Narrative sections must still use first-person zö voice."""
 
@@ -138,14 +140,16 @@ def format_brand_voice_block(
         )
     )
 
+    kb_voice = kb_zo_voice or bv.get("kbZoVoice") or bv.get("kb_zo_voice") or ""
     lines = [
         format_register_block(register),
         "",
         "## zö core brand voice (MANDATORY — preserve in every rewrite)",
         zo_core,
     ]
-    if kb_zo_voice.strip():
-        lines.append(kb_zo_voice.strip()[:2800])
+    if kb_voice.strip():
+        lines.append(kb_voice.strip()[:10000]) # Keep more voice content if available
+
 
     lines.extend(
         [

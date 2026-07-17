@@ -168,3 +168,37 @@ async def aget_proposal_draft(rfp_id: str) -> ProposalDraft | None:
 
 async def asave_proposal_draft(draft: ProposalDraft) -> None:
     await asyncio.to_thread(save_proposal_draft, draft)
+
+
+def delete_proposal_draft(rfp_id: str) -> None:
+    """Hard-delete the proposal draft from DB so Reset starts completely fresh."""
+    if _use_supabase():
+        _with_supabase_retry(
+            "delete_proposal_draft",
+            lambda: sb.delete_proposal_draft(rfp_id),
+            retries=_SUPABASE_WRITE_RETRIES,
+        )
+        return
+    with _connect() as conn:
+        conn.execute("DELETE FROM proposal_drafts WHERE rfp_id = ?", (rfp_id,))
+
+
+def delete_research_cache(rfp_id: str) -> None:
+    """Hard-delete the research cache (pipeline checkpoint, evidence, etc.) from DB."""
+    if _use_supabase():
+        _with_supabase_retry(
+            "delete_research_cache",
+            lambda: sb.delete_research_cache(rfp_id),
+            retries=_SUPABASE_WRITE_RETRIES,
+        )
+        return
+    with _connect() as conn:
+        conn.execute("DELETE FROM proposal_research WHERE rfp_id = ?", (rfp_id,))
+
+
+async def adelete_proposal_draft(rfp_id: str) -> None:
+    await asyncio.to_thread(delete_proposal_draft, rfp_id)
+
+
+async def adelete_research_cache(rfp_id: str) -> None:
+    await asyncio.to_thread(delete_research_cache, rfp_id)
