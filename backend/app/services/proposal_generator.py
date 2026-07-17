@@ -48,9 +48,9 @@ from app.services.proposal_pipeline_status import assert_manuscript_ready
 from app.services.proposal_pricing_service import generate_proposal_budget
 from app.services.proposal_presubmit_review import run_presubmit_review
 from app.services.proposal_presubmit_autofix import run_presubmit_autofix_loop
-from app.services.proposal_proof_points import build_proof_points_for_rfp
-from app.services.proposal_retrieval_gap_fill import gap_fill_evidence_for_sections
-from app.services.proposal_retrieval_graph import run_retrieval_graph
+from app.services.proposal_intelligence.graph import run_intelligence_graph
+from app.services.proposal_intelligence.plan_ops import IntelligenceError
+from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
 from app.services.proposal_self_edit_loop import run_self_edit_loop
 from app.services.proposal_sections_graph import run_sections_1_3_graph
 from app.services.rfp_repository import get_rfp
@@ -734,41 +734,39 @@ def _load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]
 
 
 async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
-    """Phase 2 only: RFP section map + per-section Supermemory + coverage + evidence corpus."""
+    """Phase 2: Proposal Intelligence Layer → ProposalExecutionPlan (no writing evidence)."""
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
     rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
     prior_research = get_research_cache(rfp_id)
 
-    logger.info("Phase 2 retrieval (standalone) starting for %s", rfp_id)
-    rfp_sections, evidence_corpus, retrieval_rounds, provider, section_queries = await run_retrieval_graph(
-        rfp_id=rfp.id,
-        rfp_title=rfp.title,
-        rfp_client=rfp.client,
-        rfp_sector=rfp.sector,
-        rfp_location=rfp.location or None,
-        rfp_context=rfp_context,
-    )
+    logger.info("Phase 2 intelligence starting for %s", rfp_id)
+    try:
+        plan, legacy = await run_intelligence_graph(
+            rfp_id=rfp.id,
+            rfp_title=rfp.title,
+            rfp_client=rfp.client,
+            rfp_sector=rfp.sector,
+            rfp_location=rfp.location or None,
+            rfp_context=rfp_context,
+        )
+    except IntelligenceError as exc:
+        raise ProposalError(str(exc), status_code=422) from exc
 
-    evidence_corpus, section_queries, rfp_sections = await gap_fill_evidence_for_sections(
-        rfp_sections=rfp_sections,
-        evidence_corpus=evidence_corpus,
-        section_queries=section_queries,
-        rfp_client=rfp.client,
-        rfp_sector=rfp.sector,
-    )
+    if plan.validation.readiness_status == "blocked":
+        raise ProposalError(
+            "Phase 2 intelligence blocked: " + "; ".join(plan.validation.blockers),
+            status_code=422,
+        )
+
+    rfp_sections = legacy.get("rfpSections") or []
+    section_queries = legacy.get("sectionQueries") or {}
+    proof_points = legacy.get("proofPoints") or []
 
     loss_lessons, writing_avoidances, _loss_sources = await build_loss_lessons_for_rfp(
         rfp=rfp,
         rfp_context=rfp_context,
-    )
-
-    proof_points = await build_proof_points_for_rfp(
-        rfp=rfp,
-        rfp_context=rfp_context,
-        rfp_sections=rfp_sections,
-        evidence_corpus=evidence_corpus,
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -777,30 +775,45 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         rfpSections=rfp_sections,
         questions=prior_research.questions if prior_research else [],
         brandVoice=prior_research.brand_voice if prior_research else None,
-        evidenceCorpus=evidence_corpus,
+        evidenceCorpus=[],  # HARD RULE: writing evidence only in Phase 3
         sectionQueries=section_queries,
-        retrievalRounds=retrieval_rounds,
+        retrievalRounds=0,
         coverageThreshold=85,
         lossLessons=loss_lessons,
         writingAvoidances=writing_avoidances,
         proofPoints=proof_points,
+        proposalExecutionPlan=plan,
         budget=prior_research.budget if prior_research else None,
         presubmitReview=prior_research.presubmit_review if prior_research else None,
         pipelineCheckpoint=prior_research.pipeline_checkpoint if prior_research else None,
         updatedAt=now,
-        provider=provider,
+        provider=plan.metadata.provider,
     )
     save_research_cache(research)
 
     logger.info(
-        "Phase 2 complete for %s: %d RFP sections, %d evidence items, %d loss lessons, %d proof points",
+        "Phase 2 complete for %s: plan=%s sections=%d decisions=%d evidence=0",
         rfp_id,
+        plan.validation.readiness_status,
         len(rfp_sections),
-        len(evidence_corpus),
-        len(loss_lessons),
-        len(proof_points),
+        len(plan.decision_log),
     )
     return research
+
+
+def _phase2_plan_ready(research: ProposalResearchCache | None) -> bool:
+    if not research:
+        return False
+    plan = research.proposal_execution_plan
+    if plan is None:
+        # Legacy caches created before intelligence layer
+        return bool(research.evidence_corpus and research.rfp_sections)
+    if isinstance(plan, dict):
+        status = (plan.get("validation") or {}).get("readinessStatus")
+        return status == "ready" and bool(research.rfp_sections)
+    if isinstance(plan, ProposalExecutionPlan):
+        return plan.validation.readiness_status == "ready" and bool(research.rfp_sections)
+    return bool(research.rfp_sections)
 
 
 async def generate_sections_1_3(
@@ -1197,14 +1210,15 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
 
     rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
     research = get_research_cache(rfp_id)
-    if not research or not research.evidence_corpus:
+    if not _phase2_plan_ready(research):
         raise ProposalError(
-            "Phase 2 research required. Run Phase 2 — KB retrieval first.",
+            "Phase 2 Proposal Execution Plan required. Run Phase 2 intelligence first.",
             status_code=400,
         )
+    assert research is not None
     if not research.rfp_sections:
         raise ProposalError(
-            "No RFP sections mapped. Re-run Phase 2 retrieval.",
+            "No RFP sections mapped. Re-run Phase 2.",
             status_code=400,
         )
 
@@ -1243,7 +1257,7 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         provider="phase-3",
     )
 
-    drafted_rfp_sections, provider = await run_drafting_graph(
+    drafted_rfp_sections, provider, jit_corpus = await run_drafting_graph(
         rfp_id=rfp.id,
         rfp_title=rfp.title,
         rfp_client=rfp.client,
@@ -1257,8 +1271,17 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         writing_avoidances=research.writing_avoidances,
         loss_lessons=research.loss_lessons,
         proof_points=research.proof_points,
+        execution_plan=(
+            research.proposal_execution_plan.model_dump(by_alias=True)
+            if hasattr(research.proposal_execution_plan, "model_dump")
+            else research.proposal_execution_plan
+        ),
         on_sections_drafted=_on_phase3_batch,
     )
+
+    if jit_corpus:
+        research = research.model_copy(update={"evidence_corpus": jit_corpus})
+        save_research_cache(research)
 
     merged_sections = _merge_static_with_rfp_sections(
         static_sections,
@@ -1350,6 +1373,16 @@ async def run_phase3_5_budget_reconcile(
     return draft, research, budget
 
 
+def _assert_proposal_not_reset(rfp_id: str) -> None:
+    """Refuse to persist if the user reset the proposal while a phase was running."""
+    draft = get_proposal_draft(rfp_id)
+    if draft is None:
+        raise ProposalError(
+            "Proposal was reset while this step was running. Progress was discarded.",
+            status_code=409,
+        )
+
+
 async def run_phase3_5_budget(
     rfp_id: str,
 ) -> tuple[ProposalDraft, ProposalResearchCache, ProposalBudget]:
@@ -1366,6 +1399,10 @@ async def run_phase3_5_budget(
 
     logger.info("Phase 3.5 budget starting for %s", rfp_id)
     budget, research = await generate_proposal_budget(rfp_id)
+
+    # User may have clicked Reset while budget was computing — do not rewrite wiped data.
+    _assert_proposal_not_reset(rfp_id)
+
     draft = incorporate_budget_into_draft(rfp_id, budget)
     if not draft:
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
@@ -1375,6 +1412,7 @@ async def run_phase3_5_budget(
         draft=draft,
         budget=budget,
     )
+    _assert_proposal_not_reset(rfp_id)
     save_proposal_draft(draft)
 
     # Re-render budget section after fee sync so narrative totals stay aligned
@@ -1391,12 +1429,14 @@ async def run_phase3_5_budget(
             status_code=502,
         ) from exc
 
+    _assert_proposal_not_reset(rfp_id)
     if research:
         research = research.model_copy(update={"budget": budget})
         save_research_cache(research)
     final_draft = incorporate_budget_into_draft(rfp_id, budget)
     if final_draft:
         draft = final_draft
+        _assert_proposal_not_reset(rfp_id)
         save_proposal_draft(draft)
 
     logger.info(

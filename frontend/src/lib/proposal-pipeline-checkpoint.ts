@@ -21,7 +21,7 @@ export const PIPELINE_PHASE_ORDER: PipelinePhase[] = [
 
 export const PIPELINE_PHASE_LABELS: Record<PipelinePhase, string> = {
   "sections-1-3": "Sections 1–3",
-  "phase-2": "Phase 2 research",
+  "phase-2": "Phase 2 intelligence",
   "phase-3": "Phase 3 drafting",
   "phase-3-6-self-edit": "Senior editor polish",
   "phase-3-5-budget": "Budget build",
@@ -111,6 +111,12 @@ export function phaseIsComplete(
   if (!research) return false;
 
   if (phase === "phase-2") {
+    const readiness =
+      research.proposalExecutionPlan?.validation?.readinessStatus;
+    if (readiness) {
+      return readiness === "ready" && Boolean(research.rfpSections?.length);
+    }
+    // Legacy caches created before intelligence layer
     return Boolean(research.evidenceCorpus?.length && research.rfpSections?.length);
   }
   if (phase === "phase-3") {
@@ -181,7 +187,9 @@ export function resolveResumePhase(
   }
   if (draft && research) {
     if (!research.presubmitReview) return "phase-4-review";
-    if (!research.proofPoints?.length) return "phase-2";
+    const planReady =
+      research.proposalExecutionPlan?.validation?.readinessStatus === "ready";
+    if (!planReady && !research.proofPoints?.length) return "phase-2";
   }
   return "complete";
 }

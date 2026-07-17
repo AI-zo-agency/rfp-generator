@@ -146,6 +146,19 @@ export interface FeeJustificationMemo {
   provider?: string | null;
 }
 
+export interface ProposalExecutionPlanSummary {
+  validation?: {
+    readinessStatus?: "ready" | "blocked" | "partial";
+    blockers?: string[];
+    warnings?: string[];
+    lowConfidenceArtifacts?: string[];
+  };
+  metadata?: {
+    planVersion?: string;
+    planConfidence?: number;
+  };
+}
+
 export interface ProposalResearch {
   rfpId: string;
   rfpSections: RfpSectionMap[];
@@ -158,6 +171,7 @@ export interface ProposalResearch {
   proofPoints?: ProofPoint[];
   presubmitReview?: PreSubmitReview | null;
   pipelineCheckpoint?: ProposalPipelineCheckpoint | null;
+  proposalExecutionPlan?: ProposalExecutionPlanSummary | null;
   updatedAt: string;
   provider?: string | null;
   sectionQueries?: Record<string, string[]>;

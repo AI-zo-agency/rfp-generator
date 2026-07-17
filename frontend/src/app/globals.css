@@ -1656,12 +1656,15 @@ h4 {
   display: flex;
   align-items: flex-start;
   gap: 0.5rem;
+  border: 0;
   border-radius: var(--zo-radius-md);
+  background: transparent;
   padding: 0.5rem 0.625rem;
   font-size: 0.8125rem;
   font-weight: 500;
   line-height: 1.4;
   color: var(--zo-text-secondary);
+  cursor: pointer;
   transition:
     color var(--duration-fast) var(--ease-smooth),
     background var(--duration-fast) var(--ease-smooth);
@@ -1691,6 +1694,15 @@ h4 {
 }
 
 .proposal-on-page-link:hover .proposal-on-page-num {
+  color: var(--zo-orange);
+}
+
+.proposal-on-page-link.is-active {
+  background: rgba(239, 80, 24, 0.12);
+  color: var(--zo-orange);
+}
+
+.proposal-on-page-link.is-active .proposal-on-page-num {
   color: var(--zo-orange);
 }
 

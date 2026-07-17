@@ -23,7 +23,6 @@ import {
   generateProposalPricing,
   generateProposalSections1to3,
   pipelineResumeMessage,
-  PIPELINE_PHASE_LABELS,
   recoverProposalDraftIfSaved,
   runPhase3Drafting,
   runPhase3_5BudgetWithRecovery,
@@ -56,7 +55,7 @@ import {
   type ManualFillFlag,
 } from "@/lib/proposal-manual-flags";
 import { phaseIsComplete } from "@/lib/proposal-pipeline-checkpoint";
-import { getTopLevelSectionProgress } from "@/lib/proposal-outline-tree";
+import { getTopLevelSectionProgress, getManuscriptSections, resolveManuscriptJumpTarget } from "@/lib/proposal-outline-tree";
 
 type WorkspaceTab = "outline" | "content" | "pricing" | "export";
 
@@ -212,8 +211,10 @@ export function ProposalDraftWorkspace({
     useState<ProposalPipelineStatus | null>(null);
   const skipNextSaveRef = useRef(false);
   const saveGenerationRef = useRef(0);
+  const fullProposalAbortRef = useRef<AbortController | null>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const sectionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const contentScrollRef = useRef<HTMLDivElement | null>(null);
   const [sectionRevisions, setSectionRevisions] = useState<SectionRevisionMap>({});
   const [revisionDrawerSectionId, setRevisionDrawerSectionId] = useState<string | null>(
     null
@@ -250,8 +251,11 @@ export function ProposalDraftWorkspace({
   );
 
   useEffect(() => {
-    setSectionRevisions(loadStoredRevisions(rfp.id));
-    setRevisionDrawerSectionId(null);
+    const revisions = loadStoredRevisions(rfp.id);
+    queueMicrotask(() => {
+      setSectionRevisions(revisions);
+      setRevisionDrawerSectionId(null);
+    });
   }, [rfp.id]);
 
   const activeRevision =
@@ -293,17 +297,39 @@ export function ProposalDraftWorkspace({
     return resolveFlagHighlight(activeSubmissionFlag, section.content ?? "");
   }, [activeSubmissionFlag, outline.sections]);
 
+  const manuscriptSections = useMemo(
+    () => getManuscriptSections(outline.sections),
+    [outline.sections]
+  );
+
+  const scrollToManuscriptSection = useCallback((requestedId: string) => {
+    const targetId = resolveManuscriptJumpTarget(outline.sections, requestedId);
+    const scroller = contentScrollRef.current;
+    const target = document.getElementById(targetId);
+    if (!target) return;
+    setHighlightedSectionId(targetId);
+    setSelectedSectionId(targetId);
+    window.setTimeout(() => setHighlightedSectionId(null), 2200);
+    if (scroller) {
+      const sRect = scroller.getBoundingClientRect();
+      const tRect = target.getBoundingClientRect();
+      scroller.scrollTo({
+        top: scroller.scrollTop + (tRect.top - sRect.top) - 20,
+        behavior: "smooth",
+      });
+      return;
+    }
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [outline.sections]);
+
   useEffect(() => {
     if (activeTab !== "content" || !activeSubmissionFlag) return;
     const sectionId = activeSubmissionFlag.sectionId;
     const frame = requestAnimationFrame(() => {
-      document.getElementById(sectionId)?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
+      scrollToManuscriptSection(sectionId);
     });
     return () => cancelAnimationFrame(frame);
-  }, [activeTab, activeSubmissionFlag]);
+  }, [activeTab, activeSubmissionFlag, scrollToManuscriptSection]);
 
   useEffect(() => {
     let cancelled = false;
@@ -459,7 +485,9 @@ export function ProposalDraftWorkspace({
     [outline]
   );
 
-  const phase2Done = (research?.evidenceCorpus?.length ?? 0) > 0;
+  const phase2Done =
+    research?.proposalExecutionPlan?.validation?.readinessStatus === "ready" ||
+    (research?.evidenceCorpus?.length ?? 0) > 0;
 
   const phase3Done = useMemo(
     () =>
@@ -632,32 +660,44 @@ export function ProposalDraftWorkspace({
     }
   }, [applyOutlineFromServer]);
 
-  const handleGenerateFullProposal = useCallback(async () => {
-    const canResume = pipelineStatus?.canResume ?? false;
-    const resumePhase = pipelineStatus?.resumeFromPhase;
-    const forwardOnlyResume =
-      resumePhase === "phase-3-5-budget" || resumePhase === "phase-4-review";
+  const handleGenerateFullProposal = useCallback(async (options?: { startAfterSections1to3?: boolean }) => {
+    // Continue = resume from checkpoint (e.g. budget failure).
+    // Fresh / regenerate-from-done = forceRestart from Sections 1–3.
+    const startAfterSections1to3 = Boolean(options?.startAfterSections1to3);
+    const shouldResume = !startAfterSections1to3 && canResumePipeline && Boolean(pipelineStatus);
 
-    if (canResume && !fullProposalDone) {
-      // Resume without confirmation when manuscript is incomplete.
+    if (startAfterSections1to3) {
+      if (!staticSections1to3Complete(outline)) {
+        setGenerateError("Draft Sections 1–3 first, then start after Sections 1–3.");
+        return;
+      }
+      if (
+        !confirm(
+          "Start after Sections 1–3?\n\nThis keeps the existing Sections 1–3 and runs Phase 2 intelligence, RFP drafting, budget, and review."
+        )
+      ) {
+        return;
+      }
+    } else if (shouldResume) {
+      if (
+        !confirm(
+          `${pipelineResumeMessage(pipelineStatus!)}\n\nContinue from where it left off? (Skips finished phases.)`
+        )
+      ) {
+        return;
+      }
     } else if (
-      canResume &&
-      fullProposalDone &&
-      !forwardOnlyResume &&
-      !confirm(
-        `Resume pipeline from ${resumePhase ? PIPELINE_PHASE_LABELS[resumePhase] : "checkpoint"}? Completed phases will be skipped.`
-      )
-    ) {
-      return;
-    } else if (
-      !canResume &&
       fullProposalDone &&
       !confirm(
-        "Proposal already generated. Re-run full pipeline anyway? (Uses LLM tokens.)"
+        "Start full proposal from the beginning?\n\nThis regenerates Sections 1–3, intelligence, drafting, budget, and review (uses LLM tokens)."
       )
     ) {
       return;
     }
+
+    fullProposalAbortRef.current?.abort();
+    const abort = new AbortController();
+    fullProposalAbortRef.current = abort;
 
     setIsFullProposalRunning(true);
     setFullProposalProgress(null);
@@ -668,10 +708,17 @@ export function ProposalDraftWorkspace({
     try {
       const { draft, research: updatedResearch } =
         await generateFullProposalStaged(rfp.id, setFullProposalProgress, {
-          startFrom: canResume ? pipelineStatus?.resumeFromPhase : undefined,
-          forceRestart: !canResume && fullProposalDone,
+          forceRestart: !(shouldResume || startAfterSections1to3),
+          startFrom: startAfterSections1to3
+            ? "phase-2"
+            : shouldResume
+            ? pipelineStatus!.resumeFromPhase
+            : undefined,
+          forceRerunFromStart: startAfterSections1to3,
+          signal: abort.signal,
           onDraftUpdate: handleLiveDraftUpdate,
         });
+      if (abort.signal.aborted) return;
       applyOutlineFromServer(draft);
       if (updatedResearch) {
         setResearch(updatedResearch);
@@ -688,10 +735,12 @@ export function ProposalDraftWorkspace({
       setSelectedSectionId(
         draft.sections.find((s) => s.content)?.id ?? draft.sections[0]?.id ?? null
       );
-      if (canResume) {
-        setGenerateNotice("Pipeline resumed and completed from the last checkpoint.");
-      }
     } catch (error) {
+      if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+        setGenerateNotice("Generation cancelled. Outline was reset.");
+        setGenerateError(null);
+        return;
+      }
       setFullProposalProgress("recovering");
       const errMsg =
         error instanceof Error ? error.message : "Full proposal generation failed";
@@ -729,20 +778,32 @@ export function ProposalDraftWorkspace({
         setGenerateError(errMsg);
       }
     } finally {
+      if (fullProposalAbortRef.current === abort) {
+        fullProposalAbortRef.current = null;
+      }
       setIsFullProposalRunning(false);
       setFullProposalProgress(null);
       setLiveLatestSectionTitle(null);
     }
-  }, [rfp.id, fullProposalDone, pipelineStatus, outline, handleLiveDraftUpdate]);
+  }, [rfp.id, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, applyOutlineFromServer]);
 
   const handleResetOutline = async () => {
     if (
       !confirm(
-        "Reset outline and clear ALL generated content?\n\nThis will permanently delete:\n• All generated sections (Sections 1–3, RFP sections)\n• All pipeline checkpoints from the database\n• Research cache and evidence corpus\n\nThis cannot be undone."
+        "Reset outline and clear ALL generated content?\n\nThis will permanently delete:\n• All generated sections (Sections 1–3, RFP sections)\n• All pipeline checkpoints from the database\n• Research cache and evidence corpus\n• Cancel any generation currently running\n\nThis cannot be undone."
       )
     ) {
       return;
     }
+
+    // Cancel in-flight Full Proposal / budget HTTP calls first
+    fullProposalAbortRef.current?.abort();
+    fullProposalAbortRef.current = null;
+    setIsFullProposalRunning(false);
+    setIsPricingRunning(false);
+    setIsRefiningBudget(false);
+    setFullProposalProgress(null);
+    setLiveLatestSectionTitle(null);
 
     // 1. Hard-delete from DB (draft + checkpoint + research cache)
     try {
@@ -762,10 +823,19 @@ export function ProposalDraftWorkspace({
     setSelectedSectionId(defaults.sections[0]?.id ?? null);
     setPresubmitReview(null);
     setResearch(null);
+    setBudget(null);
+    setPipelineStatus(null);
     setGenerateError(null);
-    setGenerateNotice(null);
+    setGenerateNotice("Reset complete. All generated content cleared.");
     setFullProposalProgress(null);
     setLiveLatestSectionTitle(null);
+
+    // 3. Wipe again after a beat — in case a late budget save raced past the first reset
+    window.setTimeout(() => {
+      void fetch(`/api/rfps/${rfp.id}/proposal/reset`, { method: "POST" }).catch(
+        () => undefined
+      );
+    }, 2500);
   };
 
 
@@ -1122,9 +1192,13 @@ export function ProposalDraftWorkspace({
             type="button"
             onClick={handleResetOutline}
             className="zo-btn secondary"
-            disabled={anyPipelineRunning}
+            title={
+              anyPipelineRunning
+                ? "Cancel running generation and clear all content"
+                : "Clear all generated content"
+            }
           >
-            Reset
+            {anyPipelineRunning ? "Cancel & reset" : "Reset"}
           </button>
           <button
             type="button"
@@ -1136,7 +1210,7 @@ export function ProposalDraftWorkspace({
             {isFullProposalRunning && fullProposalProgress === "sections-1-3" ? (
               <>
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-zo-teal/30 border-t-zo-teal" />
-                Drafting sections 1–3…
+                <span>Drafting sections 1–3…</span>
               </>
             ) : (
               <>
@@ -1193,6 +1267,15 @@ export function ProposalDraftWorkspace({
                 {primaryPipelineLabel}
               </>
             )}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleGenerateFullProposal({ startAfterSections1to3: true })}
+            disabled={anyPipelineRunning || !staticSections1to3Complete(outline)}
+            className="zo-btn secondary disabled:opacity-60"
+            title="Keep current Sections 1–3 and run Phase 2 onward"
+          >
+            Start After Sections 1–3
           </button>
         </div>
       </div>
@@ -1444,7 +1527,10 @@ export function ProposalDraftWorkspace({
         {outline.sections.some((s) => s.content.trim()) ||
         (isFullProposalRunning && fullProposalProgress === "sections-1-3") ? (
           <div className="proposal-content-layout grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(200px,260px)] lg:gap-4 lg:p-3">
-            <div className="proposal-content-scroll custom-scrollbar space-y-4 p-3 md:p-4 lg:px-2 lg:py-2">
+            <div
+              ref={contentScrollRef}
+              className="proposal-content-scroll custom-scrollbar space-y-4 p-3 md:p-4 lg:px-2 lg:py-2"
+            >
               {isFullProposalRunning && fullProposalProgress === "sections-1-3" ? (
                 <div className="rounded-xl border border-zo-orange/30 bg-[#ef5018]/08 px-4 py-3 text-sm text-foreground">
                   <span className="font-semibold text-zo-orange">Drafting live</span>
@@ -1459,20 +1545,7 @@ export function ProposalDraftWorkspace({
                   ) : null}
                 </div>
               ) : null}
-              {outline.sections
-                .filter(
-                  (section) =>
-                    section.content?.trim() ||
-                    section.id.startsWith("section-1-") ||
-                    section.id.startsWith("section-2-bio-") ||
-                    section.id.startsWith("section-3-work-")
-                )
-                .filter(
-                  (section) =>
-                    section.id !== "section-2-bio-placeholder" &&
-                    section.id !== "section-3-work-placeholder"
-                )
-                .map((section, index) =>
+              {manuscriptSections.map((section, index) =>
                   section.content?.trim() ? (
                   <article
                     key={section.id}
@@ -1550,37 +1623,30 @@ export function ProposalDraftWorkspace({
               <p className="shrink-0 text-[10px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                 On this page
               </p>
+              <p className="mt-1 shrink-0 text-[11px] text-zo-text-muted">
+                {manuscriptSections.length} sections
+              </p>
               <div className="proposal-on-page-nav-scroll custom-scrollbar">
                 <ul className="space-y-0.5">
-                  {outline.sections
-                    .filter(
-                      (s) =>
-                        s.content?.trim() ||
-                        s.id.startsWith("section-1-") ||
-                        (s.id.startsWith("section-2-bio-") &&
-                          s.id !== "section-2-bio-placeholder") ||
-                        (s.id.startsWith("section-3-work-") &&
-                          s.id !== "section-3-work-placeholder")
-                    )
-                    .map((section, index) => (
+                  {manuscriptSections.map((section, index) => (
                       <li key={section.id}>
-                        <a
-                          href={`#${section.id}`}
-                          className="proposal-on-page-link"
+                        <button
+                          type="button"
+                          className={`proposal-on-page-link w-full text-left ${
+                            highlightedSectionId === section.id ||
+                            selectedSectionId === section.id
+                              ? "is-active"
+                              : ""
+                          }`}
                           title={section.title}
-                          onClick={(event) => {
-                            event.preventDefault();
-                            document
-                              .getElementById(section.id)
-                              ?.scrollIntoView({ behavior: "smooth", block: "start" });
-                          }}
+                          onClick={() => scrollToManuscriptSection(section.id)}
                         >
                           <span className="proposal-on-page-num">{index + 1}</span>
                           <span className="proposal-on-page-title">
                             {section.title}
                             {!section.content?.trim() ? " · …" : ""}
                           </span>
-                        </a>
+                        </button>
                       </li>
                     ))}
                 </ul>

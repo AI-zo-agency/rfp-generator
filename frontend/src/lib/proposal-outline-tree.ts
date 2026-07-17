@@ -27,8 +27,12 @@ export type OutlineTreeLeaf = {
 
 export type OutlineTreeNode = OutlineTreeGroup | OutlineTreeLeaf;
 
-function isPlaceholder(section: OutlineSection): boolean {
+export function isPlaceholderSection(section: OutlineSection): boolean {
   return PLACEHOLDER_IDS.has(section.id);
+}
+
+function isPlaceholder(section: OutlineSection): boolean {
+  return isPlaceholderSection(section);
 }
 
 function matchesGroup(section: OutlineSection, groupId: string): boolean {
@@ -53,6 +57,41 @@ function matchesGroup(section: OutlineSection, groupId: string): boolean {
     default:
       return false;
   }
+}
+
+/** Sections rendered in Content tab + On this page nav (never placeholders). */
+export function getManuscriptSections(sections: OutlineSection[]): OutlineSection[] {
+  return sections.filter((section) => {
+    if (isPlaceholder(section)) return false;
+    if (section.content?.trim()) return true;
+    // Keep static 1–3 stubs visible while drafting.
+    if (section.id.startsWith("section-1-")) return true;
+    if (section.id.startsWith("section-2-bio-")) return true;
+    if (section.id.startsWith("section-3-work-")) return true;
+    // Keep RFP/dynamic outline entries visible even before content lands.
+    if (section.source === "rfp" || section.source === "generated") return true;
+    return false;
+  });
+}
+
+/** First real Our Work / Team Bios target for group-style nav clicks. */
+export function resolveManuscriptJumpTarget(
+  sections: OutlineSection[],
+  requestedId: string,
+): string {
+  if (requestedId === "section-2-bio-placeholder" || requestedId === "section-2") {
+    const firstBio = getManuscriptSections(sections).find((s) =>
+      s.id.startsWith("section-2-bio-"),
+    );
+    if (firstBio) return firstBio.id;
+  }
+  if (requestedId === "section-3-work-placeholder" || requestedId === "section-3") {
+    const firstWork = getManuscriptSections(sections).find((s) =>
+      s.id.startsWith("section-3-work-"),
+    );
+    if (firstWork) return firstWork.id;
+  }
+  return requestedId;
 }
 
 export function buildOutlineSectionTree(

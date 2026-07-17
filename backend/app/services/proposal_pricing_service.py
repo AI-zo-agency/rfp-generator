@@ -166,6 +166,7 @@ MATH (mandatory — verify before returning):
 7. optionTermNotes MUST use agencyRevenueEstimate as the base-year agency fee figure.
 8. Do NOT leave pricingFlags describing math discrepancies — fix the numbers instead.
 9. pricingFlags are ONLY for items requiring Sonja/human review (out-of-guide scope, missing KB).
+   NEVER put compliance or qualification [VERIFY: …] tags in pricingFlags — those belong in proposal narrative sections, not the budget object.
 10. Final check: agencyRevenueEstimate > 0 whenever commissionRate or agency_fee line items exist — reject your own output if zero.
 
 Return ONLY JSON:
@@ -419,7 +420,11 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         )
 
     now = datetime.now(timezone.utc).isoformat()
-    flags = [str(f) for f in (raw.get("pricingFlags") or []) if str(f).strip()]
+    flags = [
+        str(f)
+        for f in (raw.get("pricingFlags") or [])
+        if str(f).strip() and not str(f).strip().upper().startswith("[VERIFY:")
+    ]
     if not stage_one_ready:
         flags.append(
             "[PRICING FLAG: Stage 1 Go/No-Go not complete — run fit analysis for tier selection]"

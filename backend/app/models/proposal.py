@@ -1,6 +1,9 @@
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+if TYPE_CHECKING:
+    from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
 
 ProposalSectionMode = Literal["pull", "select", "write"]
 ProposalSectionSource = Literal["template", "rfp", "generated"]
@@ -316,8 +319,22 @@ class ProposalResearchCache(BaseModel):
     pipeline_checkpoint: ProposalPipelineCheckpoint | None = Field(
         default=None, alias="pipelineCheckpoint"
     )
+    proposal_execution_plan: Any | None = Field(
+        default=None, alias="proposalExecutionPlan"
+    )
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None
+
+    @field_validator("proposal_execution_plan", mode="before")
+    @classmethod
+    def _coerce_execution_plan(cls, value: Any) -> Any:
+        if value is None or hasattr(value, "model_dump"):
+            return value
+        if isinstance(value, dict):
+            from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
+
+            return ProposalExecutionPlan.model_validate(value)
+        return value
 
 
 class ProposalSection(BaseModel):
