@@ -23,9 +23,23 @@ export interface OutlineSection {
   kbRefs?: string[];
 }
 
+export interface ProposalDraftSnapshot {
+  savedAt: string;
+  label: string;
+  sections: OutlineSection[];
+  /** Present when API returns slim snapshots (sections loaded on demand). */
+  sectionCount?: number;
+  scanSummary?: Record<string, unknown>;
+}
+
 export interface ProposalOutline {
   sections: OutlineSection[];
   updatedAt: string;
+  googleDocUrl?: string | null;
+  googleDocId?: string | null;
+  googleDocExportedAt?: string | null;
+  snapshots?: ProposalDraftSnapshot[];
+  lastFulfillReport?: Record<string, unknown>;
 }
 
 export interface ProposalDraftMeta {
@@ -197,6 +211,26 @@ export interface ProposalResearch {
       covered: boolean;
       evaluationWeight?: number | null;
     }>;
+    requirementsMethodology?: {
+      summary?: string;
+      steps?: string[];
+      coverageRule?: string;
+      sourceNote?: string;
+      notIncluded?: string[];
+      sectionRollups?: Array<{
+        sectionId: string;
+        sectionTitle: string;
+        requirementsTotal: number;
+        requirementsCovered: number;
+      }>;
+    } | null;
+    closingPackage?: {
+      detected?: string[];
+      added?: string[];
+      humanDecisionGaps?: string[];
+      submissionChecklistExpected?: string[];
+      submissionNarrativesAdded?: string[];
+    } | null;
   } | null;
   pipelineCheckpoint?: ProposalPipelineCheckpoint | null;
   proposalExecutionPlan?: ProposalExecutionPlanSummary | null;

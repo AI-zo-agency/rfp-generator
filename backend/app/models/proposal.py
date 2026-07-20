@@ -251,6 +251,10 @@ class ProposalBudget(BaseModel):
     lump_sum_total: float | None = Field(default=None, alias="lumpSumTotal")
     direct_expenses_total: float | None = Field(default=None, alias="directExpensesTotal")
     commission_model: str | None = Field(default=None, alias="commissionModel")
+    form_hourly_rate: float | None = Field(default=None, alias="formHourlyRate")
+    form_monthly_rate: float | None = Field(default=None, alias="formMonthlyRate")
+    form_annual_rate: float | None = Field(default=None, alias="formAnnualRate")
+    form_rate_notes: str = Field(default="", alias="formRateNotes")
     pricing_flags: list[str] = Field(default_factory=list, alias="pricingFlags")
     qualifying_language: str = Field(default="", alias="qualifyingLanguage")
     scope_adjustments: list[str] = Field(default_factory=list, alias="scopeAdjustments")
@@ -277,6 +281,14 @@ class ProposalPipelineCheckpoint(BaseModel):
     last_failed_phase: str | None = Field(default=None, alias="lastFailedPhase")
     last_error: str | None = Field(default=None, alias="lastError")
     resume_from_phase: str | None = Field(default=None, alias="resumeFromPhase")
+    activity_label: str | None = Field(
+        default=None,
+        alias="activityLabel",
+        description="Human-readable sub-step (e.g. drafting section title, KPI scan).",
+    )
+    activity_detail: str | None = Field(default=None, alias="activityDetail")
+    step_index: int | None = Field(default=None, alias="stepIndex")
+    step_total: int | None = Field(default=None, alias="stepTotal")
     updated_at: str = Field(alias="updatedAt")
 
 
@@ -386,6 +398,15 @@ class ProposalSection(BaseModel):
     kb_refs: list[str] = Field(default_factory=list, alias="kbRefs")
 
 
+class ProposalDraftSnapshot(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    saved_at: str = Field(alias="savedAt")
+    label: str
+    sections: list[ProposalSection]
+    scan_summary: dict[str, Any] | None = Field(default=None, alias="scanSummary")
+
+
 class ProposalDraft(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -394,6 +415,15 @@ class ProposalDraft(BaseModel):
     updated_at: str = Field(alias="updatedAt")
     generated_at: str | None = Field(default=None, alias="generatedAt")
     provider: str | None = None
+    google_doc_url: str | None = Field(default=None, alias="googleDocUrl")
+    google_doc_id: str | None = Field(default=None, alias="googleDocId")
+    google_doc_exported_at: str | None = Field(
+        default=None, alias="googleDocExportedAt"
+    )
+    snapshots: list[ProposalDraftSnapshot] = Field(default_factory=list)
+    last_fulfill_report: dict[str, Any] | None = Field(
+        default=None, alias="lastFulfillReport"
+    )
 
 
 class ProposalGenerateResponse(BaseModel):
@@ -471,3 +501,36 @@ class PreSubmitAutoFixRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     use_llm: bool = Field(default=True, alias="useLlm")
+
+
+class ProposalFulfillGapsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    ok: bool = True
+    review: PreSubmitReview
+    research: ProposalResearchCache
+    draft: ProposalDraft
+    fulfill_report: dict[str, Any] = Field(default_factory=dict, alias="fulfillReport")
+
+
+class ProposalRestoreSnapshotRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    saved_at: str = Field(alias="savedAt")
+
+
+class ProposalRestoreSnapshotResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    ok: bool = True
+    draft: ProposalDraft
+
+
+class ProposalGoogleDocExportResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    ok: bool = True
+    document_id: str = Field(alias="documentId")
+    document_url: str = Field(alias="documentUrl")
+    title: str
+    section_count: int = Field(alias="sectionCount")

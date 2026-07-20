@@ -137,16 +137,79 @@ def record_phase_started(rfp_id: str, phase: str) -> None:
     clear_stale_in_progress_checkpoint(rfp_id)
     research = _ensure_research(rfp_id)
     prior = research.pipeline_checkpoint
+    phase_label = PHASE_LABELS.get(phase, phase)
     checkpoint = ProposalPipelineCheckpoint(
         lastCompletedPhase=prior.last_completed_phase if prior else None,
         inProgressPhase=phase,
         lastFailedPhase=None,
         lastError=None,
         resumeFromPhase=phase,
+        activityLabel=phase_label,
+        activityDetail=None,
+        stepIndex=None,
+        stepTotal=None,
         updatedAt=_now_iso(),
     )
     _save_checkpoint(rfp_id, checkpoint)
     logger.info("Pipeline checkpoint: %s started %s", rfp_id, phase)
+
+
+def record_pipeline_activity(
+    rfp_id: str,
+    *,
+    label: str,
+    detail: str | None = None,
+    step_index: int | None = None,
+    step_total: int | None = None,
+    in_progress_phase: str | None = None,
+) -> None:
+    """Update live sub-step text while a phase runs (polled by the UI)."""
+    research = _ensure_research(rfp_id)
+    cp = research.pipeline_checkpoint
+    if cp is None:
+        cp = ProposalPipelineCheckpoint(
+            inProgressPhase=in_progress_phase or "phase-3",
+            activityLabel=label[:500],
+            activityDetail=detail[:500] if detail else None,
+            stepIndex=step_index,
+            stepTotal=step_total,
+            updatedAt=_now_iso(),
+        )
+    else:
+        updates: dict[str, object] = {
+            "activity_label": label[:500],
+            "activity_detail": detail[:500] if detail else None,
+            "step_index": step_index,
+            "step_total": step_total,
+            "updated_at": _now_iso(),
+        }
+        if in_progress_phase is not None:
+            updates["in_progress_phase"] = in_progress_phase
+        cp = cp.model_copy(update=updates)
+    _save_checkpoint(rfp_id, cp)
+
+
+def clear_fulfill_scan_activity(rfp_id: str) -> None:
+    """Clear transient Scan RFP progress without touching a real pipeline phase."""
+    research = get_research_cache(rfp_id)
+    if not research or not research.pipeline_checkpoint:
+        return
+    cp = research.pipeline_checkpoint
+    if cp.in_progress_phase != "fulfill-scan":
+        return
+    _save_checkpoint(
+        rfp_id,
+        cp.model_copy(
+            update={
+                "in_progress_phase": None,
+                "activity_label": None,
+                "activity_detail": None,
+                "step_index": None,
+                "step_total": None,
+                "updated_at": _now_iso(),
+            }
+        ),
+    )
 
 
 def _next_phase_after(completed_phase: str) -> str:
@@ -189,6 +252,10 @@ def record_phase_completed(rfp_id: str, phase: str) -> None:
         lastFailedPhase=None,
         lastError=None,
         resumeFromPhase=None if next_phase == "complete" else next_phase,
+        activityLabel=None,
+        activityDetail=None,
+        stepIndex=None,
+        stepTotal=None,
         updatedAt=_now_iso(),
     )
     _save_checkpoint(rfp_id, checkpoint)

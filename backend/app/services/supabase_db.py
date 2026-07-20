@@ -368,6 +368,28 @@ def save_research_cache(cache: ProposalResearchCache) -> None:
     ).execute()
 
 
+def list_google_doc_urls() -> dict[str, str]:
+    """Map rfp_id → Google Doc URL from proposal_drafts payloads."""
+    client = _get_client()
+    result = client.table("proposal_drafts").select("rfp_id,payload").execute()
+    rows = _handle_response(result.data, context="list_google_doc_urls")
+    out: dict[str, str] = {}
+    for row in rows:
+        payload = row.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                continue
+        if not isinstance(payload, dict):
+            continue
+        url = payload.get("googleDocUrl") or payload.get("google_doc_url")
+        rfp_id = row.get("rfp_id")
+        if rfp_id and isinstance(url, str) and url.strip():
+            out[str(rfp_id)] = url.strip()
+    return out
+
+
 def get_proposal_draft(rfp_id: str) -> ProposalDraft | None:
     client = _get_client()
     result = (

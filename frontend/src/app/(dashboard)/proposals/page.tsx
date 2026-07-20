@@ -5,16 +5,21 @@ import { ProposalsWorkspaceSkeleton } from "@/components/loading/ProposalsWorksp
 
 export default function ProposalsPage() {
   return (
-    <div className="space-y-3 sm:space-y-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-2 sm:gap-3">
+      <div className="shrink-0">
       <DashboardHeader
         title="Proposals"
-        subtitle="Draft Go RFPs — full-width editor with section outlines, AI revisions, and export."
+        subtitle="Draft Go RFPs — outlines, review, and export."
         showSync={false}
+        compact
       />
+      </div>
 
-      <Suspense fallback={<ProposalsWorkspaceSkeleton />}>
-        <ProposalsWorkspaceLoader />
-      </Suspense>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <Suspense fallback={<ProposalsWorkspaceSkeleton />}>
+          <ProposalsWorkspaceLoader />
+        </Suspense>
+      </div>
     </div>
   );
 }

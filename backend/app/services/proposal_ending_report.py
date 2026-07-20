@@ -29,6 +29,97 @@ class EndingRequirementStatus(BaseModel):
     evaluation_weight: int | None = Field(default=None, alias="evaluationWeight")
 
 
+class RequirementSectionRollup(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    section_title: str = Field(alias="sectionTitle")
+    requirements_total: int = Field(alias="requirementsTotal")
+    requirements_covered: int = Field(alias="requirementsCovered")
+
+
+class RequirementsMethodology(BaseModel):
+    """How requirementsCovered / requirementsTotal is computed — shown in Export UI."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    summary: str = Field(
+        default=(
+            "An automatic check of whether your draft talks about each tracked "
+            "theme—not a human score and not a full legal compliance review."
+        )
+    )
+    steps: list[str] = Field(default_factory=list)
+    coverage_rule: str = Field(default="", alias="coverageRule")
+    source_note: str = Field(default="", alias="sourceNote")
+    not_included: list[str] = Field(default_factory=list, alias="notIncluded")
+    section_rollups: list[RequirementSectionRollup] = Field(
+        default_factory=list, alias="sectionRollups"
+    )
+
+
+REQUIREMENT_COVERAGE_RULE_TEXT = (
+    "We take the important words from each checklist line (skipping filler like "
+    '"the" or "provide"). If at least half of those words—or at least two words, '
+    "whichever is higher—appear anywhere in your full draft, we count that line as "
+    "covered."
+)
+
+
+def build_requirements_methodology(
+    *,
+    rfp_mapped_count: int,
+    statuses: list[EndingRequirementStatus],
+) -> RequirementsMethodology:
+    rollups: dict[str, RequirementSectionRollup] = {}
+    for st in statuses:
+        r = rollups.get(st.section_id)
+        if not r:
+            r = RequirementSectionRollup(
+                sectionId=st.section_id,
+                sectionTitle=st.section_title,
+                requirementsTotal=0,
+                requirementsCovered=0,
+            )
+            rollups[st.section_id] = r
+        r = r.model_copy(
+            update={
+                "requirements_total": r.requirements_total + 1,
+                "requirements_covered": r.requirements_covered + (1 if st.covered else 0),
+            }
+        )
+        rollups[st.section_id] = r
+
+    return RequirementsMethodology(
+        summary=(
+            f"We track {len(statuses)} checklist lines across {rfp_mapped_count} "
+            f"RFP-driven sections in your proposal. The score counts how many of "
+            f"those lines look addressed in your written draft."
+        ),
+        steps=[
+            "When this RFP was mapped, we saved a checklist of themes and points each section should cover (often key messages, not every legal “shall” in the PDF).",
+            "We read your entire proposal draft—all sections combined.",
+            "For each checklist line, we search the draft for the main words from that line.",
+            "If enough of those words appear, the line counts as covered. Your score is covered lines ÷ total lines.",
+        ],
+        coverageRule=REQUIREMENT_COVERAGE_RULE_TEXT,
+        sourceNote=(
+            "The total can increase when we add closing sections (references, insurance, "
+            "signatures, etc.) or run Fulfill RFP gaps. Pre-submit issues (e.g. placeholders "
+            "or wording fixes) are counted separately—they are not this score."
+        ),
+        notIncluded=[
+            "A line-by-line legal audit of the RFP PDF",
+            "Whether attachments are actually attached (COI, signed forms, screenshots)—unless you wrote about them in the text",
+            "How a human evaluator would score the bid, or whether every form box is filled",
+        ],
+        sectionRollups=sorted(
+            rollups.values(),
+            key=lambda x: (x.section_title or x.section_id).casefold(),
+        ),
+    )
+
+
 class ProposalEndingReport(BaseModel):
     """What the proposal ends with after Budget — not just 'done', a close-out brief."""
 
@@ -64,6 +155,9 @@ class ProposalEndingReport(BaseModel):
     requirements_uncovered: int = Field(default=0, alias="requirementsUncovered")
     requirement_statuses: list[EndingRequirementStatus] = Field(
         default_factory=list, alias="requirementStatuses"
+    )
+    requirements_methodology: RequirementsMethodology | None = Field(
+        default=None, alias="requirementsMethodology"
     )
 
     compliance_gaps: int = Field(default=0, alias="complianceGaps")
@@ -149,7 +243,7 @@ def build_proposal_ending_report(
     uncovered_n = total_reqs - covered
     if uncovered_n > 0:
         next_actions.append(
-            f"Address {uncovered_n} uncovered RFP requirement(s) — see requirementStatuses."
+            f"Address {uncovered_n} uncovered checklist line(s) — see the list below."
         )
     if gaps:
         next_actions.append(f"Close {len(gaps)} compliance gap(s) flagged from the RFP map.")
@@ -159,6 +253,11 @@ def build_proposal_ending_report(
     ends_with = (
         "After Budget → Pre-submit REVIEW → Ending report → EXPORT. "
         "There is no automatic cover letter unless the RFP mapped one in Phase 2."
+    )
+
+    methodology = build_requirements_methodology(
+        rfp_mapped_count=len(rfp_mapped),
+        statuses=statuses,
     )
 
     summary = _format_summary_markdown(
@@ -173,6 +272,7 @@ def build_proposal_ending_report(
         tier=budget.pricing_tier if budget else None,
         ready=bool(review and review.ready_to_submit),
         next_actions=next_actions,
+        methodology=methodology,
     )
 
     report = ProposalEndingReport(
@@ -193,6 +293,7 @@ def build_proposal_ending_report(
         requirementsCovered=covered,
         requirementsUncovered=uncovered_n,
         requirementStatuses=statuses,
+        requirementsMethodology=methodology,
         complianceGaps=len(gaps),
         presubmitIssues=len(review.issues) if review else 0,
         readyToSubmit=bool(review and review.ready_to_submit),
@@ -223,6 +324,7 @@ def _format_summary_markdown(
     tier: str | None,
     ready: bool,
     next_actions: list[str],
+    methodology: RequirementsMethodology | None = None,
 ) -> str:
     lines = [
         f"# Proposal Ending Report — {client}",
@@ -244,8 +346,34 @@ def _format_summary_markdown(
         f"- Budget: **{'yes — ' + (tier or 'built') if has_budget else 'missing'}**",
         f"- Ready to submit: **{'yes' if ready else 'not yet'}**",
         "",
-        "## Next actions",
     ]
+    if methodology:
+        lines.extend(
+            [
+                "## What the requirements score means",
+                "",
+                methodology.summary,
+                "",
+                "How we count:",
+            ]
+        )
+        for step in methodology.steps:
+            lines.append(f"- {step}")
+        lines.extend(
+            ["", f"**When we say “covered”:** {methodology.coverage_rule}", ""]
+        )
+        if methodology.section_rollups:
+            lines.append("By section:")
+            for r in methodology.section_rollups:
+                lines.append(
+                    f"- {r.section_title}: {r.requirements_covered}/{r.requirements_total}"
+                )
+            lines.append("")
+        lines.append("**Not included in this ratio:**")
+        for item in methodology.not_included:
+            lines.append(f"- {item}")
+        lines.append("")
+    lines.append("## Next actions")
     for action in next_actions:
         lines.append(f"- {action}")
     return "\n".join(lines)

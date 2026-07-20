@@ -10,6 +10,8 @@ export type PipelinePhase =
   | "phase-4-review"
   | "complete";
 
+export type PipelineInProgressPhase = PipelinePhase | typeof FULFILL_SCAN_PHASE;
+
 export const PIPELINE_PHASE_ORDER: PipelinePhase[] = [
   "sections-1-3",
   "phase-2",
@@ -31,12 +33,36 @@ export const PIPELINE_PHASE_LABELS: Record<PipelinePhase, string> = {
 
 export interface ProposalPipelineCheckpoint {
   lastCompletedPhase?: PipelinePhase | null;
-  inProgressPhase?: PipelinePhase | null;
+  inProgressPhase?: PipelineInProgressPhase | null;
   lastFailedPhase?: PipelinePhase | null;
   lastError?: string | null;
   resumeFromPhase?: PipelinePhase | null;
+  activityLabel?: string | null;
+  activityDetail?: string | null;
+  stepIndex?: number | null;
+  stepTotal?: number | null;
   updatedAt: string;
 }
+
+export const FULFILL_SCAN_PHASE = "fulfill-scan";
+
+export const FULFILL_SCAN_STEP_LABELS = [
+  "Closing & submission",
+  "RFP structure",
+  "Budget",
+  "Repairs",
+  "Contractor KPIs",
+  "Pre-submit",
+] as const;
+
+export const FULL_PROPOSAL_STEP_LABELS: { phase: PipelinePhase; label: string }[] = [
+  { phase: "sections-1-3", label: "Sections 1–3" },
+  { phase: "phase-2", label: "Intelligence" },
+  { phase: "phase-3", label: "RFP tabs" },
+  { phase: "phase-3-6-self-edit", label: "Senior editor" },
+  { phase: "phase-3-5-budget", label: "Budget" },
+  { phase: "phase-4-review", label: "Review" },
+];
 
 export interface ProposalPipelineStatus {
   resumeFromPhase: PipelinePhase;
@@ -172,8 +198,8 @@ export function resolveResumePhase(
     }
     return cp.lastFailedPhase;
   }
-  if (cp?.inProgressPhase && PIPELINE_PHASE_ORDER.includes(cp.inProgressPhase)) {
-    return cp.inProgressPhase;
+  if (cp?.inProgressPhase && PIPELINE_PHASE_ORDER.includes(cp.inProgressPhase as PipelinePhase)) {
+    return cp.inProgressPhase as PipelinePhase;
   }
   if (cp?.resumeFromPhase && PIPELINE_PHASE_ORDER.includes(cp.resumeFromPhase)) {
     if (!phaseIsComplete(draft, research, cp.resumeFromPhase)) {

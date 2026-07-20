@@ -112,6 +112,7 @@ export interface RfpRecord {
   justwinDetailUrl?: string;
   syncedAt?: string;
   goNoGoAnalysis?: GoNoGoAnalysis | null;
+  googleDocUrl?: string;
 }
 
 export interface DashboardStats {

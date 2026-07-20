@@ -20,6 +20,7 @@ function sectionManualFillCount(
 
 interface ProposalSectionTreeProps {
   sections: OutlineSection[];
+  manuscriptIndexById: Map<string, number>;
   selectedSectionId: string | null;
   highlightedSectionId: string | null;
   manualFillFlags: ManualFillFlag[];
@@ -39,6 +40,7 @@ function SectionRow({
   sectionButtonRefs,
   onSelectSection,
   onOpenRevision,
+  indexLabel,
 }: {
   section: OutlineSection;
   depth: number;
@@ -49,6 +51,7 @@ function SectionRow({
   sectionButtonRefs: React.MutableRefObject<Map<string, HTMLButtonElement>>;
   onSelectSection: (sectionId: string) => void;
   onOpenRevision: (sectionId: string) => void;
+  indexLabel: string;
 }) {
   const hasContent = Boolean(section.content.trim());
 
@@ -74,7 +77,7 @@ function SectionRow({
           }`}
           aria-hidden
         >
-          {depth > 0 ? "·" : "§"}
+          {indexLabel}
         </span>
         <div className="min-w-0 flex-1">
           <p
@@ -130,6 +133,7 @@ function SectionGroup({
   onToggle,
   onSelectSection,
   onOpenRevision,
+  manuscriptIndexById,
 }: {
   group: OutlineTreeGroup;
   selectedSectionId: string | null;
@@ -141,6 +145,7 @@ function SectionGroup({
   onToggle: () => void;
   onSelectSection: (sectionId: string) => void;
   onOpenRevision: (sectionId: string) => void;
+  manuscriptIndexById: Map<string, number>;
 }) {
   const generatedCount = group.sections.filter((section) =>
     section.content.trim(),
@@ -181,6 +186,7 @@ function SectionGroup({
               sectionButtonRefs={sectionButtonRefs}
               onSelectSection={onSelectSection}
               onOpenRevision={onOpenRevision}
+              indexLabel={String(manuscriptIndexById.get(section.id) ?? "·")}
             />
           ))}
         </ul>
@@ -191,6 +197,7 @@ function SectionGroup({
 
 export function ProposalSectionTree({
   sections,
+  manuscriptIndexById,
   selectedSectionId,
   highlightedSectionId,
   manualFillFlags,
@@ -242,6 +249,7 @@ export function ProposalSectionTree({
             }
             onSelectSection={onSelectSection}
             onOpenRevision={onOpenRevision}
+            manuscriptIndexById={manuscriptIndexById}
           />
         ) : (
           <SectionRow
@@ -255,6 +263,9 @@ export function ProposalSectionTree({
             sectionButtonRefs={sectionButtonRefs}
             onSelectSection={onSelectSection}
             onOpenRevision={onOpenRevision}
+            indexLabel={String(
+              manuscriptIndexById.get(node.section.id) ?? "·",
+            )}
           />
         ),
       )}

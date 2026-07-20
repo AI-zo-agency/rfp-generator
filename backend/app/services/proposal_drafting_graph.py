@@ -81,7 +81,7 @@ ALLOWED WITHOUT inventing company facts (plan-driven structure):
 
 Rules (strict):
 1. Never invent unverified company facts (metrics, clients, certifications, team members, contract awards). Those require evidence [E#] or [VERIFY].
-2. Cite evidence inline as [E1], [E2], etc. when using corpus facts.
+2. Use ONLY facts from the evidence corpus. Do NOT insert markers like [E1] or [E2] in the written proposal — keep the prose client-ready.
 3. For requirements not covered by evidence, write [VERIFY: describe what must be confirmed] ONLY for the missing fact — prefer citing [E#] when any excerpt partially answers. Do not blank the whole section.
 4. For template/layout pulls (zoMode pull/select), include [DESIGNER NOTE: ...] and reference evidence.
 5. Match the BRAND VOICE and REGISTER blocks for each section.
@@ -110,8 +110,13 @@ Rules (strict):
 28. If a Winning Pattern is provided, use it only for structure, flow, tone, visuals, and persuasion strategy. Never copy, paraphrase, or cite prior won proposal prose.
 29. Plan-driven narrative sections (Understanding / Methodology / Timeline / Budget overview) MUST be drafted even when evidence is thin or empty. Use RFP requirements, Opportunity Understanding, Section Strategy, Winning Pattern, and Proposal Memory. Cite [E#] only when evidence exists; do not refuse to write the whole section. Use [VERIFY: specific field] only for discrete missing facts, never as the entire section body.
 30. Understanding sections should restate the client's goals, constraints, audiences, success measures, and risks in zö voice before pitching solution — show we read the RFP carefully.
-31. When the section title is Budget / Pricing / Fees / Cost: you MUST write full narrative covering (a) transparent compensation philosophy, (b) pass-through / no hidden media markup commitment, (c) how media spend is allocated across RFP priorities with rationale, (d) that detailed agency fee tables follow in the pricing build. Ground compensation language in 00_Guide_Pricing evidence when present. Use RFP-stated spend amounts from requirements/plan. Leave only discrete unknown agency rate cells as [VERIFY: …], never blank the whole section.
-32. ANTI-DUPLICATION: Each section has ONE job. Do not re-write Who We Are, full bios, full case studies, FEIN/address/certs, or brand story that belongs in Sections 1–3 or another RFP tab. One brief cross-reference is OK — then add NEW RFP-specific detail only. Prefer concise prose within wordTarget.
+31. When the section title is Budget / Pricing / Fees / Cost: you MUST write full narrative covering (a) transparent compensation philosophy, (b) pass-through / no hidden media markup commitment, (c) how media spend is allocated across RFP priorities with rationale, (d) that detailed agency fee tables follow in the pricing build. Ground compensation language in 00_Guide_Pricing evidence when present. Use RFP-stated spend amounts from requirements/plan. Leave only discrete unknown agency rate cells as [VERIFY: …], never blank the whole section. If the RFP forbids altering the official Quotation/Pricing Proposal Form, do NOT restructure the form into Section A/B/C/D — mirror the buyer's field labels only and put all rationale in a separate "Supporting Budget Rationale" section.
+32. References sections: restate the RFP's required reference count and institution type when the RFP specifies them. Never claim the RFP is silent on references if requirements list three customers, two-year public, or NJ public-college reference tables. If zö lacks a qualifying reference, state the gap honestly and use [MANUAL FILL: leadership decision] — do not deny the requirement exists.
+33. KPI scope: When the RFP distinguishes agency-wide/strategic-plan KPIs from CONTRACTOR-scored KPIs, commit ONLY to the contractor set (with numeric targets from Section 2 / monitoring). Never substitute the buyer's four agency KPIs for the three contractor KPIs.
+34. Cost scoring: If the RFP uses inverse cost scoring (lowest responsive price gets maximum cost points), never claim that bidding at the published ceiling earns the highest cost rating — state the tradeoff honestly.
+35. Cost weight: Use the RFP's stated criteria points for cost/price (sum Criteria #4 + #5 when both exist) — do not round to a generic "10%".
+36. Budget container: When the RFP requires Attachment 01 / Excel budget worksheet, the narrative budget section must point to that file — not replace it with a PDF cost-category table.
+37. ANTI-DUPLICATION: Each section has ONE job. Do not re-write Who We Are, full bios, full case studies, FEIN/address/certs, or brand story that belongs in Sections 1–3 or another RFP tab. One brief cross-reference is OK — then add NEW RFP-specific detail only. Prefer concise prose within wordTarget.
 
 Return ONLY JSON:
 {
@@ -254,14 +259,64 @@ _PLAN_DRIVEN_TITLE_HINTS = (
     "pricing",
     "fees",
     "cost",
+    "qualification",
+    "relevant experience",
+    "firm experience",
+    "team experience",
+    "past performance",
+    "similar project",
 )
+
+
+_WHOLE_SECTION_VERIFY_RE = re.compile(
+    r"^\[VERIFY:\s*Draft content for .+ — (?:insufficient evidence in corpus|writer returned empty prose)",
+    re.I | re.S,
+)
+
+
+def _is_qualifications_narrative(title: str) -> bool:
+    lower = (title or "").strip().lower()
+    return any(
+        hint in lower
+        for hint in (
+            "qualification",
+            "relevant experience",
+            "offeror qualification",
+            "vendor qualification",
+            "firm experience",
+        )
+    )
 
 
 def _is_plan_driven_narrative(*, title: str, register: str) -> bool:
     if register != "narrative":
         return False
     lower = (title or "").strip().lower()
+    if _is_qualifications_narrative(title):
+        return True
     return any(hint in lower for hint in _PLAN_DRIVEN_TITLE_HINTS)
+
+
+def _is_whole_section_verify_placeholder(content: str) -> bool:
+    return bool(_WHOLE_SECTION_VERIFY_RE.match((content or "").strip()))
+
+
+def _section_prose_missing(content: str) -> bool:
+    stripped = (content or "").strip()
+    return not stripped or _is_whole_section_verify_placeholder(stripped)
+
+
+def _looks_truncated_prose(content: str) -> bool:
+    """Detect mid-sentence cutoffs from max-output token limits."""
+    stripped = (content or "").rstrip()
+    if len(stripped) < 350:
+        return False
+    tail = stripped[-220:]
+    if re.search(r'[.!?](?:\s|$|")', tail):
+        return False
+    if re.search(r"\]\s*$", stripped):
+        return False
+    return True
 
 
 def _empty_draft_fallback(
@@ -348,8 +403,10 @@ async def _retry_plan_driven_section(
     state: DraftingGraphState,
     *,
     payload: dict[str, Any],
+    max_tokens: int = 8192,
+    reason: str = "empty",
 ) -> dict[str, Any] | None:
-    """One focused retry when a plan-driven narrative section returns empty prose."""
+    """One focused retry when a plan-driven narrative section fails or truncates."""
     sid = str(section.get("id") or "")
     title = str(section.get("title") or sid)
     plan_ctx = str(payload.get("planContext") or _format_plan_context(state, sid)).strip()
@@ -357,8 +414,12 @@ async def _retry_plan_driven_section(
         f"Client: {state.get('rfp_client')}\n"
         f"RFP: {state.get('rfp_title')}\n\n"
         f"Draft ONLY this narrative section now. Return non-empty prose.\n"
-        "Use plan context and requirements. Cite [E#] only if evidence is present.\n"
-        "Do NOT return empty content. Do NOT return a whole-section VERIFY.\n\n"
+        f"Retry reason: {reason}.\n"
+        "Use plan context, proof points, agency capabilities, and RFP requirements. "
+        "Cite [E#] only if evidence is present.\n"
+        "Do NOT return empty content. Do NOT return a whole-section VERIFY.\n"
+        "For qualifications: use KB case studies and agency facts when present; "
+        "otherwise write capability-aligned narrative from plan memory (no invented client names).\n\n"
         f"Plan context:\n{plan_ctx[:6000]}\n\n"
         f"Section payload:\n{json.dumps(payload, indent=2)[:5000]}\n\n"
         "Return JSON: {\"sections\":[{\"sectionId\":\""
@@ -371,7 +432,7 @@ async def _retry_plan_driven_section(
                 {"role": "system", "content": DRAFT_BATCH_PROMPT},
                 {"role": "user", "content": retry_user},
             ],
-            max_tokens=8192,
+            max_tokens=max_tokens,
             temperature=0.4,
         )
     except LlmError as exc:
@@ -669,6 +730,14 @@ async def _draft_batch_once(
                     "RFP requirements, and Proposal Memory. Do not return an empty content "
                     "field or a whole-section VERIFY about insufficient evidence.\n\n"
                 )
+            if _is_qualifications_narrative(str(payload.get("title") or "")):
+                user_content += (
+                    f"QUALIFICATIONS SECTION {payload.get('sectionId')}: "
+                    "Write full experience narrative using retrieved case studies, references, "
+                    "and agency credentials when present. If geo-specific case studies are "
+                    "missing, describe transferable place-branding / economic development "
+                    "capabilities without inventing false project names or metrics.\n\n"
+                )
             title_lower = str(payload.get("title") or "").lower()
             if any(k in title_lower for k in ("budget", "pricing", "fees", "cost")):
                 user_content += (
@@ -680,13 +749,25 @@ async def _draft_batch_once(
 
     user_content += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
 
+    draft_max_tokens = 12_288 if any(
+        _is_plan_driven_narrative(
+            title=str(s.get("title") or ""),
+            register=classify_section_register(
+                section_id=str(s.get("id") or ""),
+                title=str(s.get("title") or ""),
+                zo_mode=str(s.get("zoMode") or s.get("zo_mode") or "write"),
+            ),
+        )
+        for s in batch
+    ) else 8192
+
     async with _LLM_SEMAPHORE:
         raw, provider = await chat_json_with_repair(
             [
                 {"role": "system", "content": DRAFT_BATCH_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=8192,
+            max_tokens=draft_max_tokens,
             temperature=0.35,
         )
 
@@ -715,7 +796,18 @@ async def _draft_batch_once(
             title=title,
             zo_mode=zo_mode,
         )
-        if not content and _is_plan_driven_narrative(title=title, register=register):
+        section_payload = payload_by_id.get(sid) or {
+            "sectionId": sid,
+            "title": title,
+            "register": register,
+            "requirements": section.get("requirements") or [],
+            "wordTarget": _word_target(section),
+            "evidence": "(retry — use plan context)",
+            "planContext": _format_plan_context(state, sid),
+        }
+        if _section_prose_missing(content) and _is_plan_driven_narrative(
+            title=title, register=register
+        ):
             logger.warning(
                 "Phase 3 empty prose for plan-driven section %s (%s) — retrying once",
                 sid,
@@ -724,20 +816,33 @@ async def _draft_batch_once(
             retried = await _retry_plan_driven_section(
                 section,
                 state,
-                payload=payload_by_id.get(sid) or {
-                    "sectionId": sid,
-                    "title": title,
-                    "register": register,
-                    "requirements": section.get("requirements") or [],
-                    "wordTarget": _word_target(section),
-                    "evidence": "(retry — use plan context)",
-                    "planContext": _format_plan_context(state, sid),
-                },
+                payload=section_payload,
+                reason="empty or verify-only",
             )
             if retried:
                 item = retried
                 content = str(item.get("content") or "").strip()
-        if not content:
+        elif _looks_truncated_prose(content) and _is_plan_driven_narrative(
+            title=title, register=register
+        ):
+            logger.warning(
+                "Phase 3 truncated prose for section %s (%s) — retrying with higher token limit",
+                sid,
+                title,
+            )
+            retried = await _retry_plan_driven_section(
+                section,
+                state,
+                payload=section_payload,
+                max_tokens=16_384,
+                reason="previous draft ended mid-sentence (output limit)",
+            )
+            if retried:
+                candidate = str(retried.get("content") or "").strip()
+                if candidate and len(candidate) > len(content):
+                    item = retried
+                    content = candidate
+        if _section_prose_missing(content):
             plan_ctx = _format_plan_context(state, sid)
             content = _empty_draft_fallback(
                 title=title,
@@ -805,6 +910,19 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
     )
 
     for index, batch in enumerate(batches, start=1):
+        rfp_id = str(state.get("rfp_id") or "")
+        if batch and rfp_id:
+            sec = batch[0]
+            sec_title = str(sec.get("title") or sec.get("id") or "Section")
+            from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
+
+            record_pipeline_activity(
+                rfp_id,
+                label=f"Drafting: {sec_title}",
+                detail="LLM writing this RFP tab (not a context limit — one section per request).",
+                step_index=index,
+                step_total=len(batches),
+            )
         try:
             # Pass already-drafted sections so each batch avoids repeating them
             batch_state = {

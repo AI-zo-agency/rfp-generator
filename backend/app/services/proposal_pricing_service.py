@@ -146,10 +146,32 @@ PHASE 4 — Stress-test before finalizing:
 - Leave 15–20% room for scope expansion
 - PM is 5–8% of total
 
-PHASE 5 — Budget page format (match RFP):
+PHASE 5 — Budget page format (match THIS RFP — titles/fields from the solicitation):
+- blended_rate_form: RFP provides a Pricing/Cost Proposal Form with ONE hourly, ONE monthly,
+  and ONE annual rate (annual = monthly × 12). Fill formHourlyRate / formMonthlyRate /
+  formAnnualRate explicitly. Keep detailed line items only as supporting rationale AFTER the form.
 - phased: Phase 1/2/3 subtotals + project total
-- personnel_loading: Team Member / Classification / Hourly Rate / Hours / Subtotal + NTE + Direct Expenses (hourly rates from KB 07_FIN/06_WON only)
+- personnel_loading: Team Member / Classification / Hourly Rate / Hours / Subtotal + NTE + Direct Expenses
 - service_menu: per-unit or per-project rates by category
+
+If the RFP form asks for three blended rates, budgetFormat MUST be blended_rate_form — do not
+substitute a 17-line personnel table as the primary answer.
+
+INVERSE COST SCORING (when RFP awards max cost points to lowest responsive price):
+- Never claim matching the budget ceiling maximizes cost score.
+- qualifyingLanguage must acknowledge lowest-price-wins math if bid is at/near ceiling.
+- Sum ALL cost-related criteria points (e.g. Cost Points Conversion + Price Reasonableness).
+
+SEPARATE BUDGET ATTACHMENT (Attachment 01 / Excel worksheet):
+- scopeSummary and qualifyingLanguage must state the official worksheet is the pricing submission.
+- Line items in JSON support the attachment; narrative budget section is cover/rationale only.
+
+QUOTATION FORM ALTERATION (submission disqualifier when RFP says so):
+- If the RFP states that altering or departing from the Quotation/Pricing Proposal Form
+  disqualifies the bid: NEVER output Section A/B/C/D substitutes or extra clauses on the form.
+- Put hourly/monthly/annual (and amount-in-words placeholders) in formHourlyRate fields only.
+- qualifyingLanguage, commission model, scope protection, and line items belong in supporting
+  rationale AFTER the verbatim form — not labeled as sections of the official form.
 
 PHASE 6 — qualifyingLanguage MUST include all four blocks:
 Investment Framing, Scope Protection, Reimbursable Expenses, Revision Rounds (use KB guide wording when present).
@@ -175,7 +197,11 @@ Return ONLY JSON:
   "rfpBudgetNotes": "string",
   "feeStructure": "string",
   "pricingTier": "Low|Average|High",
-  "budgetFormat": "phased|personnel_loading|service_menu",
+  "budgetFormat": "blended_rate_form|phased|personnel_loading|service_menu",
+  "formHourlyRate": number|null,
+  "formMonthlyRate": number|null,
+  "formAnnualRate": number|null,
+  "formRateNotes": "string — how the three form rates were derived",
   "commissionModel": "string|null",
   "commissionRate": number|null,
   "lumpSumTotal": number|null,
@@ -459,6 +485,22 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         feeStructure=str(raw.get("feeStructure") or ""),
         pricingTier=str(raw.get("pricingTier") or "Average"),
         budgetFormat=str(raw.get("budgetFormat") or "phased"),
+        formHourlyRate=(
+            float(raw["formHourlyRate"])
+            if isinstance(raw.get("formHourlyRate"), (int, float))
+            else None
+        ),
+        formMonthlyRate=(
+            float(raw["formMonthlyRate"])
+            if isinstance(raw.get("formMonthlyRate"), (int, float))
+            else None
+        ),
+        formAnnualRate=(
+            float(raw["formAnnualRate"])
+            if isinstance(raw.get("formAnnualRate"), (int, float))
+            else None
+        ),
+        formRateNotes=str(raw.get("formRateNotes") or "")[:2000],
         lineItems=line_items,
         tiers=_parse_tiers(raw.get("tiers")),
         recommendedTierId=raw.get("recommendedTierId"),

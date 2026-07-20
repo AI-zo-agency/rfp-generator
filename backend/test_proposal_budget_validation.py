@@ -134,6 +134,25 @@ class ProposalBudgetValidationTests(unittest.TestCase):
         assert_budget_canonical(reconciled)
         self.assertEqual(collect_pm_ratio_violations(reconciled), [])
 
+    def test_sonja_line_flags_do_not_block_validation(self) -> None:
+        budget = ProposalBudget(
+            rfpId="test-rfp",
+            updatedAt="2026-07-17T00:00:00Z",
+            lineItems=[
+                _line(item_id="a", description="Discovery bundle", extended=50_000),
+            ],
+            agencyFeeSubtotal=50_000,
+            agencyRevenueEstimate=50_000,
+            lineItemSum=50_000,
+            pricingFlags=[
+                "L01 — Bundled Discovery exceeds Average ceiling; Sonja review required",
+                "L16 — Bundled media spend outside standard 00_Guide_Pricing menu",
+                "Verified burdened hourly rates are internal benchmarks — Sonja review",
+            ],
+        )
+        reconciled = reconcile_proposal_budget(budget)
+        assert_budget_canonical(reconciled)
+
 
 if __name__ == "__main__":
     unittest.main()

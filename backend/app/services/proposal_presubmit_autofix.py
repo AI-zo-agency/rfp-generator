@@ -74,7 +74,7 @@ SURGICAL_FIX_PROMPT = """You repair ONE proposal section to resolve ALL listed p
 MANDATORY:
 1. Preserve section structure — headings, lists, paragraph order, approximate length, and any [DESIGNER NOTE: ...] blocks.
 2. Preserve zö BRAND VOICE from the voice block — first person we/our in narrative sections.
-3. Use ONLY facts from the evidence corpus / KB excerpts. Cite inline as [E1], [E2], etc. when using evidence.
+3. Use ONLY facts from the evidence corpus / KB excerpts. Do NOT leave citation markers like [E1] or [E2] in the text.
 4. Replace [VERIFY: ...] tags with real prose FROM evidence when available; remove resolved tags entirely.
 5. Keep a short [VERIFY: ...] ONLY for requirements still missing from evidence after search.
 6. Wrong-client names → use the target client name or remove the stray reference.
@@ -155,7 +155,7 @@ def _apply_deterministic_fixes(
     methods: list[str] = []
     content = section.content
 
-    fixed, stale_count = fix_stale_client_references(content, rfp)
+    fixed, stale_count = fix_stale_client_references(content, rfp, section=section)
     if stale_count > 0 and fixed != content:
         content = fixed
         methods.append(f"stale_client×{stale_count}")
@@ -177,7 +177,16 @@ def _section_with_content(section: ProposalSection, content: str) -> ProposalSec
     return section.model_copy(update={"content": content})
 
 
+def _placeholder_count(text: str) -> int:
+    return len(re.findall(r"\[(?:VERIFY|MANUAL FILL|FLAG|TBD|INSERT)\b", text or "", re.I))
+
+
 def _score_section(section: ProposalSection, content: str, rfp: RfpRecord) -> tuple[int, int]:
+    """Voice/copy-paste score only — (critical_count, total). Lower is better.
+
+    Note: compliance / requirement findings are NOT in this score. A section can
+    show score (0, 0) while still having compliance autofix findings.
+    """
     return issue_score(
         scan_section_issues(section=_section_with_content(section, content), rfp=rfp)
     )
@@ -189,7 +198,7 @@ def _sanitize_after_llm(
     section: ProposalSection,
     rfp: RfpRecord,
 ) -> str:
-    fixed, _ = fix_stale_client_references(content, rfp)
+    fixed, _ = fix_stale_client_references(content, rfp, section=section)
     return enforce_narrative_voice(
         fixed,
         section_id=section.id,
@@ -694,6 +703,12 @@ async def run_presubmit_autofix_loop(
             if not section or not section.content.strip():
                 continue
 
+            from app.services.proposal_fulfill_guard import fulfill_scan_preserves_section
+
+            if fulfill_scan_preserves_section(section):
+                logger.info("Auto-fix skipped preserved section: %s", section_id)
+                continue
+
             section_issues = grouped[section_id]
             original = section.content
             baseline_score = _score_section(section, original, rfp)
@@ -713,7 +728,9 @@ async def run_presubmit_autofix_loop(
 
             if run_llm:
                 logger.info(
-                    "Auto-fix: section %d/%d — %s (%d finding(s), score %s)",
+                    "Auto-fix: section %d/%d — %s (%d finding(s), "
+                    "voice/copy-paste score %s — (critical, total); "
+                    "0,0 means no voice/client-paste defects, not 'no work left')",
                     section_index,
                     total_sections,
                     section.title,
@@ -749,22 +766,49 @@ async def run_presubmit_autofix_loop(
                 )
                 if provider:
                     llm_score = _score_section(section, repaired, rfp)
-                    if llm_score < best_score:
+                    cats = {i.category for i in section_issues}
+                    ph_improved = _placeholder_count(repaired) < _placeholder_count(
+                        best_content
+                    )
+                    # Voice/copy-paste score alone can stay (0,0) while compliance
+                    # rewrites are still useful — accept non-worsening patches that
+                    # change content or clear placeholders.
+                    accept = False
+                    if repaired.strip() and repaired != best_content:
+                        if llm_score < best_score:
+                            accept = True
+                        elif llm_score <= best_score and (
+                            ph_improved
+                            or bool(cats & {"compliance", "placeholder", "consistency"})
+                        ):
+                            accept = True
+                    if accept:
                         best_content = repaired
                         best_score = llm_score
                         methods.append("llm_repair")
                     else:
                         logger.info(
-                            "Rejected LLM patch for %s — score %s not better than %s",
+                            "Rejected LLM patch for %s — score %s not better than %s "
+                            "(empty=%s)",
                             section.title,
                             llm_score,
                             best_score,
+                            not bool(repaired.strip()),
                         )
                         methods.append("llm_rejected")
 
             content = best_content
 
-            if best_score >= baseline_score:
+            # When voice score was already perfect (0,0), still allow content
+            # patches that cleared placeholders / compliance rewrites.
+            if best_content == original:
+                continue
+            if best_score > baseline_score:
+                continue
+            if best_score == baseline_score and not (
+                _placeholder_count(best_content) < _placeholder_count(original)
+                or best_content != original
+            ):
                 continue
 
             if content == original:

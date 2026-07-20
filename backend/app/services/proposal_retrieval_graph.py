@@ -43,9 +43,18 @@ CRITICAL — RFP-PRIMARY (not a static template for every bid):
 - Methodology, Timeline, Budget narrative, Approach, References appear ONLY when THIS RFP demands them.
 - Do NOT invent generic tabs that are not in the RFP.
 - Do NOT skip a scored/required tab because zö already has Sections 1–3 — map it and set duplicateOfStaticSection if it overlaps.
-- Every important need on every required page must become a requirement bullet so Phase 3 drafts against it.
+- Phase 3 drafts zö Sections 1–3 first, then ONLY RFP-mapped tabs from this list (dynamic per solicitation).
+- For References: quote required count, institution type (e.g. two-year public), and contact fields from the RFP.
+- For Pricing/Quotation forms: when the RFP includes a form or forbids alterations, map it as its own tab — do not substitute a custom Section A/B/C/D outline.
 
-Include compliance/admin sections only if they need narrative content (not pure forms).
+MANDATORY SUBMISSION SCAN (every RFP):
+- Read "Documents to be Submitted" / Section IV (or equivalent) and list EVERY item: narrative tabs,
+  signed forms, addenda acknowledgement, Excel/pricing attachments, references, certifications.
+- Vendor qualification blocks: if RFP asks for financial stability, awards/recognitions, higher-ed
+  commitment as scored narrative, map each as its own section with requirement bullets quoting RFP text.
+- Acknowledgement of Addenda: always map when the RFP says it must be returned with the proposal.
+
+Include compliance/admin sections when they need narrative OR a checklist section in the proposal.
 
 Return ONLY JSON:
 {

@@ -65,6 +65,11 @@ async def run_submission_polish_pass(
     )
 
     for section_id, section_blockers in by_section.items():
+        from app.services.proposal_fulfill_guard import section_id_preserved_in_fulfill
+
+        if section_id_preserved_in_fulfill(section_id, draft.sections):
+            logs.append(f"{section_id}: skipped — preserved section")
+            continue
         brief = build_submission_repair_brief(
             section_blockers,
             draft=draft,

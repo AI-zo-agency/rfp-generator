@@ -26,18 +26,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="shell-app flex min-h-screen">
+    <div className="shell-app flex h-dvh max-h-dvh overflow-hidden">
       <Sidebar collapsed={collapsed} />
-      <div className="main-column flex min-w-0 flex-1 flex-col">
+      <div className="main-column flex min-h-0 min-w-0 flex-1 flex-col">
         <TopBar
           collapsed={collapsed}
           onToggleSidebar={() => setCollapsed((c) => !c)}
         />
-        <main className="flex-1 overflow-auto">
+        <main
+          className={
+            isProposalsWorkspace
+              ? "flex min-h-0 flex-1 flex-col overflow-hidden"
+              : "min-h-0 flex-1 overflow-auto"
+          }
+        >
           <div
             className={
               isProposalsWorkspace
-                ? "px-2 py-3 sm:px-3 sm:py-4 md:px-4 md:py-5"
+                ? "flex min-h-0 flex-1 flex-col overflow-hidden px-2 py-2 sm:px-3 sm:py-3 md:px-4 md:py-4"
                 : "mx-auto max-w-[1480px] px-4 py-6 sm:px-6 sm:py-8 md:px-10 md:py-10 lg:px-12"
             }
           >

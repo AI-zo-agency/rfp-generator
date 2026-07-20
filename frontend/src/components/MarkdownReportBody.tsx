@@ -2,15 +2,72 @@ type Block =
   | { type: "heading"; level: number; text: string }
   | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "list"; ordered: boolean; items: string[] }
-  | { type: "paragraph"; text: string };
+  | { type: "paragraph"; text: string }
+  | { type: "designer_note"; text: string }
+  | { type: "hr" };
+
+function isThematicBreak(line: string): boolean {
+  return /^(-{3,}|\*{3,}|_{3,})$/.test(line.trim());
+}
+
+function parseSubheadingLine(line: string): string | null {
+  const trimmed = line.trim();
+  const boldOnly = trimmed.match(/^\*\*([^*]+)\*\*:?\s*$/);
+  if (boldOnly) return boldOnly[1].trim();
+  const colonLead = trimmed.match(/^([A-Z0-9][^.\n]{2,88}):\s*$/);
+  if (colonLead && !colonLead[1].includes("|")) return colonLead[1].trim();
+  return null;
+}
+
+function pushParagraphBlock(blocks: Block[], paragraphLines: string[]) {
+  if (paragraphLines.length === 0) return;
+
+  if (paragraphLines.length === 1) {
+    const sub = parseSubheadingLine(paragraphLines[0]!);
+    if (sub) {
+      blocks.push({ type: "heading", level: 3, text: sub });
+      return;
+    }
+    const designer = tryDesignerNoteFromParagraph(paragraphLines[0]!);
+    if (designer) {
+      blocks.push({ type: "designer_note", text: designer });
+      return;
+    }
+  }
+
+  if (paragraphLines.length >= 2) {
+    const sub = parseSubheadingLine(paragraphLines[0]!);
+    if (sub) {
+      blocks.push({ type: "heading", level: 3, text: sub });
+      const rest = paragraphLines.slice(1).join(" ").trim();
+      if (rest) blocks.push({ type: "paragraph", text: rest });
+      return;
+    }
+  }
+
+  blocks.push({ type: "paragraph", text: paragraphLines.join(" ") });
+}
+
+/** Strip internal KB evidence markers ([E1], [E2], …) from client-facing copy. */
+export function stripEvidenceCitations(text: string): string {
+  return (text || "").replace(/\s*\[E\d+\]/g, "");
+}
 
 function isTableRow(line: string): boolean {
   const trimmed = line.trim();
-  return trimmed.includes("|") && trimmed.split("|").filter(Boolean).length >= 2;
+  if (!trimmed.includes("|")) return false;
+  const cells = trimmed
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((c) => c.trim());
+  return cells.length >= 2;
 }
 
 function isTableSeparator(line: string): boolean {
-  return /^\|?[\s:-]+\|[\s|:-]+\|?$/.test(line.trim());
+  const trimmed = line.trim();
+  // GFM alignment row: | --- | :---: | ---: |
+  return /^\|?[\s:\-–—]+\|[\s|:\-–—]+\|?$/.test(trimmed);
 }
 
 function parseTableRow(line: string): string[] {
@@ -32,6 +89,12 @@ function parseBlocks(body: string): Block[] {
     const trimmed = line.trim();
 
     if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    if (isThematicBreak(trimmed)) {
+      blocks.push({ type: "hr" });
       index += 1;
       continue;
     }
@@ -99,10 +162,15 @@ function parseBlocks(body: string): Block[] {
       paragraphLines.push(currentTrimmed);
       index += 1;
     }
-    blocks.push({ type: "paragraph", text: paragraphLines.join(" ") });
+    pushParagraphBlock(blocks, paragraphLines);
   }
 
   return blocks;
+}
+
+function tryDesignerNoteFromParagraph(text: string): string | null {
+  const m = text.match(/^\[(?:DESIGNER NOTE|Designer Note)\s*:?\s*([\s\S]*)\]\s*$/i);
+  return m ? m[1].trim() : null;
 }
 
 function escapeRegex(value: string): string {
@@ -121,9 +189,10 @@ function buildInlinePattern(highlightTexts: string[]): RegExp {
   return new RegExp(`(${highlights}|${tagPattern})`, "gi");
 }
 
-function renderInline(text: string, highlightTexts: string[] = []) {
+function renderInline(text: string | undefined | null, highlightTexts: string[] = []) {
   let markAssigned = false;
-  const parts = text.split(buildInlinePattern(highlightTexts));
+  const safe = text ?? "";
+  const parts = safe.split(buildInlinePattern(highlightTexts));
   const normalizedHighlights = new Set(
     highlightTexts.map((h) => h.trim()).filter(Boolean)
   );
@@ -203,13 +272,25 @@ export function MarkdownReportBody({
   variant?: "report" | "document";
   highlightTexts?: string[];
 }) {
-  const blocks = parseBlocks(body);
+  const blocks = parseBlocks(
+    variant === "document" ? stripEvidenceCitations(body) : body
+  );
   const highlights = highlightTexts.filter((h) => h?.trim());
 
   if (variant === "document") {
     return (
-      <div>
+      <div className="proposal-prose proposal-prose--manuscript">
         {blocks.map((block, index) => {
+          if (block.type === "hr") {
+            return (
+              <hr
+                key={index}
+                className="proposal-manuscript-divider"
+                aria-hidden
+              />
+            );
+          }
+
           if (block.type === "heading") {
             if (block.level === 1) return <h1 key={index}>{renderInline(block.text, highlights)}</h1>;
             if (block.level === 2) return <h2 key={index}>{renderInline(block.text, highlights)}</h2>;
@@ -250,14 +331,31 @@ export function MarkdownReportBody({
             const ListTag = block.ordered ? "ol" : "ul";
             return (
               <ListTag key={index}>
-                {block.items.map((item, itemIndex) => (
-                  <li key={`${index}-li-${itemIndex}`}>{renderInline(item, highlights)}</li>
-                ))}
+              {block.items.map((item, itemIndex) => (
+                <li key={`${index}-li-${itemIndex}`}>
+                  {renderInline(item ?? "", highlights)}
+                </li>
+              ))}
               </ListTag>
             );
           }
 
-          return <p key={index}>{renderInline(block.text, highlights)}</p>;
+          if (block.type === "designer_note") {
+            return (
+              <div
+                key={index}
+                className="proposal-designer-note-callout"
+                role="note"
+              >
+                <p className="proposal-designer-note-label">Designer note</p>
+                <p className="proposal-designer-note-body">
+                  {renderInline(block.text, highlights)}
+                </p>
+              </div>
+            );
+          }
+
+          return <p key={index}>{renderInline(block.text ?? "", highlights)}</p>;
         })}
       </div>
     );
@@ -323,14 +421,31 @@ export function MarkdownReportBody({
               }`}
             >
               {block.items.map((item, itemIndex) => (
-                <li key={`${index}-li-${itemIndex}`}>{renderInline(item, highlights)}</li>
+                <li key={`${index}-li-${itemIndex}`}>
+                  {renderInline(item ?? "", highlights)}
+                </li>
               ))}
             </ListTag>
           );
         }
 
+        if (block.type === "designer_note") {
+          return (
+            <div
+              key={index}
+              className="proposal-designer-note-callout"
+              role="note"
+            >
+              <p className="proposal-designer-note-label">Designer note</p>
+              <p className="proposal-designer-note-body">
+                {renderInline(block.text ?? "", highlights)}
+              </p>
+            </div>
+          );
+        }
+
         return (
-          <p key={index}>{renderInline(block.text, highlights)}</p>
+          <p key={index}>{renderInline(block.text ?? "", highlights)}</p>
         );
       })}
     </div>

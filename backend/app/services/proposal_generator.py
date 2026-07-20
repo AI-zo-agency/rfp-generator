@@ -1469,7 +1469,12 @@ async def run_phase3_5_budget_reconcile(
     from app.services.proposal_pricing_service import reconcile_cached_budget
 
     budget, research = reconcile_cached_budget(rfp_id)
-    draft = incorporate_budget_into_draft(rfp_id, budget)
+    rfp_context = load_rfp_for_proposal(rfp_id)[2]
+    from app.services.proposal_budget_content import rfp_wants_blended_pricing_form
+
+    if rfp_wants_blended_pricing_form(rfp_context):
+        budget = budget.model_copy(update={"budget_format": "blended_rate_form"})
+    draft = incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
     if not draft:
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
@@ -1483,11 +1488,11 @@ async def run_phase3_5_budget_reconcile(
     budget = run_budget_editor_pass(
         budget,
         rfp_sections=research.rfp_sections if research else [],
-        rfp_context=load_rfp_for_proposal(rfp_id)[2][:28_000],
+        rfp_context=rfp_context[:28_000],
     )
     research = research.model_copy(update={"budget": budget})
     save_research_cache(research)
-    final_draft = incorporate_budget_into_draft(rfp_id, budget)
+    final_draft = incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
     if final_draft:
         draft = final_draft
         save_proposal_draft(draft)
@@ -1532,7 +1537,15 @@ async def run_phase3_5_budget(
     # User may have clicked Reset while budget was computing — do not rewrite wiped data.
     _assert_proposal_not_reset(rfp_id)
 
-    draft = incorporate_budget_into_draft(rfp_id, budget)
+    rfp_context = load_rfp_for_proposal(rfp_id)[2]
+    from app.services.proposal_budget_content import rfp_wants_blended_pricing_form
+
+    if rfp_wants_blended_pricing_form(rfp_context):
+        budget = budget.model_copy(update={"budget_format": "blended_rate_form"})
+        research = research.model_copy(update={"budget": budget})
+        save_research_cache(research)
+
+    draft = incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
     if not draft:
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
@@ -1562,7 +1575,7 @@ async def run_phase3_5_budget(
     if research:
         research = research.model_copy(update={"budget": budget})
         save_research_cache(research)
-    final_draft = incorporate_budget_into_draft(rfp_id, budget)
+    final_draft = incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
     if final_draft:
         draft = final_draft
         _assert_proposal_not_reset(rfp_id)

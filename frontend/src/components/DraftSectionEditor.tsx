@@ -6,7 +6,7 @@ import { improveProposalSection } from "@/lib/proposal-api";
 import { getTextareaCaretViewportRect, scrollTextareaToRange } from "@/lib/textarea-selection";
 import type { FlagHighlightRange } from "@/lib/proposal-manual-flags";
 import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
-import { MarkdownReportBody } from "./MarkdownReportBody";
+import { MarkdownReportBody, stripEvidenceCitations } from "./MarkdownReportBody";
 
 
 export interface SectionRevisionRecord {
@@ -89,7 +89,8 @@ export function DraftSectionEditor({
     setInstruction("");
     setError(null);
     appliedHighlightKeyRef.current = null;
-  }, [section.id]);
+    setPreviewMode(Boolean(value));
+  }, [section.id, value]);
 
   useEffect(() => {
     if (!highlightRange || !textareaRef.current || dialogOpen || isRunning) return;
@@ -313,7 +314,15 @@ export function DraftSectionEditor({
               {value ? (
                 <button
                   type="button"
-                  onClick={() => setPreviewMode((p) => !p)}
+                  onClick={() => {
+                    if (previewMode) {
+                      setPreviewMode(false);
+                      window.setTimeout(() => textareaRef.current?.focus(), 50);
+                    } else {
+                      setPreviewMode(true);
+                      clearSelection();
+                    }
+                  }}
                   className="flex items-center gap-1 rounded-md border border-zo-border bg-zo-surface px-2 py-1 text-[11px] font-semibold text-zo-text-secondary transition-smooth hover:border-zo-orange hover:text-zo-orange"
                 >
                   {previewMode ? (
@@ -361,21 +370,17 @@ export function DraftSectionEditor({
 
           {!compact ? (
             <p className="proposal-draft-hint mb-2 text-[11px] text-zo-text-muted">
-              Highlight text — a <strong>Revise content</strong> button appears on the selection.
+              Preview by default. Click <strong>Edit</strong> to change text; use{" "}
+              <strong>Improve full section</strong> for AI revisions.
             </p>
           ) : null}
 
           <div className="proposal-draft-textarea-shell">
             {previewMode && value ? (
-              <div
-                className="min-h-[260px] rounded-lg border border-zo-border bg-white px-4 py-4 text-sm leading-relaxed cursor-text"
-                onClick={() => { setPreviewMode(false); setTimeout(() => textareaRef.current?.focus(), 50); }}
-                title="Click to edit"
-              >
-                <MarkdownReportBody body={value} variant="report" />
+              <div className="proposal-draft-preview-pane custom-scrollbar">
+                <MarkdownReportBody body={stripEvidenceCitations(value)} variant="report" />
               </div>
             ) : (
-
             <textarea
               ref={textareaRef}
               value={value}

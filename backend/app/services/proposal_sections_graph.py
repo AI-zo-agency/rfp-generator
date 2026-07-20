@@ -323,9 +323,9 @@ def _apply_verified_corrections(text: str, rfp_client: str = "") -> str:
         flags=re.I | re.DOTALL,
     )
 
-    # 5. Insurance placeholder — "City of Bend" must be replaced with the actual RFP client
-    if rfp_client and rfp_client.strip():
-        text = text.replace("City of Bend", rfp_client)
+    # 5. Do NOT replace portfolio client names (e.g. City of Bend) with rfp_client globally —
+    # that mail-merges Section 3 case studies when client is a service title like
+    # "Digital Advertising Services". Insurance placeholders use [VERIFY] / buyer label in prompts.
 
     # 6. Strip Benedictine University hallucinated percentage metrics
     # The real KB has only qualitative KPIs for Benedictine — no percentages
@@ -2142,7 +2142,9 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
                 "Format:\n"
                 "We maintain the following insurance coverage:\n"
                 "- **General Liability:** [VERIFY: amount] per occurrence / [VERIFY: amount] aggregate\n"
-                "- **Professional Liability / E&O:** [VERIFY: amount]\n"
+                "- **Professional Liability / E&O:** [VERIFY: per-occurrence amount] / [VERIFY: aggregate amount]\n"
+                "- When the RFP lists mandatory minimum limits (Section 11 or insurance exhibit), include "
+                "**every** required line in the limits table — especially E&O/Professional Liability if stated.\n"
                 "- **Workers' Compensation:** As required by state law\n"
                 "- **Commercial Auto:** [VERIFY: amount] (if applicable)\n\n"
                 "Certificates of insurance available upon request."

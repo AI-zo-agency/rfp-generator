@@ -2,9 +2,58 @@
 
 from __future__ import annotations
 
-from app.models.proposal import EvidenceItem, ProposalResearchCache
+from typing import Any
+
+from app.models.proposal import EvidenceItem, ProposalDraft, ProposalDraftSnapshot, ProposalResearchCache
 
 _EXCERPT_API_MAX = 500
+_MAX_FULFILL_LOG_LINES = 40
+
+
+def slim_draft_for_api(draft: ProposalDraft) -> dict[str, Any]:
+    """Omit snapshot section bodies from list/get responses — full copies stay in DB."""
+    data = draft.model_dump(by_alias=True)
+    slim_snaps: list[dict[str, Any]] = []
+    for snap in draft.snapshots or []:
+        slim_snaps.append(
+            {
+                "savedAt": snap.saved_at,
+                "label": snap.label,
+                "sectionCount": len(snap.sections or []),
+                "sections": [],
+                "scanSummary": snap.scan_summary,
+            }
+        )
+    data["snapshots"] = slim_snaps
+    report = data.get("lastFulfillReport")
+    if isinstance(report, dict) and isinstance(report.get("logs"), list):
+        logs = report["logs"]
+        if len(logs) > _MAX_FULFILL_LOG_LINES:
+            data["lastFulfillReport"] = {
+                **report,
+                "logs": logs[-_MAX_FULFILL_LOG_LINES:],
+            }
+    return data
+
+
+def merge_snapshots_for_save(
+    incoming: ProposalDraft,
+    existing: ProposalDraft | None,
+) -> ProposalDraft:
+    """Client autosave sends slim snapshots — restore full section copies from DB."""
+    if not existing or not existing.snapshots:
+        return incoming
+    by_saved_at = {s.saved_at: s for s in existing.snapshots}
+    merged: list[ProposalDraftSnapshot] = []
+    incoming_snaps = incoming.snapshots or []
+    if not incoming_snaps:
+        return incoming.model_copy(update={"snapshots": list(existing.snapshots)})
+    for snap in incoming_snaps:
+        if (not snap.sections) and snap.saved_at in by_saved_at:
+            merged.append(by_saved_at[snap.saved_at])
+        else:
+            merged.append(snap)
+    return incoming.model_copy(update={"snapshots": merged})
 
 
 def slim_research_for_api(research: ProposalResearchCache) -> ProposalResearchCache:

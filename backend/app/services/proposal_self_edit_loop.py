@@ -585,6 +585,21 @@ async def run_self_edit_loop(
             parallel,
         )
 
+        from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
+
+        kpi_in_batch = any(s.id in lock_ids for s in weak)
+        first_title = weak[0].title if weak else "sections"
+        record_pipeline_activity(
+            rfp_id,
+            label=f"Senior editor: {first_title}",
+            detail=(
+                f"Iteration {iteration}/{max_iterations} · {len(weak)} section(s)"
+                + (" · KPI / lock alignment" if kpi_in_batch else "")
+            ),
+            step_index=iteration,
+            step_total=max_iterations,
+        )
+
         tasks = [_run_one(s.id, True) for s in weak]
         results = await asyncio.gather(*tasks)
 

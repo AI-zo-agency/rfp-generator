@@ -1,8 +1,12 @@
 import json
+import logging
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+import httpx
 
 from app.core.config import settings
 from app.models.go_no_go import GoNoGoAnalysis
@@ -10,11 +14,40 @@ from app.models.rfp import DashboardStats, ManualRfpCreate, RfpRecord
 from app.services.rfp_storage import delete_rfp_pdf, save_rfp_pdf
 from app.services import supabase_db as sb
 
+logger = logging.getLogger(__name__)
+
 TERMINAL_STATUSES = {"won", "lost", "passed", "submitted"}
+_SUPABASE_RETRIES = 5
+_RETRY_BACKOFF_SEC = (0.25, 0.6, 1.2, 2.0, 3.0)
+_TRANSIENT_EXC = (httpx.HTTPError, OSError, ConnectionError, TimeoutError)
 
 
 def _use_supabase() -> bool:
     return sb.use_supabase_db()
+
+
+def _with_supabase_retry(op_name: str, fn):
+    last_exc: Exception | None = None
+    for attempt in range(_SUPABASE_RETRIES):
+        try:
+            return fn()
+        except _TRANSIENT_EXC as exc:
+            last_exc = exc
+            if attempt >= _SUPABASE_RETRIES - 1:
+                raise
+            if _use_supabase():
+                sb.reset_supabase_client()
+            delay = _RETRY_BACKOFF_SEC[min(attempt, len(_RETRY_BACKOFF_SEC) - 1)]
+            logger.warning(
+                "Supabase transient failure in %s (attempt %d/%d): %s",
+                op_name,
+                attempt + 1,
+                _SUPABASE_RETRIES,
+                exc,
+            )
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _db_path() -> Path:
@@ -157,28 +190,34 @@ def _dedupe_by_title(rfps: list[RfpRecord]) -> list[RfpRecord]:
 
 def list_rfps() -> list[RfpRecord]:
     if _use_supabase():
-        return sb.list_rfps()
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM rfps ORDER BY synced_at DESC, received_date DESC"
-        ).fetchall()
-    return _dedupe_by_title([_row_to_rfp(row) for row in rows])
+        rfps = sb.list_rfps()
+    else:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM rfps ORDER BY synced_at DESC, received_date DESC"
+            ).fetchall()
+        rfps = _dedupe_by_title([_row_to_rfp(row) for row in rows])
+    return rfps
 
 
 def get_rfp(rfp_id: str) -> RfpRecord | None:
     if _use_supabase():
-        return sb.get_rfp(rfp_id)
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM rfps WHERE id = ? OR external_id = ?",
-            (rfp_id, rfp_id),
-        ).fetchone()
-    return _row_to_rfp(row) if row else None
+        rfp = _with_supabase_retry("get_rfp", lambda: sb.get_rfp(rfp_id))
+    else:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM rfps WHERE id = ? OR external_id = ?",
+                (rfp_id, rfp_id),
+            ).fetchone()
+        rfp = _row_to_rfp(row) if row else None
+    if not rfp:
+        return None
+    return rfp
 
 
 def rfp_exists(rfp_id: str) -> bool:
     if _use_supabase():
-        return sb.rfp_exists(rfp_id)
+        return bool(_with_supabase_retry("rfp_exists", lambda: sb.rfp_exists(rfp_id)))
     with _connect() as conn:
         row = conn.execute(
             "SELECT 1 FROM rfps WHERE id = ? OR external_id = ? LIMIT 1",

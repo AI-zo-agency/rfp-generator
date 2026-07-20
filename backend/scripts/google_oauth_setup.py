@@ -28,8 +28,11 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 _ENV_FILE = _BACKEND_ROOT / ".env"
 
-DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
-DRIVE_SCOPES = [DRIVE_READONLY_SCOPE]
+DRIVE_SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/documents",
+]
 REDIRECT_URI = "http://localhost:8080/"
 
 

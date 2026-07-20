@@ -25,19 +25,19 @@ export function HeroBanner() {
           </p>
         </div>
 
-        <FadeInStagger className="flex w-full shrink-0 flex-col gap-3 sm:w-auto sm:flex-row lg:flex-col">
-          <FadeInItem className="w-full sm:w-auto">
-            <SyncJustWinButton variant="hero" className="w-full sm:w-auto" />
+        <FadeInStagger className="flex w-full max-w-sm shrink-0 flex-col gap-3">
+          <FadeInItem className="w-full">
+            <SyncJustWinButton variant="hero" className="!w-full" />
           </FadeInItem>
-          <FadeInItem className="w-full sm:w-auto">
-            <AddManualRfpButton variant="hero" className="w-full sm:w-auto" />
+          <FadeInItem className="w-full">
+            <AddManualRfpButton variant="hero" className="!w-full" />
           </FadeInItem>
-          <FadeInItem className="w-full sm:w-auto">
+          <FadeInItem className="w-full">
             <Link
               href="/knowledge-base"
-              className="zo-btn secondary !w-full !border-black/25 !text-black sm:!w-auto"
+              className="zo-btn secondary !flex !w-full !justify-center !border-black/25 !text-black"
             >
-              Knowledge Base →
+              Knowledge Base
             </Link>
           </FadeInItem>
         </FadeInStagger>

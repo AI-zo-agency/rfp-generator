@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 AGENT = "compliance_mapping"
 
 _SYSTEM = """You are the Compliance Mapping Agent. Consume RFP understanding JSON.
-Build a compliance matrix. Return JSON only — no proposal prose:
+Build a compliance matrix from the FULL submission checklist (documents to be submitted,
+forms to return, vendor qualification narratives, addenda acknowledgement).
+Return JSON only — no proposal prose:
 {
   "items": [
     {
@@ -28,6 +30,7 @@ Build a compliance matrix. Return JSON only — no proposal prose:
   ],
   "confidence": 0.0
 }
+Include: addenda ack, financial stability, awards, each named compliance form, references, pricing attachment format.
 """
 
 

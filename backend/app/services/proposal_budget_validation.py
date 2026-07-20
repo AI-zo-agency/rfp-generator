@@ -52,7 +52,17 @@ _PM_LINE_RE = re.compile(
     r"\bproject\s+management\b|\baccount\s+management\b|\bprogram\s+management\b",
     re.I,
 )
-_PRICING_FLAG_ADVISORY_RE = re.compile(r"PRICING\s+FLAG", re.I)
+_PRICING_FLAG_ADVISORY_RE = re.compile(
+    r"PRICING\s+FLAG|"
+    r"Sonja\s+review|"
+    r"^\s*L\d+\s*[—–\-]|"
+    r"capability\s+gap|"
+    r"internal\s+benchmark|"
+    r"outside\s+standard|"
+    r"exceeds\s+.*ceiling|"
+    r"Attachment\s+\d+",
+    re.I | re.M,
+)
 _MISPLACED_VERIFY_FLAG_RE = re.compile(r"^\[VERIFY:", re.I)
 _PM_RATIO_MIN = 0.05
 _PM_RATIO_MAX = 0.08
@@ -546,11 +556,12 @@ def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
     for flag in budget.pricing_flags:
         if _STALE_RECONCILIATION_FLAG_RE.search(flag):
             violations.append(f"stale reconciliation flag remains: {flag[:100]}")
-        elif _PRICING_FLAG_ADVISORY_RE.search(flag):
-            # Advisory — surfaced in budget panel / manual flags; Sonja resolves pre-submit.
-            continue
-        elif flag.strip():
-            violations.append(f"unresolved budget flag: {flag[:120]}")
+        # All other pricing_flags are human-review notes (Sonja, line L01–Lnn, capability gaps).
+        # They surface in the budget panel and pre-submit — they must not halt the pipeline.
+        elif flag.strip() and not _PRICING_FLAG_ADVISORY_RE.search(flag):
+            # Unknown flag format: still advisory unless it looks like a broken reconcile artifact.
+            if re.search(r"reconcil|must equal|!=\s*sum", flag, re.I):
+                violations.append(f"unresolved budget flag: {flag[:120]}")
 
     violations.extend(collect_pm_ratio_violations(budget))
 

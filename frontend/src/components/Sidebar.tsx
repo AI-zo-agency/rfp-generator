@@ -69,20 +69,6 @@ export function Sidebar({ collapsed }: SidebarProps) {
           })}
         </div>
       </nav>
-
-      {!collapsed && (
-        <div className="border-t border-[var(--shell-border)] p-4">
-          <div className="zo-panel-teal rounded-2xl p-4">
-            <div className="text-[11px] uppercase tracking-[0.24em] text-white/60">
-              Human loop
-            </div>
-            <p className="mt-2 text-sm leading-6 text-white">
-              Sync solicitations, review go/no-go, and track each RFP through
-              submission.
-            </p>
-          </div>
-        </div>
-      )}
     </aside>
   );
 }

@@ -446,6 +446,11 @@ async def run_rfp_compliance_polish_pass(
     rfp_title = rfp.title
 
     for section_id, section_gaps in by_section.items():
+        from app.services.proposal_fulfill_guard import section_id_preserved_in_fulfill
+
+        if section_id_preserved_in_fulfill(section_id, draft.sections):
+            logs.append(f"{section_id}: skipped — preserved section")
+            continue
         brief = build_rfp_compliance_repair_brief(
             section_gaps,
             draft=draft,

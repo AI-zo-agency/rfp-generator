@@ -37,7 +37,7 @@ JustWinTab = Literal["hot", "warm", "review"]
 
 
 class RfpRecord(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
 
     id: str
     title: str
@@ -67,6 +67,8 @@ class RfpRecord(BaseModel):
     justwin_detail_url: str | None = Field(default=None, alias="justwinDetailUrl")
     synced_at: str | None = Field(default=None, alias="syncedAt")
     go_no_go_analysis: dict | None = Field(default=None, alias="goNoGoAnalysis")
+    # Enriched from proposal draft — not a DB column on rfps
+    google_doc_url: str | None = Field(default=None, alias="googleDocUrl")
 
 
 class ManualRfpCreate(BaseModel):

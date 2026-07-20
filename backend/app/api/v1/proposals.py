@@ -1,8 +1,12 @@
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response
 import httpx
+from urllib.parse import quote
 
 from app.models.proposal import (
     ProposalDraft,
+    ProposalFulfillGapsResponse,
+    ProposalGoogleDocExportResponse,
     ProposalGenerateResponse,
     ProposalPhase2Response,
     ProposalPhase3Response,
@@ -10,11 +14,17 @@ from app.models.proposal import (
     ProposalPhase4Response,
     ProposalPricingResponse,
     ProposalResearchCache,
+    ProposalRestoreSnapshotRequest,
+    ProposalRestoreSnapshotResponse,
     ProposalSectionImproveResponse,
     PreSubmitAutoFixRequest,
     SectionImproveRequest,
 )
-from app.services.proposal_api_slim import slim_research_for_api
+from app.services.proposal_api_slim import (
+    merge_snapshots_for_save,
+    slim_draft_for_api,
+    slim_research_for_api,
+)
 from app.services.proposal_pipeline_checkpoint import (
     build_pipeline_status,
     clear_pipeline_checkpoint,
@@ -67,8 +77,10 @@ async def get_proposal(rfp_id: str) -> dict[str, object]:
     last_exc: httpx.HTTPError | None = None
     for attempt in range(3):
         try:
-            draft = await aget_proposal_draft(rfp_id)
-            research = await aget_research_cache(rfp_id)
+            draft, research = await asyncio.gather(
+                aget_proposal_draft(rfp_id),
+                aget_research_cache(rfp_id),
+            )
             last_exc = None
             break
         except httpx.HTTPError as exc:
@@ -87,12 +99,32 @@ async def get_proposal(rfp_id: str) -> dict[str, object]:
     if draft is None and research is None and not rfp_exists(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
     job = await get_proposal_job(rfp_id)
+    slim_research = _slim_research(research)
     return {
-        "draft": draft.model_dump(by_alias=True) if draft else None,
-        "research": research.model_dump(by_alias=True) if research else None,
+        "draft": slim_draft_for_api(draft) if draft else None,
+        "research": slim_research.model_dump(by_alias=True) if slim_research else None,
         "pipelineStatus": build_pipeline_status(rfp_id, draft=draft, research=research),
         "proposalJob": proposal_job_to_dict(job),
     }
+
+
+@router.get("/{rfp_id}/proposal/snapshot/{saved_at}")
+async def get_proposal_snapshot(rfp_id: str, saved_at: str) -> dict[str, object]:
+    """Full snapshot sections for version compare / preview (not loaded on every GET)."""
+    from urllib.parse import unquote
+
+    from app.services.proposal_repository import aget_proposal_draft
+
+    key = unquote(saved_at)
+    draft = await aget_proposal_draft(rfp_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="No proposal draft found.")
+    for snap in draft.snapshots or []:
+        if snap.saved_at == key:
+            return {
+                "snapshot": snap.model_dump(by_alias=True),
+            }
+    raise HTTPException(status_code=404, detail="Snapshot not found.")
 
 
 @router.get("/{rfp_id}/proposal/job-status")
@@ -109,8 +141,10 @@ def upsert_proposal(rfp_id: str, draft: ProposalDraft) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="RFP not found")
     if draft.rfp_id != rfp_id:
         raise HTTPException(status_code=400, detail="rfpId mismatch")
+    existing = get_proposal_draft(rfp_id)
+    draft = merge_snapshots_for_save(draft, existing)
     save_proposal_draft(draft)
-    return {"ok": True, "draft": draft.model_dump(by_alias=True)}
+    return {"ok": True, "draft": slim_draft_for_api(draft)}
 
 
 @router.post("/{rfp_id}/proposal/reset")
@@ -439,3 +473,182 @@ async def phase4_finalize_gaps_endpoint(rfp_id: str) -> ProposalPhase4Response:
     save_proposal_draft(draft)
     slim = _slim_research(research) or research
     return ProposalPhase4Response(review=review, research=slim, draft=draft)
+
+
+@router.post(
+    "/{rfp_id}/proposal/fulfill-rfp-gaps",
+    response_model=ProposalFulfillGapsResponse,
+)
+async def fulfill_rfp_gaps_endpoint(
+    rfp_id: str,
+    body: PreSubmitAutoFixRequest | None = None,
+) -> ProposalFulfillGapsResponse:
+    """Re-read THIS RFP, add missing closing package sections, patch uncovered gaps."""
+    from app.services.proposal_fulfill_rfp_gaps import run_fulfill_rfp_gaps
+
+    use_llm = body.use_llm if body else True
+    try:
+        review, research, draft, fulfill_report = await run_fulfill_rfp_gaps(
+            rfp_id, use_llm=use_llm
+        )
+    except ProposalError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Fulfill RFP gaps failed: {exc}",
+        ) from exc
+
+    slim = _slim_research(research) or research
+    return ProposalFulfillGapsResponse(
+        review=review,
+        research=slim,
+        draft=draft,
+        fulfill_report=fulfill_report,
+    )
+
+
+@router.post(
+    "/{rfp_id}/proposal/restore-snapshot",
+    response_model=ProposalRestoreSnapshotResponse,
+)
+async def restore_proposal_snapshot_endpoint(
+    rfp_id: str,
+    body: ProposalRestoreSnapshotRequest,
+) -> ProposalRestoreSnapshotResponse:
+    from app.services.proposal_draft_snapshots import restore_proposal_snapshot
+    from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
+
+    draft = await aget_proposal_draft(rfp_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="No proposal draft found.")
+    restored = restore_proposal_snapshot(draft, saved_at=body.saved_at)
+    if not restored:
+        raise HTTPException(status_code=404, detail="Snapshot not found.")
+    await asave_proposal_draft(restored)
+    return ProposalRestoreSnapshotResponse(draft=restored)
+
+
+@router.post("/{rfp_id}/proposal/export/docx")
+async def export_proposal_docx(rfp_id: str) -> Response:
+    """Download full proposal as Word (.docx) — same structure as in-app manuscript."""
+    from app.services.proposal_docx_export import (
+        ProposalDocxExportError,
+        build_proposal_docx_bytes,
+        build_proposal_docx_filename,
+    )
+    from app.services.proposal_google_doc_export import _sanitize_doc_title
+    from app.services.proposal_repository import aget_proposal_draft
+
+    try:
+        if not rfp_exists(rfp_id):
+            raise HTTPException(status_code=404, detail="RFP not found")
+
+        draft = await aget_proposal_draft(rfp_id)
+        if not draft or not draft.sections:
+            raise HTTPException(status_code=400, detail="No proposal draft to export.")
+
+        title = "Proposal"
+        try:
+            rfp = get_rfp(rfp_id)
+            if rfp and rfp.title:
+                title = rfp.title
+        except Exception:
+            pass
+
+        doc_title = _sanitize_doc_title(f"{title} — Proposal")
+        payload = build_proposal_docx_bytes(doc_title=doc_title, draft=draft)
+        filename = build_proposal_docx_filename(rfp_title=title)
+    except HTTPException:
+        raise
+    except ProposalDocxExportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection dropped while exporting. Please try again.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Word export failed: {exc}",
+        ) from exc
+
+    encoded = quote(filename)
+    return Response(
+        content=payload,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{encoded}"; filename*=UTF-8\'\'{encoded}'
+            ),
+        },
+    )
+
+
+@router.post(
+    "/{rfp_id}/proposal/export/google-doc",
+    response_model=ProposalGoogleDocExportResponse,
+)
+async def export_proposal_google_doc(rfp_id: str) -> ProposalGoogleDocExportResponse:
+    """Create a Google Doc with the full ordered proposal manuscript."""
+    from app.services.proposal_google_doc_export import (
+        ProposalGoogleDocExportError,
+        export_proposal_to_google_doc,
+    )
+    from app.services.proposal_repository import aget_proposal_draft
+
+    try:
+        if not rfp_exists(rfp_id):
+            raise HTTPException(status_code=404, detail="RFP not found")
+
+        draft = await aget_proposal_draft(rfp_id)
+        if not draft or not draft.sections:
+            raise HTTPException(status_code=400, detail="No proposal draft to export.")
+
+        title = "Proposal"
+        try:
+            rfp = get_rfp(rfp_id)
+            if rfp and rfp.title:
+                title = rfp.title
+        except Exception:
+            # Title is nice-to-have; don't fail export if Supabase briefly drops.
+            pass
+
+        result = await export_proposal_to_google_doc(rfp_title=title, draft=draft)
+
+        from datetime import datetime, timezone
+
+        from app.services.proposal_repository import asave_proposal_draft
+
+        draft.google_doc_url = result["documentUrl"]
+        draft.google_doc_id = result["documentId"]
+        draft.google_doc_exported_at = datetime.now(timezone.utc).isoformat()
+        try:
+            await asave_proposal_draft(draft)
+        except Exception:
+            # Export succeeded; URL persistence is best-effort.
+            pass
+    except HTTPException:
+        raise
+    except ProposalGoogleDocExportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection dropped while exporting. Please try again.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google Doc export failed: {exc}",
+        ) from exc
+
+    return ProposalGoogleDocExportResponse(
+        document_id=result["documentId"],
+        document_url=result["documentUrl"],
+        title=result["title"],
+        section_count=result["sectionCount"],
+    )

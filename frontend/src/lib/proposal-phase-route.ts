@@ -42,8 +42,14 @@ export async function proxyProposalPhasePost(
     try {
       data = JSON.parse(text);
     } catch {
+      const snippet = text.replace(/\s+/g, " ").slice(0, 180);
       return NextResponse.json(
-        { detail: "Invalid JSON from backend." },
+        {
+          detail:
+            res.status >= 500
+              ? `${errorLabel} failed on the server (HTTP ${res.status}). Try again in a moment.`
+              : `Invalid JSON from backend (HTTP ${res.status}): ${snippet}`,
+        },
         { status: 502 }
       );
     }

@@ -18,6 +18,7 @@ from app.services import llm, supermemory
 from app.services.rfp_content import combine_rfp_text, load_local_rfp_text, resolve_rfp_pdf_path
 from app.services.pdf_text import IMAGE_ONLY_TEXT_THRESHOLD
 from app.services.rfp_repository import get_rfp_pdf_path
+from app.services.proposal_rfp_excerpt import build_priority_rfp_excerpt
 
 EVALUATION_QUESTIONS: list[tuple[str, str]] = [
     (
@@ -594,15 +595,7 @@ def _extract_action_flags(*texts: str) -> list[str]:
 
 
 def _truncate_rfp_text(text: str, *, max_chars: int = RFP_PROMPT_MAX_CHARS) -> str:
-    if len(text) <= max_chars:
-        return text
-    head = int(max_chars * 0.72)
-    tail = max_chars - head - 100
-    return (
-        f"{text[:head]}\n\n"
-        f"[... middle of RFP omitted ({len(text) - head - tail:,} chars) ...]\n\n"
-        f"{text[-tail:]}"
-    )
+    return build_priority_rfp_excerpt(text, max_chars=max_chars)
 
 
 async def _plan_knowledge_base_queries(

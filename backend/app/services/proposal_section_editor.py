@@ -67,7 +67,7 @@ SECTION_REDRAFT_PROMPT = """Rewrite ONE zö agency proposal section based on use
 
 Rules:
 1. Directly address the user's edit request.
-2. Use ONLY facts from the evidence corpus. Cite inline as [E1], [E2], etc.
+2. Use ONLY facts from the evidence corpus. Do NOT put citation markers like [E1] or [E2] in the prose — write clean client-facing sentences.
 3. Improve substantially on the previous draft — never return the same placeholder or [VERIFY] block if evidence now supports the content.
 4. Use [VERIFY: ...] only for requirements still missing from evidence.
 5. Follow the REGISTER block: narrative sections use first person we/our — NEVER "The Vendor", "The Offeror", or third-person agency distance.

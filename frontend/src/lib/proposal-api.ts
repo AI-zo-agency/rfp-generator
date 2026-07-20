@@ -28,13 +28,39 @@ interface ApiProposalDraft {
   updatedAt: string;
   generatedAt?: string | null;
   provider?: string | null;
+  googleDocUrl?: string | null;
+  googleDocId?: string | null;
+  googleDocExportedAt?: string | null;
+  snapshots?: ProposalOutline["snapshots"];
+  lastFulfillReport?: Record<string, unknown>;
 }
 
 export function apiDraftToOutline(draft: ApiProposalDraft): ProposalOutline {
   return {
     updatedAt: draft.updatedAt,
     sections: draft.sections,
+    googleDocUrl: draft.googleDocUrl ?? null,
+    googleDocId: draft.googleDocId ?? null,
+    googleDocExportedAt: draft.googleDocExportedAt ?? null,
+    snapshots: (draft.snapshots ?? []).map((s) => ({
+      ...s,
+      sections: s.sections ?? [],
+    })),
+    lastFulfillReport: draft.lastFulfillReport ?? undefined,
   };
+}
+
+function slimSnapshotsForSave(
+  snapshots: ProposalOutline["snapshots"]
+): ProposalOutline["snapshots"] {
+  if (!snapshots?.length) return [];
+  return snapshots.map((s) => ({
+    savedAt: s.savedAt,
+    label: s.label,
+    scanSummary: s.scanSummary,
+    sectionCount: s.sections?.length ?? s.sectionCount ?? 0,
+    sections: [],
+  }));
 }
 
 export function outlineToApiDraft(
@@ -44,6 +70,11 @@ export function outlineToApiDraft(
   return {
     rfpId,
     updatedAt: outline.updatedAt,
+    googleDocUrl: outline.googleDocUrl ?? null,
+    googleDocId: outline.googleDocId ?? null,
+    googleDocExportedAt: outline.googleDocExportedAt ?? null,
+    snapshots: slimSnapshotsForSave(outline.snapshots),
+    lastFulfillReport: outline.lastFulfillReport ?? null,
     sections: outline.sections.map((s) => ({
       ...s,
       source:
@@ -150,9 +181,11 @@ export function countSectionsWithContent(outline: ProposalOutline): number {
 /** Poll saved draft while a long backend phase runs — surfaces each section as it lands. */
 export function startLiveDraftPolling(
   rfpId: string,
-  onDraftUpdate: (draft: ProposalOutline) => void
+  onDraftUpdate: (draft: ProposalOutline) => void,
+  onResearchUpdate?: (research: ProposalResearch | null) => void
 ): () => void {
   let lastFingerprint = "";
+  let lastResearchAt = "";
   let stopped = false;
 
   const fingerprint = (draft: ProposalOutline) => {
@@ -171,6 +204,11 @@ export function startLiveDraftPolling(
       if (next !== lastFingerprint) {
         lastFingerprint = next;
         onDraftUpdate(snapshot.draft);
+      }
+      const cpAt = snapshot.research?.pipelineCheckpoint?.updatedAt ?? "";
+      if (onResearchUpdate && cpAt !== lastResearchAt) {
+        lastResearchAt = cpAt;
+        onResearchUpdate(snapshot.research ?? null);
       }
     } catch {
       // Ignore transient poll errors during long runs.
@@ -191,12 +229,13 @@ export function startLiveDraftPolling(
 function withLiveDraftPolling<T>(
   rfpId: string,
   onDraftUpdate: ((draft: ProposalOutline) => void) | undefined,
-  run: () => Promise<T>
+  run: () => Promise<T>,
+  onResearchUpdate?: (research: ProposalResearch | null) => void
 ): Promise<T> {
   if (!onDraftUpdate) {
     return run();
   }
-  const stop = startLiveDraftPolling(rfpId, onDraftUpdate);
+  const stop = startLiveDraftPolling(rfpId, onDraftUpdate, onResearchUpdate);
   return run().finally(stop);
 }
 
@@ -299,6 +338,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const PROPOSAL_FETCH_TIMEOUT_MS = 90_000;
+/** First paint — don't block the workspace on a stuck backend. */
+export const PROPOSAL_INITIAL_LOAD_TIMEOUT_MS = 18_000;
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  timeoutMs = PROPOSAL_FETCH_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function fetchProposalSnapshot(
+  rfpId: string,
+  savedAt: string
+): Promise<NonNullable<ProposalOutline["snapshots"]>[number] | null> {
+  const encoded = encodeURIComponent(savedAt);
+  const res = await fetchWithTimeout(
+    `/api/rfps/${rfpId}/proposal/snapshot/${encoded}`,
+    { cache: "no-store" },
+    120_000
+  );
+  if (!res.ok) return null;
+  const data = (await res.json()) as {
+    snapshot?: NonNullable<ProposalOutline["snapshots"]>[number];
+  };
+  return data.snapshot ?? null;
+}
+
 async function captureProposalTimestamps(rfpId: string): Promise<{
   draftAt: string;
   researchAt: string;
@@ -386,6 +460,7 @@ export async function generateFullProposalStaged(
     /** Re-run startFrom and every later phase even if previously complete. */
     forceRerunFromStart?: boolean;
     onDraftUpdate?: (draft: ProposalOutline) => void;
+    onResearchUpdate?: (research: ProposalResearch | null) => void;
     signal?: AbortSignal;
   }
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
@@ -451,8 +526,11 @@ export async function generateFullProposalStaged(
     if (!(await skipIfPhaseAlreadyFinished("sections-1-3"))) {
       throwIfAborted(signal);
       onProgress?.("sections-1-3");
-      draft = await withLiveDraftPolling(rfpId, options?.onDraftUpdate, () =>
-        generateProposalSections1to3(rfpId, signal)
+      draft = await withLiveDraftPolling(
+        rfpId,
+        options?.onDraftUpdate,
+        () => generateProposalSections1to3(rfpId, signal),
+        options?.onResearchUpdate
       );
       ({ draft, research } = await refreshProposalSnapshot(rfpId));
     }
@@ -471,8 +549,11 @@ export async function generateFullProposalStaged(
     if (!(await skipIfPhaseAlreadyFinished("phase-3"))) {
       throwIfAborted(signal);
       onProgress?.("phase-3");
-      const phase3 = await withLiveDraftPolling(rfpId, options?.onDraftUpdate, () =>
-        runPhase3Drafting(rfpId, signal)
+      const phase3 = await withLiveDraftPolling(
+        rfpId,
+        options?.onDraftUpdate,
+        () => runPhase3Drafting(rfpId, signal),
+        options?.onResearchUpdate
       );
       draft = phase3.draft;
       research = phase3.research;
@@ -483,8 +564,11 @@ export async function generateFullProposalStaged(
     if (!(await skipIfPhaseAlreadyFinished("phase-3-6-self-edit"))) {
       throwIfAborted(signal);
       onProgress?.("phase-3-6-self-edit");
-      const edited = await withLiveDraftPolling(rfpId, options?.onDraftUpdate, () =>
-        runPhase3_6SelfEditWithRecovery(rfpId, signal)
+      const edited = await withLiveDraftPolling(
+        rfpId,
+        options?.onDraftUpdate,
+        () => runPhase3_6SelfEditWithRecovery(rfpId, signal),
+        options?.onResearchUpdate
       );
       draft = edited.draft;
       research = edited.research;
@@ -592,12 +676,16 @@ async function waitForInFlightPhase(
   // Stale in-progress checkpoint (uvicorn killed, browser disconnected) — start fresh.
 }
 
-export async function fetchProposalDraft(rfpId: string): Promise<{
+export async function fetchProposalDraft(
+  rfpId: string,
+  options?: { timeoutMs?: number }
+): Promise<{
   draft: ProposalOutline | null;
   research: ProposalResearch | null;
   provider?: string | null;
   pipelineStatus: ProposalPipelineStatus | null;
 }> {
+  const timeoutMs = options?.timeoutMs ?? PROPOSAL_FETCH_TIMEOUT_MS;
   const empty = {
     draft: null as ProposalOutline | null,
     research: null as ProposalResearch | null,
@@ -605,7 +693,21 @@ export async function fetchProposalDraft(rfpId: string): Promise<{
   };
 
   for (let attempt = 0; attempt < 4; attempt++) {
-    const res = await fetch(`/api/rfps/${rfpId}/proposal`, { cache: "no-store" });
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(
+        `/api/rfps/${rfpId}/proposal`,
+        { cache: "no-store" },
+        timeoutMs
+      );
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error(
+          "Loading the proposal timed out — the server may still be generating. Wait a moment and refresh, or cancel generation on the server."
+        );
+      }
+      throw error;
+    }
     if (res.status === 503 || res.status === 502) {
       if (attempt < 3) {
         await sleep(500 * (attempt + 1));
@@ -1033,6 +1135,98 @@ export async function runPhase4FinalizeGaps(
   };
 }
 
+export async function runFulfillRfpGaps(
+  rfpId: string,
+  options?: { useLlm?: boolean; signal?: AbortSignal }
+): Promise<{
+  review: PreSubmitReview;
+  research: ProposalResearch;
+  draft: ProposalOutline;
+  fulfillReport: {
+    closingDetected?: string[];
+    closingDetectedSections?: Array<{ id: string; title: string }>;
+    closingAlreadyPresent?: Array<{ id: string; title: string }>;
+    inPlaceFixCount?: number;
+    closingAdded?: string[];
+    closingAddedSections?: Array<{ id: string; title: string }>;
+    submissionNarrativesAdded?: string[];
+    submissionDeliverablesAdded?: Array<{ id: string; title: string; kind?: string }>;
+    logs?: string[];
+    humanDecisionGaps?: string[];
+  };
+}> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/fulfill-rfp-gaps`, {
+    ...proposalPostInit(options?.signal),
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ useLlm: options?.useLlm ?? true }),
+  });
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    review?: PreSubmitReview;
+    research?: ProposalResearch;
+    draft?: ApiProposalDraft;
+    fulfillReport?: {
+      closingDetected?: string[];
+      closingDetectedSections?: Array<{ id: string; title: string }>;
+      closingAlreadyPresent?: Array<{ id: string; title: string }>;
+      inPlaceFixCount?: number;
+      closingAdded?: string[];
+      closingAddedSections?: Array<{ id: string; title: string }>;
+      submissionNarrativesAdded?: string[];
+      submissionDeliverablesAdded?: Array<{
+        id: string;
+        title: string;
+        kind?: string;
+      }>;
+      logs?: string[];
+      humanDecisionGaps?: string[];
+    };
+  };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from fulfill RFP gaps.");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Fulfill RFP gaps failed");
+  }
+  if (!data.review || !data.research || !data.draft) {
+    throw new Error("Incomplete fulfill RFP gaps response");
+  }
+  return {
+    review: data.review,
+    research: data.research,
+    draft: apiDraftToOutline(data.draft),
+    fulfillReport: data.fulfillReport ?? {},
+  };
+}
+
+export async function restoreProposalSnapshot(
+  rfpId: string,
+  savedAt: string
+): Promise<ProposalOutline> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/restore-snapshot`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ savedAt }),
+  });
+  const text = await res.text();
+  let data: { detail?: string; draft?: ApiProposalDraft };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from restore snapshot.");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Could not restore snapshot.");
+  }
+  if (!data.draft) {
+    throw new Error("Incomplete restore snapshot response.");
+  }
+  return apiDraftToOutline(data.draft);
+}
+
 export async function runPhase4PreSubmitAutoFix(
   rfpId: string,
   options?: { useLlm?: boolean; signal?: AbortSignal }
@@ -1136,5 +1330,85 @@ export async function improveProposalSection(
     assistantMessage:
       data.assistantMessage ??
       `Updated ${data.section.title}. Review the draft above.`,
+  };
+}
+
+export async function downloadProposalDocx(rfpId: string): Promise<void> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/export/docx`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    let detail = "Word export failed";
+    try {
+      const parsed = JSON.parse(text) as { detail?: string };
+      if (parsed.detail) detail = parsed.detail;
+    } catch {
+      if (text.trim()) detail = text.slice(0, 200);
+    }
+    throw new Error(detail);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i);
+  const rawName = decodeURIComponent(match?.[1] || match?.[2] || "proposal.docx");
+  const filename = rawName.endsWith(".docx") ? rawName : `${rawName}.docx`;
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function exportProposalToGoogleDoc(rfpId: string): Promise<{
+  documentId: string;
+  documentUrl: string;
+  title: string;
+  sectionCount: number;
+}> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/export/google-doc`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    documentId?: string;
+    document_id?: string;
+    documentUrl?: string;
+    document_url?: string;
+    title?: string;
+    sectionCount?: number;
+    section_count?: number;
+  };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(
+      res.status >= 500
+        ? "Export failed on the server. Wait a moment and try again."
+        : "Invalid response from Google Doc export."
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      typeof data.detail === "string"
+        ? data.detail
+        : "Google Doc export failed"
+    );
+  }
+  const documentId = data.documentId ?? data.document_id;
+  const documentUrl = data.documentUrl ?? data.document_url;
+  if (!documentId || !documentUrl) {
+    throw new Error("Google Doc export returned incomplete data");
+  }
+  return {
+    documentId,
+    documentUrl,
+    title: data.title ?? "Proposal",
+    sectionCount: data.sectionCount ?? data.section_count ?? 0,
   };
 }

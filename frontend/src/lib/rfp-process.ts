@@ -79,6 +79,46 @@ export const STAGE_LABELS: Record<RfpStage, string> = {
   passed: "Passed",
 };
 
+/** Plain-language workflow step for pipeline tables (not generic "Go / No-Go" for every row). */
+export function getWorkflowStepDisplay(rfp: RfpRecord): {
+  label: string;
+  hint: string;
+} {
+  if (rfp.goNoGo === "no_go" || rfp.stage === "passed") {
+    return { label: "Not bidding", hint: "Marked pass — no proposal draft" };
+  }
+  if (isNewIntake(rfp)) {
+    return {
+      label: "New intake",
+      hint: "Upload or sync RFP, then run Go/No-Go analysis",
+    };
+  }
+  if (needsGoNoGoDecision(rfp)) {
+    return {
+      label: "Awaiting bid decision",
+      hint: "Review fit score and confirm Go or Pass",
+    };
+  }
+  const hints: Partial<Record<RfpStage, string>> = {
+    intake: "RFP received — run analysis when ready",
+    go_no_go: "Analysis done — open RFP and confirm Go",
+    compliance: "Map requirements and build outline",
+    sections_1_3: "Draft Sections 1–3 from knowledge base",
+    sections_4_5: "Draft RFP-mapped sections",
+    pricing: "Build budget and fee schedule",
+    review: "Pre-submit review and gap fixes",
+    export: "Export final manuscript",
+    submitted: "Submitted to buyer",
+    won: "Awarded",
+    lost: "Not selected",
+  };
+  const label = STAGE_LABELS[rfp.stage] ?? rfp.stage;
+  return {
+    label,
+    hint: hints[rfp.stage] ?? "Continue in proposal workspace",
+  };
+}
+
 const PROPOSAL_STAGES: RfpStage[] = [
   "compliance",
   "sections_1_3",

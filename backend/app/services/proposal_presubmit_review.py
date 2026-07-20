@@ -22,6 +22,20 @@ from app.services.proposal_rfp_compliance import (
     requirement_likely_covered,
     scan_rfp_compliance_gaps,
 )
+from app.services.proposal_common import load_rfp_for_proposal
+from app.services.proposal_rfp_excerpt import (
+    extract_reference_requirement_summary,
+    evaluation_and_kpi_excerpt,
+    rfp_forbids_quotation_form_changes,
+)
+from app.services.proposal_fulfill_rfp_accuracy import (
+    parse_scoring_facts_from_rfp,
+    scan_draft_accuracy_findings,
+)
+from app.services.proposal_rfp_submission_requirements import (
+    detect_narrative_submission_gaps,
+    list_submission_checklist_from_rfp,
+)
 from app.services.proposal_manuscript_cleanup import (
     GRAMMAR_GLITCH_RE,
     budget_mentions_subcontractors,
@@ -62,6 +76,146 @@ _TEMPLATE_LEAK_RE = re.compile(
 )
 
 
+_REF_DENIAL_RE = re.compile(
+    r"(?:rfp|excerpt|solicitation).{0,80}(?:does not|did not|do not)\s+specify.{0,160}"
+    r"(?:reference|number of references|institution type)",
+    re.I | re.S,
+)
+_QUOTATION_FORM_REWRITE_RE = re.compile(r"\bsection\s+[a-d]\b", re.I)
+
+
+def _scan_rfp_contradictions(
+    *,
+    draft: ProposalDraft,
+    rfp: RfpRecord,
+) -> list[PreSubmitIssue]:
+    """Flag prose that denies RFP requirements or rewrites mandatory forms."""
+    issues: list[PreSubmitIssue] = []
+    try:
+        _, _, rfp_text = load_rfp_for_proposal(rfp.id)
+    except Exception:  # noqa: BLE001
+        return issues
+
+    ref_spec = extract_reference_requirement_summary(rfp_text)
+    for section in draft.sections:
+        content = section.content or ""
+        title_cf = (section.title or "").casefold()
+        if ref_spec and "reference" in title_cf and (
+            _REF_DENIAL_RE.search(content)
+            or "does not specify" in content.casefold()
+            and "reference" in content.casefold()
+        ):
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="compliance",
+                    message=(
+                        "References section incorrectly states the RFP does not specify "
+                        "reference requirements — the RFP text requires specific references."
+                    ),
+                    sectionId=section.id,
+                    sectionTitle=section.title,
+                    excerpt=ref_spec[:200],
+                )
+            )
+        if (
+            rfp_forbids_quotation_form_changes(rfp_text)
+            and any(k in title_cf for k in ("pricing", "quotation", "cost proposal", "budget"))
+            and _QUOTATION_FORM_REWRITE_RE.search(content)
+        ):
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="compliance",
+                    message=(
+                        "Pricing section restructures the official Quotation/Pricing Proposal Form "
+                        "(Section A–D). This RFP disqualifies altered forms — fill the buyer's "
+                        "form verbatim and move rationale to a supporting page."
+                    ),
+                    sectionId=section.id,
+                    sectionTitle=section.title,
+                )
+            )
+
+    excerpt = evaluation_and_kpi_excerpt(rfp_text)
+    facts = parse_scoring_facts_from_rfp(excerpt or rfp_text)
+    seen_kinds: set[str] = set()
+    for finding in scan_draft_accuracy_findings(draft, facts, rfp_text):
+        if finding.kind in seen_kinds:
+            continue
+        seen_kinds.add(finding.kind)
+        sid = finding.section_ids[0] if finding.section_ids else ""
+        section = next((s for s in draft.sections if s.id == sid), None)
+        issues.append(
+            PreSubmitIssue(
+                severity="critical",
+                category="compliance",
+                message=finding.message,
+                sectionId=section.id if section else None,
+                sectionTitle=section.title if section else None,
+            )
+        )
+    return issues
+
+
+def _scan_submission_document_gaps(
+    *,
+    draft: ProposalDraft,
+    rfp: RfpRecord,
+) -> list[PreSubmitIssue]:
+    issues: list[PreSubmitIssue] = []
+    try:
+        _, _, rfp_text = load_rfp_for_proposal(rfp.id)
+    except Exception:  # noqa: BLE001
+        return issues
+
+    manuscript = "\n\n".join(
+        f"{s.title}\n{s.content}" for s in draft.sections if s.content.strip()
+    ).casefold()
+
+    if re.search(r"acknowledgement\s+of\s+addenda|acknowledgment\s+of\s+addenda", rfp_text, re.I):
+        if not any(
+            k in manuscript
+            for k in (
+                "acknowledgement of addenda",
+                "acknowledgment of addenda",
+                "addenda acknowledgment",
+                "no addenda received",
+            )
+        ) and "rfp-closing-addenda" not in {s.id for s in draft.sections}:
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="compliance",
+                    message=(
+                        "RFP requires Acknowledgement of Addenda returned with the proposal — "
+                        "no addenda section or statement found."
+                    ),
+                    sectionId=None,
+                    sectionTitle=None,
+                )
+            )
+
+    for item in detect_narrative_submission_gaps(draft, rfp_text):
+        issues.append(
+            PreSubmitIssue(
+                severity="critical",
+                category="compliance",
+                message=f"RFP requires narrative: {item.title} — not found in manuscript.",
+                sectionId=item.section_id,
+                sectionTitle=item.title,
+            )
+        )
+
+    for label in list_submission_checklist_from_rfp(rfp_text):
+        if "signed" in label.casefold() or "notarized" in label.casefold():
+            continue  # physical forms — closing checklist handles
+        if "narrative" in label.casefold():
+            continue  # covered by detect_narrative_submission_gaps
+
+    return issues
+
+
 def _manuscript_text(draft: ProposalDraft) -> str:
     return "\n\n".join(
         f"## {s.title}\n{s.content}" for s in draft.sections if s.content.strip()
@@ -77,13 +231,86 @@ def _rfp_context_blob(rfp: RfpRecord) -> str:
     ).casefold()
 
 
+def is_service_title_client(client: str) -> bool:
+    """True when RFP `client` field is a service category, not the buyer institution."""
+    c = (client or "").strip().casefold()
+    if not c or len(c) < 4:
+        return False
+    org_markers = (
+        "county",
+        "college",
+        "university",
+        "community college",
+        "city of",
+        "authority",
+        "department of",
+        "school district",
+        "state of",
+    )
+    if any(m in c for m in org_markers):
+        return False
+    service_markers = (
+        "services",
+        "advertising",
+        "marketing",
+        "consulting",
+        "communications",
+        "digital ",
+    )
+    return any(m in c for m in service_markers)
+
+
+def proposal_client_label(rfp: RfpRecord) -> str:
+    """Best buyer/org label for this RFP — never a service-category title fragment.
+
+    Manual RFPs sometimes store client=\"Digital Advertising Services\" with
+    title=\"… for Hudson County Community College\". Prefer the institution after \"for\".
+    """
+    client = (rfp.client or "").strip()
+    title = (rfp.title or "").strip()
+    if is_service_title_client(client):
+        m = re.search(r"\bfor\s+(.+)$", title, re.I)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+    if client and title:
+        prefix = f"{client} for "
+        if title.casefold().startswith(prefix.casefold()):
+            extracted = title[len(prefix) :].strip()
+            if extracted:
+                return extracted
+    if client:
+        return client
+    return title or "the Client"
+
+
+def is_case_study_section(
+    section: ProposalSection | None,
+    *,
+    section_id: str = "",
+    title: str = "",
+) -> bool:
+    """Past-client proof (Section 3 / Our Work) — portfolio names here are intentional."""
+    sid = ((section.id if section else section_id) or "").casefold()
+    ttl = ((section.title if section else title) or "").casefold()
+    if sid.startswith("section-3-work-") or sid in {
+        "section-3-our-work",
+        "section-3-work-placeholder",
+    }:
+        return True
+    if "our work" in ttl or "case stud" in ttl:
+        return True
+    return False
+
+
 def _is_stale_client_for_rfp(stale: str, rfp: RfpRecord) -> bool:
     """True when a portfolio name should be treated as wrong-client paste for this RFP."""
-    client_lower = rfp.client.strip().casefold()
+    client_lower = proposal_client_label(rfp).casefold()
     context_lower = _rfp_context_blob(rfp)
     stale_lower = stale.casefold()
 
     if stale_lower in context_lower:
+        return False
+    if stale_lower in client_lower:
         return False
 
     client_tokens = [t for t in re.split(r"[\s,]+", client_lower) if len(t) > 3]
@@ -116,20 +343,32 @@ def issue_score(issues: list[PreSubmitIssue]) -> tuple[int, int]:
     return critical, len(issues)
 
 
-def fix_stale_client_references(content: str, rfp: RfpRecord) -> tuple[str, int]:
-    """Replace known portfolio client names with the current RFP client when they appear as stale paste."""
+def fix_stale_client_references(
+    content: str,
+    rfp: RfpRecord,
+    *,
+    section: ProposalSection | None = None,
+) -> tuple[str, int]:
+    """Replace wrong-client paste with THIS RFP's buyer — never rewrite case studies.
+
+    Section 3 / Our Work intentionally names past clients (Bend, Santa Clara, etc.).
+    Autofix must not mail-merge those into the current RFP client/title.
+    """
     if not content.strip():
+        return content, 0
+    if section is not None and is_case_study_section(section):
         return content, 0
 
     replacements = 0
     text = content
+    replacement = proposal_client_label(rfp)
 
     for stale in _STALE_CLIENT_PATTERNS:
         if not _is_stale_client_for_rfp(stale, rfp):
             continue
         pattern = re.compile(re.escape(stale), re.IGNORECASE)
         if pattern.search(text):
-            text = pattern.sub(rfp.client.strip(), text)
+            text = pattern.sub(replacement, text)
             replacements += 1
 
     return text, replacements
@@ -145,6 +384,65 @@ def _scan_copy_paste(
     for section in draft.sections:
         if not section.content.strip():
             continue
+        # Case studies intentionally name past portfolio clients — not wrong-client paste.
+        if is_case_study_section(section):
+            # Detect mail-merge corruption: service-title substituted for real clients.
+            bad_label = (rfp.client or "").strip()
+            if bad_label and is_service_title_client(bad_label):
+                needle = bad_label.casefold()
+                body = section.content.casefold()
+                if needle in body and any(
+                    frag in body
+                    for frag in (
+                        f"city of {needle}",
+                        f"for the {needle}",
+                        f"{needle} is one of the largest",
+                        f"{needle} county",
+                        f"{needle} fair",
+                        f"{needle} library",
+                        f"{needle} water",
+                        f"{needle} department",
+                    )
+                ):
+                    issues.append(
+                        PreSubmitIssue(
+                            severity="critical",
+                            category="copy_paste",
+                            message=(
+                                "Case study mail-merge corruption: portfolio client names were "
+                                f"replaced with RFP service title '{bad_label}'. Re-draft Section 3 "
+                                "from KB — do not ship."
+                            ),
+                            sectionId=section.id,
+                            sectionTitle=section.title,
+                            excerpt=section.content[:200],
+                        )
+                    )
+            for match in _PLACEHOLDER_RE.finditer(section.content):
+                tag = match.group(0)
+                sev = "critical" if tag.upper().startswith("[VERIFY") else "warning"
+                issues.append(
+                    PreSubmitIssue(
+                        severity=sev,
+                        category="placeholder",
+                        message=f"Unresolved tag: {tag[:80]}",
+                        sectionId=section.id,
+                        sectionTitle=section.title,
+                        excerpt=tag,
+                    )
+                )
+            if _TEMPLATE_LEAK_RE.search(section.content):
+                issues.append(
+                    PreSubmitIssue(
+                        severity="warning",
+                        category="copy_paste",
+                        message="Template placeholder language detected",
+                        sectionId=section.id,
+                        sectionTitle=section.title,
+                    )
+                )
+            continue
+
         content_lower = section.content.casefold()
 
         for stale in _STALE_CLIENT_PATTERNS:
@@ -551,6 +849,8 @@ def run_presubmit_review(
 ) -> PreSubmitReview:
     issues: list[PreSubmitIssue] = []
     issues.extend(_scan_copy_paste(draft=draft, rfp=rfp))
+    issues.extend(_scan_rfp_contradictions(draft=draft, rfp=rfp))
+    issues.extend(_scan_submission_document_gaps(draft=draft, rfp=rfp))
     issues.extend(_scan_voice(draft=draft))
     issues.extend(_scan_grammar(draft=draft))
     issues.extend(_scan_subcontractor_narrative(draft=draft, research=research))

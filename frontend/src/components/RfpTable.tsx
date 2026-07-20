@@ -6,16 +6,15 @@ import { motion } from "motion/react";
 import { computeOverallGoScore, daysUntil, formatDate } from "@/lib/format";
 import { expoOutEase } from "@/lib/motion";
 import {
+  getWorkflowStepDisplay,
   isNewIntake,
   isProposalInProgress,
   needsGoNoGoDecision,
-  STAGE_LABELS,
 } from "@/lib/rfp-process";
 import type { RfpRecord } from "@/types/rfp";
 import { DeleteRfpButton } from "./DeleteRfpButton";
+import { GoNoGoBadge } from "./StatusBadge";
 import { GoSign } from "./GoSign";
-import { GoNoGoBadge, PriorityBadge } from "./StatusBadge";
-import { IconChevron } from "./ui/icons";
 import { OutlineTabs } from "./ui/OutlineTabs";
 
 type FilterTab = "all" | "go" | "pending" | "in_progress" | "new";
@@ -63,7 +62,6 @@ function RfpRowMeta({ rfp }: { rfp: RfpRecord }) {
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
-        <PriorityBadge priority={rfp.priority} />
         {rfp.source === "manual" && (
           <span className="rounded-md border border-zo-teal/40 bg-zo-teal/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zo-teal">
             Manual
@@ -171,14 +169,7 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                   </Link>
                   <RfpRowMeta rfp={rfp} />
                 </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Link
-                    href={`/rfps/${rfp.id}`}
-                    className="table-action-btn"
-                    aria-label={`Open ${rfp.title}`}
-                  >
-                    <IconChevron className="h-4 w-4" />
-                  </Link>
+                <div className="flex shrink-0 items-center">
                   <DeleteRfpButton
                     rfpId={rfp.id}
                     title={rfp.title}
@@ -198,7 +189,7 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
             <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-[11px] font-bold uppercase tracking-[0.12em] text-zo-text-secondary">
               <th className="px-6 py-4 lg:px-8">RFP</th>
               <th className="px-4 py-4">Client</th>
-              <th className="px-4 py-4">Stage</th>
+              <th className="px-4 py-4">Workflow step</th>
               <th className="px-4 py-4">Due</th>
               <th className="px-4 py-4">Go Score</th>
               <th className="px-4 py-4">Go/No-Go</th>
@@ -226,6 +217,7 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
             ) : (
               filtered.map((rfp) => {
                 const due = daysUntil(rfp.dueDate);
+                const workflow = getWorkflowStepDisplay(rfp);
                 const goScore = computeOverallGoScore(
                   rfp.fitScore,
                   rfp.worthScore,
@@ -239,31 +231,34 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                     className="group border-b border-zo-border/60 transition-colors duration-200 hover:bg-[var(--zo-hover-bg)]"
                   >
                     <td className="px-6 py-5 lg:px-8">
-                      <div className="flex items-start gap-3">
-                        {rfp.goNoGo === "go" ? <GoSign className="mt-1 shrink-0" /> : null}
-                        <div className="min-w-0">
-                          <Link
-                            href={`/rfps/${rfp.id}`}
-                            className="block max-w-md font-semibold leading-snug text-foreground transition-colors group-hover:text-zo-orange"
-                          >
-                            {rfp.title}
-                          </Link>
-                          <RfpRowMeta rfp={rfp} />
-                          {rfp.assignedTo ? (
-                            <p className="mt-1.5 text-xs text-zo-text-muted">
-                              Assigned · {rfp.assignedTo}
-                            </p>
-                          ) : null}
-                        </div>
+                      <div className="min-w-0">
+                        <Link
+                          href={`/rfps/${rfp.id}`}
+                          className="block max-w-md font-semibold leading-snug text-foreground transition-colors group-hover:text-zo-orange"
+                        >
+                          {rfp.title}
+                        </Link>
+                        <RfpRowMeta rfp={rfp} />
+                        {rfp.assignedTo ? (
+                          <p className="mt-1.5 text-xs text-zo-text-muted">
+                            Assigned · {rfp.assignedTo}
+                          </p>
+                        ) : null}
                       </div>
                     </td>
                     <td className="px-4 py-5 align-top">
                       <p className="font-medium text-zo-text-secondary">{rfp.client}</p>
                     </td>
                     <td className="px-4 py-5 align-top">
-                      <span className="text-sm font-semibold text-foreground">
-                        {STAGE_LABELS[rfp.stage]}
-                      </span>
+                      <p className="text-sm font-semibold text-foreground">
+                        {workflow.label}
+                      </p>
+                      <p
+                        className="mt-1 max-w-[14rem] text-xs leading-snug text-zo-text-muted"
+                        title={workflow.hint}
+                      >
+                        {workflow.hint}
+                      </p>
                     </td>
                     <td className="px-4 py-5 align-top">
                       <p className="text-sm font-medium">{formatDate(rfp.dueDate)}</p>
@@ -306,14 +301,7 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                       )}
                     </td>
                     <td className="px-4 py-5 align-top">
-                      <div className="flex items-center justify-end gap-1 opacity-80 transition-opacity duration-200 group-hover:opacity-100">
-                        <Link
-                          href={`/rfps/${rfp.id}`}
-                          className="table-action-btn"
-                          aria-label={`Open ${rfp.title}`}
-                        >
-                          <IconChevron className="h-4 w-4" />
-                        </Link>
+                      <div className="flex justify-end">
                         <DeleteRfpButton
                           rfpId={rfp.id}
                           title={rfp.title}

@@ -55,26 +55,29 @@ function GoRfpPickerPanel({
       </div>
 
       <div className="proposal-go-drawer-search">
-        <svg
-          className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zo-text-muted"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={2}
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
+        <div className="relative w-full">
+          <svg
+            className="pointer-events-none absolute left-3 top-1/2 z-[1] h-4 w-4 -translate-y-1/2 text-zo-text-muted"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+            aria-hidden
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
+            />
+          </svg>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search Go RFPs…"
+            className="zo-input w-full rounded-xl py-2.5 pl-10 pr-3 text-sm outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10 [&::-webkit-search-cancel-button]:hidden"
           />
-        </svg>
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search Go RFPs…"
-          className="zo-input w-full rounded-xl py-2.5 pl-10 pr-3 text-sm outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
-        />
+        </div>
       </div>
 
       <ul className="custom-scrollbar proposal-go-drawer-list">
@@ -215,7 +218,7 @@ export function ProposalsWorkspace({ goRfps }: ProposalsWorkspaceProps) {
   }
 
   return (
-    <div className="proposal-workspace-shell min-w-0">
+    <div className="proposal-workspace-shell flex min-h-0 min-w-0 flex-1 flex-col">
       {selectedRfp && (
         <ProposalDraftWorkspace
           key={selectedRfp.id}

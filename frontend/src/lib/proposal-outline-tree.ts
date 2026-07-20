@@ -59,9 +59,95 @@ function matchesGroup(section: OutlineSection, groupId: string): boolean {
   }
 }
 
-/** Sections rendered in Content tab + On this page nav (never placeholders). */
+const SECTION_1_ID_ORDER = [
+  "section-1-who-we-are",
+  "section-1-org-structure",
+  "section-1-business-info",
+  "section-1-certifications",
+  "section-1-insurance",
+  "section-1-company-overview",
+] as const;
+
+function parseTitleMajorMinor(title: string): { major: number; minor: number } {
+  const m = title.match(/^\s*(\d+)\.(\d+)/);
+  if (m) {
+    return { major: parseInt(m[1], 10), minor: parseInt(m[2], 10) };
+  }
+  return { major: 999, minor: 999 };
+}
+
+/** Stable proposal order: 1.x company → 2.x bios → 3.x work → RFP tabs → other. */
+export function compareManuscriptSections(
+  a: OutlineSection,
+  b: OutlineSection,
+): number {
+  const rank = (s: OutlineSection): [number, number, number, string] => {
+    const id = s.id;
+    const { major, minor } = parseTitleMajorMinor(s.title);
+
+    if (id.startsWith("section-1-")) {
+      const idx = SECTION_1_ID_ORDER.indexOf(
+        id as (typeof SECTION_1_ID_ORDER)[number],
+      );
+      return [1, idx >= 0 ? idx : 40 + minor, minor, id];
+    }
+    if (
+      id.startsWith("section-2-bio-") ||
+      id === "section-2-team-overview"
+    ) {
+      return [2, minor, 0, id];
+    }
+    if (
+      id.startsWith("section-3-work-") ||
+      id === "section-3-our-work"
+    ) {
+      return [3, minor, 0, id];
+    }
+    if (id.startsWith("section-4-")) {
+      return [4, major, minor, id];
+    }
+    if (id.startsWith("section-5-")) {
+      return [5, major, minor, id];
+    }
+    if (s.source === "rfp" || id.startsWith("rfp-")) {
+      return [6, major, minor, id];
+    }
+    return [7, major, minor, id];
+  };
+
+  const ra = rank(a);
+  const rb = rank(b);
+  for (let i = 0; i < ra.length; i++) {
+    const av = ra[i];
+    const bv = rb[i];
+    if (av === bv) continue;
+    if (typeof av === "string" && typeof bv === "string") {
+      return av.localeCompare(bv);
+    }
+    return (av as number) - (bv as number);
+  }
+  return 0;
+}
+
+export function sortManuscriptSections(
+  sections: OutlineSection[],
+): OutlineSection[] {
+  return [...sections].sort(compareManuscriptSections);
+}
+
+export function normalizeOutlineSectionOrder(
+  outline: { sections: OutlineSection[] },
+): { sections: OutlineSection[] } {
+  const sorted = sortManuscriptSections(outline.sections);
+  const unchanged = sorted.every(
+    (section, index) => section.id === outline.sections[index]?.id,
+  );
+  if (unchanged) return outline;
+  return { ...outline, sections: sorted };
+}
+
 export function getManuscriptSections(sections: OutlineSection[]): OutlineSection[] {
-  return sections.filter((section) => {
+  const filtered = sections.filter((section) => {
     if (isPlaceholder(section)) return false;
     if (section.content?.trim()) return true;
     // Keep static 1–3 stubs visible while drafting.
@@ -72,6 +158,18 @@ export function getManuscriptSections(sections: OutlineSection[]): OutlineSectio
     if (section.source === "rfp" || section.source === "generated") return true;
     return false;
   });
+  return sortManuscriptSections(filtered);
+}
+
+/** 1-based index in reading order (Content tab, export, editor chrome). */
+export function buildManuscriptIndexMap(
+  sections: OutlineSection[],
+): Map<string, number> {
+  const map = new Map<string, number>();
+  getManuscriptSections(sections).forEach((section, index) => {
+    map.set(section.id, index + 1);
+  });
+  return map;
 }
 
 /** First real Our Work / Team Bios target for group-style nav clicks. */
@@ -108,6 +206,7 @@ export function buildOutlineSectionTree(
         matchesGroup(section, groupId),
     );
     if (children.length === 0) continue;
+    children.sort(compareManuscriptSections);
     children.forEach((section) => used.add(section.id));
 
     if (children.length === 1 && (groupId === "section-4" || groupId === "section-5")) {
@@ -118,8 +217,13 @@ export function buildOutlineSectionTree(
     nodes.push({ kind: "group", id: groupId, label, sections: children });
   }
 
+  const leftovers: OutlineSection[] = [];
   for (const section of sections) {
     if (used.has(section.id) || isPlaceholder(section)) continue;
+    leftovers.push(section);
+  }
+  leftovers.sort(compareManuscriptSections);
+  for (const section of leftovers) {
     nodes.push({ kind: "leaf", section });
   }
 

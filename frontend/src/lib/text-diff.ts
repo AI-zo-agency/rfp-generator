@@ -124,3 +124,50 @@ export function countWords(text: string): number {
   if (!trimmed) return 0;
   return trimmed.split(/\s+/).length;
 }
+
+export type InlineDiffHighlight = "remove" | "add";
+
+export interface InlineDiffSegment {
+  text: string;
+  highlight?: InlineDiffHighlight;
+}
+
+/** Prefix / changed middle / suffix for side-by-side inline highlights. */
+export function inlineDiffSegments(
+  text: string,
+  other: string,
+  side: "before" | "after"
+): InlineDiffSegment[] {
+  if (!text.trim()) return [];
+  if (!other.trim()) {
+    return [{ text, highlight: side === "before" ? "remove" : "add" }];
+  }
+
+  let start = 0;
+  const minLen = Math.min(text.length, other.length);
+  while (start < minLen && text[start] === other[start]) start += 1;
+
+  let endText = text.length;
+  let endOther = other.length;
+  while (
+    endText > start &&
+    endOther > start &&
+    text[endText - 1] === other[endOther - 1]
+  ) {
+    endText -= 1;
+    endOther -= 1;
+  }
+
+  const segments: InlineDiffSegment[] = [];
+  if (start > 0) segments.push({ text: text.slice(0, start) });
+  const mid = text.slice(start, endText);
+  if (mid) {
+    segments.push({
+      text: mid,
+      highlight: side === "before" ? "remove" : "add",
+    });
+  }
+  const tail = text.slice(endText);
+  if (tail) segments.push({ text: tail });
+  return segments.length ? segments : [{ text }];
+}

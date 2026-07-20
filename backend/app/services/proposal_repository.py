@@ -170,6 +170,28 @@ async def asave_proposal_draft(draft: ProposalDraft) -> None:
     await asyncio.to_thread(save_proposal_draft, draft)
 
 
+def list_google_doc_urls() -> dict[str, str]:
+    """Map rfp_id → Google Doc URL from saved proposal drafts."""
+    if _use_supabase():
+        return _with_supabase_retry(
+            "list_google_doc_urls",
+            lambda: sb.list_google_doc_urls(),
+            retries=_SUPABASE_READ_RETRIES,
+        )
+    out: dict[str, str] = {}
+    with _connect() as conn:
+        rows = conn.execute("SELECT rfp_id, payload FROM proposal_drafts").fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except Exception:
+            continue
+        url = payload.get("googleDocUrl") or payload.get("google_doc_url")
+        if isinstance(url, str) and url.strip():
+            out[str(row["rfp_id"])] = url.strip()
+    return out
+
+
 def delete_proposal_draft(rfp_id: str) -> None:
     """Hard-delete the proposal draft from DB so Reset starts completely fresh."""
     if _use_supabase():

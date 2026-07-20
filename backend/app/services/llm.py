@@ -92,6 +92,16 @@ async def _post_gemini_chat(
         raise LlmError(f"Gemini API error ({response.status_code}): {detail}", status_code=response.status_code)
     
     data = response.json()
+    finish_reason = ""
+    try:
+        finish_reason = str(data["candidates"][0].get("finishReason") or "")
+    except (KeyError, IndexError, TypeError):
+        pass
+    if finish_reason == "MAX_TOKENS":
+        logger.warning(
+            "Gemini hit MAX_TOKENS model=%s — response may be truncated JSON",
+            model,
+        )
     try:
         content = data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
