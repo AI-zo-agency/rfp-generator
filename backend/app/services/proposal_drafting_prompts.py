@@ -19,7 +19,7 @@ YOU MUST NEVER:
 8. Claim "X years of Y experience" unless that exact phrasing is in verified facts
 
 VERIFIED FACTS ONLY:
-- Agency founded: 2012 (13 years total as zö agency)
+- Agency founded: 2013 (August 21, 2013). Years in operation = current calendar year − 2013 (13 in 2026).
 - Certifications: WBENC, WOSB (ONLY these two are verified)
 - Client retention: DO NOT cite a specific average retention rate (not formally tracked)
 - Awards: Creative Excellence 2024, Netty 2024, NYX 2024, Vega Digital 2024, Sonja's Enterprising Women 2026

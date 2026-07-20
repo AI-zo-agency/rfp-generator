@@ -61,7 +61,7 @@ YOU MUST NEVER:
 9. Invent agency hourly rates, fee tables, or markups not grounded in 00_Guide_Pricing evidence / pricing plan
 
 VERIFIED FACTS ONLY (from evidence corpus):
-- Agency: 13 years total as zö agency (founded 2012)
+- Agency: founded August 21, 2013; years in operation = current year − 2013 (13 in 2026). Never say a different year count than Business Information.
 - Certifications: WBENC, WOSB ONLY (no platform certs unless in verified evidence)
 - Client retention: NEVER cite specific retention rate (not formally tracked per verified facts)
 - Awards: Creative Excellence 2024, Netty 2024, NYX 2024, Vega Digital 2024, Sonja's Enterprising Women 2026
@@ -111,6 +111,7 @@ Rules (strict):
 29. Plan-driven narrative sections (Understanding / Methodology / Timeline / Budget overview) MUST be drafted even when evidence is thin or empty. Use RFP requirements, Opportunity Understanding, Section Strategy, Winning Pattern, and Proposal Memory. Cite [E#] only when evidence exists; do not refuse to write the whole section. Use [VERIFY: specific field] only for discrete missing facts, never as the entire section body.
 30. Understanding sections should restate the client's goals, constraints, audiences, success measures, and risks in zö voice before pitching solution — show we read the RFP carefully.
 31. When the section title is Budget / Pricing / Fees / Cost: you MUST write full narrative covering (a) transparent compensation philosophy, (b) pass-through / no hidden media markup commitment, (c) how media spend is allocated across RFP priorities with rationale, (d) that detailed agency fee tables follow in the pricing build. Ground compensation language in 00_Guide_Pricing evidence when present. Use RFP-stated spend amounts from requirements/plan. Leave only discrete unknown agency rate cells as [VERIFY: …], never blank the whole section.
+32. ANTI-DUPLICATION: Each section has ONE job. Do not re-write Who We Are, full bios, full case studies, FEIN/address/certs, or brand story that belongs in Sections 1–3 or another RFP tab. One brief cross-reference is OK — then add NEW RFP-specific detail only. Prefer concise prose within wordTarget.
 
 Return ONLY JSON:
 {
@@ -140,6 +141,7 @@ class DraftingGraphState(TypedDict, total=False):
     writing_avoidances: list[str]
     loss_lessons: list[dict[str, Any]]
     proof_points: list[dict[str, Any]]
+    manuscript_locks: dict[str, Any] | None
     drafted_sections: list[dict[str, Any]]
     provider: str
     error: str | None
@@ -581,6 +583,37 @@ async def _draft_batch_once(
             "do not duplicate verbatim — adapt to RFP section requirements):\n"
             f"{zo_ctx[:6000]}\n\n"
         )
+
+    from app.services.proposal_section_dedup import (
+        format_anti_duplication_rules,
+        format_prior_sections_block,
+    )
+
+    user_content += f"{format_anti_duplication_rules()}\n\n"
+    prior = state.get("drafted_sections") or []
+    batch_ids = {
+        str(s.get("id") or "") for s in batch if s.get("id")
+    }
+    prior_block = format_prior_sections_block(prior, exclude_ids=batch_ids)
+    if prior_block:
+        user_content += f"{prior_block}\n\n"
+
+    from app.services.proposal_manuscript_locks import format_manuscript_locks_block
+    from app.models.proposal import ManuscriptLocks
+
+    locks_raw = state.get("manuscript_locks")
+    locks = None
+    if isinstance(locks_raw, ManuscriptLocks):
+        locks = locks_raw
+    elif isinstance(locks_raw, dict):
+        try:
+            locks = ManuscriptLocks.model_validate(locks_raw)
+        except Exception:
+            locks = None
+    locks_block = format_manuscript_locks_block(locks)
+    if locks_block:
+        user_content += f"{locks_block}\n\n"
+
     avoid_block = format_avoidance_block(
         state.get("writing_avoidances") or [],
         [
@@ -773,7 +806,12 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
 
     for index, batch in enumerate(batches, start=1):
         try:
-            batch_results, batch_provider = await _draft_batch(batch, state)
+            # Pass already-drafted sections so each batch avoids repeating them
+            batch_state = {
+                **state,
+                "drafted_sections": all_drafted,
+            }
+            batch_results, batch_provider = await _draft_batch(batch, batch_state)
             all_drafted.extend(batch_results)
             provider = batch_provider
             logger.info(
@@ -862,6 +900,7 @@ async def run_drafting_graph(
     writing_avoidances: list[str] | None = None,
     loss_lessons: list[LossLesson] | None = None,
     proof_points: list | None = None,
+    manuscript_locks: dict[str, Any] | None = None,
     execution_plan: dict[str, Any] | None = None,
     on_sections_drafted: SectionDraftedCallback | None = None,
 ) -> tuple[list[ProposalSection], str, list[EvidenceItem]]:
@@ -874,6 +913,10 @@ async def run_drafting_graph(
     plan_dict = execution_plan
     if plan_dict is not None and hasattr(plan_dict, "model_dump"):
         plan_dict = plan_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
+
+    locks_dict = manuscript_locks
+    if locks_dict is not None and hasattr(locks_dict, "model_dump"):
+        locks_dict = locks_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
 
     initial: DraftingGraphState = {
         "rfp_id": rfp_id,
@@ -895,6 +938,7 @@ async def run_drafting_graph(
             p.model_dump(by_alias=True) if hasattr(p, "model_dump") else p
             for p in (proof_points or [])
         ],
+        "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
         "drafted_sections": [],
     }
 

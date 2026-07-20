@@ -147,9 +147,14 @@ function renderInline(text: string, highlightTexts: string[] = []) {
     }
 
     if (part.startsWith("**") && part.endsWith("**")) {
+      const inner = part.slice(2, -2);
+      // LLM sometimes wraps the entire section in **…** — don't render that as bold.
+      if (inner.split(/\s+/).filter(Boolean).length > 12) {
+        return <span key={index}>{inner}</span>;
+      }
       return (
         <strong key={index} className="font-semibold text-foreground">
-          {part.slice(2, -2)}
+          {inner}
         </strong>
       );
     }

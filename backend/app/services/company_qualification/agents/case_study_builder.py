@@ -31,7 +31,11 @@ async def run_case_study_builder_agent(
                     "- ONLY use verified facts from the retrieved case study document below.\n"
                     "- If facts are missing, use [VERIFY] — do NOT invent.\n"
                     "- Do NOT include Source:, filename, .pdf, .docx, or knowledge-base citations "
-                    "in the client-facing prose. Sources stay in metadata only.\n\n"
+                    "in the client-facing prose. Sources stay in metadata only.\n"
+                    "- NEVER write meta notes like 'the requested file was not present', "
+                    "'Case Study Master', 'pull additional metrics before submission', "
+                    "'Creative Examples:', or any word-count labels — those are internal only.\n"
+                    "- End after Why Relevant. Do not append catalogs of creative examples.\n\n"
                     "Template:\n"
                     "- Client overview\n"
                     "- Challenge\n"
@@ -57,6 +61,9 @@ async def run_case_study_builder_agent(
     )
 
     content = str(raw.get("content") or "").strip()
+    from app.services.proposal_manuscript_locks import strip_internal_proposal_meta
+
+    content = strip_internal_proposal_meta(content)
     refs = raw.get("kbRefs") or raw.get("kb_refs") or kb_sources
     if not isinstance(refs, list):
         refs = kb_sources

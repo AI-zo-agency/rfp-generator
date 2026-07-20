@@ -194,13 +194,46 @@ export function resolveResumePhase(
   return "complete";
 }
 
+/** True only when there is real progress to continue — not an empty post-Reset shell. */
+export function hasResumablePipelineProgress(
+  draft: ProposalOutline | null,
+  research: ProposalResearch | null
+): boolean {
+  const cp = research?.pipelineCheckpoint;
+  if (
+    cp?.lastCompletedPhase ||
+    cp?.lastFailedPhase ||
+    cp?.inProgressPhase
+  ) {
+    return true;
+  }
+  if (
+    (research?.rfpSections?.length ?? 0) > 0 ||
+    (research?.evidenceCorpus?.length ?? 0) > 0 ||
+    Boolean(research?.budget) ||
+    Boolean(research?.presubmitReview)
+  ) {
+    return true;
+  }
+  if (draft?.sections.some((s) => s.content?.trim())) {
+    return true;
+  }
+  return false;
+}
+
 export function buildPipelineStatus(
   draft: ProposalOutline | null,
   research: ProposalResearch | null,
   serverStatus?: ProposalPipelineStatus | null
 ): ProposalPipelineStatus {
+  const hasProgress = hasResumablePipelineProgress(draft, research);
   if (serverStatus) {
-    return serverStatus;
+    return {
+      ...serverStatus,
+      // Never treat an empty post-Reset shell as resumable, even if the
+      // server still reports canResume from a stale checkpoint.
+      canResume: hasProgress && serverStatus.canResume && !serverStatus.isComplete,
+    };
   }
   const resumeFromPhase = resolveResumePhase(draft, research);
   const completedPhases = PIPELINE_PHASE_ORDER.filter((phase) =>
@@ -211,11 +244,10 @@ export function buildPipelineStatus(
     resumeFromPhase,
     completedPhases,
     isComplete: resumeFromPhase === "complete",
+    // Empty default outline after Reset is NOT resumable — that is a fresh Generate.
     canResume:
-      Boolean(draft) &&
-      Boolean(
-        cp?.lastFailedPhase || resumeFromPhase !== "complete"
-      ),
+      hasProgress &&
+      Boolean(cp?.lastFailedPhase || resumeFromPhase !== "complete"),
     lastCompletedPhase: cp?.lastCompletedPhase ?? completedPhases.at(-1) ?? null,
     lastFailedPhase: cp?.lastFailedPhase ?? null,
     lastError: cp?.lastError ?? null,

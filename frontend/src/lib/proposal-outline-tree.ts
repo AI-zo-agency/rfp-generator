@@ -137,17 +137,15 @@ export function getTopLevelSectionProgress(sections: OutlineSection[]): {
   complete: number;
   total: number;
 } {
-  const complete = GROUP_ORDER.filter(({ id: groupId }) =>
-    sections.some(
-      (section) =>
-        !isPlaceholder(section) &&
-        matchesGroup(section, groupId) &&
-        section.content.trim().length > 0,
-    ),
+  // Count real manuscript tabs (Sections 1–3 + RFP-mapped leaves), not the
+  // fixed 5 template shells — otherwise RFP tabs can be drafted while the
+  // header still shows 3/5 and 60%.
+  const manuscript = getManuscriptSections(sections);
+  if (manuscript.length === 0) {
+    return { complete: 0, total: GROUP_ORDER.length };
+  }
+  const complete = manuscript.filter(
+    (section) => section.content.trim().length > 0,
   ).length;
-
-  return {
-    complete,
-    total: GROUP_ORDER.length,
-  };
+  return { complete, total: manuscript.length };
 }

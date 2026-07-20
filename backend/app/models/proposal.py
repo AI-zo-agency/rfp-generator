@@ -26,6 +26,10 @@ class RfpSectionMap(BaseModel):
     uncovered_requirements: list[str] = Field(
         default_factory=list, alias="uncoveredRequirements"
     )
+    section_type: str | None = Field(default=None, alias="sectionType")
+    duplicate_of_static_section: str | None = Field(
+        default=None, alias="duplicateOfStaticSection"
+    )
 
 
 class EvidenceItem(BaseModel):
@@ -297,6 +301,24 @@ class Section1EditorialReview(BaseModel):
     provider: str | None = None
 
 
+class ManuscriptLocks(BaseModel):
+    """Cross-section commitments locked in Phase 2 — every tab must obey these."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    primary_contact_name: str = Field(default="", alias="primaryContactName")
+    primary_contact_title: str = Field(default="", alias="primaryContactTitle")
+    primary_contact_role: str = Field(
+        default="primary liaison / dedicated account representative",
+        alias="primaryContactRole",
+    )
+    executive_sponsor_name: str = Field(default="", alias="executiveSponsorName")
+    required_kpis: list[str] = Field(default_factory=list, alias="requiredKpis")
+    decision_rationale: str = Field(default="", alias="decisionRationale")
+    needs_human_confirm: bool = Field(default=False, alias="needsHumanConfirm")
+    updated_at: str = Field(default="", alias="updatedAt")
+
+
 class ProposalResearchCache(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -312,7 +334,17 @@ class ProposalResearchCache(BaseModel):
     loss_lessons: list[LossLesson] = Field(default_factory=list, alias="lossLessons")
     writing_avoidances: list[str] = Field(default_factory=list, alias="writingAvoidances")
     proof_points: list[ProofPoint] = Field(default_factory=list, alias="proofPoints")
+    manuscript_locks: ManuscriptLocks | None = Field(
+        default=None,
+        alias="manuscriptLocks",
+        description="Locked primary contact + RFQ-named KPIs for cross-section consistency.",
+    )
     presubmit_review: PreSubmitReview | None = Field(default=None, alias="presubmitReview")
+    ending_report: dict[str, Any] | None = Field(
+        default=None,
+        alias="endingReport",
+        description="Close-out brief after Budget + Review (proposal ending report).",
+    )
     section1_editorial_review: Section1EditorialReview | None = Field(
         default=None, alias="section1EditorialReview"
     )

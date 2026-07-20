@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.services import llm
+from app.services.agency_facts import agency_tenure_block, enforce_agency_tenure
 from app.services.company_qualification.schemas import (
     CompanyTruth,
     GeneratedSubsection,
@@ -23,10 +24,14 @@ SECTION_SPECS: tuple[tuple[str, str, str], ...] = (
     (
         "section-1-who-we-are",
         "1.1 — Who We Are",
-        "Structure: ## Who We Are and ## Our Promise. Lead with primary capabilities only. "
-        "No client-specific pitch. No omit-tier capabilities. No certifications or insurance. "
-        "Address ONLY the RFP client named in the prompt — never name other clients "
-        "(including prior proposal clients like HCCC or other agencies).",
+        "Structure: opening brand paragraphs (no Who We Are heading), then blank line, "
+        "then '## Our Promise' on its own line. Our Promise = warm commitment tone only — "
+        "NO staff names, titles, channels, CRM, dashboards, or report cadences. "
+        "Client bridge max 1–2 feeling sentences. Never inline headings. No whole-paragraph bold. "
+        "Lead with zö brand essence (zö = family/kindred/clan; strongest advocate). "
+        "HARD MAX 250 words (prefer ~200). "
+        "Use canonical agency years from CompanyTruth / tenure block — never invent a different year count. "
+        "No certifications or insurance. Address ONLY the RFP client named in the prompt.",
     ),
     (
         "section-1-org-structure",
@@ -43,6 +48,7 @@ SECTION_SPECS: tuple[tuple[str, str, str], ...] = (
         "section-1-business-info",
         "1.3 — Business Information",
         "Facts/table only: legal name, DBA, ownership, EIN, registration, addresses, contact. "
+        "Founded August 21, 2013; Years in Operation must match canonical tenure (same number as Who We Are). "
         "NO narrative, NO Who We Are copy, NO certifications, NO insurance.",
     ),
     (
@@ -105,6 +111,12 @@ async def _write_one_subsection(
     )
 
     max_tokens = 4096 if sec_id == "section-1-org-structure" else 2048
+    temperature = 0.55 if sec_id == "section-1-who-we-are" else 0.2
+    tenure = (
+        agency_tenure_block() + "\n\n"
+        if sec_id in {"section-1-who-we-are", "section-1-business-info"}
+        else ""
+    )
 
     raw, provider = await llm.chat_json(
         [
@@ -122,6 +134,13 @@ async def _write_one_subsection(
                         if sec_id == "section-1-org-structure"
                         else ""
                     )
+                    + (
+                        "Write with bold zö brand voice — warm, human, attractive to the client. "
+                        "## Our Promise on its own line as a vow. "
+                        "FORBIDDEN in 1.1: staff names, titles, SEM/SEO/PPC lists, CRM, dashboards, report SLAs.\n"
+                        if sec_id == "section-1-who-we-are"
+                        else ""
+                    )
                     + "\nReturn JSON:\n"
                     f'{{"id": "{sec_id}", "title": "{title}", "content": "markdown", "wordCount": 0}}'
                 ),
@@ -130,6 +149,7 @@ async def _write_one_subsection(
                 "role": "user",
                 "content": (
                     f"Voice:\n{brand_voice_block}\n\n"
+                    f"{tenure}"
                     f"Client: {rfp_client} | Sector: {rfp_sector}\n"
                     f"Budget: {budget}\n"
                     f"Spec: {hint}\n\n"
@@ -143,7 +163,7 @@ async def _write_one_subsection(
             },
         ],
         max_tokens=max_tokens,
-        temperature=0.2,
+        temperature=temperature,
     )
 
     try:
@@ -153,7 +173,10 @@ async def _write_one_subsection(
         sec = GeneratedSubsection(id=sec_id, title=title, content=content)
     if sec.id != sec_id:
         sec = sec.model_copy(update={"id": sec_id, "title": title})
-    return sec.model_copy(update={"wordCount": _word_count(sec.content)}), provider
+    content = sec.content or ""
+    if sec_id in {"section-1-who-we-are", "section-1-business-info"}:
+        content = enforce_agency_tenure(content)
+    return sec.model_copy(update={"content": content, "wordCount": _word_count(content)}), provider
 
 
 async def run_section_1_builder_agent(

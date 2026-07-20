@@ -32,6 +32,7 @@ from app.services.proposal_repository import (
     aget_research_cache,
     asave_proposal_draft,
     asave_research_cache,
+    delete_proposal_draft,
     get_proposal_draft,
     get_research_cache,
     save_proposal_draft,
@@ -64,8 +65,8 @@ ZO_SECTIONS: list[dict[str, object]] = [
         "title": "1.1 — Who We Are",
         "mode": "pull",
         "source": "template",
-        "word_target": 600,
-        "designer_note": "Section 1 subsection: 1.1 — Who We Are.",
+        "word_target": 250,
+        "designer_note": "Section 1 subsection: 1.1 — Who We Are (max 250 words).",
     },
     {
         "id": "section-1-org-structure",
@@ -790,6 +791,25 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         rfp_context=rfp_context,
     )
 
+    roster_excerpt = ""
+    try:
+        roster_excerpt, _roster_sources = await proposal_knowledge_base_tools.fetch_master_team_roster(
+            rfp_client=rfp.client,
+            rfp_sector=rfp.sector,
+            rfp_context=rfp_context,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 2 roster fetch for locks failed (non-fatal): %s", exc)
+
+    from app.services.proposal_manuscript_locks import build_manuscript_locks
+
+    manuscript_locks = await build_manuscript_locks(
+        rfp=rfp,
+        rfp_context=rfp_context,
+        plan=plan,
+        roster_excerpt=roster_excerpt or "",
+    )
+
     now = datetime.now(timezone.utc).isoformat()
     research = ProposalResearchCache(
         rfpId=rfp.id,
@@ -803,6 +823,7 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         lossLessons=loss_lessons,
         writingAvoidances=writing_avoidances,
         proofPoints=proof_points,
+        manuscriptLocks=manuscript_locks,
         proposalExecutionPlan=plan,
         budget=prior_research.budget if prior_research else None,
         presubmitReview=prior_research.presubmit_review if prior_research else None,
@@ -819,6 +840,14 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         len(rfp_sections),
         len(plan.decision_log),
     )
+    for index, section in enumerate(rfp_sections, 1):
+        logger.info(
+            "  Phase 2 required tab %02d: %s (weight=%s, %d requirements)",
+            index,
+            section.title,
+            section.evaluation_weight,
+            len(section.requirements or []),
+        )
     return research
 
 
@@ -859,6 +888,18 @@ async def generate_sections_1_3(
             "Force-regenerating sections 1–3 for %s (explicit draft request)",
             rfp_id,
         )
+        # Wipe prior manuscript so live-poll + richer-merge cannot resurrect
+        # stale Section 1–3 or leftover RFP tabs from a previous run.
+        if existing_draft:
+            try:
+                delete_proposal_draft(rfp_id)
+            except Exception:
+                logger.exception(
+                    "Failed to clear prior draft before force-regenerate for %s",
+                    rfp_id,
+                )
+            existing_draft = None
+            existing_sections_1_3 = []
     elif existing_draft:
         # Check if we already have COMPLETE sections 1-3 with content
         existing_sections_1_3 = [
@@ -935,6 +976,41 @@ async def generate_sections_1_3(
     preserve_existing = bool(existing_draft and not force_regenerate)
     logger.info("Sections 1–3 generation (LangGraph) starting for %s", rfp_id)
 
+    # Lock primary contact + RFQ KPIs BEFORE writing Sections 1–3 so Team Bios
+    # cannot invent a different day-to-day primary than Methodology will use.
+    prior_research = get_research_cache(rfp_id)
+    manuscript_locks = prior_research.manuscript_locks if prior_research else None
+    if manuscript_locks is None or not manuscript_locks.primary_contact_name:
+        roster_excerpt = ""
+        try:
+            roster_excerpt, _ = await proposal_knowledge_base_tools.fetch_master_team_roster(
+                rfp_client=rfp.client,
+                rfp_sector=rfp.sector,
+                rfp_context=rfp_context,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Early locks roster fetch failed (non-fatal): %s", exc)
+        from app.services.proposal_manuscript_locks import build_manuscript_locks
+
+        manuscript_locks = await build_manuscript_locks(
+            rfp=rfp,
+            rfp_context=rfp_context,
+            plan=prior_research.proposal_execution_plan if prior_research else None,
+            roster_excerpt=roster_excerpt or "",
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        research_seed = prior_research or ProposalResearchCache(
+            rfpId=rfp.id,
+            updatedAt=now,
+        )
+        research_seed = research_seed.model_copy(
+            update={
+                "manuscript_locks": manuscript_locks,
+                "updated_at": now,
+            }
+        )
+        save_research_cache(research_seed)
+
     async def _on_sections_partial(
         partial: list[ProposalSection],
         provider: str,
@@ -978,6 +1054,9 @@ async def generate_sections_1_3(
         skip_section_1=skip_section_1,
         skip_section_2=skip_section_2,
         skip_section_3=skip_section_3,
+        manuscript_locks=(
+            manuscript_locks.model_dump(by_alias=True) if manuscript_locks else None
+        ),
     )
 
     # Merge with existing sections if any were already complete
@@ -1316,6 +1395,11 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         writing_avoidances=research.writing_avoidances,
         loss_lessons=research.loss_lessons,
         proof_points=research.proof_points,
+        manuscript_locks=(
+            research.manuscript_locks.model_dump(by_alias=True)
+            if research.manuscript_locks
+            else None
+        ),
         execution_plan=(
             research.proposal_execution_plan.model_dump(by_alias=True)
             if hasattr(research.proposal_execution_plan, "model_dump")
@@ -1514,17 +1598,37 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         rfp=rfp, draft=draft, research=research, finalized=False
     )
 
+    from app.services.proposal_ending_report import (
+        build_proposal_ending_report,
+        ending_report_as_dict,
+    )
+
     now = datetime.now(timezone.utc).isoformat()
-    updated_research = (research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)).model_copy(
-        update={"presubmit_review": review, "updated_at": now}
+    # Attach review before ending report so next-actions / readyToSubmit match.
+    research_for_ending = (research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)).model_copy(
+        update={
+            "presubmit_review": review,
+            "updated_at": now,
+        }
+    )
+    ending = build_proposal_ending_report(
+        rfp=rfp, draft=draft, research=research_for_ending
+    )
+    updated_research = research_for_ending.model_copy(
+        update={
+            "ending_report": ending_report_as_dict(ending),
+            "updated_at": now,
+        }
     )
     save_research_cache(updated_research)
 
     logger.info(
-        "Phase 4 pre-submit review for %s: %d issues, ready=%s",
+        "Phase 4 pre-submit review for %s: %d issues, ready=%s, ending_reqs=%d/%d",
         rfp_id,
         len(review.issues),
         review.ready_to_submit,
+        ending.requirements_covered,
+        ending.requirements_total,
     )
     return review, updated_research
 
@@ -1677,16 +1781,35 @@ async def generate_full_proposal(
             research=research,
             extra_issues=extra_issues,
         )
+        from app.services.proposal_ending_report import (
+            build_proposal_ending_report,
+            ending_report_as_dict,
+        )
+
         now = datetime.now(timezone.utc).isoformat()
-        research = research.model_copy(
-            update={"presubmit_review": review, "updated_at": now}
+        research_for_ending = research.model_copy(
+            update={
+                "presubmit_review": review,
+                "updated_at": now,
+            }
+        )
+        ending = build_proposal_ending_report(
+            rfp=rfp, draft=draft, research=research_for_ending
+        )
+        research = research_for_ending.model_copy(
+            update={
+                "ending_report": ending_report_as_dict(ending),
+                "updated_at": now,
+            }
         )
         save_research_cache(research)
         logger.info(
-            "Phase 4 pre-submit review (auto) for %s: %d issues, ready=%s",
+            "Phase 4 pre-submit review (auto) for %s: %d issues, ready=%s, ending_reqs=%d/%d",
             rfp_id,
             len(review.issues),
             review.ready_to_submit,
+            ending.requirements_covered,
+            ending.requirements_total,
         )
 
     assert_manuscript_ready(

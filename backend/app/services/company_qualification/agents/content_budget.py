@@ -19,8 +19,8 @@ DEFAULT_BUDGETS: list[SubsectionBudget] = [
         sectionId="section-1-who-we-are",
         title="1.1 — Who We Are",
         format="narrative",
-        wordMin=250,
-        wordMax=350,
+        wordMin=180,
+        wordMax=250,
     ),
     SubsectionBudget(
         sectionId="section-1-org-structure",
@@ -68,7 +68,7 @@ async def run_content_budget_agent(
                     "You are the Content Budget Agent for zö agency Section 1.\n"
                     "Assign word/format budgets per subsection. Do NOT write proposal content.\n"
                     "Default budgets (adjust only if RFP clearly warrants it):\n"
-                    "- 1.1 Who We Are: 250-350 words narrative\n"
+                    "- 1.1 Who We Are: 180-250 words narrative (HARD MAX 250)\n"
                     "- 1.2 Org Structure: 400-900 words structured list — ALL roster people by department\n"
                     "- 1.3 Business Info: table format, no word target\n"
                     "- 1.4 Certifications: 75-150 words list\n"

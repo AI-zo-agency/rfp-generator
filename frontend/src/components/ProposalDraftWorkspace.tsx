@@ -25,6 +25,7 @@ import {
   generateProposalSections1to3,
   pipelineResumeMessage,
   recoverProposalDraftIfSaved,
+  resetProposal,
   runPhase3Drafting,
   runPhase3_5BudgetWithRecovery,
   runPhase3_5BudgetReconcileWithRecovery,
@@ -216,6 +217,7 @@ export function ProposalDraftWorkspace({
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const sectionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const contentScrollRef = useRef<HTMLDivElement | null>(null);
+  const liveContentFingerprintRef = useRef<Map<string, number>>(new Map());
   const [sectionRevisions, setSectionRevisions] = useState<SectionRevisionMap>({});
   const [revisionDrawerSectionId, setRevisionDrawerSectionId] = useState<string | null>(
     null
@@ -365,7 +367,7 @@ export function ProposalDraftWorkspace({
       setPresubmitReview(research?.presubmitReview ?? null);
       setProvider(providerName);
       setPipelineStatus(
-        status ?? buildPipelineStatus(draft, research)
+        buildPipelineStatus(draft, research, status)
       );
 
       const contentSections = draft ? countSectionsWithContent(draft) : 0;
@@ -430,8 +432,15 @@ export function ProposalDraftWorkspace({
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
       void fetchProposalDraft(rfp.id).then((snap) => {
-        if (snap.pipelineStatus) setPipelineStatus(snap.pipelineStatus);
-        if (snap.research) setResearch(snap.research);
+        // Always sync — including null after Reset — so stale research/checkpoint
+        // cannot resurrect "Continue proposal" on an empty outline.
+        setPipelineStatus(snap.pipelineStatus);
+        setResearch(snap.research);
+        if (snap.research?.budget) setBudget(snap.research.budget);
+        if (!snap.research) {
+          setBudget(null);
+          setPresubmitReview(null);
+        }
       });
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -518,8 +527,13 @@ export function ProposalDraftWorkspace({
     [hydrated, outline, research]
   );
 
+  // Resume only when the manuscript itself has content. An empty post-Reset
+  // shell (0 words) is always a fresh Generate — leftover research/checkpoint
+  // must not keep showing "Continue proposal".
   const canResumePipeline =
-    Boolean(pipelineStatus?.canResume) && !pipelineStatus?.isComplete;
+    countSectionsWithContent(outline) > 0 &&
+    Boolean(pipelineStatus?.canResume) &&
+    !pipelineStatus?.isComplete;
 
   const anyPipelineRunning =
     isFullProposalRunning ||
@@ -637,7 +651,7 @@ export function ProposalDraftWorkspace({
     setLiveGeneratedCount(withContent.length);
 
     // Section 1 must be readable first. While any 1.x subsection is still empty,
-    // keep focus on the newest Section 1 subsection instead of jumping to bios.
+    // keep focus on the newest Section 1 subsection instead of jumping ahead.
     const section1Ids = draft.sections
       .filter((s) => s.id.startsWith("section-1-"))
       .map((s) => s.id);
@@ -650,16 +664,46 @@ export function ProposalDraftWorkspace({
     const newestInGroup = (prefix: string) =>
       [...withContent].reverse().find((s) => s.id.startsWith(prefix));
 
-    const latest = !section1Complete
+    const fingerprints = new Map(
+      draft.sections.map((s) => [s.id, (s.content || "").length] as const)
+    );
+    const prev = liveContentFingerprintRef.current;
+
+    // Currently writing = content grew since last poll (not merely "last completed").
+    let growing: OutlineSection | undefined;
+    for (const section of draft.sections) {
+      const len = fingerprints.get(section.id) ?? 0;
+      const prevLen = prev.get(section.id) ?? 0;
+      if (len > prevLen) {
+        growing = section;
+      }
+    }
+
+    // Frontier = first empty section in order (what's next / about to fill).
+    const frontier = draft.sections.find((s) => !(s.content || "").trim());
+
+    liveContentFingerprintRef.current = fingerprints;
+
+    const nonSection1 = withContent.filter((s) => !s.id.startsWith("section-1-"));
+    const latestComplete = !section1Complete
       ? newestInGroup("section-1-") ?? withContent[withContent.length - 1]
-      : newestInGroup("section-1-") ??
+      : newestInGroup("section-3-") ??
         newestInGroup("section-2-") ??
-        newestInGroup("section-3-") ??
+        nonSection1[nonSection1.length - 1] ??
         withContent[withContent.length - 1];
 
-    if (latest) {
-      setLiveLatestSectionTitle(latest.title);
-      setSelectedSectionId(latest.id);
+    // Prefer in-flight / next empty so the button does not keep naming a finished
+    // section (e.g. 3.2 Oregon) while the next case study is drafting.
+    const focus = !section1Complete
+      ? growing ?? newestInGroup("section-1-") ?? frontier ?? latestComplete
+      : growing ?? frontier ?? latestComplete;
+
+    // Progress chip: only name a section that is still writing or next up —
+    // never linger on a completed title like "3.2 — Oregon…".
+    const progressTitle = growing?.title ?? frontier?.title ?? null;
+    setLiveLatestSectionTitle(progressTitle);
+    if (focus) {
+      setSelectedSectionId(focus.id);
     }
   }, [applyOutlineFromServer]);
 
@@ -667,7 +711,13 @@ export function ProposalDraftWorkspace({
     // Continue = resume from checkpoint (e.g. budget failure).
     // Fresh / regenerate-from-done = forceRestart from Sections 1–3.
     const startAfterSections1to3 = Boolean(options?.startAfterSections1to3);
-    const shouldResume = !startAfterSections1to3 && canResumePipeline && Boolean(pipelineStatus);
+    const hasManuscriptContent = countSectionsWithContent(outline) > 0;
+    // Never "resume" an empty outline — that is always a forceRestart generate.
+    const shouldResume =
+      !startAfterSections1to3 &&
+      canResumePipeline &&
+      hasManuscriptContent &&
+      Boolean(pipelineStatus);
 
     if (startAfterSections1to3) {
       if (!staticSections1to3Complete(outline)) {
@@ -702,16 +752,40 @@ export function ProposalDraftWorkspace({
     const abort = new AbortController();
     fullProposalAbortRef.current = abort;
 
+    const forceRestart = !(shouldResume || startAfterSections1to3);
+
     setIsFullProposalRunning(true);
     setFullProposalProgress(null);
-    setLiveGeneratedCount(countSectionsWithContent(outline));
-    setLiveLatestSectionTitle(null);
     setGenerateError(null);
     setGenerateNotice(null);
+
+    // Fresh start: clear the editor immediately so old manuscript cannot flash
+    // while the server wipe + Sections 1–3 regenerate.
+    if (forceRestart) {
+      const defaults = buildDefaultOutline(rfp);
+      saveGenerationRef.current += 1;
+      skipNextSaveRef.current = true;
+      liveContentFingerprintRef.current = new Map();
+      setOutline(defaults);
+      setResearch(null);
+      setBudget(null);
+      setPresubmitReview(null);
+      setPipelineStatus(null);
+      setSectionRevisions({});
+      persistStoredRevisions(rfp.id, {});
+      setLiveGeneratedCount(0);
+      setLiveLatestSectionTitle(null);
+      setSelectedSectionId(defaults.sections[0]?.id ?? null);
+      setActiveTab("content");
+    } else {
+      setLiveGeneratedCount(countSectionsWithContent(outline));
+      setLiveLatestSectionTitle(null);
+    }
+
     try {
       const { draft, research: updatedResearch } =
         await generateFullProposalStaged(rfp.id, setFullProposalProgress, {
-          forceRestart: !(shouldResume || startAfterSections1to3),
+          forceRestart,
           startFrom: startAfterSections1to3
             ? "phase-2"
             : shouldResume
@@ -788,7 +862,7 @@ export function ProposalDraftWorkspace({
       setFullProposalProgress(null);
       setLiveLatestSectionTitle(null);
     }
-  }, [rfp.id, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, applyOutlineFromServer]);
+  }, [rfp, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, applyOutlineFromServer]);
 
   const handleResetOutline = async () => {
     if (
@@ -807,12 +881,17 @@ export function ProposalDraftWorkspace({
     setIsRefiningBudget(false);
     setFullProposalProgress(null);
     setLiveLatestSectionTitle(null);
+    liveContentFingerprintRef.current = new Map();
 
     // 1. Hard-delete from DB (draft + checkpoint + research cache)
+    let resetFailed: string | null = null;
     try {
-      await fetch(`/api/rfps/${rfp.id}/proposal/reset`, { method: "POST" });
-    } catch {
-      // Non-fatal — proceed with local reset anyway
+      await resetProposal(rfp.id);
+    } catch (error) {
+      resetFailed =
+        error instanceof Error
+          ? error.message
+          : "Server reset failed — local outline still cleared.";
     }
 
     // 2. Reset local state to defaults
@@ -828,10 +907,15 @@ export function ProposalDraftWorkspace({
     setResearch(null);
     setBudget(null);
     setPipelineStatus(null);
-    setGenerateError(null);
-    setGenerateNotice("Reset complete. All generated content cleared.");
+    setGenerateError(resetFailed);
+    setGenerateNotice(
+      resetFailed
+        ? "Local outline cleared, but server wipe failed — try Reset again before generating."
+        : "Reset complete. All generated content cleared."
+    );
     setFullProposalProgress(null);
     setLiveLatestSectionTitle(null);
+    setLiveGeneratedCount(0);
 
     // 3. Persist empty shell so a late autosave / race cannot resurrect old monolith sections
     try {
@@ -845,7 +929,7 @@ export function ProposalDraftWorkspace({
     window.setTimeout(() => {
       if (fullProposalAbortRef.current) return; // generation in flight — do not wipe
       if (saveGenerationRef.current !== resetToken) return;
-      void fetch(`/api/rfps/${rfp.id}/proposal/reset`, { method: "POST" })
+      void resetProposal(rfp.id)
         .then(() => saveProposalDraft(rfp.id, defaults))
         .catch(() => undefined);
     }, 2500);
@@ -961,6 +1045,8 @@ export function ProposalDraftWorkspace({
           fullProposalProgress === "phase-3" ||
           fullProposalProgress === "phase-3-6-self-edit");
       if (showLiveCount) {
+        // liveLatestSectionTitle is only set for in-flight / next empty — never a
+        // finished section, so "14/19 — 3.2…" no longer falsely looks stuck on 3.2.
         const title = liveLatestSectionTitle
           ? ` — ${liveLatestSectionTitle.slice(0, 36)}${liveLatestSectionTitle.length > 36 ? "…" : ""}`
           : "";
@@ -1108,6 +1194,19 @@ export function ProposalDraftWorkspace({
                   <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-800">
                     Manuscript complete
                   </span>
+                  {research?.endingReport ? (
+                    <span
+                      className={`rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                        research.endingReport.readyToSubmit
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                          : "border-sky-200 bg-sky-50 text-sky-900"
+                      }`}
+                    >
+                      {research.endingReport.readyToSubmit
+                        ? "Ready to submit"
+                        : "Ending report"}
+                    </span>
+                  ) : null}
                   {reviewCriticalCount > 0 && (
                     <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-900">
                       {reviewCriticalCount} critical review issue
@@ -1719,64 +1818,210 @@ export function ProposalDraftWorkspace({
 
       {/* Export tab */}
       <TabPanel id="export" activeTab={activeTab} className="proposal-workspace-tab">
-        <div className="proposal-tab-panel proposal-tab-panel-scroll grid gap-5 md:grid-cols-2">
-          <div>
-            <h3 className="font-heading text-lg font-bold text-foreground">
-              Export manuscript
-            </h3>
-            <p className="mt-2 text-sm leading-relaxed text-zo-text-muted">
-              Design-ready plain text for Curt and the layout team. Sections are
-              separated with horizontal rules.
-            </p>
-
-            <div className="mt-6 space-y-3">
-              <div className="zo-surface-panel flex items-center justify-between border border-zo-border px-4 py-3">
-                <span className="text-sm text-zo-text-secondary">Words</span>
-                <span className="font-semibold tabular-nums text-foreground">
-                  {stats.totalWords.toLocaleString()}
+        <div className="proposal-tab-panel proposal-tab-panel-scroll space-y-6">
+          {research?.endingReport ? (
+            <div className="zo-surface-panel border border-zo-border p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-heading text-lg font-bold text-foreground">
+                    Ending report
+                  </h3>
+                  <p className="mt-1 text-sm text-zo-text-muted">
+                    {research.endingReport.endsWith ||
+                      "Budget → Review → Ending report → Export"}
+                  </p>
+                </div>
+                <span
+                  className={`rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                    research.endingReport.readyToSubmit
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                      : "border-amber-200 bg-amber-50 text-amber-900"
+                  }`}
+                >
+                  {research.endingReport.readyToSubmit
+                    ? "Ready to submit"
+                    : "Not ready yet"}
                 </span>
               </div>
-              <div className="zo-surface-panel flex items-center justify-between border border-zo-border px-4 py-3">
-                <span className="text-sm text-zo-text-secondary">
-                  Sections
-                </span>
-                <span className="font-semibold tabular-nums text-foreground">
-                  {stats.generatedSections}
-                </span>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="rounded-lg border border-zo-border/80 bg-[var(--zo-input-bg)]/40 px-3 py-2.5">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
+                    RFP tabs
+                  </p>
+                  <p className="mt-1 text-lg font-semibold tabular-nums text-foreground">
+                    {research.endingReport.rfpMappedSectionsCount ??
+                      research.rfpSections?.length ??
+                      0}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-zo-border/80 bg-[var(--zo-input-bg)]/40 px-3 py-2.5">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
+                    Requirements
+                  </p>
+                  <p className="mt-1 text-lg font-semibold tabular-nums text-foreground">
+                    {research.endingReport.requirementsCovered ?? 0}/
+                    {research.endingReport.requirementsTotal ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-zo-border/80 bg-[var(--zo-input-bg)]/40 px-3 py-2.5">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
+                    Gaps
+                  </p>
+                  <p className="mt-1 text-lg font-semibold tabular-nums text-foreground">
+                    {research.endingReport.complianceGaps ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-zo-border/80 bg-[var(--zo-input-bg)]/40 px-3 py-2.5">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-zo-text-muted">
+                    Budget
+                  </p>
+                  <p className="mt-1 text-lg font-semibold text-foreground">
+                    {research.endingReport.hasBudget
+                      ? research.endingReport.budgetTier || "Built"
+                      : "Missing"}
+                  </p>
+                </div>
+              </div>
+
+              {(research.endingReport.nextActions?.length ?? 0) > 0 ? (
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-zo-text-muted">
+                    Next actions
+                  </p>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-foreground">
+                    {research.endingReport.nextActions!.map((action) => (
+                      <li key={action}>{action}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {(research.endingReport.requirementStatuses ?? []).some(
+                (status) => !status.covered
+              ) ? (
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-zo-text-muted">
+                    Uncovered RFP requirements
+                  </p>
+                  <ul className="mt-2 max-h-40 space-y-2 overflow-y-auto text-sm text-zo-text-secondary">
+                    {research.endingReport.requirementStatuses!
+                      .filter((status) => !status.covered)
+                      .map((status) => (
+                        <li
+                          key={`${status.sectionId}:${status.requirement}`}
+                          className="border-l-2 border-amber-300 pl-3"
+                        >
+                          <span className="font-medium text-foreground">
+                            {status.sectionTitle}
+                          </span>
+                          {" — "}
+                          {status.requirement}
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {research.endingReport.summaryMarkdown ? (
+                <div className="proposal-prose mt-5 border-t border-zo-border/70 pt-4">
+                  <MarkdownReportBody
+                    body={research.endingReport.summaryMarkdown}
+                    variant="document"
+                  />
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="zo-surface-panel border border-dashed border-zo-border p-5">
+              <h3 className="font-heading text-lg font-bold text-foreground">
+                Ending report
+              </h3>
+              <p className="mt-2 text-sm text-zo-text-muted">
+                Finish Budget and pre-submit review to generate the close-out
+                report (RFP requirement coverage + next actions before export).
+              </p>
+            </div>
+          )}
+
+          <div className="grid gap-5 md:grid-cols-2">
+            <div>
+              <h3 className="font-heading text-lg font-bold text-foreground">
+                Export manuscript
+              </h3>
+              <p className="mt-2 text-sm leading-relaxed text-zo-text-muted">
+                Design-ready plain text for Curt and the layout team. Sections are
+                separated with horizontal rules.
+              </p>
+
+              <div className="mt-6 space-y-3">
+                <div className="zo-surface-panel flex items-center justify-between border border-zo-border px-4 py-3">
+                  <span className="text-sm text-zo-text-secondary">Words</span>
+                  <span className="font-semibold tabular-nums text-foreground">
+                    {stats.totalWords.toLocaleString()}
+                  </span>
+                </div>
+                <div className="zo-surface-panel flex items-center justify-between border border-zo-border px-4 py-3">
+                  <span className="text-sm text-zo-text-secondary">
+                    Sections
+                  </span>
+                  <span className="font-semibold tabular-nums text-foreground">
+                    {topLevelSectionProgress.complete}/
+                    {topLevelSectionProgress.total}
+                  </span>
+                </div>
+                <div className="zo-surface-panel flex items-center justify-between border border-zo-border px-4 py-3">
+                  <span className="text-sm text-zo-text-secondary">
+                    RFP-mapped tabs
+                  </span>
+                  <span className="font-semibold tabular-nums text-foreground">
+                    {
+                      outline.sections.filter(
+                        (section) =>
+                          section.source === "rfp" &&
+                          section.content.trim().length > 0
+                      ).length
+                    }
+                    /
+                    {research?.rfpSections?.length ??
+                      outline.sections.filter((section) => section.source === "rfp")
+                        .length}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-6 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={handleCopy}
+                  disabled={!fullManuscript}
+                  className="zo-btn !py-2.5 disabled:opacity-40"
+                >
+                  {copied ? "Copied!" : "Copy manuscript"}
+                </button>
+                <a
+                  href={`data:text/plain;charset=utf-8,${encodeURIComponent(fullManuscript)}`}
+                  download={`${rfp.client.replace(/\s+/g, "-")}-proposal-draft.txt`}
+                  className={`zo-btn secondary !py-2.5 disabled:opacity-40 ${
+                    fullManuscript ? "" : "pointer-events-none opacity-40"
+                  }`}
+                >
+                  Download .txt
+                </a>
               </div>
             </div>
 
-            <div className="mt-6 flex flex-wrap gap-3">
-              <button
-                type="button"
-                onClick={handleCopy}
-                disabled={!fullManuscript}
-                className="zo-btn !py-2.5 disabled:opacity-40"
-              >
-                {copied ? "Copied!" : "Copy manuscript"}
-              </button>
-              <a
-                href={`data:text/plain;charset=utf-8,${encodeURIComponent(fullManuscript)}`}
-                download={`${rfp.client.replace(/\s+/g, "-")}-proposal-draft.txt`}
-                className={`zo-btn secondary !py-2.5 disabled:opacity-40 ${
-                  fullManuscript ? "" : "pointer-events-none opacity-40"
-                }`}
-              >
-                Download .txt
-              </a>
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zo-text-muted">
+                Preview
+              </p>
+              <textarea
+                readOnly
+                value={fullManuscript || "Generate proposal content first…"}
+                rows={20}
+                className="zo-input h-full min-h-[320px] w-full resize-none px-4 py-4 font-mono text-xs leading-relaxed"
+              />
             </div>
-          </div>
-
-          <div>
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zo-text-muted">
-              Preview
-            </p>
-            <textarea
-              readOnly
-              value={fullManuscript || "Generate proposal content first…"}
-              rows={20}
-              className="zo-input h-full min-h-[320px] w-full resize-none px-4 py-4 font-mono text-xs leading-relaxed"
-            />
           </div>
         </div>
       </TabPanel>

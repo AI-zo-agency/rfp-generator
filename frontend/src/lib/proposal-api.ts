@@ -392,6 +392,13 @@ export async function generateFullProposalStaged(
   const signal = options?.signal;
   throwIfAborted(signal);
 
+  // Fresh run must wipe DB first — otherwise live polling and section merges
+  // immediately rehydrate the previous manuscript (including RFP tabs).
+  if (options?.forceRestart) {
+    await resetProposal(rfpId);
+    throwIfAborted(signal);
+  }
+
   const snapshot = await fetchProposalDraft(rfpId);
   let draft = snapshot.draft;
   let research = snapshot.research;
@@ -618,7 +625,11 @@ export async function fetchProposalDraft(rfpId: string): Promise<{
       return {
         draft: null,
         research: data.research ?? null,
-        pipelineStatus: data.pipelineStatus ?? null,
+        pipelineStatus: buildPipelineStatus(
+          null,
+          data.research ?? null,
+          data.pipelineStatus ?? null
+        ),
       };
     }
     const draft = apiDraftToOutline(data.draft);
@@ -627,9 +638,11 @@ export async function fetchProposalDraft(rfpId: string): Promise<{
       draft,
       research,
       provider: data.draft.provider,
-      pipelineStatus:
-        data.pipelineStatus ??
-        buildPipelineStatus(draft, research),
+      pipelineStatus: buildPipelineStatus(
+        draft,
+        research,
+        data.pipelineStatus ?? null
+      ),
     };
   }
 
@@ -686,6 +699,25 @@ export async function generateFullProposal(rfpId: string): Promise<ProposalOutli
 
 export async function generateProposalDraft(rfpId: string): Promise<ProposalOutline> {
   return generateFullProposal(rfpId);
+}
+
+/** Hard-wipe draft, research cache, and pipeline checkpoint on the server. */
+export async function resetProposal(rfpId: string): Promise<void> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/reset`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    let detail = "Proposal reset failed";
+    try {
+      const data = (await res.json()) as { detail?: string };
+      if (data.detail) detail = data.detail;
+    } catch {
+      // keep default
+    }
+    throw new Error(detail);
+  }
 }
 
 export async function generateProposalSections1to3(

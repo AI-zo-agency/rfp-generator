@@ -39,6 +39,9 @@ Run a deep knowledge-base search and write full submission-ready prose for every
 Remove [VERIFY] when evidence supports the answer. Use [E#] citations. Keep zö first-person narrative voice (we/our).
 Do not return the same placeholder text.
 
+ANTI-DUPLICATION: This section has ONE job. Do NOT re-copy Who We Are, full bios, full case studies, FEIN/certs,
+or brand story from other sections. One short cross-reference is OK — then add NEW detail only. Prefer concise prose.
+
 Senior editor priorities (fix if present):
 1. Grammar: "We were established …, and is organized" → use "and are organized" or "organized as …"
 2. Pronouns: never "of we" or "across we" — use "our firm", "zö agency", or "our studio"
@@ -47,6 +50,7 @@ Senior editor priorities (fix if present):
 5. Budget: never $0 agency revenue when commission applies — agencyRevenueEstimate must equal commission rate × pass-through or agency_fee line items
 6. MWBE and Personnel: use identical workforce % — one HR-verified figure
 7. References: full contact block (name, title, phone, email) — not "contact on request"
+8. Dedup: strip repeated company bio / case study dumps that already live in Sections 1–3
 """
 
 
@@ -130,6 +134,34 @@ async def _senior_editor_instructions(
     return AUTO_REPAIR_MESSAGE
 
 
+def _dedup_brief_for_repair(
+    draft: ProposalDraft | None,
+    *,
+    section_id: str,
+) -> str:
+    if not draft:
+        return ""
+    from app.services.proposal_section_dedup import (
+        format_anti_duplication_rules,
+        format_prior_sections_block,
+    )
+
+    prior = [s for s in draft.sections if s.id != section_id and (s.content or "").strip()]
+    block = format_prior_sections_block(prior, exclude_ids={section_id})
+    parts = [format_anti_duplication_rules()]
+    if block:
+        parts.append(block)
+    return "\n\n".join(parts)
+
+
+def _locks_brief_for_repair(research: ProposalResearchCache | None) -> str:
+    from app.services.proposal_manuscript_locks import format_manuscript_locks_block
+
+    if not research or not research.manuscript_locks:
+        return ""
+    return format_manuscript_locks_block(research.manuscript_locks)
+
+
 async def _repair_one_section(
     rfp_id: str,
     section_id: str,
@@ -210,6 +242,8 @@ async def _repair_one_section(
         f"Section: {before.title}\nWord target: {before.word_target}\n"
         f"Requirements:\n" + "\n".join(f"- {r}" for r in requirements)
         + f"\n\nRepair task:\n{message}\n\n"
+        f"{_locks_brief_for_repair(research)}\n\n"
+        f"{_dedup_brief_for_repair(draft, section_id=section_id)}\n\n"
         f"Previous draft:\n{before.content[:5000]}\n\n"
         f"Evidence corpus (cite as [E#]):\n{evidence_block or '(search tools for more)'}"
     )
@@ -389,10 +423,13 @@ def _total_manuscript_flags(
     rfp: RfpRecord,
 ) -> int:
     from app.services.proposal_manuscript_cleanup import scan_submission_blockers
+    from app.services.proposal_manuscript_locks import scan_manuscript_lock_issues
     from app.services.proposal_rfp_compliance import scan_rfp_compliance_gaps
 
-    return len(scan_submission_blockers(draft=draft, research=research)) + len(
-        scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
+    return (
+        len(scan_submission_blockers(draft=draft, research=research))
+        + len(scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp))
+        + len(scan_manuscript_lock_issues(draft=draft, research=research))
     )
 
 
@@ -448,7 +485,10 @@ async def run_self_edit_loop(
     zero_improve_streak = 0
     zero_flag_streak = 0
     flags_at_start = _total_manuscript_flags(draft, research, rfp)
-    if flags_at_start <= TARGET_FLAG_COUNT:
+    from app.services.proposal_manuscript_locks import scan_manuscript_lock_issues
+
+    lock_issues_at_start = scan_manuscript_lock_issues(draft=draft, research=research)
+    if flags_at_start <= TARGET_FLAG_COUNT and not lock_issues_at_start:
         report.stopped_reason = "flag_target_met"
         logger.info(
             "Self-edit skipped for %s: %d flags already at target (≤%d)",
@@ -462,6 +502,7 @@ async def run_self_edit_loop(
         return time.monotonic() < deadline
 
     from app.services.proposal_manuscript_cleanup import sections_with_submission_blockers
+    from app.services.proposal_manuscript_locks import scan_manuscript_lock_issues
     from app.services.proposal_rfp_compliance import sections_with_compliance_gaps
 
     async def _run_one(sid: str, use_senior: bool) -> tuple[str, bool, str]:
@@ -484,23 +525,54 @@ async def run_self_edit_loop(
         draft = await aget_proposal_draft(rfp_id) or draft
         blocker_ids = sections_with_submission_blockers(draft, research)
         compliance_ids = sections_with_compliance_gaps(draft, research, rfp)
+        lock_ids = {
+            i.section_id
+            for i in scan_manuscript_lock_issues(draft=draft, research=research)
+            if i.section_id
+        }
+        # KPI gaps may attach to first reporting section; also target all reporting tabs
+        if any(
+            i.category == "manuscript_locks" and "KPI" in (i.message or "")
+            for i in scan_manuscript_lock_issues(draft=draft, research=research)
+        ):
+            for s in draft.sections:
+                title_l = s.title.casefold()
+                if any(
+                    m in title_l
+                    for m in (
+                        "methodolog",
+                        "report",
+                        "analytics",
+                        "optimiz",
+                        "measurement",
+                        "kpi",
+                        "metric",
+                    )
+                ):
+                    lock_ids.add(s.id)
         weak = [
             s
             for s in draft.sections
-            if is_weak_section(s) or s.id in blocker_ids or s.id in compliance_ids
+            if is_weak_section(s)
+            or s.id in blocker_ids
+            or s.id in compliance_ids
+            or s.id in lock_ids
         ]
         if not weak:
             report.stopped_reason = "all_sections_ok"
             break
 
         weak.sort(key=weakness_score, reverse=True)
+        # Prefer lock-conflict sections first
+        weak.sort(key=lambda s: (0 if s.id in lock_ids else 1, -weakness_score(s)))
         if len(weak) > MAX_WEAK_SECTIONS_PER_ITERATION:
             weak = weak[:MAX_WEAK_SECTIONS_PER_ITERATION]
         report.iterations_run = iteration
         report.sections_targeted += len(weak)
 
         flags_before = _total_manuscript_flags(draft, research, rfp)
-        if flags_before <= TARGET_FLAG_COUNT:
+        remaining_locks = scan_manuscript_lock_issues(draft=draft, research=research)
+        if flags_before <= TARGET_FLAG_COUNT and not remaining_locks:
             report.stopped_reason = "flag_target_met"
             break
 
@@ -701,6 +773,24 @@ async def run_self_edit_loop(
             update={"updated_at": datetime.now(timezone.utc).isoformat()}
         )
         await asave_research_cache(research)
+
+    remaining_locks = scan_manuscript_lock_issues(draft=draft, research=research)
+    if remaining_locks:
+        summary = "; ".join(
+            (i.message or "")[:160] for i in remaining_locks[:4]
+        )
+        report.stopped_reason = "manuscript_locks_failed"
+        logger.error(
+            "Self-edit for %s FAILED manuscript locks (%d): %s",
+            rfp_id,
+            len(remaining_locks),
+            summary,
+        )
+        raise ProposalError(
+            "Senior editor could not clear manuscript locks (primary contact / RFQ KPIs): "
+            + summary,
+            status_code=422,
+        )
 
     logger.info(
         "Self-edit for %s: %d iterations, %d improved, stopped=%s",

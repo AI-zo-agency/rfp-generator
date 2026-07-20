@@ -170,6 +170,34 @@ export interface ProposalResearch {
   writingAvoidances?: string[];
   proofPoints?: ProofPoint[];
   presubmitReview?: PreSubmitReview | null;
+  /** Close-out brief after Budget + Review — requirement coverage + next actions. */
+  endingReport?: {
+    rfpId: string;
+    rfpTitle: string;
+    rfpClient: string;
+    endsWith?: string;
+    pipelineOrder?: string[];
+    requirementsTotal?: number;
+    requirementsCovered?: number;
+    requirementsUncovered?: number;
+    hasBudget?: boolean;
+    budgetTier?: string | null;
+    readyToSubmit?: boolean;
+    summaryMarkdown?: string;
+    nextActions?: string[];
+    complianceGaps?: number;
+    presubmitIssues?: number;
+    draftedSectionsCount?: number;
+    rfpMappedSectionsCount?: number;
+    totalWords?: number;
+    requirementStatuses?: Array<{
+      sectionId: string;
+      sectionTitle: string;
+      requirement: string;
+      covered: boolean;
+      evaluationWeight?: number | null;
+    }>;
+  } | null;
   pipelineCheckpoint?: ProposalPipelineCheckpoint | null;
   proposalExecutionPlan?: ProposalExecutionPlanSummary | null;
   updatedAt: string;

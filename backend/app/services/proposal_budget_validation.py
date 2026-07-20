@@ -322,7 +322,12 @@ def adjust_pm_line_items_to_guide(
     line_items: list[BudgetLineItem],
     agency_base: float,
 ) -> tuple[list[BudgetLineItem], str | None]:
-    """Scale PM / account-management lines into the 5–8% agency-fee guide when out of range."""
+    """Scale PM / account-management lines into the 5–8% agency-fee guide when out of range.
+
+    Ratio is PM / total_agency (including PM). Target is computed from non-PM agency
+    fees so scaling lands inside the band (scaling against an inclusive base leaves
+    4.9% stuck just under 5% after a one-shot bump).
+    """
     base = float(agency_base or 0)
     if base <= 0:
         return line_items, None
@@ -337,12 +342,32 @@ def adjust_pm_line_items_to_guide(
     if pm_total <= 0 or not pm_indices:
         return line_items, None
 
-    ratio = pm_total / base
+    # Prefer exclusive base from current line items when agency_base looks inclusive.
+    non_pm = round(base - pm_total, 2)
+    if non_pm <= 0:
+        # agency_base may already exclude PM
+        non_pm = base
+        inclusive_total = base + pm_total
+        ratio = pm_total / inclusive_total if inclusive_total > 0 else 0.0
+    else:
+        ratio = pm_total / base if base > 0 else 0.0
+
     if _PM_RATIO_MIN <= ratio <= _PM_RATIO_MAX:
         return line_items, None
 
     target_ratio = _PM_RATIO_TARGET if ratio > _PM_RATIO_MAX else _PM_RATIO_MIN
-    target_pm = round(base * target_ratio, 2)
+    # P / (non_pm + P) = target  =>  P = non_pm * target / (1 - target)
+    target_pm = round(non_pm * target_ratio / (1.0 - target_ratio), 2)
+    if target_pm <= 0:
+        return line_items, None
+    # Rounding can leave 4.999% — nudge up/down so the inclusive ratio is in band.
+    inclusive = non_pm + target_pm
+    if inclusive > 0:
+        landed = target_pm / inclusive
+        if landed < _PM_RATIO_MIN:
+            target_pm = round(non_pm * _PM_RATIO_MIN / (1.0 - _PM_RATIO_MIN) + 0.01, 2)
+        elif landed > _PM_RATIO_MAX:
+            target_pm = round(non_pm * _PM_RATIO_MAX / (1.0 - _PM_RATIO_MAX) - 0.01, 2)
     scale = target_pm / pm_total
 
     adjusted: list[BudgetLineItem] = []

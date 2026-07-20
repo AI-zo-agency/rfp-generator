@@ -179,11 +179,38 @@ async def _derive_legacy(state: IntelligenceGraphState) -> dict[str, Any]:
         return {}
     plan = _load_plan(state)
     legacy = derive_legacy_fields(plan)
+    sections = legacy.get("rfpSections") or []
     log_intel_event(
         "legacy_derived",
-        sections=len(legacy.get("rfpSections") or []),
+        sections=len(sections),
         queries=len(legacy.get("sectionQueries") or {}),
     )
+    # Terminal + intelligence log: what the RFP requires us to write
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "Phase 2 RFP outline for %s — %d required proposal sections:",
+        state.get("rfp_id"),
+        len(sections),
+    )
+    for index, section in enumerate(sections, 1):
+        title = getattr(section, "title", None) or (
+            section.get("title") if isinstance(section, dict) else None
+        ) or "?"
+        reqs = getattr(section, "requirements", None) or (
+            section.get("requirements") if isinstance(section, dict) else None
+        ) or []
+        weight = getattr(section, "evaluation_weight", None)
+        if weight is None and isinstance(section, dict):
+            weight = section.get("evaluationWeight")
+        weight_bit = f" weight={weight}" if weight is not None else ""
+        logger.info("  %02d. %s%s (%d req bullets)", index, title, weight_bit, len(reqs))
+        log_intel_event(
+            "rfp_section_mapped",
+            index=index,
+            title=title,
+            requirements=len(reqs),
+            weight=weight,
+        )
     return {"legacy": legacy, "plan": _dump_plan(plan)}
 
 

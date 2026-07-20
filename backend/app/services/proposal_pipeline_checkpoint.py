@@ -289,6 +289,28 @@ def phase_is_complete(
     return False
 
 
+def _has_resumable_pipeline_progress(
+    draft: ProposalDraft | None,
+    research: ProposalResearchCache | None,
+) -> bool:
+    """True only when there is real progress to continue — not an empty post-Reset shell."""
+    if research is not None:
+        cp = research.pipeline_checkpoint
+        if cp and (
+            cp.last_completed_phase or cp.last_failed_phase or cp.in_progress_phase
+        ):
+            return True
+        if research.rfp_sections or research.evidence_corpus:
+            return True
+        if research.budget is not None or research.presubmit_review is not None:
+            return True
+    if draft is not None:
+        for section in draft.sections:
+            if section.content and section.content.strip():
+                return True
+    return False
+
+
 def resolve_resume_phase(
     rfp_id: str,
     *,
@@ -358,11 +380,13 @@ def build_pipeline_status(
         if phase_is_complete(draft=draft, research=research, phase=phase)
     ]
     cp = research.pipeline_checkpoint if research else None
+    has_progress = _has_resumable_pipeline_progress(draft, research)
     return {
         "resumeFromPhase": resume_from,
         "completedPhases": completed,
         "isComplete": resume_from == "complete",
-        "canResume": bool(draft)
+        # Empty default outline after Reset is NOT resumable — that is a fresh Generate.
+        "canResume": has_progress
         and (
             (cp is not None and cp.last_failed_phase is not None)
             or resume_from != "complete"

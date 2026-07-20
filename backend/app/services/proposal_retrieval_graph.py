@@ -28,14 +28,22 @@ _LLM_SEMAPHORE = asyncio.Semaphore(2)
 
 RFP_ANALYSIS_PROMPT = """You analyze an RFP to plan a full proposal response for zö agency.
 
-Extract every section the proposer must submit (proposal format, table of contents, attachment list,
-evaluation/scored sections). For each section return:
-- title (as stated in RFP)
+Extract EVERY section the proposer must submit (proposal format, table of contents, attachment list,
+evaluation/scored sections, page-by-page demands). For each section return:
+- title (as stated in the RFP — keep RFP wording)
 - pageLimit if specified
-- requirements (bullet list of what evaluators require in that section)
-- retrievalFocus (what to search in zö knowledge base: e.g. case studies, bios, certs, pricing)
+- requirements (bullet list of what evaluators require — quote RFP language)
+- retrievalFocus (what to search in zö knowledge base: case studies, bios, certs, pricing, etc.)
 - zoMode: pull (company facts/template), select (pick bios/case studies), or write (custom narrative)
 - evaluationWeight (points if stated, else null)
+- sectionType (firm|team|experience|approach|methodology|timeline|budget|references|forms|other)
+- duplicateOfStaticSection (section-1|section-2|section-3 when this RFP tab overlaps zö static sections, else null)
+
+CRITICAL — RFP-PRIMARY (not a static template for every bid):
+- Methodology, Timeline, Budget narrative, Approach, References appear ONLY when THIS RFP demands them.
+- Do NOT invent generic tabs that are not in the RFP.
+- Do NOT skip a scored/required tab because zö already has Sections 1–3 — map it and set duplicateOfStaticSection if it overlaps.
+- Every important need on every required page must become a requirement bullet so Phase 3 drafts against it.
 
 Include compliance/admin sections only if they need narrative content (not pure forms).
 
@@ -49,7 +57,9 @@ Return ONLY JSON:
       "requirements": ["..."],
       "retrievalFocus": ["case studies", "government"],
       "zoMode": "select",
-      "evaluationWeight": 25
+      "evaluationWeight": 25,
+      "sectionType": "experience",
+      "duplicateOfStaticSection": "section-3"
     }
   ]
 }"""

@@ -218,6 +218,10 @@ def scan_manuscript_consistency(
     budget_idx = find_budget_section_index(draft.sections)
     client_lower = rfp.client.strip().casefold()
 
+    from app.services.proposal_manuscript_locks import scan_manuscript_lock_issues
+
+    issues.extend(scan_manuscript_lock_issues(draft=draft, research=research))
+
     if budget and budget.agency_revenue_estimate:
         allowed = allowed_budget_amounts(budget)
         for index, section in enumerate(draft.sections):

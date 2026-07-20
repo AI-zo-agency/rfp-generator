@@ -22,6 +22,11 @@ from langgraph.graph import END, START, StateGraph
 from app.core.config import settings
 from app.models.proposal import ProposalBrandVoice, ProposalSection, Section1EditorialReview, Section1EditorialRecommendation
 from app.services import llm, proposal_knowledge_base_tools, supermemory
+from app.services.agency_facts import (
+    agency_tenure_block,
+    agency_years_in_operation,
+    enforce_agency_tenure,
+)
 from app.services.company_qualification.agents.capability_prioritization import (
     run_capability_prioritization_agent,
 )
@@ -91,6 +96,141 @@ async def _emit_partial(state: SectionsGraphState, accumulated_sections: list[di
         logger.debug("_emit_partial failed (non-fatal): %s", exc)
 
 
+def _trim_to_max_words(text: str, max_words: int) -> str:
+    """Hard-cap word count while keeping whole sentences and newlines when possible.
+
+    Never flatten the manuscript with ``" ".join(words)`` — that turns
+    ``## Our Promise`` headings into mid-paragraph junk like ``**## Our Promise**``.
+    """
+    text = (text or "").strip()
+    if not text:
+        return text
+    if len(text.split()) <= max_words:
+        return text
+
+    tokens = re.findall(r"\S+|\s+", text)
+    kept: list[str] = []
+    word_n = 0
+    for tok in tokens:
+        if tok.isspace():
+            if word_n > 0:
+                kept.append(tok)
+            continue
+        word_n += 1
+        if word_n > max_words:
+            break
+        kept.append(tok)
+    clipped = "".join(kept).strip()
+    # Prefer ending on a sentence boundary inside the clip
+    for end in (".", "!", "?"):
+        idx = clipped.rfind(end)
+        if idx >= 0 and len(clipped[: idx + 1].split()) >= int(max_words * 0.55):
+            return clipped[: idx + 1].strip()
+    return clipped.strip()
+
+
+def _normalize_who_we_are_markdown(text: str) -> str:
+    """Repair common Who We Are LLM formatting failures before they hit the UI."""
+    if not text or not text.strip():
+        return text
+    out = text.strip()
+
+    # Whole-section bold wrapper → normal prose
+    if out.startswith("**") and out.endswith("**") and out.count("**") == 2:
+        out = out[2:-2].strip()
+
+    # Headings glued into a paragraph: "...action. ## Our Promise We promise..."
+    out = re.sub(
+        r"[ \t]*\*{0,2}[ \t]*(##)\s*(Who We Are|Our Promise)\s*\*{0,2}[ \t]*",
+        r"\n\n\1 \2\n\n",
+        out,
+        flags=re.IGNORECASE,
+    )
+    # Bolded heading lines: **## Our Promise** / **Our Promise**
+    out = re.sub(
+        r"(?m)^\s*\*\*\s*(#{1,3}\s+.+?)\s*\*\*\s*$",
+        r"\1",
+        out,
+    )
+    out = re.sub(
+        r"(?m)^\s*\*\*\s*((?:Who We Are|Our Promise))\s*\*\*\s*$",
+        r"## \1",
+        out,
+        flags=re.IGNORECASE,
+    )
+
+    # Drop the redundant ## Who We Are heading — the UI card already titles 1.1
+    out = re.sub(
+        r"(?im)^\s*##\s*Who We Are\s*\n+",
+        "",
+        out,
+        count=1,
+    )
+    # Title glued to opening sentence: "Who We Are We are more than…"
+    out = re.sub(
+        r"(?i)^\s*Who We Are\s+(?=We\b)",
+        "",
+        out,
+        count=1,
+    )
+
+    # Unwrap paragraph-length bold (more than ~12 words inside one **...**)
+    def _unwrap_long_bold(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        if len(inner.split()) > 12:
+            return inner
+        return match.group(0)
+
+    out = re.sub(r"\*\*([^*]+)\*\*", _unwrap_long_bold, out)
+    out = _scrub_ops_from_our_promise(out)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out
+
+
+_OUR_PROMISE_OPS_RE = re.compile(
+    r"(?i)("
+    r"ron\s+comer|sonja\s+anderson|curt\s+schultz|letitia\s+hopper|gil\s+aranowitz|"
+    r"senior\s+account\s+manager|dedicated\s+client\s+manager|executive\s+sponsor|"
+    r"\bSEM\b|\bSEO\b|\bPPC\b|paid\s+social|remarketing|\bCRM\b|"
+    r"real[- ]time\s+dashboard|campaign\s+reports?|within\s+two\s+weeks|"
+    r"\bEIN\b|\bFEIN\b"
+    r")"
+)
+
+
+def _scrub_ops_from_our_promise(text: str) -> str:
+    """Drop ops/staff sentences from Our Promise — that block is tone only."""
+    parts = re.split(r"(?im)^(##\s*Our Promise)\s*$", text, maxsplit=1)
+    if len(parts) < 3:
+        # No clean heading — still try after an inline marker
+        m = re.search(r"(?i)##\s*Our Promise", text)
+        if not m:
+            return text
+        head, promise = text[: m.start()], text[m.end() :]
+        heading = "## Our Promise"
+    else:
+        head, heading, promise = parts[0], parts[1], parts[2]
+
+    kept: list[str] = []
+    for para in re.split(r"\n\s*\n", promise.strip()):
+        para = para.strip()
+        if not para:
+            continue
+        sentences = re.split(r"(?<=[.!?])\s+", para)
+        clean = [s for s in sentences if s and not _OUR_PROMISE_OPS_RE.search(s)]
+        if clean:
+            kept.append(" ".join(clean))
+    promise_body = "\n\n".join(kept).strip()
+    if not promise_body:
+        promise_body = (
+            "Excellence is a guarantee, not a goal. We meet and beat deadlines and budgets, "
+            "keep every conversation transparent, and give you direct access to the people "
+            "doing the work — no surprise bills, no black boxes. We ambassador your brand "
+            "like family, because when you win, we win."
+        )
+    return f"{head.rstrip()}\n\n{heading}\n\n{promise_body}".strip()
+
+
 def _sanitize_content(text: str) -> str:
     """Normalize Unicode and strip non-ASCII/non-Latin garbage characters that
     sometimes bleed in from KB PDFs (e.g. Gujarati or other Indic scripts
@@ -132,6 +272,9 @@ def _sanitize_content(text: str) -> str:
         "",
         clean,
     )
+    from app.services.proposal_manuscript_locks import strip_internal_proposal_meta
+
+    clean = strip_internal_proposal_meta(clean)
     clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
     return clean
 
@@ -228,15 +371,30 @@ class SectionsGraphState(TypedDict, total=False):
     team_selection: dict[str, Any]
     evidence_selection: dict[str, Any]
     section1_editorial_review: dict[str, Any]
+    manuscript_locks: dict[str, Any]
 
 
 def _proposal_voice_block(state: SectionsGraphState) -> str:
-    return format_brand_voice_block(
+    from app.models.proposal import ManuscriptLocks
+    from app.services.proposal_manuscript_locks import format_manuscript_locks_block
+
+    base = format_brand_voice_block(
         state.get("brand_voice"),
         kb_zo_voice=state.get("kb_zo_voice") or "",
         rfp_client=state.get("rfp_client") or "",
         register="narrative",
     )
+    locks_raw = state.get("manuscript_locks")
+    locks = None
+    if isinstance(locks_raw, dict):
+        try:
+            locks = ManuscriptLocks.model_validate(locks_raw)
+        except Exception:
+            locks = None
+    locks_block = format_manuscript_locks_block(locks)
+    if locks_block:
+        return f"{base}\n\n{locks_block}"
+    return base
 
 
 def _section_group_has_content(
@@ -261,7 +419,7 @@ def _sections_to_state(existing: list[ProposalSection]) -> list[dict[str, Any]]:
 
 
 SECTION_1_STUB_SPECS: tuple[tuple[str, str, int], ...] = (
-    ("section-1-who-we-are", "1.1 — Who We Are", 350),
+    ("section-1-who-we-are", "1.1 — Who We Are", 250),
     ("section-1-org-structure", "1.2 — Organizational Structure", 800),
     ("section-1-business-info", "1.3 — Business Information", 400),
     ("section-1-certifications", "1.4 — Certifications", 150),
@@ -1243,11 +1401,16 @@ def _format_member_bio_content(member: str, extracted: dict[str, Any]) -> str:
 
 
 def _narrative_section_preamble(state: SectionsGraphState) -> str:
+    from app.services.proposal_section_dedup import format_anti_duplication_rules
+
     return (
         "You write zö agency NARRATIVE proposal content.\n"
         f"{format_register_block('narrative')}\n\n"
         "Facts (clients, certs, team, case studies) must come ONLY from knowledge-base excerpts.\n"
         "Voice must follow BOTH zö core brand voice AND the RFP-specific adaptation block.\n"
+        f"{format_anti_duplication_rules()}\n"
+        "Within Sections 1–3: Who We Are = brand essence only; Org/Business/Certs/Insurance = facts only; "
+        "Team = bios only; Case Studies = proof only — never repeat the same company pitch across subsections.\n"
         f"Client: {state['rfp_client']} | Sector: {state['rfp_sector']}\n"
     )
 
@@ -1399,7 +1562,7 @@ def _section_kb_user_content(state: SectionsGraphState, sec_id: str) -> str:
 
 
 _SECTION1_PAGE_RATIOS: dict[str, tuple[float, int]] = {
-    "section-1-who-we-are": (0.04, 350),
+    "section-1-who-we-are": (0.03, 250),
     "section-1-org-structure": (0.08, 800),
     "section-1-business-info": (0.03, 400),
     "section-1-certifications": (0.03, 150),
@@ -1418,6 +1581,12 @@ def _composition_to_section_payloads(
         ratio, default_words = _SECTION1_PAGE_RATIOS.get(generated.id, (0.03, 400))
         word_target = generated.word_count or default_words
         content = _sanitize_content(generated.content.strip())
+        if generated.id in {"section-1-who-we-are", "section-1-business-info"}:
+            content = enforce_agency_tenure(content)
+        if generated.id == "section-1-who-we-are":
+            content = _normalize_who_we_are_markdown(content)
+            content = _trim_to_max_words(content, 250)
+            content = _normalize_who_we_are_markdown(content)
         payloads.append(
             _section_payload(
                 section_id=generated.id,
@@ -1695,6 +1864,34 @@ async def _select_evidence(state: SectionsGraphState) -> dict[str, Any]:
     }
 
 
+def _case_study_display_title(index: int, study: str) -> str:
+    """Human title for Section 3 cards — never raw PDF filenames in the UI chip."""
+    name = (study or "").strip()
+    for suffix in (".pdf", ".docx", ".doc", ".PDF", ".DOCX"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    lower = name.casefold()
+    for prefix in ("03_cs_", "02_cs_", "01_cs_", "cs_", "03_", "02_", "01_"):
+        if lower.startswith(prefix):
+            name = name[len(prefix) :]
+            lower = name.casefold()
+            break
+    name = name.replace("_", " ").replace("-", " ").strip()
+    # OregonEmployment → Oregon Employment
+    spaced: list[str] = []
+    for i, ch in enumerate(name):
+        if i and ch.isupper() and name[i - 1].islower():
+            spaced.append(" ")
+        spaced.append(ch)
+    name = "".join(spaced).strip()
+    if name and (name == name.upper() or name.islower()):
+        name = name.title()
+    if not name:
+        name = (study or "").strip() or f"Case study {index}"
+    return f"3.{index} — {name}"
+
+
 async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
     """Case Study Builder — full retrieval per selected study only."""
     if state.get("skip_section_3"):
@@ -1721,7 +1918,7 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
     for i, study in enumerate(selected_studies, 1):
         safe_id = study.lower()[:40].replace(" ", "-").replace("/", "-")
         sec_id = f"section-3-work-{i:02d}-{safe_id}"
-        sec_title = f"3.{i} — {study}"
+        sec_title = _case_study_display_title(i, study)
 
         case_text, case_sources = await proposal_knowledge_base_tools.fetch_single_case_study(study)
         raw, _provider = await run_case_study_builder_agent(
@@ -1809,33 +2006,61 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
 
     voice = _proposal_voice_block(state)
     existing = state.get("sections") or []
+    tenure = agency_tenure_block()
+    years = agency_years_in_operation()
 
     subsections = [
         (
             "section-1-who-we-are",
             "1.1 — Who We Are",
             (
-                "Write the 'Who We Are' section for zö agency. Structure it into two distinct parts: '## Who We Are' and '## Our Promise'.\n\n"
-                "🚨 CRITICAL ANTI-HALLUCINATION RULES:\n"
-                "- DO NOT list multiple client names (no City of X, County of Y laundry lists - max 1-2 if essential)\n"
-                "- DO NOT cite '4.5 million residents' or any audience size numbers (project-specific, not agency-wide)\n"
-                "- DO NOT mention certifications (WBENC, WOSB) here - they go ONLY in section 1.4 Certifications\n"
-                "- DO NOT mention platform certifications (Google Ads, Meta, Spotify, ISO) - NOT agency certifications\n"
-                "- DO NOT mention awards here - separate section only if needed\n"
-                "- DO NOT cite 'X years of government/municipal experience' - only '13 years as zö agency' if needed\n"
-                "- DO NOT mention business address, FEIN, or insurance details (covered in other subsections)\n\n"
-                "Tone & Content Guidelines:\n"
-                "- Write in a highly expressive, bold, and passionate voice. Use bold formatting on key impact phrases.\n"
-                "- We are 'more than just an agency' – we are their strongest advocate and happily become an extension of their team (as if we are their marketing department).\n"
-                "- Explain that the name 'zö' is our term for family, kindred, clan, community, and a force of collaboration in action.\n"
-                "- State that we believe in becoming true partners with our clients, particularly the client for this RFP (incorporate their name dynamically), creating authentic campaigns that reflect their unique spirit.\n"
-                "- We approach each project with fresh energy, an open mind, and value timelessness. We combine deep sector/public expertise with energetic approaches.\n"
-                "- Under the heading '## Our Promise', write our firm commitment: excellence is a guarantee, not a goal. We meet/beat deadlines and budgets, provide complete transparency, direct access to the team (no surprise bills or hidden agendas), and will ambassador their brand identity with the dedication of a true partner.\n\n"
-                "Focus on BRAND ESSENCE, not resume facts. Keep it about who we are, not what we've done."
+                "Write the 'Who We Are' section for zö agency. Structure it into TWO required parts "
+                "with REAL markdown line breaks (blank line before/after each heading):\n"
+                "1) Opening brand paragraphs (NO '# Who We Are' heading — the UI already titles this section)\n"
+                "2) Then a separate line exactly: ## Our Promise\n"
+                "   Then the promise paragraphs. Our Promise is mandatory — never skip it.\n\n"
+                "MARKDOWN RULES (non-negotiable — bad formatting = reject):\n"
+                "- Put ## Our Promise on its OWN line. Never inline it mid-sentence "
+                "(FORBIDDEN: '…action. ## Our Promise We promise…').\n"
+                "- Body text is normal weight. Do NOT wrap whole paragraphs or the whole section in **bold**.\n"
+                "- At most TWO short bold phrases total (a few words each). Never bold headings.\n"
+                "- Do not re-print the section title 'Who We Are' as the first line.\n\n"
+                "HARD WORD LIMIT: MAX 250 words total. Prefer 180–220. Never exceed 250.\n\n"
+                f"{tenure}\n\n"
+                "VOICE (non-negotiable — brand essence, NOT a capability pitch):\n"
+                "- Open with signature energy: we are more than an agency — we are their strongest advocate "
+                "and an extension of their team.\n"
+                "- Explain that 'zö' means family, kindred, clan, community — a force of collaboration in action.\n"
+                "- Sound raw, real, street-smart, warm, and human. First person we/our/us.\n"
+                "- FORBIDDEN bland corporate filler ('leveraging synergies', 'comprehensive solutions', "
+                "'full-service partner committed to excellence' without zö-specific soul).\n"
+                "- Brand first, then a TINY client bridge (1–2 sentences max) that names THIS RFP client "
+                "with feeling — why this relationship matters — NOT how you'll run the work.\n"
+                "Do not let the RFP pitch crowd out Who We Are + Our Promise.\n\n"
+                "🚨 CRITICAL — KEEP SECTION 1.1 CLEAN (put these elsewhere):\n"
+                "- DO NOT name staff (Ron Comer, Sonja Anderson, Curt Schultz, etc.) — bios are Section 2\n"
+                "- DO NOT name titles/roles as assignments ('dedicated client manager', 'executive sponsor')\n"
+                "- DO NOT list channels or tactics (SEM, SEO, PPC, paid social, remarketing, CRM, dashboards)\n"
+                "- DO NOT promise report cadences, deliverable SLAs, or mid-campaign process detail\n"
+                "- DO NOT list multiple client names (prefer THIS RFP client only)\n"
+                "- DO NOT cite audience size numbers (e.g. '4.5 million residents')\n"
+                "- DO NOT mention certifications (WBENC, WOSB) — section 1.4 only\n"
+                "- DO NOT mention platform certifications (Google Ads, Meta, Spotify, ISO)\n"
+                "- DO NOT mention awards, business address, FEIN/EIN, or insurance here\n"
+                f"- Agency tenure: ONLY '{years} years as zö agency' / '{years} years of lived experience' — "
+                f"never {years - 1} or {years + 1}\n\n"
+                "## Our Promise = tone + commitment only (attractive to the client, not an org chart):\n"
+                "- Write like a vow: short, warm, confident, memorable.\n"
+                "- MUST hit these feelings: excellence is a guarantee not a goal; we meet/beat deadlines "
+                "and budgets; full transparency and real access to the people doing the work; "
+                "no surprise bills; we ambassador their brand like family.\n"
+                "- FORBIDDEN in Our Promise: person names, job titles, channel lists, dashboards, "
+                "CRM, reporting schedules, enrollment/KPI process talk, or anything that belongs in "
+                "methodology / team / budget tabs."
             ),
             "pull",
-            0.04,
-            600,
+            0.03,
+            250,
         ),
         (
             "section-1-org-structure",
@@ -1858,11 +2083,12 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
             "1.3 — Business Information",
             (
                 "Write the 'Business Information' subsection ONLY. This is a factual registration block — NOT marketing copy.\n\n"
+                f"{tenure}\n\n"
                 "INCLUDE (structured facts only):\n"
                 "- Legal business name and DBA\n"
                 "- Business type / ownership structure\n"
                 "- EIN and state business registration IDs (DUNS/SAM/CAGE if in KB)\n"
-                "- Year founded and years in operation (one factual line, not a story)\n"
+                f"- Year founded MUST be August 21, 2013; Years in Operation MUST be {years}\n"
                 "- Office, mailing, and remittance addresses\n"
                 "- Main phone, email, website\n\n"
                 "DO NOT INCLUDE (already covered in other subsections):\n"
@@ -1972,7 +2198,12 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
                                     "section-1-certifications",
                                     "section-1-insurance",
                                 }
-                                else "Be thorough and detailed. Include every fact you find in the KB.\n"
+                                else (
+                                    "Lead with zö brand voice from the Brand Voice KB. "
+                                    "Do NOT dump every company fact — Who We Are is essence + promise, not a fact sheet.\n"
+                                    if sec_id == "section-1-who-we-are"
+                                    else "Be thorough and detailed. Include every fact you find in the KB.\n"
+                                )
                             )
                         )
                         + 'Return JSON: {"content": "full detailed content", "kbRefs": ["source1", ...]}'
@@ -1987,9 +2218,16 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
                 },
             ],
             max_tokens=2048,
-            temperature=0.0,  # Zero temp for strict factual extraction
+            # Who We Are needs creative range; factual subsections stay cold.
+            temperature=0.55 if sec_id == "section-1-who-we-are" else 0.0,
         )
         content = _sanitize_content(raw.get("content", "").strip())
+        if sec_id in {"section-1-who-we-are", "section-1-business-info"}:
+            content = enforce_agency_tenure(content)
+        if sec_id == "section-1-who-we-are":
+            content = _normalize_who_we_are_markdown(content)
+            content = _trim_to_max_words(content, 250)
+            content = _normalize_who_we_are_markdown(content)
         section = _section_payload(
             section_id=sec_id,
             title=sec_title,
@@ -2199,7 +2437,7 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
     for i, study in enumerate(selected_studies, 1):
         safe_id = study.lower()[:40].replace(" ", "-").replace("/", "-")
         sec_id = f"section-3-work-{i:02d}-{safe_id}"
-        sec_title = f"3.{i} — {study}"
+        sec_title = _case_study_display_title(i, study)
 
         raw, _ = await llm.chat_json(
             [
@@ -2212,7 +2450,8 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                         f"- Do NOT write about '{rfp_client}' — that is the CURRENT client this proposal is for, NOT a past case study.\n"
                         "- ONLY pull verified facts, client names, and outcomes directly from the case studies knowledge base.\n"
                         "- If facts are not in the KB, do NOT invent them. Use only what is explicitly stated.\n"
-                        "- Do NOT include Source:, filename, .pdf, .docx, or knowledge-base citations in the prose.\n\n"
+                        "- Do NOT include Source:, filename, .pdf, .docx, or knowledge-base citations in the prose.\n"
+                        "- NEVER append 'Creative Examples:' catalogs or word-count labels.\n\n"
                         "Format and Content:\n"
                         "- Write from zö's perspective (we/our/us).\n"
                         "- Use bold text for key outcomes and impact metrics.\n"
@@ -2377,6 +2616,7 @@ async def run_sections_1_3_graph(
     skip_section_1: bool = False,
     skip_section_2: bool = False,
     skip_section_3: bool = False,
+    manuscript_locks: dict[str, Any] | None = None,
 ) -> tuple[list[ProposalSection], ProposalBrandVoice, str, Section1EditorialReview | None]:
     if not llm.is_configured():
         raise LlmError(
@@ -2404,6 +2644,7 @@ async def run_sections_1_3_graph(
         "skip_section_1": skip_section_1,
         "skip_section_2": skip_section_2,
         "skip_section_3": skip_section_3,
+        "manuscript_locks": manuscript_locks or {},
     }
 
     cq_mode = settings.use_company_qualification_s1

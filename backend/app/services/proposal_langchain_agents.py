@@ -58,6 +58,7 @@ ALWAYS flag these senior-editor priorities when present:
 - Budget: flag agency revenue estimate showing $0 when commission or fees apply — must match commission rate × pass-through
 - References: flag "contact on request" or missing phone/email
 - Workforce: flag inconsistent % female/minority between MWBE and Personnel sections
+- Duplication: flag when this section re-copies Who We Are, full bios, full case studies, FEIN/certs, or brand story that belongs in another section — instruct a concise rewrite with ONE job only
 
 Do NOT rewrite the section yourself — write patch instructions for the Section Repair agent.
 Return ONLY JSON when done researching:
@@ -78,6 +79,7 @@ Rules:
 9. RFP compliance: reference contacts with phones and emails, workforce diversity %, budget hours table, PSA acks — from KB only; never defer to unnamed attachments or "upon request".
 10. Budget section: agency revenue / commission must be positive dollars matching canonical budget — never $0 when commission model applies.
 11. MWBE and Personnel must use the same workforce percentages — align to one HR-verified figure.
+12. ANTI-DUPLICATION: This section has ONE job. Do not re-paste company bio, full bios, or full case studies owned by other sections. One short cross-reference is OK — then add NEW detail only. Prefer concise prose.
 10. When done researching, respond with ONLY JSON:
 {"content":"full section prose","kbRefs":["E1"],"designerNote":null}"""
 
