@@ -72,7 +72,7 @@ export interface ProposalPipelineStatus {
   lastCompletedPhase?: PipelinePhase | null;
   lastFailedPhase?: PipelinePhase | null;
   lastError?: string | null;
-  inProgressPhase?: PipelinePhase | null;
+  inProgressPhase?: PipelineInProgressPhase | null;
   phaseLabels: Record<string, string>;
   checkpoint?: ProposalPipelineCheckpoint | null;
 }
@@ -291,6 +291,11 @@ export function shouldRunPhase(
   return phaseIndex(phase) >= phaseIndex(resumeFrom);
 }
 
+function inProgressPhaseLabel(phase: PipelineInProgressPhase): string {
+  if (phase === FULFILL_SCAN_PHASE) return "Scan RFP";
+  return PIPELINE_PHASE_LABELS[phase];
+}
+
 export function pipelineResumeMessage(
   status: ProposalPipelineStatus,
   options?: { blocker?: string | null }
@@ -309,7 +314,7 @@ export function pipelineResumeMessage(
   }
   const label = PIPELINE_PHASE_LABELS[status.resumeFromPhase];
   if (status.inProgressPhase) {
-    return `Interrupted during ${PIPELINE_PHASE_LABELS[status.inProgressPhase]}. Resume from ${label}.`;
+    return `Interrupted during ${inProgressPhaseLabel(status.inProgressPhase)}. Resume from ${label}.`;
   }
   return `Resume from ${label}.`;
 }

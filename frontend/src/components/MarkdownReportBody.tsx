@@ -355,7 +355,11 @@ export function MarkdownReportBody({
             );
           }
 
-          return <p key={index}>{renderInline(block.text ?? "", highlights)}</p>;
+          if (block.type === "paragraph") {
+            return <p key={index}>{renderInline(block.text, highlights)}</p>;
+          }
+
+          return null;
         })}
       </div>
     );
@@ -444,9 +448,23 @@ export function MarkdownReportBody({
           );
         }
 
-        return (
-          <p key={index}>{renderInline(block.text ?? "", highlights)}</p>
-        );
+        if (block.type === "hr") {
+          return (
+            <hr
+              key={index}
+              className="my-4 border-zo-border"
+              aria-hidden
+            />
+          );
+        }
+
+        if (block.type === "paragraph") {
+          return (
+            <p key={index}>{renderInline(block.text, highlights)}</p>
+          );
+        }
+
+        return null;
       })}
     </div>
   );

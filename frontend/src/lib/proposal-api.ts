@@ -74,7 +74,7 @@ export function outlineToApiDraft(
     googleDocId: outline.googleDocId ?? null,
     googleDocExportedAt: outline.googleDocExportedAt ?? null,
     snapshots: slimSnapshotsForSave(outline.snapshots),
-    lastFulfillReport: outline.lastFulfillReport ?? null,
+    lastFulfillReport: outline.lastFulfillReport ?? undefined,
     sections: outline.sections.map((s) => ({
       ...s,
       source:
