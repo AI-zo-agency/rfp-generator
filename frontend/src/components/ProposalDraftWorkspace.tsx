@@ -953,7 +953,7 @@ export function ProposalDraftWorkspace({
         addedTitles.length
           ? `Added from RFP — open Review: ${addedTitles.join(", ")}`
           : detectedLabels.length || inPlaceFixes
-            ? `RFP scan finished — ${detectedLabels.length} closing items matched; ${inPlaceFixes} in-place fixes. Open Review (Insurance, Signature, Item 16 qual stub may still need KB).`
+            ? `RFP scan finished — ${detectedLabels.length} closing items matched; ${inPlaceFixes} in-place fixes. Qualifications stay [VERIFY] until real KB/Section 3 content — Scan will not invent case studies.`
             : "RFP scan finished — review the updated proposal."
       );
       setGenerateError(null);

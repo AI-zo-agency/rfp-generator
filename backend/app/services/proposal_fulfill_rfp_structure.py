@@ -11,6 +11,7 @@ from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSe
 from app.models.rfp import RfpRecord
 from app.services import llm
 from app.services.proposal_fulfill_guard import fulfill_scan_preserves_section
+from app.services.proposal_fulfill_truncation_repair import looks_truncated_for_fulfill
 from app.services.proposal_rfp_excerpt import submission_documents_excerpt
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,21 @@ async def extract_rfp_scored_section_specs(
     return specs
 
 
+def _title_is_qual_or_reference(title: str) -> bool:
+    t = _section_title_cf(title)
+    return any(h in t for h in _QUAL_TITLE_HINTS) or "contractor reference" in t
+
+
+def _spec_is_rfp_title_noise(spec: RfpSectionSpec) -> bool:
+    """LLM sometimes returns the full RFP title as a 'section' — do not reframe against it."""
+    title = (spec.rfp_title or "").strip()
+    if len(title) > 85:
+        return True
+    if title.count(" ") > 14:
+        return True
+    return False
+
+
 def _match_section_for_spec(
     draft: ProposalDraft,
     spec: RfpSectionSpec,
@@ -219,7 +235,8 @@ async def _reframe_section_to_rfp_spec(
         "Rules:\n"
         "- Use the required headings/outline exactly (markdown ## with RFP labels).\n"
         "- Preserve verified facts, team names, case studies, and numbers from the current draft.\n"
-        "- Do NOT invent clients, metrics, or Oceania/Hawaii work not in the draft or RFP.\n"
+        "- Do NOT invent clients, case studies, reference contacts, metrics, or Oceania/Hawaii work.\n"
+        "- If evidence is missing, use [VERIFY: …] — never fabricate named engagements.\n"
         "- Fold timeline/phases INTO this section when the RFP expects schedule here (e.g. BMP).\n"
         "- Do NOT rewrite team bios (Section 2.x) or static company tabs.\n"
         'Return JSON: {"content": "full markdown section"}'
@@ -254,38 +271,9 @@ async def _redraft_verify_stub_section(
     rfp_excerpt: str,
     requirements: list[str],
 ) -> str:
-    stub = section.content or ""
-    if not _VERIFY_STUB_RE.search(stub):
-        return stub
-    if not llm.is_configured():
-        return stub
-
-    req_block = "\n".join(f"- {r}" for r in requirements[:12])
-    system = (
-        "Draft ONE qualification/experience section for zö agency per THIS RFP.\n"
-        "Use KB-appropriate case studies and references — if geo-specific work is missing, "
-        "state transferable capabilities honestly; use [VERIFY: …] only for facts Sonja must confirm.\n"
-        "Do NOT leave a whole-section VERIFY stub.\n"
-        'Return JSON: {"content": "markdown"}'
-    )
-    user = (
-        f"RFP: {rfp.title}\nSection: {section.title}\n"
-        f"RFP requirements:\n{req_block or '(see excerpt)'}\n\n"
-        f"Excerpt:\n{rfp_excerpt[:28000]}\n\n"
-        f"Replace stub:\n{stub[:4000]}"
-    )
-    try:
-        raw, _ = await llm.chat_json(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=4096,
-            temperature=0.3,
-        )
-        content = str((raw or {}).get("content") or "").strip()
-        if content and not _VERIFY_STUB_RE.search(content):
-            return content
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("VERIFY stub redraft failed for %s: %s", section.id, exc)
-    return stub
+    """Disabled — Scan must not LLM-fill qualification stubs (fabrication risk)."""
+    _ = (rfp, rfp_excerpt, requirements)
+    return section.content or ""
 
 
 def _requirements_for_section(
@@ -322,15 +310,22 @@ async def run_rfp_structure_alignment_pass(
 
     sections = list(draft.sections)
     changed = False
+    reframed_ids: set[str] = set()
 
     for spec in specs:
+        if _spec_is_rfp_title_noise(spec):
+            continue
         if not spec.required_headings and not spec.instructions:
             continue
         working = draft.model_copy(update={"sections": sections})
         section = _match_section_for_spec(working, spec)
         if not section or section.id in skip_section_ids:
             continue
+        if section.id in reframed_ids:
+            continue
         if fulfill_scan_preserves_section(section):
+            continue
+        if _title_is_qual_or_reference(section.title or ""):
             continue
         body = section.content or ""
         missing = _headings_present(body, spec.required_headings) if spec.required_headings else []
@@ -347,7 +342,9 @@ async def run_rfp_structure_alignment_pass(
                     "— re-run Scan with LLM to reframe."
                 )
             continue
-        if missing or generic_only or _VERIFY_STUB_RE.search(body):
+        if _VERIFY_STUB_RE.search(body):
+            continue
+        if missing or generic_only:
             idx = next(i for i, s in enumerate(sections) if s.id == section.id)
             new_content = await _reframe_section_to_rfp_spec(
                 section=section,
@@ -357,41 +354,31 @@ async def run_rfp_structure_alignment_pass(
                 missing_headings=missing or spec.required_headings,
             )
             if new_content.strip() and new_content != body:
+                if looks_truncated_for_fulfill(new_content):
+                    human.append(
+                        f"“{section.title}” reframe may have truncated — re-run Scan or restore snapshot."
+                    )
+                    continue
                 sections[idx] = section.model_copy(
                     update={"content": new_content, "status": "generated"}
                 )
                 logs.append(
                     f"RFP structure: reframed “{section.title}” to {spec.rfp_title} outline"
                 )
+                reframed_ids.add(section.id)
                 changed = True
 
-    # Qualifications / offeror sections with VERIFY stubs
-    for idx, section in enumerate(sections):
+    # Qualifications: never LLM-invent — keep [VERIFY] until KB/Sonja fills.
+    for section in sections:
         if section.id in skip_section_ids or fulfill_scan_preserves_section(section):
             continue
-        t = _section_title_cf(section.title)
-        if not any(h in t for h in _QUAL_TITLE_HINTS):
+        if not _title_is_qual_or_reference(section.title or ""):
             continue
-        if not _VERIFY_STUB_RE.search(section.content or ""):
-            continue
-        if not use_llm:
+        if _VERIFY_STUB_RE.search(section.content or ""):
             human.append(
-                f"“{section.title}” is still a VERIFY stub — enable LLM on Scan to draft from RFP + KB."
+                f"“{section.title}” remains [VERIFY] — add verified Section 3 / KB content manually; "
+                "Scan will not fabricate case studies or references."
             )
-            continue
-        reqs = _requirements_for_section(research, section.id)
-        new_content = await _redraft_verify_stub_section(
-            section=section,
-            rfp=rfp,
-            rfp_excerpt=excerpt,
-            requirements=reqs,
-        )
-        if new_content != (section.content or ""):
-            sections[idx] = section.model_copy(
-                update={"content": new_content, "status": "generated"}
-            )
-            logs.append(f"RFP structure: redrafted qualification stub “{section.title}”")
-            changed = True
 
     if not changed:
         return draft, logs, human

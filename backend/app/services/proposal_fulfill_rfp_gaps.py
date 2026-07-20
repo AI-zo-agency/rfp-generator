@@ -457,6 +457,20 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("RFP structure alignment skipped: %s", exc)
         report["logs"].append(f"RFP structure scan skipped: {exc}")
 
+    try:
+        from app.services.proposal_fulfill_fabrication_guard import (
+            repair_fabricated_qualifications,
+        )
+
+        draft, fab_logs, fab_human = repair_fabricated_qualifications(draft, research)
+        report["logs"].extend(fab_logs)
+        report["humanDecisionGaps"].extend(fab_human)
+        if fab_logs:
+            await asave_proposal_draft(draft)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Fabrication guard skipped: %s", exc)
+        report["logs"].append(f"Fabrication guard skipped: {exc}")
+
     draft, repair_logs = await _repair_misstated_closing_sections(
         draft=draft,
         rfp=rfp,
@@ -563,6 +577,24 @@ async def _run_fulfill_rfp_gaps_body(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Manuscript consistency repairs skipped: %s", exc)
         report["logs"].append(f"Consistency repairs skipped: {exc}")
+
+    try:
+        from app.services.proposal_fulfill_truncation_repair import (
+            repair_truncated_manuscript_sections,
+        )
+
+        draft, trunc_logs = await repair_truncated_manuscript_sections(
+            draft=draft,
+            rfp=rfp,
+            skip_section_ids=preserved_ids,
+            use_llm=use_llm,
+        )
+        report["logs"].extend(trunc_logs)
+        if trunc_logs:
+            await asave_proposal_draft(draft)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Truncation repair skipped: %s", exc)
+        report["logs"].append(f"Truncation repair skipped: {exc}")
 
     if use_llm:
         try:
@@ -674,7 +706,8 @@ async def _run_fulfill_rfp_gaps_body(
                 "Insurance limits",
                 "Roster fix",
                 "Accuracy repair",
-                "Re-drafted",
+                "Fabrication guard",
+                "Truncation repair",
             )
         )
     )

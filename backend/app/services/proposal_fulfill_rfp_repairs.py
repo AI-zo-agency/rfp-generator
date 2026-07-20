@@ -151,12 +151,19 @@ def scan_empty_qualifications_stub(draft: "ProposalDraft") -> str | None:
             or "offeror qualification" in title_cf
             or ("experience" in title_cf and "reference" in title_cf)
         )
+        from app.services.proposal_fulfill_fabrication_guard import (
+            portfolio_client_names,
+            section_has_invented_qual_content,
+        )
+
+        portfolio = portfolio_client_names(draft)
+        invented = section_has_invented_qual_content(section.content or "", portfolio)
         stub = len(blob) < 400 and (
             "[verify:" in blob
             or "insufficient evidence" in blob
             or "manual fill" in blob
         )
-        if qual and stub:
+        if qual and (stub or invented):
             return (
                 f"Section “{section.title}” is still a placeholder — RFP Criteria #1/#3 "
                 "need creative examples, Oceania/Hawaii case studies, and references. "
