@@ -911,6 +911,10 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
 
     for index, batch in enumerate(batches, start=1):
         rfp_id = str(state.get("rfp_id") or "")
+        if rfp_id:
+            from app.services.proposal_generation_cancel import check_generation_cancelled
+
+            await check_generation_cancelled(rfp_id)
         if batch and rfp_id:
             sec = batch[0]
             sec_title = str(sec.get("title") or sec.get("id") or "Section")

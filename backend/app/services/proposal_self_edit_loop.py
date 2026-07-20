@@ -518,6 +518,9 @@ async def run_self_edit_loop(
             )
 
     for iteration in range(1, max_iterations + 1):
+        from app.services.proposal_generation_cancel import check_generation_cancelled
+
+        await check_generation_cancelled(rfp_id)
         if not _time_left():
             report.stopped_reason = "time_budget"
             break

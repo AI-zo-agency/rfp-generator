@@ -287,15 +287,61 @@ def clear_pipeline_checkpoint(rfp_id: str) -> None:
     save_research_cache(updated)
 
 
+def record_generation_stopped(rfp_id: str, phase: str | None = None) -> None:
+    """User hit Stop — clear in-progress, keep completed work, set resume pointer."""
+    research = get_research_cache(rfp_id)
+    prior = research.pipeline_checkpoint if research else None
+    active = phase or (prior.in_progress_phase if prior else None) or "phase-3"
+    resume: str | None = None
+    if active in PIPELINE_PHASES:
+        resume = active
+    elif prior and prior.resume_from_phase and prior.resume_from_phase in PIPELINE_PHASES:
+        resume = prior.resume_from_phase
+    elif prior and prior.last_completed_phase and prior.last_completed_phase in PIPELINE_PHASES:
+        resume = _next_phase_after(prior.last_completed_phase)
+        if resume == "complete":
+            resume = prior.last_completed_phase
+    failed = active if active in PIPELINE_PHASES else (prior.last_failed_phase if prior else None)
+    checkpoint = ProposalPipelineCheckpoint(
+        lastCompletedPhase=prior.last_completed_phase if prior else None,
+        inProgressPhase=None,
+        lastFailedPhase=failed,
+        lastError="Stopped by user. Progress is saved — use Continue proposal to resume.",
+        resumeFromPhase=resume,
+        activityLabel=None,
+        activityDetail=None,
+        stepIndex=None,
+        stepTotal=None,
+        updatedAt=_now_iso(),
+    )
+    _save_checkpoint(rfp_id, checkpoint)
+    logger.info("Pipeline checkpoint: %s stopped during %s (resume=%s)", rfp_id, active, resume)
+
+
 @asynccontextmanager
 async def pipeline_phase(rfp_id: str, phase: str):
+    from app.services.proposal_generation_cancel import (
+        ProposalGenerationCancelled,
+        bind_active_rfp,
+        check_generation_cancelled,
+        unbind_active_rfp,
+    )
+
+    token = bind_active_rfp(rfp_id)
     record_phase_started(rfp_id, phase)
     try:
+        await check_generation_cancelled(rfp_id)
         yield
+        await check_generation_cancelled(rfp_id)
         record_phase_completed(rfp_id, phase)
+    except ProposalGenerationCancelled as exc:
+        record_generation_stopped(rfp_id, phase)
+        raise exc
     except Exception as exc:
         record_phase_failed(rfp_id, phase, str(exc))
         raise
+    finally:
+        unbind_active_rfp(token)
 
 
 def phase_is_complete(

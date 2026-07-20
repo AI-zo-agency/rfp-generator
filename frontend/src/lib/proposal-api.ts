@@ -128,6 +128,42 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
+function throwIfProposalStopped(res: Response, data: { detail?: string }): void {
+  if (res.status === 409) {
+    throw new DOMException(
+      data.detail ?? "Proposal generation stopped",
+      "AbortError"
+    );
+  }
+}
+
+/** Tell backend to stop LLM/Supermemory and save pipeline checkpoint. */
+export async function stopProposalGeneration(rfpId: string): Promise<void> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/stop`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!res.ok && res.status !== 409) {
+    let detail = "Stop request failed";
+    try {
+      const data = (await res.json()) as { detail?: string };
+      if (data.detail) detail = data.detail;
+    } catch {
+      // keep default
+    }
+    throw new Error(detail);
+  }
+}
+
+export async function clearProposalGenerationStop(rfpId: string): Promise<void> {
+  await fetch(`/api/rfps/${rfpId}/proposal/generation/clear-stop`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+}
+
 const VERIFY_TAG_RE = /\[VERIFY:/gi;
 
 export function countVerifyTagsInOutline(outline: ProposalOutline): number {
@@ -466,6 +502,7 @@ export async function generateFullProposalStaged(
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
   const signal = options?.signal;
   throwIfAborted(signal);
+  await clearProposalGenerationStop(rfpId);
 
   // Fresh run must wipe DB first — otherwise live polling and section merges
   // immediately rehydrate the previous manuscript (including RFP tabs).
@@ -838,6 +875,7 @@ export async function generateProposalSections1to3(
     throw new Error("Invalid response from server (generation may have timed out).");
   }
   if (!res.ok) {
+    throwIfProposalStopped(res, data);
     throw new Error(data.detail ?? "Sections 1–3 generation failed");
   }
   if (!data.draft) {
@@ -861,6 +899,7 @@ export async function runPhase2Retrieval(
     throw new Error("Invalid response from server (Phase 2 may have timed out).");
   }
   if (!res.ok) {
+    throwIfProposalStopped(res, data);
     throw new Error(data.detail ?? "Phase 2 retrieval failed");
   }
   if (!data.research) {
@@ -888,6 +927,7 @@ export async function runPhase3Drafting(
     throw new Error("Invalid response from server (Phase 3 may have timed out).");
   }
   if (!res.ok) {
+    throwIfProposalStopped(res, data);
     throw new Error(data.detail ?? "Phase 3 drafting failed");
   }
   if (!data.draft || !data.research) {
@@ -918,6 +958,7 @@ export async function runPhase3_6SelfEdit(
     throw new Error("Invalid response from server (self-edit may have timed out).");
   }
   if (!res.ok) {
+    throwIfProposalStopped(res, data);
     throw new Error(data.detail ?? "Self-edit loop failed");
   }
   if (!data.draft || !data.research) {
@@ -953,6 +994,7 @@ export async function runPhase3_5Budget(
     throw new Error("Invalid response from server (budget step may have timed out).");
   }
   if (!res.ok) {
+    throwIfProposalStopped(res, data);
     throw new Error(data.detail ?? "Phase 3.5 budget failed");
   }
   if (!data.budget || !data.research) {
@@ -1092,6 +1134,7 @@ export async function runPhase4PreSubmitReview(
     throw new Error("Invalid response from pre-submit review.");
   }
   if (!res.ok) {
+    throwIfProposalStopped(res, data);
     throw new Error(data.detail ?? "Pre-submit review failed");
   }
   if (!data.review || !data.research) {
@@ -1189,6 +1232,7 @@ export async function runFulfillRfpGaps(
     throw new Error("Invalid response from fulfill RFP gaps.");
   }
   if (!res.ok) {
+    throwIfProposalStopped(res, data);
     throw new Error(data.detail ?? "Fulfill RFP gaps failed");
   }
   if (!data.review || !data.research || !data.draft) {

@@ -29,6 +29,7 @@ import {
   runPhase4FinalizeGaps,
   runFulfillRfpGaps,
   restoreProposalSnapshot,
+  stopProposalGeneration,
   downloadProposalDocx,
   saveProposalDraft,
   startLiveDraftPolling,
@@ -229,6 +230,7 @@ export function ProposalDraftWorkspace({
   const skipNextSaveRef = useRef(false);
   const saveGenerationRef = useRef(0);
   const fullProposalAbortRef = useRef<AbortController | null>(null);
+  const fulfillAbortRef = useRef<AbortController | null>(null);
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const sectionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const contentScrollRef = useRef<HTMLDivElement | null>(null);
@@ -896,6 +898,53 @@ export function ProposalDraftWorkspace({
     return { filled, total: ids.size };
   }, [research?.rfpSections, outline.sections]);
 
+  const handleStopPipeline = useCallback(async () => {
+    fullProposalAbortRef.current?.abort();
+    fulfillAbortRef.current?.abort();
+    try {
+      await stopProposalGeneration(rfp.id);
+    } catch {
+      // Still stop UI even if stop request fails (e.g. offline).
+    }
+    try {
+      const snapshot = await fetchProposalDraft(rfp.id);
+      if (snapshot.draft) {
+        applyOutlineFromServer(snapshot.draft);
+      }
+      if (snapshot.research) {
+        setResearch(snapshot.research);
+        setPipelineStatus(
+          buildPipelineStatus(
+            snapshot.draft,
+            snapshot.research,
+            snapshot.pipelineStatus
+          )
+        );
+        if (snapshot.research.budget) {
+          setBudget(snapshot.research.budget);
+        }
+        if (snapshot.research.presubmitReview) {
+          setPresubmitReview(snapshot.research.presubmitReview);
+        }
+      }
+    } catch {
+      // Non-fatal — checkpoint still updated on server.
+    }
+    setIsFullProposalRunning(false);
+    setIsFulfillingRfpGaps(false);
+    setIsPricingRunning(false);
+    setIsRefiningBudget(false);
+    setIsFinalizingGaps(false);
+    setFullProposalProgress(null);
+    setLiveLatestSectionTitle(null);
+    fullProposalAbortRef.current = null;
+    fulfillAbortRef.current = null;
+    setGenerateNotice(
+      "Stopped — progress saved in the database. Use Continue proposal to resume."
+    );
+    setGenerateError(null);
+  }, [rfp.id, applyOutlineFromServer]);
+
   const handleFulfillRfpGaps = useCallback(async () => {
     if (
       !confirm(
@@ -907,6 +956,9 @@ export function ProposalDraftWorkspace({
     setIsFulfillingRfpGaps(true);
     setGapResolveError(null);
     setGapResolveNotice(null);
+    fulfillAbortRef.current?.abort();
+    const abort = new AbortController();
+    fulfillAbortRef.current = abort;
     const stopScanPoll = startLiveDraftPolling(
       rfp.id,
       handleLiveDraftUpdate,
@@ -914,7 +966,7 @@ export function ProposalDraftWorkspace({
     );
     try {
       const { review, research: updatedResearch, draft, fulfillReport } =
-        await runFulfillRfpGaps(rfp.id);
+        await runFulfillRfpGaps(rfp.id, { signal: abort.signal });
       setPresubmitReview(review);
       setResearch(updatedResearch);
       applyOutlineFromServer(draft);
@@ -970,11 +1022,24 @@ export function ProposalDraftWorkspace({
         }, 120);
       }
     } catch (error) {
+      if (
+        abort.signal.aborted ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
+        setGenerateNotice(
+          "Scan RFP stopped — partial changes may be saved; check Submit → Saved versions."
+        );
+        setGenerateError(null);
+        return;
+      }
       const message =
         error instanceof Error ? error.message : "RFP scan failed";
       setGapResolveError(message);
       setGenerateError(message);
     } finally {
+      if (fulfillAbortRef.current === abort) {
+        fulfillAbortRef.current = null;
+      }
       stopScanPoll();
       setIsFulfillingRfpGaps(false);
     }
@@ -1088,7 +1153,9 @@ export function ProposalDraftWorkspace({
       );
     } catch (error) {
       if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
-        setGenerateNotice("Generation cancelled. Outline was reset.");
+        setGenerateNotice(
+          "Stopped — progress saved in the database. Use Continue proposal to resume."
+        );
         setGenerateError(null);
         return;
       }
@@ -1544,11 +1611,20 @@ export function ProposalDraftWorkspace({
             </span>
             <button
               type="button"
-              onClick={handleResetOutline}
+              onClick={() => void handleResetOutline()}
               className="text-xs font-medium text-zo-text-secondary underline-offset-2 hover:text-foreground hover:underline"
             >
-              {anyPipelineRunning ? "Cancel" : "Reset draft"}
+              Reset draft
             </button>
+            {anyPipelineRunning ? (
+              <button
+                type="button"
+                onClick={() => void handleStopPipeline()}
+                className="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 transition-smooth hover:bg-red-50"
+              >
+                Stop
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => void handlePrimaryPipeline()}
@@ -1970,7 +2046,7 @@ export function ProposalDraftWorkspace({
             <p className="mt-2 max-w-sm text-sm leading-relaxed text-zo-text-muted">
               Generate the full proposal (Sections 1–3 + RFP-specific sections).
             </p>
-            <div className="mt-6 flex flex-wrap gap-3">
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
               <button
                 type="button"
                 onClick={() => void handleGenerateFullProposal()}
@@ -1979,6 +2055,15 @@ export function ProposalDraftWorkspace({
               >
                 Generate Proposal
               </button>
+              {anyPipelineRunning ? (
+                <button
+                  type="button"
+                  onClick={() => void handleStopPipeline()}
+                  className="rounded-xl border border-red-300 bg-white px-5 py-2.5 text-sm font-semibold text-red-700 transition-smooth hover:bg-red-50"
+                >
+                  Stop
+                </button>
+              ) : null}
             </div>
           </div>
         )}

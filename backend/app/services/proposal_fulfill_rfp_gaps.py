@@ -23,6 +23,7 @@ from app.services.proposal_closing_package import (
     detect_closing_components,
     draft_already_covers_component,
 )
+from app.services.proposal_generation_cancel import ProposalGenerationCancelled
 from app.services.proposal_common import ProposalError, aload_rfp_for_proposal
 from app.services.proposal_ending_report import (
     build_proposal_ending_report,
@@ -193,6 +194,8 @@ async def _draft_closing_section(
         )
         content = str((raw or {}).get("content") or "").strip()
         return content or stub
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Closing section draft failed for %s: %s", component.id, exc)
         return stub
@@ -285,11 +288,24 @@ async def run_fulfill_rfp_gaps(
     use_llm: bool = True,
 ) -> tuple[PreSubmitReview, ProposalResearchCache, ProposalDraft, dict[str, Any]]:
     """Re-walk THIS RFP → add missing closing tabs → patch gaps → refresh ending report."""
-    from app.services.proposal_pipeline_checkpoint import clear_fulfill_scan_activity
+    from app.services.proposal_generation_cancel import (
+        ProposalGenerationCancelled,
+        bind_active_rfp,
+        unbind_active_rfp,
+    )
+    from app.services.proposal_pipeline_checkpoint import (
+        clear_fulfill_scan_activity,
+        record_generation_stopped,
+    )
 
+    token = bind_active_rfp(rfp_id)
     try:
         return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
+    except ProposalGenerationCancelled:
+        record_generation_stopped(rfp_id, "fulfill-scan")
+        raise
     finally:
+        unbind_active_rfp(token)
         clear_fulfill_scan_activity(rfp_id)
 
 
@@ -344,6 +360,11 @@ async def _run_fulfill_rfp_gaps_body(
         "Pre-submit refresh",
     )
 
+    async def _ensure_not_stopped() -> None:
+        from app.services.proposal_generation_cancel import check_generation_cancelled
+
+        await check_generation_cancelled(rfp_id)
+
     def _scan_progress(step: int, label: str, detail: str | None = None) -> None:
         record_pipeline_activity(
             rfp_id,
@@ -359,6 +380,7 @@ async def _run_fulfill_rfp_gaps_body(
         "Scan RFP: closing & submission",
         f"Reading {len(rfp_text.strip()):,} chars from uploaded PDF.",
     )
+    await _ensure_not_stopped()
 
     report: dict[str, Any] = {
         "snapshotSavedAt": draft.snapshots[-1].saved_at if draft.snapshots else None,
@@ -427,6 +449,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
             if research:
                 await asave_research_cache(research)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Submission narrative pass skipped: %s", exc)
         report["logs"].append(f"Submission narratives skipped: {exc}")
@@ -439,6 +463,7 @@ async def _run_fulfill_rfp_gaps_body(
             "Scan RFP: structure & scored sections",
             "Exhibit A / TOC / criteria — reframe BMP, qualifications, approach per RFP.",
         )
+        await _ensure_not_stopped()
         preserved_pre = fulfill_scan_preserve_bio_and_case_study_ids(draft)
         draft, struct_logs, struct_human = await run_rfp_structure_alignment_pass(
             draft=draft,
@@ -453,6 +478,8 @@ async def _run_fulfill_rfp_gaps_body(
         report["humanDecisionGaps"].extend(struct_human)
         if struct_logs:
             await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("RFP structure alignment skipped: %s", exc)
         report["logs"].append(f"RFP structure scan skipped: {exc}")
@@ -467,6 +494,8 @@ async def _run_fulfill_rfp_gaps_body(
         report["humanDecisionGaps"].extend(fab_human)
         if fab_logs:
             await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Fabrication guard skipped: %s", exc)
         report["logs"].append(f"Fabrication guard skipped: {exc}")
@@ -487,6 +516,8 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].extend(s3_logs)
         if s3_logs and any("Rebuilt Section 3" in line for line in s3_logs):
             await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Section 3 repair skipped: %s", exc)
         report["logs"].append(f"Section 3 repair skipped: {exc}")
@@ -503,6 +534,8 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].extend(ins_logs)
         if ins_logs and any("Added E&O" in line for line in ins_logs):
             await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Insurance repair skipped: %s", exc)
         report["logs"].append(f"Insurance repair skipped: {exc}")
@@ -543,6 +576,7 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
         _scan_progress(3, "Scan RFP: budget reconcile", "Fee tables vs RFP spend — not full-manuscript context.")
+        await _ensure_not_stopped()
         draft, research, budget_logs = await run_fulfill_budget_scan(
             rfp_id=rfp_id,
             rfp=rfp,
@@ -558,6 +592,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
             if research:
                 await asave_research_cache(research)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Budget scan skipped: %s", exc)
         report["logs"].append(f"Budget scan skipped: {exc}")
@@ -566,6 +602,7 @@ async def _run_fulfill_rfp_gaps_body(
         from app.services.proposal_fulfill_rfp_repairs import run_manuscript_consistency_repairs
 
         _scan_progress(4, "Scan RFP: consistency repairs", "Roster, KPI wording, qualification stubs.")
+        await _ensure_not_stopped()
         draft, repair_logs, repair_human = await run_manuscript_consistency_repairs(
             draft,
             skip_section_ids=preserved_ids,
@@ -574,6 +611,8 @@ async def _run_fulfill_rfp_gaps_body(
         report["humanDecisionGaps"].extend(repair_human)
         if repair_logs:
             await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Manuscript consistency repairs skipped: %s", exc)
         report["logs"].append(f"Consistency repairs skipped: {exc}")
@@ -592,6 +631,8 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].extend(trunc_logs)
         if trunc_logs:
             await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Truncation repair skipped: %s", exc)
         report["logs"].append(f"Truncation repair skipped: {exc}")
@@ -605,6 +646,7 @@ async def _run_fulfill_rfp_gaps_body(
                 "Scan RFP: contractor KPIs + detail",
                 "Activity Measure tables & BMP linkages — rewrite, not label swap.",
             )
+            await _ensure_not_stopped()
             draft, kpi_logs, kpi_human = await run_fulfill_kpi_scan(
                 draft=draft,
                 rfp=rfp,
@@ -617,6 +659,8 @@ async def _run_fulfill_rfp_gaps_body(
             report["kpiScan"] = kpi_logs
             report["humanDecisionGaps"].extend(kpi_human)
             await asave_proposal_draft(draft)
+        except ProposalGenerationCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("KPI scan skipped: %s", exc)
             report["logs"].append(f"KPI scan skipped: {exc}")
@@ -625,6 +669,7 @@ async def _run_fulfill_rfp_gaps_body(
             from app.services.proposal_fulfill_rfp_budget_kpi import run_fulfill_kpi_scan
 
             _scan_progress(5, "Scan RFP: contractor KPIs", "Deterministic KPI alignment (no LLM).")
+            await _ensure_not_stopped()
             draft, kpi_logs, kpi_human = await run_fulfill_kpi_scan(
                 draft=draft,
                 rfp=rfp,
@@ -637,6 +682,8 @@ async def _run_fulfill_rfp_gaps_body(
             report["kpiScan"] = kpi_logs
             report["humanDecisionGaps"].extend(kpi_human)
             await asave_proposal_draft(draft)
+        except ProposalGenerationCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             report["logs"].append(f"KPI deterministic scan skipped: {exc}")
 
@@ -667,6 +714,8 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
     _scan_progress(6, "Scan RFP: pre-submit refresh", "Updating checklist and ending report.")
+    await _ensure_not_stopped()
+
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp, draft=draft, research=research, finalized=False
     )

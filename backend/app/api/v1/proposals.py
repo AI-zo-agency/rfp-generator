@@ -163,7 +163,36 @@ async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
         # Ignore errors if research didn't exist
         pass
     clear_pipeline_checkpoint(rfp_id)
+    from app.services.proposal_generation_cancel import clear_generation_cancel
+
+    clear_generation_cancel(rfp_id)
     return {"ok": True, "message": "Proposal draft and all checkpoints cleared from database."}
+
+
+@router.post("/{rfp_id}/proposal/stop")
+async def stop_proposal_generation_endpoint(rfp_id: str) -> dict[str, object]:
+    """Request cooperative stop — ends current LLM/Supermemory work and saves checkpoint."""
+    from app.services.proposal_generation_cancel import request_generation_cancel
+    from app.services.proposal_pipeline_checkpoint import record_generation_stopped
+
+    request_generation_cancel(rfp_id)
+    research = get_research_cache(rfp_id)
+    phase = None
+    if research and research.pipeline_checkpoint:
+        phase = research.pipeline_checkpoint.in_progress_phase
+    record_generation_stopped(rfp_id, phase)
+    return {
+        "ok": True,
+        "message": "Stop requested. Current step will end; use Continue proposal to resume.",
+    }
+
+
+@router.post("/{rfp_id}/proposal/generation/clear-stop")
+async def clear_proposal_stop_flag_endpoint(rfp_id: str) -> dict[str, bool]:
+    from app.services.proposal_generation_cancel import clear_generation_cancel
+
+    clear_generation_cancel(rfp_id)
+    return {"ok": True}
 
 
 @router.post("/{rfp_id}/proposal/generate", response_model=ProposalGenerateResponse)

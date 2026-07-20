@@ -60,14 +60,20 @@ async def _request(
     json_body: dict[str, Any] | None = None,
     allow_status: set[int] | None = None,
 ) -> Any:
+    from app.services.proposal_generation_cancel import run_with_generation_cancel
+
     url = f"{settings.supermemory_base_url.rstrip('/')}{path}"
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.request(
-            method,
-            url,
-            headers=_auth_headers(),
-            json=json_body,
-        )
+
+    async def _do_request() -> httpx.Response:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            return await client.request(
+                method,
+                url,
+                headers=_auth_headers(),
+                json=json_body,
+            )
+
+    response = await run_with_generation_cancel(_do_request)
 
     if response.status_code in (allow_status or set()):
         if not response.content:

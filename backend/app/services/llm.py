@@ -82,9 +82,14 @@ async def _post_gemini_chat(
         body["generationConfig"]["maxOutputTokens"] = max_tokens
     
     logger.info("LLM request: provider=Gemini model=%s messages=%d", model, len(messages))
-    
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.post(url, json=body)
+
+    from app.services.proposal_generation_cancel import run_with_generation_cancel
+
+    async def _post() -> httpx.Response:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            return await client.post(url, json=body)
+
+    response = await run_with_generation_cancel(_post)
     
     if response.status_code >= 400:
         detail = response.text.strip() or response.reason_phrase
@@ -150,9 +155,15 @@ async def _post_chat(
     )
 
     last_error: LlmError | None = None
+    from app.services.proposal_generation_cancel import run_with_generation_cancel
+
     for attempt in range(4):
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            response = await client.post(url, headers=headers, json=body)
+
+        async def _post() -> httpx.Response:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                return await client.post(url, headers=headers, json=body)
+
+        response = await run_with_generation_cancel(_post)
 
         if response.status_code == 429 and attempt < 3:
             wait_s = 2 ** (attempt + 1)

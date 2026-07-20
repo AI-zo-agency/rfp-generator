@@ -764,6 +764,9 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
     prior_research = get_research_cache(rfp_id)
 
     logger.info("Phase 2 intelligence starting for %s", rfp_id)
+    from app.services.proposal_generation_cancel import check_generation_cancelled
+
+    await check_generation_cancelled(rfp_id)
     try:
         plan, legacy = await run_intelligence_graph(
             rfp_id=rfp.id,
