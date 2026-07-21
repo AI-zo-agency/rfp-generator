@@ -53,6 +53,9 @@ def _with_supabase_retry(
     raise last_exc
 
 
+_MAX_ARCHIVES_PER_RFP = 20
+
+
 def init_proposal_db() -> None:
     init_rfp_db()
     if _use_supabase():
@@ -70,6 +73,18 @@ def init_proposal_db() -> None:
                 payload TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS proposal_draft_archives (
+                id TEXT PRIMARY KEY,
+                rfp_id TEXT NOT NULL,
+                archived_at TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                label TEXT,
+                section_count INTEGER NOT NULL DEFAULT 0,
+                filled_count INTEGER NOT NULL DEFAULT 0,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_proposal_draft_archives_rfp_archived
+                ON proposal_draft_archives (rfp_id, archived_at DESC);
             """
         )
 
@@ -224,3 +239,170 @@ async def adelete_proposal_draft(rfp_id: str) -> None:
 
 async def adelete_research_cache(rfp_id: str) -> None:
     await asyncio.to_thread(delete_research_cache, rfp_id)
+
+
+def _archive_counts(draft: ProposalDraft) -> tuple[int, int]:
+    sections = draft.sections or []
+    section_count = len(sections)
+    filled_count = sum(1 for s in sections if (s.content or "").strip())
+    return section_count, filled_count
+
+
+def _prune_archives_sqlite(conn: sqlite3.Connection, rfp_id: str) -> None:
+    rows = conn.execute(
+        """
+        SELECT id FROM proposal_draft_archives
+        WHERE rfp_id = ?
+        ORDER BY archived_at DESC
+        """,
+        (rfp_id,),
+    ).fetchall()
+    if len(rows) <= _MAX_ARCHIVES_PER_RFP:
+        return
+    drop_ids = [str(r["id"]) for r in rows[_MAX_ARCHIVES_PER_RFP:]]
+    conn.executemany(
+        "DELETE FROM proposal_draft_archives WHERE id = ?",
+        [(i,) for i in drop_ids],
+    )
+
+
+def save_proposal_draft_archive(
+    *,
+    rfp_id: str,
+    reason: str,
+    label: str | None,
+    payload: ProposalDraft,
+) -> str:
+    """Persist a full draft payload to the archive table. Returns archive id."""
+    if _use_supabase():
+        return _with_supabase_retry(
+            "save_proposal_draft_archive",
+            lambda: sb.save_proposal_draft_archive(
+                rfp_id=rfp_id,
+                reason=reason,
+                label=label,
+                payload=payload,
+                max_per_rfp=_MAX_ARCHIVES_PER_RFP,
+            ),
+            retries=_SUPABASE_WRITE_RETRIES,
+        )
+    import uuid
+
+    now = datetime.now(timezone.utc).isoformat()
+    archive_id = str(uuid.uuid4())
+    section_count, filled_count = _archive_counts(payload)
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO proposal_draft_archives (
+                id, rfp_id, archived_at, reason, label,
+                section_count, filled_count, payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                archive_id,
+                rfp_id,
+                now,
+                reason,
+                label,
+                section_count,
+                filled_count,
+                payload.model_dump_json(by_alias=True),
+            ),
+        )
+        _prune_archives_sqlite(conn, rfp_id)
+    return archive_id
+
+
+def list_proposal_draft_archives(rfp_id: str) -> list[dict]:
+    """Return archive metadata newest-first (no payloads)."""
+    if _use_supabase():
+        return _with_supabase_retry(
+            "list_proposal_draft_archives",
+            lambda: sb.list_proposal_draft_archives(rfp_id),
+            retries=_SUPABASE_READ_RETRIES,
+        )
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, rfp_id, archived_at, reason, label, section_count, filled_count
+            FROM proposal_draft_archives
+            WHERE rfp_id = ?
+            ORDER BY archived_at DESC
+            """,
+            (rfp_id,),
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "rfp_id": str(row["rfp_id"]),
+            "archived_at": str(row["archived_at"]),
+            "reason": str(row["reason"]),
+            "label": row["label"],
+            "section_count": int(row["section_count"] or 0),
+            "filled_count": int(row["filled_count"] or 0),
+        }
+        for row in rows
+    ]
+
+
+def get_proposal_draft_archive(rfp_id: str, archive_id: str) -> ProposalDraft | None:
+    if _use_supabase():
+        return _with_supabase_retry(
+            "get_proposal_draft_archive",
+            lambda: sb.get_proposal_draft_archive(rfp_id, archive_id),
+            retries=_SUPABASE_READ_RETRIES,
+        )
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT payload FROM proposal_draft_archives
+            WHERE rfp_id = ? AND id = ?
+            """,
+            (rfp_id, archive_id),
+        ).fetchone()
+    if not row:
+        return None
+    return ProposalDraft.model_validate(json.loads(row["payload"]))
+
+
+def restore_proposal_draft_archive(rfp_id: str, archive_id: str) -> ProposalDraft:
+    archived = get_proposal_draft_archive(rfp_id, archive_id)
+    if archived is None:
+        raise KeyError(f"Archive {archive_id} not found for {rfp_id}")
+    # Ensure restored draft points at this RFP and gets a fresh updatedAt via save.
+    restored = archived.model_copy(update={"rfp_id": rfp_id})
+    save_proposal_draft(restored)
+    return get_proposal_draft(rfp_id) or restored
+
+
+async def asave_proposal_draft_archive(
+    *,
+    rfp_id: str,
+    reason: str,
+    label: str | None,
+    payload: ProposalDraft,
+) -> str:
+    return await asyncio.to_thread(
+        save_proposal_draft_archive,
+        rfp_id=rfp_id,
+        reason=reason,
+        label=label,
+        payload=payload,
+    )
+
+
+async def alist_proposal_draft_archives(rfp_id: str) -> list[dict]:
+    return await asyncio.to_thread(list_proposal_draft_archives, rfp_id)
+
+
+async def aget_proposal_draft_archive(
+    rfp_id: str, archive_id: str
+) -> ProposalDraft | None:
+    return await asyncio.to_thread(get_proposal_draft_archive, rfp_id, archive_id)
+
+
+async def arestore_proposal_draft_archive(
+    rfp_id: str, archive_id: str
+) -> ProposalDraft:
+    return await asyncio.to_thread(restore_proposal_draft_archive, rfp_id, archive_id)

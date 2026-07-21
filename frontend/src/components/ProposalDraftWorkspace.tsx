@@ -29,12 +29,15 @@ import {
   runPhase4FinalizeGaps,
   runFulfillRfpGaps,
   restoreProposalSnapshot,
+  listProposalArchives,
+  restoreProposalArchive,
   stopProposalGeneration,
   downloadProposalDocx,
   saveProposalDraft,
   startLiveDraftPolling,
   fullProposalProgressFromInFlight,
   type FullProposalProgress,
+  type ProposalDraftArchiveMeta,
   type ProposalPipelineStatus,
 } from "@/lib/proposal-api";
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
@@ -224,6 +227,11 @@ export function ProposalDraftWorkspace({
   const [isFulfillingRfpGaps, setIsFulfillingRfpGaps] = useState(false);
   const [isRestoringSnapshot, setIsRestoringSnapshot] = useState(false);
   const [restoreSnapshotAt, setRestoreSnapshotAt] = useState("");
+  const [draftArchives, setDraftArchives] = useState<ProposalDraftArchiveMeta[]>(
+    []
+  );
+  const [selectedArchiveId, setSelectedArchiveId] = useState("");
+  const [isRestoringArchive, setIsRestoringArchive] = useState(false);
   const [gapResolveNotice, setGapResolveNotice] = useState<string | null>(null);
   const [gapResolveError, setGapResolveError] = useState<string | null>(null);
   const [presubmitReview, setPresubmitReview] = useState<PreSubmitReview | null>(null);
@@ -925,6 +933,76 @@ export function ProposalDraftWorkspace({
     [restoreSnapshotAt, handleRestoreSnapshot]
   );
 
+  const refreshDraftArchives = useCallback(async () => {
+    try {
+      const archives = await listProposalArchives(rfp.id);
+      setDraftArchives(archives);
+      setSelectedArchiveId((prev) =>
+        archives.some((a) => a.id === prev) ? prev : (archives[0]?.id ?? "")
+      );
+    } catch {
+      // Archives are optional until migration is applied.
+    }
+  }, [rfp.id]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    void refreshDraftArchives();
+  }, [hydrated, refreshDraftArchives, outline.updatedAt]);
+
+  const handleRestoreArchive = useCallback(
+    async (archiveIdOverride?: string) => {
+      const archiveId = archiveIdOverride ?? selectedArchiveId;
+      if (!archiveId) return false;
+      const meta = draftArchives.find((a) => a.id === archiveId);
+      const label = meta?.label || meta?.reason || "archived manuscript";
+      if (
+        !confirm(
+          `Restore archived manuscript "${label}"?\n\nCurrent live draft will be archived first, then replaced.`
+        )
+      ) {
+        return false;
+      }
+      setIsRestoringArchive(true);
+      setGapResolveError(null);
+      try {
+        const restored = await restoreProposalArchive(rfp.id, archiveId);
+        applyOutlineFromServer(restored);
+        setGapResolveNotice(`Restored archived manuscript "${label}".`);
+        setActiveTab("outline");
+        await refreshDraftArchives();
+        return true;
+      } catch (error) {
+        setGapResolveError(
+          error instanceof Error ? error.message : "Archive restore failed"
+        );
+        return false;
+      } finally {
+        setIsRestoringArchive(false);
+      }
+    },
+    [
+      selectedArchiveId,
+      draftArchives,
+      rfp.id,
+      applyOutlineFromServer,
+      refreshDraftArchives,
+    ]
+  );
+
+  const handleArchiveDropdownChange = useCallback(
+    async (archiveId: string) => {
+      if (!archiveId || archiveId === selectedArchiveId) return;
+      const previous = selectedArchiveId;
+      setSelectedArchiveId(archiveId);
+      const ok = await handleRestoreArchive(archiveId);
+      if (!ok) {
+        setSelectedArchiveId(previous);
+      }
+    },
+    [selectedArchiveId, handleRestoreArchive]
+  );
+
   useEffect(() => {
     const snaps = outline.snapshots ?? [];
     if (!snaps.length) {
@@ -1278,7 +1356,7 @@ export function ProposalDraftWorkspace({
     setGenerateNotice(null);
 
     // Fresh start: clear the editor immediately so old manuscript cannot flash
-    // while the server wipe + Sections 1–3 regenerate.
+    // while the server soft-regenerates Sections 1–3 in place (no DB wipe).
     if (forceRestart) {
       const defaults = buildDefaultOutline(rfp);
       saveGenerationRef.current += 1;
@@ -1411,7 +1489,7 @@ export function ProposalDraftWorkspace({
   const handleResetOutline = async () => {
     if (
       !confirm(
-        "Reset outline and clear ALL generated content?\n\nThis will permanently delete:\n• All generated sections (Sections 1–3, RFP sections)\n• All pipeline checkpoints from the database\n• Research cache and evidence corpus\n• Cancel any generation currently running\n\nThis cannot be undone."
+        "Reset outline and clear ALL generated content?\n\nThis will:\n• Archive the current filled manuscript (if any) for rollback\n• Delete live sections, pipeline checkpoints, and research cache\n• Cancel any generation currently running\n\nYou can restore from Archives after reset."
       )
     ) {
       return;
@@ -1427,7 +1505,7 @@ export function ProposalDraftWorkspace({
     setLiveLatestSectionTitle(null);
     liveContentFingerprintRef.current = new Map();
 
-    // 1. Hard-delete from DB (draft + checkpoint + research cache)
+    // 1. Hard-delete from DB (archives filled draft first, then wipe)
     let resetFailed: string | null = null;
     try {
       await resetProposal(rfp.id);
@@ -1455,7 +1533,7 @@ export function ProposalDraftWorkspace({
     setGenerateNotice(
       resetFailed
         ? "Local outline cleared, but server wipe failed — try Reset again before generating."
-        : "Reset complete. All generated content cleared."
+        : "Reset complete. Manuscript archived when one existed; live draft cleared."
     );
     setFullProposalProgress(null);
     setLiveLatestSectionTitle(null);
@@ -1468,15 +1546,14 @@ export function ProposalDraftWorkspace({
       // Non-fatal — DB reset already cleared content
     }
 
-    // 4. Wipe again after a beat — only if generation has not started yet
-    const resetToken = saveGenerationRef.current;
-    window.setTimeout(() => {
-      if (fullProposalAbortRef.current) return; // generation in flight — do not wipe
-      if (saveGenerationRef.current !== resetToken) return;
-      void resetProposal(rfp.id)
-        .then(() => saveProposalDraft(rfp.id, defaults))
-        .catch(() => undefined);
-    }, 2500);
+    // Refresh archive list so the just-archived manuscript appears for rollback.
+    try {
+      const archives = await listProposalArchives(rfp.id);
+      setDraftArchives(archives);
+      setSelectedArchiveId(archives[0]?.id ?? "");
+    } catch {
+      // Non-fatal
+    }
   };
 
 
@@ -1917,6 +1994,41 @@ export function ProposalDraftWorkspace({
                         {snap.label}
                         {" · "}
                         {new Date(snap.savedAt).toLocaleString(undefined, {
+                          month: "short",
+                          day: "numeric",
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })}
+                      </option>
+                    ))}
+                  </select>
+                </span>
+              </label>
+            ) : null}
+            {draftArchives.length > 0 ? (
+              <label className="proposal-snapshot-field">
+                <span className="proposal-snapshot-field-label">
+                  Archive
+                </span>
+                <span className="proposal-snapshot-field-control">
+                  <select
+                    value={selectedArchiveId}
+                    onChange={(e) =>
+                      void handleArchiveDropdownChange(e.target.value)
+                    }
+                    disabled={isRestoringArchive || anyPipelineRunning}
+                    className="proposal-snapshot-select"
+                    aria-label="Restore an archived manuscript"
+                    aria-busy={isRestoringArchive}
+                    title="Roll back to a manuscript archived before regenerate or reset"
+                  >
+                    {draftArchives.map((arch) => (
+                      <option key={arch.id} value={arch.id}>
+                        {arch.label || arch.reason}
+                        {" · "}
+                        {arch.filledCount} filled
+                        {" · "}
+                        {new Date(arch.archivedAt).toLocaleString(undefined, {
                           month: "short",
                           day: "numeric",
                           hour: "numeric",

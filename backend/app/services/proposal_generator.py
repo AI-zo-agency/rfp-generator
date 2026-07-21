@@ -28,7 +28,6 @@ from app.services.proposal_voice_enforcement import (
     is_duplicate_static_rfp_section,
 )
 from app.services.proposal_repository import (
-    adelete_proposal_draft,
     aget_proposal_draft,
     aget_research_cache,
     asave_proposal_draft,
@@ -725,8 +724,13 @@ async def _persist_sections_1_3_partial(
         rfpId=rfp_id,
         sections=merged,
         updatedAt=now,
-        generatedAt=now,
+        generatedAt=(existing.generated_at if existing and existing.generated_at else now),
         provider=provider,
+        googleDocUrl=existing.google_doc_url if existing else None,
+        googleDocId=existing.google_doc_id if existing else None,
+        googleDocExportedAt=existing.google_doc_exported_at if existing else None,
+        snapshots=list(existing.snapshots) if existing else [],
+        lastFulfillReport=existing.last_fulfill_report if existing else None,
     )
     await asave_proposal_draft(draft)
 
@@ -969,21 +973,27 @@ async def generate_sections_1_3(
 
     if force_regenerate:
         logger.info(
-            "Force-regenerating sections 1–3 for %s (explicit draft request)",
+            "Force-regenerating sections 1–3 for %s (soft — no draft delete)",
             rfp_id,
         )
-        # Wipe prior manuscript so live-poll + richer-merge cannot resurrect
-        # stale Section 1–3 or leftover RFP tabs from a previous run.
-        if existing_draft:
-            try:
-                await adelete_proposal_draft(rfp_id)
-            except Exception:
-                logger.exception(
-                    "Failed to clear prior draft before force-regenerate for %s",
-                    rfp_id,
-                )
-            existing_draft = None
-            existing_sections_1_3 = []
+        # Archive + in-draft snapshot first. NEVER delete the proposal_drafts row here —
+        # that permanently destroyed filled manuscripts when a later run skipped/failed.
+        if existing_draft and any(
+            (s.content or "").strip() for s in existing_draft.sections or []
+        ):
+            from app.services.proposal_draft_archives import (
+                REASON_BEFORE_SECTIONS_1_3_REGEN,
+                archive_filled_draft,
+            )
+
+            await archive_filled_draft(
+                existing_draft,
+                reason=REASON_BEFORE_SECTIONS_1_3_REGEN,
+                label="Before Sections 1–3 regenerate",
+            )
+            existing_draft = await aget_proposal_draft(rfp_id)
+        existing_sections_1_3 = []
+        # Fall through to full regen of 1–3 while keeping the live row + RFP tabs.
     elif existing_draft:
         # Check if we already have COMPLETE sections 1-3 with content
         existing_sections_1_3 = [

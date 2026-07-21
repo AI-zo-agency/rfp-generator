@@ -535,13 +535,8 @@ export async function generateFullProposalStaged(
   throwIfAborted(signal);
   await clearProposalGenerationStop(rfpId);
 
-  // Fresh run must wipe DB first — otherwise live polling and section merges
-  // immediately rehydrate the previous manuscript (including RFP tabs).
-  if (options?.forceRestart) {
-    await resetProposal(rfpId);
-    throwIfAborted(signal);
-  }
-
+  // Soft restart: do NOT wipe the DB. Backend archives + regenerates in place.
+  // (Hard wipe is only Reset draft.) Clearing happens in the UI only.
   const snapshot = await fetchProposalDraft(rfpId);
   let draft = snapshot.draft;
   let research = snapshot.research;
@@ -1314,6 +1309,64 @@ export async function restoreProposalSnapshot(
   }
   if (!data.draft) {
     throw new Error("Incomplete restore snapshot response.");
+  }
+  return apiDraftToOutline(data.draft);
+}
+
+export type ProposalDraftArchiveMeta = {
+  id: string;
+  rfpId: string;
+  archivedAt: string;
+  reason: string;
+  label?: string | null;
+  sectionCount: number;
+  filledCount: number;
+};
+
+export async function listProposalArchives(
+  rfpId: string
+): Promise<ProposalDraftArchiveMeta[]> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/archives`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  const text = await res.text();
+  let data: { detail?: string; archives?: ProposalDraftArchiveMeta[] };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from proposal archives.");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Could not list proposal archives.");
+  }
+  return data.archives ?? [];
+}
+
+export async function restoreProposalArchive(
+  rfpId: string,
+  archiveId: string
+): Promise<ProposalOutline> {
+  const res = await fetch(
+    `/api/rfps/${rfpId}/proposal/archives/${encodeURIComponent(archiveId)}/restore`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    }
+  );
+  const text = await res.text();
+  let data: { detail?: string; draft?: ApiProposalDraft };
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from restore archive.");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Could not restore archive.");
+  }
+  if (!data.draft) {
+    throw new Error("Incomplete restore archive response.");
   }
   return apiDraftToOutline(data.draft);
 }

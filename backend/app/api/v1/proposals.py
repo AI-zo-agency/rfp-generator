@@ -47,6 +47,7 @@ from app.services.proposal_generator import (
 from app.services.proposal_section_editor import improve_proposal_section
 from app.services.proposal_repository import (
     get_proposal_draft,
+    get_research_cache,
     save_proposal_draft,
     aget_research_cache,
     asave_proposal_draft,
@@ -180,38 +181,112 @@ def upsert_proposal(rfp_id: str, draft: ProposalDraft) -> dict[str, object]:
             1 for s in draft.sections if (s.content or "").strip()
         )
         if existing_filled > 0 and incoming_filled == 0:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Refusing to overwrite a filled proposal with an empty outline. "
-                    "Use Reset draft if you intend to clear the manuscript."
-                ),
+            research = get_research_cache(rfp_id)
+            completed = None
+            if research and research.pipeline_checkpoint:
+                completed = research.pipeline_checkpoint.last_completed_phase
+            detail = (
+                "Refusing to overwrite a filled proposal with an empty outline. "
+                "Use Reset draft if you intend to clear the manuscript."
             )
+            if completed:
+                detail = (
+                    f"Refusing to overwrite a filled proposal (pipeline reached "
+                    f"{completed}) with an empty outline. "
+                    "Use Reset draft if you intend to clear the manuscript."
+                )
+            raise HTTPException(status_code=409, detail=detail)
     draft = merge_snapshots_for_save(draft, existing)
     save_proposal_draft(draft)
     return {"ok": True, "draft": slim_draft_for_api(draft)}
 
 
-@router.post("/{rfp_id}/proposal/reset")
-async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
-    """Hard-reset: wipe draft AND pipeline checkpoint from DB so generation starts completely fresh."""
+@router.get("/{rfp_id}/proposal/archives")
+async def list_proposal_archives_endpoint(rfp_id: str) -> dict[str, object]:
     if not rfp_exists(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
+    from app.services.proposal_draft_archives import archive_meta_dict
+    from app.services.proposal_repository import alist_proposal_draft_archives
+
+    rows = await alist_proposal_draft_archives(rfp_id)
+    return {"archives": [archive_meta_dict(row) for row in rows]}
+
+
+@router.post("/{rfp_id}/proposal/archives/{archive_id}/restore")
+async def restore_proposal_archive_endpoint(
+    rfp_id: str, archive_id: str
+) -> dict[str, object]:
+    if not rfp_exists(rfp_id):
+        raise HTTPException(status_code=404, detail="RFP not found")
+    from app.services.proposal_draft_archives import (
+        REASON_BEFORE_ARCHIVE_RESTORE,
+        archive_filled_draft,
+    )
+    from app.services.proposal_repository import (
+        aget_proposal_draft,
+        aget_proposal_draft_archive,
+        arestore_proposal_draft_archive,
+    )
+
+    archived = await aget_proposal_draft_archive(rfp_id, archive_id)
+    if archived is None:
+        raise HTTPException(status_code=404, detail="Archive not found.")
+    current = await aget_proposal_draft(rfp_id)
+    await archive_filled_draft(
+        current,
+        reason=REASON_BEFORE_ARCHIVE_RESTORE,
+        label="Before archive restore",
+    )
+    try:
+        draft = await arestore_proposal_draft_archive(rfp_id, archive_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "draft": slim_draft_for_api(draft)}
+
+
+@router.post("/{rfp_id}/proposal/reset")
+async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
+    """Hard-reset: archive filled draft, then wipe draft + checkpoint so generation starts fresh."""
+    if not rfp_exists(rfp_id):
+        raise HTTPException(status_code=404, detail="RFP not found")
+    from app.services.proposal_draft_archives import (
+        REASON_BEFORE_RESET,
+        archive_filled_draft,
+    )
+    from app.services.proposal_repository import aget_proposal_draft
+
+    try:
+        current = await aget_proposal_draft(rfp_id)
+        await archive_filled_draft(
+            current,
+            reason=REASON_BEFORE_RESET,
+            label="Before Reset draft",
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "Failed to archive draft before reset for %s", rfp_id
+        )
     try:
         await adelete_proposal_draft(rfp_id)
-    except Exception as exc:
-        # Ignore errors if draft didn't exist
+    except Exception:
         pass
     try:
         await adelete_research_cache(rfp_id)
-    except Exception as exc:
-        # Ignore errors if research didn't exist
+    except Exception:
         pass
     await clear_pipeline_checkpoint(rfp_id)
     from app.services.proposal_generation_cancel import clear_generation_cancel
 
     clear_generation_cancel(rfp_id)
-    return {"ok": True, "message": "Proposal draft and all checkpoints cleared from database."}
+    return {
+        "ok": True,
+        "message": (
+            "Proposal draft and all checkpoints cleared from database. "
+            "A filled manuscript was archived first when one existed."
+        ),
+    }
 
 
 @router.post("/{rfp_id}/proposal/stop")

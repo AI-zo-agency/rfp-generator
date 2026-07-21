@@ -431,6 +431,97 @@ def delete_research_cache(rfp_id: str) -> None:
     client.table("proposal_research").delete().eq("rfp_id", rfp_id).execute()
 
 
+def save_proposal_draft_archive(
+    *,
+    rfp_id: str,
+    reason: str,
+    label: str | None,
+    payload: ProposalDraft,
+    max_per_rfp: int = 20,
+) -> str:
+    now = datetime.now(timezone.utc).isoformat()
+    sections = payload.sections or []
+    section_count = len(sections)
+    filled_count = sum(1 for s in sections if (s.content or "").strip())
+    body = {
+        "rfp_id": rfp_id,
+        "archived_at": now,
+        "reason": reason,
+        "label": label,
+        "section_count": section_count,
+        "filled_count": filled_count,
+        "payload": json.loads(payload.model_dump_json(by_alias=True)),
+    }
+    client = _get_client()
+    result = client.table("proposal_draft_archives").insert(body).execute()
+    rows = _handle_response(result.data, context="save_proposal_draft_archive")
+    archive_id = str((rows[0] if rows else {}).get("id") or "")
+    if not archive_id:
+        raise RuntimeError("proposal_draft_archives insert returned no id")
+
+    listed = (
+        client.table("proposal_draft_archives")
+        .select("id")
+        .eq("rfp_id", rfp_id)
+        .order("archived_at", desc=True)
+        .execute()
+    )
+    keep_rows = _handle_response(listed.data, context="prune_proposal_draft_archives")
+    if len(keep_rows) > max_per_rfp:
+        for stale in keep_rows[max_per_rfp:]:
+            stale_id = stale.get("id")
+            if stale_id:
+                client.table("proposal_draft_archives").delete().eq(
+                    "id", stale_id
+                ).execute()
+    return archive_id
+
+
+def list_proposal_draft_archives(rfp_id: str) -> list[dict[str, Any]]:
+    client = _get_client()
+    result = (
+        client.table("proposal_draft_archives")
+        .select(
+            "id, rfp_id, archived_at, reason, label, section_count, filled_count"
+        )
+        .eq("rfp_id", rfp_id)
+        .order("archived_at", desc=True)
+        .execute()
+    )
+    rows = _handle_response(result.data, context="list_proposal_draft_archives")
+    return [
+        {
+            "id": str(row.get("id") or ""),
+            "rfp_id": str(row.get("rfp_id") or ""),
+            "archived_at": str(row.get("archived_at") or ""),
+            "reason": str(row.get("reason") or ""),
+            "label": row.get("label"),
+            "section_count": int(row.get("section_count") or 0),
+            "filled_count": int(row.get("filled_count") or 0),
+        }
+        for row in rows
+    ]
+
+
+def get_proposal_draft_archive(rfp_id: str, archive_id: str) -> ProposalDraft | None:
+    client = _get_client()
+    result = (
+        client.table("proposal_draft_archives")
+        .select("payload")
+        .eq("rfp_id", rfp_id)
+        .eq("id", archive_id)
+        .limit(1)
+        .execute()
+    )
+    rows = _handle_response(result.data, context="get_proposal_draft_archive")
+    if not rows:
+        return None
+    payload = rows[0].get("payload")
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    return ProposalDraft.model_validate(payload)
+
+
 
 
 def create_sync_job(job_id: str) -> None:
