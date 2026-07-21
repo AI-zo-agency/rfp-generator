@@ -3,6 +3,8 @@ import { withDashboardPdfUrl } from "@/lib/rfp-pdf";
 import { mapSupabaseRfpRow } from "@/lib/supabase-rfp-map";
 import { NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+
 /**
  * Reads RFP list directly from Supabase — completely independent of the
  * Python backend, so the dashboard never blocks during generation.
