@@ -450,6 +450,12 @@ class ProposalSectionImproveResponse(BaseModel):
     draft: ProposalDraft
     research: ProposalResearchCache
     assistant_message: str = Field(alias="assistantMessage")
+    draft_changed: bool = Field(default=True, alias="draftChanged")
+
+
+class SectionChatTurn(BaseModel):
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(max_length=4000)
 
 
 class SectionImproveRequest(BaseModel):
@@ -459,6 +465,10 @@ class SectionImproveRequest(BaseModel):
     selection_start: int | None = Field(default=None, alias="selectionStart", ge=0)
     selection_end: int | None = Field(default=None, alias="selectionEnd", ge=0)
     selection_text: str | None = Field(default=None, alias="selectionText", max_length=8000)
+    conversation_history: list[SectionChatTurn] = Field(
+        default_factory=list, alias="conversationHistory"
+    )
+    proposal_wide: bool = Field(default=False, alias="proposalWide")
 
 
 class ProposalPhase3Response(BaseModel):

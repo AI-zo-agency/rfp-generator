@@ -52,6 +52,7 @@ export const FULFILL_SCAN_STEP_LABELS = [
   "Budget",
   "Repairs",
   "Contractor KPIs",
+  "KB fact-check",
   "Pre-submit",
 ] as const;
 
@@ -291,9 +292,86 @@ export function shouldRunPhase(
   return phaseIndex(phase) >= phaseIndex(resumeFrom);
 }
 
-function inProgressPhaseLabel(phase: PipelineInProgressPhase): string {
+export function inProgressPhaseLabel(phase: PipelineInProgressPhase): string {
   if (phase === FULFILL_SCAN_PHASE) return "Scan RFP";
   return PIPELINE_PHASE_LABELS[phase];
+}
+
+const IN_PROGRESS_STALE_MS = 900_000;
+const DRAFT_LIVENESS_MS = 600_000;
+
+function isoAgeMs(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? Date.now() - t : null;
+}
+
+/**
+ * Align checkpoint display for every viewer (reload / second account) without
+ * mutating Supabase — mirrors backend heal + stale detection on read.
+ */
+export function normalizeCheckpointForDisplay(
+  draft: ProposalOutline | null,
+  research: ProposalResearch | null
+): ProposalResearch | null {
+  if (!research?.pipelineCheckpoint) return research;
+  const cp = research.pipelineCheckpoint;
+  const draftAge = isoAgeMs(draft?.updatedAt ?? null);
+  const draftLive = draftAge !== null && draftAge < DRAFT_LIVENESS_MS;
+
+  if (!cp.inProgressPhase && cp.lastFailedPhase && cp.lastError) {
+    const err = cp.lastError.toLowerCase();
+    if (
+      (err.includes("interrupted") || err.includes("connection lost")) &&
+      draftLive
+    ) {
+      return {
+        ...research,
+        pipelineCheckpoint: {
+          ...cp,
+          inProgressPhase: cp.lastFailedPhase,
+          lastFailedPhase: null,
+          lastError: null,
+        },
+      };
+    }
+  }
+
+  if (cp.inProgressPhase) {
+    const cpAge = isoAgeMs(cp.updatedAt);
+    const manuscriptLive =
+      draftAge !== null && draftAge < IN_PROGRESS_STALE_MS;
+    if (manuscriptLive) {
+      return research;
+    }
+    if (cpAge !== null && cpAge >= IN_PROGRESS_STALE_MS) {
+      const failed = PIPELINE_PHASE_ORDER.includes(
+        cp.inProgressPhase as PipelinePhase
+      )
+        ? (cp.inProgressPhase as PipelinePhase)
+        : cp.lastFailedPhase ?? "phase-3";
+      return {
+        ...research,
+        pipelineCheckpoint: {
+          ...cp,
+          inProgressPhase: null,
+          lastFailedPhase: failed,
+          lastError:
+            cp.lastError ??
+            "Phase interrupted (connection lost or server restarted). Resume to continue.",
+        },
+      };
+    }
+  }
+
+  return research;
+}
+
+/** Shown when the HTTP client timed out but checkpoint still marks a phase in flight. */
+export function pipelineServerStillWorkingMessage(
+  phase: PipelineInProgressPhase
+): string {
+  return `Server is still running ${inProgressPhaseLabel(phase)} — the draft may update below. Click Stop to cancel on the server.`;
 }
 
 export function pipelineResumeMessage(

@@ -66,13 +66,13 @@ export function OutlineTabs({
   }, [updateIndicator, tabs]);
 
   const shellClass = isUnderline
-    ? `outline-tabs-underline flex gap-0 border-b border-zo-border/80 ${fullWidth ? "w-full" : ""}`
+    ? `outline-tabs-underline flex gap-1 border-b border-zo-border/80 sm:gap-2 ${fullWidth ? "w-full" : ""}`
     : compact
       ? "relative inline-flex max-w-full gap-0.5 rounded-lg border border-zo-border/80 bg-[#f8f9f8] p-0.5"
       : "relative inline-flex gap-2 rounded-xl border border-zo-border bg-white p-1.5 shadow-sm";
 
   const tabClass = isUnderline
-    ? "outline-tab-underline relative flex flex-1 items-center justify-center gap-2 border-b-2 transition-colors -mb-px sm:flex-none sm:justify-start"
+    ? "outline-tab-underline relative flex flex-1 items-center justify-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors -mb-px sm:flex-none sm:justify-start sm:px-4"
     : compact
       ? "relative z-10 rounded-md px-3 py-1.5 text-xs font-semibold tracking-normal normal-case"
       : "relative z-10 flex items-center gap-2.5 rounded-lg px-6 py-3 text-xs font-cabin font-semibold uppercase tracking-[0.08em]";

@@ -56,6 +56,20 @@ _OCEANIA_CLAIMS_PRESENCE = re.compile(
     re.I,
 )
 
+_ACTIVITY_MEASURE_HEADING_RE = re.compile(
+    r"(?im)^#{1,4}\s*(?:g\.\s*)?activity\s+measures?(?:\s+methodology)?\s*$"
+)
+_ACTIVITY_MEASURE_TABLE_HINT_RE = re.compile(
+    r"(?i)activity\s+measure|"
+    r"\|\s*measure\s*\||"
+    r"total\s+visitor\s+arrivals|"
+    r"average\s+islands\s+visited"
+)
+_BMP_SECTION_TITLE_RE = re.compile(
+    r"\bbmp\b|brand\s+management\s+plan|exhibit\s*a",
+    re.I,
+)
+
 
 def section_blob(section: "ProposalSection") -> str:
     return f"{section.title}\n{section.content or ''}"
@@ -172,6 +186,122 @@ def scan_empty_qualifications_stub(draft: "ProposalDraft") -> str | None:
     return None
 
 
+def _extract_activity_measures_block(content: str) -> tuple[str, str] | None:
+    """Return (block, remainder) when a ## Activity Measures… section exists with body."""
+    text = content or ""
+    match = _ACTIVITY_MEASURE_HEADING_RE.search(text)
+    if not match:
+        return None
+    start = match.start()
+    rest = text[match.end() :]
+    next_h = re.search(r"(?m)^#{1,3}\s+\S", rest)
+    end = match.end() + (next_h.start() if next_h else len(rest))
+    block = text[start:end].strip()
+    # Require real rows — header-only / truncated G is not worth moving.
+    if block.count("|") < 6 and "total visitor" not in block.casefold():
+        return None
+    remainder = (text[:start] + text[end:]).strip()
+    remainder = re.sub(r"\n{3,}", "\n\n", remainder).strip()
+    return block, remainder
+
+
+def relocate_misplaced_activity_measures(
+    draft: "ProposalDraft",
+    *,
+    skip_section_ids: set[str],
+) -> tuple["ProposalDraft", list[str]]:
+    """Move a populated Activity Measures block into the BMP section (Exhibit A §G)."""
+    from datetime import datetime, timezone
+
+    logs: list[str] = []
+    sections = list(draft.sections)
+
+    bmp_idx: int | None = None
+    for i, section in enumerate(sections):
+        if section.id in skip_section_ids:
+            continue
+        if _BMP_SECTION_TITLE_RE.search(section.title or ""):
+            bmp_idx = i
+            break
+    if bmp_idx is None:
+        return draft, logs
+
+    bmp = sections[bmp_idx]
+    bmp_body = bmp.content or ""
+    existing = _extract_activity_measures_block(bmp_body)
+    if existing and existing[0].count("|") >= 6:
+        return draft, logs
+
+    donor_idx: int | None = None
+    donor_block = ""
+    donor_remainder = ""
+    for i, section in enumerate(sections):
+        if i == bmp_idx or section.id in skip_section_ids:
+            continue
+        title_cf = (section.title or "").casefold()
+        if _BMP_SECTION_TITLE_RE.search(title_cf):
+            continue
+        extracted = _extract_activity_measures_block(section.content or "")
+        if not extracted:
+            body = section.content or ""
+            if (
+                _ACTIVITY_MEASURE_TABLE_HINT_RE.search(body)
+                and "oceania" in title_cf
+                and body.count("|") >= 8
+            ):
+                m = re.search(r"(?im)^#{1,4}\s*.*activity\s+measure", body)
+                if not m:
+                    continue
+                start = m.start()
+                rest = body[m.end() :]
+                next_h = re.search(r"(?m)^#{1,2}\s+\S", rest)
+                end = m.end() + (next_h.start() if next_h else len(rest))
+                block = body[start:end].strip()
+                if block.count("|") < 6:
+                    continue
+                extracted = (block, (body[:start] + body[end:]).strip())
+            else:
+                continue
+        block, remainder = extracted
+        if block.count("|") < 6:
+            continue
+        donor_idx = i
+        donor_block = block
+        donor_remainder = remainder
+        break
+
+    if donor_idx is None or not donor_block:
+        return draft, logs
+
+    if not re.match(r"(?im)^#{1,4}\s*g\.\s*activity", donor_block):
+        donor_block = re.sub(
+            r"(?im)^#{1,4}\s*(?:g\.\s*)?activity\s+measures?(?:\s+methodology)?\s*$",
+            "## G. Activity Measures Methodology",
+            donor_block,
+            count=1,
+        )
+        if not donor_block.lstrip().startswith("#"):
+            donor_block = "## G. Activity Measures Methodology\n\n" + donor_block
+
+    bmp_cleaned = bmp_body
+    stub = _extract_activity_measures_block(bmp_cleaned)
+    if stub and stub[0].count("|") < 6:
+        bmp_cleaned = stub[1]
+
+    new_bmp = (bmp_cleaned.rstrip() + "\n\n" + donor_block.strip()).strip()
+    donor_title = sections[donor_idx].title
+    sections[bmp_idx] = bmp.model_copy(update={"content": new_bmp, "status": "generated"})
+    sections[donor_idx] = sections[donor_idx].model_copy(
+        update={"content": donor_remainder, "status": "generated"}
+    )
+    logs.append(
+        f"Activity Measures: moved populated table from “{donor_title}” "
+        f"into BMP Section G (“{bmp.title}”)."
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+
+
 async def run_manuscript_consistency_repairs(
     draft: "ProposalDraft",
     *,
@@ -202,6 +332,17 @@ async def run_manuscript_consistency_repairs(
             sections[idx] = section.model_copy(update={"content": fixed})
             logs.extend(fix_logs)
             changed = True
+
+    working = (
+        draft.model_copy(update={"sections": sections}) if changed else draft
+    )
+    working, am_logs = relocate_misplaced_activity_measures(
+        working, skip_section_ids=skip_section_ids
+    )
+    if am_logs:
+        logs.extend(am_logs)
+        sections = list(working.sections)
+        changed = True
 
     office = scan_oceania_office_contradiction(
         draft.model_copy(update={"sections": sections}) if changed else draft

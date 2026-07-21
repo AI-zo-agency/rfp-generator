@@ -48,9 +48,24 @@ function pushParagraphBlock(blocks: Block[], paragraphLines: string[]) {
   blocks.push({ type: "paragraph", text: paragraphLines.join(" ") });
 }
 
+/** Strip LLM leaks (retrieval: / ```markdown fences) and OCR HTML comments. */
+export function stripManuscriptDisplayArtifacts(text: string): string {
+  let t = (text || "").trim();
+  t = t.replace(/^(?:retrieval|context|kb|source|markdown)\s*:\s*\n?/i, "");
+  const wrapped = t.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/i);
+  if (wrapped) {
+    t = wrapped[1].trim();
+  } else {
+    t = t.replace(/^```(?:markdown|md)?\s*\n/i, "");
+    t = t.replace(/\n```\s*$/i, "");
+  }
+  t = t.replace(/<!--[\s\S]*?-->/g, "");
+  return t.trim();
+}
+
 /** Strip internal KB evidence markers ([E1], [E2], …) from client-facing copy. */
 export function stripEvidenceCitations(text: string): string {
-  return (text || "").replace(/\s*\[E\d+\]/g, "");
+  return stripManuscriptDisplayArtifacts(text).replace(/\s*\[E\d+\]/g, "");
 }
 
 function isTableRow(line: string): boolean {

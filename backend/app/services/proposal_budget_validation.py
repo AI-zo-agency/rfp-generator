@@ -67,6 +67,118 @@ _MISPLACED_VERIFY_FLAG_RE = re.compile(r"^\[VERIFY:", re.I)
 _PM_RATIO_MIN = 0.05
 _PM_RATIO_MAX = 0.08
 _PM_RATIO_TARGET = 0.065
+_PM_GUIDE_FLOOR = 7500.0
+_PM_CAMPAIGN_SPECIFIC_RE = re.compile(
+    r"campaign-specific|short project|3[\s-]*6\s*month|pilot",
+    re.I,
+)
+
+_ONE_TIME_LINE_RE = re.compile(
+    r"\b(design\s*&\s*setup|setup|development|one-?time|initial\s+setup|"
+    r"newsletter\s+design\s*&\s*setup|landing\s+page\s+design)\b",
+    re.I,
+)
+_RECURRING_LINE_RE = re.compile(
+    r"\bmonthly\b|\bper\s+month\b|\brecurring\b|\bongoing\b",
+    re.I,
+)
+_MONTH_UNIT_RE = re.compile(r"\b(month|months|mo)\b", re.I)
+
+# Year / NTE / "Annual Allocation" rows are the RFP budget ENVELOPE, not billable work.
+# Summing them with Discovery/Strategy/etc. double-counts and blows past hard caps (e.g. HTA $2.95M).
+_BUDGET_ENVELOPE_LINE_RE = re.compile(
+    r"^\s*annual\s+allocation\b|"
+    r"\ballocation\s+year\s*\d+\b|"
+    r"\byear\s*[123]\s+(?:allocation|ceiling|cap|envelope|budget)\b|"
+    r"\b(?:y1|y2|y3)\s+(?:allocation|ceiling|cap|envelope)\b|"
+    r"\bmaximum\s+compensation\b|"
+    r"\bnot[\s-]*to[\s-]*exceed\b|"
+    r"\bnte\b|"
+    r"\bbudget\s+(?:ceiling|cap|envelope)\b|"
+    r"\btotal\s+available\s+(?:budget|funding)\b",
+    re.I,
+)
+
+
+def is_budget_envelope_line_item(item: BudgetLineItem) -> bool:
+    """True when the row is an RFP funding envelope / yearly cap, not a cost line."""
+    blob = " ".join(
+        part
+        for part in (
+            item.category or "",
+            item.description or "",
+            item.notes or "",
+            item.role_title or "",
+        )
+        if part
+    )
+    return bool(_BUDGET_ENVELOPE_LINE_RE.search(blob))
+
+
+def strip_budget_envelope_line_items(
+    line_items: list[BudgetLineItem],
+) -> tuple[list[BudgetLineItem], list[BudgetLineItem], list[str]]:
+    """Remove envelope/allocation rows from the cost table; return (kept, stripped, notes)."""
+    kept: list[BudgetLineItem] = []
+    stripped: list[BudgetLineItem] = []
+    notes: list[str] = []
+    for item in line_items:
+        if is_budget_envelope_line_item(item):
+            stripped.append(item)
+            notes.append(
+                f"[PRICING FLAG: Removed envelope row “{(item.description or item.category or item.id)[:80]}” "
+                f"({_usd(float(item.extended or 0))}) — yearly/NTE allocations are the RFP ceiling, "
+                "not additive cost lines]"
+            )
+        else:
+            kept.append(item)
+    return kept, stripped, notes
+
+
+def scale_line_items_to_hard_cap(
+    line_items: list[BudgetLineItem],
+    *,
+    hard_cap: float,
+    direct_expenses: float = 0.0,
+) -> tuple[list[BudgetLineItem], list[str]]:
+    """Proportionally scale agency_fee rows so agency revenue stays at or under hard_cap."""
+    if hard_cap <= 0:
+        return line_items, []
+    _, agency_fee, _ = split_line_item_totals(line_items)
+    current = round(agency_fee + float(direct_expenses or 0), 2)
+    if current <= hard_cap + 0.01:
+        return line_items, []
+
+    # Leave room for direct expenses inside the cap.
+    target_agency = max(0.0, round(hard_cap - float(direct_expenses or 0), 2))
+    if agency_fee <= 0 or target_agency <= 0:
+        return line_items, [
+            f"[PRICING FLAG: Proposed total {_usd(current)} exceeds RFP hard cap {_usd(hard_cap)} "
+            "— could not auto-scale (no agency fee base); Sonja must rebuild]"
+        ]
+
+    factor = target_agency / agency_fee
+    scaled: list[BudgetLineItem] = []
+    for item in line_items:
+        if infer_line_item_type(item) == "client_passthrough":
+            scaled.append(item)
+            continue
+        ext = float(item.extended or 0)
+        if ext <= 0:
+            scaled.append(item)
+            continue
+        new_ext = round(ext * factor, 2)
+        updates: dict[str, Any] = {"extended": new_ext}
+        if item.rate is not None and item.quantity is not None and float(item.quantity) > 0:
+            updates["rate"] = round(new_ext / float(item.quantity), 2)
+        elif item.rate is not None and item.quantity is None:
+            updates["rate"] = round(float(item.rate) * factor, 2)
+        scaled.append(item.model_copy(update=updates))
+
+    return scaled, [
+        f"[PRICING FLAG: Auto-scaled agency fee lines {_usd(agency_fee)} → {_usd(target_agency)} "
+        f"to stay under RFP hard cap {_usd(hard_cap)} (was {_usd(current)}) — Sonja confirm scope]"
+    ]
 
 
 def _usd(value: float) -> str:
@@ -159,6 +271,45 @@ def collect_pm_ratio_violations(budget: ProposalBudget) -> list[str]:
             f"— pricing guide targets 5–8%. Adjust rates or scope with Sonja before submission."
         )
     ]
+
+
+def collect_line_item_math_violations(budget: ProposalBudget) -> list[str]:
+    """Flag when extended does not equal rate × quantity (after rounding tolerance)."""
+    violations: list[str] = []
+    for item in budget.line_items:
+        rate, qty, ext = item.rate, item.quantity, item.extended
+        if rate is None or qty is None or ext is None:
+            continue
+        if float(qty) <= 0:
+            continue
+        expected = round(float(rate) * float(qty), 2)
+        if abs(float(ext) - expected) > 0.02:
+            violations.append(
+                f"{item.id}: extended ({ext}) != rate×qty ({expected}) for {item.description[:80]}"
+            )
+    return violations
+
+
+def collect_one_time_recurring_violations(budget: ProposalBudget) -> list[str]:
+    """Flag one-time guide lines priced as ×12 months (SRIA-style error)."""
+    violations: list[str] = []
+    for item in budget.line_items:
+        desc = item.description or ""
+        if _RECURRING_LINE_RE.search(desc):
+            continue
+        if not _ONE_TIME_LINE_RE.search(desc):
+            continue
+        qty = item.quantity
+        unit = (item.unit or "").strip()
+        if qty is not None and float(qty) >= 12:
+            violations.append(
+                f"{item.id}: one-time/setup line multiplied by {qty} — use a monthly guide line or flag scope"
+            )
+        elif _MONTH_UNIT_RE.search(unit) and qty is not None and float(qty) > 1:
+            violations.append(
+                f"{item.id}: one-time/setup line billed across {qty} {unit} — likely misapplied recurring math"
+            )
+    return violations
 
 
 def is_commission_style_budget(budget: ProposalBudget) -> bool:
@@ -328,6 +479,27 @@ def _is_pm_line_item(item: BudgetLineItem) -> bool:
     return bool(_PM_LINE_RE.search(cat))
 
 
+def _pm_needs_engagement_floor(item: BudgetLineItem) -> bool:
+    """Full-engagement PM lines must meet guide dollar floor; campaign-specific rows may be smaller."""
+    return not bool(_PM_CAMPAIGN_SPECIFIC_RE.search(item.description or ""))
+
+
+def collect_pm_floor_violations(budget: ProposalBudget) -> list[str]:
+    violations: list[str] = []
+    for item in budget.line_items:
+        if not _is_pm_line_item(item) or not _pm_needs_engagement_floor(item):
+            continue
+        ext = float(item.extended or 0)
+        if ext <= 0:
+            continue
+        if ext < _PM_GUIDE_FLOOR:
+            violations.append(
+                f"{item.id}: project management at {_usd(ext)} is below 00_Guide_Pricing "
+                f"engagement floor (~{_usd(_PM_GUIDE_FLOOR)}–$12,000 Average tier)"
+            )
+    return violations
+
+
 def adjust_pm_line_items_to_guide(
     line_items: list[BudgetLineItem],
     agency_base: float,
@@ -363,6 +535,19 @@ def adjust_pm_line_items_to_guide(
         ratio = pm_total / base if base > 0 else 0.0
 
     if _PM_RATIO_MIN <= ratio <= _PM_RATIO_MAX:
+        floor_violations = [
+            item
+            for item in line_items
+            if _is_pm_line_item(item)
+            and _pm_needs_engagement_floor(item)
+            and 0 < float(item.extended or 0) < _PM_GUIDE_FLOOR
+        ]
+        if floor_violations:
+            ext = float(floor_violations[0].extended or 0)
+            return line_items, (
+                f"[PRICING FLAG: PM ratio in band but dollar amount {_usd(ext)} is below "
+                f"00_Guide_Pricing engagement floor {_usd(_PM_GUIDE_FLOOR)} — raise PM or Sonja review]"
+            )
         return line_items, None
 
     target_ratio = _PM_RATIO_TARGET if ratio > _PM_RATIO_MAX else _PM_RATIO_MIN
@@ -378,6 +563,20 @@ def adjust_pm_line_items_to_guide(
             target_pm = round(non_pm * _PM_RATIO_MIN / (1.0 - _PM_RATIO_MIN) + 0.01, 2)
         elif landed > _PM_RATIO_MAX:
             target_pm = round(non_pm * _PM_RATIO_MAX / (1.0 - _PM_RATIO_MAX) - 0.01, 2)
+
+    needs_floor = any(
+        _pm_needs_engagement_floor(line_items[i]) for i in pm_indices
+    )
+    if ratio < _PM_RATIO_MIN and needs_floor:
+        target_pm = max(target_pm, _PM_GUIDE_FLOOR)
+
+    if ratio > _PM_RATIO_MAX and needs_floor and target_pm < _PM_GUIDE_FLOOR:
+        return line_items, (
+            f"[PRICING FLAG: PM is {ratio * 100:.1f}% of agency fees at {_usd(pm_total)} "
+            f"(guide 5–8%) — do not auto-cut PM below 00_Guide_Pricing floor "
+            f"{_usd(_PM_GUIDE_FLOOR)}; reduce scope/tier or Sonja review]"
+        )
+
     scale = target_pm / pm_total
 
     adjusted: list[BudgetLineItem] = []
@@ -424,6 +623,23 @@ def reconcile_proposal_budget(
     )
 
     line_items = fix_line_item_extended_values(budget.line_items)
+    line_items, _envelope_rows, envelope_notes = strip_budget_envelope_line_items(line_items)
+    flags.extend(envelope_notes)
+
+    # Infer / keep hard cap — envelope sum is a useful fallback when LLM omitted rfpBudgetCap.
+    hard_cap = budget.rfp_budget_cap
+    if hard_cap is None and _envelope_rows:
+        envelope_sum = round(
+            sum(float(i.extended or 0) for i in _envelope_rows if i.extended),
+            2,
+        )
+        if envelope_sum > 0:
+            hard_cap = envelope_sum
+            flags.append(
+                f"[PRICING FLAG: rfpBudgetCap set from stripped yearly allocation total "
+                f"({_usd(envelope_sum)}) — confirm against RFP Section compensation cap]"
+            )
+
     _, agency_fee_seed, _ = split_line_item_totals(line_items)
     agency_base = budget.agency_fee_subtotal
     if agency_base is None:
@@ -431,6 +647,14 @@ def reconcile_proposal_budget(
     line_items, pm_note = adjust_pm_line_items_to_guide(line_items, float(agency_base or 0))
     if pm_note:
         flags.append(pm_note)
+
+    if hard_cap is not None and float(hard_cap) > 0:
+        line_items, cap_notes = scale_line_items_to_hard_cap(
+            line_items,
+            hard_cap=float(hard_cap),
+            direct_expenses=float(budget.direct_expenses_total or 0),
+        )
+        flags.extend(cap_notes)
 
     line_sum, agency_fee, passthrough = split_line_item_totals(line_items)
     direct = round(float(budget.direct_expenses_total or 0), 2)
@@ -457,6 +681,13 @@ def reconcile_proposal_budget(
             if passthrough > 0:
                 total_invoicing = round(passthrough + agency_revenue, 2)
 
+    # Proposed price vs hard cap — proposed total must never exceed the RFP ceiling.
+    if hard_cap is not None and float(hard_cap) > 0 and agency_revenue > float(hard_cap) + 0.01:
+        flags.append(
+            f"[PRICING FLAG: DISQUALIFY RISK — proposed agency total {_usd(agency_revenue)} "
+            f"exceeds RFP hard cap {_usd(float(hard_cap))} after reconcile — rebuild before submit]"
+        )
+
     updates: dict[str, Any] = {
         "line_items": line_items,
         "line_item_sum": line_sum,
@@ -465,6 +696,8 @@ def reconcile_proposal_budget(
         "total_client_invoicing": total_invoicing if commission_style and passthrough > 0 else None,
         "agency_revenue_estimate": agency_revenue,
     }
+    if hard_cap is not None:
+        updates["rfp_budget_cap"] = float(hard_cap)
 
     computed = agency_revenue
     requires_lump_hourly = rfp_requires_lump_sum_and_hourly(rfp_sections, rfp_context)
@@ -564,6 +797,9 @@ def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
                 violations.append(f"unresolved budget flag: {flag[:120]}")
 
     violations.extend(collect_pm_ratio_violations(budget))
+    violations.extend(collect_line_item_math_violations(budget))
+    violations.extend(collect_one_time_recurring_violations(budget))
+    violations.extend(collect_pm_floor_violations(budget))
 
     return violations
 

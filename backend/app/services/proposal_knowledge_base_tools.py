@@ -249,40 +249,41 @@ async def _search_hits_all_modes(
     *,
     limit: int,
     filters: dict[str, Any] | None = None,
+    threshold: float = 0.45,
 ) -> list[dict[str, Any]]:
+    """v4 hybrid (memories) + documents (chunks). Memories first; chunks fill gaps."""
+    import asyncio
+
     active_filters = filters or supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS
-    seen: set[str] = set()
-    merged: list[dict[str, Any]] = []
 
-    for search_fn in (supermemory.search_documents, supermemory.search_document_chunks):
+    async def _hybrid() -> list[dict[str, Any]]:
         try:
-            if search_fn is supermemory.search_documents:
-                hits = await search_fn(
-                    query=query,
-                    limit=limit,
-                    include_full_docs=True,
-                    search_mode="hybrid",
-                    filters=active_filters,
-                )
-            else:
-                hits = await search_fn(
-                    query=query,
-                    limit=limit,
-                    filters=active_filters,
-                )
+            return await supermemory.search_documents(
+                query=query,
+                limit=limit,
+                include_full_docs=True,
+                search_mode="hybrid",
+                filters=active_filters,
+                threshold=threshold,
+            )
         except supermemory.SupermemoryError:
-            continue
+            return []
 
-        for hit in hits:
-            if not supermemory.is_knowledge_base_hit(hit):
-                continue
-            key = supermemory.document_dedupe_key(hit) or str(hit.get("id") or id(hit))
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(hit)
+    async def _chunks() -> list[dict[str, Any]]:
+        try:
+            return await supermemory.search_document_chunks(
+                query=query,
+                limit=limit,
+                filters=active_filters,
+                threshold=threshold,
+            )
+        except supermemory.SupermemoryError:
+            return []
 
-    return merged
+    memory_hits, chunk_hits = await asyncio.gather(_hybrid(), _chunks())
+    memory_hits = [h for h in memory_hits if supermemory.is_knowledge_base_hit(h)]
+    chunk_hits = [h for h in chunk_hits if supermemory.is_knowledge_base_hit(h)]
+    return supermemory.merge_memory_and_chunk_hits(memory_hits, chunk_hits)
 
 
 async def _search_hits(query: str) -> list[dict[str, Any]]:
@@ -391,6 +392,9 @@ async def _gather_bucket(
         return "(No queries for this bucket.)", []
     all_hits: list[list[dict[str, Any]]] = []
     for i, query in enumerate(queries, 1):
+        from app.services.proposal_generation_cancel import check_cancelled_for_active
+
+        await check_cancelled_for_active()
         logger.info(
             "  └─ [Knowledge Base Retriever] [%s] query %d/%d: %s", bucket, i, len(queries), query[:80]
         )

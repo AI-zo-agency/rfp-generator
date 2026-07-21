@@ -28,6 +28,7 @@ from app.services.proposal_brand_voice import (
 )
 from app.services.proposal_loss_lessons import format_avoidance_block
 from app.services.proposal_voice_enforcement import enforce_narrative_voice
+from app.services.proposal_draft_snapshots import push_proposal_snapshot
 from app.services.proposal_repository import (
     aget_proposal_draft,
     aget_research_cache,
@@ -49,19 +50,279 @@ from app.services.proposal_retrieval_graph import (
     _hit_key,
     _hit_label,
 )
+from app.services.proposal_budget_playbook import (
+    BUDGET_EXPLAIN_ADVISORY_RULES,
+    budget_playbook_prompt_block,
+    refuse_noncompliant_budget_edit,
+    should_apply_budget_playbook,
+    user_asks_budget_explanation,
+)
 
 logger = logging.getLogger(__name__)
 
-REFINE_QUERIES_PROMPT = """Plan 3-4 NEW Supermemory search queries to improve ONE proposal section.
+SECTION_CHAT_ADVISORY_PROMPT = """You are a zö agency proposal editor assistant in a chat with the user.
+
+You may receive the FULL proposal manuscript digest plus one focus section and optionally a highlighted excerpt.
+
+Rules:
+1. Answer from the RFP requirements and the proposal as a whole — do not invent compliance facts.
+2. If the user asks about another section or the whole draft, use the manuscript digest.
+3. If the user asks whether something meets the RFP, cite specific RFP asks and gaps.
+4. You may disagree or push back when their request would weaken compliance or accuracy.
+5. Do NOT rewrite the section in this turn — explain what you would change and why, or answer the question.
+6. Be concise (2–6 short paragraphs max). Use **bold** for key RFP requirements.
+7. If they need an edit, tell them to ask explicitly (e.g. "update 1.1 to…" or use Revise content on an excerpt).
+8. Budget/pricing/fees: follow the pricing playbook when provided — refuse invented numbers and reverse-engineered totals (option C); flag out-of-guide scope with [PRICING FLAG: … — Sonja review required].
+
+Return ONLY JSON: {"reply": "markdown message for the chat"}"""
+
+_EDIT_INTENT_RE = re.compile(
+    r"\b("
+    r"change|fix|update|rewrite|revise|edit|improve|shorten|lengthen|add|remove|replace|fill|"
+    r"make it|make this|patch|insert|delete|correct|align"
+    r")\b",
+    re.I,
+)
+
+
+def _wants_section_edit(user_message: str) -> bool:
+    text = user_message.strip()
+    if not text:
+        return False
+    if _EDIT_INTENT_RE.search(text):
+        return True
+    if text.endswith("?"):
+        return False
+    lower = text.casefold()
+    if re.search(
+        r"\b(why|explain|what does|is this|does this|compliant|requirement|argue|push back|should we)\b",
+        lower,
+    ):
+        return False
+    return True
+
+
+def _compose_chat_user_message(
+    user_message: str,
+    conversation_history: list[dict[str, str]] | None,
+) -> str:
+    if not conversation_history:
+        return user_message
+    lines = ["Prior conversation (context only — address the latest message):"]
+    for turn in conversation_history[-10:]:
+        role = turn.get("role", "user")
+        label = "User" if role == "user" else "Assistant"
+        content = (turn.get("content") or "").strip()
+        if content:
+            lines.append(f"{label}: {content[:800]}")
+    lines.append(f"\nLatest user message:\n{user_message.strip()}")
+    return "\n".join(lines)
+
+
+def _query_focus_message(
+    user_message: str,
+    *,
+    section: ProposalSection,
+    requirements_block: str,
+) -> str:
+    """Crisp signal for KB query planning — gaps + latest ask, not full chat dump."""
+    gaps = _gap_fields_from_text(section.content or "")
+    parts = [
+        f"Latest edit request: {user_message.strip()}",
+        f"Section: {section.title}",
+    ]
+    if gaps:
+        parts.append(
+            "Fill these [VERIFY] gaps with KB facts (one query each):\n"
+            + "\n".join(f"- {g}" for g in gaps[:12])
+        )
+    if requirements_block.strip():
+        parts.append(requirements_block[:2500])
+    return "\n\n".join(parts)
+
+
+def _seed_gap_queries(
+    *,
+    section: ProposalSection,
+    rfp: RfpRecord,
+    prior_queries: list[str],
+) -> list[str]:
+    used = {q.strip().lower() for q in prior_queries}
+    seeded: list[str] = []
+    for field in _gap_fields_from_text(section.content or "")[:6]:
+        q = (
+            f"zö agency {field} 01 companyfacts 02 master template "
+            f"{rfp.client} {section.title}"
+        )[:240]
+        key = q.lower()
+        if key not in used:
+            seeded.append(q)
+            used.add(key)
+    return seeded
+
+
+def _rfp_section_requirements_block(
+    research: ProposalResearchCache | None,
+    section_id: str,
+) -> str:
+    if not research or not research.rfp_sections:
+        return ""
+    for sec in research.rfp_sections:
+        if sec.id == section_id:
+            parts = [f"Section map — {sec.title or section_id}"]
+            if sec.requirements:
+                parts.append("Requirements:\n" + "\n".join(f"- {r}" for r in sec.requirements[:24]))
+            if sec.uncovered_requirements:
+                parts.append(
+                    "Uncovered:\n"
+                    + "\n".join(f"- {r}" for r in sec.uncovered_requirements[:12])
+                )
+            if sec.evaluation_weight:
+                parts.append(f"Evaluation weight hint: {sec.evaluation_weight}")
+            if sec.page_limit:
+                parts.append(f"Page limit hint: {sec.page_limit}")
+            return "\n".join(parts)
+    return ""
+
+
+def _manuscript_digest(draft: ProposalDraft, *, max_chars: int = 12000) -> str:
+    """Compact full-proposal context for chat (TOC + section snippets)."""
+    lines: list[str] = ["FULL PROPOSAL MANUSCRIPT (for cross-section context):"]
+    used = 0
+    for section in draft.sections:
+        title = section.title or section.id
+        body = (section.content or "").strip()
+        if not body:
+            block = f"\n### {title}\n(empty)\n"
+        else:
+            snippet = body[:900] + ("…" if len(body) > 900 else "")
+            block = f"\n### {title}\n{snippet}\n"
+        if used + len(block) > max_chars:
+            lines.append("\n…(additional sections omitted)")
+            break
+        lines.append(block)
+        used += len(block)
+    return "".join(lines)
+
+
+def _resolve_section_from_message(
+    draft: ProposalDraft,
+    user_message: str,
+    default_section_id: str,
+) -> ProposalSection | None:
+    default = _find_draft_section(draft, default_section_id)
+    text = user_message.strip()
+    if not text:
+        return default
+    lower = text.casefold()
+    ranked = sorted(
+        draft.sections,
+        key=lambda s: len(s.title or ""),
+        reverse=True,
+    )
+    for section in ranked:
+        title = (section.title or "").strip()
+        if len(title) >= 4 and title.casefold() in lower:
+            return section
+    num_match = re.search(
+        r"\b(?:section\s*)?(\d+(?:\.\d+)?)\b",
+        lower,
+    )
+    if num_match:
+        num = num_match.group(1)
+        for section in draft.sections:
+            t = (section.title or "").casefold()
+            if t.startswith(f"{num} ") or t.startswith(num):
+                return section
+    return default
+
+
+async def _section_chat_advisory_reply(
+    *,
+    section: ProposalSection,
+    rfp: RfpRecord,
+    rfp_context: str,
+    user_message: str,
+    conversation_history: list[dict[str, str]] | None,
+    selection_text: str | None,
+    requirements_block: str,
+    manuscript_digest: str = "",
+    research: ProposalResearchCache | None = None,
+) -> str:
+    excerpt = (selection_text or "").strip()
+    excerpt_block = f"\n\nHighlighted excerpt:\n\"{excerpt[:2000]}\"\n" if excerpt else ""
+    history_block = ""
+    if conversation_history:
+        history_block = "\n\nRecent chat:\n" + "\n".join(
+            f"{'User' if t.get('role') == 'user' else 'Assistant'}: {(t.get('content') or '')[:400]}"
+            for t in conversation_history[-6:]
+        )
+    guide_block = ""
+    if should_apply_budget_playbook(section, user_message):
+        from app.services.proposal_pricing_service import fetch_pricing_guide_context
+
+        stage_two = ""
+        if research and research.rfp_sections:
+            stage_two = "\n".join(
+                f"{s.title}: {', '.join((s.requirements or [])[:5])}"
+                for s in research.rfp_sections[:12]
+            )
+        guide_text, guide_sources = await fetch_pricing_guide_context(
+            rfp,
+            stage_two=stage_two,
+            focus_hint=user_message[:300],
+        )
+        src_note = ", ".join(guide_sources[:8]) if guide_sources else "(no sources)"
+        guide_block = (
+            f"\n\n=== 00_Guide_Pricing (Supermemory — cite menu ids from here) ===\n"
+            f"{guide_text[:20000]}\n\nKB sources: {src_note}\n"
+        )
+    prompt = (
+        f"RFP: {rfp.title} — {rfp.client}\n\n"
+        f"RFP context (rescan):\n{rfp_context[:6000]}\n\n"
+        f"{requirements_block}\n\n"
+        f"{manuscript_digest[:12000]}\n\n"
+        f"{guide_block}"
+        f"Focus section: {section.title}\n\n"
+        f"Focus section draft:\n{(section.content or '')[:8000]}"
+        f"{excerpt_block}"
+        f"{history_block}\n\n"
+        f"User message:\n{user_message.strip()}"
+    )
+    system_prompt = SECTION_CHAT_ADVISORY_PROMPT
+    if should_apply_budget_playbook(section, user_message):
+        full_detail = user_asks_budget_explanation(user_message)
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            f"{budget_playbook_prompt_block(research=research, full_budget_detail=full_detail)}"
+        )
+        if full_detail:
+            system_prompt = f"{system_prompt}\n\n{BUDGET_EXPLAIN_ADVISORY_RULES}"
+    max_tokens = 2000 if user_asks_budget_explanation(user_message) else 1200
+    raw, _ = await llm.chat_json(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=max_tokens,
+        temperature=0.25 if user_asks_budget_explanation(user_message) else 0.35,
+    )
+    reply = str(raw.get("reply", "")).strip()
+    return reply or (
+        "I reviewed the RFP context for this section — ask me to change specific text when you are ready."
+    )
+
+REFINE_QUERIES_PROMPT = """Plan 5-6 NEW Supermemory search queries to improve ONE proposal section.
 Prior queries failed or returned insufficient evidence. User feedback describes what is wrong or missing.
 
 Rules:
 - Queries must be MORE SPECIFIC and DIFFERENT from all prior queries (never repeat or lightly rephrase).
-- Use document-type hints where relevant: 02 master template, 03_CS case studies, 04 bio, certifications, org chart.
-- Target the exact gaps: firm history, employee count, philosophy, org structure, case studies, fees, etc.
-- Include client name, sector, and section requirements in each query.
+- Use document-type hints where relevant: 01 companyfacts, 02 master template, 03_CS case studies, 04 bio, certifications, org chart, references.
+- Target the exact gaps: firm legal name, Bend address, phone/email contacts, employee count, philosophy, tourism/DMO experience, org structure, case studies, fees, etc.
+- Include "zö agency" + field name + doc hint in each query. Add client name and sector when relevant.
+- If [VERIFY: ...] fields or RFP requirements are listed, dedicate at least one query per missing field.
 
-Return ONLY JSON: {"queries": ["detailed query 1", "detailed query 2", "detailed query 3"]}"""
+Return ONLY JSON: {"queries": ["detailed query 1", "detailed query 2", "detailed query 3", "detailed query 4", "detailed query 5"]}"""
 
 SECTION_REDRAFT_PROMPT = """Rewrite ONE zö agency proposal section based on user feedback and evidence.
 
@@ -97,10 +358,12 @@ Rules:
 6. Keep markdown structure inside the excerpt (lists, table rows) if the selection had them.
 7. Return ONLY JSON: {"replacement": "revised excerpt text only"}
 8. Budget/pricing excerpts: NEVER change agency revenue or commission lines to $0 — use commission rate × pass-through or canonical fee from section context; if unknown use [VERIFY: Sonja confirm commission rate and annual media estimate].
-9. Reference excerpts: include name, title, phone, and email — never "contact on request" or deferral language.
-10. PSA/compliance excerpts: add specific acknowledgment language when user asks — cover insurance, living wage, MacBride, Title VI, Chapter 63, audit rights as applicable.
-11. NEVER shorten the excerpt. Preserve every paragraph, heading, list item, and sentence the user did not ask to change.
-12. When the user asks to fill gaps, placeholders, or [VERIFY] tags: ONLY replace those tags with KB facts — do not rewrite or summarize the surrounding prose."""
+9. Do NOT reverse-engineer dollar amounts to hit a user-requested total — each line must trace to the Pricing Guide; suggest tier/scope changes instead (option C).
+10. One-time setup/development lines must not be multiplied by 12 unless the excerpt is explicitly a monthly recurring service from the guide.
+11. Reference excerpts: include name, title, phone, and email — never "contact on request" or deferral language.
+12. PSA/compliance excerpts: add specific acknowledgment language when user asks — cover insurance, living wage, MacBride, Title VI, Chapter 63, audit rights as applicable.
+13. NEVER shorten the excerpt. Preserve every paragraph, heading, list item, and sentence the user did not ask to change.
+14. When the user asks to fill gaps, placeholders, or [VERIFY] tags: ONLY replace those tags with KB facts — do not rewrite or summarize the surrounding prose."""
 
 SELECTION_KB_PLAN_PROMPT = """You plan a surgical edit to ONE highlighted excerpt inside a zö agency proposal section.
 
@@ -120,10 +383,15 @@ Rules:
 STATIC_SECTION_REDRAFT_PROMPT = """Improve ONE static zö proposal section (company overview, team bios, or case studies).
 
 Use ONLY the knowledge-base excerpts provided. For pull/select sections, include [DESIGNER NOTE: ...] where layout applies.
-Address the user's feedback. Do not invent clients or metrics.
+Address the user's feedback. Do not invent clients, metrics, addresses, phones, or emails.
 
 NARRATIVE REGISTER: first person we/our — never "The Vendor" or third-person procurement language.
-PRESERVE the BRAND VOICE block — zö core voice and RFP adaptation are mandatory.
+PRESERVE the full BRAND VOICE block — zö core voice + RFP adaptation are mandatory.
+- Keep warm, confident, proof-led rhythm — not generic consultant prose.
+- Prefer concrete facts from KB over vague claims.
+- Fill [VERIFY: ...] tags when KB has the fact; otherwise keep a precise [VERIFY: ...] tag.
+- Do not flatten the previous draft's voice unless the user explicitly asked for a tone change.
+Apply WRITING AVOIDANCES when provided.
 
 Return ONLY JSON:
 {
@@ -296,6 +564,53 @@ async def _fetch_kb_blob_for_selection(
     return "\n\n".join(llm_parts), "\n\n".join(fact_parts)
 
 
+async def _bio_kb_context_for_section(section: ProposalSection) -> str:
+    """Authoritative 04_Bio PDF text for Section 2 team member bios."""
+    if not section.id.startswith("section-2-bio"):
+        return ""
+    from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
+    from app.services.proposal_sections_graph import _fetch_member_bio_kb
+
+    member = _member_name_from_bio_section(section.title or "")
+    if not member.strip():
+        return ""
+    bio_text, _sources = await _fetch_member_bio_kb(member)
+    if not bio_text.strip() or bio_text.startswith("("):
+        return ""
+    return bio_text
+
+
+async def _merge_bio_kb_into_blobs(
+    section: ProposalSection,
+    *,
+    kb_block: str,
+    fact_blob: str,
+) -> tuple[str, str]:
+    bio_text = await _bio_kb_context_for_section(section)
+    if not bio_text:
+        return kb_block, fact_blob
+    header = f"=== 04_Bio approved file ({section.title}) ===\n{bio_text[:80_000]}"
+    merged_kb = f"{kb_block}\n\n{header}".strip() if kb_block.strip() else header
+    merged_fact = f"{fact_blob}\n\n{bio_text}".strip() if fact_blob.strip() else bio_text
+    return merged_kb, merged_fact
+
+
+def _apply_bio_work_history_kb_fill(
+    section: ProposalSection,
+    content: str,
+    kb_text: str,
+) -> tuple[str, int]:
+    if not section.id.startswith("section-2-bio") or not kb_text.strip():
+        return content, 0
+    from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
+    from app.services.proposal_sections_graph import replace_bio_work_history_verify_from_kb
+
+    member = _member_name_from_bio_section(section.title or "")
+    if not member.strip():
+        return content, 0
+    return replace_bio_work_history_verify_from_kb(content, member, kb_text)
+
+
 async def _search_hits(query: str) -> list[dict[str, Any]]:
     if not supermemory.is_configured():
         return []
@@ -395,6 +710,8 @@ async def _improve_section_selection(
     fact_blob: str = "",
     avoidance_block: str = "",
     working_excerpt: str | None = None,
+    research: ProposalResearchCache | None = None,
+    compliance_user_message: str = "",
 ) -> tuple[ProposalSection, str, int]:
     """Surgical excerpt edit — full section context, splice replacement only."""
     content = section.content or ""
@@ -441,6 +758,9 @@ async def _improve_section_selection(
         user_block += f"KB excerpts:\n{kb_block[:8000]}\n\n"
     if avoidance_block:
         user_block += f"{avoidance_block}\n\n"
+    ask_for_compliance = compliance_user_message.strip() or user_message.strip()
+    if should_apply_budget_playbook(section, ask_for_compliance):
+        user_block += f"{budget_playbook_prompt_block(research=research)}\n\n"
 
     raw, provider = await llm.chat_json(
         [
@@ -456,6 +776,10 @@ async def _improve_section_selection(
             "Selection edit did not return replacement text. Try a more specific instruction.",
             status_code=422,
         )
+
+    refusal = refuse_noncompliant_budget_edit(ask_for_compliance, replacement)
+    if refusal:
+        raise ProposalError(refusal, status_code=422)
 
     kb_fills = 0
     if blob_for_facts.strip() and VERIFY_TAG_RE.search(replacement):
@@ -592,7 +916,7 @@ async def _plan_refined_queries(
         if text and text.lower() not in used:
             cleaned.append(text[:240])
             used.add(text.lower())
-    return cleaned[:4]
+    return cleaned[:6]
 
 
 async def _redraft_rfp_section(
@@ -608,6 +932,7 @@ async def _redraft_rfp_section(
     prior_content: str,
     zo_context: str,
     avoidance_block: str = "",
+    research: ProposalResearchCache | None = None,
 ) -> tuple[ProposalSection, str]:
     requirements = rfp_section.requirements if rfp_section else []
     register = classify_section_register(
@@ -625,6 +950,7 @@ async def _redraft_rfp_section(
     original_content = (section.content or "").strip()
     prior_for_agent, full_rewrite = prior_content_for_redraft(section)
     rewrite_note = ""
+    bio_kb = await _bio_kb_context_for_section(section)
     if full_rewrite:
         rewrite_note = (
             "\n\nIMPORTANT: Prior draft is below the word target or not marked generated. "
@@ -649,6 +975,13 @@ async def _redraft_rfp_section(
         + (f"{avoidance_block}\n\n" if avoidance_block else "")
         + (f"zö Sections 1–3 reference:\n{zo_context[:3000]}\n" if zo_context else "")
     )
+    if bio_kb.strip():
+        user_block += (
+            f"\n\n=== 04_Bio approved file (use for Work History, education, accounts) ===\n"
+            f"{bio_kb[:50_000]}\n"
+        )
+    if should_apply_budget_playbook(section, user_message):
+        user_block += f"\n{budget_playbook_prompt_block(research=research)}\n"
 
     max_tokens = 8192 if section.word_target >= 1500 else 6144
 
@@ -684,6 +1017,10 @@ async def _redraft_rfp_section(
         zo_mode=section.mode,
     )
 
+    refusal = refuse_noncompliant_budget_edit(user_message, content)
+    if refusal:
+        raise ProposalError(refusal, status_code=422)
+
     if redraft_is_inadequate(section, content, original_content=original_content):
         logger.warning(
             "User Revise output too short for %s (%d words, keys=%s) — retrying chat_json",
@@ -712,6 +1049,14 @@ async def _redraft_rfp_section(
             "Try a more specific instruction or re-run Phase 3 for this section.",
             status_code=422,
         )
+    if bio_kb.strip():
+        content, _ = _apply_bio_work_history_kb_fill(section, content, bio_kb)
+        content = enforce_narrative_voice(
+            content,
+            section_id=section.id,
+            title=section.title,
+            zo_mode=section.mode,
+        )
     # KB references removed - not included in proposals
     
     updated = section.model_copy(
@@ -734,24 +1079,25 @@ async def _improve_static_section(
     user_message: str,
     brand_voice: dict[str, Any] | None,
     kb_zo_voice: str,
+    avoidance_block: str = "",
 ) -> tuple[ProposalSection, str]:
     kb_parts: list[str] = []
     sources: list[str] = []
     for query in queries:
         text, refs = await proposal_knowledge_base_tools.search_knowledge_base(
             query,
-            limit=6,
+            limit=8,
         )
         if text.strip():
-            kb_parts.append(text[:3500])
+            kb_parts.append(text[:4500])
         sources.extend(refs)
 
     if not kb_parts:
         text, refs = await proposal_knowledge_base_tools.search_knowledge_base(
-            f"zö agency {section.title} {rfp.client} {rfp.sector}",
-            limit=8,
+            f"zö agency {section.title} firm address phone email philosophy {rfp.client} {rfp.sector}",
+            limit=10,
         )
-        kb_parts.append(text[:4000])
+        kb_parts.append(text[:5000])
         sources.extend(refs)
 
     voice_block = format_brand_voice_block(
@@ -761,25 +1107,29 @@ async def _improve_static_section(
         register="narrative",
     )
 
+    prior = section.content or ""
+    user_content = (
+        f"BRAND VOICE (mandatory — maintain throughout; do not genericize):\n{voice_block}\n\n"
+        f"Section: {section.title}\n"
+        f"Mode: {section.mode}\n"
+        f"Client: {rfp.client}\n"
+        f"Sector: {rfp.sector}\n"
+        f"User request:\n{user_message}\n\n"
+        f"Previous content (preserve zö voice while improving — fill gaps from KB):\n"
+        f"{prior[:9000]}\n\n"
+        f"KB excerpts:\n{'---'.join(kb_parts)[:14000]}\n\n"
+        f"RFP excerpt:\n{rfp_context[:5000]}"
+    )
+    if avoidance_block:
+        user_content += f"\n\n{avoidance_block}"
+
     raw, provider = await llm.chat_json(
         [
             {"role": "system", "content": STATIC_SECTION_REDRAFT_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"BRAND VOICE (mandatory — maintain throughout):\n{voice_block}\n\n"
-                    f"Section: {section.title}\n"
-                    f"Mode: {section.mode}\n"
-                    f"Client: {rfp.client}\n"
-                    f"User request:\n{user_message}\n\n"
-                    f"Previous content (preserve zö voice while improving):\n{section.content[:2500]}\n\n"
-                    f"KB excerpts:\n{'---'.join(kb_parts)[:10000]}\n\n"
-                    f"RFP excerpt:\n{rfp_context[:3000]}"
-                ),
-            },
+            {"role": "user", "content": user_content},
         ],
         max_tokens=4096,
-        temperature=0.35,
+        temperature=0.28,
     )
     content = enforce_narrative_voice(
         str(raw.get("content", "")).strip(),
@@ -787,7 +1137,20 @@ async def _improve_static_section(
         title=section.title,
         register="narrative",
     )
-    # KB references removed - not included in proposals
+    # Prefer deterministic KB fill for remaining VERIFY tags after rewrite
+    bio_kb = await _bio_kb_context_for_section(section)
+    if bio_kb.strip():
+        kb_parts.insert(0, bio_kb[:50_000])
+    if content and kb_parts:
+        joined_kb = "\n\n".join(kb_parts)
+        content, _ = _apply_bio_work_history_kb_fill(section, content, bio_kb or joined_kb)
+        content, _ = _replace_verify_tags_from_blob(content, joined_kb)
+        content = enforce_narrative_voice(
+            content,
+            section_id=section.id,
+            title=section.title,
+            register="narrative",
+        )
     updated = section.model_copy(
         update={
             "content": content or section.content,
@@ -807,8 +1170,10 @@ async def improve_proposal_section(
     selection_start: int | None = None,
     selection_end: int | None = None,
     selection_text: str | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
+    proposal_wide: bool = False,
     persist: bool = True,
-) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache, str, str]:
+) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache, str, str, bool]:
     """Re-query KB with new detailed queries, expand evidence, re-draft one section only."""
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
@@ -820,12 +1185,87 @@ async def improve_proposal_section(
     if not draft:
         raise ProposalError("No proposal draft found. Generate a proposal first.", status_code=400)
 
+    selection_mode = (
+        selection_start is not None
+        and selection_end is not None
+        and selection_end > selection_start
+    )
+
+    # When not pinned to a Revise-content excerpt, resolve the section the user named.
+    if not selection_mode:
+        resolved = _resolve_section_from_message(draft, user_message, section_id)
+        if resolved:
+            section_id = resolved.id
+
     section = _find_draft_section(draft, section_id)
     if not section:
         raise ProposalError(f"Section {section_id} not found in draft.", status_code=404)
     before_section = section.model_copy()
 
     research = await aget_research_cache(rfp_id)
+    requirements_block = _rfp_section_requirements_block(research, section_id)
+    if requirements_block:
+        rfp_context = f"{rfp_context}\n\n--- Mapped section requirements ---\n{requirements_block}"
+
+    manuscript_digest = (
+        _manuscript_digest(draft) if proposal_wide or not selection_mode else ""
+    )
+    if manuscript_digest:
+        rfp_context = f"{rfp_context}\n\n{manuscript_digest}"
+
+    if should_apply_budget_playbook(section, user_message):
+        from app.services.proposal_pricing_service import fetch_pricing_guide_context
+
+        stage_two = ""
+        if research and research.rfp_sections:
+            stage_two = "\n".join(
+                f"{s.title}: {', '.join((s.requirements or [])[:5])}"
+                for s in research.rfp_sections[:12]
+            )
+        guide_text, _guide_sources = await fetch_pricing_guide_context(
+            rfp,
+            stage_two=stage_two,
+            focus_hint=user_message[:300],
+        )
+        if guide_text.strip() and not guide_text.startswith("(No 00_Guide"):
+            rfp_context = (
+                f"{rfp_context}\n\n=== 00_Guide_Pricing (Supermemory) ===\n{guide_text[:20_000]}"
+            )
+
+    if not _wants_section_edit(user_message):
+        reply = await _section_chat_advisory_reply(
+            section=section,
+            rfp=rfp,
+            rfp_context=rfp_context,
+            user_message=user_message,
+            conversation_history=conversation_history,
+            selection_text=selection_text,
+            requirements_block=requirements_block,
+            manuscript_digest=manuscript_digest,
+            research=research,
+        )
+        provider = _provider_name()
+        if research is None:
+            research = ProposalResearchCache(
+                rfpId=rfp_id,
+                updatedAt=datetime.now(timezone.utc).isoformat(),
+                provider=provider,
+            )
+        return section, draft, research, provider, reply, False
+
+    latest_user_ask = user_message.strip()
+    query_focus = _query_focus_message(
+        latest_user_ask,
+        section=section,
+        requirements_block=requirements_block,
+    )
+    user_message = _compose_chat_user_message(user_message, conversation_history)
+
+    if persist:
+        draft = push_proposal_snapshot(
+            draft,
+            label=f"Before chat edit — {section.title[:48]}",
+        )
     is_static = section_id in STATIC_SECTION_IDS or section.source == "template"
 
     brand_voice_dict, kb_zo_voice = await resolve_voice_context(
@@ -837,12 +1277,18 @@ async def improve_proposal_section(
             else None
         ),
     )
+    # Always refresh KB voice samples for chat revises so tone stays grounded.
+    from app.services.proposal_brand_voice import fetch_zo_voice_excerpt
 
-    selection_mode = (
-        selection_start is not None
-        and selection_end is not None
-        and selection_end > selection_start
+    fresh_voice = await fetch_zo_voice_excerpt(
+        rfp_title=rfp.title,
+        rfp_client=rfp.client,
+        rfp_sector=rfp.sector,
+        rfp_location=rfp.location,
+        rfp_context=rfp_context,
     )
+    if fresh_voice.strip():
+        kb_zo_voice = fresh_voice
 
     if selection_mode:
         logger.info(
@@ -890,8 +1336,20 @@ async def improve_proposal_section(
             evidence_blob=evidence_blob,
             supplemental_blob=supplemental,
         )
+        kb_block, contact_fact_blob = await _merge_bio_kb_into_blobs(
+            section,
+            kb_block=kb_block,
+            fact_blob=contact_fact_blob,
+        )
         fact_blob = "\n\n".join(
             part for part in (full_content, contact_fact_blob) if part.strip()
+        )
+
+        excerpt = (section.content or "")[selection_start:selection_end]
+        excerpt, bio_wh_fills = _apply_bio_work_history_kb_fill(
+            section,
+            excerpt,
+            contact_fact_blob,
         )
 
         logger.info(
@@ -904,6 +1362,7 @@ async def improve_proposal_section(
         )
 
         working_excerpt, pre_fills = _replace_verify_tags_from_blob(excerpt, fact_blob)
+        pre_fills += bio_wh_fills
         if pre_fills > 0 and not _gap_fields_from_text(working_excerpt):
             new_content = enforce_narrative_voice(
                 _splice_selection(
@@ -956,7 +1415,7 @@ async def improve_proposal_section(
                 section_id,
                 pre_fills,
             )
-            return updated_section, updated_draft, research, provider, assistant_message
+            return updated_section, updated_draft, research, provider, assistant_message, True
 
         updated_section, provider, kb_fills = await _improve_section_selection(
             section=section,
@@ -973,6 +1432,8 @@ async def improve_proposal_section(
             fact_blob=fact_blob,
             avoidance_block=avoidance_block,
             working_excerpt=working_excerpt if pre_fills > 0 else None,
+            research=research,
+            compliance_user_message=user_message,
         )
         if research is None:
             research = ProposalResearchCache(
@@ -1016,7 +1477,7 @@ async def improve_proposal_section(
             before_words,
             after_words,
         )
-        return updated_section, updated_draft, research, provider, assistant_message
+        return updated_section, updated_draft, research, provider, assistant_message, True
 
     logger.info(
         "Section improve for %s / %s: static=%s message=%r",
@@ -1034,20 +1495,43 @@ async def improve_proposal_section(
         prior_queries = []
         if research:
             prior_queries = (research.section_queries or {}).get(section_id, [])
-        queries = await _plan_refined_queries(
+        rfp_section = _find_rfp_section(research, section_id) if research else None
+        seeded = _seed_gap_queries(
             section=section,
-            rfp_section=None,
             rfp=rfp,
             prior_queries=prior_queries,
-            user_message=user_message,
+        )
+        queries = await _plan_refined_queries(
+            section=section,
+            rfp_section=rfp_section,
+            rfp=rfp,
+            prior_queries=[*prior_queries, *seeded],
+            user_message=query_focus,
             current_content=section.content,
         )
+        # Prefer gap seeds first, then planner queries, then fallbacks.
+        merged_q: list[str] = []
+        used_q = {q.strip().lower() for q in prior_queries}
+        for q in [*seeded, *queries]:
+            key = q.strip().lower()
+            if q.strip() and key not in used_q:
+                merged_q.append(q.strip()[:240])
+                used_q.add(key)
+        queries = merged_q
         if not queries:
             queries = [
-                f"zö agency 02 master template {section.title} {rfp.client}"[:220],
-                f"zö agency {rfp.sector} {section.title} organizational structure employees"[:220],
+                f"zö agency 01 companyfacts firm legal name address Bend Oregon {rfp.client}"[:220],
+                f"zö agency contact phone email Sonja 02 master template {section.title}"[:220],
+                f"zö agency tourism DMO destination marketing experience {rfp.sector}"[:220],
+                f"zö agency company philosophy employees organizational structure {section.title}"[:220],
             ]
         query_count = len(queries)
+        avoidance_block = ""
+        if research:
+            avoidance_block = format_avoidance_block(
+                research.writing_avoidances,
+                research.loss_lessons,
+            )
         updated_section, provider = await _improve_static_section(
             section=section,
             rfp=rfp,
@@ -1056,6 +1540,7 @@ async def improve_proposal_section(
             user_message=user_message,
             brand_voice=brand_voice_dict,
             kb_zo_voice=kb_zo_voice,
+            avoidance_block=avoidance_block,
         )
         new_queries = {
             **(research.section_queries if research else {}),
@@ -1085,7 +1570,7 @@ async def improve_proposal_section(
             rfp_section=rfp_section,
             rfp=rfp,
             prior_queries=prior_queries,
-            user_message=user_message,
+            user_message=query_focus,
             current_content=section.content,
         )
         if not queries:
@@ -1135,6 +1620,7 @@ async def improve_proposal_section(
             prior_content=section.content,
             zo_context=zo_context,
             avoidance_block=avoidance_block,
+            research=research,
         )
 
         new_queries = {**research.section_queries, section_id: [*prior_queries, *queries]}
@@ -1178,17 +1664,24 @@ async def improve_proposal_section(
         await asave_research_cache(research)
 
     word_count_result = word_count(updated_section.content)
+    remaining_gaps = _gap_fields_from_text(updated_section.content or "")
     if is_static:
         assistant_message = (
-            f"Re-searched the knowledge base with {query_count} new detailed queries "
-            f"and rewrote **{section.title}** ({word_count_result} words). "
-            f"Review citations and [DESIGNER NOTE] blocks."
+            f"Ran **{query_count}** gap-targeted KB queries (VERIFY fields + RFP asks), "
+            f"re-applied zö brand voice, and rewrote **{section.title}** "
+            f"({word_count_result} words)."
         )
     else:
         assistant_message = (
             f"Ran {query_count} new Supermemory queries (different from prior searches), "
-            f"added {evidence_added} evidence item(s) to the corpus, and rewrote "
-            f"**{section.title}** ({word_count_result} words). Check [E#] citations."
+            f"added {evidence_added} evidence item(s) to the corpus, preserved brand voice, "
+            f"and rewrote **{section.title}** ({word_count_result} words)."
+        )
+    if remaining_gaps:
+        assistant_message += (
+            " Still needs manual/KB fill: "
+            + ", ".join(f"`{g}`" for g in remaining_gaps[:6])
+            + "."
         )
 
     logger.info(
@@ -1197,4 +1690,4 @@ async def improve_proposal_section(
         section_id,
         word_count_result,
     )
-    return updated_section, updated_draft, research, provider, assistant_message
+    return updated_section, updated_draft, research, provider, assistant_message, True

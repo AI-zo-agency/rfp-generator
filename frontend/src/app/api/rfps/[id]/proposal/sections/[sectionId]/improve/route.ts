@@ -20,6 +20,8 @@ export async function POST(
     selectionStart?: number;
     selectionEnd?: number;
     selectionText?: string;
+    conversationHistory?: { role: string; content: string }[];
+    proposalWide?: boolean;
   };
   try {
     body = await request.json();
@@ -41,6 +43,8 @@ export async function POST(
           selectionStart: body.selectionStart,
           selectionEnd: body.selectionEnd,
           selectionText: body.selectionText,
+          conversationHistory: body.conversationHistory,
+          proposalWide: body.proposalWide === true,
         }),
         timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS,
       }

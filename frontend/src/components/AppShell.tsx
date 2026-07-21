@@ -22,7 +22,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [router]);
 
   if (!isAuthenticated) {
-    return null;
+    return (
+      <div className="flex h-dvh w-full items-center justify-center bg-[var(--zo-bg)]">
+        <div className="flex flex-col items-center gap-4">
+          <div className="h-10 w-10 animate-spin rounded-full border-[3px] border-[var(--zo-primary)] border-t-transparent" />
+          <span className="text-sm font-medium tracking-widest uppercase text-[var(--zo-text-muted)]">
+            ZO AGENCY
+          </span>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -43,7 +52,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div
             className={
               isProposalsWorkspace
-                ? "flex min-h-0 flex-1 flex-col overflow-hidden px-2 py-2 sm:px-3 sm:py-3 md:px-4 md:py-4"
+                ? "flex min-h-0 flex-1 flex-col overflow-hidden px-2 py-1 sm:px-3 sm:py-1.5 md:px-4 md:py-2"
                 : "mx-auto max-w-[1480px] px-4 py-6 sm:px-6 sm:py-8 md:px-10 md:py-10 lg:px-12"
             }
           >

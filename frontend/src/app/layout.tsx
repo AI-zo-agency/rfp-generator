@@ -21,6 +21,10 @@ export const metadata: Metadata = {
   title: "Zo RFP Intelligence Studio | zö agency",
   description:
     "Sync JustWin solicitations, go/no-go review, and RFP tracking for zö agency.",
+  icons: {
+    icon: "/icon.png",
+    apple: "/icon.png",
+  },
 };
 
 export default function RootLayout({

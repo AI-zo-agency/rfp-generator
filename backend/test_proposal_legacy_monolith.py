@@ -67,6 +67,39 @@ class LegacyMonolithStripTests(unittest.TestCase):
         )
         self.assertFalse(static_sections_1_3_have_content(draft))
 
+    def test_section_1_without_who_we_are_is_incomplete(self) -> None:
+        """1.2–1.5 filled but empty Who We Are must not count as Sections 1–3 done."""
+        draft = ProposalDraft(
+            rfpId="test",
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            sections=[
+                _sec("section-1-who-we-are", "1.1 — Who We Are", ""),
+                _sec("section-1-org-structure", "1.2 — Organizational Structure"),
+                _sec("section-1-business-info", "1.3 — Business Information"),
+                _sec("section-1-certifications", "1.4 — Certifications"),
+                _sec("section-1-insurance", "1.5 — Insurance Information"),
+                _sec("section-2-bio-sonja-anderson", "2.1 — Sonja Anderson"),
+                _sec("section-3-work-01-case", "3.1 — Case Study"),
+            ],
+        )
+        self.assertFalse(static_sections_1_3_have_content(draft))
+
+    def test_full_section_1_with_team_and_work_is_complete(self) -> None:
+        draft = ProposalDraft(
+            rfpId="test",
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            sections=[
+                _sec("section-1-who-we-are", "1.1 — Who We Are"),
+                _sec("section-1-org-structure", "1.2 — Organizational Structure"),
+                _sec("section-1-business-info", "1.3 — Business Information"),
+                _sec("section-1-certifications", "1.4 — Certifications"),
+                _sec("section-1-insurance", "1.5 — Insurance Information"),
+                _sec("section-2-bio-sonja-anderson", "2.1 — Sonja Anderson"),
+                _sec("section-3-work-01-case", "3.1 — Case Study"),
+            ],
+        )
+        self.assertTrue(static_sections_1_3_have_content(draft))
+
 
 if __name__ == "__main__":
     unittest.main()

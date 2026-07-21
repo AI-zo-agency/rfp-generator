@@ -302,11 +302,11 @@ async def run_fulfill_rfp_gaps(
     try:
         return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
     except ProposalGenerationCancelled:
-        record_generation_stopped(rfp_id, "fulfill-scan")
+        await record_generation_stopped(rfp_id, "fulfill-scan")
         raise
     finally:
         unbind_active_rfp(token)
-        clear_fulfill_scan_activity(rfp_id)
+        await clear_fulfill_scan_activity(rfp_id)
 
 
 async def _run_fulfill_rfp_gaps_body(
@@ -357,6 +357,7 @@ async def _run_fulfill_rfp_gaps_body(
         "Budget reconcile",
         "Consistency repairs",
         "Contractor KPIs (Section 2.3)",
+        "KB fact-check (Supermemory)",
         "Pre-submit refresh",
     )
 
@@ -365,8 +366,8 @@ async def _run_fulfill_rfp_gaps_body(
 
         await check_generation_cancelled(rfp_id)
 
-    def _scan_progress(step: int, label: str, detail: str | None = None) -> None:
-        record_pipeline_activity(
+    async def _scan_progress(step: int, label: str, detail: str | None = None) -> None:
+        await record_pipeline_activity(
             rfp_id,
             label=label,
             detail=detail,
@@ -375,7 +376,7 @@ async def _run_fulfill_rfp_gaps_body(
             in_progress_phase="fulfill-scan",
         )
 
-    _scan_progress(
+    await _scan_progress(
         1,
         "Scan RFP: closing & submission",
         f"Reading {len(rfp_text.strip()):,} chars from uploaded PDF.",
@@ -458,7 +459,7 @@ async def _run_fulfill_rfp_gaps_body(
     try:
         from app.services.proposal_fulfill_rfp_structure import run_rfp_structure_alignment_pass
 
-        _scan_progress(
+        await _scan_progress(
             2,
             "Scan RFP: structure & scored sections",
             "Exhibit A / TOC / criteria — reframe BMP, qualifications, approach per RFP.",
@@ -575,7 +576,7 @@ async def _run_fulfill_rfp_gaps_body(
             summarize_budget_kpi_findings,
         )
 
-        _scan_progress(3, "Scan RFP: budget reconcile", "Fee tables vs RFP spend — not full-manuscript context.")
+        await _scan_progress(3, "Scan RFP: budget reconcile", "Fee tables vs RFP spend — not full-manuscript context.")
         await _ensure_not_stopped()
         draft, research, budget_logs = await run_fulfill_budget_scan(
             rfp_id=rfp_id,
@@ -601,7 +602,7 @@ async def _run_fulfill_rfp_gaps_body(
     try:
         from app.services.proposal_fulfill_rfp_repairs import run_manuscript_consistency_repairs
 
-        _scan_progress(4, "Scan RFP: consistency repairs", "Roster, KPI wording, qualification stubs.")
+        await _scan_progress(4, "Scan RFP: consistency repairs", "Roster, KPI wording, qualification stubs.")
         await _ensure_not_stopped()
         draft, repair_logs, repair_human = await run_manuscript_consistency_repairs(
             draft,
@@ -641,7 +642,7 @@ async def _run_fulfill_rfp_gaps_body(
         try:
             from app.services.proposal_fulfill_rfp_budget_kpi import run_fulfill_kpi_scan
 
-            _scan_progress(
+            await _scan_progress(
                 5,
                 "Scan RFP: contractor KPIs + detail",
                 "Activity Measure tables & BMP linkages — rewrite, not label swap.",
@@ -668,7 +669,7 @@ async def _run_fulfill_rfp_gaps_body(
         try:
             from app.services.proposal_fulfill_rfp_budget_kpi import run_fulfill_kpi_scan
 
-            _scan_progress(5, "Scan RFP: contractor KPIs", "Deterministic KPI alignment (no LLM).")
+            await _scan_progress(5, "Scan RFP: contractor KPIs", "Deterministic KPI alignment (no LLM).")
             await _ensure_not_stopped()
             draft, kpi_logs, kpi_human = await run_fulfill_kpi_scan(
                 draft=draft,
@@ -713,7 +714,54 @@ async def _run_fulfill_rfp_gaps_body(
             "acknowledge openly rather than implying local history."
         )
 
-    _scan_progress(6, "Scan RFP: pre-submit refresh", "Updating checklist and ending report.")
+    await _scan_progress(
+        6,
+        "Scan RFP: KB fact-check",
+        "Requirements → RFP excerpt → Supermemory per section (smart rewrite when needed).",
+    )
+    await _ensure_not_stopped()
+
+    try:
+        from app.services.proposal_kb_fact_checker import run_kb_fact_check_pass
+
+        if research is None:
+            research = await aget_research_cache(rfp_id)
+        logger.info(
+            "Scan RFP step 6/7 — KB fact-check starting for %s (%d sections)",
+            rfp_id,
+            len(draft.sections),
+        )
+        draft, fc_report = await run_kb_fact_check_pass(
+            draft,
+            rfp=rfp,
+            rfp_context=rfp_text,
+            research=research,
+        )
+        if fc_report.logs:
+            report["kbFactCheck"] = {
+                "sectionsChecked": fc_report.sections_checked,
+                "requirementRepairs": fc_report.requirement_repairs,
+                "verifyTagsFilled": fc_report.verify_tags_filled,
+                "stubsRepaired": fc_report.stubs_repaired,
+                "evalRepairs": fc_report.eval_repairs,
+                "duplicatesRemoved": fc_report.duplicates_removed,
+                "metricFlags": fc_report.metric_flags,
+                "logs": fc_report.logs,
+            }
+            for line in fc_report.logs[:20]:
+                report["logs"].append(f"KB fact-check: {line}")
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KB fact-check during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"KB fact-check skipped: {exc}")
+
+    await _scan_progress(
+        7,
+        "Scan RFP: pre-submit refresh",
+        "Checklist, manual flags, and ending report.",
+    )
     await _ensure_not_stopped()
 
     review = run_presubmit_review_with_manual_flags(
@@ -757,6 +805,8 @@ async def _run_fulfill_rfp_gaps_body(
                 "Accuracy repair",
                 "Fabrication guard",
                 "Truncation repair",
+                "KB fact-check",
+                "Smart fact-check",
             )
         )
     )

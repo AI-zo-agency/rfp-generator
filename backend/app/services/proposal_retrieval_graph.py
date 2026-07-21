@@ -24,7 +24,9 @@ MAX_CHUNKS_PER_SECTION = 30
 EXCERPT_MAX_CHARS = 2_000
 MAX_CONCURRENT_SUPERMEMORY_SEARCHES = 6
 
-_LLM_SEMAPHORE = asyncio.Semaphore(2)
+# Cap concurrent LLM calls within a single RFP's retrieval run — created per
+# invocation in run_retrieval_graph so unrelated RFPs never wait on each other.
+LLM_CONCURRENCY = 2
 
 RFP_ANALYSIS_PROMPT = """You analyze an RFP to plan a full proposal response for zö agency.
 
@@ -114,6 +116,7 @@ class RetrievalGraphState(TypedDict, total=False):
     evidence_corpus: list[dict[str, Any]]
     provider: str
     error: str | None
+    llm_semaphore: asyncio.Semaphore
 
 
 def _hit_label(hit: dict[str, Any]) -> str:
@@ -289,7 +292,7 @@ async def _plan_queries_for_sections(
         )
 
     try:
-        async with _LLM_SEMAPHORE:
+        async with state["llm_semaphore"]:
             raw, _ = await llm.chat_json(
                 [
                     {"role": "system", "content": BATCH_QUERY_PLANNER_PROMPT},
@@ -435,6 +438,7 @@ async def _retrieve_round(state: RetrievalGraphState) -> dict[str, Any]:
 async def _evaluate_coverage_batch(
     sections: list[dict[str, Any]],
     section_hits: dict[str, list[dict[str, Any]]],
+    llm_semaphore: asyncio.Semaphore,
 ) -> list[dict[str, Any]]:
     """One LLM call to score all sections (avoids N parallel coverage evals)."""
     batch_input: list[dict[str, Any]] = []
@@ -471,7 +475,7 @@ async def _evaluate_coverage_batch(
     scores_by_id: dict[str, dict[str, Any]] = {}
     if batch_input:
         try:
-            async with _LLM_SEMAPHORE:
+            async with llm_semaphore:
                 raw, _ = await llm.chat_json(
                     [
                         {"role": "system", "content": BATCH_COVERAGE_EVAL_PROMPT},
@@ -530,7 +534,7 @@ async def _evaluate_coverage(state: RetrievalGraphState) -> dict[str, Any]:
     section_hits = state.get("section_hits") or {}
     sections = state.get("rfp_sections") or []
 
-    updated = await _evaluate_coverage_batch(sections, section_hits)
+    updated = await _evaluate_coverage_batch(sections, section_hits, state["llm_semaphore"])
     scores = [section.get("coveragePercent") or 0 for section in updated]
     logger.info(
         "Coverage round %d for %s: scores=%s avg=%.0f (1 LLM eval call)",
@@ -650,6 +654,7 @@ async def run_retrieval_graph(
         "section_hits": {},
         "section_queries": {},
         "evidence_corpus": [],
+        "llm_semaphore": asyncio.Semaphore(LLM_CONCURRENCY),
     }
 
     logger.info("Proposal retrieval graph starting for rfp_id=%s", rfp_id)

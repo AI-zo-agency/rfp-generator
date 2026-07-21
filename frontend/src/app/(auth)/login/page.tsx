@@ -76,7 +76,9 @@ export default function LoginPage() {
         </label>
         <input
           type="email"
+          name="login-email"
           required
+          autoComplete="username"
           className="auth-input zo-input w-full px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[var(--zo-primary)] focus:border-transparent transition-smooth"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
@@ -91,7 +93,9 @@ export default function LoginPage() {
         <div className="relative">
           <input
             type={showPassword ? "text" : "password"}
+            name="login-password"
             required
+            autoComplete="current-password"
             className="auth-input zo-input w-full px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[var(--zo-primary)] focus:border-transparent transition-smooth pr-12"
             value={password}
             onChange={(e) => setPassword(e.target.value)}

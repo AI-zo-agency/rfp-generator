@@ -24,7 +24,8 @@ from app.services.proposal_budget_validation import (
 )
 from app.services.proposal_common import ProposalError, load_rfp_for_proposal
 from app.services.proposal_knowledge_base_tools import search_knowledge_base
-from app.services.proposal_repository import get_research_cache, save_research_cache
+from app.services.proposal_budget_playbook import BUDGET_PLAYBOOK_CANONICAL
+from app.services.proposal_repository import aget_research_cache, asave_research_cache
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +38,18 @@ STAGE3_BUDGET_PROMPT = """You are zö agency's Stage 3 Budget assistant. Build a
 - 06_WON / 07_FIN proposal excerpts ONLY for budget page format or burdened hourly rates when the RFP requires personnel loading
 
 Do not invent numbers. Every amount must trace to a Pricing Guide line item at the selected tier or an explicit KB excerpt.
+Never reverse-engineer a line item's rate or extended amount so the sum hits a target — change tier or scope instead.
+One-time deliverables (setup, development, package) must not be multiplied by 12 to simulate recurring fees.
+
+""" + BUDGET_PLAYBOOK_CANONICAL + """
 
 === PROCESS (follow in order) ===
 
-PHASE 1 — Extract five signals from the RFP and prior stages:
+PHASE 1 — Extract five signals from the RFP and prior stages (align with playbook §1–2):
 1. Budget ceiling (hard cap if stated — stay under it)
-2. Cost weight in scoring → tier: 25%+ = Low, 15–20% = Average (default), 10% or less = High
-3. Budget format: phased | personnel_loading | service_menu
-4. Deliverables from Stage 2 → each becomes a line item
+2. Cost weight in scoring → tier: 25%+ = Low, 15–20% = Average (default), 10% or less = High — state tier + rationale
+3. Budget format: phased | personnel_loading | service_menu | blended_rate_form (match RFP, not habit)
+4. Deliverables from Stage 2 → each becomes a line item (one-time vs recurring per playbook §3)
 5. Travel — add direct expenses line if zö is out of region
 
 PHASE 2 — Pick ONE pricing tier (Low / Average / High) for the entire proposal.
@@ -227,6 +232,14 @@ Return ONLY JSON:
 
 lineItems must be a flat array (one row per line). Do not back-fill to the budget ceiling.
 
+CRITICAL — HARD CAP / YEAR ALLOCATIONS (submission disqualifier if wrong):
+- If the RFP states a maximum compensation / NTE / total proposed price ceiling (e.g. $2,950,000),
+  set rfpBudgetCap to that number and keep agencyRevenueEstimate + lumpSumTotal AT OR UNDER it.
+- Yearly "Annual Allocation Year 1/2/3" (or similar) figures are the BUDGET ENVELOPE, not cost lines.
+  NEVER add them as lineItems — that double-counts and exceeds the hard cap.
+- lineItems = billable work only (Discovery, Strategy, Content, Digital, PM, etc.) that SUM to ≤ rfpBudgetCap.
+- If scope would exceed the cap, scope DOWN (fewer hours/deliverables) — do not invent extra rows to pad.
+
 rateSource on each lineItem should cite the guide menu item (e.g. "5.3 — 00_Guide_Pricing Average tier")."""
 
 
@@ -269,29 +282,53 @@ def _structural_map_text(
     return text, bool(text)
 
 
-async def _fetch_guide_context(rfp: RfpRecord, stage_two: str) -> tuple[str, list[str]]:
+async def fetch_pricing_guide_context(
+    rfp: RfpRecord,
+    *,
+    stage_two: str = "",
+    focus_hint: str = "",
+) -> tuple[str, list[str]]:
+    """Retrieve 00_Guide_Pricing from Supermemory (Stage 3, chat explain, section edits)."""
+    return await _fetch_guide_context(rfp, stage_two, focus_hint=focus_hint)
+
+
+async def _fetch_guide_context(
+    rfp: RfpRecord,
+    stage_two: str,
+    *,
+    focus_hint: str = "",
+) -> tuple[str, list[str]]:
     """Retrieve 00_Guide_Pricing from Supermemory (pricing + reference categories)."""
     if not supermemory.is_configured():
         return "(Supermemory not configured.)", []
 
     scope_hint = stage_two[:200] if stage_two else (rfp.title or "")
+    hint = (focus_hint or "")[:300]
     queries = [
         "00_Guide_Pricing tier ranges Low Average High discovery strategy content digital media project management contingency qualifying language",
+        "00_Guide_Pricing 4.4 Email Newsletter Design Setup one-time Santa Clara average tier",
+        "00_Guide_Pricing 9.1 9.2 Project Management short projects campaign-specific 5-8 percent floor",
         f"00_Guide_Pricing {rfp.client or ''} {scope_hint[:150]}".strip(),
     ]
+    if hint:
+        queries.insert(1, f"00_Guide_Pricing {hint[:240]}".strip())
 
     chunks: list[str] = []
     sources: list[str] = []
+    seen_chunk_keys: set[str] = set()
     for query in queries:
         for category in ("reference", "pricing"):
             text, srcs = await search_knowledge_base(
                 query,
                 limit=8,
                 category=category,
-                max_chars=GUIDE_SEARCH_CHAR_LIMIT // 2,
+                max_chars=GUIDE_SEARCH_CHAR_LIMIT // 3,
             )
             if text and not text.startswith("("):
-                chunks.append(text)
+                key = text[:200]
+                if key not in seen_chunk_keys:
+                    seen_chunk_keys.add(key)
+                    chunks.append(text)
             for src in srcs:
                 if src not in sources:
                     sources.append(src)
@@ -397,7 +434,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         raise ProposalError("LLM not configured.", status_code=503)
 
     rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
-    prior_research = get_research_cache(rfp_id)
+    prior_research = await aget_research_cache(rfp_id)
 
     stage_one, stage_one_ready = _stage_one_text(rfp)
     stage_two, stage_two_ready = _structural_map_text(prior_research)
@@ -573,7 +610,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             updatedAt=now,
             provider=provider,
         )
-    save_research_cache(research)
+    await asave_research_cache(research)
 
     logger.info(
         "Stage 3 budget for %s: %d line items, tier=%s, format=%s, confidence=%d",
@@ -586,10 +623,10 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     return budget, research
 
 
-def reconcile_cached_budget(rfp_id: str) -> tuple[ProposalBudget, ProposalResearchCache]:
+async def reconcile_cached_budget(rfp_id: str) -> tuple[ProposalBudget, ProposalResearchCache]:
     """Re-run deterministic budget editor on cached budget (no LLM regen)."""
     _rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
-    research = get_research_cache(rfp_id)
+    research = await aget_research_cache(rfp_id)
     if not research or not research.budget:
         raise ProposalError(
             "No cached budget to reconcile. Run Phase 3.5 budget generation first.",
@@ -603,7 +640,7 @@ def reconcile_cached_budget(rfp_id: str) -> tuple[ProposalBudget, ProposalResear
     )
     now = datetime.now(timezone.utc).isoformat()
     research = research.model_copy(update={"budget": budget, "updated_at": now})
-    save_research_cache(research)
+    await asave_research_cache(research)
     logger.info(
         "Budget reconciled for %s: revenue=%s, lump=%s, %d line items",
         rfp_id,

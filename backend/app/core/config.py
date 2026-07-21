@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_model: str = "anthropic/claude-sonnet-4"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # Role-tier router: heavy = Sonnet-class (writing/judgment); light = Haiku-class (plan/gate).
+    # Empty heavy → fall back to openrouter_model. Empty light → fall back to heavy.
+    llm_heavy_model: str = ""
+    llm_light_model: str = "anthropic/claude-haiku-4.5"
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash-exp"

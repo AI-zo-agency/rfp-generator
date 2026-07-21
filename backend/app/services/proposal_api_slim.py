@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.proposal import EvidenceItem, ProposalDraft, ProposalDraftSnapshot, ProposalResearchCache
+from app.services.proposal_manuscript_locks import strip_leaked_markdown_wrappers
 
 _EXCERPT_API_MAX = 500
 _MAX_FULFILL_LOG_LINES = 40
@@ -13,6 +14,14 @@ _MAX_FULFILL_LOG_LINES = 40
 def slim_draft_for_api(draft: ProposalDraft) -> dict[str, Any]:
     """Omit snapshot section bodies from list/get responses — full copies stay in DB."""
     data = draft.model_dump(by_alias=True)
+    sections = data.get("sections")
+    if isinstance(sections, list):
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            raw = section.get("content")
+            if isinstance(raw, str) and raw.strip():
+                section["content"] = strip_leaked_markdown_wrappers(raw)
     slim_snaps: list[dict[str, Any]] = []
     for snap in draft.snapshots or []:
         slim_snaps.append(

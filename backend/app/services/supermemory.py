@@ -1,7 +1,11 @@
 """Supermemory client.
 
 API split (Supermemory platform — not our choice):
-  - v4/search  → query KB (hybrid = memories + document chunks; use hybrid by default)
+  - v4/search  → query KB
+      • searchMode=hybrid    → memories (+ related docs)
+      • searchMode=documents → raw PDF/DOCX chunks
+    Retrieval priority: use memories when present; fill gaps from chunks
+    (docs with Memories=0 still surface via chunk search).
   - v3/documents* → ingest only (batch upload, file upload, list) — no v4 write API exists
   - v3/connections* → Google Drive OAuth/sync only
 
@@ -296,6 +300,7 @@ async def search_documents(
     include_full_docs: bool = False,
     filters: dict[str, Any] | None = None,
     search_mode: str = "hybrid",
+    threshold: float = 0.45,
 ) -> list[dict[str, Any]]:
     """Query KB via POST /v4/search (always v4 — never v3 for reads)."""
     body: dict[str, Any] = {
@@ -304,7 +309,7 @@ async def search_documents(
         "containerTag": container_tag(),
         "searchMode": search_mode,
         "rerank": True,
-        "threshold": 0.45,
+        "threshold": threshold,
     }
     if include_full_docs:
         body["include"] = {
@@ -331,6 +336,7 @@ async def search_hybrid(
     limit: int = 8,
     include_full_docs: bool = False,
     filters: dict[str, Any] | None = None,
+    threshold: float = 0.45,
 ) -> list[dict[str, Any]]:
     """v4 hybrid — memories + document chunks (default retrieval mode)."""
     return await search_documents(
@@ -339,6 +345,7 @@ async def search_hybrid(
         include_full_docs=include_full_docs,
         filters=filters,
         search_mode="hybrid",
+        threshold=threshold,
     )
 
 
@@ -347,6 +354,7 @@ async def search_document_chunks(
     query: str,
     limit: int = 8,
     filters: dict[str, Any] | None = None,
+    threshold: float = 0.45,
 ) -> list[dict[str, Any]]:
     """v4 documents mode — raw PDF/DOCX chunks (phones/emails live here, not in memory summaries)."""
     return await search_documents(
@@ -355,6 +363,7 @@ async def search_document_chunks(
         include_full_docs=True,
         filters=filters,
         search_mode="documents",
+        threshold=threshold,
     )
 
 
@@ -385,13 +394,75 @@ def hit_text(hit: dict[str, Any]) -> str:
                 if value:
                     return str(value).strip()
 
-    for key in ("chunk", "content", "memory", "text", "summary", "documentSummary"):
+    # Chunks before memories — memories are summaries and often omit section detail (e.g. KPIs).
+    for key in ("chunk", "chunks", "content", "text", "memory", "summary", "documentSummary"):
         value = hit.get(key)
         if value:
             if isinstance(value, list):
                 return "\n".join(str(item) for item in value).strip()
             return str(value).strip()
     return ""
+
+
+def is_chunk_hit(hit: dict[str, Any]) -> bool:
+    """True when the hit is from searchMode=documents (raw chunks), not a memory summary."""
+    if hit.get("chunk") or hit.get("chunks"):
+        return True
+    if hit.get("memory") and not hit.get("chunk"):
+        return False
+    return bool(hit.get("_retrieval_mode") == "documents")
+
+
+def is_memory_hit(hit: dict[str, Any]) -> bool:
+    """True when the hit carries a memory summary (searchMode=hybrid)."""
+    if hit.get("_retrieval_mode") == "hybrid":
+        return True
+    return bool(hit.get("memory")) and not bool(hit.get("chunk"))
+
+
+def merge_memory_and_chunk_hits(
+    memory_hits: list[dict[str, Any]],
+    chunk_hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Priority merge: keep memory hits, then add chunk hits for docs memories missed.
+
+    When the same document appears in both, keep the memory hit for ranking identity but
+    overlay chunk text so section detail (KPIs, etc.) is available without relying on
+    memory summaries alone.
+    """
+    merged: list[dict[str, Any]] = []
+    by_doc: dict[str, dict[str, Any]] = {}
+
+    for hit in memory_hits:
+        tagged = dict(hit)
+        tagged["_retrieval_mode"] = "hybrid"
+        key = document_dedupe_key(tagged) or str(tagged.get("id") or id(tagged))
+        by_doc[key] = tagged
+        merged.append(tagged)
+
+    for hit in chunk_hits:
+        tagged = dict(hit)
+        tagged["_retrieval_mode"] = "documents"
+        key = document_dedupe_key(tagged) or str(tagged.get("id") or id(tagged))
+        chunk_body = hit_text(tagged)
+        if key in by_doc:
+            # Memories found the doc — enrich with chunk text when memory summary is thinner
+            existing = by_doc[key]
+            memory_body = hit_text(existing)
+            if chunk_body and (
+                not memory_body
+                or len(chunk_body) > len(memory_body) * 1.2
+                or (chunk_body and chunk_body not in memory_body)
+            ):
+                existing["chunk"] = chunk_body
+                existing["content"] = chunk_body
+                existing["_enriched_from_chunks"] = True
+            continue
+        # Not in memories → include chunk hit (Torrent-style: Memories 0, Chunks 10)
+        by_doc[key] = tagged
+        merged.append(tagged)
+
+    return merged
 
 
 def hit_custom_id(hit: dict[str, Any]) -> str:

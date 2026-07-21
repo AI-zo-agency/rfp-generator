@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 import httpx
+import re
 from urllib.parse import quote
 
 from app.models.proposal import (
@@ -46,10 +47,11 @@ from app.services.proposal_generator import (
 from app.services.proposal_section_editor import improve_proposal_section
 from app.services.proposal_repository import (
     get_proposal_draft,
-    get_research_cache,
     save_proposal_draft,
-    delete_proposal_draft,
-    delete_research_cache,
+    aget_research_cache,
+    asave_proposal_draft,
+    adelete_proposal_draft,
+    adelete_research_cache,
 )
 from app.services.proposal_job_runner import (
     get_proposal_job,
@@ -100,30 +102,55 @@ async def get_proposal(rfp_id: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="RFP not found")
     job = await get_proposal_job(rfp_id)
     slim_research = _slim_research(research)
+    pipeline_status = await build_pipeline_status(rfp_id, draft=draft, research=research)
     return {
         "draft": slim_draft_for_api(draft) if draft else None,
         "research": slim_research.model_dump(by_alias=True) if slim_research else None,
-        "pipelineStatus": build_pipeline_status(rfp_id, draft=draft, research=research),
+        "pipelineStatus": pipeline_status,
         "proposalJob": proposal_job_to_dict(job),
     }
 
 
-@router.get("/{rfp_id}/proposal/snapshot/{saved_at}")
-async def get_proposal_snapshot(rfp_id: str, saved_at: str) -> dict[str, object]:
-    """Full snapshot sections for version compare / preview (not loaded on every GET)."""
+@router.get("/{rfp_id}/proposal/snapshot")
+async def get_proposal_snapshot_query(
+    rfp_id: str,
+    saved_at: str = Query(..., alias="savedAt"),
+) -> dict[str, object]:
+    """Full snapshot sections for version compare (query param — avoids '+' path mangling)."""
+    return await _get_proposal_snapshot(rfp_id, saved_at)
+
+
+@router.get("/{rfp_id}/proposal/snapshot/{saved_at:path}")
+async def get_proposal_snapshot_path(rfp_id: str, saved_at: str) -> dict[str, object]:
+    """Legacy path form — prefer ?savedAt= for ISO timestamps with offsets."""
+    return await _get_proposal_snapshot(rfp_id, saved_at)
+
+
+def _normalize_snapshot_saved_at(value: str) -> str:
     from urllib.parse import unquote
 
+    key = unquote(unquote((value or "").strip()))
+    # Path/query decoders sometimes turn '+' into space in "+00:00".
+    key = re.sub(
+        r"(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(\d{2}:\d{2})$",
+        r"\1+\2",
+        key,
+    )
+    if key.endswith("Z"):
+        key = key[:-1] + "+00:00"
+    return key
+
+
+async def _get_proposal_snapshot(rfp_id: str, saved_at: str) -> dict[str, object]:
     from app.services.proposal_repository import aget_proposal_draft
 
-    key = unquote(saved_at)
+    key = _normalize_snapshot_saved_at(saved_at)
     draft = await aget_proposal_draft(rfp_id)
     if not draft:
         raise HTTPException(status_code=404, detail="No proposal draft found.")
     for snap in draft.snapshots or []:
-        if snap.saved_at == key:
-            return {
-                "snapshot": snap.model_dump(by_alias=True),
-            }
+        if _normalize_snapshot_saved_at(snap.saved_at) == key:
+            return {"snapshot": snap.model_dump(by_alias=True)}
     raise HTTPException(status_code=404, detail="Snapshot not found.")
 
 
@@ -142,6 +169,24 @@ def upsert_proposal(rfp_id: str, draft: ProposalDraft) -> dict[str, object]:
     if draft.rfp_id != rfp_id:
         raise HTTPException(status_code=400, detail="rfpId mismatch")
     existing = get_proposal_draft(rfp_id)
+    # Guard: client autosave of an empty shell must not wipe a filled manuscript.
+    # Snapshots alone survive that bug — Restore version still works — but live sections
+    # would show "Not started" after reload. Explicit Reset deletes the row first.
+    if existing is not None:
+        existing_filled = sum(
+            1 for s in existing.sections if (s.content or "").strip()
+        )
+        incoming_filled = sum(
+            1 for s in draft.sections if (s.content or "").strip()
+        )
+        if existing_filled > 0 and incoming_filled == 0:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Refusing to overwrite a filled proposal with an empty outline. "
+                    "Use Reset draft if you intend to clear the manuscript."
+                ),
+            )
     draft = merge_snapshots_for_save(draft, existing)
     save_proposal_draft(draft)
     return {"ok": True, "draft": slim_draft_for_api(draft)}
@@ -153,16 +198,16 @@ async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
     if not rfp_exists(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
     try:
-        delete_proposal_draft(rfp_id)
+        await adelete_proposal_draft(rfp_id)
     except Exception as exc:
         # Ignore errors if draft didn't exist
         pass
     try:
-        delete_research_cache(rfp_id)
+        await adelete_research_cache(rfp_id)
     except Exception as exc:
         # Ignore errors if research didn't exist
         pass
-    clear_pipeline_checkpoint(rfp_id)
+    await clear_pipeline_checkpoint(rfp_id)
     from app.services.proposal_generation_cancel import clear_generation_cancel
 
     clear_generation_cancel(rfp_id)
@@ -176,11 +221,11 @@ async def stop_proposal_generation_endpoint(rfp_id: str) -> dict[str, object]:
     from app.services.proposal_pipeline_checkpoint import record_generation_stopped
 
     request_generation_cancel(rfp_id)
-    research = get_research_cache(rfp_id)
+    research = await aget_research_cache(rfp_id)
     phase = None
     if research and research.pipeline_checkpoint:
         phase = research.pipeline_checkpoint.in_progress_phase
-    record_generation_stopped(rfp_id, phase)
+    await record_generation_stopped(rfp_id, phase)
     return {
         "ok": True,
         "message": "Stop requested. Current step will end; use Continue proposal to resume.",
@@ -242,13 +287,16 @@ async def generate_full_proposal_endpoint(rfp_id: str) -> ProposalGenerateRespon
     "/{rfp_id}/proposal/generate/sections-1-3",
     response_model=ProposalGenerateResponse,
 )
-async def generate_sections_1_3_endpoint(rfp_id: str) -> ProposalGenerateResponse:
+async def generate_sections_1_3_endpoint(rfp_id: str, request: Request) -> ProposalGenerateResponse:
     """Generate static Sections 1–3 only (Phase 2 retrieval is a separate endpoint)."""
+    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+
     try:
-        async with pipeline_phase(rfp_id, "sections-1-3"):
-            draft, brand_voice, research = await generate_sections_1_3(
-                rfp_id, force_regenerate=True
-            )
+        async with cancel_generation_on_disconnect(rfp_id, request):
+            async with pipeline_phase(rfp_id, "sections-1-3"):
+                draft, brand_voice, research = await generate_sections_1_3(
+                    rfp_id, force_regenerate=True
+                )
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -268,11 +316,14 @@ async def generate_sections_1_3_endpoint(rfp_id: str) -> ProposalGenerateRespons
     "/{rfp_id}/proposal/phase-2-retrieval",
     response_model=ProposalPhase2Response,
 )
-async def phase2_retrieval_endpoint(rfp_id: str) -> ProposalPhase2Response:
+async def phase2_retrieval_endpoint(rfp_id: str, request: Request) -> ProposalPhase2Response:
     """Phase 2 only: map RFP sections, per-section Supermemory retrieval, coverage, evidence corpus."""
+    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+
     try:
-        async with pipeline_phase(rfp_id, "phase-2"):
-            research = await run_phase2_retrieval(rfp_id)
+        async with cancel_generation_on_disconnect(rfp_id, request):
+            async with pipeline_phase(rfp_id, "phase-2"):
+                research = await run_phase2_retrieval(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -288,11 +339,14 @@ async def phase2_retrieval_endpoint(rfp_id: str) -> ProposalPhase2Response:
     "/{rfp_id}/proposal/phase-3-drafting",
     response_model=ProposalPhase3Response,
 )
-async def phase3_drafting_endpoint(rfp_id: str) -> ProposalPhase3Response:
+async def phase3_drafting_endpoint(rfp_id: str, request: Request) -> ProposalPhase3Response:
     """Phase 3: draft all RFP sections from evidence corpus with [E#] citations."""
+    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+
     try:
-        async with pipeline_phase(rfp_id, "phase-3"):
-            draft, research = await run_phase3_drafting(rfp_id)
+        async with cancel_generation_on_disconnect(rfp_id, request):
+            async with pipeline_phase(rfp_id, "phase-3"):
+                draft, research = await run_phase3_drafting(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -309,11 +363,14 @@ async def phase3_drafting_endpoint(rfp_id: str) -> ProposalPhase3Response:
     "/{rfp_id}/proposal/phase-3-6-self-edit",
     response_model=ProposalPhase3Response,
 )
-async def phase3_6_self_edit_endpoint(rfp_id: str) -> ProposalPhase3Response:
+async def phase3_6_self_edit_endpoint(rfp_id: str, request: Request) -> ProposalPhase3Response:
     """Phase 3.6: senior-editor self-edit loop — gap-fill KB and patch weak sections."""
+    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+
     try:
-        async with pipeline_phase(rfp_id, "phase-3-6-self-edit"):
-            draft, research, _report = await run_phase3_6_self_edit(rfp_id)
+        async with cancel_generation_on_disconnect(rfp_id, request):
+            async with pipeline_phase(rfp_id, "phase-3-6-self-edit"):
+                draft, research, _report = await run_phase3_6_self_edit(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -332,11 +389,14 @@ async def phase3_6_self_edit_endpoint(rfp_id: str) -> ProposalPhase3Response:
     "/{rfp_id}/proposal/phase-3-5-budget",
     response_model=ProposalPricingResponse,
 )
-async def phase3_5_budget_endpoint(rfp_id: str) -> ProposalPricingResponse:
+async def phase3_5_budget_endpoint(rfp_id: str, request: Request) -> ProposalPricingResponse:
     """Phase 3.5: Stage 3 budget + incorporate into manuscript + sync fee narrative."""
+    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+
     try:
-        async with pipeline_phase(rfp_id, "phase-3-5-budget"):
-            draft, research, budget = await run_phase3_5_budget(rfp_id)
+        async with cancel_generation_on_disconnect(rfp_id, request):
+            async with pipeline_phase(rfp_id, "phase-3-5-budget"):
+                draft, research, budget = await run_phase3_5_budget(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -400,13 +460,17 @@ async def improve_section_endpoint(
 ) -> ProposalSectionImproveResponse:
     """Re-query KB with new detailed queries and re-draft one section from user feedback."""
     try:
-        section, draft, research, _provider, assistant_message = await improve_proposal_section(
+        section, draft, research, _provider, assistant_message, draft_changed = await improve_proposal_section(
             rfp_id,
             section_id,
             body.message,
             selection_start=body.selection_start,
             selection_end=body.selection_end,
             selection_text=body.selection_text,
+            conversation_history=[
+                {"role": t.role, "content": t.content} for t in body.conversation_history
+            ],
+            proposal_wide=body.proposal_wide,
         )
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -421,6 +485,7 @@ async def improve_section_endpoint(
         draft=draft,
         research=_slim_research(research) or research,
         assistantMessage=assistant_message,
+        draftChanged=draft_changed,
     )
 
 
@@ -428,11 +493,14 @@ async def improve_section_endpoint(
     "/{rfp_id}/proposal/phase-4-review",
     response_model=ProposalPhase4Response,
 )
-async def phase4_presubmit_review_endpoint(rfp_id: str) -> ProposalPhase4Response:
+async def phase4_presubmit_review_endpoint(rfp_id: str, request: Request) -> ProposalPhase4Response:
     """Stage 4: pre-submit copy-paste scan + compliance checklist."""
+    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+
     try:
-        async with pipeline_phase(rfp_id, "phase-4-review"):
-            review, research = await run_phase4_presubmit_review(rfp_id)
+        async with cancel_generation_on_disconnect(rfp_id, request):
+            async with pipeline_phase(rfp_id, "phase-4-review"):
+                review, research = await run_phase4_presubmit_review(rfp_id)
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -499,7 +567,7 @@ async def phase4_finalize_gaps_endpoint(rfp_id: str) -> ProposalPhase4Response:
             detail=f"Gap finalize failed: {exc}",
         ) from exc
 
-    save_proposal_draft(draft)
+    await asave_proposal_draft(draft)
     slim = _slim_research(research) or research
     return ProposalPhase4Response(review=review, research=slim, draft=draft)
 
@@ -510,16 +578,19 @@ async def phase4_finalize_gaps_endpoint(rfp_id: str) -> ProposalPhase4Response:
 )
 async def fulfill_rfp_gaps_endpoint(
     rfp_id: str,
+    request: Request,
     body: PreSubmitAutoFixRequest | None = None,
 ) -> ProposalFulfillGapsResponse:
     """Re-read THIS RFP, add missing closing package sections, patch uncovered gaps."""
+    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
     from app.services.proposal_fulfill_rfp_gaps import run_fulfill_rfp_gaps
 
     use_llm = body.use_llm if body else True
     try:
-        review, research, draft, fulfill_report = await run_fulfill_rfp_gaps(
-            rfp_id, use_llm=use_llm
-        )
+        async with cancel_generation_on_disconnect(rfp_id, request):
+            review, research, draft, fulfill_report = await run_fulfill_rfp_gaps(
+                rfp_id, use_llm=use_llm
+            )
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:

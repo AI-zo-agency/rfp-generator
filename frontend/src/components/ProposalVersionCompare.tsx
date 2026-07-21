@@ -106,7 +106,8 @@ export function ProposalVersionCompare({
   if (!hasChanges) {
     return (
       <p className="text-[11px] leading-relaxed text-zo-text-muted">
-        No differences between this saved version and the current proposal.
+        No differences between this saved version and the current proposal
+        (current draft includes your latest section revises).
       </p>
     );
   }
@@ -115,10 +116,11 @@ export function ProposalVersionCompare({
     <>
       <div className="space-y-3 rounded-lg border border-zo-border/80 bg-white p-3 text-[11px] leading-relaxed text-foreground">
         <p className="font-semibold text-xs">
-          Compare: {selectedSnapshot.label} → now
+          Compare: {selectedSnapshot.label} → current draft
         </p>
         <p className="text-zo-text-muted">
-          Click a section to open a side-by-side diff with highlights.
+          Current draft includes section revises and edits. Click a section for a
+          side-by-side diff.
         </p>
 
         {scanLines.length > 0 ? (

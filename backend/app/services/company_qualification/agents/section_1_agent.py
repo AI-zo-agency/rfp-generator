@@ -13,6 +13,7 @@ from app.services.company_qualification.schemas import (
     Section1PlanResult,
     SubsectionPlan,
 )
+from app.services.llm import LlmError
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,39 @@ SECTION_IDS = (
     "section-1-certifications",
     "section-1-insurance",
 )
+
+
+def _fallback_section_plan(
+    *,
+    content_budget,
+    primary_caps: list[str],
+    omit_caps: list[str],
+    cert_names: list[str],
+) -> dict[str, SubsectionPlan]:
+    """Deterministic plan from prioritized caps + budgets — no LLM."""
+    plan: dict[str, SubsectionPlan] = {}
+    for sec_id in SECTION_IDS:
+        b = next((x for x in content_budget.budgets if x.section_id == sec_id), None)
+        targets = {"min": b.word_min if b else None, "max": b.word_max if b else None}
+        if sec_id == "section-1-who-we-are":
+            plan[sec_id] = SubsectionPlan(
+                includedCapabilities=list(primary_caps),
+                omittedCapabilities=list(omit_caps),
+                targetWords=targets,
+            )
+        elif sec_id == "section-1-certifications":
+            plan[sec_id] = SubsectionPlan(
+                includedCapabilities=list(cert_names),
+                omittedCapabilities=[],
+                targetWords=targets,
+            )
+        else:
+            plan[sec_id] = SubsectionPlan(
+                includedCapabilities=[],
+                omittedCapabilities=[],
+                targetWords=targets,
+            )
+    return plan
 
 
 async def run_section_1_agent(
@@ -40,50 +74,64 @@ async def run_section_1_agent(
     primary_caps = [c.capability for c in prioritized_capabilities.primary]
     secondary_caps = [c.capability for c in prioritized_capabilities.secondary]
     omit_caps = [c.capability for c in prioritized_capabilities.omit]
-    relevant_certs = [c.name for c in company_truth.certifications]
+    relevant_certs = [c.name for c in company_truth.certifications if (c.name or "").strip()]
 
-    raw, plan_provider = await llm.chat_json(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You are the Section 1 Agent for zö agency.\n"
-                    "DECIDE what belongs in each Section 1 subsection — do NOT write prose.\n\n"
-                    "Rules:\n"
-                    "- Who We Are: primary capabilities only; never omit-tier; no client pitch\n"
-                    "- Org Structure: include EVERY person from the Master Team Roster, grouped by "
-                    "department (Leadership, Client Services, Project Management, Creative, "
-                    "Finance/HR, coaches/implementors). Name + title for each. Never truncate to heads only.\n"
-                    "- Business Info / Insurance: facts from CompanyTruth only\n"
-                    "- Certifications: only certs relevant to this RFP context\n\n"
-                    "Return JSON:\n"
-                    "{\n"
-                    '  "sectionPlan": {\n'
-                    '    "section-1-who-we-are": {\n'
-                    '      "includedCapabilities": ["..."],\n'
-                    '      "omittedCapabilities": ["..."],\n'
-                    '      "targetWords": {"min": 180, "max": 250}\n'
-                    "    }\n"
-                    "  }\n"
-                    "}\n"
-                    "Include all 5 section ids in sectionPlan."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"ProposalContext:\n{proposal_context.model_dump_json()}\n\n"
-                    f"Primary capabilities: {primary_caps}\n"
-                    f"Secondary: {secondary_caps}\n"
-                    f"Omit (must NOT appear in 1.1): {omit_caps}\n\n"
-                    f"Available certifications: {relevant_certs}\n\n"
-                    f"Content budgets:\n{content_budget.model_dump_json()}"
-                ),
-            },
-        ],
-        max_tokens=2048,
-        temperature=0.0,
-    )
+    try:
+        raw, plan_provider = await llm.chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the Section 1 Agent for zö agency.\n"
+                        "DECIDE what belongs in each Section 1 subsection — do NOT write prose.\n"
+                        "Compact JSON only — no markdown fences.\n"
+                        "Rules:\n"
+                        "- Who We Are: primary caps only; never omit-tier\n"
+                        "- Org Structure: full roster by department (plan only — no names here)\n"
+                        "- Business Info / Insurance: facts from CompanyTruth\n"
+                        "- Certifications: only RFP-relevant cert names from the list\n"
+                        "Return:\n"
+                        '{"sectionPlan":{'
+                        '"section-1-who-we-are":{"includedCapabilities":[],"omittedCapabilities":[],'
+                        '"targetWords":{"min":180,"max":250}},'
+                        '"section-1-org-structure":{…},'
+                        '"section-1-business-info":{…},'
+                        '"section-1-certifications":{…},'
+                        '"section-1-insurance":{…}}}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"proposalType: {proposal_context.proposal_type}\n"
+                        f"industry: {proposal_context.industry}\n"
+                        f"Primary: {primary_caps}\n"
+                        f"Secondary: {secondary_caps}\n"
+                        f"Omit: {omit_caps}\n"
+                        f"Certs: {relevant_certs}\n"
+                        f"Budgets: {[(b.section_id, b.word_min, b.word_max, b.format) for b in content_budget.budgets]}"
+                    ),
+                },
+            ],
+            max_tokens=2048,
+            temperature=0.0,
+            tier="light",
+        )
+    except LlmError as exc:
+        logger.warning(
+            "Section 1 plan LLM failed (%s); using deterministic plan (no retry)",
+            str(exc)[:180],
+        )
+        plan = Section1PlanResult(
+            contentBudget=content_budget,
+            sectionPlan=_fallback_section_plan(
+                content_budget=content_budget,
+                primary_caps=primary_caps,
+                omit_caps=omit_caps,
+                cert_names=relevant_certs,
+            ),
+        )
+        return plan, budget_provider or "defaults"
 
     section_plan_raw = raw.get("sectionPlan") or raw.get("section_plan") or {}
     section_plan: dict[str, SubsectionPlan] = {}
@@ -92,15 +140,25 @@ async def run_section_1_agent(
         try:
             section_plan[sec_id] = SubsectionPlan.model_validate(entry)
         except Exception:
-            b = next((x for x in content_budget.budgets if x.section_id == sec_id), None)
-            section_plan[sec_id] = SubsectionPlan(
-                includedCapabilities=primary_caps if sec_id == "section-1-who-we-are" else [],
-                omittedCapabilities=omit_caps if sec_id == "section-1-who-we-are" else [],
-                targetWords={
-                    "min": b.word_min if b else None,
-                    "max": b.word_max if b else None,
-                },
-            )
+            section_plan[sec_id] = _fallback_section_plan(
+                content_budget=content_budget,
+                primary_caps=primary_caps,
+                omit_caps=omit_caps,
+                cert_names=relevant_certs,
+            )[sec_id]
+
+    # Ensure Who We Are never drops primary / never includes omit
+    who = section_plan.get("section-1-who-we-are")
+    if who is not None:
+        included = [c for c in (who.included_capabilities or []) if c not in omit_caps]
+        if not included:
+            included = list(primary_caps)
+        section_plan["section-1-who-we-are"] = who.model_copy(
+            update={
+                "included_capabilities": included,
+                "omitted_capabilities": list(omit_caps),
+            }
+        )
 
     plan = Section1PlanResult(contentBudget=content_budget, sectionPlan=section_plan)
     return plan, plan_provider or budget_provider

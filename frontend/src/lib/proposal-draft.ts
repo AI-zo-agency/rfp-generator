@@ -32,17 +32,24 @@ export function stripLegacyMonolithSections(
   return { ...draft, sections };
 }
 
+const SECTION_1_REQUIRED_IDS = [
+  "section-1-who-we-are",
+  "section-1-org-structure",
+  "section-1-business-info",
+  "section-1-certifications",
+  "section-1-insurance",
+] as const;
+
 export function staticSections1to3Complete(
   draft: ProposalOutline | null
 ): boolean {
   if (!draft) return false;
   // Modern subsections only — legacy monoliths (company-overview / team-overview / our-work)
   // must not count as complete or they keep resurfacing wrong-client copy after reset.
-  const hasSection1 = draft.sections.some(
-    (s) =>
-      s.id.startsWith("section-1-") &&
-      s.id !== "section-1-company-overview" &&
-      s.content?.trim()
+  // Require ALL Section 1 cards — 1.2–1.5 alone must not skip past empty Who We Are.
+  const byId = new Map(draft.sections.map((s) => [s.id, s]));
+  const hasSection1 = SECTION_1_REQUIRED_IDS.every((id) =>
+    Boolean(byId.get(id)?.content?.trim())
   );
   const hasSection2 = draft.sections.some(
     (s) =>
@@ -188,16 +195,27 @@ export function countSectionsWithContent(outline: ProposalOutline): number {
   return outline.sections.filter((s) => s.content?.trim()).length;
 }
 
-/** Empty 5-section shell saved over a researched manuscript (autosave wipe). */
+/** Empty shell that must not be autosaved over a real manuscript. */
 export function isLikelyWipedOutline(
   outline: ProposalOutline,
   research: ProposalResearch | null
 ): boolean {
   if (countSectionsWithContent(outline) > 0) return false;
+
+  // Snapshots mean the manuscript existed — empty live sections are a wipe, not a fresh draft.
+  const snapCount = outline.snapshots?.length ?? 0;
+  if (snapCount > 0) return true;
+
   const mappedSections = research?.rfpSections?.length ?? 0;
   const evidence = research?.evidenceCorpus?.length ?? 0;
-  const hadManuscriptWork = mappedSections > 5 || evidence > 20;
-  return hadManuscriptWork && outline.sections.length <= 5;
+  const hadCheckpoint = Boolean(
+    research?.pipelineCheckpoint?.lastCompletedPhase ||
+      research?.pipelineCheckpoint?.resumeFromPhase ||
+      research?.pipelineCheckpoint?.inProgressPhase
+  );
+  // Any Phase 2+ research / checkpoint means empty live text is accidental wipe.
+  // (Old guard used sections.length <= 5 — modern shells are 7+ cards, so wipes slipped through.)
+  return mappedSections > 0 || evidence > 0 || hadCheckpoint;
 }
 
 /** Restore section list from Phase 2 research when draft text was cleared. */
@@ -211,19 +229,41 @@ export function rebuildOutlineFromResearch(
     (existingDraft?.sections ?? []).map((section) => [section.id, section])
   );
 
-  const staticSections: OutlineSection[] = STATIC_SECTION_IDS.map((id) => {
-    const fromDraft = existingById.get(id);
-    const fromDefault = defaults.sections.find((s) => s.id === id);
-    const base = fromDraft ?? fromDefault;
-    if (!base) {
-      throw new Error(`Missing static section ${id}`);
-    }
-    return { ...base, content: fromDraft?.content ?? "", status: fromDraft?.content ? "generated" : "outline" };
-  });
+  const isStaticId = (id: string) =>
+    STATIC_SECTION_PREFIXES.some((prefix) => id.startsWith(prefix));
 
-  const staticIds = new Set(STATIC_SECTION_IDS);
+  // Section 1 subsections are a fixed set from defaults. Sections 2/3 are dynamic
+  // (one per team member / work example) — prefer real generated ones already in
+  // the draft over the generic placeholder, which only exists pre-generation.
+  const dynamicExisting = (existingDraft?.sections ?? []).filter(
+    (s) =>
+      (s.id.startsWith("section-2-bio-") && s.id !== "section-2-bio-placeholder") ||
+      (s.id.startsWith("section-3-work-") && s.id !== "section-3-work-placeholder")
+  );
+  const hasDynamicBios = dynamicExisting.some((s) => s.id.startsWith("section-2-bio-"));
+  const hasDynamicWork = dynamicExisting.some((s) => s.id.startsWith("section-3-work-"));
+
+  const staticSections: OutlineSection[] = [
+    ...defaults.sections
+      .filter((s) => isStaticId(s.id))
+      .filter((s) => {
+        if (s.id === "section-2-bio-placeholder") return !hasDynamicBios;
+        if (s.id === "section-3-work-placeholder") return !hasDynamicWork;
+        return true;
+      })
+      .map((base) => {
+        const fromDraft = existingById.get(base.id);
+        return {
+          ...base,
+          content: fromDraft?.content ?? "",
+          status: fromDraft?.content ? ("generated" as const) : ("outline" as const),
+        };
+      }),
+    ...dynamicExisting,
+  ];
+
   const rfpSections: OutlineSection[] = (research.rfpSections ?? [])
-    .filter((mapped) => !staticIds.has(mapped.id as (typeof STATIC_SECTION_IDS)[number]))
+    .filter((mapped) => !isStaticId(mapped.id))
     .map((mapped) => {
       const fromDraft = existingById.get(mapped.id);
       const content = fromDraft?.content ?? "";

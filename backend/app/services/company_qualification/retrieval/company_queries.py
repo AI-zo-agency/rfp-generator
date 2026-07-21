@@ -72,6 +72,9 @@ async def fetch_company_truth_corpus(
     # One query at a time — never fan out parallel Supermemory/LLM pressure.
     hit_groups: list[list[dict[str, Any]]] = []
     for i, q in enumerate(COMPANY_TRUTH_QUERIES):
+        from app.services.proposal_generation_cancel import check_cancelled_for_active
+
+        await check_cancelled_for_active()
         hit_groups.append(await _one(q, i + 1))
 
     # Prefer known company docs; keep at most a few unique sources as snippets.
@@ -101,6 +104,9 @@ async def fetch_company_truth_corpus(
     max_chars = 120_000
 
     for hit in selected:
+        from app.services.proposal_generation_cancel import check_cancelled_for_active
+
+        await check_cancelled_for_active()
         label = supermemory.hit_file_name(hit)
         content = await supermemory.resolve_hit_document_content(hit)
         if not content.strip():

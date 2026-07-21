@@ -28,6 +28,7 @@ from app.services.proposal_voice_enforcement import (
     enforce_narrative_voice,
     is_duplicate_static_rfp_section,
 )
+from app.services.proposal_intelligence.log import log_intel_event
 from app.services import llm
 from app.services.llm import LlmError
 from app.services.proposal_draft_llm import (
@@ -40,7 +41,9 @@ logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 1
 DEFAULT_WORD_TARGET = 800
-_LLM_SEMAPHORE = asyncio.Semaphore(1)
+# Cap concurrent LLM calls within a single RFP's drafting run — created per
+# invocation in run_drafting_graph so unrelated RFPs never wait on each other.
+LLM_CONCURRENCY = 1
 
 SectionDraftedCallback = Callable[[list["ProposalSection"], str], Awaitable[None]]
 _SECTION_DRAFT_CALLBACKS: dict[str, SectionDraftedCallback] = {}
@@ -150,6 +153,7 @@ class DraftingGraphState(TypedDict, total=False):
     drafted_sections: list[dict[str, Any]]
     provider: str
     error: str | None
+    llm_semaphore: asyncio.Semaphore
 
 
 def _word_target(section: dict[str, Any]) -> int:
@@ -245,6 +249,8 @@ def _plan_retrieval_entry(state: DraftingGraphState, section_id: str) -> dict[st
 
 
 _PLAN_DRIVEN_TITLE_HINTS = (
+    "cover letter",
+    "executive summary",
     "understanding",
     "challenge",
     "requirement",
@@ -584,9 +590,16 @@ async def _draft_batch_once(
 
     for section in batch:
         sid = str(section.get("id") or "")
+        title = str(section.get("title") or sid)
+        log_intel_event(
+            "SECTION_GENERATE_NEXT",
+            rfp_id=state.get("rfp_id"),
+            section_id=sid,
+            title=title,
+            phase="phase-3",
+        )
         evidence = await _ensure_jit_evidence(state, sid)
         zo_mode = str(section.get("zoMode") or section.get("zo_mode") or "write")
-        title = str(section.get("title") or sid)
         register = classify_section_register(
             section_id=sid,
             title=title,
@@ -761,7 +774,7 @@ async def _draft_batch_once(
         for s in batch
     ) else 8192
 
-    async with _LLM_SEMAPHORE:
+    async with state["llm_semaphore"]:
         raw, provider = await chat_json_with_repair(
             [
                 {"role": "system", "content": DRAFT_BATCH_PROMPT},
@@ -920,7 +933,7 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
             sec_title = str(sec.get("title") or sec.get("id") or "Section")
             from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
 
-            record_pipeline_activity(
+            await record_pipeline_activity(
                 rfp_id,
                 label=f"Drafting: {sec_title}",
                 detail="LLM writing this RFP tab (not a context limit — one section per request).",
@@ -1062,6 +1075,7 @@ async def run_drafting_graph(
         ],
         "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
         "drafted_sections": [],
+        "llm_semaphore": asyncio.Semaphore(LLM_CONCURRENCY),
     }
 
     if on_sections_drafted:
@@ -1089,5 +1103,87 @@ async def run_drafting_graph(
         rfp_id,
         len(drafted),
         len(jit_corpus),
+    )
+    return drafted, provider, jit_corpus
+
+
+async def draft_single_rfp_section_phase3(
+    *,
+    rfp_id: str,
+    rfp_title: str,
+    rfp_client: str,
+    rfp_sector: str,
+    rfp_location: str | None,
+    rfp_context: str,
+    section: RfpSectionMap,
+    evidence_corpus: list[EvidenceItem],
+    brand_voice: ProposalBrandVoice | None,
+    zo_template_sections: list[ProposalSection] | None = None,
+    writing_avoidances: list[str] | None = None,
+    loss_lessons: list[LossLesson] | None = None,
+    proof_points: list | None = None,
+    manuscript_locks: dict[str, Any] | None = None,
+    execution_plan: dict[str, Any] | None = None,
+    rewrite_brief: str = "",
+) -> tuple[ProposalSection, str, list[EvidenceItem]]:
+    """Phase 3 drafting path for exactly one RFP-mapped section (Senior Editor tickets)."""
+    if not llm.is_configured():
+        raise LlmError(
+            "LLM not configured. Set OPENROUTER_API_KEY or FIREWORKS_API_KEY.",
+            status_code=503,
+        )
+
+    plan_dict = execution_plan
+    if plan_dict is not None and hasattr(plan_dict, "model_dump"):
+        plan_dict = plan_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
+
+    locks_dict = manuscript_locks
+    if locks_dict is not None and hasattr(locks_dict, "model_dump"):
+        locks_dict = locks_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
+
+    section_dump = section.model_dump(by_alias=True)
+    if rewrite_brief.strip():
+        # Inject Senior Editor brief into uncoveredRequirements so the batch prompt sees it.
+        extra = list(section_dump.get("uncoveredRequirements") or [])
+        extra.append(f"Senior Editor rewrite brief: {rewrite_brief.strip()}")
+        section_dump["uncoveredRequirements"] = extra
+
+    state: DraftingGraphState = {
+        "rfp_id": rfp_id,
+        "rfp_title": rfp_title,
+        "rfp_client": rfp_client,
+        "rfp_sector": rfp_sector,
+        "rfp_location": rfp_location,
+        "rfp_context": rfp_context,
+        "rfp_sections": [section_dump],
+        "evidence_corpus": [e.model_dump(by_alias=True) for e in evidence_corpus],
+        "execution_plan": plan_dict if isinstance(plan_dict, dict) else None,
+        "brand_voice": brand_voice.model_dump(by_alias=True) if brand_voice else {},
+        "zo_sections_context": _zo_sections_context(zo_template_sections or []),
+        "writing_avoidances": writing_avoidances or [],
+        "loss_lessons": [
+            lesson.model_dump(by_alias=True) for lesson in (loss_lessons or [])
+        ],
+        "proof_points": [
+            p.model_dump(by_alias=True) if hasattr(p, "model_dump") else p
+            for p in (proof_points or [])
+        ],
+        "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
+        "drafted_sections": [],
+        "llm_semaphore": asyncio.Semaphore(LLM_CONCURRENCY),
+    }
+
+    results, provider = await _draft_batch([section_dump], state)
+    if not results:
+        raise LlmError(f"Phase 3 single-section draft returned empty for {section.id}", status_code=422)
+    drafted = ProposalSection.model_validate(results[0])
+    jit_corpus = [
+        EvidenceItem.model_validate(item) for item in (state.get("evidence_corpus") or [])
+    ]
+    logger.info(
+        "Phase 3 single-section draft for %s / %s (%d chars)",
+        rfp_id,
+        section.id,
+        len(drafted.content or ""),
     )
     return drafted, provider, jit_corpus

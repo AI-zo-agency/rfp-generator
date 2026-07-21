@@ -1,15 +1,60 @@
 import { backendFetch } from "@/lib/backend-api";
-import { getDashboardData } from "@/lib/rfp-service";
-import type { RfpPriority } from "@/types/rfp";
+import { withDashboardPdfUrl } from "@/lib/rfp-pdf";
+import { computeStats } from "@/lib/mock-rfps";
+import type { DashboardStats, RfpRecord } from "@/types/rfp";
 import { NextResponse } from "next/server";
 
-export async function GET() {
-  const data = await getDashboardData();
+const DASHBOARD_PROXY_TIMEOUT_MS = 45_000;
 
-  return NextResponse.json({
-    ...data,
-    source: "backend",
-  });
+export async function GET() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DASHBOARD_PROXY_TIMEOUT_MS);
+  try {
+    const response = await backendFetch("/rfps/dashboard", {
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    if (!text.trim()) {
+      return NextResponse.json(
+        { error: "Empty response from backend", rfps: [], allRfps: [], stats: computeStats([]) },
+        { status: 502 }
+      );
+    }
+    const data = JSON.parse(text) as {
+      rfps: RfpRecord[];
+      allRfps: RfpRecord[];
+      stats: DashboardStats;
+    };
+    if (!response.ok) {
+      return NextResponse.json(
+        { error: "Dashboard request failed", rfps: [], allRfps: [], stats: computeStats([]) },
+        { status: response.status }
+      );
+    }
+    return NextResponse.json({
+      rfps: data.rfps.map(withDashboardPdfUrl),
+      allRfps: data.allRfps.map(withDashboardPdfUrl),
+      stats: data.stats,
+      source: "backend",
+    });
+  } catch (error) {
+    const timedOut = error instanceof Error && error.name === "AbortError";
+    return NextResponse.json(
+      {
+        error: timedOut
+          ? "Dashboard timed out — backend may be busy. Retry shortly."
+          : error instanceof Error
+            ? error.message
+            : "Backend unreachable",
+        rfps: [],
+        allRfps: [],
+        stats: computeStats([]),
+      },
+      { status: timedOut ? 504 : 503 }
+    );
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function POST(request: Request) {

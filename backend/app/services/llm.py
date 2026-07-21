@@ -2,13 +2,28 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+LlmTier = Literal["heavy", "light"]
+
+# Process-local: once Fireworks returns 412, never call it again this process.
+_FIREWORKS_SUSPENDED = False
+
+
+def resolve_llm_model(tier: LlmTier = "heavy") -> str:
+    """OpenRouter model id for heavy (Sonnet) vs light (Haiku) tiers."""
+    heavy = (settings.llm_heavy_model or settings.openrouter_model or "").strip()
+    light = (settings.llm_light_model or "").strip()
+    if tier == "light" and light:
+        return light
+    return heavy or settings.openrouter_model
+
 
 _PLACEHOLDER_KEY_MARKERS = (
     "your_openrouter_key",
@@ -137,12 +152,18 @@ async def _post_chat(
         "Content-Type": "application/json",
         **(extra_headers or {}),
     }
+    # Anthropic via OpenRouter often ignores response_format and emits ```json fences,
+    # then stops mid-object. Prompt + salvage is more reliable than json_object mode.
+    model_l = (model or "").lower()
+    effective_json_mode = json_mode and not (
+        "anthropic" in model_l or "claude" in model_l
+    )
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
     }
-    if json_mode:
+    if effective_json_mode:
         body["response_format"] = {"type": "json_object"}
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
@@ -196,12 +217,32 @@ async def _post_chat(
 
         data = response.json()
         try:
-            content = data["choices"][0]["message"]["content"]
+            choice0 = data["choices"][0]
+            content = choice0["message"]["content"]
+            finish_reason = str(choice0.get("finish_reason") or "")
         except (KeyError, IndexError, TypeError) as exc:
             raise LlmError(f"{provider} returned an unexpected response shape") from exc
 
         if not isinstance(content, str) or not content.strip():
             raise LlmError(f"{provider} returned empty content")
+
+        usage = data.get("usage") or {}
+        logger.info(
+            "LLM success: provider=%s model=%s response_chars=%d finish_reason=%s usage=%s",
+            provider,
+            model,
+            len(content),
+            finish_reason or "?",
+            usage if usage else "{}",
+        )
+        if finish_reason in {"length", "max_tokens"}:
+            logger.warning(
+                "LLM hit output token limit: provider=%s model=%s finish_reason=%s chars=%d",
+                provider,
+                model,
+                finish_reason,
+                len(content),
+            )
 
         # Check if response looks truncated (suspiciously short for a JSON response)
         if len(content) < 30 and '"content":' in content:
@@ -212,18 +253,8 @@ async def _post_chat(
                 len(content),
                 content[:200],
             )
-            # Check if this was due to token limits in the response
-            usage = data.get("usage", {})
-            if usage:
-                logger.info(f"Token usage: {usage}")
             raise LlmError(f"{provider} returned truncated response (only {len(content)} chars)")
 
-        logger.info(
-            "LLM success: provider=%s model=%s response_chars=%d",
-            provider,
-            model,
-            len(content),
-        )
         return content.strip()
 
     if last_error:
@@ -236,8 +267,12 @@ async def chat_json(
     *,
     max_tokens: int | None = None,
     temperature: float = 0.2,
+    tier: LlmTier = "heavy",
 ) -> tuple[dict[str, Any], str]:
+    global _FIREWORKS_SUSPENDED
     errors: list[str] = []
+    openrouter_model = resolve_llm_model(tier)
+    skip_fireworks_fallback = False
 
     # Try Gemini first if API key is configured and not skipped by preferences
     gemini_key = settings.gemini_api_key.strip()
@@ -263,7 +298,7 @@ async def chat_json(
             raw = await _post_chat(
                 base_url=settings.openrouter_base_url,
                 api_key=openrouter_key,
-                model=settings.openrouter_model,
+                model=openrouter_model,
                 messages=messages,
                 provider="OpenRouter",
                 extra_headers={
@@ -277,13 +312,16 @@ async def chat_json(
         except LlmError as exc:
             errors.append(str(exc))
             logger.info("OpenRouter failed: %s", str(exc)[:200])
-            # If OpenRouter response was truncated, likely due to model limits
-            # Don't bother trying Fireworks fallback as it will likely hit same issue
-            if "truncated" in str(exc).lower() or len(str(exc)) < 100:
-                logger.info("OpenRouter returned truncated response, retrying without Fireworks fallback")
+            # Invalid/truncated JSON already consumed tokens — do not re-run on Fireworks.
+            msg = str(exc).lower()
+            if "invalid json" in msg or "truncated" in msg:
+                skip_fireworks_fallback = True
+                logger.info(
+                    "Skipping Fireworks fallback after OpenRouter JSON failure (avoid duplicate spend)"
+                )
 
     fireworks_key = _fireworks_key()
-    if fireworks_key:
+    if fireworks_key and not _FIREWORKS_SUSPENDED and not skip_fireworks_fallback:
         try:
             # Scale with caller request — hard cap 8192 (pricing budgets need room).
             requested = max_tokens or 4096
@@ -301,9 +339,12 @@ async def chat_json(
         except LlmError as exc:
             # If Fireworks account is suspended (412), don't count it as a provider failure
             if exc.status_code == 412:
+                _FIREWORKS_SUSPENDED = True
                 logger.warning("Fireworks account suspended - skipping for future calls")
             else:
                 errors.append(str(exc))
+    elif _FIREWORKS_SUSPENDED:
+        logger.debug("Fireworks skipped (account previously suspended)")
 
     if not errors:
         raise LlmError(
@@ -317,14 +358,37 @@ async def chat_json(
     )
 
 
+async def chat_json_soft(
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int | None = None,
+    temperature: float = 0.2,
+    tier: LlmTier = "heavy",
+) -> tuple[dict[str, Any], str]:
+    """One LLM JSON call. On failure return ({}, \"failed\") — never retry, never raise."""
+    try:
+        return await chat_json(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            tier=tier,
+        )
+    except LlmError as exc:
+        logger.warning("chat_json_soft: %s", str(exc)[:220])
+        return {}, "failed"
+
+
 async def chat_text(
     messages: list[dict[str, str]],
     *,
     max_tokens: int | None = None,
     temperature: float = 0.2,
+    tier: LlmTier = "heavy",
 ) -> tuple[str, str]:
     """Plain-text chat completion (no JSON response format)."""
+    global _FIREWORKS_SUSPENDED
     errors: list[str] = []
+    openrouter_model = resolve_llm_model(tier)
 
     gemini_key = settings.gemini_api_key.strip()
     skip_gemini = settings.llm_prefer_openrouter or settings.llm_prefer_fireworks
@@ -349,7 +413,7 @@ async def chat_text(
             raw = await _post_chat(
                 base_url=settings.openrouter_base_url,
                 api_key=openrouter_key,
-                model=settings.openrouter_model,
+                model=openrouter_model,
                 messages=messages,
                 provider="OpenRouter",
                 extra_headers={
@@ -365,7 +429,7 @@ async def chat_text(
             errors.append(str(exc))
 
     fireworks_key = _fireworks_key()
-    if fireworks_key:
+    if fireworks_key and not _FIREWORKS_SUSPENDED:
         try:
             requested = max_tokens or 4096
             fireworks_tokens = min(requested, 8192)
@@ -381,7 +445,10 @@ async def chat_text(
             )
             return raw, "fireworks"
         except LlmError as exc:
-            if exc.status_code != 412:
+            if exc.status_code == 412:
+                _FIREWORKS_SUSPENDED = True
+                logger.warning("Fireworks account suspended - skipping for future calls")
+            elif exc.status_code != 412:
                 errors.append(str(exc))
 
     if not errors:
@@ -400,33 +467,34 @@ def _strip_code_fence(text: str) -> str:
     stripped = text.strip()
     if stripped.startswith("```"):
         stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
-        stripped = re.sub(r"\s*```$", "", stripped)
+    # Always drop a trailing fence — common after slicing from the first `{`.
+    stripped = re.sub(r"\s*```(?:\w*)?\s*$", "", stripped)
     return stripped.strip()
 
 
 def _extract_json_from_text(text: str) -> str:
     """Extract JSON from text that may have explanatory prefixes or markdown formatting."""
-    text = text.strip()
-    
-    # Try to find JSON object starting with {
-    brace_start = text.find('{')
-    if brace_start > 0:
-        # There's text before the JSON, extract from the first {
+    # Strip fences FIRST. If we slice from `{` before stripping, a trailing ``` remains
+    # and json.loads fails on otherwise-valid Claude responses.
+    text = _strip_code_fence(text.strip())
+
+    brace_start = text.find("{")
+    bracket_start = text.find("[")
+
+    if brace_start >= 0 and (bracket_start < 0 or brace_start < bracket_start):
         text = text[brace_start:]
-    
-    # Also try to find JSON array starting with [
-    bracket_start = text.find('[')
-    if bracket_start >= 0 and (brace_start < 0 or bracket_start < brace_start):
+    elif bracket_start >= 0:
         text = text[bracket_start:]
-    
+
     return _strip_code_fence(text)
 
 
 def _close_truncated_json(text: str) -> str:
-    """Close an unterminated string and trailing brackets/braces."""
+    """Close truncated JSON by finishing open strings and LIFO-closing braces/brackets."""
     s = text.strip()
     in_string = False
     escape = False
+    stack: list[str] = []
     for ch in s:
         if escape:
             escape = False
@@ -436,16 +504,255 @@ def _close_truncated_json(text: str) -> str:
             continue
         if ch == '"':
             in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch == "}" and stack and stack[-1] == "{":
+            stack.pop()
+        elif ch == "]" and stack and stack[-1] == "[":
+            stack.pop()
     if in_string:
         s += '"'
     s = s.rstrip().rstrip(",")
-    open_brackets = s.count("[") - s.count("]")
-    open_braces = s.count("{") - s.count("}")
-    if open_brackets > 0:
-        s += "]" * open_brackets
-    if open_braces > 0:
-        s += "}" * open_braces
+    # Drop trailing incomplete `"key":` with no value — common Claude stop mid-object.
+    # Do NOT strip complete `"key": 123` / null / true / false (those are valid).
+    while True:
+        cleaned = re.sub(r',?\s*"[^"\\]+"\s*:\s*$', "", s)
+        if cleaned == s:
+            break
+        s = cleaned.rstrip().rstrip(",")
+
+    # Re-scan stack after incomplete-key stripping
+    in_string = False
+    escape = False
+    stack = []
+    for ch in s:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch == "}" and stack and stack[-1] == "{":
+            stack.pop()
+        elif ch == "]" and stack and stack[-1] == "[":
+            stack.pop()
+    if in_string:
+        s += '"'
+    s = s.rstrip().rstrip(",")
+    for opener in reversed(stack):
+        s += "}" if opener == "{" else "]"
     return s
+
+
+def _salvage_manuscript_locks_payload(text: str) -> dict[str, Any] | None:
+    """Recover primaryContact* fields when locks JSON truncates mid-string."""
+    if "primaryContactName" not in text:
+        return None
+    payload: dict[str, Any] = {}
+
+    def _str_field(key: str) -> str | None:
+        m = re.search(rf'"{key}"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+        if m:
+            try:
+                return json.loads(f'"{m.group(1)}"')
+            except json.JSONDecodeError:
+                return m.group(1)
+        # Truncated open string
+        m = re.search(rf'"{key}"\s*:\s*"([^"]*)$', text, re.M)
+        if m:
+            return m.group(1).rstrip()
+        return None
+
+    for key in (
+        "primaryContactName",
+        "primaryContactTitle",
+        "primaryContactRole",
+        "executiveSponsorName",
+        "decisionRationale",
+    ):
+        val = _str_field(key)
+        if val is not None:
+            payload[key] = val
+
+    bool_m = re.search(r'"needsHumanConfirm"\s*:\s*(true|false)', text, re.I)
+    if bool_m:
+        payload["needsHumanConfirm"] = bool_m.group(1).lower() == "true"
+
+    kpis: list[str] = []
+    for m in re.finditer(r'"requiredKpis"\s*:\s*\[(.*?)(?:\]|$)', text, re.S):
+        for item in re.finditer(r'"((?:\\.|[^"\\])*)"', m.group(1)):
+            try:
+                kpis.append(json.loads(f'"{item.group(1)}"'))
+            except json.JSONDecodeError:
+                kpis.append(item.group(1))
+    if kpis:
+        payload["requiredKpis"] = kpis
+
+    if payload.get("primaryContactName"):
+        return payload
+    return None
+
+
+def _salvage_classification_payload(text: str) -> dict[str, Any] | None:
+    """Recover ProposalContext-style fields when classification JSON truncates."""
+    if '"industry"' not in text and '"servicesRequested"' not in text:
+        return None
+    payload: dict[str, Any] = {}
+
+    def _str_field(key: str) -> str | None:
+        m = re.search(rf'"{key}"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+        if m:
+            try:
+                return json.loads(f'"{m.group(1)}"')
+            except json.JSONDecodeError:
+                return m.group(1)
+        m = re.search(rf'"{key}"\s*:\s*"([^"]*)$', text, re.M)
+        if m:
+            return m.group(1).rstrip()
+        return None
+
+    for key in ("industry", "buyerType", "projectComplexity", "proposalType", "summary"):
+        val = _str_field(key)
+        if val is not None:
+            payload[key] = val
+
+    for key in ("servicesRequested", "evaluationPriorities"):
+        m = re.search(rf'"{key}"\s*:\s*\[(.*?)(?:\]|$)', text, re.S)
+        if not m:
+            continue
+        items: list[str] = []
+        for item in re.finditer(r'"((?:\\.|[^"\\])*)"', m.group(1)):
+            try:
+                items.append(json.loads(f'"{item.group(1)}"'))
+            except json.JSONDecodeError:
+                items.append(item.group(1))
+        # Truncated last string without closing quote
+        tail = re.search(r',\s*"([^"]+)$', m.group(1))
+        if not items and tail:
+            items.append(tail.group(1).rstrip())
+        elif tail and (not m.group(1).rstrip().endswith('"')):
+            items.append(tail.group(1).rstrip())
+        if items:
+            payload[key] = items
+
+    if payload.get("industry") or payload.get("servicesRequested"):
+        return payload
+    return None
+
+
+def _salvage_capability_tiers_payload(text: str) -> dict[str, Any] | None:
+    """Recover primary/secondary/omit capability tiers from truncated ranking JSON."""
+    if '"primary"' not in text and '"secondary"' not in text and '"omit"' not in text:
+        return None
+
+    def _tier_items(key: str) -> list[dict[str, str]]:
+        m = re.search(rf'"{key}"\s*:\s*\[(.*?)(?:\]\s*,|\]\s*}}|$)', text, re.S)
+        if not m:
+            return []
+        chunk = m.group(1)
+        items: list[dict[str, str]] = []
+        for obj in re.finditer(
+            r'\{\s*"capability"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"rationale"\s*:\s*"((?:\\.|[^"\\])*)"',
+            chunk,
+        ):
+            try:
+                cap = json.loads(f'"{obj.group(1)}"')
+                rat = json.loads(f'"{obj.group(2)}"')
+            except json.JSONDecodeError:
+                cap, rat = obj.group(1), obj.group(2)
+            items.append({"capability": cap, "rationale": rat})
+        # Truncated last object with open rationale string
+        tail = re.search(
+            r'\{\s*"capability"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"rationale"\s*:\s*"([^"]*)$',
+            chunk,
+            re.M,
+        )
+        if tail:
+            try:
+                cap = json.loads(f'"{tail.group(1)}"')
+            except json.JSONDecodeError:
+                cap = tail.group(1)
+            items.append({"capability": cap, "rationale": tail.group(2).rstrip()[:80]})
+        return items
+
+    payload = {
+        "primary": _tier_items("primary"),
+        "secondary": _tier_items("secondary"),
+        "omit": _tier_items("omit"),
+    }
+    if payload["primary"] or payload["secondary"] or payload["omit"]:
+        return payload
+    return None
+
+
+def _salvage_company_truth_payload(text: str) -> dict[str, Any] | None:
+    """Recover CompanyTruth top-level fields when extraction JSON truncates."""
+    if '"legalName"' not in text and '"dba"' not in text:
+        return None
+    payload: dict[str, Any] = {}
+
+    def _str_field(key: str) -> str | None:
+        m = re.search(rf'"{key}"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+        if m:
+            try:
+                return json.loads(f'"{m.group(1)}"')
+            except json.JSONDecodeError:
+                return m.group(1)
+        m = re.search(rf'"{key}"\s*:\s*"([^"]*)$', text, re.M)
+        if m:
+            return m.group(1).rstrip()
+        return None
+
+    for key in (
+        "legalName",
+        "dba",
+        "founded",
+        "ownership",
+        "employeeCount",
+    ):
+        val = _str_field(key)
+        if val is not None:
+            payload[key] = val
+
+    years = re.search(r'"yearsInOperation"\s*:\s*(\d+)', text)
+    if years:
+        payload["yearsInOperation"] = int(years.group(1))
+
+    # Nested simple objects: locations / contact — take closed string fields only
+    for obj_key in ("locations", "contact"):
+        m = re.search(rf'"{obj_key}"\s*:\s*\{{([^}}]*)\}}', text, re.S)
+        if not m:
+            continue
+        nested: dict[str, Any] = {}
+        for fm in re.finditer(r'"(\w+)"\s*:\s*(?:"((?:\\.|[^"\\])*)"|null)', m.group(1)):
+            nested[fm.group(1)] = None if fm.group(2) is None and "null" in fm.group(0) else fm.group(2)
+        if nested:
+            payload[obj_key] = nested
+
+    caps: list[str] = []
+    cm = re.search(r'"capabilities"\s*:\s*\[(.*?)(?:\]|$)', text, re.S)
+    if cm:
+        for item in re.finditer(r'"((?:\\.|[^"\\])*)"', cm.group(1)):
+            try:
+                caps.append(json.loads(f'"{item.group(1)}"'))
+            except json.JSONDecodeError:
+                caps.append(item.group(1))
+        if caps:
+            payload["capabilities"] = caps
+
+    if payload.get("legalName") or payload.get("dba") or payload.get("founded"):
+        return payload
+    return None
 
 
 def _try_parse_json_object(text: str) -> dict[str, Any] | None:
@@ -636,7 +943,43 @@ def _salvage_simple_content_payload(text: str) -> dict[str, Any] | None:
     if content.strip():
         # Clean up any trailing closed quotes, braces, brackets
         clean_content = content.rstrip('}" \t\n\r')
-        return {"content": clean_content}
+        payload: dict[str, Any] = {"content": clean_content}
+        id_m = re.search(r'"id"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+        title_m = re.search(r'"title"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+        if id_m:
+            payload["id"] = _unescape_json_string(id_m.group(1))
+        if title_m:
+            payload["title"] = _unescape_json_string(title_m.group(1))
+        return payload
+    return None
+
+
+def _salvage_section1_budgets_payload(text: str) -> dict[str, Any] | None:
+    """Recover Section 1 content-budget objects from truncated planning JSON."""
+    if '"budgets"' not in text:
+        return None
+    items: list[dict[str, Any]] = []
+    for m in re.finditer(
+        r'\{\s*"sectionId"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"title"\s*:\s*"((?:\\.|[^"\\])*)"'
+        r'\s*,\s*"format"\s*:\s*"((?:\\.|[^"\\])*)"',
+        text,
+    ):
+        entry: dict[str, Any] = {
+            "sectionId": _unescape_json_string(m.group(1)),
+            "title": _unescape_json_string(m.group(2)),
+            "format": _unescape_json_string(m.group(3)),
+        }
+        # Pull nearby wordMin/wordMax after this object start if present before next `{`
+        window = text[m.start() : m.start() + 400]
+        wmin = re.search(r'"wordMin"\s*:\s*(\d+|null)', window)
+        wmax = re.search(r'"wordMax"\s*:\s*(\d+|null)', window)
+        if wmin:
+            entry["wordMin"] = None if wmin.group(1) == "null" else int(wmin.group(1))
+        if wmax:
+            entry["wordMax"] = None if wmax.group(1) == "null" else int(wmax.group(1))
+        items.append(entry)
+    if items:
+        return {"budgets": items}
     return None
 
 
@@ -700,9 +1043,21 @@ def _salvage_recommendations_payload(text: str) -> dict[str, Any] | None:
 def _parse_json_response(raw: str) -> dict[str, Any]:
     # First try to extract JSON from any surrounding text
     text = _extract_json_from_text(raw)
+    # Normalize fancy quotes that break json.loads
+    text = (
+        text.replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+    )
     parsed = _try_parse_json_object(text)
     if parsed is None:
         for salvager, label in (
+            (_salvage_manuscript_locks_payload, "manuscript lock field(s)"),
+            (_salvage_classification_payload, "classification field(s)"),
+            (_salvage_capability_tiers_payload, "capability tier(s)"),
+            (_salvage_section1_budgets_payload, "section-1 budget(s)"),
+            (_salvage_company_truth_payload, "company truth field(s)"),
             (_salvage_sections_payload, "section(s)"),
             (_salvage_recommendations_payload, "recommendation(s)"),
             (_salvage_simple_content_payload, "simple content"),
@@ -714,6 +1069,9 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
                     salvaged.get("sections")
                     or salvaged.get("recommendations")
                     or salvaged.get("lineItems")
+                    or salvaged.get("budgets")
+                    or salvaged.get("primary")
+                    or salvaged.get("capabilities")
                     or [1]
                 )
                 logger.warning(

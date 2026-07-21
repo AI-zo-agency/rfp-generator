@@ -1,6 +1,46 @@
+import { supabase } from "@/lib/supabase-direct";
+import { withDashboardPdfUrl } from "@/lib/rfp-pdf";
+import { mapSupabaseRfpRow } from "@/lib/supabase-rfp-map";
 import { NextResponse } from "next/server";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
+
+/**
+ * GET reads single RFP directly from Supabase — independent of backend.
+ */
+export async function GET(
+  _request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  try {
+    const { data, error } = await supabase
+      .from("rfps")
+      .select("*")
+      .or(`id.eq.${id},external_id.eq.${id}`)
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      return NextResponse.json(
+        { detail: `Supabase error: ${error.message}` },
+        { status: 502 }
+      );
+    }
+    if (!data) {
+      return NextResponse.json({ detail: "RFP not found" }, { status: 404 });
+    }
+
+    return NextResponse.json(
+      withDashboardPdfUrl(mapSupabaseRfpRow(data as Record<string, unknown>))
+    );
+  } catch (err) {
+    return NextResponse.json(
+      { detail: err instanceof Error ? err.message : "Unknown error" },
+      { status: 500 }
+    );
+  }
+}
 
 export async function DELETE(
   _request: Request,

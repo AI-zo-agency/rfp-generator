@@ -7,6 +7,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
 from app.models.rfp import RfpRecord
@@ -160,6 +161,242 @@ def _locks_brief_for_repair(research: ProposalResearchCache | None) -> str:
     if not research or not research.manuscript_locks:
         return ""
     return format_manuscript_locks_block(research.manuscript_locks)
+
+
+def _manuscript_digest_for_senior_editor(draft: ProposalDraft, *, max_chars: int = 55_000) -> str:
+    parts: list[str] = []
+    used = 0
+    for section in draft.sections:
+        body = (section.content or "").strip()
+        if not body:
+            chunk = f"### {section.id} — {section.title}\n(empty)\n"
+        else:
+            # Keep head of each section so cover letter + who-we-are stay visible.
+            excerpt = body[:2200]
+            chunk = f"### {section.id} — {section.title}\n{excerpt}\n"
+        if used + len(chunk) > max_chars:
+            break
+        parts.append(chunk)
+        used += len(chunk)
+    return "\n".join(parts)
+
+
+def _requirements_by_section_id(research: ProposalResearchCache | None) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    if not research:
+        return out
+    for mapped in research.rfp_sections or []:
+        out[mapped.id] = list(mapped.requirements or [])
+    return out
+
+
+def _ticket_rewrite_brief(ticket: dict[str, Any]) -> str:
+    brief = str(ticket.get("rewriteBrief") or ticket.get("trimGuidance") or "").strip()
+    unmet = ticket.get("unmetRequirements") or []
+    parts = [brief] if brief else []
+    if isinstance(unmet, list) and unmet:
+        parts.append("Unmet RFP requirements:\n" + "\n".join(f"- {u}" for u in unmet[:12]))
+    return "\n".join(parts).strip()
+
+
+async def _redraft_section_via_phase3_isolated(
+    *,
+    rfp_id: str,
+    section_id: str,
+    rewrite_brief: str,
+    rfp: RfpRecord,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+) -> tuple[ProposalDraft, ProposalResearchCache | None, bool, str]:
+    """Phase 3 single-section draft; hard-isolate so siblings (e.g. cover letter) never change."""
+    from app.services.proposal_drafting_graph import draft_single_rfp_section_phase3
+    from app.services.proposal_kb_fact_checker import run_kb_fact_check_section_ids
+    from app.services.proposal_section_isolation import (
+        SectionIsolationError,
+        replace_section_isolated,
+        snapshot_section_contents,
+    )
+
+    before_snap = snapshot_section_contents(draft)
+    mapped = None
+    if research:
+        mapped = next((s for s in research.rfp_sections if s.id == section_id), None)
+    existing = next((s for s in draft.sections if s.id == section_id), None)
+    if not existing:
+        return draft, research, False, "missing section"
+
+    if mapped is None:
+        # Template/static sections: use Section Repair with the ticket brief (still isolated).
+        sid, improved, detail = await _repair_one_section(
+            rfp_id,
+            section_id,
+            use_senior_editor=False,
+            rfp=rfp,
+            rfp_client=rfp.client,
+            rfp_title=rfp.title,
+            budget=research.budget if research else None,
+            repair_message=(
+                f"{rewrite_brief}\n\n"
+                "Rewrite ONLY this section. Do not change any other section."
+            ),
+        )
+        draft2 = await aget_proposal_draft(rfp_id) or draft
+        try:
+            from app.services.proposal_section_isolation import assert_only_section_changed
+
+            assert_only_section_changed(before_snap, draft2, allowed_section_id=section_id)
+        except SectionIsolationError as exc:
+            logger.error("Isolation violation after repair %s: %s — discarding", section_id, exc)
+            return draft, research, False, f"isolation_violation: {exc}"
+        return draft2, research, improved, detail
+
+    from app.services.proposal_common import load_rfp_for_proposal
+
+    _, _, rfp_context = load_rfp_for_proposal(rfp_id)
+    static = [s for s in draft.sections if s.source == "template"][:6]
+    try:
+        drafted, _provider, jit = await draft_single_rfp_section_phase3(
+            rfp_id=rfp_id,
+            rfp_title=rfp.title,
+            rfp_client=rfp.client,
+            rfp_sector=rfp.sector,
+            rfp_location=rfp.location or None,
+            rfp_context=rfp_context,
+            section=mapped,
+            evidence_corpus=(research.evidence_corpus if research else []) or [],
+            brand_voice=research.brand_voice if research else None,
+            zo_template_sections=static,
+            writing_avoidances=list(research.writing_avoidances or []) if research else None,
+            loss_lessons=list(research.loss_lessons or []) if research else None,
+            proof_points=list(research.proof_points or []) if research else None,
+            manuscript_locks=(
+                research.manuscript_locks.model_dump(by_alias=True)
+                if research and research.manuscript_locks
+                else None
+            ),
+            execution_plan=(
+                research.proposal_execution_plan.model_dump(by_alias=True)
+                if research and research.proposal_execution_plan
+                else None
+            ),
+            rewrite_brief=rewrite_brief,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3 single-section failed for %s: %s", section_id, exc)
+        return draft, research, False, f"phase3_failed: {exc}"
+
+    # Preserve title/id from existing; only content/status from Phase 3.
+    updated = existing.model_copy(
+        update={
+            "content": drafted.content or existing.content,
+            "status": "generated",
+            "kb_refs": drafted.kb_refs or existing.kb_refs,
+            "designer_note": drafted.designer_note or existing.designer_note,
+        }
+    )
+    try:
+        next_draft = replace_section_isolated(draft, updated)
+    except SectionIsolationError as exc:
+        logger.error("Isolation reject for %s: %s", section_id, exc)
+        return draft, research, False, f"isolation_violation: {exc}"
+
+    if research and jit:
+        research = research.model_copy(update={"evidence_corpus": jit})
+        await asave_research_cache(research)
+
+    await asave_proposal_draft(next_draft)
+
+    # Fact-check only this section.
+    next_draft, _fc = await run_kb_fact_check_section_ids(
+        next_draft,
+        [section_id],
+        rfp=rfp,
+        rfp_context=rfp_context,
+        research=research,
+    )
+    # Re-assert isolation after fact-check
+    try:
+        from app.services.proposal_section_isolation import assert_only_section_changed
+
+        assert_only_section_changed(before_snap, next_draft, allowed_section_id=section_id)
+    except SectionIsolationError as exc:
+        logger.error("Fact-check isolation violation %s: %s — reverting to pre-fc", section_id, exc)
+        # Keep Phase 3 content without fact-check mutation of siblings
+        next_draft = replace_section_isolated(draft, updated)
+        await asave_proposal_draft(next_draft)
+        return next_draft, research, True, "phase3_ok_factcheck_skipped_isolation"
+
+    await asave_proposal_draft(next_draft)
+    improved = (updated.content or "") != (existing.content or "")
+    return next_draft, research, improved, "phase3_ticket_redraft"
+
+
+async def _run_senior_editor_ticket_pass(
+    *,
+    rfp_id: str,
+    rfp: RfpRecord,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    report: SelfEditReport,
+    max_tickets: int = 3,
+) -> tuple[ProposalDraft, ProposalResearchCache | None]:
+    """Emit Senior Editor tickets and dispatch Phase 3 single-section redrafts."""
+    from app.services.proposal_langchain_agents import senior_editor_emit_tickets
+
+    tickets = await senior_editor_emit_tickets(
+        rfp_client=rfp.client,
+        rfp_title=rfp.title,
+        manuscript_digest=_manuscript_digest_for_senior_editor(draft),
+        requirements_by_section=_requirements_by_section_id(research),
+    )
+    coverage = list(tickets.get("coverageTickets") or [])
+    dedupe = list(tickets.get("dedupeTickets") or [])
+    # Coverage first, then dedupe; unique by sectionId.
+    ordered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in [*coverage, *dedupe]:
+        if not isinstance(raw, dict):
+            continue
+        sid = str(raw.get("sectionId") or "").strip()
+        if not sid or sid in seen:
+            continue
+        if not any(s.id == sid for s in draft.sections):
+            continue
+        seen.add(sid)
+        ordered.append(raw)
+        if len(ordered) >= max_tickets:
+            break
+
+    if not ordered:
+        report.section_logs.append(
+            {"section": "senior-editor", "detail": "no tickets emitted"}
+        )
+        return draft, research
+
+    for ticket in ordered:
+        sid = str(ticket.get("sectionId") or "")
+        brief = _ticket_rewrite_brief(ticket)
+        draft, research, improved, detail = await _redraft_section_via_phase3_isolated(
+            rfp_id=rfp_id,
+            section_id=sid,
+            rewrite_brief=brief or "Address Senior Editor ticket for this section only.",
+            rfp=rfp,
+            draft=draft,
+            research=research,
+        )
+        report.sections_targeted += 1
+        if improved:
+            report.sections_improved += 1
+        else:
+            report.sections_unchanged += 1
+        report.section_logs.append(
+            {
+                "sectionId": sid,
+                "detail": detail,
+                "ticket": "coverage" if ticket in coverage else "dedupe",
+            }
+        )
+    return draft, research
 
 
 async def _repair_one_section(
@@ -393,7 +630,7 @@ async def _fallback_improve_section(
         f"{reason}. Preserve last good draft facts; fix only the listed gaps.\n\n"
     )
     try:
-        _section, updated_draft, updated_research, provider, detail = await improve_proposal_section(
+        _section, updated_draft, updated_research, provider, detail, _ = await improve_proposal_section(
             rfp_id,
             section_id,
             failure_prefix + message,
@@ -478,8 +715,34 @@ async def run_self_edit_loop(
     if not rfp:
         raise ProposalError("RFP not found for self-edit.", status_code=404)
 
+    from app.services.proposal_common import load_rfp_for_proposal
+    from app.services.proposal_kb_fact_checker import run_kb_fact_check_pass
+
+    _, _, rfp_context = load_rfp_for_proposal(rfp_id)
+    draft, fc_report = await run_kb_fact_check_pass(
+        draft,
+        rfp=rfp,
+        rfp_context=rfp_context,
+        research=research,
+    )
+    if fc_report.logs:
+        await asave_proposal_draft(draft)
+        report_preface = SelfEditReport(
+            stopped_reason="",
+            section_logs=[{"section": "fact-check", "detail": log} for log in fc_report.logs[:20]],
+        )
+        logger.info(
+            "KB fact-check before self-edit for %s: %d log lines",
+            rfp_id,
+            len(fc_report.logs),
+        )
+    else:
+        report_preface = None
+
     budget = research.budget if research else None
     report = SelfEditReport()
+    if report_preface and report_preface.section_logs:
+        report.section_logs.extend(report_preface.section_logs)
     deadline = time.monotonic() + time_budget_sec
     sem = asyncio.Semaphore(parallel)
     zero_improve_streak = 0
@@ -590,9 +853,54 @@ async def run_self_edit_loop(
 
         from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
 
+        # Senior Editor ticket pass (Phase 3 single-section) before weak-section repair.
+        if iteration == 1:
+            await record_pipeline_activity(
+                rfp_id,
+                label="Senior editor: ticket pass",
+                detail="Dedupe + RFP coverage tickets → Phase 3 single-section redraft",
+                step_index=iteration,
+                step_total=max_iterations,
+            )
+            draft, research = await _run_senior_editor_ticket_pass(
+                rfp_id=rfp_id,
+                rfp=rfp,
+                draft=draft,
+                research=research,
+                report=report,
+            )
+            draft = await aget_proposal_draft(rfp_id) or draft
+            research = await aget_research_cache(rfp_id) or research
+            flags_after_tickets = _total_manuscript_flags(draft, research, rfp)
+            if flags_after_tickets <= TARGET_FLAG_COUNT:
+                report.stopped_reason = "flag_target_met"
+                break
+            # Refresh weak set after ticket redrafts
+            blocker_ids = sections_with_submission_blockers(draft, research)
+            compliance_ids = sections_with_compliance_gaps(draft, research, rfp)
+            lock_ids = {
+                i.section_id
+                for i in scan_manuscript_lock_issues(draft=draft, research=research)
+                if i.section_id
+            }
+            weak = [
+                s
+                for s in draft.sections
+                if is_weak_section(s)
+                or s.id in blocker_ids
+                or s.id in compliance_ids
+                or s.id in lock_ids
+            ]
+            weak.sort(key=lambda s: (0 if s.id in lock_ids else 1, -weakness_score(s)))
+            if len(weak) > MAX_WEAK_SECTIONS_PER_ITERATION:
+                weak = weak[:MAX_WEAK_SECTIONS_PER_ITERATION]
+            if not weak:
+                report.stopped_reason = "all_sections_ok"
+                break
+
         kpi_in_batch = any(s.id in lock_ids for s in weak)
         first_title = weak[0].title if weak else "sections"
-        record_pipeline_activity(
+        await record_pipeline_activity(
             rfp_id,
             label=f"Senior editor: {first_title}",
             detail=(
@@ -603,7 +911,8 @@ async def run_self_edit_loop(
             step_total=max_iterations,
         )
 
-        tasks = [_run_one(s.id, True) for s in weak]
+        # Remaining weak sections: Section Repair without re-running Senior Editor fact hunt.
+        tasks = [_run_one(s.id, False) for s in weak]
         results = await asyncio.gather(*tasks)
 
         improved_this_round = 0

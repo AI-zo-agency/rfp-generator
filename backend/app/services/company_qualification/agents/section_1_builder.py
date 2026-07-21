@@ -110,7 +110,7 @@ async def _write_one_subsection(
         else ""
     )
 
-    max_tokens = 4096 if sec_id == "section-1-org-structure" else 2048
+    max_tokens = 8192 if sec_id == "section-1-org-structure" else 3072
     temperature = 0.55 if sec_id == "section-1-who-we-are" else 0.2
     tenure = (
         agency_tenure_block() + "\n\n"
@@ -118,53 +118,75 @@ async def _write_one_subsection(
         else ""
     )
 
-    raw, provider = await llm.chat_json(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You are the Section 1 Builder for zö agency.\n"
-                    f"Write ONLY the subsection: {title} ({sec_id}).\n"
-                    "ASSEMBLE from the approved plan and CompanyTruth. Do NOT invent facts.\n"
-                    "Apply the content budget. Omit-tier capabilities must not appear.\n"
-                    "Write in first person (we/our/us). Never use 'The Vendor'.\n"
-                    + (
-                        "CRITICAL for Org Structure: list EVERY person from the Master Team Roster "
-                        "with their exact title. Incomplete org charts are failures.\n"
-                        if sec_id == "section-1-org-structure"
-                        else ""
-                    )
-                    + (
-                        "Write with bold zö brand voice — warm, human, attractive to the client. "
-                        "## Our Promise on its own line as a vow. "
-                        "FORBIDDEN in 1.1: staff names, titles, SEM/SEO/PPC lists, CRM, dashboards, report SLAs.\n"
-                        if sec_id == "section-1-who-we-are"
-                        else ""
-                    )
-                    + "\nReturn JSON:\n"
-                    f'{{"id": "{sec_id}", "title": "{title}", "content": "markdown", "wordCount": 0}}'
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Voice:\n{brand_voice_block}\n\n"
-                    f"{tenure}"
-                    f"Client: {rfp_client} | Sector: {rfp_sector}\n"
-                    f"Budget: {budget}\n"
-                    f"Spec: {hint}\n\n"
-                    f"Subsection plan:\n{plan_json}\n\n"
-                    f"CompanyTruth:\n{company_truth.model_dump_json()}\n\n"
-                    f"ProposalContext:\n{proposal_context.model_dump_json()}\n\n"
-                    f"Primary capabilities: {primary_caps}\n"
-                    f"Omit capabilities (must NOT appear): {omit_caps}\n\n"
-                    f"{roster_block}"
-                ),
-            },
-        ],
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+    try:
+        raw, provider = await llm.chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the Section 1 Builder for zö agency.\n"
+                        f"Write ONLY the subsection: {title} ({sec_id}).\n"
+                        "ASSEMBLE from the approved plan and CompanyTruth. Do NOT invent facts.\n"
+                        "Apply the content budget. Omit-tier capabilities must not appear.\n"
+                        "Write in first person (we/our/us). Never use 'The Vendor'.\n"
+                        "Return ONE complete JSON object — no markdown fences. Finish every string/brace.\n"
+                        + (
+                            "CRITICAL for Org Structure: list EVERY person from the Master Team Roster "
+                            "with their exact title. Incomplete org charts are failures.\n"
+                            if sec_id == "section-1-org-structure"
+                            else ""
+                        )
+                        + (
+                            "Write with bold zö brand voice — warm, human, attractive to the client. "
+                            "## Our Promise on its own line as a vow. "
+                            "FORBIDDEN in 1.1: staff names, titles, SEM/SEO/PPC lists, CRM, dashboards, report SLAs.\n"
+                            if sec_id == "section-1-who-we-are"
+                            else ""
+                        )
+                        + "\nReturn JSON:\n"
+                        f'{{"id": "{sec_id}", "title": "{title}", "content": "markdown", "wordCount": 0}}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Voice:\n{brand_voice_block}\n\n"
+                        f"{tenure}"
+                        f"Client: {rfp_client} | Sector: {rfp_sector}\n"
+                        f"Budget: {budget}\n"
+                        f"Spec: {hint}\n\n"
+                        f"Subsection plan:\n{plan_json}\n\n"
+                        f"CompanyTruth:\n{company_truth.model_dump_json()}\n\n"
+                        f"ProposalContext:\n{proposal_context.model_dump_json()}\n\n"
+                        f"Primary capabilities: {primary_caps}\n"
+                        f"Omit capabilities (must NOT appear): {omit_caps}\n\n"
+                        f"{roster_block}"
+                    ),
+                },
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            tier="heavy" if sec_id in {"section-1-who-we-are", "section-1-org-structure"} else "light",
+        )
+    except Exception as exc:  # noqa: BLE001 — never abort remaining subsections
+        logger.warning(
+            "Section 1 Builder %s failed (%s); VERIFY stub (no retry)",
+            sec_id,
+            str(exc)[:180],
+        )
+        stub = (
+            f"[VERIFY: complete {title} from CompanyTruth / Master Team Roster — "
+            f"generation interrupted mid-JSON]"
+        )
+        return (
+            GeneratedSubsection(
+                id=sec_id,
+                title=title,
+                content=stub,
+                wordCount=_word_count(stub),
+            ),
+            "failed",
+        )
 
     try:
         sec = GeneratedSubsection.model_validate(raw)

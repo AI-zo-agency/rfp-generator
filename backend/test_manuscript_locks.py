@@ -8,6 +8,18 @@ from app.services.proposal_manuscript_locks import (
 )
 
 
+def test_strip_leaked_markdown_wrappers() -> None:
+    from app.services.proposal_manuscript_locks import strip_leaked_markdown_wrappers
+
+    raw = (
+        "retrieval:\n```markdown\n# YOUR KEY TEAM\n\n## JUSTIN BRONSON\n\nBio text.\n```"
+    )
+    clean = strip_leaked_markdown_wrappers(raw)
+    assert "retrieval:" not in clean.lower()
+    assert "```" not in clean
+    assert "JUSTIN BRONSON" in clean
+
+
 def test_strip_case_study_meta_and_word_count() -> None:
     text = (
         "Deschutes Brewery Heritage on Tap\n\n"

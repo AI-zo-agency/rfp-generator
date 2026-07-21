@@ -22,7 +22,7 @@ interface ApiProposalSection {
   kbRefs?: string[];
 }
 
-interface ApiProposalDraft {
+export interface ApiProposalDraft {
   rfpId: string;
   sections: ApiProposalSection[];
   updatedAt: string;
@@ -88,11 +88,14 @@ export function outlineToApiDraft(
 import {
   buildPipelineStatus,
   inferResumePhaseFromBlocker,
+  normalizeCheckpointForDisplay,
   phaseIsComplete,
   resolveResumePhase,
   shouldRunPhase,
   type PipelinePhase,
+  type PipelineInProgressPhase,
   type ProposalPipelineStatus,
+  FULFILL_SCAN_PHASE,
 } from "./proposal-pipeline-checkpoint";
 import { staticSections1to3Complete } from "./proposal-draft";
 import { PROPOSAL_STAGE_TIMEOUT_MS } from "./proposal-stage-timeout";
@@ -103,6 +106,7 @@ export {
   PIPELINE_PHASE_LABELS,
   inferResumePhaseFromBlocker,
   pipelineResumeMessage,
+  pipelineServerStillWorkingMessage,
   resolveResumePhase,
 } from "./proposal-pipeline-checkpoint";
 
@@ -210,6 +214,24 @@ export type FullProposalProgress =
   | "phase-4-review"
   | "recovering";
 
+/** Map server checkpoint in-flight phase to UI progress when the client HTTP call already ended. */
+export function fullProposalProgressFromInFlight(
+  phase: PipelineInProgressPhase | null | undefined
+): FullProposalProgress | null {
+  if (!phase || phase === FULFILL_SCAN_PHASE) return null;
+  switch (phase) {
+    case "sections-1-3":
+    case "phase-2":
+    case "phase-3":
+    case "phase-3-6-self-edit":
+    case "phase-3-5-budget":
+    case "phase-4-review":
+      return phase;
+    default:
+      return "phase-3";
+  }
+}
+
 export function countSectionsWithContent(outline: ProposalOutline): number {
   return outline.sections.filter((s) => s.content?.trim()).length;
 }
@@ -235,16 +257,23 @@ export function startLiveDraftPolling(
     if (stopped) return;
     try {
       const snapshot = await fetchProposalDraft(rfpId);
-      if (!snapshot.draft) return;
-      const next = fingerprint(snapshot.draft);
-      if (next !== lastFingerprint) {
-        lastFingerprint = next;
-        onDraftUpdate(snapshot.draft);
+      if (snapshot.draft) {
+        const next = fingerprint(snapshot.draft);
+        if (next !== lastFingerprint) {
+          lastFingerprint = next;
+          onDraftUpdate(snapshot.draft);
+        }
       }
       const cpAt = snapshot.research?.pipelineCheckpoint?.updatedAt ?? "";
       if (onResearchUpdate && cpAt !== lastResearchAt) {
         lastResearchAt = cpAt;
         onResearchUpdate(snapshot.research ?? null);
+      } else if (
+        onResearchUpdate &&
+        !snapshot.draft &&
+        snapshot.research?.pipelineCheckpoint?.inProgressPhase
+      ) {
+        onResearchUpdate(snapshot.research);
       }
     } catch {
       // Ignore transient poll errors during long runs.
@@ -366,7 +395,7 @@ export async function runPhase3_6SelfEditWithRecovery(
 
 const STAGE_POLL_INTERVAL_MS = 12_000;
 const STAGE_POLL_MAX_MS = 22 * 60 * 1000;
-const LIVE_DRAFT_POLL_INTERVAL_MS = 1_500;
+const LIVE_DRAFT_POLL_INTERVAL_MS = 4_000;
 /** If checkpoint says in-flight but timestamps never move, backend was killed — don't block resume. */
 const IN_FLIGHT_STALE_MS = 90_000;
 
@@ -376,7 +405,7 @@ function sleep(ms: number): Promise<void> {
 
 const PROPOSAL_FETCH_TIMEOUT_MS = 90_000;
 /** First paint — don't block the workspace on a stuck backend. */
-export const PROPOSAL_INITIAL_LOAD_TIMEOUT_MS = 18_000;
+export const PROPOSAL_INITIAL_LOAD_TIMEOUT_MS = 45_000;
 
 async function fetchWithTimeout(
   input: RequestInfo | URL,
@@ -396,9 +425,10 @@ export async function fetchProposalSnapshot(
   rfpId: string,
   savedAt: string
 ): Promise<NonNullable<ProposalOutline["snapshots"]>[number] | null> {
-  const encoded = encodeURIComponent(savedAt);
+  const qs = new URLSearchParams({ savedAt });
+  // Query param (not path) — ISO offsets with '+' break in path segments.
   const res = await fetchWithTimeout(
-    `/api/rfps/${rfpId}/proposal/snapshot/${encoded}`,
+    `/api/rfps/${rfpId}/proposal/snapshot?${qs.toString()}`,
     { cache: "no-store" },
     120_000
   );
@@ -501,6 +531,7 @@ export async function generateFullProposalStaged(
   }
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
   const signal = options?.signal;
+  try {
   throwIfAborted(signal);
   await clearProposalGenerationStop(rfpId);
 
@@ -662,6 +693,15 @@ export async function generateFullProposalStaged(
   }
 
   return { draft, research };
+  } finally {
+    if (signal?.aborted) {
+      try {
+        await stopProposalGeneration(rfpId);
+      } catch {
+        // Best-effort — UI also calls stop explicitly.
+      }
+    }
+  }
 }
 
 async function refreshProposalSnapshot(rfpId: string): Promise<{
@@ -739,9 +779,13 @@ export async function fetchProposalDraft(
       );
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
-        throw new Error(
-          "Loading the proposal timed out — the server may still be generating. Wait a moment and refresh, or cancel generation on the server."
-        );
+        // During generation the single-worker backend may be busy — return empty
+        // instead of crashing the page. The live polling will retry.
+        if (attempt < 3) {
+          await sleep(2000 * (attempt + 1));
+          continue;
+        }
+        return empty;
       }
       throw error;
     }
@@ -760,23 +804,26 @@ export async function fetchProposalDraft(
       research: ProposalResearch | null;
       pipelineStatus?: ProposalPipelineStatus | null;
     };
-    if (!data.draft?.sections?.length) {
+    const researchRaw = data.research ?? null;
+    const draftPayload = data.draft;
+    if (!draftPayload) {
+      const research = normalizeCheckpointForDisplay(null, researchRaw);
       return {
         draft: null,
-        research: data.research ?? null,
+        research,
         pipelineStatus: buildPipelineStatus(
           null,
-          data.research ?? null,
+          research,
           data.pipelineStatus ?? null
         ),
       };
     }
-    const draft = apiDraftToOutline(data.draft);
-    const research = data.research ?? null;
+    const draft = apiDraftToOutline(draftPayload);
+    const research = normalizeCheckpointForDisplay(draft, researchRaw);
     return {
       draft,
       research,
-      provider: data.draft.provider,
+      provider: draftPayload.provider,
       pipelineStatus: buildPipelineStatus(
         draft,
         research,
@@ -1324,12 +1371,15 @@ export async function improveProposalSection(
   message: string,
   options?: {
     selection?: { start: number; end: number; text: string };
+    conversationHistory?: { role: "user" | "assistant"; content: string }[];
+    proposalWide?: boolean;
   }
 ): Promise<{
   section: OutlineSection;
   draft: ProposalOutline;
   research: ProposalResearch | null;
   assistantMessage: string;
+  draftChanged: boolean;
 }> {
   const res = await fetch(
     `/api/rfps/${rfpId}/proposal/sections/${sectionId}/improve`,
@@ -1345,6 +1395,10 @@ export async function improveProposalSection(
               selectionText: options.selection.text,
             }
           : {}),
+        ...(options?.conversationHistory?.length
+          ? { conversationHistory: options.conversationHistory }
+          : {}),
+        ...(options?.proposalWide ? { proposalWide: true } : {}),
       }),
     }
   );
@@ -1355,6 +1409,7 @@ export async function improveProposalSection(
     draft?: ApiProposalDraft;
     research?: ProposalResearch;
     assistantMessage?: string;
+    draftChanged?: boolean;
   };
   try {
     data = text.trim() ? JSON.parse(text) : {};
@@ -1374,6 +1429,7 @@ export async function improveProposalSection(
     assistantMessage:
       data.assistantMessage ??
       `Updated ${data.section.title}. Review the draft above.`,
+    draftChanged: data.draftChanged !== false,
   };
 }
 

@@ -32,7 +32,7 @@ export function ProposalPipelineProgressStrip({
   const inProgress = cp?.inProgressPhase;
   const isFulfill =
     isFulfillScanRunning || inProgress === FULFILL_SCAN_PHASE;
-  const isRunning = Boolean(fullProposalProgress || isFulfill);
+  const isRunning = Boolean(fullProposalProgress || isFulfill || inProgress);
 
   if (!isRunning) return null;
 

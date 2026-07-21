@@ -9,7 +9,35 @@ import {
 } from "@/lib/proposal-outline-tree";
 import type { OutlineSection } from "@/types/proposal";
 import type { SectionRevisionRecord } from "./DraftSectionEditor";
-import { SectionStatusPill } from "./SectionStatusPill";
+
+function SectionDraftCheckbox({
+  checked,
+  needsAttention,
+}: {
+  checked: boolean;
+  needsAttention: boolean;
+}) {
+  return (
+    <span
+      className={`proposal-section-checkbox ${checked ? "is-checked" : ""} ${
+        needsAttention ? "needs-attention" : ""
+      }`}
+      aria-hidden
+    >
+      {checked ? (
+        <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none">
+          <path
+            d="M2.5 6.2 4.8 8.5 9.5 3.8"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ) : null}
+    </span>
+  );
+}
 
 function sectionManualFillCount(
   sectionId: string,
@@ -40,7 +68,6 @@ function SectionRow({
   sectionButtonRefs,
   onSelectSection,
   onOpenRevision,
-  indexLabel,
 }: {
   section: OutlineSection;
   depth: number;
@@ -51,9 +78,16 @@ function SectionRow({
   sectionButtonRefs: React.MutableRefObject<Map<string, HTMLButtonElement>>;
   onSelectSection: (sectionId: string) => void;
   onOpenRevision: (sectionId: string) => void;
-  indexLabel: string;
 }) {
   const hasContent = Boolean(section.content.trim());
+  const needsAttention = flagCount > 0 || hasRevision;
+  const titleHint = [
+    hasContent ? "Draft has content" : "Not drafted yet",
+    flagCount > 0 ? `${flagCount} fill-in tag(s)` : "",
+    hasRevision ? "Section updated — double-click title area in review for changes" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <li>
@@ -64,59 +98,27 @@ function SectionRow({
           else sectionButtonRefs.current.delete(section.id);
         }}
         onClick={() => onSelectSection(section.id)}
+        onDoubleClick={() => {
+          if (hasRevision) onOpenRevision(section.id);
+        }}
+        title={titleHint}
+        aria-current={active ? "true" : undefined}
         className={`proposal-section-list-item ${
           depth > 0 ? "proposal-section-list-item--child" : ""
         } ${active ? "is-active" : ""} ${highlighted ? "is-flag-target" : ""}`}
-        style={depth > 0 ? { paddingLeft: `${12 + depth * 14}px` } : undefined}
+        style={depth > 0 ? { paddingLeft: `${8 + depth * 10}px` } : undefined}
       >
+        <SectionDraftCheckbox
+          checked={hasContent}
+          needsAttention={needsAttention && !hasContent}
+        />
         <span
-          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
-            hasContent
-              ? "bg-[#ef5018] text-white"
-              : "border border-zo-border bg-[var(--zo-input-bg)] text-zo-text-muted"
+          className={`min-w-0 flex-1 truncate text-left text-[13px] leading-snug ${
+            active ? "font-semibold text-zo-orange" : "font-medium text-foreground"
           }`}
-          aria-hidden
         >
-          {indexLabel}
+          {section.title}
         </span>
-        <div className="min-w-0 flex-1">
-          <p
-            className={`line-clamp-2 text-[13px] font-semibold leading-snug ${
-              active ? "text-zo-orange" : "text-foreground"
-            }`}
-          >
-            {section.title}
-          </p>
-          <div className="mt-1 flex flex-wrap items-center gap-1">
-            <SectionStatusPill status={section.status} />
-            {flagCount > 0 ? (
-              <span
-                className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-900"
-                title={`${flagCount} manual fill-in tag(s)`}
-              >
-                {flagCount} fill-in{flagCount === 1 ? "" : "s"}
-              </span>
-            ) : null}
-            {hasRevision ? (
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onOpenRevision(section.id);
-                }}
-                className="rounded bg-teal-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-teal-900 hover:bg-teal-200"
-                title="View what changed in this section"
-              >
-                Updated
-              </button>
-            ) : null}
-            {section.custom ? (
-              <span className="text-[9px] font-bold uppercase text-zo-orange">
-                Custom
-              </span>
-            ) : null}
-          </div>
-        </div>
       </button>
     </li>
   );
@@ -133,7 +135,6 @@ function SectionGroup({
   onToggle,
   onSelectSection,
   onOpenRevision,
-  manuscriptIndexById,
 }: {
   group: OutlineTreeGroup;
   selectedSectionId: string | null;
@@ -145,7 +146,6 @@ function SectionGroup({
   onToggle: () => void;
   onSelectSection: (sectionId: string) => void;
   onOpenRevision: (sectionId: string) => void;
-  manuscriptIndexById: Map<string, number>;
 }) {
   const generatedCount = group.sections.filter((section) =>
     section.content.trim(),
@@ -165,10 +165,10 @@ function SectionGroup({
         >
           ▾
         </span>
-        <span className="min-w-0 flex-1 text-left text-[12px] font-bold leading-snug text-foreground">
+        <span className="proposal-section-tree-group-label min-w-0 flex-1 text-left">
           {group.label}
         </span>
-        <span className="shrink-0 text-[10px] font-semibold text-zo-text-muted">
+        <span className="shrink-0 text-[10px] font-semibold tabular-nums text-zo-text-muted">
           {generatedCount}/{group.sections.length}
         </span>
       </button>
@@ -186,7 +186,6 @@ function SectionGroup({
               sectionButtonRefs={sectionButtonRefs}
               onSelectSection={onSelectSection}
               onOpenRevision={onOpenRevision}
-              indexLabel={String(manuscriptIndexById.get(section.id) ?? "·")}
             />
           ))}
         </ul>
@@ -249,7 +248,6 @@ export function ProposalSectionTree({
             }
             onSelectSection={onSelectSection}
             onOpenRevision={onOpenRevision}
-            manuscriptIndexById={manuscriptIndexById}
           />
         ) : (
           <SectionRow
@@ -263,9 +261,6 @@ export function ProposalSectionTree({
             sectionButtonRefs={sectionButtonRefs}
             onSelectSection={onSelectSection}
             onOpenRevision={onOpenRevision}
-            indexLabel={String(
-              manuscriptIndexById.get(node.section.id) ?? "·",
-            )}
           />
         ),
       )}

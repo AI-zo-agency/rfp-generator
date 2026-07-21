@@ -17,14 +17,27 @@ def get_supabase_client() -> Client:
         raise HTTPException(status_code=500, detail=f"Supabase client error: {str(e)}")
 
 
+ALLOWED_DOMAIN = "zo.agency"
+
+
 class AuthRequest(BaseModel):
     email: str
     password: str
     redirect_url: str | None = None
 
 
+def _validate_domain(email: str) -> None:
+    domain = email.strip().rsplit("@", 1)[-1].lower()
+    if domain != ALLOWED_DOMAIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Different domain not allowed.",
+        )
+
+
 @router.post("/signup")
 async def signup(req: AuthRequest, supabase: Client = Depends(get_supabase_client)):
+    _validate_domain(req.email)
     try:
         options = {}
         if req.redirect_url:

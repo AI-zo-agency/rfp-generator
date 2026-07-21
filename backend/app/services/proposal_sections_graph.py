@@ -27,6 +27,7 @@ from app.services.agency_facts import (
     agency_years_in_operation,
     enforce_agency_tenure,
 )
+from app.services.proposal_intelligence.log import log_intel_event
 from app.services.company_qualification.agents.capability_prioritization import (
     run_capability_prioritization_agent,
 )
@@ -56,6 +57,7 @@ from app.services.company_qualification.schemas import (
 )
 from app.services.llm import LlmError
 from app.services.proposal_brand_voice import format_brand_voice_block, format_register_block
+from app.services.proposal_manuscript_locks import strip_leaked_markdown_wrappers
 from app.services.proposal_voice_enforcement import enforce_narrative_voice
 from app.services.proposal_langchain import _provider_name
 from app.services.sections_agent_log import (
@@ -78,6 +80,15 @@ SectionsPartialCallback = Callable[
 _partial_cb_var: contextvars.ContextVar[SectionsPartialCallback | None] = contextvars.ContextVar(
     "_sections_partial_cb", default=None
 )
+
+
+def _log_section_generate_next(state: SectionsGraphState, *, section_id: str, title: str) -> None:
+    log_intel_event(
+        "SECTION_GENERATE_NEXT",
+        rfp_id=state.get("rfp_id"),
+        section_id=section_id,
+        title=title,
+    )
 
 
 async def _emit_partial(state: SectionsGraphState, accumulated_sections: list[dict[str, Any]]) -> None:
@@ -245,6 +256,7 @@ def _sanitize_content(text: str) -> str:
     """
     if not text:
         return text
+    text = strip_leaked_markdown_wrappers(text)
     # NFKC first — normalizes composed forms
     text = unicodedata.normalize("NFKC", text)
     result: list[str] = []
@@ -719,6 +731,8 @@ async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
     if target_file not in sources and text.strip():
         sources = sorted(set(sources) | {target_file})
 
+    text = _normalize_bio_text_dates(text)
+
     logger.info(
         "Bio fetch for %s: full_doc=%d roster=%d assembled=%d from %s",
         member,
@@ -846,8 +860,23 @@ def _section_block_text(kb_text: str, header: str) -> str:
     return match.group(1) if match else ""
 
 
+_BIO_YEAR_RANGE_INNER = r"\s*[-\u2013\u2014–—]\s*"
+
+
+def _normalize_bio_text_dates(text: str) -> str:
+    """PDF/OCR often uses en-dash; bio parsers expect ASCII hyphen in ranges."""
+    if not text:
+        return text
+    return re.sub(
+        rf"(\b(?:19|20)\d{{2}}){_BIO_YEAR_RANGE_INNER}(Present|(?:19|20)\d{{2}})",
+        r"\1 - \2",
+        text,
+        flags=re.I,
+    )
+
+
 _DATE_RANGE_RE = re.compile(
-    r"\b(?:19|20)\d{2}\s*-\s*(?:Present|(?:19|20)\d{2})\b",
+    rf"\b(?:19|20)\d{{2}}{_BIO_YEAR_RANGE_INNER}(?:Present|(?:19|20)\d{{2}})\b",
     re.I,
 )
 
@@ -975,6 +1004,7 @@ def _sanitize_bio_extraction(extracted: dict[str, Any], kb_text: str) -> dict[st
 
 def _parse_bio_sections_from_text(kb_text: str, member: str) -> dict[str, Any]:
     """Deterministic parser for 04_Bio PDF section headers (no LLM)."""
+    kb_text = _normalize_bio_text_dates(kb_text or "")
     empty: dict[str, Any] = {
         "title": "",
         "overview": "",
@@ -1400,6 +1430,57 @@ def _format_member_bio_content(member: str, extracted: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+_WORK_HISTORY_VERIFY_RE = re.compile(
+    r"\[VERIFY:[^\]]*work\s*history",
+    re.I,
+)
+
+
+def replace_bio_work_history_verify_from_kb(
+    content: str,
+    member: str,
+    kb_text: str,
+) -> tuple[str, int]:
+    """Replace a Work History VERIFY stub with parsed 04_Bio employment rows."""
+    if not (content or "").strip() or not (kb_text or "").strip():
+        return content, 0
+    if not _WORK_HISTORY_VERIFY_RE.search(content):
+        return content, 0
+
+    normalized = _normalize_bio_text_dates(kb_text)
+    parsed = _sanitize_bio_extraction(
+        _parse_bio_sections_from_text(normalized, member),
+        normalized,
+    )
+    jobs = parsed.get("work_history") or []
+    if not jobs:
+        return content, 0
+
+    block_lines = ["**Work History**"]
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        company = str(job.get("company") or "").strip() or "[VERIFY: company]"
+        job_title = str(job.get("title") or "").strip()
+        dates = str(job.get("dates") or "").strip() or "[VERIFY: dates]"
+        if job_title and not job_title.startswith("[VERIFY"):
+            block_lines.append(f"- **{company}** — {job_title}, {dates}")
+        else:
+            block_lines.append(f"- **{company}**, {dates}")
+    new_block = "\n".join(block_lines)
+
+    pattern = re.compile(
+        r"\*\*Work History\*\*\s*\n.*?(?=\n\*\*[^*]+\*\*|\Z)",
+        re.I | re.S,
+    )
+    if not pattern.search(content):
+        return content, 0
+    updated = pattern.sub(new_block + "\n\n", content, count=1)
+    if updated == content:
+        return content, 0
+    return updated.rstrip() + ("\n" if content.endswith("\n") else ""), 1
+
+
 def _narrative_section_preamble(state: SectionsGraphState) -> str:
     from app.services.proposal_section_dedup import format_anti_duplication_rules
 
@@ -1802,6 +1883,7 @@ async def _build_bios(state: SectionsGraphState) -> dict[str, Any]:
         safe_id = member.lower().replace(" ", "-").replace("'", "")
         sec_id = f"section-2-bio-{safe_id}"
         sec_title = f"2.{i} — {member}"
+        _log_section_generate_next(state, section_id=sec_id, title=sec_title)
 
         logger.info("Fetching 04_Bio file for: %s", member)
         kb_text_for_extraction, bio_sources = await _fetch_member_bio_kb(member)
@@ -1919,6 +2001,7 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
         safe_id = study.lower()[:40].replace(" ", "-").replace("/", "-")
         sec_id = f"section-3-work-{i:02d}-{safe_id}"
         sec_title = _case_study_display_title(i, study)
+        _log_section_generate_next(merged_state, section_id=sec_id, title=sec_title)
 
         case_text, case_sources = await proposal_knowledge_base_tools.fetch_single_case_study(study)
         raw, _provider = await run_case_study_builder_agent(
@@ -2159,70 +2242,83 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
     kb_sources = state.get("kb_company_sources") or []
 
     for sec_id, sec_title, instruction, mode, ratio, word_tgt in subsections:
+        _log_section_generate_next(state, section_id=sec_id, title=sec_title)
         section_kb_sources = (
             state.get("kb_master_roster_sources") or []
             if sec_id == "section-1-org-structure"
             else kb_sources
         )
-        raw, _ = await llm.chat_json(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        f"{_section_system_preamble(state)}\n"
-                        f"You are writing subsection: '{sec_title}'.\n"
-                        f"Task: {instruction}\n\n"
-                        "🚨 CRITICAL ANTI-HALLUCINATION RULES:\n"
-                        "1. ONLY use facts that are EXPLICITLY stated in the Knowledge Base below\n"
-                        "2. NEVER invent certifications, addresses, email addresses, phone numbers, or credentials\n"
-                        "3. NEVER upgrade job titles (e.g. 'Graphic Designer' → 'Senior Graphic Designer')\n"
-                        "4. NEVER invent office locations or physical presences that aren't documented\n"
-                        "5. If a fact is NOT in the KB, write '[VERIFY: field name]' as a placeholder\n"
-                        "6. Use EXACT names, titles, and numbers as they appear in the KB - no paraphrasing\n"
-                        "7. Do NOT add certifications like 'Google Ads Certification' unless the AGENCY holds it (not just individuals)\n"
-                        "8. Do NOT invent email addresses - only use ones explicitly listed in the KB\n"
-                        + (
-                            "9. For org structure: ONLY list people named in the Master Team Roster — "
-                            "never add names from proposals, case studies, or memory\n"
-                            if sec_id == "section-1-org-structure"
-                            else ""
-                        )
-                        + "\nWrite in first-person zö voice (we/our/us). Never use 'The Vendor' or third-person.\n"
-                        + (
-                            "Be thorough — include every roster name and title you find.\n"
-                            if sec_id == "section-1-org-structure"
-                            else (
-                                "Include ONLY facts for this subsection. "
-                                "Do NOT repeat narrative or facts that belong in other Section 1 subsections.\n"
-                                if sec_id
-                                in {
-                                    "section-1-business-info",
-                                    "section-1-certifications",
-                                    "section-1-insurance",
-                                }
+        try:
+            raw, _ = await llm.chat_json(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            f"{_section_system_preamble(state)}\n"
+                            f"You are writing subsection: '{sec_title}'.\n"
+                            f"Task: {instruction}\n\n"
+                            "🚨 CRITICAL ANTI-HALLUCINATION RULES:\n"
+                            "1. ONLY use facts that are EXPLICITLY stated in the Knowledge Base below\n"
+                            "2. NEVER invent certifications, addresses, email addresses, phone numbers, or credentials\n"
+                            "3. NEVER upgrade job titles (e.g. 'Graphic Designer' → 'Senior Graphic Designer')\n"
+                            "4. NEVER invent office locations or physical presences that aren't documented\n"
+                            "5. If a fact is NOT in the KB, write '[VERIFY: field name]' as a placeholder\n"
+                            "6. Use EXACT names, titles, and numbers as they appear in the KB - no paraphrasing\n"
+                            "7. Do NOT add certifications like 'Google Ads Certification' unless the AGENCY holds it (not just individuals)\n"
+                            "8. Do NOT invent email addresses - only use ones explicitly listed in the KB\n"
+                            + (
+                                "9. For org structure: ONLY list people named in the Master Team Roster — "
+                                "never add names from proposals, case studies, or memory\n"
+                                if sec_id == "section-1-org-structure"
+                                else ""
+                            )
+                            + "\nWrite in first-person zö voice (we/our/us). Never use 'The Vendor' or third-person.\n"
+                            + (
+                                "Be thorough — include every roster name and title you find.\n"
+                                if sec_id == "section-1-org-structure"
                                 else (
-                                    "Lead with zö brand voice from the Brand Voice KB. "
-                                    "Do NOT dump every company fact — Who We Are is essence + promise, not a fact sheet.\n"
-                                    if sec_id == "section-1-who-we-are"
-                                    else "Be thorough and detailed. Include every fact you find in the KB.\n"
+                                    "Include ONLY facts for this subsection. "
+                                    "Do NOT repeat narrative or facts that belong in other Section 1 subsections.\n"
+                                    if sec_id
+                                    in {
+                                        "section-1-business-info",
+                                        "section-1-certifications",
+                                        "section-1-insurance",
+                                    }
+                                    else (
+                                        "Lead with zö brand voice from the Brand Voice KB. "
+                                        "Do NOT dump every company fact — Who We Are is essence + promise, not a fact sheet.\n"
+                                        if sec_id == "section-1-who-we-are"
+                                        else "Be thorough and detailed. Include every fact you find in the KB.\n"
+                                    )
                                 )
                             )
-                        )
-                        + 'Return JSON: {"content": "full detailed content", "kbRefs": ["source1", ...]}'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Voice:\n{voice}\n\n"
-                        f"{_section_kb_user_content(state, sec_id)}"
-                    ),
-                },
-            ],
-            max_tokens=2048,
-            # Who We Are needs creative range; factual subsections stay cold.
-            temperature=0.55 if sec_id == "section-1-who-we-are" else 0.0,
-        )
+                            + "Return ONE complete JSON object — no markdown fences.\n"
+                            + 'Return JSON: {"content": "full detailed content", "kbRefs": ["source1", ...]}'
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Voice:\n{voice}\n\n"
+                            f"{_section_kb_user_content(state, sec_id)}"
+                        ),
+                    },
+                ],
+                max_tokens=4096 if sec_id == "section-1-org-structure" else 3072,
+                # Who We Are needs creative range; factual subsections stay cold.
+                temperature=0.55 if sec_id == "section-1-who-we-are" else 0.0,
+            )
+        except LlmError as exc:
+            logger.warning(
+                "Legacy Section 1 %s failed (%s); VERIFY stub (no retry)",
+                sec_id,
+                str(exc)[:160],
+            )
+            raw = {
+                "content": f"[VERIFY: complete {sec_title} from KB — generation interrupted]",
+                "kbRefs": section_kb_sources,
+            }
         content = _sanitize_content(raw.get("content", "").strip())
         if sec_id in {"section-1-who-we-are", "section-1-business-info"}:
             content = enforce_agency_tenure(content)
@@ -2230,6 +2326,12 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
             content = _normalize_who_we_are_markdown(content)
             content = _trim_to_max_words(content, 250)
             content = _normalize_who_we_are_markdown(content)
+            if not content.strip():
+                logger.warning("Who We Are empty after one call — VERIFY stub (no retry)")
+                content = (
+                    "[VERIFY: complete Who We Are from Brand Voice + CompanyTruth — "
+                    "empty model output]"
+                )
         section = _section_payload(
             section_id=sec_id,
             title=sec_title,
@@ -2282,34 +2384,45 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
         roster_sources = state.get("kb_master_roster_sources") or []
 
     context_block = state.get("proposal_context") or {}
-    selection, _ = await llm.chat_json(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You are the Team Selection Agent for zö agency Section 2.\n"
-                    "Determine required roles from the RFP, then select EXACTLY 5 team members "
-                    "from the Master Team Roster whose skills match this solicitation.\n\n"
-                    "STRICT RULES:\n"
-                    "- Skill-based selection only — NO mandatory names.\n"
-                    "- ONLY select people named in the Master Team Roster.\n"
-                    "- Maximum 5 people. Each must have a DISTINCT role.\n"
-                    "- Do NOT select the same person twice under different spellings.\n"
-                    'Return JSON: {"members": ["Name 1", "Name 2", "Name 3", "Name 4", "Name 5"], '
-                    '"requiredRoles": ["role 1", "role 2"]}'
-                )
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Proposal context:\n{context_block}\n\n"
-                    f"RFP context:\n{state['rfp_context'][:15000]}\n\n"
-                    f"Master Team Roster ({proposal_knowledge_base_tools.MASTER_TEAM_ROSTER_DOC}):\n"
-                    f"{roster_text[:500000]}"
-                )
-            }
-        ]
-    )
+    try:
+        selection, _ = await llm.chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the Team Selection Agent for zö agency Section 2.\n"
+                        "Determine required roles from the RFP, then select EXACTLY 5 team members "
+                        "from the Master Team Roster whose skills match this solicitation.\n"
+                        "Compact JSON only — no markdown fences.\n\n"
+                        "STRICT RULES:\n"
+                        "- Skill-based selection only — NO mandatory names.\n"
+                        "- ONLY select people named in the Master Team Roster.\n"
+                        "- Maximum 5 people. Each must have a DISTINCT role.\n"
+                        "- Do NOT select the same person twice under different spellings.\n"
+                        'Return JSON: {"members": ["Name 1", "Name 2", "Name 3", "Name 4", "Name 5"], '
+                        '"requiredRoles": ["role 1", "role 2"]}'
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Proposal context:\n{context_block}\n\n"
+                        f"RFP context:\n{state['rfp_context'][:15000]}\n\n"
+                        f"Master Team Roster ({proposal_knowledge_base_tools.MASTER_TEAM_ROSTER_DOC}):\n"
+                        f"{roster_text[:500000]}"
+                    )
+                }
+            ],
+            max_tokens=1536,
+            temperature=0.0,
+            tier="light",
+        )
+    except LlmError as exc:
+        logger.warning(
+            "Legacy team selection failed (%s); empty members (no retry)",
+            str(exc)[:160],
+        )
+        selection = {}
     raw_members = selection.get("members")
     members = _normalize_selected_bio_members(
         raw_members if isinstance(raw_members, list) else []
@@ -2323,6 +2436,7 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
         safe_id = member.lower().replace(" ", "-").replace("'", "")
         sec_id = f"section-2-bio-{safe_id}"
         sec_title = f"2.{i} — {member}"
+        _log_section_generate_next(state, section_id=sec_id, title=sec_title)
 
         logger.info("Fetching 04_Bio file for: %s", member)
         kb_text_for_extraction, bio_sources = await _fetch_member_bio_kb(member)
@@ -2400,34 +2514,45 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
         )
 
     context_block = state.get("proposal_context") or {}
-    selection, _ = await llm.chat_json(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You are the Evidence Selection Agent for zö agency Section 3.\n"
-                    "Score and select the strongest 3–5 past case studies for THIS RFP.\n\n"
-                    "Scoring weights: Industry 35%, Service 30%, Evaluation alignment 20%, "
-                    "Proof strength 10%, Recency 5%.\n\n"
-                    "STRICT RULES:\n"
-                    f"- Do NOT select work for '{rfp_client}' — that is the CURRENT client.\n"
-                    "- ONLY titles explicitly present in the case study corpus below.\n"
-                    "- Return 3–5 studies maximum. Never return more than 5.\n"
-                    "- Omit weak or irrelevant examples.\n"
-                    'Return JSON: {"selectedStudies": ["Exact Title 1", "Exact Title 2"], '
-                    '"scores": [{"title": "...", "score": 0.0, "rationale": "..."}]}'
-                )
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Proposal context:\n{context_block}\n\n"
-                    f"RFP requirements summary:\n{state['rfp_context'][:15000]}\n\n"
-                    f"Case study corpus (ONLY use titles listed here):\n{case_corpus[:500000]}"
-                )
-            }
-        ]
-    )
+    try:
+        selection, _ = await llm.chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the Evidence Selection Agent for zö agency Section 3.\n"
+                        "Score and select the strongest 3–5 past case studies for THIS RFP.\n"
+                        "Compact JSON only — no markdown fences.\n\n"
+                        "Scoring weights: Industry 35%, Service 30%, Evaluation alignment 20%, "
+                        "Proof strength 10%, Recency 5%.\n\n"
+                        "STRICT RULES:\n"
+                        f"- Do NOT select work for '{rfp_client}' — that is the CURRENT client.\n"
+                        "- ONLY titles explicitly present in the case study corpus below.\n"
+                        "- Return 3–5 studies maximum. Never return more than 5.\n"
+                        "- Omit weak or irrelevant examples.\n"
+                        'Return JSON: {"selectedStudies": ["Exact Title 1", "Exact Title 2"], '
+                        '"scores": [{"title": "...", "score": 0.0, "rationale": "..."}]}'
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Proposal context:\n{context_block}\n\n"
+                        f"RFP requirements summary:\n{state['rfp_context'][:15000]}\n\n"
+                        f"Case study corpus (ONLY use titles listed here):\n{case_corpus[:500000]}"
+                    )
+                }
+            ],
+            max_tokens=1536,
+            temperature=0.0,
+            tier="light",
+        )
+    except LlmError as exc:
+        logger.warning(
+            "Legacy evidence selection failed (%s); empty studies (no retry)",
+            str(exc)[:160],
+        )
+        selection = {}
     selected_studies = selection.get("selectedStudies") or selection.get("selected_studies") or []
     # DO NOT fallback to generic names — if nothing found, leave empty so no hallucination.
     selected_studies = [s for s in selected_studies if s.strip()]
@@ -2441,39 +2566,51 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
         sec_id = f"section-3-work-{i:02d}-{safe_id}"
         sec_title = _case_study_display_title(i, study)
 
-        raw, _ = await llm.chat_json(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        f"{_section_system_preamble(state)}\n"
-                        f"Write a detailed 'Our Work' case study for: '{study}'.\n\n"
-                        "CRITICAL RULES:\n"
-                        f"- Do NOT write about '{rfp_client}' — that is the CURRENT client this proposal is for, NOT a past case study.\n"
-                        "- ONLY pull verified facts, client names, and outcomes directly from the case studies knowledge base.\n"
-                        "- If facts are not in the KB, do NOT invent them. Use only what is explicitly stated.\n"
-                        "- Do NOT include Source:, filename, .pdf, .docx, or knowledge-base citations in the prose.\n"
-                        "- NEVER append 'Creative Examples:' catalogs or word-count labels.\n\n"
-                        "Format and Content:\n"
-                        "- Write from zö's perspective (we/our/us).\n"
-                        "- Use bold text for key outcomes and impact metrics.\n"
-                        "- Structure as: Client overview → Challenge → Our Approach → Key Tactics → Measurable Outcomes\n"
-                        "- Use bullet points for tactics and outcomes — no long boring paragraphs.\n"
-                        "- Use ASCII characters only in all text — no special Unicode or non-English characters.\n"
-                        'Return JSON: {"content": "full case study content", "kbRefs": ["..."]}'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Voice:\n{voice}\n\n"
-                        f"Case studies knowledge base:\n{case_corpus[:500000]}"
-                    ),
-                },
-            ],
-            max_tokens=2048,
-            temperature=0.0,  # Zero temp for strict factual extraction
-        )
+        try:
+            raw, _ = await llm.chat_json(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            f"{_section_system_preamble(state)}\n"
+                            f"Write a detailed 'Our Work' case study for: '{study}'.\n\n"
+                            "CRITICAL RULES:\n"
+                            f"- Do NOT write about '{rfp_client}' — that is the CURRENT client this proposal is for, NOT a past case study.\n"
+                            "- ONLY pull verified facts, client names, and outcomes directly from the case studies knowledge base.\n"
+                            "- If facts are not in the KB, do NOT invent them. Use only what is explicitly stated.\n"
+                            "- Do NOT include Source:, filename, .pdf, .docx, or knowledge-base citations in the prose.\n"
+                            "- NEVER append 'Creative Examples:' catalogs or word-count labels.\n"
+                            "- Return ONE complete JSON object — no markdown fences.\n\n"
+                            "Format and Content:\n"
+                            "- Write from zö's perspective (we/our/us).\n"
+                            "- Use bold text for key outcomes and impact metrics.\n"
+                            "- Structure as: Client overview → Challenge → Our Approach → Key Tactics → Measurable Outcomes\n"
+                            "- Use bullet points for tactics and outcomes — no long boring paragraphs.\n"
+                            "- Use ASCII characters only in all text — no special Unicode or non-English characters.\n"
+                            'Return JSON: {"content": "full case study content", "kbRefs": ["..."]}'
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Voice:\n{voice}\n\n"
+                            f"Case studies knowledge base:\n{case_corpus[:500000]}"
+                        ),
+                    },
+                ],
+                max_tokens=3072,
+                temperature=0.0,  # Zero temp for strict factual extraction
+            )
+        except LlmError as exc:
+            logger.warning(
+                "Legacy case study %s failed (%s); VERIFY stub (no retry)",
+                study,
+                str(exc)[:160],
+            )
+            raw = {
+                "content": f"[VERIFY: complete case study '{study}' from KB — generation interrupted]",
+                "kbRefs": kb_sources,
+            }
         content = _sanitize_content(raw.get("content", "").strip())
         section = _section_payload(
             section_id=sec_id,

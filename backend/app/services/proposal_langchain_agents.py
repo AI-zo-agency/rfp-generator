@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.services.llm import LlmError, _fireworks_key, chat_json
+from app.services.llm import LlmError, LlmTier, _fireworks_key, chat_json
 from app.services.proposal_langchain import (
     _provider_name,
     _use_fireworks_primary,
@@ -40,29 +40,26 @@ class AgentProfile:
     max_tokens: int
     max_tool_rounds: int
     system_prompt: str
+    tier: LlmTier = "heavy"
 
 
-SENIOR_EDITOR_SYSTEM = """You are zö agency's Senior Proposal Editor.
-Review ONE proposal section against its RFP requirements BEFORE the Section Repair agent rewrites it.
+SENIOR_EDITOR_SYSTEM = """You are zö agency's Senior Proposal Editor (manuscript director).
+You do NOT fill [VERIFY] tags or invent KB facts — the KB fact-checker owns facts.
 
-Process (use tools — do not skip):
-1. Call search_rfp_requirements with the section topic to read source RFP requirements for this section.
-2. Call KB tools (search_knowledge_base, search_master_template, search_case_studies, search_team_bios) for facts needed to complete the section.
-3. Identify every issue: blank/missing content, [VERIFY] stubs, generation-error text, grammar/wording errors, unmet RFP requirements, wrong voice.
-
-ALWAYS flag these senior-editor priorities when present:
-- Subject-verb disagreement after "We were …, and is …" (cover letter / entity description)
-- Malformed possessives: "of we", "across we", "sole owner of we" — must use our firm / zö agency / our studio
-- Subcontractor inconsistency: Company Background claiming "no subcontractors" while cost proposal lists translation partners — align narrative with budget
-- RFP compliance: reference contact names/phones/emails, workforce diversity %, staff hours in budget, PSA acknowledgments (insurance, living wage, MacBride, Title VI) — never defer to unnamed attachments
-- Budget: flag agency revenue estimate showing $0 when commission or fees apply — must match commission rate × pass-through
-- References: flag "contact on request" or missing phone/email
-- Workforce: flag inconsistent % female/minority between MWBE and Personnel sections
-- Duplication: flag when this section re-copies Who We Are, full bios, full case studies, FEIN/certs, or brand story that belongs in another section — instruct a concise rewrite with ONE job only
-
-Do NOT rewrite the section yourself — write patch instructions for the Section Repair agent.
-Return ONLY JSON when done researching:
-{"patchInstructions":"specific steps: what to fetch, what to fix, what RFP reqs to address","priority":"critical|high|medium","issues":["issue 1"],"kbQueries":["queries you ran"]}"""
+Your job for ONE pass over the proposal:
+1. Read the proposal sections and mapped RFP requirements provided.
+2. DEDUPE: find places where Who We Are / brand story / FEIN / full bios / full case studies
+   are re-copied into sections that have a different job. For each hit, emit a dedupeTicket
+   with trimGuidance that keeps what THAT section needs + one short cross-ref — do NOT blank content.
+3. COVERAGE: map each section to its RFP requirements. If unmet, emit a coverageTicket with
+   unmetRequirements and a rewriteBrief for the Phase 3 section writer.
+4. Do NOT rewrite section prose yourself. Do NOT ask to patch unrelated sections.
+5. Return ONLY JSON:
+{"dedupeTickets":[{"sectionId":"...","keepHomeSectionId":"...","trimGuidance":"..."}],
+ "coverageTickets":[{"sectionId":"...","unmetRequirements":["..."],"rewriteBrief":"..."}],
+ "notes":[]}
+If nothing to fix: empty ticket arrays.
+"""
 
 SECTION_REPAIR_SYSTEM = """You are zö agency's Section Repair agent (self-edit loop after Phase 3).
 Your job: search the knowledge base with tools, then produce ONE complete section patch.
@@ -88,10 +85,10 @@ The user gave explicit feedback. Search KB with tools for missing facts, then re
 
 Rules:
 1. Directly address the user's edit request.
-2. Call tools for deeper KB search — more specific than the first draft pass.
+2. Call tools for deeper KB search — more specific than the first draft pass (firm address, contacts, tourism/DMO proof, philosophy).
 3. Improve substantially — never return the same [VERIFY] placeholder if tools found support.
-4. Preserve zö BRAND VOICE (first person we/our, warm, proof-led).
-5. Budget/fee edits: never output $0 agency revenue when commission applies — use rate × pass-through or [VERIFY: Sonja confirm rate].
+4. PRESERVE zö BRAND VOICE from the voice block: first person we/our, warm, confident, proof-led — never flatten into generic consultant prose.
+5. Budget/fee edits (option C): never output $0 agency revenue when commission applies — use rate × pass-through or [VERIFY: Sonja confirm rate]. Refuse invented numbers and reverse-engineered totals to hit a target; flag out-of-guide scope with [PRICING FLAG: … — Sonja review required]. One-time setup lines must not be ×12 without a monthly guide line.
 6. Reference edits: full contact block (name, title, phone, email) — never defer to "on request".
 7. Return ONLY JSON: {"content":"...","kbRefs":["E1"],"designerNote":null}"""
 
@@ -106,19 +103,22 @@ Rules:
 5. Return ONLY JSON: {"content":"full updated section text","kbRefs":[]}"""
 
 QUERY_PLANNER_SYSTEM = """You are zö agency's Query Planner agent.
-Plan 3-4 NEW Supermemory search queries for ONE proposal section.
+Plan 2-4 NEW Supermemory search queries for ONE proposal section.
 Prior queries failed or were insufficient. Never repeat prior queries.
-Use hints: 02 master template, 03_CS case studies, 04 bio, certifications, org chart, references.
-Return ONLY JSON: {"queries":["query 1","query 2","query 3"]}"""
+Use hints: 01 companyfacts, 02 master template, 03_CS case studies, 04 bio, certifications, org chart, references.
+When [VERIFY] gaps or RFP requirements are listed, dedicate a query to each missing field (address, phone, email, tourism experience, etc.).
+Each query should include "zö agency" + the specific fact + a doc-type hint.
+Return ONLY JSON: {"queries":["query 1","query 2","query 3","query 4"]}"""
 
 AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
     AgentRole.SENIOR_EDITOR: AgentProfile(
         role=AgentRole.SENIOR_EDITOR,
         label="Senior Proposal Editor",
         temperature=0.15,
-        max_tokens=1024,
-        max_tool_rounds=3,
+        max_tokens=4096,
+        max_tool_rounds=0,
         system_prompt=SENIOR_EDITOR_SYSTEM,
+        tier="heavy",
     ),
     AgentRole.SECTION_REPAIR: AgentProfile(
         role=AgentRole.SECTION_REPAIR,
@@ -127,6 +127,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         max_tokens=4096,
         max_tool_rounds=2,
         system_prompt=SECTION_REPAIR_SYSTEM,
+        tier="heavy",
     ),
     AgentRole.USER_REVISE: AgentProfile(
         role=AgentRole.USER_REVISE,
@@ -135,6 +136,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         max_tokens=4096,
         max_tool_rounds=4,
         system_prompt=USER_REVISE_SYSTEM,
+        tier="heavy",
     ),
     AgentRole.SURGICAL_FIX: AgentProfile(
         role=AgentRole.SURGICAL_FIX,
@@ -143,6 +145,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         max_tokens=4096,
         max_tool_rounds=3,
         system_prompt=SURGICAL_FIX_SYSTEM,
+        tier="heavy",
     ),
     AgentRole.QUERY_PLANNER: AgentProfile(
         role=AgentRole.QUERY_PLANNER,
@@ -151,6 +154,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         max_tokens=1024,
         max_tool_rounds=0,
         system_prompt=QUERY_PLANNER_SYSTEM,
+        tier="light",
     ),
 }
 
@@ -261,6 +265,7 @@ async def run_json_agent(
             temperature=profile.temperature,
             max_tokens=profile.max_tokens,
             force_fireworks=fireworks,
+            tier=profile.tier,
         )
         response = await llm.ainvoke(
             [
@@ -308,6 +313,7 @@ async def run_tool_json_agent(
         max_rounds=profile.max_tool_rounds,
         agent_label=profile.label,
         rfp_id=rfp_id,
+        tier=profile.tier,
     )
     parsed = await _parse_json_from_agent_text(final_text)
     if not str(parsed.get("content") or "").strip():
@@ -321,6 +327,43 @@ async def run_tool_json_agent(
     return parsed, provider, tool_log
 
 
+async def senior_editor_emit_tickets(
+    *,
+    rfp_client: str,
+    rfp_title: str,
+    manuscript_digest: str,
+    requirements_by_section: dict[str, list[str]],
+) -> dict[str, Any]:
+    """Senior Editor: emit dedupe + coverage tickets (no prose rewrite, no fact fill)."""
+    req_lines: list[str] = []
+    for sid, reqs in requirements_by_section.items():
+        if not reqs:
+            continue
+        req_lines.append(f"{sid}:")
+        req_lines.extend(f"  - {r}" for r in reqs[:12])
+    user_content = (
+        f"Client: {rfp_client}\nRFP: {rfp_title}\n\n"
+        f"Mapped requirements by section:\n"
+        + ("\n".join(req_lines) if req_lines else "(none mapped)")
+        + f"\n\nProposal manuscript digest:\n{manuscript_digest[:60_000]}"
+    )
+    try:
+        raw, _ = await run_json_agent(AgentRole.SENIOR_EDITOR, user_content)
+        dedupe = raw.get("dedupeTickets") if isinstance(raw.get("dedupeTickets"), list) else []
+        coverage = (
+            raw.get("coverageTickets") if isinstance(raw.get("coverageTickets"), list) else []
+        )
+        notes = raw.get("notes") if isinstance(raw.get("notes"), list) else []
+        return {
+            "dedupeTickets": [t for t in dedupe if isinstance(t, dict)],
+            "coverageTickets": [t for t in coverage if isinstance(t, dict)],
+            "notes": [str(n) for n in notes if str(n).strip()],
+        }
+    except (LlmError, Exception) as exc:
+        logger.warning("Senior editor ticket pass failed: %s", exc)
+        return {"dedupeTickets": [], "coverageTickets": [], "notes": [str(exc)]}
+
+
 async def senior_editor_patch_instructions(
     *,
     rfp_id: str,
@@ -331,39 +374,27 @@ async def senior_editor_patch_instructions(
     rfp_title: str,
     requirements: list[str] | None = None,
 ) -> str:
-    """Senior editor: read RFP + KB via tools, return patch instructions for Section Repair."""
-    profile = get_profile(AgentRole.SENIOR_EDITOR)
-    tools = build_proposal_tools(rfp_id, rfp_title, rfp_client)
-    req_block = "\n".join(f"- {r}" for r in (requirements or [])) or "(use search_rfp_requirements)"
-    user_content = (
-        f"Client: {rfp_client}\nRFP: {rfp_title}\n"
-        f"Section: {section_title}\nWord target: {word_target}\n"
-        f"Mapped RFP requirements:\n{req_block}\n\n"
-        f"Current draft:\n{section_content[:5000]}"
+    """Backward-compat: fold one section into ticket brief for Section Repair fallback."""
+    del rfp_id, word_target  # unused — tickets use manuscript-level pass
+    tickets = await senior_editor_emit_tickets(
+        rfp_client=rfp_client,
+        rfp_title=rfp_title,
+        manuscript_digest=f"### {section_title}\n{section_content[:8000]}",
+        requirements_by_section={section_title: list(requirements or [])},
     )
-    try:
-        final_text, _provider, _tool_log = await run_tool_agent_loop(
-            system_prompt=profile.system_prompt,
-            user_content=user_content,
-            tools=tools,
-            temperature=profile.temperature,
-            max_tokens=profile.max_tokens,
-            max_rounds=profile.max_tool_rounds,
-            agent_label=profile.label,
-            rfp_id=rfp_id,
-        )
-        raw = await _parse_json_from_agent_text(final_text)
-        instructions = str(raw.get("patchInstructions") or "").strip()
-        issues = raw.get("issues") or []
-        if isinstance(issues, list) and issues:
-            issue_lines = "\n".join(f"- {i}" for i in issues[:6] if str(i).strip())
-            if issue_lines:
-                instructions = f"{instructions}\n\nIssues flagged:\n{issue_lines}".strip()
-        if instructions:
-            return instructions
-    except (LlmError, Exception) as exc:
-        logger.warning("Senior editor agent failed for %s: %s", section_title, exc)
-    return ""
+    parts: list[str] = []
+    for t in tickets.get("coverageTickets") or []:
+        brief = str(t.get("rewriteBrief") or "").strip()
+        unmet = t.get("unmetRequirements") or []
+        if brief:
+            parts.append(brief)
+        if isinstance(unmet, list) and unmet:
+            parts.append("Unmet: " + "; ".join(str(u) for u in unmet[:8]))
+    for t in tickets.get("dedupeTickets") or []:
+        guide = str(t.get("trimGuidance") or "").strip()
+        if guide:
+            parts.append(f"Dedupe: {guide}")
+    return "\n".join(parts).strip()
 
 
 async def plan_section_queries_agent(

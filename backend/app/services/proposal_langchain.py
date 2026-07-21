@@ -8,7 +8,7 @@ from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
 from app.services import proposal_knowledge_base_tools
-from app.services.llm import LlmError, _fireworks_key, _openrouter_key, chat_json
+from app.services.llm import LlmError, LlmTier, _fireworks_key, _openrouter_key, chat_json, resolve_llm_model
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ def get_chat_model(
     temperature: float = 0.2,
     max_tokens: int = 4096,
     force_fireworks: bool = False,
+    tier: LlmTier = "heavy",
 ) -> ChatOpenAI:
     """LangChain chat model — respects LLM_PREFER_FIREWORKS like chat_json."""
     if force_fireworks or _use_fireworks_primary():
@@ -41,7 +42,7 @@ def get_chat_model(
         )
     if _openrouter_key():
         return ChatOpenAI(
-            model=settings.openrouter_model,
+            model=resolve_llm_model(tier),
             api_key=_openrouter_key(),
             base_url=settings.openrouter_base_url.rstrip("/"),
             temperature=temperature,
@@ -71,6 +72,7 @@ async def run_tool_agent_loop(
     max_rounds: int,
     agent_label: str,
     rfp_id: str = "",
+    tier: LlmTier = "heavy",
 ) -> tuple[str, str, list[str]]:
     """Generic LangChain tool-calling loop. Falls back to Fireworks on OpenRouter failure."""
     try:
@@ -84,6 +86,7 @@ async def run_tool_agent_loop(
             agent_label=agent_label,
             rfp_id=rfp_id,
             force_fireworks=_use_fireworks_primary(),
+            tier=tier,
         )
     except Exception as exc:
         if _fireworks_key() and not _use_fireworks_primary():
@@ -102,6 +105,7 @@ async def run_tool_agent_loop(
                 agent_label=agent_label,
                 rfp_id=rfp_id,
                 force_fireworks=True,
+                tier=tier,
             )
         raise
 
@@ -133,6 +137,7 @@ async def _run_tool_agent_loop_once(
     agent_label: str,
     rfp_id: str,
     force_fireworks: bool,
+    tier: LlmTier = "heavy",
 ) -> tuple[str, str, list[str]]:
     """Single provider attempt for tool-calling loop."""
     tool_map = {t.name: t for t in tools}
@@ -140,6 +145,7 @@ async def _run_tool_agent_loop_once(
         temperature=temperature,
         max_tokens=max_tokens,
         force_fireworks=force_fireworks,
+        tier=tier,
     )
     tool_llm = base_llm.bind_tools(tools)
     messages: list[Any] = [

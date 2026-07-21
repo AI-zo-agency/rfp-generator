@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { signupUser } from "@/lib/api/auth";
 import Link from "next/link";
 import {
@@ -10,6 +10,28 @@ import {
 } from "@/components/AuthPageShell";
 import { AnimatePresence, motion } from "motion/react";
 import { expoOutEase } from "@/lib/motion";
+
+const SIGNUP_DOMAIN_ERROR = "Different domain not allowed.";
+
+function isZoAgencyEmail(email: string): boolean {
+  const trimmed = email.trim().toLowerCase();
+  const at = trimmed.lastIndexOf("@");
+  if (at < 0) return false;
+  return trimmed.slice(at + 1) === "zo.agency";
+}
+
+/** Inline error only after a full non-@zo.agency domain (not while typing @ or zo.agency). */
+function shouldShowSignupDomainError(email: string): boolean {
+  const trimmed = email.trim().toLowerCase();
+  const at = trimmed.lastIndexOf("@");
+  if (at < 0) return false;
+  const domain = trimmed.slice(at + 1);
+  if (!domain) return false;
+  if (domain === "zo.agency") return false;
+  if ("zo.agency".startsWith(domain)) return false;
+  if (!domain.includes(".")) return false;
+  return domain !== "zo.agency";
+}
 
 function PasswordHint({
   ok,
@@ -36,6 +58,14 @@ export default function SignupPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [fieldsReady, setFieldsReady] = useState(false);
+
+  useEffect(() => {
+    setEmail("");
+    setPassword("");
+    setConfirmPassword("");
+    setFieldsReady(false);
+  }, []);
 
   const hasMinLength = password.length >= 8;
   const hasLowercase = /[a-z]/.test(password);
@@ -49,6 +79,10 @@ export default function SignupPage() {
     setError(null);
     setSuccess(null);
 
+    if (!isZoAgencyEmail(email)) {
+      setError(SIGNUP_DOMAIN_ERROR);
+      return;
+    }
     if (password !== confirmPassword) {
       setError("Passwords do not match");
       return;
@@ -75,6 +109,8 @@ export default function SignupPage() {
     }
   };
 
+  const domainInvalid = shouldShowSignupDomainError(email);
+
   if (success) {
     return (
       <AuthPageShell headline="Create an Account" formTitle="Sign Up">
@@ -99,6 +135,8 @@ export default function SignupPage() {
     <AuthPageShell
       headline="Create an Account"
       formTitle="Sign Up"
+      formAutoComplete="off"
+      formNoValidate
       onSubmit={handleSignup}
       footer={
         <p className="text-sm text-center text-[var(--zo-text-muted)] pt-4">
@@ -133,12 +171,27 @@ export default function SignupPage() {
         </label>
         <input
           type="email"
+          name="signup-email"
           required
-          className="auth-input zo-input w-full px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[var(--zo-primary)] focus:border-transparent transition-smooth"
+          readOnly={!fieldsReady}
+          autoComplete="off"
+          className={`auth-input zo-input w-full px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[var(--zo-primary)] focus:border-transparent transition-smooth ${
+            domainInvalid ? "border-red-500 ring-1 ring-red-200" : ""
+          }`}
           value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder="Enter your email"
+          onFocus={() => setFieldsReady(true)}
+          onChange={(e) => {
+            setEmail(e.target.value);
+            if (error === SIGNUP_DOMAIN_ERROR) setError(null);
+          }}
+          placeholder="name@zo.agency"
+          aria-invalid={domainInvalid}
         />
+        {domainInvalid ? (
+          <p className="mt-2 text-sm text-red-600" role="alert">
+            {SIGNUP_DOMAIN_ERROR}
+          </p>
+        ) : null}
       </AuthField>
 
       <AuthField>
@@ -148,9 +201,13 @@ export default function SignupPage() {
         <div className="relative">
           <input
             type={showPassword ? "text" : "password"}
+            name="signup-password"
             required
+            readOnly={!fieldsReady}
+            autoComplete="new-password"
             className="auth-input zo-input w-full px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[var(--zo-primary)] focus:border-transparent transition-smooth pr-12"
             value={password}
+            onFocus={() => setFieldsReady(true)}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Create a password"
           />
@@ -200,9 +257,13 @@ export default function SignupPage() {
         <div className="relative">
           <input
             type={showConfirmPassword ? "text" : "password"}
+            name="signup-password-confirm"
             required
+            readOnly={!fieldsReady}
+            autoComplete="new-password"
             className="auth-input zo-input w-full px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[var(--zo-primary)] focus:border-transparent transition-smooth pr-12"
             value={confirmPassword}
+            onFocus={() => setFieldsReady(true)}
             onChange={(e) => setConfirmPassword(e.target.value)}
             placeholder="Confirm your password"
           />

@@ -137,6 +137,29 @@ Teacher, 2019 - Present
             ],
         )
 
+    def test_work_history_parses_en_dash_date_ranges(self) -> None:
+        text = """# CURT SCHULTZ
+creative director
+
+Curt leads creative work.
+
+# WORK HISTORY
+
+**zö agency**
+Creative Director
+2013 – Present
+
+**SRIA**
+Account lead
+2020 — 2024
+"""
+        parsed = _parse_bio_sections_from_text(text, "Curt Schultz")
+
+        self.assertGreaterEqual(len(parsed["work_history"]), 1)
+        dates = " ".join(j.get("dates", "") for j in parsed["work_history"])
+        self.assertIn("2013", dates)
+        self.assertIn("Present", dates)
+
     def test_selected_bios_are_at_most_five_and_deduplicated(self) -> None:
         selected = _normalize_selected_bio_members(
             [

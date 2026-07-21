@@ -341,46 +341,52 @@ async def _extract_rfp_staffing_needs(
     rfp_context: str,
 ) -> tuple[list[RequiredTeamRole], str]:
     """Pass 1 — extract what the RFP needs. No person names allowed."""
-    raw, provider = await llm.chat_json(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You are the RFP Staffing Needs Analyst for zö agency.\n"
-                    "Extract ONLY the roles this solicitation needs for a winning proposal team.\n"
-                    "Do NOT name any people. Do NOT invent roles the RFP does not imply.\n\n"
-                    "Rules:\n"
-                    "- Derive roles from scope, evaluation criteria, deliverables, and required expertise.\n"
-                    "- ALWAYS include Principal-in-Charge / Agency Owner as the FIRST role "
-                    "(isLeadership=true) for formal client RFPs — the agency owner must be named.\n"
-                    "- Then add 2–4 specialist roles the RFP actually needs.\n"
-                    "- For each role, list must-have skills (required) and nice-to-have skills.\n"
-                    "- Be specific (e.g. 'Paid Media / Media Buying Lead', not vague 'Marketer').\n\n"
-                    "Return JSON:\n"
-                    "{\n"
-                    '  "requiredRoles": [\n'
-                    "    {\n"
-                    '      "role": "Media Buying Lead",\n'
-                    '      "mustHaveSkills": ["media buying", "broadcast", "digital media"],\n'
-                    '      "niceToHaveSkills": ["public sector"],\n'
-                    '      "whyNeeded": "RFP requires paid media planning and buying",\n'
-                    '      "seniority": "senior",\n'
-                    '      "isLeadership": false\n'
-                    "    }\n"
-                    "  ]\n"
-                    "}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Proposal context:\n{proposal_context.model_dump_json()}\n\n"
-                    f"RFP context:\n{rfp_context[:18000]}"
-                ),
-            },
-        ],
-        temperature=0.0,
-    )
+    try:
+        raw, provider = await llm.chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the RFP Staffing Needs Analyst for zö agency.\n"
+                        "Extract ONLY the roles this solicitation needs for a winning proposal team.\n"
+                        "Do NOT name any people. Do NOT invent roles the RFP does not imply.\n"
+                        "Compact JSON only — no markdown fences. Finish every brace.\n\n"
+                        "Rules:\n"
+                        "- Derive roles from scope, evaluation criteria, deliverables, and required expertise.\n"
+                        "- ALWAYS include Principal-in-Charge / Agency Owner as the FIRST role "
+                        "(isLeadership=true) for formal client RFPs — the agency owner must be named.\n"
+                        "- Then add 2–4 specialist roles the RFP actually needs.\n"
+                        "- For each role, list must-have skills (required) and nice-to-have skills.\n"
+                        "- Be specific (e.g. 'Paid Media / Media Buying Lead', not vague 'Marketer').\n"
+                        "- Keep whyNeeded ≤12 words.\n\n"
+                        "Return JSON:\n"
+                        '{"requiredRoles":[{"role":"…","mustHaveSkills":[],"niceToHaveSkills":[],'
+                        '"whyNeeded":"…","seniority":"senior","isLeadership":false}]}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"proposalType: {proposal_context.proposal_type}\n"
+                        f"industry: {proposal_context.industry}\n"
+                        f"servicesRequested: {proposal_context.services_requested}\n"
+                        f"summary: {(proposal_context.summary or '')[:280]}\n\n"
+                        f"RFP context:\n{rfp_context[:12000]}"
+                    ),
+                },
+            ],
+            max_tokens=1536,
+            temperature=0.0,
+            tier="light",
+        )
+    except Exception as exc:  # noqa: BLE001 — continue with principal-only fallback
+        logger.warning(
+            "Team Selection Pass 1 failed (%s); principal-only fallback (no retry)",
+            str(exc)[:180],
+        )
+        roles = _ensure_principal_role([])
+        return roles, "fallback"
+
     roles = _parse_required_roles(raw if isinstance(raw, dict) else {})
     roles = _ensure_principal_role(roles)
     logger.info(
@@ -400,52 +406,52 @@ async def _map_roles_to_best_people(
     if not role_requirements or not roster_profiles:
         return [], "none"
 
-    raw, provider = await llm.chat_json(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You are the Team Fit Mapper for zö agency Section 2.\n"
-                    "For EACH required RFP role, choose the ONE strongest person from ZO_ROSTER_PROFILES.\n\n"
-                    "Rules:\n"
-                    "- Choose only superior fits (fitScore >= 0.70 preferred; never below 0.55).\n"
-                    "- Match must-have skills to the person's title + expertise years + snippet.\n"
-                    "- Prefer deeper relevant years of experience for that role's core skill.\n"
-                    "- One person may fill only ONE role. No duplicate names.\n"
-                    "- For Principal-in-Charge / Agency Owner / Executive Sponsor: choose the "
-                    "Founder/CEO/Agency Director (Sonja Anderson when present on the roster). "
-                    "Do NOT assign the owner to niche demo/pitch-only roles.\n"
-                    "- If no roster person is a strong fit for a specialist role, OMIT that role "
-                    "(do not force a weak pick). Always fill Principal-in-Charge when the owner is on roster.\n"
-                    "- Never invent names. Names must match ZO_ROSTER_PROFILES exactly.\n"
-                    "- Rationale must cite concrete roster evidence (title/skills/years).\n"
-                    f"- Return at most {MAX_TEAM_SIZE} members, ordered by importance to the RFP.\n\n"
-                    "Return JSON:\n"
-                    "{\n"
-                    '  "members": [\n'
-                    "    {\n"
-                    '      "name": "Full Name",\n'
-                    '      "role": "RFP role being filled",\n'
-                    '      "fitScore": 0.92,\n'
-                    '      "matchedSkills": ["media buying", "account management"],\n'
-                    '      "rationale": "38 yrs account management + traditional/digital media expertise"\n'
-                    "    }\n"
-                    "  ]\n"
-                    "}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Proposal context:\n{proposal_context.model_dump_json()}\n\n"
-                    f"RFP_REQUIRED_ROLES:\n{[r.model_dump(by_alias=True) for r in role_requirements]}\n\n"
-                    f"ZO_ROSTER_PROFILES:\n{roster_profiles}"
-                ),
-            },
-        ],
-        temperature=0.0,
-        max_tokens=2048,
-    )
+    try:
+        raw, provider = await llm.chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the Team Fit Mapper for zö agency Section 2.\n"
+                        "For EACH required RFP role, choose the ONE strongest person from ZO_ROSTER_PROFILES.\n"
+                        "Compact JSON only — no markdown fences. Finish every brace. Rationale ≤12 words.\n\n"
+                        "Rules:\n"
+                        "- Choose only superior fits (fitScore >= 0.70 preferred; never below 0.55).\n"
+                        "- Match must-have skills to the person's title + expertise years + snippet.\n"
+                        "- Prefer deeper relevant years of experience for that role's core skill.\n"
+                        "- One person may fill only ONE role. No duplicate names.\n"
+                        "- For Principal-in-Charge / Agency Owner / Executive Sponsor: choose the "
+                        "Founder/CEO/Agency Director (Sonja Anderson when present on the roster). "
+                        "Do NOT assign the owner to niche demo/pitch-only roles.\n"
+                        "- If no roster person is a strong fit for a specialist role, OMIT that role "
+                        "(do not force a weak pick). Always fill Principal-in-Charge when the owner is on roster.\n"
+                        "- Never invent names. Names must match ZO_ROSTER_PROFILES exactly.\n"
+                        f"- Return at most {MAX_TEAM_SIZE} members, ordered by importance to the RFP.\n\n"
+                        "Return JSON:\n"
+                        '{"members":[{"name":"…","role":"…","fitScore":0.92,'
+                        '"matchedSkills":[],"rationale":"…"}]}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"proposalType: {proposal_context.proposal_type}\n"
+                        f"industry: {proposal_context.industry}\n\n"
+                        f"RFP_REQUIRED_ROLES:\n{[r.model_dump(by_alias=True) for r in role_requirements]}\n\n"
+                        f"ZO_ROSTER_PROFILES:\n{roster_profiles}"
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=2048,
+            tier="light",
+        )
+    except Exception as exc:  # noqa: BLE001 — owner/principal filled downstream
+        logger.warning(
+            "Team Selection Pass 2 failed (%s); empty map (owner ensured later, no retry)",
+            str(exc)[:180],
+        )
+        return [], "fallback"
 
     members_raw = raw.get("members") or [] if isinstance(raw, dict) else []
     members: list[TeamMemberSelection] = []

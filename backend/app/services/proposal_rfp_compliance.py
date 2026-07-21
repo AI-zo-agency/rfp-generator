@@ -422,15 +422,15 @@ async def run_rfp_compliance_polish_pass(
 ) -> tuple[ProposalDraft, list[str]]:
     """LLM repair for RFP requirement gaps surfaced by Phase 2 research."""
     from app.services.proposal_common import ProposalError, load_rfp_for_proposal
-    from app.services.proposal_repository import get_proposal_draft, get_research_cache
+    from app.services.proposal_repository import aget_proposal_draft, aget_research_cache
     from app.services.proposal_self_edit_loop import _repair_one_section
 
     if rfp is None:
         rfp, _, _ = load_rfp_for_proposal(rfp_id)
-    draft = draft or get_proposal_draft(rfp_id)
+    draft = draft or await aget_proposal_draft(rfp_id)
     if not draft:
         raise ProposalError("No proposal draft for RFP compliance polish.", status_code=400)
-    research = research if research is not None else get_research_cache(rfp_id)
+    research = research if research is not None else await aget_research_cache(rfp_id)
     budget = research.budget if research else None
 
     gaps = scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
@@ -469,7 +469,7 @@ async def run_rfp_compliance_polish_pass(
         )
         log_line = f"{sid}: {'fixed' if improved else 'unchanged'} — {detail[:120]}"
         logs.append(log_line)
-        draft = get_proposal_draft(rfp_id) or draft
+        draft = await aget_proposal_draft(rfp_id) or draft
 
     remaining = scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
     if remaining:

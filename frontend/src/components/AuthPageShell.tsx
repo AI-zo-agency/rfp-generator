@@ -38,6 +38,8 @@ type AuthPageShellProps = Readonly<{
   children: React.ReactNode;
   footer?: React.ReactNode;
   onSubmit?: (e: React.FormEvent<HTMLFormElement>) => void;
+  formAutoComplete?: string;
+  formNoValidate?: boolean;
 }>;
 
 const staggerFields = {
@@ -50,6 +52,8 @@ export function AuthPageShell({
   children,
   footer,
   onSubmit,
+  formAutoComplete,
+  formNoValidate,
 }: AuthPageShellProps) {
   return (
     <>
@@ -100,6 +104,8 @@ export function AuthPageShell({
             animate="visible"
             variants={staggerFields}
             onSubmit={onSubmit}
+            autoComplete={formAutoComplete}
+            noValidate={formNoValidate}
           >
             {children}
           </motion.form>

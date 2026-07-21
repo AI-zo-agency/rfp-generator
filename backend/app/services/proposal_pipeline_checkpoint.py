@@ -13,7 +13,7 @@ from app.models.proposal import (
 )
 from app.services.proposal_generator import static_sections_1_3_have_content
 from app.services.proposal_pipeline_status import count_verify_tags
-from app.services.proposal_repository import get_research_cache, save_research_cache
+from app.services.proposal_repository import aget_research_cache, asave_research_cache
 
 logger = logging.getLogger(__name__)
 
@@ -50,23 +50,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _ensure_research(rfp_id: str) -> ProposalResearchCache:
-    research = get_research_cache(rfp_id)
+async def _ensure_research(rfp_id: str) -> ProposalResearchCache:
+    research = await aget_research_cache(rfp_id)
     if research:
         return research
     now = _now_iso()
     return ProposalResearchCache(rfpId=rfp_id, updatedAt=now)
 
 
-def _save_checkpoint(rfp_id: str, checkpoint: ProposalPipelineCheckpoint) -> ProposalResearchCache:
-    research = _ensure_research(rfp_id)
+async def _save_checkpoint(rfp_id: str, checkpoint: ProposalPipelineCheckpoint) -> ProposalResearchCache:
+    research = await _ensure_research(rfp_id)
     updated = research.model_copy(
         update={
             "pipeline_checkpoint": checkpoint,
             "updated_at": _now_iso(),
         }
     )
-    save_research_cache(updated)
+    await asave_research_cache(updated)
     return updated
 
 
@@ -80,7 +80,26 @@ def _checkpoint_age_sec(checkpoint: ProposalPipelineCheckpoint) -> float | None:
         return None
 
 
-_IN_PROGRESS_STALE_SEC = 90
+_IN_PROGRESS_STALE_SEC = 900  # RFP tabs can take many minutes per LLM call
+
+
+def _iso_age_sec(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        updated = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - updated).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def _draft_recently_saved(draft: ProposalDraft | None, *, within_sec: float) -> bool:
+    if not draft:
+        return False
+    age = _iso_age_sec(draft.updated_at)
+    return age is not None and age < within_sec
 
 
 def _self_edit_considered_complete(
@@ -103,23 +122,36 @@ def _self_edit_considered_complete(
     return False
 
 
-def clear_stale_in_progress_checkpoint(
+async def clear_stale_in_progress_checkpoint(
     rfp_id: str,
     *,
     research: ProposalResearchCache | None = None,
+    draft: ProposalDraft | None = None,
 ) -> bool:
     """Mark abandoned in-progress phases failed after server kill or disconnect."""
     if research is None:
-        research = get_research_cache(rfp_id)
+        research = await aget_research_cache(rfp_id)
     if not research or not research.pipeline_checkpoint:
         return False
     cp = research.pipeline_checkpoint
     if not cp.in_progress_phase:
         return False
+
+    from app.services.proposal_repository import aget_proposal_draft
+
+    if draft is None:
+        draft = await aget_proposal_draft(rfp_id)
+
+    # Backend may still be drafting one tab for minutes — manuscript saves prove liveness.
+    if _draft_recently_saved(draft, within_sec=_IN_PROGRESS_STALE_SEC):
+        refreshed = cp.model_copy(update={"updated_at": _now_iso()})
+        await _save_checkpoint(rfp_id, refreshed)
+        return False
+
     age = _checkpoint_age_sec(cp)
     if age is None or age < _IN_PROGRESS_STALE_SEC:
         return False
-    record_phase_failed(
+    await record_phase_failed(
         rfp_id,
         cp.in_progress_phase,
         "Phase interrupted (connection lost or laptop sleep). Resume to continue.",
@@ -133,9 +165,54 @@ def clear_stale_in_progress_checkpoint(
     return True
 
 
-def record_phase_started(rfp_id: str, phase: str) -> None:
-    clear_stale_in_progress_checkpoint(rfp_id)
-    research = _ensure_research(rfp_id)
+async def heal_false_interrupted_checkpoint(
+    rfp_id: str,
+    *,
+    draft: ProposalDraft | None = None,
+    research: ProposalResearchCache | None = None,
+) -> bool:
+    """Undo a stale 'connection lost' failure when the manuscript is still updating."""
+    if research is None:
+        research = await aget_research_cache(rfp_id)
+    if not research or not research.pipeline_checkpoint:
+        return False
+    cp = research.pipeline_checkpoint
+    if cp.in_progress_phase or not cp.last_failed_phase:
+        return False
+    err = (cp.last_error or "").lower()
+    if "interrupted" not in err and "connection lost" not in err:
+        return False
+    from app.services.proposal_repository import aget_proposal_draft
+
+    if draft is None:
+        draft = await aget_proposal_draft(rfp_id)
+    if not _draft_recently_saved(draft, within_sec=600):
+        return False
+    phase = cp.last_failed_phase
+    if phase not in PIPELINE_PHASES:
+        return False
+    healed = cp.model_copy(
+        update={
+            "in_progress_phase": phase,
+            "last_failed_phase": None,
+            "last_error": None,
+            "resume_from_phase": phase,
+            "activity_label": cp.activity_label or PHASE_LABELS.get(phase, phase),
+            "updated_at": _now_iso(),
+        }
+    )
+    await _save_checkpoint(rfp_id, healed)
+    logger.info(
+        "Pipeline checkpoint: %s healed false interrupt — restored in-progress %s",
+        rfp_id,
+        phase,
+    )
+    return True
+
+
+async def record_phase_started(rfp_id: str, phase: str) -> None:
+    await clear_stale_in_progress_checkpoint(rfp_id)
+    research = await _ensure_research(rfp_id)
     prior = research.pipeline_checkpoint
     phase_label = PHASE_LABELS.get(phase, phase)
     checkpoint = ProposalPipelineCheckpoint(
@@ -150,11 +227,11 @@ def record_phase_started(rfp_id: str, phase: str) -> None:
         stepTotal=None,
         updatedAt=_now_iso(),
     )
-    _save_checkpoint(rfp_id, checkpoint)
+    await _save_checkpoint(rfp_id, checkpoint)
     logger.info("Pipeline checkpoint: %s started %s", rfp_id, phase)
 
 
-def record_pipeline_activity(
+async def record_pipeline_activity(
     rfp_id: str,
     *,
     label: str,
@@ -164,7 +241,7 @@ def record_pipeline_activity(
     in_progress_phase: str | None = None,
 ) -> None:
     """Update live sub-step text while a phase runs (polled by the UI)."""
-    research = _ensure_research(rfp_id)
+    research = await _ensure_research(rfp_id)
     cp = research.pipeline_checkpoint
     if cp is None:
         cp = ProposalPipelineCheckpoint(
@@ -186,18 +263,18 @@ def record_pipeline_activity(
         if in_progress_phase is not None:
             updates["in_progress_phase"] = in_progress_phase
         cp = cp.model_copy(update=updates)
-    _save_checkpoint(rfp_id, cp)
+    await _save_checkpoint(rfp_id, cp)
 
 
-def clear_fulfill_scan_activity(rfp_id: str) -> None:
+async def clear_fulfill_scan_activity(rfp_id: str) -> None:
     """Clear transient Scan RFP progress without touching a real pipeline phase."""
-    research = get_research_cache(rfp_id)
+    research = await aget_research_cache(rfp_id)
     if not research or not research.pipeline_checkpoint:
         return
     cp = research.pipeline_checkpoint
     if cp.in_progress_phase != "fulfill-scan":
         return
-    _save_checkpoint(
+    await _save_checkpoint(
         rfp_id,
         cp.model_copy(
             update={
@@ -219,13 +296,13 @@ def _next_phase_after(completed_phase: str) -> str:
     return PIPELINE_PHASES[idx + 1]
 
 
-def record_phase_completed(rfp_id: str, phase: str) -> None:
+async def record_phase_completed(rfp_id: str, phase: str) -> None:
     if phase == "sections-1-3":
-        from app.services.proposal_repository import get_proposal_draft
+        from app.services.proposal_repository import aget_proposal_draft
 
-        draft = get_proposal_draft(rfp_id)
+        draft = await aget_proposal_draft(rfp_id)
         if not static_sections_1_3_have_content(draft):
-            record_phase_failed(
+            await record_phase_failed(
                 rfp_id,
                 phase,
                 "Sections 1–3 incomplete — one or more static sections (Company, Team, Case Studies) has no content",
@@ -233,9 +310,9 @@ def record_phase_completed(rfp_id: str, phase: str) -> None:
             return
 
     if phase == "phase-3-6-self-edit":
-        from app.services.proposal_repository import get_proposal_draft
+        from app.services.proposal_repository import aget_proposal_draft
 
-        draft = get_proposal_draft(rfp_id)
+        draft = await aget_proposal_draft(rfp_id)
         if draft:
             remaining = count_verify_tags(draft)
             if remaining > 0:
@@ -258,12 +335,12 @@ def record_phase_completed(rfp_id: str, phase: str) -> None:
         stepTotal=None,
         updatedAt=_now_iso(),
     )
-    _save_checkpoint(rfp_id, checkpoint)
+    await _save_checkpoint(rfp_id, checkpoint)
     logger.info("Pipeline checkpoint: %s completed %s (next=%s)", rfp_id, phase, next_phase)
 
 
-def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
-    research = get_research_cache(rfp_id)
+async def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
+    research = await aget_research_cache(rfp_id)
     prior = research.pipeline_checkpoint if research else None
     checkpoint = ProposalPipelineCheckpoint(
         lastCompletedPhase=prior.last_completed_phase if prior else None,
@@ -273,23 +350,23 @@ def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
         resumeFromPhase=phase,
         updatedAt=_now_iso(),
     )
-    _save_checkpoint(rfp_id, checkpoint)
+    await _save_checkpoint(rfp_id, checkpoint)
     logger.warning("Pipeline checkpoint: %s failed at %s — %s", rfp_id, phase, error[:200])
 
 
-def clear_pipeline_checkpoint(rfp_id: str) -> None:
-    research = get_research_cache(rfp_id)
+async def clear_pipeline_checkpoint(rfp_id: str) -> None:
+    research = await aget_research_cache(rfp_id)
     if not research or not research.pipeline_checkpoint:
         return
     updated = research.model_copy(
         update={"pipeline_checkpoint": None, "updated_at": _now_iso()}
     )
-    save_research_cache(updated)
+    await asave_research_cache(updated)
 
 
-def record_generation_stopped(rfp_id: str, phase: str | None = None) -> None:
+async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> None:
     """User hit Stop — clear in-progress, keep completed work, set resume pointer."""
-    research = get_research_cache(rfp_id)
+    research = await aget_research_cache(rfp_id)
     prior = research.pipeline_checkpoint if research else None
     active = phase or (prior.in_progress_phase if prior else None) or "phase-3"
     resume: str | None = None
@@ -314,7 +391,7 @@ def record_generation_stopped(rfp_id: str, phase: str | None = None) -> None:
         stepTotal=None,
         updatedAt=_now_iso(),
     )
-    _save_checkpoint(rfp_id, checkpoint)
+    await _save_checkpoint(rfp_id, checkpoint)
     logger.info("Pipeline checkpoint: %s stopped during %s (resume=%s)", rfp_id, active, resume)
 
 
@@ -328,17 +405,17 @@ async def pipeline_phase(rfp_id: str, phase: str):
     )
 
     token = bind_active_rfp(rfp_id)
-    record_phase_started(rfp_id, phase)
+    await record_phase_started(rfp_id, phase)
     try:
         await check_generation_cancelled(rfp_id)
         yield
         await check_generation_cancelled(rfp_id)
-        record_phase_completed(rfp_id, phase)
+        await record_phase_completed(rfp_id, phase)
     except ProposalGenerationCancelled as exc:
-        record_generation_stopped(rfp_id, phase)
+        await record_generation_stopped(rfp_id, phase)
         raise exc
     except Exception as exc:
-        record_phase_failed(rfp_id, phase, str(exc))
+        await record_phase_failed(rfp_id, phase, str(exc))
         raise
     finally:
         unbind_active_rfp(token)
@@ -424,20 +501,18 @@ def _has_resumable_pipeline_progress(
     return False
 
 
-def resolve_resume_phase(
+async def resolve_resume_phase(
     rfp_id: str,
     *,
     draft: ProposalDraft | None,
     research: ProposalResearchCache | None,
 ) -> str:
-    if draft is None:
-        draft = None  # caller may pass None; infer from research only for early phases
-    from app.services.proposal_repository import get_proposal_draft
+    from app.services.proposal_repository import aget_proposal_draft
 
     if draft is None:
-        draft = get_proposal_draft(rfp_id)
+        draft = await aget_proposal_draft(rfp_id)
     if research is None:
-        research = get_research_cache(rfp_id)
+        research = await aget_research_cache(rfp_id)
 
     if draft is not None and not static_sections_1_3_have_content(draft):
         return "sections-1-3"
@@ -469,24 +544,25 @@ def resolve_resume_phase(
     return "complete"
 
 
-def build_pipeline_status(
+async def build_pipeline_status(
     rfp_id: str,
     *,
     draft: ProposalDraft | None = None,
     research: ProposalResearchCache | None = None,
 ) -> dict[str, object]:
-    from app.services.proposal_repository import get_proposal_draft
+    from app.services.proposal_repository import aget_proposal_draft
 
     if draft is None:
-        draft = get_proposal_draft(rfp_id)
+        draft = await aget_proposal_draft(rfp_id)
     if research is None:
-        research = get_research_cache(rfp_id)
+        research = await aget_research_cache(rfp_id)
 
-    clear_stale_in_progress_checkpoint(rfp_id, research=research)
+    await clear_stale_in_progress_checkpoint(rfp_id, research=research, draft=draft)
+    await heal_false_interrupted_checkpoint(rfp_id, draft=draft, research=research)
     if research is None:
-        research = get_research_cache(rfp_id)
+        research = await aget_research_cache(rfp_id)
 
-    resume_from = resolve_resume_phase(rfp_id, draft=draft, research=research)
+    resume_from = await resolve_resume_phase(rfp_id, draft=draft, research=research)
     completed = [
         phase
         for phase in PIPELINE_PHASES

@@ -15,9 +15,8 @@ from app.services.proposal_manuscript_cleanup import (
     sections_with_submission_blockers,
 )
 from app.services.proposal_repository import (
-    get_proposal_draft,
-    get_research_cache,
-    save_proposal_draft,
+    aget_proposal_draft,
+    aget_research_cache,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,10 +37,10 @@ async def run_submission_polish_pass(
 
     if rfp is None:
         rfp, _, _ = load_rfp_for_proposal(rfp_id)
-    draft = draft or get_proposal_draft(rfp_id)
+    draft = draft or await aget_proposal_draft(rfp_id)
     if not draft:
         raise ProposalError("No proposal draft for submission polish.", status_code=400)
-    research = research if research is not None else get_research_cache(rfp_id)
+    research = research if research is not None else await aget_research_cache(rfp_id)
     budget = research.budget if research else None
 
     blockers = scan_submission_blockers(draft=draft, research=research)
@@ -88,7 +87,7 @@ async def run_submission_polish_pass(
         log_line = f"{sid}: {'fixed' if improved else 'unchanged'} — {detail[:120]}"
         logs.append(log_line)
         logger.info("Submission polish section %s", log_line)
-        draft = get_proposal_draft(rfp_id) or draft
+        draft = await aget_proposal_draft(rfp_id) or draft
 
     remaining = scan_submission_blockers(draft=draft, research=research)
     if remaining:

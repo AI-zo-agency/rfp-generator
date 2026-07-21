@@ -9,6 +9,7 @@ No hand-rolled name/KPI regexes — scanning uses fixed phrase lists + LLM when 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -148,53 +149,70 @@ async def build_manuscript_locks(
         except Exception as exc:  # noqa: BLE001
             logger.debug("plan excerpt for locks failed: %s", exc)
 
-    raw, _provider = await llm.chat_json(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You lock cross-section manuscript facts for zö agency proposals.\n"
-                    "Return JSON only:\n"
-                    "{\n"
-                    '  "primaryContactName": "Full Name",\n'
-                    '  "primaryContactTitle": "Title from roster",\n'
-                    '  "primaryContactRole": "dedicated customer service representative / primary liaison",\n'
-                    '  "executiveSponsorName": "Name or empty",\n'
-                    '  "requiredKpis": ["exact RFQ-named metric phrases"],\n'
-                    '  "decisionRationale": "1-2 sentences",\n'
-                    '  "needsHumanConfirm": false\n'
-                    "}\n\n"
-                    "PRIMARY CONTACT RULES:\n"
-                    "- Lock EXACTLY one day-to-day primary account contact.\n"
-                    "- For multi-year media buying / retainers / high-touch account management RFQs: "
-                    "prefer Senior Account Manager (e.g. Ron Comer) over Agency Director/CEO.\n"
-                    "- For small municipal brand-strategy engagements: Agency Director (Sonja) may be primary.\n"
-                    "- Executive sponsor is escalation only — never the same as day-to-day primary unless "
-                    "the RFQ is tiny and clearly director-led.\n"
-                    "- Only pick names that appear in the roster excerpt when provided.\n"
-                    "- Set needsHumanConfirm true when the call is ambiguous (state agency + CEO vs SAM).\n\n"
-                    "KPI RULES:\n"
-                    "- Extract EVERY named brand-awareness / reporting metric the RFQ itself names "
-                    "(e.g. specific media property viewership/subscriptions, survey names).\n"
-                    "- Prefer exact RFQ phrasing. Do not invent KPIs not in the RFQ.\n"
-                    "- Include metrics from Attachment/scoring sections about reporting & analytics.\n"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Client: {rfp.client}\nTitle: {rfp.title}\nSector: {rfp.sector}\n\n"
-                    f"{plan_bits}\n"
-                    f"Roster excerpt:\n{roster_excerpt[:20000] or '(not provided — use known zö account leads)'}\n\n"
-                    f"RFP excerpt:\n{rfp_context[:45000]}"
-                ),
-            },
-        ],
-        max_tokens=2048,
-        temperature=0.0,
+    now = datetime.now(timezone.utc).isoformat()
+    fallback = ManuscriptLocks(
+        primaryContactName="Ron Comer",
+        primaryContactTitle="Senior Account Manager",
+        primaryContactRole="primary liaison / dedicated account representative",
+        executiveSponsorName="Todd Anderson",
+        requiredKpis=[],
+        decisionRationale="Fallback lock — LLM parse failed; prefer SAM for day-to-day account work.",
+        needsHumanConfirm=True,
+        updatedAt=now,
     )
 
-    now = datetime.now(timezone.utc).isoformat()
+    try:
+        raw, _provider = await llm.chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You lock cross-section manuscript facts for zö agency proposals.\n"
+                        "Return compact JSON only (no markdown fences, no commentary):\n"
+                        "{\n"
+                        '  "primaryContactName": "Full Name",\n'
+                        '  "primaryContactTitle": "Title from roster",\n'
+                        '  "primaryContactRole": "dedicated customer service representative / primary liaison",\n'
+                        '  "executiveSponsorName": "Name or empty",\n'
+                        '  "requiredKpis": ["exact RFQ-named metric phrases"],\n'
+                        '  "decisionRationale": "1-2 sentences",\n'
+                        '  "needsHumanConfirm": false\n'
+                        "}\n\n"
+                        "PRIMARY CONTACT RULES:\n"
+                        "- Lock EXACTLY one day-to-day primary account contact.\n"
+                        "- For multi-year media buying / retainers / high-touch account management RFQs: "
+                        "prefer Senior Account Manager (e.g. Ron Comer) over Agency Director/CEO.\n"
+                        "- For small municipal brand-strategy engagements: Agency Director (Sonja) may be primary.\n"
+                        "- Executive sponsor is escalation only — never the same as day-to-day primary unless "
+                        "the RFQ is tiny and clearly director-led.\n"
+                        "- Only pick names that appear in the roster excerpt when provided.\n"
+                        "- Set needsHumanConfirm true when the call is ambiguous (state agency + CEO vs SAM).\n\n"
+                        "KPI RULES:\n"
+                        "- Extract EVERY named brand-awareness / reporting metric the RFQ itself names "
+                        "(e.g. specific media property viewership/subscriptions, survey names).\n"
+                        "- Prefer exact RFQ phrasing. Do not invent KPIs not in the RFQ.\n"
+                        "- Include metrics from Attachment/scoring sections about reporting & analytics.\n"
+                        "- Keep requiredKpis short phrases; do not write long essays in any field.\n"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Client: {rfp.client}\nTitle: {rfp.title}\nSector: {rfp.sector}\n\n"
+                        f"{plan_bits}\n"
+                        f"Roster excerpt:\n{roster_excerpt[:20000] or '(not provided — use known zö account leads)'}\n\n"
+                        f"RFP excerpt:\n{rfp_context[:45000]}"
+                    ),
+                },
+            ],
+            max_tokens=4096,
+            temperature=0.0,
+            tier="light",
+        )
+    except Exception as exc:  # noqa: BLE001 — locks must never abort Sections 1–3
+        logger.warning("manuscript locks LLM failed: %s — using fallback", exc)
+        return fallback
+
     try:
         locks = ManuscriptLocks.model_validate(
             {
@@ -204,16 +222,7 @@ async def build_manuscript_locks(
         )
     except Exception as exc:
         logger.warning("manuscript locks validation failed: %s — using fallback", exc)
-        locks = ManuscriptLocks(
-            primaryContactName="Ron Comer",
-            primaryContactTitle="Senior Account Manager",
-            primaryContactRole="primary liaison / dedicated account representative",
-            executiveSponsorName="Todd Anderson",
-            requiredKpis=[],
-            decisionRationale="Fallback lock — LLM parse failed; prefer SAM for day-to-day account work.",
-            needsHumanConfirm=True,
-            updatedAt=now,
-        )
+        locks = fallback
 
     if not locks.primary_contact_name.strip():
         locks = locks.model_copy(
@@ -484,6 +493,32 @@ async def audit_manuscript_locks_with_llm(
             )
         )
     return issues
+
+
+def strip_leaked_markdown_wrappers(text: str) -> str:
+    """Remove LLM/KB leak prefixes (retrieval: + ```markdown fences) from section bodies."""
+    if not text:
+        return text
+    t = text.strip()
+    t = re.sub(
+        r"^(?:retrieval|context|kb|source|markdown)\s*:\s*\n?",
+        "",
+        t,
+        flags=re.I,
+    )
+    wrapped = re.match(
+        r"^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$",
+        t,
+        flags=re.I,
+    )
+    if wrapped:
+        t = wrapped.group(1).strip()
+    else:
+        t = re.sub(r"^```(?:markdown|md)?\s*\n", "", t, flags=re.I)
+        t = re.sub(r"\n```\s*$", "", t)
+    # Designer/layout comments from OCR templates — not client-facing copy.
+    t = re.sub(r"<!--[\s\S]*?-->", "", t)
+    return t.strip()
 
 
 def strip_internal_proposal_meta(text: str) -> str:

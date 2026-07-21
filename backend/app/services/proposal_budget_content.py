@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 
 from app.models.proposal import ProposalBudget, ProposalDraft, ProposalSection
-from app.services.proposal_repository import get_proposal_draft, save_proposal_draft
+from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
 from app.services.proposal_rfp_excerpt import rfp_forbids_quotation_form_changes
 
 _BUDGET_TITLE_PATTERN = re.compile(
@@ -433,14 +433,14 @@ def reshape_budget_for_rfp_form(
     return draft.model_copy(update={"sections": sections, "updated_at": now})
 
 
-def incorporate_budget_into_draft(
+async def incorporate_budget_into_draft(
     rfp_id: str,
     budget: ProposalBudget,
     *,
     rfp_text: str = "",
 ) -> ProposalDraft | None:
     """Write generated budget into the best-matching proposal section (or append one)."""
-    draft = get_proposal_draft(rfp_id)
+    draft = await aget_proposal_draft(rfp_id)
     if not draft:
         return None
 
@@ -468,5 +468,5 @@ def incorporate_budget_into_draft(
         )
 
     updated = draft.model_copy(update={"sections": sections, "updated_at": now})
-    save_proposal_draft(updated)
+    await asave_proposal_draft(updated)
     return updated

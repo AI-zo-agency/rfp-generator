@@ -28,16 +28,13 @@ from app.services.proposal_voice_enforcement import (
     is_duplicate_static_rfp_section,
 )
 from app.services.proposal_repository import (
+    adelete_proposal_draft,
     aget_proposal_draft,
     aget_research_cache,
     asave_proposal_draft,
     asave_research_cache,
-    delete_proposal_draft,
-    get_proposal_draft,
-    get_research_cache,
-    save_proposal_draft,
-    save_research_cache,
 )
+from app.services.proposal_common import aload_rfp_for_proposal
 from app.services.proposal_drafting_graph import run_drafting_graph
 from app.services.proposal_budget_content import incorporate_budget_into_draft
 from app.services.proposal_budget_editor import run_budget_editor_pass
@@ -156,16 +153,30 @@ def _strip_legacy_monolith_sections(
     return [s for s in sections if not _is_legacy_monolith_section_id(s.id)]
 
 
+# Section 1 is not "complete" if 1.2–1.5 filled but 1.1 Who We Are is still empty.
+_SECTION_1_REQUIRED_IDS: tuple[str, ...] = (
+    "section-1-who-we-are",
+    "section-1-org-structure",
+    "section-1-business-info",
+    "section-1-certifications",
+    "section-1-insurance",
+)
+
+
+def section_1_subsections_complete(sections: list[ProposalSection]) -> bool:
+    """True only when every required Section 1 card (incl. Who We Are) has body text."""
+    by_id = {s.id: s for s in sections}
+    return all(
+        bool((by_id.get(sid) and (by_id[sid].content or "").strip()))
+        for sid in _SECTION_1_REQUIRED_IDS
+    )
+
+
 def static_sections_1_3_have_content(draft: ProposalDraft | None) -> bool:
     """True when all three zö template sections have body text (modern subsections only)."""
     if not draft:
         return False
-    has_section1 = any(
-        s.id.startswith("section-1-")
-        and not _is_legacy_monolith_section_id(s.id)
-        and (s.content or "").strip()
-        for s in draft.sections
-    )
+    has_section1 = section_1_subsections_complete(draft.sections)
     has_section2 = any(
         (
             (s.id.startswith("section-2-bio-") and s.id != "section-2-bio-placeholder")
@@ -461,7 +472,7 @@ async def generate_proposal(rfp_id: str) -> tuple[ProposalDraft, ProposalResearc
         updatedAt=now,
         provider=provider,
     )
-    save_research_cache(research)
+    await asave_research_cache(research)
 
     summary = _research_summary(research)
     sections = _default_sections(rfp.page_limit)
@@ -481,7 +492,7 @@ async def generate_proposal(rfp_id: str) -> tuple[ProposalDraft, ProposalResearc
         generatedAt=now,
         provider=provider,
     )
-    save_proposal_draft(draft)
+    await asave_proposal_draft(draft)
 
     logger.info("Proposal generation complete for %s (%d sections)", rfp_id, len(built))
     return draft, research
@@ -573,6 +584,49 @@ def _prefer_richer_section(current: ProposalSection, incoming: ProposalSection) 
     return incoming
 
 
+async def _incremental_fact_check_after_sections(
+    rfp_id: str,
+    section_ids: list[str],
+) -> None:
+    """Run KB fact-check agent on sections just generated (before next section drafts)."""
+    ids = list(dict.fromkeys(sid for sid in section_ids if sid))
+    if not ids:
+        return
+    draft = await aget_proposal_draft(rfp_id)
+    if not draft:
+        return
+    try:
+        rfp, _, rfp_context = await aload_rfp_for_proposal(rfp_id)
+        research = await aget_research_cache(rfp_id)
+        from app.services.proposal_kb_fact_checker import run_kb_fact_check_section_ids
+        from app.services.proposal_intelligence.log import log_intel_event
+
+        draft, fc_report = await run_kb_fact_check_section_ids(
+            draft,
+            ids,
+            rfp=rfp,
+            rfp_context=rfp_context,
+            research=research,
+        )
+        await asave_proposal_draft(draft)
+        if fc_report.logs:
+            logger.info(
+                "KB fact-check after %s for %s: %s",
+                ", ".join(ids[:3]),
+                rfp_id,
+                "; ".join(fc_report.logs[:3]),
+            )
+        log_intel_event(
+            "SECTION_FACT_CHECK_DONE",
+            rfp_id=rfp_id,
+            section_ids=",".join(ids[:8]),
+            repairs=fc_report.requirement_repairs,
+            verify_fills=fc_report.verify_tags_filled,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Incremental KB fact-check failed for %s %s: %s", rfp_id, ids, exc)
+
+
 async def _persist_sections_1_3_partial(
     rfp_id: str,
     sections_1_3: list[ProposalSection],
@@ -585,9 +639,13 @@ async def _persist_sections_1_3_partial(
     Parallel S1 / S2 / S3 tracks emit independently — merge with the existing draft so
     one track never blanks another track's already-generated subsections.
     """
+    partial_emit = list(sections_1_3)
     rfp = get_rfp(rfp_id)
     page_limit = rfp.page_limit if rfp else 30
     existing = await aget_proposal_draft(rfp_id)
+    prior_content_by_id = (
+        {s.id: (s.content or "") for s in existing.sections} if existing else {}
+    )
 
     template_1_3 = [
         s
@@ -672,6 +730,16 @@ async def _persist_sections_1_3_partial(
     )
     await asave_proposal_draft(draft)
 
+    fact_check_ids = [
+        s.id
+        for s in partial_emit
+        if (s.content or "").strip()
+        and not _is_legacy_monolith_section_id(s.id)
+        and prior_content_by_id.get(s.id) != (s.content or "").strip()
+    ]
+    if fact_check_ids:
+        await _incremental_fact_check_after_sections(rfp_id, fact_check_ids)
+
     if brand_voice is not None:
         prior_research = await aget_research_cache(rfp_id)
         research = ProposalResearchCache(
@@ -698,6 +766,10 @@ async def _persist_phase3_partial(
     provider: str,
 ) -> None:
     """Save each drafted RFP section immediately; remaining slots stay as outline stubs."""
+    existing = await aget_proposal_draft(rfp_id)
+    prior_content_by_id = (
+        {s.id: (s.content or "") for s in existing.sections} if existing else {}
+    )
     drafted_ids = {section.id for section in drafted_rfp_sections}
     stubs: list[ProposalSection] = []
     for mapped in rfp_sections:
@@ -750,6 +822,15 @@ async def _persist_phase3_partial(
     )
     await asave_proposal_draft(draft)
 
+    new_ids = [
+        s.id
+        for s in drafted_rfp_sections
+        if (s.content or "").strip()
+        and prior_content_by_id.get(s.id) != (s.content or "").strip()
+    ]
+    if new_ids:
+        await _incremental_fact_check_after_sections(rfp_id, new_ids)
+
 
 def _load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]:
     return load_rfp_for_proposal(rfp_id)
@@ -761,7 +842,7 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         raise ProposalError("LLM not configured.", status_code=503)
 
     rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
-    prior_research = get_research_cache(rfp_id)
+    prior_research = await aget_research_cache(rfp_id)
 
     logger.info("Phase 2 intelligence starting for %s", rfp_id)
     from app.services.proposal_generation_cancel import check_generation_cancelled
@@ -834,7 +915,7 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         updatedAt=now,
         provider=plan.metadata.provider,
     )
-    save_research_cache(research)
+    await asave_research_cache(research)
 
     logger.info(
         "Phase 2 complete for %s: plan=%s sections=%d decisions=%d evidence=0",
@@ -879,7 +960,7 @@ async def generate_sections_1_3(
 
     rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
 
-    existing_draft = get_proposal_draft(rfp_id)
+    existing_draft = await aget_proposal_draft(rfp_id)
     existing_sections_1_3: list[ProposalSection] = []
     has_section1 = has_section2 = has_section3 = False
     existing_section1: list[ProposalSection] = []
@@ -895,7 +976,7 @@ async def generate_sections_1_3(
         # stale Section 1–3 or leftover RFP tabs from a previous run.
         if existing_draft:
             try:
-                delete_proposal_draft(rfp_id)
+                await adelete_proposal_draft(rfp_id)
             except Exception:
                 logger.exception(
                     "Failed to clear prior draft before force-regenerate for %s",
@@ -911,12 +992,9 @@ async def generate_sections_1_3(
         ]
 
         # Modern subsections only — a leftover company-overview monolith is NOT "complete".
-        has_section1 = any(
-            s.id.startswith("section-1-")
-            and not _is_legacy_monolith_section_id(s.id)
-            and s.content.strip()
-            for s in existing_sections_1_3
-        )
+        # Require ALL Section 1 cards (esp. Who We Are). Filling 1.2–1.5 alone must not
+        # skip regeneration and jump to Team Bios.
+        has_section1 = section_1_subsections_complete(existing_sections_1_3)
         has_section2 = any(
             s.id.startswith("section-2-bio-")
             and s.id != "section-2-bio-placeholder"
@@ -936,7 +1014,7 @@ async def generate_sections_1_3(
                 "Use RESET to regenerate.",
                 rfp_id,
             )
-            research = get_research_cache(rfp_id)
+            research = await aget_research_cache(rfp_id)
             brand_voice = (
                 research.brand_voice
                 if research and research.brand_voice
@@ -981,7 +1059,7 @@ async def generate_sections_1_3(
 
     # Lock primary contact + RFQ KPIs BEFORE writing Sections 1–3 so Team Bios
     # cannot invent a different day-to-day primary than Methodology will use.
-    prior_research = get_research_cache(rfp_id)
+    prior_research = await aget_research_cache(rfp_id)
     manuscript_locks = prior_research.manuscript_locks if prior_research else None
     if manuscript_locks is None or not manuscript_locks.primary_contact_name:
         roster_excerpt = ""
@@ -1012,7 +1090,7 @@ async def generate_sections_1_3(
                 "updated_at": now,
             }
         )
-        save_research_cache(research_seed)
+        await asave_research_cache(research_seed)
 
     async def _on_sections_partial(
         partial: list[ProposalSection],
@@ -1099,7 +1177,7 @@ async def generate_sections_1_3(
     # Parallel tracks persist via partial callbacks; the graph return can still
     # omit a track if stream accumulation fails. Fold richer draft content back in.
     # Never fold legacy monoliths back in after a regenerate.
-    draft_after_graph = get_proposal_draft(rfp_id)
+    draft_after_graph = await aget_proposal_draft(rfp_id)
     if draft_after_graph:
         by_id = {
             s.id: s
@@ -1131,6 +1209,8 @@ async def generate_sections_1_3(
         sections_1_3 = [by_id[sid] for sid in ordered_ids if sid in by_id]
 
     def _group_has_content(prefix: str) -> bool:
+        if prefix == "section-1-":
+            return section_1_subsections_complete(sections_1_3)
         return any(
             s.id.startswith(prefix) and (s.content or "").strip() for s in sections_1_3
         )
@@ -1163,12 +1243,14 @@ async def generate_sections_1_3(
             page_limit=rfp.page_limit,
             on_sections_partial=_on_sections_partial,
             existing_sections=existing_sections_for_graph,
-            skip_section_1=skip_section_1 or _group_has_content("section-1-"),
+            # Never skip Section 1 while Who We Are (or any required 1.x) is empty —
+            # that was causing Team Bios to run with 1.1 still OUTLINE.
+            skip_section_1=skip_section_1 or section_1_subsections_complete(sections_1_3),
             skip_section_2=skip_section_2 or _group_has_content("section-2-"),
             skip_section_3=skip_section_3 or _group_has_content("section-3-"),
         )
         # Re-fold draft after retry — still never resurrect legacy monoliths
-        draft_after_retry = get_proposal_draft(rfp_id)
+        draft_after_retry = await aget_proposal_draft(rfp_id)
         if draft_after_retry:
             by_id = {
                 s.id: s
@@ -1202,14 +1284,12 @@ async def generate_sections_1_3(
         empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
         still_missing = [
             label
-            for label, prefix in (
-                ("Section 1 (Company)", "section-1-"),
-                ("Section 2 (Team)", "section-2-"),
-                ("Section 3 (Our Work)", "section-3-"),
+            for label, check in (
+                ("Section 1 (Company)", lambda: section_1_subsections_complete(sections_1_3)),
+                ("Section 2 (Team)", lambda: _group_has_content("section-2-")),
+                ("Section 3 (Our Work)", lambda: _group_has_content("section-3-")),
             )
-            if not any(
-                s.id.startswith(prefix) and (s.content or "").strip() for s in sections_1_3
-            )
+            if not check()
         ]
         if empty_ids:
             from app.services.proposal_section_editor import improve_proposal_section
@@ -1224,7 +1304,7 @@ async def generate_sections_1_3(
                 if not section:
                     continue
                 try:
-                    improved, _, _, _, _ = await improve_proposal_section(
+                    improved, _, _, _, _, _ = await improve_proposal_section(
                         rfp_id,
                         sid,
                         "Generate the full section from the knowledge base. "
@@ -1242,15 +1322,15 @@ async def generate_sections_1_3(
             empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
             still_missing = [
                 label
-                for label, prefix in (
-                    ("Section 1 (Company)", "section-1-"),
-                    ("Section 2 (Team)", "section-2-"),
-                    ("Section 3 (Our Work)", "section-3-"),
+                for label, check in (
+                    (
+                        "Section 1 (Company)",
+                        lambda: section_1_subsections_complete(sections_1_3),
+                    ),
+                    ("Section 2 (Team)", lambda: _group_has_content("section-2-")),
+                    ("Section 3 (Our Work)", lambda: _group_has_content("section-3-")),
                 )
-                if not any(
-                    s.id.startswith(prefix) and (s.content or "").strip()
-                    for s in sections_1_3
-                )
+                if not check()
             ]
             if empty_ids:
                 titles = [s.title for s in sections_1_3 if s.id in empty_ids]
@@ -1267,7 +1347,7 @@ async def generate_sections_1_3(
             )
 
     now = datetime.now(timezone.utc).isoformat()
-    existing = get_proposal_draft(rfp_id)
+    existing = await aget_proposal_draft(rfp_id)
     base_sections = []
     if existing:
         for s in existing.sections:
@@ -1306,9 +1386,9 @@ async def generate_sections_1_3(
         generatedAt=now,
         provider=provider,
     )
-    save_proposal_draft(draft)
+    await asave_proposal_draft(draft)
 
-    prior_research = get_research_cache(rfp_id)
+    prior_research = await aget_research_cache(rfp_id)
     research = ProposalResearchCache(
         rfpId=rfp.id,
         rfpSections=prior_research.rfp_sections if prior_research else [],
@@ -1324,7 +1404,7 @@ async def generate_sections_1_3(
         updatedAt=now,
         provider=provider,
     )
-    save_research_cache(research)
+    await asave_research_cache(research)
 
     logger.info("Sections 1–3 complete for %s (run Phase 2 separately for KB retrieval)", rfp_id)
     return draft, brand_voice, research
@@ -1336,7 +1416,7 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         raise ProposalError("LLM not configured.", status_code=503)
 
     rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
-    research = get_research_cache(rfp_id)
+    research = await aget_research_cache(rfp_id)
     if not _phase2_plan_ready(research):
         raise ProposalError(
             "Phase 2 Proposal Execution Plan required. Run Phase 2 intelligence first.",
@@ -1349,7 +1429,7 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
             status_code=400,
         )
 
-    existing = get_proposal_draft(rfp_id)
+    existing = await aget_proposal_draft(rfp_id)
     static_sections = _static_sections_from_draft(existing, rfp.page_limit)
     if not any(section.content.strip() for section in static_sections):
         logger.info(
@@ -1413,7 +1493,7 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
 
     if jit_corpus:
         research = research.model_copy(update={"evidence_corpus": jit_corpus})
-        save_research_cache(research)
+        await asave_research_cache(research)
 
     merged_sections = _merge_static_with_rfp_sections(
         static_sections,
@@ -1443,12 +1523,12 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         generatedAt=now,
         provider=provider,
     )
-    save_proposal_draft(draft)
+    await asave_proposal_draft(draft)
 
     updated_research = research.model_copy(
         update={"updated_at": now, "provider": provider}
     )
-    save_research_cache(updated_research)
+    await asave_research_cache(updated_research)
 
     logger.info(
         "Phase 3 complete for %s: %d static + %d RFP sections (%d total)",
@@ -1471,13 +1551,13 @@ async def run_phase3_5_budget_reconcile(
     """Reconcile cached budget math, re-render budget section, sync fee narrative (no LLM regen)."""
     from app.services.proposal_pricing_service import reconcile_cached_budget
 
-    budget, research = reconcile_cached_budget(rfp_id)
+    budget, research = await reconcile_cached_budget(rfp_id)
     rfp_context = load_rfp_for_proposal(rfp_id)[2]
     from app.services.proposal_budget_content import rfp_wants_blended_pricing_form
 
     if rfp_wants_blended_pricing_form(rfp_context):
         budget = budget.model_copy(update={"budget_format": "blended_rate_form"})
-    draft = incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
+    draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
     if not draft:
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
@@ -1486,7 +1566,7 @@ async def run_phase3_5_budget_reconcile(
         draft=draft,
         budget=budget,
     )
-    save_proposal_draft(draft)
+    await asave_proposal_draft(draft)
 
     budget = run_budget_editor_pass(
         budget,
@@ -1494,11 +1574,11 @@ async def run_phase3_5_budget_reconcile(
         rfp_context=rfp_context[:28_000],
     )
     research = research.model_copy(update={"budget": budget})
-    save_research_cache(research)
-    final_draft = incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
+    await asave_research_cache(research)
+    final_draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
     if final_draft:
         draft = final_draft
-        save_proposal_draft(draft)
+        await asave_proposal_draft(draft)
 
     logger.info(
         "Budget reconcile complete for %s: revenue=%s, passthrough=%s, invoicing=%s",
@@ -1510,9 +1590,9 @@ async def run_phase3_5_budget_reconcile(
     return draft, research, budget
 
 
-def _assert_proposal_not_reset(rfp_id: str) -> None:
+async def _assert_proposal_not_reset(rfp_id: str) -> None:
     """Refuse to persist if the user reset the proposal while a phase was running."""
-    draft = get_proposal_draft(rfp_id)
+    draft = await aget_proposal_draft(rfp_id)
     if draft is None:
         raise ProposalError(
             "Proposal was reset while this step was running. Progress was discarded.",
@@ -1527,7 +1607,7 @@ async def run_phase3_5_budget(
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
-    draft_existing = get_proposal_draft(rfp_id)
+    draft_existing = await aget_proposal_draft(rfp_id)
     if not draft_existing or not any(s.content.strip() for s in draft_existing.sections):
         raise ProposalError(
             "Phase 3 manuscript required before budget. Run full proposal or Phase 3 drafting first.",
@@ -1538,7 +1618,7 @@ async def run_phase3_5_budget(
     budget, research = await generate_proposal_budget(rfp_id)
 
     # User may have clicked Reset while budget was computing — do not rewrite wiped data.
-    _assert_proposal_not_reset(rfp_id)
+    await _assert_proposal_not_reset(rfp_id)
 
     rfp_context = load_rfp_for_proposal(rfp_id)[2]
     from app.services.proposal_budget_content import rfp_wants_blended_pricing_form
@@ -1546,9 +1626,9 @@ async def run_phase3_5_budget(
     if rfp_wants_blended_pricing_form(rfp_context):
         budget = budget.model_copy(update={"budget_format": "blended_rate_form"})
         research = research.model_copy(update={"budget": budget})
-        save_research_cache(research)
+        await asave_research_cache(research)
 
-    draft = incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
+    draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
     if not draft:
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
@@ -1557,8 +1637,8 @@ async def run_phase3_5_budget(
         draft=draft,
         budget=budget,
     )
-    _assert_proposal_not_reset(rfp_id)
-    save_proposal_draft(draft)
+    await _assert_proposal_not_reset(rfp_id)
+    await asave_proposal_draft(draft)
 
     # Re-render budget section after fee sync so narrative totals stay aligned
     try:
@@ -1574,15 +1654,15 @@ async def run_phase3_5_budget(
             status_code=502,
         ) from exc
 
-    _assert_proposal_not_reset(rfp_id)
+    await _assert_proposal_not_reset(rfp_id)
     if research:
         research = research.model_copy(update={"budget": budget})
-        save_research_cache(research)
-    final_draft = incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
+        await asave_research_cache(research)
+    final_draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
     if final_draft:
         draft = final_draft
-        _assert_proposal_not_reset(rfp_id)
-        save_proposal_draft(draft)
+        await _assert_proposal_not_reset(rfp_id)
+        await asave_proposal_draft(draft)
 
     logger.info(
         "Phase 3.5 budget complete for %s: tier=%s, %d line items, revenue=%s",
@@ -1600,14 +1680,14 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
     if not rfp:
         raise ProposalError("RFP not found", status_code=404)
 
-    draft = get_proposal_draft(rfp_id)
+    draft = await aget_proposal_draft(rfp_id)
     if not draft or not any(s.content.strip() for s in draft.sections):
         raise ProposalError(
             "No proposal content to review. Generate proposal sections first.",
             status_code=400,
         )
 
-    research = get_research_cache(rfp_id)
+    research = await aget_research_cache(rfp_id)
     from app.services.proposal_presubmit_review import run_presubmit_review_with_manual_flags
 
     review = run_presubmit_review_with_manual_flags(
@@ -1636,7 +1716,7 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
             "updated_at": now,
         }
     )
-    save_research_cache(updated_research)
+    await asave_research_cache(updated_research)
 
     logger.info(
         "Phase 4 pre-submit review for %s: %d issues, ready=%s, ending_reqs=%d/%d",
@@ -1660,14 +1740,14 @@ async def run_phase4_presubmit_autofix(
     if not rfp:
         raise ProposalError("RFP not found", status_code=404)
 
-    draft = get_proposal_draft(rfp_id)
+    draft = await aget_proposal_draft(rfp_id)
     if not draft or not any(s.content.strip() for s in draft.sections):
         raise ProposalError(
             "No proposal content to fix. Generate proposal sections first.",
             status_code=400,
         )
 
-    research = get_research_cache(rfp_id)
+    research = await aget_research_cache(rfp_id)
     issues_before = len(
         run_presubmit_review(rfp=rfp, draft=draft, research=research).issues
     )
@@ -1682,14 +1762,14 @@ async def run_phase4_presubmit_autofix(
         )
     )
 
-    save_proposal_draft(updated_draft)
+    await asave_proposal_draft(updated_draft)
 
     now = datetime.now(timezone.utc).isoformat()
     base_research = updated_research_cache or research
     updated_research = (base_research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)).model_copy(
         update={"presubmit_review": review, "updated_at": now}
     )
-    save_research_cache(updated_research)
+    await asave_research_cache(updated_research)
 
     report = PreSubmitAutoFixReport(
         iterations_run=iterations_run,
@@ -1720,14 +1800,14 @@ async def run_phase4_finalize_gaps(
     if not rfp:
         raise ProposalError("RFP not found", status_code=404)
 
-    draft = get_proposal_draft(rfp_id)
+    draft = await aget_proposal_draft(rfp_id)
     if not draft or not any(s.content.strip() for s in draft.sections):
         raise ProposalError(
             "No proposal content to finalize. Generate proposal sections first.",
             status_code=400,
         )
 
-    research = get_research_cache(rfp_id)
+    research = await aget_research_cache(rfp_id)
     from app.services.proposal_submission_gap_finalizer import (
         attach_manual_fill_flags_to_review,
         run_submission_gap_finalize_pass,
@@ -1757,8 +1837,8 @@ async def run_phase4_finalize_gaps(
     saved_research = (
         updated_research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)
     ).model_copy(update={"presubmit_review": review, "updated_at": now})
-    save_research_cache(saved_research)
-    save_proposal_draft(updated_draft)
+    await asave_research_cache(saved_research)
+    await asave_proposal_draft(updated_draft)
 
     logger.info(
         "Phase 4 finalize gaps for %s: %d manual fill flag(s), ready=%s",
@@ -1786,7 +1866,7 @@ async def generate_full_proposal(
 
     if brand_voice and not research.brand_voice:
         research = research.model_copy(update={"brand_voice": brand_voice})
-        save_research_cache(research)
+        await asave_research_cache(research)
 
     rfp = get_rfp(rfp_id)
     if rfp:
@@ -1818,7 +1898,7 @@ async def generate_full_proposal(
                 "updated_at": now,
             }
         )
-        save_research_cache(research)
+        await asave_research_cache(research)
         logger.info(
             "Phase 4 pre-submit review (auto) for %s: %d issues, ready=%s, ending_reqs=%d/%d",
             rfp_id,
