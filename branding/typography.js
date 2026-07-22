@@ -1,6 +1,10 @@
 /**
  * Zo Agency Typography System
  * Source: https://zo.agency/
+ *
+ * App UI uses Open Sans + Cabin (see frontend layout).
+ * Proposal writing rules (not fonts) live in
+ * branding/ZO_BRAND_AND_WRITING_STANDARDS_REV3.md.
  */
 
 export const zoTypography = {

@@ -1,8 +1,15 @@
 import { loadProposalBundleFromSupabase } from "@/lib/proposal-supabase-read";
+import { longRunningFetch } from "@/lib/long-running-fetch";
+import { PROPOSAL_STAGE_MAX_DURATION_SEC } from "@/lib/proposal-stage-timeout";
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
-const PROXY_TIMEOUT_MS = 12_000;
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  process.env.BACKEND_URL ||
+  "http://localhost:8001";
+
+export const maxDuration = PROPOSAL_STAGE_MAX_DURATION_SEC;
+export const runtime = "nodejs";
 
 /**
  * GET reads draft + research + pipeline checkpoint from Supabase — shared state for
@@ -25,7 +32,7 @@ export async function GET(
 }
 
 /**
- * PUT still proxies to the backend — writes need to go through the API.
+ * PUT proxies to the backend — no short abort; wait for FastAPI to finish the write.
  */
 export async function PUT(
   request: Request,
@@ -34,33 +41,30 @@ export async function PUT(
   const { id } = await params;
   const body = await request.text();
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
   try {
-    const response = await fetch(`${BACKEND_URL}/api/v1/rfps/${id}/proposal`, {
-      method: "PUT",
-      signal: controller.signal,
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      body,
-      cache: "no-store",
-    });
+    const response = await longRunningFetch(
+      `${BACKEND_URL}/api/v1/rfps/${id}/proposal`,
+      {
+        method: "PUT",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body,
+        cache: "no-store",
+        // 0 = no AbortSignal; undici idle timeouts disabled in longRunningFetch
+        timeoutMs: 0,
+      }
+    );
     const data = await response.json();
     return NextResponse.json(data, { status: response.status });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Backend unreachable";
-    const timedOut = error instanceof Error && error.name === "AbortError";
     return NextResponse.json(
       {
-        detail: timedOut
-          ? `API request timed out after ${PROXY_TIMEOUT_MS / 1000}s — backend may be busy generating.`
-          : `Cannot reach API at ${BACKEND_URL}. (${message})`,
+        detail: `Cannot reach API at ${BACKEND_URL}. (${message})`,
       },
       { status: 503 }
     );
-  } finally {
-    clearTimeout(timer);
   }
 }

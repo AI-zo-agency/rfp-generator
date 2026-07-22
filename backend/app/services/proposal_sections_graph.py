@@ -249,10 +249,11 @@ def _sanitize_content(text: str) -> str:
 
     Strategy:
     1. NFKC normalize (handles ligatures, compat chars, etc.)
-    2. For each character: if it is a basic Latin / common punctuation char, keep it.
-       Otherwise try NFKD decomposition to get the base ASCII char.
-       If still non-ASCII, drop it entirely.
-    3. Strip internal KB filename citations (never show Source: *.pdf / *.docx in prose).
+    2. Preserve newlines/tabs; map other Unicode spaces / zero-width separators
+       to a normal ASCII space (dropping them glues words: "systems\\u200bmust").
+    3. For each other character: if basic Latin, keep it; else try NFKD ASCII base;
+       otherwise drop non-Latin script characters.
+    4. Strip internal KB filename citations (never show Source: *.pdf / *.docx in prose).
     """
     if not text:
         return text
@@ -261,6 +262,21 @@ def _sanitize_content(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     result: list[str] = []
     for ch in text:
+        if ch in "\n\r\t":
+            result.append(ch)
+            continue
+        # Unicode spaces / separators → ASCII space (do not drop — that glues words).
+        category = unicodedata.category(ch)
+        if ch.isspace() or category in {"Zs", "Zl", "Zp"}:
+            result.append(" ")
+            continue
+        # Soft hyphen: mid-word hyphenation marker — drop without inserting a space.
+        if ch == "\u00ad":
+            continue
+        # Other zero-width / format chars often sit between words in PDF text.
+        if category == "Cf":
+            result.append(" ")
+            continue
         if ord(ch) < 128:
             result.append(ch)
             continue
@@ -271,7 +287,7 @@ def _sanitize_content(text: str) -> str:
             result.append(ascii_equiv)
         # else: silently drop non-Latin script characters (Gujarati, Devanagari, etc.)
     clean = "".join(result)
-    # Collapse any double spaces created by dropped chars
+    # Collapse any double spaces created by dropped/mapped chars
     clean = re.sub(r" {2,}", " ", clean)
     # Never ship internal knowledge-base filenames into the client-facing proposal.
     clean = re.sub(
@@ -770,6 +786,24 @@ def _normalize_account_key(name: str) -> str:
     return re.sub(r"\s+", " ", key).casefold()
 
 
+def _accounts_are_near_duplicate(a: str, b: str) -> bool:
+    """True when names refer to the same client (Sayfe / Sayfe Families)."""
+    a_key = _normalize_account_key(a)
+    b_key = _normalize_account_key(b)
+    if not a_key or not b_key:
+        return False
+    if a_key == b_key:
+        return True
+    a_tokens = a_key.split()
+    b_tokens = b_key.split()
+    # Prefer token-prefix: "sayfe" ⊂ "sayfe families"
+    if len(a_tokens) <= len(b_tokens) and b_tokens[: len(a_tokens)] == a_tokens:
+        return True
+    if len(b_tokens) <= len(a_tokens) and a_tokens[: len(b_tokens)] == b_tokens:
+        return True
+    return False
+
+
 def _is_junk_key_account(name: str) -> bool:
     """Drop OCR taglines (SINCE 1884) and non-client fragments."""
     cleaned = name.strip()
@@ -788,21 +822,43 @@ def _is_junk_key_account(name: str) -> bool:
     return False
 
 
-def _dedupe_key_accounts(accounts: list[str]) -> list[str]:
-    """Preserve order; collapse 'the University of Idaho' / 'University of Idaho'."""
+def _dedupe_string_list(items: list[str]) -> list[str]:
+    """Exact case-insensitive dedupe, preserving first-seen display form."""
     out: list[str] = []
     seen: set[str] = set()
+    for raw in items:
+        name = _normalize_list_item(raw)
+        if not name:
+            continue
+        key = re.sub(r"\s+", " ", name).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def _dedupe_key_accounts(accounts: list[str]) -> list[str]:
+    """Preserve order; collapse 'the University of Idaho' / 'University of Idaho'
+    and near-duplicates like 'Sayfe' / 'Sayfe Families' (keep the longer name)."""
+    out: list[str] = []
     for raw in accounts:
         name = _normalize_list_item(raw)
         if not name or _is_junk_key_account(name):
             continue
         # Prefer form without leading "the " when both appear.
         display = re.sub(r"^the\s+", "", name, flags=re.I).strip() or name
-        key = _normalize_account_key(display)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(display)
+        replaced = False
+        for idx, existing in enumerate(out):
+            if not _accounts_are_near_duplicate(display, existing):
+                continue
+            # Keep the more specific (longer) label.
+            if len(display) > len(existing):
+                out[idx] = display
+            replaced = True
+            break
+        if not replaced:
+            out.append(display)
     return out
 
 
@@ -974,13 +1030,13 @@ def _sanitize_bio_extraction(extracted: dict[str, Any], kb_text: str) -> dict[st
         lic for lic in (_normalize_list_item(x) for x in (clean.get("licenses") or []))
         if lic and _item_appears_in_kb(lic, kb_text)
     ]
-    clean["licenses"] = licenses
+    clean["licenses"] = _dedupe_string_list(licenses)
 
     certifications = [
         cert for cert in (_normalize_list_item(x) for x in (clean.get("certifications") or []))
         if cert and _item_appears_in_kb(cert, kb_text)
     ]
-    clean["certifications"] = certifications
+    clean["certifications"] = _dedupe_string_list(certifications)
 
     key_accounts: list[str] = []
     ground_accounts = accounts_section or kb_text
@@ -993,7 +1049,7 @@ def _sanitize_bio_extraction(extracted: dict[str, Any], kb_text: str) -> dict[st
         edu for edu in (_normalize_list_item(x) for x in (clean.get("education") or []))
         if edu and _item_appears_in_kb(edu, kb_text)
     ]
-    clean["education"] = education
+    clean["education"] = _dedupe_string_list(education)
 
     overview = str(clean.get("overview") or "").strip()
     if overview and not _item_appears_in_kb(overview, kb_text):
@@ -1238,7 +1294,8 @@ async def _extract_key_accounts_via_rag_llm(accounts_section: str) -> list[str]:
                         "Do NOT invent names. Do NOT include employers from Work History.\n"
                         "Do NOT include taglines or founding years (e.g. 'SINCE 1884').\n"
                         "Do NOT duplicate the same client under different wording "
-                        "('the University of Idaho' and 'University of Idaho' = one entry).\n"
+                        "('the University of Idaho' and 'University of Idaho' = one entry; "
+                        "'Sayfe' and 'Sayfe Families' = one entry — keep the fuller name).\n"
                         'Return JSON: {"keyAccounts": ["Name 1", "Name 2"]}'
                     ),
                 },
@@ -1280,6 +1337,7 @@ async def _extract_member_bio_facts(member: str, kb_text: str) -> dict[str, Any]
             if acct.casefold() not in seen and _account_appears_in_kb(acct, accounts_section):
                 parsed.setdefault("key_accounts", []).append(acct)
                 seen.add(acct.casefold())
+        parsed["key_accounts"] = _dedupe_key_accounts(parsed.get("key_accounts") or [])
 
     has_bio_sections = any(
         marker in kb_text
@@ -1308,10 +1366,11 @@ async def _extract_member_bio_facts(member: str, kb_text: str) -> dict[str, Any]
         "- WORK HISTORY: only employers with year ranges (e.g. 2013 - Present). "
         "Never treat logo/client names without dates as jobs.\n"
         "- KEY ACCOUNTS: only client names from the KEY ACCOUNTS section / logo captions.\n"
-        "- Do NOT use proposal files, case studies, won RFPs, or other team members.\n"
+        "- Do NOT list the same client twice (e.g. 'Sayfe' and 'Sayfe Families' = one entry).\n"
         "- Do NOT invent clients, degrees, licenses, or employers.\n"
         "- If a section is missing in the document, return an empty array for that field.\n"
-        "- education, licenses, and certifications must be arrays of plain strings (not objects).\n\n"
+        "- education, licenses, and certifications must be arrays of plain strings (not objects).\n"
+        "- Never repeat the same license, certification, or education line.\n\n"
         "Return ONLY JSON:\n"
         '{"title":"role at zo agency","overview":"bio paragraph from doc",'
         '"expertise":[{"area":"...","years":"..."}],'
@@ -1356,9 +1415,12 @@ async def _extract_member_bio_facts(member: str, kb_text: str) -> dict[str, Any]
 
 
 def _format_member_bio_content(member: str, extracted: dict[str, Any]) -> str:
-    """Render bio with ALL mandatory sections; [VERIFY] when data missing."""
-    title = str(extracted.get("title") or "").strip() or "[VERIFY: title]"
+    """Render bio from KB facts only — omit empty blocks; never invent VERIFY padding."""
+    raw_title = str(extracted.get("title") or "").strip()
+    title = "" if raw_title.upper().startswith("[VERIFY") else raw_title
     overview = str(extracted.get("overview") or "").strip()
+    if overview.upper().startswith("[VERIFY"):
+        overview = ""
     expertise = extracted.get("expertise") or []
     work_history = extracted.get("work_history") or []
     licenses = extracted.get("licenses") or []
@@ -1366,66 +1428,87 @@ def _format_member_bio_content(member: str, extracted: dict[str, Any]) -> str:
     key_accounts = extracted.get("key_accounts") or []
     education = extracted.get("education") or []
 
-    parts = [f"### {member} — {title}\n"]
+    heading = f"### {member} — {title}\n" if title else f"### {member}\n"
+    parts = [heading]
 
-    parts.append(
-        f"**Description of Member**\n"
-        f"{overview or '[VERIFY: Description of Member]'}\n"
-    )
+    if overview:
+        parts.append(f"{overview}\n")
 
-    parts.append("**Years of Experience**")
-    parts.append("| Area of Expertise | Years |")
-    parts.append("| --- | --- |")
-    if expertise:
-        for exp in expertise:
-            if isinstance(exp, dict) and exp.get("area"):
-                parts.append(f"| {exp.get('area')} | {exp.get('years') or '[VERIFY]'} |")
-    else:
-        parts.append("| [VERIFY: Years of Experience] | [VERIFY] |")
-    parts.append("")
+    expertise_rows: list[str] = []
+    for exp in expertise:
+        if isinstance(exp, dict) and exp.get("area"):
+            area = str(exp.get("area") or "").strip()
+            years = str(exp.get("years") or "").strip()
+            if years.upper().startswith("[VERIFY"):
+                years = ""
+            if area:
+                expertise_rows.append(f"| {area} | {years or '—'} |")
+    if expertise_rows:
+        parts.append("**Years of Experience**")
+        parts.append("| Area of Expertise | Years |")
+        parts.append("| --- | --- |")
+        parts.extend(expertise_rows)
+        parts.append("")
 
-    parts.append("**Work History**")
-    if work_history:
-        for job in work_history:
-            if isinstance(job, dict) and (job.get("company") or job.get("title")):
-                company = job.get("company") or "[VERIFY: company]"
-                job_title = job.get("title") or "[VERIFY: title]"
-                dates = job.get("dates") or "[VERIFY: dates]"
-                parts.append(f"- **{company}** — {job_title}, {dates}")
-    else:
-        parts.append("- [VERIFY: Work History]")
-    parts.append("")
+    work_lines: list[str] = []
+    for job in work_history:
+        if not isinstance(job, dict):
+            continue
+        company = str(job.get("company") or "").strip()
+        job_title = str(job.get("title") or "").strip()
+        dates = str(job.get("dates") or "").strip()
+        if company.upper().startswith("[VERIFY"):
+            company = ""
+        if job_title.upper().startswith("[VERIFY"):
+            job_title = ""
+        if dates.upper().startswith("[VERIFY"):
+            dates = ""
+        if not company and not job_title:
+            continue
+        label = f"**{company}**" if company else "**Role**"
+        detail_bits = [b for b in (job_title, dates) if b]
+        if detail_bits:
+            work_lines.append(f"- {label} — {', '.join(detail_bits)}")
+        else:
+            work_lines.append(f"- {label}")
+    if work_lines:
+        parts.append("**Work History**")
+        parts.extend(work_lines)
+        parts.append("")
 
-    # Bios store credentials under Licenses (e.g. Real Estate), not Certifications.
-    # Omit the block entirely when the bio has none — do not invent VERIFY noise.
+    # Credentials: only when KB has them — never invent VERIFY noise.
     if licenses:
         parts.append("**Licenses**")
-        for credential in licenses:
-            parts.append(f"- {_normalize_list_item(credential)}")
+        for credential in _dedupe_string_list(
+            [_normalize_list_item(c) for c in licenses]
+        ):
+            parts.append(f"- {credential}")
         parts.append("")
     if certifications:
         parts.append("**Certifications**")
-        for credential in certifications:
-            parts.append(f"- {_normalize_list_item(credential)}")
+        for credential in _dedupe_string_list(
+            [_normalize_list_item(c) for c in certifications]
+        ):
+            parts.append(f"- {credential}")
         parts.append("")
 
-    parts.append("**Key Accounts**")
-    if key_accounts:
-        for acct in _dedupe_key_accounts(
-            [_normalize_list_item(a) for a in key_accounts]
-        ):
+    accounts = _dedupe_key_accounts(
+        [_normalize_list_item(a) for a in key_accounts]
+    )
+    if accounts:
+        parts.append("**Key Accounts**")
+        for acct in accounts:
             parts.append(f"- {acct}")
-    else:
-        parts.append("- [VERIFY: Key Accounts]")
-    parts.append("")
+        parts.append("")
 
-    parts.append("**Education**")
-    if education:
-        for edu in education:
-            parts.append(f"- {_normalize_list_item(edu)}")
-    else:
-        parts.append("- [VERIFY: Education]")
-    parts.append("")
+    edu_lines = _dedupe_string_list(
+        [_normalize_list_item(e) for e in education]
+    )
+    if edu_lines:
+        parts.append("**Education**")
+        for edu in edu_lines:
+            parts.append(f"- {edu}")
+        parts.append("")
 
     return "\n".join(parts)
 

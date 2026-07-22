@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 import httpx
 import re
+from datetime import datetime
 from urllib.parse import quote
 
 from app.models.proposal import (
@@ -69,6 +70,16 @@ def _slim_research(research: ProposalResearchCache | None) -> ProposalResearchCa
     return slim_research_for_api(research)
 
 
+def _parse_draft_updated_at(value: str | None) -> datetime | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 @router.get("/{rfp_id}/proposal")
 async def get_proposal(rfp_id: str) -> dict[str, object]:
     import asyncio
@@ -101,6 +112,16 @@ async def get_proposal(rfp_id: str) -> dict[str, object]:
         ) from last_exc
     if draft is None and research is None and not rfp_exists(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
+    if draft is not None:
+        from app.services.proposal_draft_snapshots import prune_clutter_snapshots
+        from app.services.proposal_repository import asave_proposal_draft
+
+        pruned = prune_clutter_snapshots(draft)
+        if [s.saved_at for s in (pruned.snapshots or [])] != [
+            s.saved_at for s in (draft.snapshots or [])
+        ]:
+            await asave_proposal_draft(pruned)
+            draft = pruned
     job = await get_proposal_job(rfp_id)
     slim_research = _slim_research(research)
     pipeline_status = await build_pipeline_status(rfp_id, draft=draft, research=research)
@@ -196,7 +217,27 @@ def upsert_proposal(rfp_id: str, draft: ProposalDraft) -> dict[str, object]:
                     "Use Reset draft if you intend to clear the manuscript."
                 )
             raise HTTPException(status_code=409, detail=detail)
+
+        # Guard: stale autosave must not drop sections the server just added (chat add-bio).
+        existing_ids = {s.id for s in existing.sections}
+        incoming_ids = {s.id for s in draft.sections}
+        dropped = existing_ids - incoming_ids
+        if dropped:
+            ex_t = _parse_draft_updated_at(existing.updated_at)
+            in_t = _parse_draft_updated_at(draft.updated_at)
+            if not (ex_t and in_t and in_t > ex_t):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Refusing to drop proposal sections via stale autosave. "
+                        "Reload the draft — newer sections are already saved."
+                    ),
+                )
+
     draft = merge_snapshots_for_save(draft, existing)
+    from app.services.proposal_draft_snapshots import prune_clutter_snapshots
+
+    draft = prune_clutter_snapshots(draft)
     save_proposal_draft(draft)
     return {"ok": True, "draft": slim_draft_for_api(draft)}
 
@@ -691,15 +732,35 @@ async def restore_proposal_snapshot_endpoint(
     rfp_id: str,
     body: ProposalRestoreSnapshotRequest,
 ) -> ProposalRestoreSnapshotResponse:
-    from app.services.proposal_draft_snapshots import restore_proposal_snapshot
+    from app.services.proposal_draft_archives import (
+        REASON_BEFORE_ARCHIVE_RESTORE,
+        archive_filled_draft,
+    )
+    from app.services.proposal_draft_snapshots import (
+        prune_clutter_snapshots,
+        restore_proposal_snapshot,
+    )
     from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
 
     draft = await aget_proposal_draft(rfp_id)
     if not draft:
         raise HTTPException(status_code=404, detail="No proposal draft found.")
+    # Durable archive (not another dropdown row) so restore cannot spam the menu.
+    await archive_filled_draft(
+        draft,
+        reason=REASON_BEFORE_ARCHIVE_RESTORE,
+        label="Before snapshot restore",
+    )
     restored = restore_proposal_snapshot(draft, saved_at=body.saved_at)
     if not restored:
-        raise HTTPException(status_code=404, detail="Snapshot not found.")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Snapshot not found or has no section content to restore. "
+                "Try another Saved version, or re-improve the section to create a fresh checkpoint."
+            ),
+        )
+    restored = prune_clutter_snapshots(restored)
     await asave_proposal_draft(restored)
     return ProposalRestoreSnapshotResponse(draft=restored)
 

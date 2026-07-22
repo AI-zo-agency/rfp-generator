@@ -56,6 +56,7 @@ interface ProposalSectionTreeProps {
   sectionButtonRefs: React.MutableRefObject<Map<string, HTMLButtonElement>>;
   onSelectSection: (sectionId: string) => void;
   onOpenRevision: (sectionId: string) => void;
+  onDeleteSection?: (sectionId: string) => void;
 }
 
 function SectionRow({
@@ -65,9 +66,11 @@ function SectionRow({
   highlighted,
   flagCount,
   hasRevision,
+  canDelete,
   sectionButtonRefs,
   onSelectSection,
   onOpenRevision,
+  onDeleteSection,
 }: {
   section: OutlineSection;
   depth: number;
@@ -75,22 +78,26 @@ function SectionRow({
   highlighted: boolean;
   flagCount: number;
   hasRevision: boolean;
+  canDelete: boolean;
   sectionButtonRefs: React.MutableRefObject<Map<string, HTMLButtonElement>>;
   onSelectSection: (sectionId: string) => void;
   onOpenRevision: (sectionId: string) => void;
+  onDeleteSection?: (sectionId: string) => void;
 }) {
   const hasContent = Boolean(section.content.trim());
   const needsAttention = flagCount > 0 || hasRevision;
   const titleHint = [
     hasContent ? "Draft has content" : "Not drafted yet",
     flagCount > 0 ? `${flagCount} fill-in tag(s)` : "",
-    hasRevision ? "Section updated — double-click title area in review for changes" : "",
+    hasRevision
+      ? "Section updated — double-click title area in review for changes"
+      : "",
   ]
     .filter(Boolean)
     .join(" · ");
 
   return (
-    <li>
+    <li className="proposal-section-tree-row">
       <button
         type="button"
         ref={(node) => {
@@ -114,12 +121,28 @@ function SectionRow({
         />
         <span
           className={`min-w-0 flex-1 truncate text-left text-[13px] leading-snug ${
-            active ? "font-semibold text-zo-orange" : "font-medium text-foreground"
+            active
+              ? "font-semibold text-zo-orange"
+              : "font-medium text-foreground"
           }`}
         >
           {section.title}
         </span>
       </button>
+      {canDelete && onDeleteSection ? (
+        <button
+          type="button"
+          className="proposal-section-delete-btn"
+          aria-label={`Delete ${section.title}`}
+          title="Delete section"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDeleteSection(section.id);
+          }}
+        >
+          ×
+        </button>
+      ) : null}
     </li>
   );
 }
@@ -130,22 +153,26 @@ function SectionGroup({
   highlightedSectionId,
   manualFillFlags,
   sectionRevisions,
+  canDelete,
   sectionButtonRefs,
   collapsed,
   onToggle,
   onSelectSection,
   onOpenRevision,
+  onDeleteSection,
 }: {
   group: OutlineTreeGroup;
   selectedSectionId: string | null;
   highlightedSectionId: string | null;
   manualFillFlags: ManualFillFlag[];
   sectionRevisions: Record<string, SectionRevisionRecord>;
+  canDelete: boolean;
   sectionButtonRefs: React.MutableRefObject<Map<string, HTMLButtonElement>>;
   collapsed: boolean;
   onToggle: () => void;
   onSelectSection: (sectionId: string) => void;
   onOpenRevision: (sectionId: string) => void;
+  onDeleteSection?: (sectionId: string) => void;
 }) {
   const generatedCount = group.sections.filter((section) =>
     section.content.trim(),
@@ -183,9 +210,11 @@ function SectionGroup({
               highlighted={highlightedSectionId === section.id}
               flagCount={sectionManualFillCount(section.id, manualFillFlags)}
               hasRevision={Boolean(sectionRevisions[section.id])}
+              canDelete={canDelete}
               sectionButtonRefs={sectionButtonRefs}
               onSelectSection={onSelectSection}
               onOpenRevision={onOpenRevision}
+              onDeleteSection={onDeleteSection}
             />
           ))}
         </ul>
@@ -196,7 +225,6 @@ function SectionGroup({
 
 export function ProposalSectionTree({
   sections,
-  manuscriptIndexById,
   selectedSectionId,
   highlightedSectionId,
   manualFillFlags,
@@ -204,8 +232,10 @@ export function ProposalSectionTree({
   sectionButtonRefs,
   onSelectSection,
   onOpenRevision,
+  onDeleteSection,
 }: ProposalSectionTreeProps) {
   const tree = useMemo(() => buildOutlineSectionTree(sections), [sections]);
+  const canDelete = sections.length > 1;
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
     () => new Set(),
   );
@@ -236,6 +266,7 @@ export function ProposalSectionTree({
             highlightedSectionId={highlightedSectionId}
             manualFillFlags={manualFillFlags}
             sectionRevisions={sectionRevisions}
+            canDelete={canDelete}
             sectionButtonRefs={sectionButtonRefs}
             collapsed={collapsedGroups.has(node.id)}
             onToggle={() =>
@@ -248,6 +279,7 @@ export function ProposalSectionTree({
             }
             onSelectSection={onSelectSection}
             onOpenRevision={onOpenRevision}
+            onDeleteSection={onDeleteSection}
           />
         ) : (
           <SectionRow
@@ -258,9 +290,11 @@ export function ProposalSectionTree({
             highlighted={highlightedSectionId === node.section.id}
             flagCount={sectionManualFillCount(node.section.id, manualFillFlags)}
             hasRevision={Boolean(sectionRevisions[node.section.id])}
+            canDelete={canDelete}
             sectionButtonRefs={sectionButtonRefs}
             onSelectSection={onSelectSection}
             onOpenRevision={onOpenRevision}
+            onDeleteSection={onDeleteSection}
           />
         ),
       )}

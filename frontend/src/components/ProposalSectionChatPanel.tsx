@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { improveProposalSection } from "@/lib/proposal-api";
+import {
+  messageLooksStructural,
+  resolveSectionFromMention,
+} from "@/lib/proposal-section-resolve";
 import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import type { SectionRevisionRecord } from "./DraftSectionEditor";
 
@@ -42,6 +46,7 @@ const QUICK_PROMPTS = [
   "Does this meet the RFP?",
   "Fill [VERIFY] tags from KB only.",
   "More client-specific — less generic.",
+  "Add 2 more team bios per RFP.",
 ];
 
 const SECTION_PIN_LABEL = "Improve this section";
@@ -57,52 +62,6 @@ export function buildSectionPinReference(
     sectionTitle: section.title,
     text: body.slice(0, 1200) || section.title,
   };
-}
-
-/** Resolve which section the user means from their message (no dropdown). */
-export function resolveSectionFromMention(
-  sections: OutlineSection[],
-  message: string,
-  fallbackId: string | null
-): OutlineSection | null {
-  const text = message.trim();
-  if (!text || sections.length === 0) {
-    return sections.find((s) => s.id === fallbackId) ?? sections[0] ?? null;
-  }
-  const lower = text.toLowerCase();
-
-  // Prefer longer title matches first
-  const byTitle = [...sections].sort(
-    (a, b) => (b.title?.length ?? 0) - (a.title?.length ?? 0)
-  );
-  for (const section of byTitle) {
-    const title = (section.title || "").trim();
-    if (title.length >= 4 && lower.includes(title.toLowerCase())) {
-      return section;
-    }
-  }
-
-  // "1.1", "section 3", "§ 2.1"
-  const numMatch = lower.match(
-    /\b(?:section\s*)?(\d+(?:\.\d+)?)\b|\b(\d+\.\d+)\s*[—–-]/
-  );
-  const num = numMatch?.[1] || numMatch?.[2];
-  if (num) {
-    const hit = sections.find((s) => {
-      const t = (s.title || "").toLowerCase();
-      return (
-        t.startsWith(`${num} `) ||
-        t.startsWith(`${num}—`) ||
-        t.startsWith(`${num}–`) ||
-        t.startsWith(`${num} -`) ||
-        t.includes(` ${num} `) ||
-        t.startsWith(num)
-      );
-    });
-    if (hit) return hit;
-  }
-
-  return sections.find((s) => s.id === fallbackId) ?? sections[0] ?? null;
 }
 
 export function ProposalSectionChatPanel({
@@ -174,7 +133,9 @@ export function ProposalSectionChatPanel({
           : reference?.mode === "section" &&
               reference.sectionId === targetSection.id
             ? `Improving ${targetSection.title}…`
-            : `Reading full proposal · focusing ${targetSection.title}…`
+            : messageLooksStructural(trimmed)
+              ? `Updating proposal sections…`
+              : `Reading full proposal · focusing ${targetSection.title}…`
       );
       onBusyChange?.(true);
 
@@ -206,16 +167,20 @@ export function ProposalSectionChatPanel({
 
         if (result.draftChanged) {
           onSectionUpdated(result.draft, result.research);
-          const contentAfter = result.section.content ?? contentBefore;
-          onFocusSection?.(targetSection.id);
-          onRevisionRecorded?.(targetSection.id, {
-            before: contentBefore,
+          const focusId = result.section?.id || targetSection.id;
+          const contentAfter =
+            result.section.content ??
+            result.draft.sections.find((s) => s.id === focusId)?.content ??
+            contentBefore;
+          onFocusSection?.(focusId);
+          onRevisionRecorded?.(focusId, {
+            before: focusId === targetSection.id ? contentBefore : "",
             after: contentAfter,
             summary: result.assistantMessage,
             instruction: trimmed,
             updatedAt: Date.now(),
           });
-          onRevisionDrawerOpenChange?.(targetSection.id, true);
+          onRevisionDrawerOpenChange?.(focusId, true);
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Chat request failed";

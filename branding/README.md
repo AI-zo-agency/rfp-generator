@@ -27,10 +27,9 @@ Zo Agency is a full-service branding and marketing firm based in Bend, Oregon, s
 
 ## Typography
 
-### Font Stack
-- **Headings**: Space Grotesk (bold, modern geometric sans-serif)
-- **Body**: Inter (clean, highly readable)
-- **Monospace**: Roboto Mono (technical content)
+### Font Stack (product UI)
+- **Headings / body**: Open Sans (app chrome)
+- **UI accents**: Cabin (buttons, tags)
 
 ### Type Scale
 - Display/Hero: 60-72px
@@ -40,6 +39,9 @@ Zo Agency is a full-service branding and marketing firm based in Bend, Oregon, s
 - H4: 24px
 - Body: 16px
 - Small: 14px
+
+Proposal writing voice (not UI fonts) is in
+[`ZO_BRAND_AND_WRITING_STANDARDS_REV3.md`](./ZO_BRAND_AND_WRITING_STANDARDS_REV3.md).
 
 ## Usage Guidelines
 

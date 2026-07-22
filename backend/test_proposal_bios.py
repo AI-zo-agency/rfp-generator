@@ -2,6 +2,7 @@ import unittest
 
 from app.services.proposal_sections_graph import (
     _apply_verified_corrections,
+    _dedupe_key_accounts,
     _format_member_bio_content,
     _is_member_bio_file_hit,
     _normalize_selected_bio_members,
@@ -16,19 +17,15 @@ class ProposalBioTests(unittest.TestCase):
     def test_missing_bio_details_do_not_invent_credentials(self) -> None:
         content = _format_member_bio_content("Test Person", {})
 
-        self.assertIn("**Description of Member**", content)
-        self.assertIn("[VERIFY: Description of Member]", content)
-        self.assertIn("**Years of Experience**", content)
-        self.assertIn("[VERIFY: Years of Experience]", content)
-        self.assertIn("**Education**", content)
-        self.assertIn("[VERIFY: Education]", content)
+        self.assertNotIn("**Description of Member**", content)
+        self.assertNotIn("[VERIFY:", content)
+        self.assertNotIn("**Years of Experience**", content)
+        self.assertNotIn("**Education**", content)
         self.assertNotIn("**Certifications**", content)
-        self.assertNotIn("[VERIFY: Certifications]", content)
         self.assertNotIn("**Licenses**", content)
-        self.assertIn("**Work History**", content)
-        self.assertIn("[VERIFY: Work History]", content)
-        self.assertIn("**Key Accounts**", content)
-        self.assertIn("[VERIFY: Key Accounts]", content)
+        self.assertNotIn("**Work History**", content)
+        self.assertNotIn("**Key Accounts**", content)
+        self.assertIn("### Test Person", content)
 
     def test_real_certifications_and_licenses_are_rendered(self) -> None:
         content = _format_member_bio_content(
@@ -160,6 +157,46 @@ Account lead
         self.assertIn("2013", dates)
         self.assertIn("Present", dates)
 
+    def test_key_accounts_collapse_near_duplicates(self) -> None:
+        deduped = _dedupe_key_accounts(
+            [
+                "Sayfe Families",
+                "POA",
+                "Sayfe",
+                "the Sayfe Families",
+                "INTEGRATE. CALIBRATE. VALIDATE.",
+            ]
+        )
+        self.assertEqual(
+            deduped,
+            ["Sayfe Families", "POA", "INTEGRATE. CALIBRATE. VALIDATE."],
+        )
+
+    def test_format_dedupes_repeated_licenses_and_accounts(self) -> None:
+        content = _format_member_bio_content(
+            "Rachel Rice",
+            {
+                "licenses": [
+                    "California Real Estate License",
+                    "Oregon Real Estate Principal Broker License",
+                    "California Real Estate License",
+                    "Oregon Real Estate Principal Broker License",
+                ],
+                "key_accounts": [
+                    "Sayfe Families",
+                    "POA",
+                    "Sayfe",
+                    "pops",
+                ],
+            },
+        )
+        self.assertEqual(content.count("California Real Estate License"), 1)
+        self.assertEqual(
+            content.count("Oregon Real Estate Principal Broker License"), 1
+        )
+        self.assertIn("- Sayfe Families", content)
+        self.assertNotIn("\n- Sayfe\n", content)
+
     def test_selected_bios_are_at_most_five_and_deduplicated(self) -> None:
         selected = _normalize_selected_bio_members(
             [
@@ -250,6 +287,22 @@ Account lead
         self.assertNotIn("Source:", cleaned)
         self.assertNotIn("11_REF_CaseStudyMaster_2025.docx", cleaned)
         self.assertIn("Why Relevant", cleaned)
+
+    def test_sanitize_does_not_glue_words_across_unicode_spaces(self) -> None:
+        # Zero-width / exotic spaces from PDFs used to be dropped → "systemsmust".
+        self.assertEqual(
+            _sanitize_content("parking systems\u200bmust be seamless"),
+            "parking systems must be seamless",
+        )
+        self.assertEqual(
+            _sanitize_content("visitor interaction\u00a0from flight"),
+            "visitor interaction from flight",
+        )
+        # Soft hyphen mid-word should disappear without inserting a space.
+        self.assertEqual(
+            _sanitize_content("interac\u00adtion from"),
+            "interaction from",
+        )
 
 
 if __name__ == "__main__":

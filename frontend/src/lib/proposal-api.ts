@@ -111,18 +111,24 @@ export {
 } from "./proposal-pipeline-checkpoint";
 
 /** Long timeout for staged proposal generation (browser → Next API route). */
-const PROPOSAL_STAGE_TIMEOUT_MS_LOCAL = PROPOSAL_STAGE_TIMEOUT_MS;
-
 function proposalPostInit(signal?: AbortSignal): RequestInit {
-  const timeout = AbortSignal.timeout(PROPOSAL_STAGE_TIMEOUT_MS_LOCAL);
-  const combined =
-    signal && typeof AbortSignal.any === "function"
-      ? AbortSignal.any([signal, timeout])
-      : signal ?? timeout;
-  return {
-    method: "POST",
-    signal: combined,
-  };
+  const init: RequestInit = { method: "POST" };
+  if (signal) {
+    if (PROPOSAL_STAGE_TIMEOUT_MS > 0 && typeof AbortSignal.any === "function") {
+      init.signal = AbortSignal.any([
+        signal,
+        AbortSignal.timeout(PROPOSAL_STAGE_TIMEOUT_MS),
+      ]);
+    } else {
+      init.signal = signal;
+    }
+    return init;
+  }
+  // No client-side timer by default — wait for Next/backend (user cancel still works via signal).
+  if (PROPOSAL_STAGE_TIMEOUT_MS > 0) {
+    init.signal = AbortSignal.timeout(PROPOSAL_STAGE_TIMEOUT_MS);
+  }
+  return init;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -403,15 +409,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const PROPOSAL_FETCH_TIMEOUT_MS = 90_000;
-/** First paint — don't block the workspace on a stuck backend. */
-export const PROPOSAL_INITIAL_LOAD_TIMEOUT_MS = 45_000;
+/** Soft client ceilings — 0 means wait (no AbortSignal). Override via env if needed. */
+const PROPOSAL_FETCH_TIMEOUT_MS = 0;
+/** First paint — allow slow Supabase/proxy without aborting the workspace shell. */
+export const PROPOSAL_INITIAL_LOAD_TIMEOUT_MS = 0;
 
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init?: RequestInit,
   timeoutMs = PROPOSAL_FETCH_TIMEOUT_MS
 ): Promise<Response> {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return fetch(input, init);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {

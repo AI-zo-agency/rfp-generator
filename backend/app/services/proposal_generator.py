@@ -781,6 +781,7 @@ async def _persist_phase3_partial(
             continue
         if is_duplicate_static_rfp_section(mapped.title):
             continue
+        prior = prior_content_by_id.get(mapped.id, "")
         stubs.append(
             ProposalSection(
                 id=mapped.id,
@@ -791,8 +792,8 @@ async def _persist_phase3_partial(
                 custom=False,
                 source="rfp",
                 mode=mapped.zo_mode or "write",
-                content="",
-                status="outline",
+                content=prior,
+                status="generated" if prior.strip() else "outline",
             )
         )
 
@@ -1447,10 +1448,21 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
             rfp_id,
         )
 
+    existing_by_id = {
+        section.id: section for section in (existing.sections if existing else [])
+    }
+    from app.services.proposal_drafting_graph import partition_phase3_sections
+
+    sections_to_draft, already_filled = partition_phase3_sections(
+        research.rfp_sections,
+        existing_by_id,
+    )
+
     logger.info(
-        "Phase 3 drafting starting for %s (%d RFP sections, %d evidence items)",
+        "Phase 3 drafting starting for %s (%d to draft, %d already filled, %d evidence items)",
         rfp_id,
-        len(research.rfp_sections),
+        len(sections_to_draft),
+        len(already_filled),
         len(research.evidence_corpus),
     )
 
@@ -1461,7 +1473,7 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         await _persist_phase3_partial(
             rfp_id,
             static_sections=static_sections,
-            drafted_rfp_sections=drafted_sections,
+            drafted_rfp_sections=[*already_filled, *drafted_sections],
             rfp_sections=research.rfp_sections,
             provider=batch_provider,
         )
@@ -1469,10 +1481,17 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
     await _persist_phase3_partial(
         rfp_id,
         static_sections=static_sections,
-        drafted_rfp_sections=[],
+        drafted_rfp_sections=list(already_filled),
         rfp_sections=research.rfp_sections,
         provider="phase-3",
     )
+
+    if not sections_to_draft:
+        logger.info("Phase 3 for %s: all draftable RFP sections already filled", rfp_id)
+        draft = await aget_proposal_draft(rfp_id)
+        if draft is None:
+            raise ProposalError("Proposal draft missing after Phase 3 seed.", status_code=500)
+        return draft, research
 
     drafted_rfp_sections, provider, jit_corpus = await run_drafting_graph(
         rfp_id=rfp.id,
@@ -1481,7 +1500,7 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         rfp_sector=rfp.sector,
         rfp_location=rfp.location or None,
         rfp_context=rfp_context,
-        rfp_sections=research.rfp_sections,
+        rfp_sections=sections_to_draft,
         evidence_corpus=research.evidence_corpus,
         brand_voice=research.brand_voice,
         zo_template_sections=static_sections,
@@ -1507,7 +1526,7 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
 
     merged_sections = _merge_static_with_rfp_sections(
         static_sections,
-        drafted_rfp_sections,
+        [*already_filled, *drafted_rfp_sections],
     )
     merged_sections = [
         section.model_copy(

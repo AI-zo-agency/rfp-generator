@@ -137,7 +137,8 @@ async def _write_one_subsection(
                             else ""
                         )
                         + (
-                            "Write with bold zö brand voice — warm, human, attractive to the client. "
+                            "Write in plain zö deliverable voice per Writing Standards rev 3: "
+                            "direct, warm, specific. No em dashes, no empty hype, no writing for effect. "
                             "## Our Promise on its own line as a vow. "
                             "FORBIDDEN in 1.1: staff names, titles, SEM/SEO/PPC lists, CRM, dashboards, report SLAs.\n"
                             if sec_id == "section-1-who-we-are"

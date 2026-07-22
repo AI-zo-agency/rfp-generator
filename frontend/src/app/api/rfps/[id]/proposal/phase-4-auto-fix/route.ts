@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { longRunningFetch } from "@/lib/long-running-fetch";
-import { PROPOSAL_STAGE_TIMEOUT_MS } from "@/lib/proposal-stage-timeout";
+import { PROPOSAL_STAGE_MAX_DURATION_SEC } from "@/lib/proposal-stage-timeout";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
@@ -8,7 +8,7 @@ const BACKEND_URL =
   "http://localhost:8001";
 
 export const runtime = "nodejs";
-export const maxDuration = 900;
+export const maxDuration = PROPOSAL_STAGE_MAX_DURATION_SEC;
 
 export async function POST(
   request: Request,
@@ -25,12 +25,11 @@ export async function POST(
     return NextResponse.json({ detail: "Invalid JSON body." }, { status: 400 });
   }
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), PROPOSAL_STAGE_TIMEOUT_MS);
-    const onClientAbort = () => controller.abort();
-    request.signal.addEventListener("abort", onClientAbort);
+  const controller = new AbortController();
+  const onClientAbort = () => controller.abort();
+  request.signal.addEventListener("abort", onClientAbort);
 
+  try {
     const res = await longRunningFetch(
       `${BACKEND_URL}/api/v1/rfps/${id}/proposal/phase-4-auto-fix`,
       {
@@ -41,15 +40,16 @@ export async function POST(
         },
         body: JSON.stringify({ useLlm: body.useLlm ?? true }),
         signal: controller.signal,
-        timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS,
+        timeoutMs: 0,
       }
     );
-    clearTimeout(timeout);
-    request.signal.removeEventListener("abort", onClientAbort);
     const text = await res.text();
     if (!text.trim()) {
       return NextResponse.json(
-        { detail: "Empty response from backend (auto-fix may have timed out)." },
+        {
+          detail:
+            "Empty response from backend (auto-fix may have failed mid-request).",
+        },
         { status: 502 }
       );
     }
@@ -70,5 +70,7 @@ export async function POST(
     const message =
       error instanceof Error ? error.message : "Pre-submit auto-fix failed";
     return NextResponse.json({ detail: message }, { status: 502 });
+  } finally {
+    request.signal.removeEventListener("abort", onClientAbort);
   }
 }

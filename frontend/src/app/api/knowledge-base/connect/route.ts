@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
+import { longRunningFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
 
 export async function POST() {
   try {
-    const response = await fetch(
+    const response = await longRunningFetch(
       `${BACKEND_URL}/api/v1/knowledge-base/connect/google-drive`,
       {
         method: "POST",

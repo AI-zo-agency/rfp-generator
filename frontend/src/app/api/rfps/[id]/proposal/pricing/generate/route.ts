@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { longRunningFetch } from "@/lib/long-running-fetch";
-import { PROPOSAL_STAGE_TIMEOUT_MS } from "@/lib/proposal-stage-timeout";
+import {
+  PROPOSAL_STAGE_TIMEOUT_MS,
+  PROPOSAL_STAGE_MAX_DURATION_SEC
+} from "@/lib/proposal-stage-timeout";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
@@ -8,7 +11,7 @@ const BACKEND_URL =
   "http://localhost:8001";
 
 export const runtime = "nodejs";
-export const maxDuration = 900;
+export const maxDuration = PROPOSAL_STAGE_MAX_DURATION_SEC;
 
 export async function POST(
   _request: Request,

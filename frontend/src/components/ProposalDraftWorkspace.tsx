@@ -232,6 +232,8 @@ export function ProposalDraftWorkspace({
   );
   const [selectedArchiveId, setSelectedArchiveId] = useState("");
   const [isRestoringArchive, setIsRestoringArchive] = useState(false);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const [isResettingDraft, setIsResettingDraft] = useState(false);
   const [gapResolveNotice, setGapResolveNotice] = useState<string | null>(null);
   const [gapResolveError, setGapResolveError] = useState<string | null>(null);
   const [presubmitReview, setPresubmitReview] = useState<PreSubmitReview | null>(null);
@@ -319,6 +321,8 @@ export function ProposalDraftWorkspace({
 
   const applySectionImproveFromServer = useCallback(
     (updatedDraft: ProposalOutline, updatedResearch: ProposalResearch | null) => {
+      // Backend already persisted the improved manuscript + After snapshot.
+      // Do not PUT again — a slim client save can race and drop chat content.
       applyOutlineFromServer(updatedDraft);
       if (updatedResearch) {
         setResearch(updatedResearch);
@@ -326,18 +330,34 @@ export function ProposalDraftWorkspace({
           setBudget(updatedResearch.budget);
         }
       }
-      void saveProposalDraft(rfp.id, updatedDraft).then(() => {
-        void fetchProposalDraft(rfp.id).then((snap) => {
-          if (snap.draft) {
-            applyOutlineFromServer(snap.draft);
+      const authoritativeIds = new Set(
+        updatedDraft.sections.map((section) => section.id)
+      );
+      const authoritativeCount = updatedDraft.sections.length;
+      void fetchProposalDraft(rfp.id).then((snap) => {
+        if (!snap.draft) return;
+        const snapIds = new Set(snap.draft.sections.map((section) => section.id));
+        const missing = [...authoritativeIds].filter((id) => !snapIds.has(id));
+        // Stale autosave can wipe sections the improve just added — push back.
+        if (
+          missing.length > 0 ||
+          snap.draft.sections.length < authoritativeCount
+        ) {
+          const repaired: ProposalOutline = {
+            ...updatedDraft,
+            updatedAt: new Date().toISOString(),
+          };
+          applyOutlineFromServer(repaired);
+          void saveProposalDraft(rfp.id, repaired);
+          return;
+        }
+        applyOutlineFromServer(snap.draft);
+        if (snap.research) {
+          setResearch(snap.research);
+          if (snap.research.budget) {
+            setBudget(snap.research.budget);
           }
-          if (snap.research) {
-            setResearch(snap.research);
-            if (snap.research.budget) {
-              setBudget(snap.research.budget);
-            }
-          }
-        });
+        }
       });
     },
     [applyOutlineFromServer, rfp.id]
@@ -373,21 +393,29 @@ export function ProposalDraftWorkspace({
     setActiveSubmissionFlag((current) =>
       current && current.sectionId !== id ? null : current
     );
+    // Always land in the editor for the clicked section — including empty ones.
+    setActiveTab("outline");
   }, []);
 
   const scrollToManuscriptSection = useCallback((requestedId: string) => {
     const targetId = resolveManuscriptJumpTarget(outline.sections, requestedId);
-    const scroller =
-      activeTab === "export"
-        ? submitScrollRef.current
-        : contentScrollRef.current;
-    const target = document.getElementById(targetId);
-    if (!target) return;
     setActiveSubmissionFlag((current) =>
       current && current.sectionId !== targetId ? null : current
     );
     setHighlightedSectionId(targetId);
     setSelectedSectionId(targetId);
+
+    const scroller =
+      activeTab === "export"
+        ? submitScrollRef.current
+        : contentScrollRef.current;
+    const target = document.getElementById(targetId);
+    if (!target) {
+      // Empty sections may not be mounted on Submit — open Sections editor instead.
+      setActiveTab("outline");
+      window.setTimeout(() => setHighlightedSectionId(null), 2200);
+      return;
+    }
     window.setTimeout(() => setHighlightedSectionId(null), 2200);
     const scrollableScroller =
       scroller && scroller.scrollHeight > scroller.clientHeight + 2;
@@ -884,6 +912,18 @@ export function ProposalDraftWorkspace({
     [rfp.id, manualFillCount, applyOutlineFromServer]
   );
 
+  const refreshDraftArchives = useCallback(async () => {
+    try {
+      const archives = await listProposalArchives(rfp.id);
+      setDraftArchives(archives);
+      setSelectedArchiveId((prev) =>
+        archives.some((a) => a.id === prev) ? prev : (archives[0]?.id ?? "")
+      );
+    } catch {
+      // Archives are optional until migration is applied.
+    }
+  }, [rfp.id]);
+
   const handleRestoreSnapshot = useCallback(
     async (savedAtOverride?: string) => {
       const savedAt = savedAtOverride ?? restoreSnapshotAt;
@@ -893,19 +933,42 @@ export function ProposalDraftWorkspace({
         "saved version";
       if (
         !confirm(
-          `Restore proposal to "${label}"?\n\nCurrent text will be replaced with that saved copy.`
+          `Load checkpoint “${label}”?\n\n` +
+            "This replaces the FULL live proposal with that saved copy.\n" +
+            "Example: an earlier Form 2 checkpoint will clear Form 3/References if they were added later."
         )
       ) {
         return false;
       }
       setIsRestoringSnapshot(true);
       setGapResolveError(null);
+      const beforeSections = outline.sections;
       try {
         const restored = await restoreProposalSnapshot(rfp.id, savedAt);
         applyOutlineFromServer(restored);
-        await saveProposalDraft(rfp.id, restored);
         setRestoreSnapshotAt(savedAt);
-        setGapResolveNotice(`Restored proposal to "${label}".`);
+
+        const beforeById = new Map(
+          beforeSections.map((s) => [s.id, (s.content || "").trim()] as const)
+        );
+        const changed =
+          restored.sections.find((s) => {
+            const prev = beforeById.get(s.id) ?? "";
+            const next = (s.content || "").trim();
+            return prev !== next;
+          }) ??
+          restored.sections.find((s) => (s.content || "").trim()) ??
+          restored.sections[0];
+        if (changed) {
+          setSelectedSectionId(changed.id);
+        }
+
+        const filled = restored.sections.filter((s) =>
+          Boolean(s.content?.trim())
+        ).length;
+        setGapResolveNotice(
+          `Restored “${label}” (${filled} sections with content). Opened “${changed?.title ?? "proposal"}” so you can see the change.`
+        );
         setActiveTab("outline");
         return true;
       } catch (error) {
@@ -917,7 +980,7 @@ export function ProposalDraftWorkspace({
         setIsRestoringSnapshot(false);
       }
     },
-    [restoreSnapshotAt, outline.snapshots, rfp.id, applyOutlineFromServer]
+    [restoreSnapshotAt, outline.snapshots, outline.sections, rfp.id, applyOutlineFromServer]
   );
 
   const handleSnapshotDropdownChange = useCallback(
@@ -932,18 +995,6 @@ export function ProposalDraftWorkspace({
     },
     [restoreSnapshotAt, handleRestoreSnapshot]
   );
-
-  const refreshDraftArchives = useCallback(async () => {
-    try {
-      const archives = await listProposalArchives(rfp.id);
-      setDraftArchives(archives);
-      setSelectedArchiveId((prev) =>
-        archives.some((a) => a.id === prev) ? prev : (archives[0]?.id ?? "")
-      );
-    } catch {
-      // Archives are optional until migration is applied.
-    }
-  }, [rfp.id]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -990,18 +1041,11 @@ export function ProposalDraftWorkspace({
     ]
   );
 
-  const handleArchiveDropdownChange = useCallback(
-    async (archiveId: string) => {
-      if (!archiveId || archiveId === selectedArchiveId) return;
-      const previous = selectedArchiveId;
-      setSelectedArchiveId(archiveId);
-      const ok = await handleRestoreArchive(archiveId);
-      if (!ok) {
-        setSelectedArchiveId(previous);
-      }
-    },
-    [selectedArchiveId, handleRestoreArchive]
-  );
+  const handleArchiveDropdownChange = useCallback((archiveId: string) => {
+    // Selection only — restore requires the explicit Restore archive action.
+    if (!archiveId) return;
+    setSelectedArchiveId(archiveId);
+  }, []);
 
   useEffect(() => {
     const snaps = outline.snapshots ?? [];
@@ -1010,7 +1054,12 @@ export function ProposalDraftWorkspace({
       return;
     }
     if (!snaps.some((s) => s.savedAt === restoreSnapshotAt)) {
-      setRestoreSnapshotAt(snaps[snaps.length - 1]!.savedAt);
+      const preferred =
+        [...snaps]
+          .reverse()
+          .find((s) => /saved after chat|after improving/i.test(s.label ?? "")) ??
+        snaps[snaps.length - 1]!;
+      setRestoreSnapshotAt(preferred.savedAt);
     }
   }, [outline.snapshots, restoreSnapshotAt]);
 
@@ -1487,13 +1536,8 @@ export function ProposalDraftWorkspace({
   }, [rfp, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, applyOutlineFromServer]);
 
   const handleResetOutline = async () => {
-    if (
-      !confirm(
-        "Reset outline and clear ALL generated content?\n\nThis will:\n• Archive the current filled manuscript (if any) for rollback\n• Delete live sections, pipeline checkpoints, and research cache\n• Cancel any generation currently running\n\nYou can restore from Archives after reset."
-      )
-    ) {
-      return;
-    }
+    setIsResettingDraft(true);
+    setResetConfirmOpen(false);
 
     // Cancel in-flight Full Proposal / budget HTTP calls first
     fullProposalAbortRef.current?.abort();
@@ -1553,6 +1597,8 @@ export function ProposalDraftWorkspace({
       setSelectedArchiveId(archives[0]?.id ?? "");
     } catch {
       // Non-fatal
+    } finally {
+      setIsResettingDraft(false);
     }
   };
 
@@ -1729,12 +1775,51 @@ export function ProposalDraftWorkspace({
   };
 
   const removeSection = (id: string) => {
+    const target = outline.sections.find((s) => s.id === id);
+    if (!target) return;
+    if (outline.sections.length <= 1) return;
+    const ok = window.confirm(`Delete “${target.title}”? This can’t be undone from here.`);
+    if (!ok) return;
+
     setOutline((prev) => {
-      const sections = prev.sections.filter((s) => s.id !== id);
+      let bio = 0;
+      let work = 0;
+      const sections = prev.sections
+        .filter((s) => s.id !== id)
+        .map((s) => {
+          if (
+            s.id.startsWith("section-2-bio-") &&
+            s.id !== "section-2-bio-placeholder"
+          ) {
+            bio += 1;
+            const name = s.title.includes("—")
+              ? s.title.split("—").slice(1).join("—").trim()
+              : s.title;
+            return { ...s, title: `2.${bio} — ${name}` };
+          }
+          if (
+            s.id.startsWith("section-3-work-") &&
+            s.id !== "section-3-work-placeholder"
+          ) {
+            work += 1;
+            const name = s.title.includes("—")
+              ? s.title.split("—").slice(1).join("—").trim()
+              : s.title;
+            return { ...s, title: `3.${work} — ${name}` };
+          }
+          return s;
+        });
       if (selectedSectionId === id) {
         setSelectedSectionId(sections[0]?.id ?? null);
       }
       return { ...prev, sections, updatedAt: new Date().toISOString() };
+    });
+    setSectionRevisions((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      persistStoredRevisions(rfp.id, next);
+      return next;
     });
   };
 
@@ -1972,24 +2057,34 @@ export function ProposalDraftWorkspace({
               {manuscriptProgress.complete}/{manuscriptProgress.total} drafted
             </span>
             <div className="proposal-tab-actions-toolbar">
-            {(outline.snapshots?.length ?? 0) > 0 ? (
-              <label className="proposal-snapshot-field">
-                <span className="proposal-snapshot-field-label">
-                  Saved version
-                </span>
-                <span className="proposal-snapshot-field-control">
-                  <select
-                    value={restoreSnapshotAt}
-                    onChange={(e) =>
-                      void handleSnapshotDropdownChange(e.target.value)
-                    }
-                    disabled={isRestoringSnapshot || anyPipelineRunning}
-                    className="proposal-snapshot-select"
-                    aria-label="Restore a saved version"
-                    aria-busy={isRestoringSnapshot}
-                    title="Pick a snapshot to restore the full draft"
-                  >
-                    {[...(outline.snapshots ?? [])].reverse().map((snap) => (
+            <label className="proposal-snapshot-field">
+              <span className="proposal-snapshot-field-label">
+                Saved version
+              </span>
+              <span className="proposal-snapshot-field-control">
+                <select
+                  value={restoreSnapshotAt}
+                  onChange={(e) =>
+                    void handleSnapshotDropdownChange(e.target.value)
+                  }
+                  disabled={
+                    isRestoringSnapshot ||
+                    anyPipelineRunning ||
+                    (outline.snapshots?.length ?? 0) === 0
+                  }
+                  className="proposal-snapshot-select"
+                  aria-label="Load a saved proposal checkpoint"
+                  aria-busy={isRestoringSnapshot}
+                  title={
+                    (outline.snapshots?.length ?? 0) > 0
+                      ? "Select a checkpoint to load that full proposal (confirm first)."
+                      : "Versions appear after chat improve, Scan RFP, or when a draft checkpoint is saved."
+                  }
+                >
+                  {(outline.snapshots?.length ?? 0) === 0 ? (
+                    <option value="">No versions yet</option>
+                  ) : (
+                    [...(outline.snapshots ?? [])].reverse().map((snap) => (
                       <option key={snap.savedAt} value={snap.savedAt}>
                         {snap.label}
                         {" · "}
@@ -2000,52 +2095,31 @@ export function ProposalDraftWorkspace({
                           minute: "2-digit",
                         })}
                       </option>
-                    ))}
-                  </select>
-                </span>
-              </label>
-            ) : null}
-            {draftArchives.length > 0 ? (
-              <label className="proposal-snapshot-field">
-                <span className="proposal-snapshot-field-label">
-                  Archive
-                </span>
-                <span className="proposal-snapshot-field-control">
-                  <select
-                    value={selectedArchiveId}
-                    onChange={(e) =>
-                      void handleArchiveDropdownChange(e.target.value)
-                    }
-                    disabled={isRestoringArchive || anyPipelineRunning}
-                    className="proposal-snapshot-select"
-                    aria-label="Restore an archived manuscript"
-                    aria-busy={isRestoringArchive}
-                    title="Roll back to a manuscript archived before regenerate or reset"
-                  >
-                    {draftArchives.map((arch) => (
-                      <option key={arch.id} value={arch.id}>
-                        {arch.label || arch.reason}
-                        {" · "}
-                        {arch.filledCount} filled
-                        {" · "}
-                        {new Date(arch.archivedAt).toLocaleString(undefined, {
-                          month: "short",
-                          day: "numeric",
-                          hour: "numeric",
-                          minute: "2-digit",
-                        })}
-                      </option>
-                    ))}
-                  </select>
-                </span>
-              </label>
-            ) : null}
+                    ))
+                  )}
+                </select>
+              </span>
+              <button
+                type="button"
+                className="proposal-tab-text-btn"
+                disabled={
+                  !restoreSnapshotAt ||
+                  isRestoringSnapshot ||
+                  anyPipelineRunning ||
+                  (outline.snapshots?.length ?? 0) === 0
+                }
+                onClick={() => void handleRestoreSnapshot()}
+              >
+                {isRestoringSnapshot ? "Restoring…" : "Restore"}
+              </button>
+            </label>
             <button
               type="button"
-              onClick={() => void handleResetOutline()}
-              className="zo-btn secondary proposal-toolbar-btn"
+              onClick={() => setResetConfirmOpen(true)}
+              disabled={isResettingDraft}
+              className="zo-btn secondary proposal-toolbar-btn disabled:opacity-60"
             >
-              Reset draft
+              {isResettingDraft ? "Resetting…" : "Reset draft"}
             </button>
             {anyPipelineRunning ? (
               <button
@@ -2096,6 +2170,7 @@ export function ProposalDraftWorkspace({
                   selectSection(sectionId);
                   setRevisionDrawerSectionId(sectionId);
                 }}
+                onDeleteSection={removeSection}
               />
             </ul>
 
@@ -2142,17 +2217,15 @@ export function ProposalDraftWorkspace({
                       aria-label="Section title"
                     />
                     <div className="ml-auto flex shrink-0 flex-wrap items-center gap-1">
-                      {selectedSection.custom ? (
-                        <IconButton
-                          onClick={() => removeSection(selectedSection.id)}
-                          label="Remove section"
-                          variant="danger"
-                        >
-                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </IconButton>
-                      ) : null}
+                      <IconButton
+                        onClick={() => removeSection(selectedSection.id)}
+                        label="Remove section"
+                        variant="danger"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </IconButton>
                     </div>
                   </div>
                 </div>
@@ -2393,7 +2466,9 @@ export function ProposalDraftWorkspace({
                   <article
                     key={section.id}
                     id={section.id}
-                    className="proposal-content-article scroll-mt-32 border border-dashed border-zo-border/80 bg-[var(--zo-input-bg)]/40 opacity-90"
+                    className={`proposal-content-article scroll-mt-32 border border-dashed border-zo-border/80 bg-[var(--zo-input-bg)]/40 opacity-90 ${
+                      highlightedSectionId === section.id ? "is-flag-target" : ""
+                    }`}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div className="flex min-w-0 items-center gap-3">
@@ -2405,11 +2480,20 @@ export function ProposalDraftWorkspace({
                             {section.title}
                           </h3>
                           <p className="mt-0.5 text-[11px] font-medium text-zo-orange">
-                            {isFullProposalRunning ? "Generating…" : "Waiting for draft"}
+                            {isFullProposalRunning ? "Generating…" : "Not drafted yet"}
                           </p>
                         </div>
                       </div>
-                      <SectionStatusPill status={section.status || "outline"} />
+                      <div className="flex shrink-0 items-center gap-2">
+                        <SectionStatusPill status={section.status || "outline"} />
+                        <button
+                          type="button"
+                          className="zo-btn !px-3 !py-1.5 !text-xs"
+                          onClick={() => selectSection(section.id)}
+                        >
+                          Open editor
+                        </button>
+                      </div>
                     </div>
                   </article>
                   )
@@ -2527,7 +2611,38 @@ export function ProposalDraftWorkspace({
                             />
                           </div>
                         </article>
-                      ) : null
+                      ) : (
+                        <article
+                          key={section.id}
+                          id={section.id}
+                          className={`proposal-content-article scroll-mt-32 border border-dashed border-zo-border/80 bg-[var(--zo-input-bg)]/40 opacity-90 ${
+                            highlightedSectionId === section.id ? "is-flag-target" : ""
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex min-w-0 items-center gap-3">
+                              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-zo-border bg-white text-sm font-bold text-zo-text-muted">
+                                {index + 1}
+                              </span>
+                              <div className="min-w-0">
+                                <h3 className="text-[1.05rem] font-bold leading-tight tracking-tight text-foreground">
+                                  {section.title}
+                                </h3>
+                                <p className="mt-0.5 text-[11px] font-medium text-zo-orange">
+                                  Not drafted yet
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              className="zo-btn !px-3 !py-1.5 !text-xs"
+                              onClick={() => selectSection(section.id)}
+                            >
+                              Open editor
+                            </button>
+                          </div>
+                        </article>
+                      )
                     )}
                   </div>
                 </div>
@@ -2625,6 +2740,66 @@ export function ProposalDraftWorkspace({
                 />
               </div>
             </>,
+            document.body
+          )
+        : null}
+      {resetConfirmOpen && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[200] flex items-center justify-center p-4 sm:p-6"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="reset-draft-title"
+            >
+              <button
+                type="button"
+                className="absolute inset-0 bg-slate-900/20 backdrop-blur-[2px]"
+                aria-label="Close reset confirmation"
+                disabled={isResettingDraft}
+                onClick={() => !isResettingDraft && setResetConfirmOpen(false)}
+              />
+              <div className="relative z-10 w-full max-w-md rounded-2xl border border-zo-border bg-white p-6 shadow-[0_24px_64px_rgba(15,23,42,0.12)]">
+                <h2
+                  id="reset-draft-title"
+                  className="font-heading text-lg font-bold text-foreground"
+                >
+                  Reset outline and clear all generated content?
+                </h2>
+                <p className="mt-2 text-sm leading-relaxed text-zo-text-secondary">
+                  This will:
+                </p>
+                <ul className="mt-2 list-disc space-y-1.5 pl-5 text-sm leading-relaxed text-zo-text-secondary">
+                  <li>Archive the current filled manuscript (if any) for rollback</li>
+                  <li>
+                    Delete live sections, pipeline checkpoints, and research cache
+                    from Supabase
+                  </li>
+                  <li>Cancel any generation currently running</li>
+                </ul>
+                <p className="mt-3 text-sm leading-relaxed text-zo-text-muted">
+                  You can restore a filled manuscript from Archives after reset.
+                  Research is not archived separately.
+                </p>
+                <div className="mt-6 flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setResetConfirmOpen(false)}
+                    disabled={isResettingDraft}
+                    className="zo-btn secondary !py-2.5 disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleResetOutline()}
+                    disabled={isResettingDraft}
+                    className="zo-btn !border-zo-danger !bg-zo-danger !py-2.5 hover:!bg-red-700 disabled:opacity-50"
+                  >
+                    {isResettingDraft ? "Resetting…" : "Reset draft"}
+                  </button>
+                </div>
+              </div>
+            </div>,
             document.body
           )
         : null}

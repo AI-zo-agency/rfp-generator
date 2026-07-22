@@ -7,7 +7,7 @@ import { ProposalsWorkspace } from "@/components/ProposalsWorkspace";
 import { ProposalsWorkspaceSkeleton } from "@/components/loading/ProposalsWorkspaceSkeleton";
 import type { RfpRecord } from "@/types/rfp";
 
-const GO_RFP_FETCH_TIMEOUT_MS = 25_000;
+const GO_RFP_FETCH_TIMEOUT_MS = 0; // 0 = wait; no artificial abort
 
 function filterGoRfps(all: RfpRecord[]): RfpRecord[] {
   return all.filter(
@@ -17,10 +17,10 @@ function filterGoRfps(all: RfpRecord[]): RfpRecord[] {
   );
 }
 
-async function fetchRfpById(id: string, signal: AbortSignal): Promise<RfpRecord | null> {
+async function fetchRfpById(id: string, signal?: AbortSignal): Promise<RfpRecord | null> {
   const res = await fetch(`/api/rfps/${encodeURIComponent(id)}`, {
     cache: "no-store",
-    signal,
+    ...(signal ? { signal } : {}),
   });
   if (!res.ok) return null;
   const data = (await res.json()) as RfpRecord;
@@ -39,7 +39,10 @@ function ProposalsWorkspaceClientInner() {
     setLoading(true);
     setLoadError(null);
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), GO_RFP_FETCH_TIMEOUT_MS);
+    const timer =
+      GO_RFP_FETCH_TIMEOUT_MS > 0
+        ? window.setTimeout(() => controller.abort(), GO_RFP_FETCH_TIMEOUT_MS)
+        : null;
 
     let list: RfpRecord[] = [];
     let errorMessage: string | null = null;
@@ -47,7 +50,7 @@ function ProposalsWorkspaceClientInner() {
     try {
       const res = await fetch("/api/rfps/list", {
         cache: "no-store",
-        signal: controller.signal,
+        ...(GO_RFP_FETCH_TIMEOUT_MS > 0 ? { signal: controller.signal } : {}),
       });
       const body = await res.json();
       if (!res.ok) {
@@ -66,12 +69,12 @@ function ProposalsWorkspaceClientInner() {
             ? error.message
             : "Could not load Go RFPs.";
     } finally {
-      window.clearTimeout(timer);
+      if (timer != null) window.clearTimeout(timer);
     }
 
     if (rfpFromUrl && !list.some((r) => r.id === rfpFromUrl)) {
       try {
-        const one = await fetchRfpById(rfpFromUrl, AbortSignal.timeout(20_000));
+        const one = await fetchRfpById(rfpFromUrl);
         if (one) {
           list = [...list, one];
           errorMessage = null;

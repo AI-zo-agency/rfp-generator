@@ -1,8 +1,14 @@
 import { NextResponse } from "next/server";
+import { longRunningFetch } from "@/lib/long-running-fetch";
+import { PROPOSAL_STAGE_MAX_DURATION_SEC } from "@/lib/proposal-stage-timeout";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
-/** Go/No-Go runs KB search + large JSON LLM (~60–90s). */
-const ANALYZE_TIMEOUT_MS = 4 * 60 * 1000;
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  process.env.BACKEND_URL ||
+  "http://localhost:8001";
+
+export const maxDuration = PROPOSAL_STAGE_MAX_DURATION_SEC;
+export const runtime = "nodejs";
 
 export async function POST(
   _request: Request,
@@ -11,12 +17,15 @@ export async function POST(
   const { id } = await params;
 
   try {
-    const response = await fetch(`${BACKEND_URL}/api/v1/rfps/${id}/analyze`, {
-      method: "POST",
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-      signal: AbortSignal.timeout(ANALYZE_TIMEOUT_MS),
-    });
+    const response = await longRunningFetch(
+      `${BACKEND_URL}/api/v1/rfps/${id}/analyze`,
+      {
+        method: "POST",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+        timeoutMs: 0,
+      }
+    );
 
     const text = await response.text();
     if (!text.trim()) {
@@ -40,14 +49,11 @@ export async function POST(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Backend unreachable";
-    const isTimeout = message.toLowerCase().includes("timeout");
     return NextResponse.json(
       {
-        detail: isTimeout
-          ? "Go/No-Go analysis timed out — try again (large RFPs can take 1–2 minutes)."
-          : `Cannot reach API at ${BACKEND_URL}. Start the FastAPI backend. (${message})`,
+        detail: `Cannot reach API at ${BACKEND_URL}. Start the FastAPI backend. (${message})`,
       },
-      { status: isTimeout ? 504 : 503 }
+      { status: 503 }
     );
   }
 }

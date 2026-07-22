@@ -2,21 +2,26 @@ import { backendFetch } from "@/lib/backend-api";
 import { withDashboardPdfUrl } from "@/lib/rfp-pdf";
 import { computeStats } from "@/lib/mock-rfps";
 import type { DashboardStats, RfpRecord } from "@/types/rfp";
+import { PROPOSAL_STAGE_MAX_DURATION_SEC } from "@/lib/proposal-stage-timeout";
 import { NextResponse } from "next/server";
 
-const DASHBOARD_PROXY_TIMEOUT_MS = 45_000;
+export const maxDuration = PROPOSAL_STAGE_MAX_DURATION_SEC;
+export const runtime = "nodejs";
 
 export async function GET() {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DASHBOARD_PROXY_TIMEOUT_MS);
   try {
     const response = await backendFetch("/rfps/dashboard", {
-      signal: controller.signal,
+      timeoutMs: 0,
     });
     const text = await response.text();
     if (!text.trim()) {
       return NextResponse.json(
-        { error: "Empty response from backend", rfps: [], allRfps: [], stats: computeStats([]) },
+        {
+          error: "Empty response from backend",
+          rfps: [],
+          allRfps: [],
+          stats: computeStats([]),
+        },
         { status: 502 }
       );
     }
@@ -27,7 +32,12 @@ export async function GET() {
     };
     if (!response.ok) {
       return NextResponse.json(
-        { error: "Dashboard request failed", rfps: [], allRfps: [], stats: computeStats([]) },
+        {
+          error: "Dashboard request failed",
+          rfps: [],
+          allRfps: [],
+          stats: computeStats([]),
+        },
         { status: response.status }
       );
     }
@@ -38,22 +48,16 @@ export async function GET() {
       source: "backend",
     });
   } catch (error) {
-    const timedOut = error instanceof Error && error.name === "AbortError";
     return NextResponse.json(
       {
-        error: timedOut
-          ? "Dashboard timed out — backend may be busy. Retry shortly."
-          : error instanceof Error
-            ? error.message
-            : "Backend unreachable",
+        error:
+          error instanceof Error ? error.message : "Backend unreachable",
         rfps: [],
         allRfps: [],
         stats: computeStats([]),
       },
-      { status: timedOut ? 504 : 503 }
+      { status: 503 }
     );
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -65,7 +69,10 @@ export async function POST(request: Request) {
     const response = await backendFetch("/rfps", {
       method: "POST",
       body: isMultipart ? await request.formData() : await request.text(),
-      headers: isMultipart ? undefined : { "Content-Type": contentType || "application/json" },
+      headers: isMultipart
+        ? undefined
+        : { "Content-Type": contentType || "application/json" },
+      timeoutMs: 0,
     });
 
     const text = await response.text();

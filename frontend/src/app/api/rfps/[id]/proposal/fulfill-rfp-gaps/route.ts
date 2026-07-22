@@ -1,7 +1,8 @@
 import { proxyProposalPhasePost } from "@/lib/proposal-phase-route";
+import { PROPOSAL_STAGE_MAX_DURATION_SEC } from "@/lib/proposal-stage-timeout";
 
 export const runtime = "nodejs";
-export const maxDuration = 900;
+export const maxDuration = PROPOSAL_STAGE_MAX_DURATION_SEC;
 
 export async function POST(
   request: Request,

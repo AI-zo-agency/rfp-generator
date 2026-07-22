@@ -46,6 +46,39 @@ export interface ProposalPipelineCheckpoint {
 
 export const FULFILL_SCAN_PHASE = "fulfill-scan";
 
+const SECTION_DRAFT_FAILURE_MARKER =
+  "[VERIFY: Section drafting failed — needs manual regeneration]";
+
+/** Mirrors backend is_duplicate_static_rfp_section — skipped by Phase 3 drafting. */
+export function isDuplicateStaticRfpSection(title: string): boolean {
+  const t = title.trim();
+  if (!t) return false;
+  const patterns = [
+    /section\s*1\b/i,
+    /company\s+overview/i,
+    /section\s*2\b/i,
+    /team\s+(overview|bios|qualifications|experience)/i,
+    /section\s*3\b/i,
+    /(case\s+stud|our\s+work|past\s+performance|relevant\s+experience)/i,
+  ];
+  const hits = patterns.filter((p) => p.test(t)).length;
+  if (hits >= 2) return true;
+  if (/section\s*[123]\b/i.test(t) && /overview|company|team|work|case/i.test(t)) {
+    return true;
+  }
+  if (/^section\s*1\s*[—\-–:]\s*company\s+overview$/i.test(t)) return true;
+  if (/^section\s*2\s*[—\-–:]\s*team\s+overview$/i.test(t)) return true;
+  if (/^section\s*3\s*[—\-–:]\s*our\s+work/i.test(t)) return true;
+  return false;
+}
+
+function phase3SectionContentUsable(content: string | undefined | null): boolean {
+  const text = content?.trim() ?? "";
+  if (!text) return false;
+  if (text === SECTION_DRAFT_FAILURE_MARKER) return false;
+  return true;
+}
+
 export const FULFILL_SCAN_STEP_LABELS = [
   "Closing & submission",
   "RFP structure",
@@ -148,11 +181,16 @@ export function phaseIsComplete(
   }
   if (phase === "phase-3") {
     if (!draft || !research.rfpSections?.length) return false;
-    const mappedIds = new Set(research.rfpSections.map((s) => s.id));
+    const draftableIds = new Set(
+      research.rfpSections
+        .filter((s) => !isDuplicateStaticRfpSection(s.title))
+        .map((s) => s.id)
+    );
+    if (draftableIds.size === 0) return false;
     const filled = draft.sections.filter(
-      (s) => mappedIds.has(s.id) && s.content?.trim()
+      (s) => draftableIds.has(s.id) && phase3SectionContentUsable(s.content)
     ).length;
-    return filled >= Math.max(1, Math.floor(mappedIds.size * 0.85));
+    return filled >= draftableIds.size;
   }
   if (phase === "phase-3-6-self-edit") {
     if (selfEditConsideredComplete(draft, research)) return true;

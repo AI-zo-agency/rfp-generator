@@ -1,4 +1,9 @@
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
+import { longRunningFetch, type LongRunningFetchInit } from "@/lib/long-running-fetch";
+
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  process.env.BACKEND_URL ||
+  "http://localhost:8001";
 
 export function backendUrl(path: string): string {
   const base = BACKEND_URL.replace(/\/$/, "");
@@ -6,11 +11,15 @@ export function backendUrl(path: string): string {
   return `${base}/api/v1${suffix}`;
 }
 
+/**
+ * Next.js server → FastAPI. Uses undici with disabled idle timeouts so
+ * production proxies do not abort while the backend is still working.
+ */
 export async function backendFetch(
   path: string,
-  init?: RequestInit
+  init?: LongRunningFetchInit
 ): Promise<Response> {
-  return fetch(backendUrl(path), {
+  return longRunningFetch(backendUrl(path), {
     ...init,
     cache: "no-store",
     headers: {
@@ -22,7 +31,7 @@ export async function backendFetch(
 
 export async function backendJson<T>(
   path: string,
-  init?: RequestInit
+  init?: LongRunningFetchInit
 ): Promise<{ data: T | null; status: number; error?: string }> {
   try {
     const response = await backendFetch(path, init);

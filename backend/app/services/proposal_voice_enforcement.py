@@ -88,14 +88,36 @@ def _fix_we_verb_agreement(text: str) -> str:
     return _WE_VERB_AGREEMENT.sub(fix, text)
 
 
+def apply_writing_standards_mechanics(content: str) -> str:
+    """Deterministic rev 3 mechanics: company name + no em dashes."""
+    if not content.strip():
+        return content
+
+    text = content
+    # Em dashes / en dashes used as clause breaks → comma or hyphen for ranges.
+    text = text.replace("—", ",")
+    text = text.replace("–", "-")
+    # Common wrong company-name spellings → zö agency
+    text = re.sub(r"\bZO\s+Agency\b", "zö agency", text)
+    text = re.sub(r"\bZÖ\s+Agency\b", "zö agency", text)
+    text = re.sub(r"\bZö\s+Agency\b", "zö agency", text)
+    text = re.sub(r"\bZo\s+Agency\b", "zö agency", text)
+    text = re.sub(r"\bzo\s+agency\b", "zö agency", text)
+    # Cleanup double commas / spaces from dash swaps
+    text = re.sub(r",\s*,", ",", text)
+    text = re.sub(r"[ \t]+,", ",", text)
+    return text
+
+
 def fix_narrative_register(content: str) -> str:
     """Rewrite third-person procurement phrasing to first-person zö voice."""
     if not content.strip():
         return content
 
+    text = apply_writing_standards_mechanics(content)
     text = _SUBSECTION_VENDOR_HEADER.sub(
         r"\1Company Identification",
-        content,
+        text,
     )
     text = _PROCUREMENT_ENTITY.sub(_swap_entity, text)
     text = _AGENCY_THIRD.sub(_swap_agency_firm, text)
@@ -126,7 +148,7 @@ def enforce_narrative_voice(
         zo_mode=zo_mode,
     )
     if reg != "narrative":
-        return content
+        return apply_writing_standards_mechanics(content)
     return fix_narrative_register(content)
 
 

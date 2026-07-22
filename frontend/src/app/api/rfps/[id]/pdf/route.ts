@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { longRunningFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
 
@@ -10,7 +11,7 @@ async function proxyPdf(
   method: "GET" | "HEAD"
 ) {
   try {
-    const response = await fetch(`${BACKEND_URL}/api/v1/rfps/${id}/pdf`, {
+    const response = await longRunningFetch(`${BACKEND_URL}/api/v1/rfps/${id}/pdf`, {
       method,
       cache: "no-store",
       redirect: "manual",

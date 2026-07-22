@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { longRunningFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
@@ -20,7 +21,7 @@ export async function GET(
       `${BACKEND_URL}/api/v1/rfps/${id}/proposal/snapshot`
     );
     backendUrl.searchParams.set("savedAt", savedAt);
-    const response = await fetch(backendUrl.toString(), {
+    const response = await longRunningFetch(backendUrl.toString(), {
       cache: "no-store",
       headers: { Accept: "application/json" },
     });

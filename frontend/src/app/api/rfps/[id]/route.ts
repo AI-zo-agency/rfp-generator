@@ -2,6 +2,7 @@ import { supabase } from "@/lib/supabase-direct";
 import { withDashboardPdfUrl } from "@/lib/rfp-pdf";
 import { mapSupabaseRfpRow } from "@/lib/supabase-rfp-map";
 import { NextResponse } from "next/server";
+import { longRunningFetch } from "@/lib/long-running-fetch";
 
 export const dynamic = "force-dynamic";
 
@@ -51,7 +52,7 @@ export async function DELETE(
   const { id } = await params;
 
   try {
-    const response = await fetch(`${BACKEND_URL}/api/v1/rfps/${id}`, {
+    const response = await longRunningFetch(`${BACKEND_URL}/api/v1/rfps/${id}`, {
       method: "DELETE",
       headers: { Accept: "application/json" },
       cache: "no-store",

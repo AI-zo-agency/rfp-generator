@@ -28,7 +28,7 @@ from app.services.proposal_brand_voice import (
 )
 from app.services.proposal_loss_lessons import format_avoidance_block
 from app.services.proposal_voice_enforcement import enforce_narrative_voice
-from app.services.proposal_draft_snapshots import push_proposal_snapshot
+from app.services.proposal_draft_snapshots import push_after_section_edit_snapshot
 from app.services.proposal_repository import (
     aget_proposal_draft,
     aget_research_cache,
@@ -224,8 +224,38 @@ def _resolve_section_from_message(
         title = (section.title or "").strip()
         if len(title) >= 4 and title.casefold() in lower:
             return section
+
+    named_hits: list[ProposalSection] = []
+    for section in ranked:
+        title = (section.title or "").strip()
+        if "—" in title:
+            name = title.split("—", 1)[-1].strip()
+        elif "–" in title:
+            name = title.split("–", 1)[-1].strip()
+        else:
+            name = ""
+        name = re.sub(r"^\d+\.\d+\s*[—\-–:]\s*", "", name).strip()
+        if len(name) >= 4 and name.casefold() in lower:
+            named_hits.append(section)
+    if len(named_hits) == 1:
+        return named_hits[0]
+    if len(named_hits) > 1:
+        instead = re.search(
+            r"\b(?:instead\s+of|replace|remove|swap\s+out)\s+([^,.]+?)(?:\s+bio|\s+resume|\s+with|\s+for|$)",
+            text,
+            re.I,
+        )
+        if instead:
+            needle = instead.group(1).strip().casefold()
+            for section in named_hits:
+                title = section.title or ""
+                name = title.split("—", 1)[-1].strip() if "—" in title else title
+                if needle and needle in name.casefold():
+                    return section
+        return named_hits[0]
+
     num_match = re.search(
-        r"\b(?:section\s*)?(\d+(?:\.\d+)?)\b",
+        r"\b(?:section\s*)?(\d+\.\d+)\b",
         lower,
     )
     if num_match:
@@ -234,6 +264,18 @@ def _resolve_section_from_message(
             t = (section.title or "").casefold()
             if t.startswith(f"{num} ") or t.startswith(num):
                 return section
+
+    if re.search(r"\b(bio|bios|resume|resumes|team\s*bios?|team\s*member)\b", text, re.I):
+        bios = [
+            s
+            for s in draft.sections
+            if s.id.startswith("section-2-bio-") and s.id != "section-2-bio-placeholder"
+        ]
+        if bios:
+            if default and any(b.id == default.id for b in bios):
+                return default
+            return bios[-1]
+
     return default
 
 
@@ -1162,6 +1204,22 @@ async def _improve_static_section(
     return updated, provider
 
 
+async def _persist_section_improve_draft(
+    updated_draft: ProposalDraft,
+    research: ProposalResearchCache,
+    *,
+    section_title: str,
+) -> ProposalDraft:
+    """Save improved manuscript + an After snapshot so versions keep chat content."""
+    to_save = push_after_section_edit_snapshot(
+        updated_draft,
+        section_title=section_title,
+    )
+    await asave_proposal_draft(to_save)
+    await asave_research_cache(research)
+    return to_save
+
+
 async def improve_proposal_section(
     rfp_id: str,
     section_id: str,
@@ -1191,8 +1249,64 @@ async def improve_proposal_section(
         and selection_end > selection_start
     )
 
-    # When not pinned to a Revise-content excerpt, resolve the section the user named.
+    research = await aget_research_cache(rfp_id)
+
+    # When not pinned to a Revise-content excerpt, resolve structural asks
+    # (add/delete sections) before rewriting the focused tab.
     if not selection_mode:
+        from app.services.proposal_chat_structure import (
+            apply_chat_structure_plan,
+            plan_chat_structure_action,
+        )
+
+        structure_plan = await plan_chat_structure_action(
+            draft=draft,
+            user_message=user_message,
+            focus_section_id=section_id,
+            rfp_title=rfp.title,
+            rfp_client=rfp.client,
+            rfp_context=rfp_context,
+        )
+        if structure_plan.action == "clarify":
+            provider = _provider_name()
+            if research is None:
+                research = ProposalResearchCache(
+                    rfpId=rfp_id,
+                    updatedAt=datetime.now(timezone.utc).isoformat(),
+                    provider=provider,
+                )
+            question = (structure_plan.clarify_question or "").strip() or (
+                "Should I edit the current section, add new sidebar sections, or delete something?"
+            )
+            focus = _find_draft_section(draft, section_id) or draft.sections[0]
+            return focus, draft, research, provider, question, False
+
+        if structure_plan.action in {"add_sections", "delete_sections"}:
+            updated_draft, focus, assistant_message = await apply_chat_structure_plan(
+                draft=draft,
+                plan=structure_plan,
+                rfp_client=rfp.client,
+                rfp_sector=rfp.sector or "",
+                rfp_context=rfp_context or "",
+            )
+            provider = _provider_name()
+            if research is None:
+                research = ProposalResearchCache(
+                    rfpId=rfp_id,
+                    updatedAt=datetime.now(timezone.utc).isoformat(),
+                    provider=provider,
+                )
+            if persist:
+                updated_draft = await _persist_section_improve_draft(
+                    updated_draft,
+                    research,
+                    section_title=focus.title,
+                )
+            return focus, updated_draft, research, provider, assistant_message, True
+
+        if structure_plan.edit_section_id:
+            section_id = structure_plan.edit_section_id
+
         resolved = _resolve_section_from_message(draft, user_message, section_id)
         if resolved:
             section_id = resolved.id
@@ -1202,7 +1316,6 @@ async def improve_proposal_section(
         raise ProposalError(f"Section {section_id} not found in draft.", status_code=404)
     before_section = section.model_copy()
 
-    research = await aget_research_cache(rfp_id)
     requirements_block = _rfp_section_requirements_block(research, section_id)
     if requirements_block:
         rfp_context = f"{rfp_context}\n\n--- Mapped section requirements ---\n{requirements_block}"
@@ -1261,11 +1374,9 @@ async def improve_proposal_section(
     )
     user_message = _compose_chat_user_message(user_message, conversation_history)
 
-    if persist:
-        draft = push_proposal_snapshot(
-            draft,
-            label=f"Before chat edit — {section.title[:48]}",
-        )
+    # Do not snapshot a pre-chat "undo point" into the version menu — those empty
+    # copies were wiping chat improvements when selected. Section revision drawer
+    # still keeps before/after for the edited section.
     is_static = section_id in STATIC_SECTION_IDS or section.source == "template"
 
     brand_voice_dict, kb_zo_voice = await resolve_voice_context(
@@ -1399,8 +1510,11 @@ async def improve_proposal_section(
                 }
             )
             if persist:
-                await asave_proposal_draft(updated_draft)
-                await asave_research_cache(research)
+                updated_draft = await _persist_section_improve_draft(
+                    updated_draft,
+                    research,
+                    section_title=section.title,
+                )
             before_words = word_count(before_section.content or "")
             after_words = word_count(updated_section.content or "")
             filled_labels = ", ".join(gap_fields) if gap_fields else "missing fields"
@@ -1456,8 +1570,11 @@ async def improve_proposal_section(
             }
         )
         if persist:
-            await asave_proposal_draft(updated_draft)
-            await asave_research_cache(research)
+            updated_draft = await _persist_section_improve_draft(
+                updated_draft,
+                research,
+                section_title=section.title,
+            )
 
         before_words = word_count(before_section.content or "")
         after_words = word_count(updated_section.content or "")
@@ -1660,8 +1777,11 @@ async def improve_proposal_section(
         }
     )
     if persist:
-        await asave_proposal_draft(updated_draft)
-        await asave_research_cache(research)
+        updated_draft = await _persist_section_improve_draft(
+            updated_draft,
+            research,
+            section_title=section.title,
+        )
 
     word_count_result = word_count(updated_section.content)
     remaining_gaps = _gap_fields_from_text(updated_section.content or "")

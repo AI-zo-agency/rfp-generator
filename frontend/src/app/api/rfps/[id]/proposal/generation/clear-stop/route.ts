@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { longRunningFetch } from "@/lib/long-running-fetch";
 
 export const runtime = "nodejs";
 
@@ -12,7 +13,7 @@ export async function POST(
     process.env.BACKEND_URL ||
     "http://localhost:8001";
   try {
-    const response = await fetch(
+    const response = await longRunningFetch(
       `${backendUrl}/api/v1/rfps/${id}/proposal/generation/clear-stop`,
       {
         method: "POST",

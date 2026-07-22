@@ -449,15 +449,25 @@ def phase_is_complete(
     if phase == "phase-3":
         if not draft or not research.rfp_sections:
             return False
-        mapped_ids = {section.id for section in research.rfp_sections}
-        if not mapped_ids:
+        from app.services.proposal_draft_llm import SECTION_DRAFT_FAILURE_PLACEHOLDER
+        from app.services.proposal_voice_enforcement import is_duplicate_static_rfp_section
+
+        draftable_ids = {
+            section.id
+            for section in research.rfp_sections
+            if not is_duplicate_static_rfp_section(section.title)
+        }
+        if not draftable_ids:
             return False
-        filled = sum(
-            1
-            for section in draft.sections
-            if section.id in mapped_ids and section.content.strip()
-        )
-        return filled >= max(1, int(len(mapped_ids) * 0.85))
+        filled = 0
+        for section in draft.sections:
+            if section.id not in draftable_ids:
+                continue
+            text = section.content.strip()
+            if not text or text == SECTION_DRAFT_FAILURE_PLACEHOLDER.strip():
+                continue
+            filled += 1
+        return filled >= len(draftable_ids)
 
     if phase == "phase-3-6-self-edit":
         if _self_edit_considered_complete(draft=draft, research=research):

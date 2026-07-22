@@ -180,6 +180,45 @@ def _section_weight(section: dict[str, Any]) -> int:
     return 0
 
 
+def order_sections_for_phase3_draft(
+    sections: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Preserve Phase 2 outline/manuscript order for drafting sequence.
+
+    Evaluation weight still drives word targets and prompt depth, but must not
+    reorder drafting — weight-first left form/compliance tabs (weight 0) empty
+    while later scored tabs filled, desyncing the UI from generation progress.
+    """
+    return list(sections)
+
+
+def _phase3_content_is_usable(content: str | None) -> bool:
+    text = (content or "").strip()
+    if not text:
+        return False
+    if text == SECTION_DRAFT_FAILURE_PLACEHOLDER.strip():
+        return False
+    return True
+
+
+def partition_phase3_sections(
+    rfp_sections: list[RfpSectionMap],
+    existing_by_id: dict[str, ProposalSection],
+) -> tuple[list[RfpSectionMap], list[ProposalSection]]:
+    """Split mapped sections into ones still needing a draft vs already filled."""
+    to_draft: list[RfpSectionMap] = []
+    already: list[ProposalSection] = []
+    for mapped in rfp_sections:
+        if is_duplicate_static_rfp_section(mapped.title):
+            continue
+        existing = existing_by_id.get(mapped.id)
+        if existing and _phase3_content_is_usable(existing.content):
+            already.append(existing)
+            continue
+        to_draft.append(mapped)
+    return to_draft, already
+
+
 def _evidence_for_section(
     section_id: str,
     corpus: list[dict[str, Any]],
@@ -901,7 +940,7 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
         for s in sections
         if not is_duplicate_static_rfp_section(str(s.get("title") or ""))
     ]
-    sections = sorted(sections, key=_section_weight, reverse=True)
+    sections = order_sections_for_phase3_draft(sections)
     if skipped:
         logger.info(
             "Phase 3 skipping %d RFP sections (duplicate of static Sections 1–3): %s",

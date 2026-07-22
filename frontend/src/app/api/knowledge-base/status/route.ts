@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
+import { longRunningFetch } from "@/lib/long-running-fetch";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8001";
 
 async function proxy(path: string, init?: RequestInit) {
   try {
-    const response = await fetch(`${BACKEND_URL}/api/v1${path}`, {
+    const response = await longRunningFetch(`${BACKEND_URL}/api/v1${path}`, {
       ...init,
       headers: {
         Accept: "application/json",
