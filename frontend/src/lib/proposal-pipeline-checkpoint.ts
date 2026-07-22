@@ -357,6 +357,11 @@ export function normalizeCheckpointForDisplay(
   const draftAge = isoAgeMs(draft?.updatedAt ?? null);
   const draftLive = draftAge !== null && draftAge < DRAFT_LIVENESS_MS;
 
+  // Do NOT clear sections-1-3 in-progress just because the draft looks complete.
+  // Force regenerate keeps prior complete content until the job finishes; clearing
+  // here would make async start+poll think the phase already ended. Stale
+  // in-progress flags are healed by the age-based block below.
+
   if (!cp.inProgressPhase && cp.lastFailedPhase && cp.lastError) {
     const err = cp.lastError.toLowerCase();
     if (
@@ -405,11 +410,11 @@ export function normalizeCheckpointForDisplay(
   return research;
 }
 
-/** Shown when the HTTP client timed out but checkpoint still marks a phase in flight. */
+/** Soft status when HTTP finished but checkpoint still shows a phase in flight. */
 export function pipelineServerStillWorkingMessage(
   phase: PipelineInProgressPhase
 ): string {
-  return `Server is still running ${inProgressPhaseLabel(phase)} — the draft may update below. Click Stop to cancel on the server.`;
+  return `Still generating ${inProgressPhaseLabel(phase)}. New sections will show up here as they finish.`;
 }
 
 export function pipelineResumeMessage(

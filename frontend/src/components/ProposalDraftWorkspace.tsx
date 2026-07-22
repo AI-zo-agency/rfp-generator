@@ -1110,6 +1110,10 @@ export function ProposalDraftWorkspace({
         const live = updated?.pipelineCheckpoint?.inProgressPhase;
         if (live && live !== FULFILL_SCAN_PHASE) {
           setGenerateNotice(pipelineServerStillWorkingMessage(live));
+        } else {
+          setGenerateNotice((prev) =>
+            prev?.startsWith("Still generating") ? null : prev
+          );
         }
       }
     );

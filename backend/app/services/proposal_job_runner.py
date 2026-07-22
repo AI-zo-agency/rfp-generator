@@ -70,6 +70,18 @@ async def start_proposal_job(
             logger.warning("Proposal job %s:%s cancelled", rfp_id, job_type)
             raise
         except Exception as exc:
+            from app.services.proposal_generation_cancel import (
+                ProposalGenerationCancelled,
+            )
+
+            if isinstance(exc, ProposalGenerationCancelled) or getattr(
+                exc, "status_code", None
+            ) == 409:
+                record.status = "cancelled"
+                record.error = str(exc)[:2000]
+                record.finished_at = _now()
+                logger.warning("Proposal job %s:%s stopped", rfp_id, job_type)
+                return
             record.status = "failed"
             record.error = str(exc)[:2000]
             record.finished_at = _now()

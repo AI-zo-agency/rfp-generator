@@ -399,14 +399,214 @@ export async function runPhase3_6SelfEditWithRecovery(
   }
 }
 
-const STAGE_POLL_INTERVAL_MS = 12_000;
+const STAGE_POLL_INTERVAL_MS = 4_000;
 const STAGE_POLL_MAX_MS = 22 * 60 * 1000;
 const LIVE_DRAFT_POLL_INTERVAL_MS = 4_000;
 /** If checkpoint says in-flight but timestamps never move, backend was killed — don't block resume. */
 const IN_FLIGHT_STALE_MS = 90_000;
+/** Start endpoints return 202 immediately — keep this short. */
+const PHASE_START_TIMEOUT_MS = 60_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type ProposalJobStatus = {
+  rfpId?: string;
+  jobType?: string;
+  status?: "running" | "completed" | "failed" | "cancelled";
+  error?: string | null;
+  startedAt?: string;
+  finishedAt?: string | null;
+};
+
+async function startProposalPhaseJob(
+  path: string,
+  signal?: AbortSignal
+): Promise<
+  | { mode: "async"; alreadyRunning: boolean }
+  | {
+      mode: "sync";
+      draft?: ApiProposalDraft;
+      research?: ProposalResearch;
+      budget?: ProposalBudget;
+      review?: PreSubmitReview;
+    }
+> {
+  throwIfAborted(signal);
+  const init: RequestInit = {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  };
+  const timers: AbortSignal[] = [AbortSignal.timeout(PHASE_START_TIMEOUT_MS)];
+  if (signal) timers.push(signal);
+  init.signal =
+    typeof AbortSignal.any === "function" ? AbortSignal.any(timers) : timers[0];
+
+  const res = await fetch(path, init);
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    ok?: boolean;
+    started?: boolean;
+    alreadyRunning?: boolean;
+    draft?: ApiProposalDraft;
+    research?: ProposalResearch;
+    budget?: ProposalBudget;
+    review?: PreSubmitReview;
+  } = {};
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from server when starting proposal phase.");
+  }
+
+  // Legacy sync backend still returns 200 with a full payload.
+  if (res.status === 200 && (data.draft || data.research || data.budget || data.review)) {
+    return {
+      mode: "sync",
+      draft: data.draft,
+      research: data.research,
+      budget: data.budget,
+      review: data.review,
+    };
+  }
+
+  if (res.status === 202 || res.ok) {
+    return { mode: "async", alreadyRunning: Boolean(data.alreadyRunning) };
+  }
+
+  throwIfProposalStopped(res, data);
+  throw new Error(data.detail ?? "Failed to start proposal phase");
+}
+
+async function fetchProposalJobStatus(
+  rfpId: string
+): Promise<ProposalJobStatus | null> {
+  try {
+    const res = await fetchWithTimeout(
+      `/api/rfps/${rfpId}/proposal/job-status`,
+      { cache: "no-store" },
+      15_000
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { job?: ProposalJobStatus | null };
+    return data.job ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * After a 202 start, poll draft/checkpoint (and optional in-memory job status)
+ * until the phase finishes. Never holds a long POST open through the proxy.
+ */
+async function waitForProposalPhase(
+  rfpId: string,
+  phase: PipelinePhase,
+  signal?: AbortSignal
+): Promise<{
+  draft: ProposalOutline | null;
+  research: ProposalResearch | null;
+}> {
+  const deadline = Date.now() + STAGE_POLL_MAX_MS;
+  let observedRunning = false;
+  const startedWall = Date.now();
+
+  while (Date.now() < deadline) {
+    throwIfAborted(signal);
+
+    const snapshot = await fetchProposalDraft(rfpId);
+    const cp = snapshot.research?.pipelineCheckpoint;
+    const job = await fetchProposalJobStatus(rfpId);
+
+    if (cp?.inProgressPhase === phase) {
+      observedRunning = true;
+    }
+    if (job?.jobType === phase && job.status === "running") {
+      observedRunning = true;
+    }
+
+    if (job?.jobType === phase) {
+      if (job.status === "cancelled") {
+        throw new DOMException(
+          job.error ?? "Proposal generation stopped",
+          "AbortError"
+        );
+      }
+      if (job.status === "failed") {
+        throw new Error(job.error ?? `${phase} failed`);
+      }
+    }
+
+    if (observedRunning && cp?.inProgressPhase !== phase) {
+      if (cp?.lastFailedPhase === phase) {
+        const err = cp.lastError ?? `${phase} failed`;
+        if (/stopped|cancel/i.test(err)) {
+          throw new DOMException(err, "AbortError");
+        }
+        throw new Error(err);
+      }
+      if (
+        cp?.lastCompletedPhase === phase ||
+        phaseIsComplete(snapshot.draft, snapshot.research, phase)
+      ) {
+        return { draft: snapshot.draft, research: snapshot.research };
+      }
+      if (job?.jobType === phase && job.status === "completed") {
+        return { draft: snapshot.draft, research: snapshot.research };
+      }
+    }
+
+    // Job finished in memory before we observed in-progress (fast phase).
+    if (
+      !observedRunning &&
+      job?.jobType === phase &&
+      job.status === "completed" &&
+      phaseIsComplete(snapshot.draft, snapshot.research, phase)
+    ) {
+      return { draft: snapshot.draft, research: snapshot.research };
+    }
+
+    // Started but checkpoint not visible yet — don't treat as failure.
+    if (!observedRunning && Date.now() - startedWall > 90_000) {
+      if (phaseIsComplete(snapshot.draft, snapshot.research, phase)) {
+        return { draft: snapshot.draft, research: snapshot.research };
+      }
+      throw new Error(
+        `Timed out waiting for ${phase} to start. Check that the backend is running.`
+      );
+    }
+
+    await sleep(STAGE_POLL_INTERVAL_MS);
+  }
+
+  throw new Error(`Timed out waiting for ${phase} to finish.`);
+}
+
+async function runProposalPhaseAsync(
+  rfpId: string,
+  phase: PipelinePhase,
+  path: string,
+  signal?: AbortSignal
+): Promise<{
+  draft: ProposalOutline | null;
+  research: ProposalResearch | null;
+  budget?: ProposalBudget;
+  review?: PreSubmitReview;
+}> {
+  const started = await startProposalPhaseJob(path, signal);
+  if (started.mode === "sync") {
+    return {
+      draft: started.draft ? apiDraftToOutline(started.draft) : null,
+      research: started.research ?? null,
+      budget: started.budget,
+      review: started.review,
+    };
+  }
+  const waited = await waitForProposalPhase(rfpId, phase, signal);
+  return waited;
 }
 
 /** Soft client ceilings — 0 means wait (no AbortSignal). Override via env if needed. */
@@ -915,111 +1115,64 @@ export async function generateProposalSections1to3(
   rfpId: string,
   signal?: AbortSignal
 ): Promise<ProposalOutline> {
-  const res = await fetch(
+  const result = await runProposalPhaseAsync(
+    rfpId,
+    "sections-1-3",
     `/api/rfps/${rfpId}/proposal/generate/sections-1-3`,
-    proposalPostInit(signal)
+    signal
   );
-  const text = await res.text();
-  let data: { detail?: string; draft?: ApiProposalDraft };
-  try {
-    data = text.trim() ? JSON.parse(text) : {};
-  } catch {
-    throw new Error("Invalid response from server (generation may have timed out).");
+  if (!result.draft) {
+    throw new Error("No draft returned after Sections 1–3 generation");
   }
-  if (!res.ok) {
-    throwIfProposalStopped(res, data);
-    throw new Error(data.detail ?? "Sections 1–3 generation failed");
-  }
-  if (!data.draft) {
-    throw new Error("No draft returned from server");
-  }
-  return apiDraftToOutline(data.draft);
+  return result.draft;
 }
 
 export async function runPhase2Retrieval(
   rfpId: string,
   signal?: AbortSignal
 ): Promise<ProposalResearch> {
-  const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-2-retrieval`, {
-    ...proposalPostInit(signal),
-  });
-  const text = await res.text();
-  let data: { detail?: string; research?: ProposalResearch };
-  try {
-    data = text.trim() ? JSON.parse(text) : {};
-  } catch {
-    throw new Error("Invalid response from server (Phase 2 may have timed out).");
+  const result = await runProposalPhaseAsync(
+    rfpId,
+    "phase-2",
+    `/api/rfps/${rfpId}/proposal/phase-2-retrieval`,
+    signal
+  );
+  if (!result.research) {
+    throw new Error("No research data returned after Phase 2");
   }
-  if (!res.ok) {
-    throwIfProposalStopped(res, data);
-    throw new Error(data.detail ?? "Phase 2 retrieval failed");
-  }
-  if (!data.research) {
-    throw new Error("No research data returned from server");
-  }
-  return data.research;
+  return result.research;
 }
 
 export async function runPhase3Drafting(
   rfpId: string,
   signal?: AbortSignal
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
-  const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-3-drafting`, {
-    ...proposalPostInit(signal),
-  });
-  const text = await res.text();
-  let data: {
-    detail?: string;
-    draft?: ApiProposalDraft;
-    research?: ProposalResearch;
-  };
-  try {
-    data = text.trim() ? JSON.parse(text) : {};
-  } catch {
-    throw new Error("Invalid response from server (Phase 3 may have timed out).");
+  const result = await runProposalPhaseAsync(
+    rfpId,
+    "phase-3",
+    `/api/rfps/${rfpId}/proposal/phase-3-drafting`,
+    signal
+  );
+  if (!result.draft || !result.research) {
+    throw new Error("No draft or research returned after Phase 3");
   }
-  if (!res.ok) {
-    throwIfProposalStopped(res, data);
-    throw new Error(data.detail ?? "Phase 3 drafting failed");
-  }
-  if (!data.draft || !data.research) {
-    throw new Error("No draft or research returned from server");
-  }
-  return {
-    draft: apiDraftToOutline(data.draft),
-    research: data.research,
-  };
+  return { draft: result.draft, research: result.research };
 }
 
 export async function runPhase3_6SelfEdit(
   rfpId: string,
   signal?: AbortSignal
 ): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
-  const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-3-6-self-edit`, {
-    ...proposalPostInit(signal),
-  });
-  const text = await res.text();
-  let data: {
-    detail?: string;
-    draft?: Parameters<typeof apiDraftToOutline>[0];
-    research?: ProposalResearch;
-  };
-  try {
-    data = text.trim() ? JSON.parse(text) : {};
-  } catch {
-    throw new Error("Invalid response from server (self-edit may have timed out).");
-  }
-  if (!res.ok) {
-    throwIfProposalStopped(res, data);
-    throw new Error(data.detail ?? "Self-edit loop failed");
-  }
-  if (!data.draft || !data.research) {
+  const result = await runProposalPhaseAsync(
+    rfpId,
+    "phase-3-6-self-edit",
+    `/api/rfps/${rfpId}/proposal/phase-3-6-self-edit`,
+    signal
+  );
+  if (!result.draft || !result.research) {
     throw new Error("No draft returned from self-edit");
   }
-  return {
-    draft: apiDraftToOutline(data.draft),
-    research: data.research,
-  };
+  return { draft: result.draft, research: result.research };
 }
 
 export async function runPhase3_5Budget(
@@ -1030,32 +1183,19 @@ export async function runPhase3_5Budget(
   research: ProposalResearch;
   draft: ProposalOutline | null;
 }> {
-  const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-3-5-budget`, {
-    ...proposalPostInit(signal),
-  });
-  const text = await res.text();
-  let data: {
-    detail?: string;
-    budget?: ProposalBudget;
-    research?: ProposalResearch;
-    draft?: Parameters<typeof apiDraftToOutline>[0] | null;
-  };
-  try {
-    data = text.trim() ? JSON.parse(text) : {};
-  } catch {
-    throw new Error("Invalid response from server (budget step may have timed out).");
-  }
-  if (!res.ok) {
-    throwIfProposalStopped(res, data);
-    throw new Error(data.detail ?? "Phase 3.5 budget failed");
-  }
-  if (!data.budget || !data.research) {
-    throw new Error("No budget data returned from server");
+  const result = await runProposalPhaseAsync(
+    rfpId,
+    "phase-3-5-budget",
+    `/api/rfps/${rfpId}/proposal/phase-3-5-budget`,
+    signal
+  );
+  if (!result.research?.budget) {
+    throw new Error("No budget data returned after Phase 3.5");
   }
   return {
-    budget: data.budget,
-    research: data.research,
-    draft: data.draft ? apiDraftToOutline(data.draft) : null,
+    budget: result.research.budget,
+    research: result.research,
+    draft: result.draft,
   };
 }
 
@@ -1139,31 +1279,18 @@ export async function generateProposalPricing(
   research: ProposalResearch;
   draft: ProposalOutline | null;
 }> {
-  const res = await fetch(`/api/rfps/${rfpId}/proposal/pricing/generate`, {
-    method: "POST",
-  });
-  const text = await res.text();
-  let data: {
-    detail?: string;
-    budget?: ProposalBudget;
-    research?: ProposalResearch;
-    draft?: Parameters<typeof apiDraftToOutline>[0] | null;
-  };
-  try {
-    data = text.trim() ? JSON.parse(text) : {};
-  } catch {
-    throw new Error("Invalid response from server (pricing may have timed out).");
-  }
-  if (!res.ok) {
-    throw new Error(data.detail ?? "Pricing generation failed");
-  }
-  if (!data.budget || !data.research) {
+  const result = await runProposalPhaseAsync(
+    rfpId,
+    "phase-3-5-budget",
+    `/api/rfps/${rfpId}/proposal/pricing/generate`
+  );
+  if (!result.research?.budget) {
     throw new Error("No budget data returned from server");
   }
   return {
-    budget: data.budget,
-    research: data.research,
-    draft: data.draft ? apiDraftToOutline(data.draft) : null,
+    budget: result.research.budget,
+    research: result.research,
+    draft: result.draft,
   };
 }
 
@@ -1171,28 +1298,19 @@ export async function runPhase4PreSubmitReview(
   rfpId: string,
   signal?: AbortSignal
 ): Promise<{ review: PreSubmitReview; research: ProposalResearch }> {
-  const res = await fetch(`/api/rfps/${rfpId}/proposal/phase-4-review`, {
-    ...proposalPostInit(signal),
-  });
-  const text = await res.text();
-  let data: {
-    detail?: string;
-    review?: PreSubmitReview;
-    research?: ProposalResearch;
+  const result = await runProposalPhaseAsync(
+    rfpId,
+    "phase-4-review",
+    `/api/rfps/${rfpId}/proposal/phase-4-review`,
+    signal
+  );
+  if (!result.research?.presubmitReview) {
+    throw new Error("No review data returned after Phase 4");
+  }
+  return {
+    review: result.research.presubmitReview,
+    research: result.research,
   };
-  try {
-    data = text.trim() ? JSON.parse(text) : {};
-  } catch {
-    throw new Error("Invalid response from pre-submit review.");
-  }
-  if (!res.ok) {
-    throwIfProposalStopped(res, data);
-    throw new Error(data.detail ?? "Pre-submit review failed");
-  }
-  if (!data.review || !data.research) {
-    throw new Error("No review data returned");
-  }
-  return { review: data.review, research: data.research };
 }
 
 export async function runPhase4FinalizeGaps(

@@ -1,5 +1,8 @@
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 import httpx
 import re
 from datetime import datetime
@@ -10,8 +13,6 @@ from app.models.proposal import (
     ProposalFulfillGapsResponse,
     ProposalGoogleDocExportResponse,
     ProposalGenerateResponse,
-    ProposalPhase2Response,
-    ProposalPhase3Response,
     ProposalPhase4AutoFixResponse,
     ProposalPhase4Response,
     ProposalPricingResponse,
@@ -58,10 +59,64 @@ from app.services.proposal_repository import (
 from app.services.proposal_job_runner import (
     get_proposal_job,
     proposal_job_to_dict,
+    start_proposal_job,
 )
 from app.services.rfp_repository import get_rfp, rfp_exists
 
 router = APIRouter(prefix="/rfps", tags=["proposals"])
+
+
+async def _enqueue_pipeline_phase(
+    rfp_id: str,
+    phase: str,
+    work: Callable[[], Awaitable[Any]],
+) -> JSONResponse:
+    """Start a long phase in-process and return immediately (202).
+
+    Clients poll GET /proposal (checkpoint + draft) until the phase completes.
+    Does not cancel on HTTP disconnect — Stop is explicit via POST /stop.
+    """
+    existing = await get_proposal_job(rfp_id)
+    if existing and existing.status == "running":
+        if existing.job_type == phase:
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "ok": True,
+                    "started": False,
+                    "alreadyRunning": True,
+                    "phase": phase,
+                    "job": proposal_job_to_dict(existing),
+                },
+            )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Another proposal job is already running ({existing.job_type}). "
+                "Stop it or wait before starting a different phase."
+            ),
+        )
+
+    from app.services.proposal_pipeline_checkpoint import record_phase_started
+
+    # Mark in-progress before returning so the first poll sees the phase.
+    await record_phase_started(rfp_id, phase)
+
+    async def _run() -> Any:
+        async with pipeline_phase(rfp_id, phase):
+            return await work()
+
+    record = await start_proposal_job(rfp_id, phase, _run)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "ok": True,
+            "started": True,
+            "alreadyRunning": False,
+            "phase": phase,
+            "job": proposal_job_to_dict(record),
+        },
+    )
 
 
 def _slim_research(research: ProposalResearchCache | None) -> ProposalResearchCache | None:
@@ -401,128 +456,62 @@ async def generate_full_proposal_endpoint(rfp_id: str) -> ProposalGenerateRespon
 
 @router.post(
     "/{rfp_id}/proposal/generate/sections-1-3",
-    response_model=ProposalGenerateResponse,
 )
-async def generate_sections_1_3_endpoint(rfp_id: str, request: Request) -> ProposalGenerateResponse:
-    """Generate static Sections 1–3 only (Phase 2 retrieval is a separate endpoint)."""
-    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+async def generate_sections_1_3_endpoint(rfp_id: str) -> JSONResponse:
+    """Start static Sections 1–3 in the background; poll GET /proposal for completion."""
 
-    try:
-        async with cancel_generation_on_disconnect(rfp_id, request):
-            async with pipeline_phase(rfp_id, "sections-1-3"):
-                draft, brand_voice, research = await generate_sections_1_3(
-                    rfp_id, force_regenerate=True
-                )
-    except ProposalError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Sections 1–3 generation failed: {exc}",
-        ) from exc
+    async def work() -> None:
+        await generate_sections_1_3(rfp_id, force_regenerate=True)
 
-    return ProposalGenerateResponse(
-        draft=draft,
-        brandVoice=brand_voice,
-        research=_slim_research(research) or research,
-    )
+    return await _enqueue_pipeline_phase(rfp_id, "sections-1-3", work)
 
 
 @router.post(
     "/{rfp_id}/proposal/phase-2-retrieval",
-    response_model=ProposalPhase2Response,
 )
-async def phase2_retrieval_endpoint(rfp_id: str, request: Request) -> ProposalPhase2Response:
-    """Phase 2 only: map RFP sections, per-section Supermemory retrieval, coverage, evidence corpus."""
-    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+async def phase2_retrieval_endpoint(rfp_id: str) -> JSONResponse:
+    """Start Phase 2 retrieval in the background; poll GET /proposal for completion."""
 
-    try:
-        async with cancel_generation_on_disconnect(rfp_id, request):
-            async with pipeline_phase(rfp_id, "phase-2"):
-                research = await run_phase2_retrieval(rfp_id)
-    except ProposalError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Phase 2 retrieval failed: {exc}",
-        ) from exc
+    async def work() -> None:
+        await run_phase2_retrieval(rfp_id)
 
-    return ProposalPhase2Response(research=_slim_research(research) or research)
+    return await _enqueue_pipeline_phase(rfp_id, "phase-2", work)
 
 
 @router.post(
     "/{rfp_id}/proposal/phase-3-drafting",
-    response_model=ProposalPhase3Response,
 )
-async def phase3_drafting_endpoint(rfp_id: str, request: Request) -> ProposalPhase3Response:
-    """Phase 3: draft all RFP sections from evidence corpus with [E#] citations."""
-    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+async def phase3_drafting_endpoint(rfp_id: str) -> JSONResponse:
+    """Start Phase 3 drafting in the background; poll GET /proposal for completion."""
 
-    try:
-        async with cancel_generation_on_disconnect(rfp_id, request):
-            async with pipeline_phase(rfp_id, "phase-3"):
-                draft, research = await run_phase3_drafting(rfp_id)
-    except ProposalError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Phase 3 drafting failed: {exc}",
-        ) from exc
+    async def work() -> None:
+        await run_phase3_drafting(rfp_id)
 
-    slim = _slim_research(research) or research
-    return ProposalPhase3Response(draft=draft, research=slim)
+    return await _enqueue_pipeline_phase(rfp_id, "phase-3", work)
 
 
 @router.post(
     "/{rfp_id}/proposal/phase-3-6-self-edit",
-    response_model=ProposalPhase3Response,
 )
-async def phase3_6_self_edit_endpoint(rfp_id: str, request: Request) -> ProposalPhase3Response:
-    """Phase 3.6: senior-editor self-edit loop — gap-fill KB and patch weak sections."""
-    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+async def phase3_6_self_edit_endpoint(rfp_id: str) -> JSONResponse:
+    """Start Phase 3.6 self-edit in the background; poll GET /proposal for completion."""
 
-    try:
-        async with cancel_generation_on_disconnect(rfp_id, request):
-            async with pipeline_phase(rfp_id, "phase-3-6-self-edit"):
-                draft, research, _report = await run_phase3_6_self_edit(rfp_id)
-    except ProposalError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Self-edit loop failed: {exc}",
-        ) from exc
+    async def work() -> None:
+        await run_phase3_6_self_edit(rfp_id)
 
-    if not research:
-        raise HTTPException(status_code=500, detail="Research cache missing after self-edit")
-    slim = _slim_research(research) or research
-    return ProposalPhase3Response(draft=draft, research=slim)
+    return await _enqueue_pipeline_phase(rfp_id, "phase-3-6-self-edit", work)
 
 
 @router.post(
     "/{rfp_id}/proposal/phase-3-5-budget",
-    response_model=ProposalPricingResponse,
 )
-async def phase3_5_budget_endpoint(rfp_id: str, request: Request) -> ProposalPricingResponse:
-    """Phase 3.5: Stage 3 budget + incorporate into manuscript + sync fee narrative."""
-    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+async def phase3_5_budget_endpoint(rfp_id: str) -> JSONResponse:
+    """Start Phase 3.5 budget in the background; poll GET /proposal for completion."""
 
-    try:
-        async with cancel_generation_on_disconnect(rfp_id, request):
-            async with pipeline_phase(rfp_id, "phase-3-5-budget"):
-                draft, research, budget = await run_phase3_5_budget(rfp_id)
-    except ProposalError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Phase 3.5 budget failed: {exc}",
-        ) from exc
+    async def work() -> None:
+        await run_phase3_5_budget(rfp_id)
 
-    slim = _slim_research(research) or research
-    return ProposalPricingResponse(budget=budget, research=slim, draft=draft)
+    return await _enqueue_pipeline_phase(rfp_id, "phase-3-5-budget", work)
 
 
 @router.post(
@@ -547,22 +536,14 @@ async def phase3_5_budget_reconcile_endpoint(rfp_id: str) -> ProposalPricingResp
 
 @router.post(
     "/{rfp_id}/proposal/pricing/generate",
-    response_model=ProposalPricingResponse,
 )
-async def generate_pricing_endpoint(rfp_id: str) -> ProposalPricingResponse:
-    """Build RFP-aware budget from Supermemory pricing KB — incorporate + sync fee narrative."""
-    try:
-        draft, research, budget = await run_phase3_5_budget(rfp_id)
-    except ProposalError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Pricing generation failed: {exc}",
-        ) from exc
+async def generate_pricing_endpoint(rfp_id: str) -> JSONResponse:
+    """Same as phase-3-5-budget — async start + poll."""
 
-    slim = _slim_research(research) or research
-    return ProposalPricingResponse(budget=budget, research=slim, draft=draft)
+    async def work() -> None:
+        await run_phase3_5_budget(rfp_id)
+
+    return await _enqueue_pipeline_phase(rfp_id, "phase-3-5-budget", work)
 
 
 @router.post(
@@ -607,26 +588,14 @@ async def improve_section_endpoint(
 
 @router.post(
     "/{rfp_id}/proposal/phase-4-review",
-    response_model=ProposalPhase4Response,
 )
-async def phase4_presubmit_review_endpoint(rfp_id: str, request: Request) -> ProposalPhase4Response:
-    """Stage 4: pre-submit copy-paste scan + compliance checklist."""
-    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+async def phase4_presubmit_review_endpoint(rfp_id: str) -> JSONResponse:
+    """Start Stage 4 pre-submit review in the background; poll GET /proposal for completion."""
 
-    try:
-        async with cancel_generation_on_disconnect(rfp_id, request):
-            async with pipeline_phase(rfp_id, "phase-4-review"):
-                review, research = await run_phase4_presubmit_review(rfp_id)
-    except ProposalError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Pre-submit review failed: {exc}",
-        ) from exc
+    async def work() -> None:
+        await run_phase4_presubmit_review(rfp_id)
 
-    slim = _slim_research(research) or research
-    return ProposalPhase4Response(review=review, research=slim)
+    return await _enqueue_pipeline_phase(rfp_id, "phase-4-review", work)
 
 
 @router.post(

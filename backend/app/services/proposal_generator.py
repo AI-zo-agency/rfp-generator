@@ -566,6 +566,92 @@ def _merge_static_with_rfp_sections(
     return [*static_sections, *rfp_only]
 
 
+# Optional shells — empty by design until dynamic cards replace them.
+# Never treat these (or any *-placeholder) as "incomplete content" that
+# warrants a full graph retry / token burn.
+_SECTION_PLACEHOLDER_IDS = frozenset(
+    {
+        "section-2-bio-placeholder",
+        "section-3-work-placeholder",
+    }
+)
+
+
+def _is_section_placeholder_id(section_id: str) -> bool:
+    return (
+        section_id in _SECTION_PLACEHOLDER_IDS
+        or section_id.endswith("-placeholder")
+    )
+
+
+def _is_optional_empty_shell(section: ProposalSection) -> bool:
+    """True for structural / stub shells that must not block the pipeline."""
+    sid = section.id or ""
+    title = (section.title or "").lower()
+    body = (section.content or "").strip()
+    if _is_section_placeholder_id(sid):
+        return True
+    if not body and (
+        "generated per" in title
+        or "(generated" in title
+        or title.endswith("(placeholder)")
+        or " — outline" in title
+    ):
+        return True
+    # Chat/KB stubs: VERIFY-only outline content is handoff, not a graph failure.
+    if body and body.count("[VERIFY:") >= 2 and len(body) < 400:
+        return True
+    return False
+
+
+def _strip_satisfied_placeholders(
+    sections: list[ProposalSection],
+) -> list[ProposalSection]:
+    """Drop bio/work placeholders once real dynamic cards exist."""
+    has_bios = any(
+        s.id.startswith("section-2-bio-")
+        and not _is_section_placeholder_id(s.id)
+        and (s.content or "").strip()
+        and not _is_optional_empty_shell(s)
+        for s in sections
+    )
+    has_work = any(
+        s.id.startswith("section-3-work-")
+        and not _is_section_placeholder_id(s.id)
+        and (s.content or "").strip()
+        and not _is_optional_empty_shell(s)
+        for s in sections
+    )
+    out: list[ProposalSection] = []
+    for s in sections:
+        if s.id == "section-2-bio-placeholder" and has_bios:
+            continue
+        if s.id == "section-3-work-placeholder" and has_work:
+            continue
+        out.append(s)
+    return out
+
+
+def _empty_required_section_ids(sections: list[ProposalSection]) -> list[str]:
+    """Only required Section 1 cards that are still empty.
+
+    Dynamic bios / case studies / RFP tabs are tracked via missing_groups
+    (or later phases), not by listing every empty shell as a retry trigger.
+    """
+    by_id = {s.id: s for s in sections}
+    empty: list[str] = []
+    for sid in _SECTION_1_REQUIRED_IDS:
+        section = by_id.get(sid)
+        if section is None or not (section.content or "").strip():
+            empty.append(sid)
+    return empty
+
+
+# Back-compat alias used in older call sites / tests.
+def _empty_content_section_ids(sections: list[ProposalSection]) -> list[str]:
+    return _empty_required_section_ids(sections)
+
+
 def _is_static_1_3_section_id(section_id: str) -> bool:
     if _is_legacy_monolith_section_id(section_id):
         return False
@@ -1223,7 +1309,11 @@ async def generate_sections_1_3(
         if prefix == "section-1-":
             return section_1_subsections_complete(sections_1_3)
         return any(
-            s.id.startswith(prefix) and (s.content or "").strip() for s in sections_1_3
+            s.id.startswith(prefix)
+            and not _is_section_placeholder_id(s.id)
+            and (s.content or "").strip()
+            and not _is_optional_empty_shell(s)
+            for s in sections_1_3
         )
 
     missing_groups = [
@@ -1236,7 +1326,11 @@ async def generate_sections_1_3(
         if not has
     ]
 
-    empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
+    # Drop structural shells once real bios / case studies exist so they cannot
+    # trigger a full graph retry (empty placeholders were wasting tokens in prod).
+    sections_1_3 = _strip_satisfied_placeholders(sections_1_3)
+
+    empty_ids = _empty_required_section_ids(sections_1_3)
     if empty_ids or missing_groups:
         logger.warning(
             "Sections 1–3 first pass incomplete for %s (empty=%s missing_groups=%s) — retrying graph once",
@@ -1292,7 +1386,8 @@ async def generate_sections_1_3(
                     ordered_ids.append(section.id)
             sections_1_3 = [by_id[sid] for sid in ordered_ids if sid in by_id]
 
-        empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
+        sections_1_3 = _strip_satisfied_placeholders(sections_1_3)
+        empty_ids = _empty_required_section_ids(sections_1_3)
         still_missing = [
             label
             for label, check in (
@@ -1330,7 +1425,8 @@ async def generate_sections_1_3(
                     logger.warning(
                         "Targeted improve failed for %s (%s): %s", rfp_id, sid, exc
                     )
-            empty_ids = [s.id for s in sections_1_3 if not (s.content or "").strip()]
+            sections_1_3 = _strip_satisfied_placeholders(sections_1_3)
+            empty_ids = _empty_required_section_ids(sections_1_3)
             still_missing = [
                 label
                 for label, check in (
