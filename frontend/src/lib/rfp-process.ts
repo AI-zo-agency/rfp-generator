@@ -96,7 +96,7 @@ export function getWorkflowStepDisplay(rfp: RfpRecord): {
   if (needsGoNoGoDecision(rfp)) {
     return {
       label: "Awaiting bid decision",
-      hint: "Review fit score and confirm Go or Pass",
+      hint: "Review Overall Go Score and confirm Go or Pass",
     };
   }
   const hints: Partial<Record<RfpStage, string>> = {

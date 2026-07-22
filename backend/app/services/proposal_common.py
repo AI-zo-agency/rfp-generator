@@ -30,6 +30,21 @@ def load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]:
         )
     content = _assess_rfp_content(rfp)
     rfp_context = _build_rfp_context(rfp, content)
+    try:
+        from app.services.evidence_trust.rfp_hard_facts import (
+            extract_rfp_hard_facts,
+            format_hard_facts_block,
+        )
+        from app.services.go_no_go_service import combine_rfp_text
+
+        hard = extract_rfp_hard_facts(
+            combine_rfp_text(content.description, content.pdf_text)
+        )
+        block = format_hard_facts_block(hard)
+        if block:
+            rfp_context = f"{rfp_context}\n\n{block}"
+    except Exception:
+        pass
     if content.substantive_chars < 200:
         raise ProposalError(
             "Insufficient RFP content. Upload a PDF or add a description.",

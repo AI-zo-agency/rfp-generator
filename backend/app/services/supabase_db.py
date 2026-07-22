@@ -313,6 +313,25 @@ def save_go_no_go_analysis(rfp_id: str, analysis: GoNoGoAnalysis) -> RfpRecord |
     return get_rfp(rfp_id)
 
 
+def clear_go_no_go_analysis(rfp_id: str) -> RfpRecord | None:
+    """Remove prior Stage 1 results so a re-run does not show stale scores mid-flight."""
+    now = datetime.now(timezone.utc).isoformat()
+    client = _get_client()
+    client.table("rfps").update(
+        {
+            "fit_score": None,
+            "worth_score": None,
+            "go_no_go": None,
+            "go_no_go_analysis": None,
+            "stage": "go_no_go",
+            "status": "new",
+            "last_activity": now,
+            "last_activity_note": "Go/No-Go re-run in progress — previous analysis cleared.",
+        }
+    ).or_(f"id.eq.{rfp_id},external_id.eq.{rfp_id}").execute()
+    return get_rfp(rfp_id)
+
+
 def mark_rfp_go(rfp_id: str) -> bool:
     now = datetime.now(timezone.utc).isoformat()
     client = _get_client()

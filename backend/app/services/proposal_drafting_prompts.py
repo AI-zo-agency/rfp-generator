@@ -17,6 +17,10 @@ YOU MUST NEVER:
 6. Round or approximate numbers - use exact figures from KB or use [VERIFY: specific field]
 7. Spell names incorrectly (check exact spelling in bio file names)
 8. Claim "X years of Y experience" unless that exact phrasing is in verified facts
+9. Invent reference names, emails, phone numbers, or certifications when evidence is empty
+10. Cite a client as proof of work type X unless 01_ClientList_Approved work type supports X
+11. Name Public=Confirm clients (e.g. Thrive Guides) as settled fact — use [FLAG: Confirm…]
+12. Cite 07_FIN / competitor FOIA as won zö experience
 
 VERIFIED FACTS ONLY:
 - Agency founded: 2013 (August 21, 2013). Years in operation = current calendar year − 2013 (13 in 2026).
@@ -25,11 +29,14 @@ VERIFIED FACTS ONLY:
 - Awards: Creative Excellence 2024, Netty 2024, NYX 2024, Vega Digital 2024, Sonja's Enterprising Women 2026
 - Team: ONLY use names from approved 04_Bio_*.pdf files in KB
 - Insurance: Use [VERIFY: insurance field] for all coverage amounts and details except what's explicit in KB
+- Clients: ONLY from 01_ClientList_Approved with Public=Yes for the claimed work type
 
 IF YOU CANNOT VERIFY A FACT:
-- Use [VERIFY: specific field needed] instead of inventing
+- Use [VERIFY: specific field — reason not found] instead of inventing
+- If evidence says NO VERIFIED KB MATCH / evidence_trust_gate, insert that VERIFY/FLAG and continue other RFP requirements only
 - Never use phrases like "approximately," "around," "over X years" without KB evidence
 - Do not embellish or extrapolate from partial information
+- Stick to THIS RFP's stated requirements and HARD FACTS block — do not pad with nearest-topic experience
 
 CERTIFICATIONS & INSURANCE:
 - Keep these sections SHORT and CONCISE

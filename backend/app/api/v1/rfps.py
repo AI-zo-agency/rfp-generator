@@ -6,6 +6,7 @@ from app.models.rfp import DashboardResponse, ManualRfpCreate, RfpRecord
 from app.services.go_no_go_service import GoNoGoError, analyze_rfp
 from app.services.rfp_repository import (
     TERMINAL_STATUSES,
+    clear_go_no_go_analysis,
     compute_stats,
     delete_rfp,
     get_rfp,
@@ -125,7 +126,13 @@ async def create_manual_rfp(request: Request) -> RfpRecord:
         )
         pdf_file = form.get("pdf")
     else:
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Expected JSON or multipart form data for manual RFP create.",
+            ) from exc
         payload = ManualRfpCreate.model_validate(body)
         pdf_file = None
 
@@ -158,6 +165,10 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
     rfp = get_rfp(rfp_id)
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
+
+    # Drop stale Stage 1 results immediately so re-runs never show the prior GO panel.
+    clear_go_no_go_analysis(rfp_id)
+    rfp = get_rfp(rfp_id) or rfp
 
     try:
         analysis = await analyze_rfp(rfp)

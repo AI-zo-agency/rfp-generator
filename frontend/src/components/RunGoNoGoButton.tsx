@@ -7,12 +7,14 @@ interface RunGoNoGoButtonProps {
   rfpId: string;
   hasPdf: boolean;
   hasDescription: boolean;
+  onLoadingChange?: (loading: boolean) => void;
 }
 
 export function RunGoNoGoButton({
   rfpId,
   hasPdf,
   hasDescription,
+  onLoadingChange,
 }: RunGoNoGoButtonProps) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -20,8 +22,13 @@ export function RunGoNoGoButton({
 
   const canAnalyze = hasPdf || hasDescription;
 
+  function setAnalyzing(next: boolean) {
+    setLoading(next);
+    onLoadingChange?.(next);
+  }
+
   async function handleAnalyze() {
-    setLoading(true);
+    setAnalyzing(true);
     setError(null);
     try {
       const res = await fetch(`/api/rfps/${rfpId}/analyze`, { method: "POST" });
@@ -34,7 +41,7 @@ export function RunGoNoGoButton({
     } catch {
       setError("Could not reach the analysis service.");
     } finally {
-      setLoading(false);
+      setAnalyzing(false);
     }
   }
 

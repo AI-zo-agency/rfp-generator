@@ -8,9 +8,47 @@ import { GoNoGoBadge } from "./StatusBadge";
 
 interface GoNoGoAnalysisPanelProps {
   analysis: GoNoGoAnalysis;
+  /** Kept for Overall fallback when matrix is missing; not shown in UI. */
   fitScore: number | null;
   worthScore: number | null;
   recommendation: GoNoGoAnalysis["recommendation"] | null;
+}
+
+/** Reasons to surface when Overall Go Score is below 3 (matrix average). */
+export function buildLeanNoGoReasons(
+  analysis: GoNoGoAnalysis,
+  overallGoScore: number | null
+): string[] {
+  if (overallGoScore === null || overallGoScore >= 3) return [];
+
+  const reasons: string[] = [];
+  const seen = new Set<string>();
+
+  const push = (text: string) => {
+    const cleaned = text.trim();
+    if (!cleaned) return;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    reasons.push(cleaned);
+  };
+
+  for (const row of analysis.decisionMatrix ?? []) {
+    if (row.score < 3) {
+      const note = row.notes?.trim();
+      push(
+        note
+          ? `${row.dimension} (${row.score}/5): ${note}`
+          : `${row.dimension} scored ${row.score}/5`
+      );
+    }
+  }
+
+  for (const gap of analysis.criticalGaps ?? []) {
+    push(gap);
+  }
+
+  return reasons;
 }
 
 function DimensionBlock({
@@ -107,6 +145,29 @@ function ActionFlagsPanel({ flags }: { flags: string[] }) {
   );
 }
 
+const UNDISCLOSED_EVAL_SECTION = `## EVALUATION CRITERIA BREAKDOWN
+Point-weighted scoring is **not disclosed** in this RFP. The solicitation uses question groups (pass/fail and scored items) without published category point totals or percentages.
+
+Cost-sensitivity is therefore **unknowable from the RFP text**. Do not invent a weighted scoring table. Describe question groups narratively only when they appear in the RFP body.`;
+
+/** Strip the known recycled "29 points / 62% cost" hallucination from older saved reports. */
+function scrubFabricatedEvalWeights(report: string): string {
+  const looksFabricated =
+    /62\s*%/i.test(report) &&
+    (/29\s*points/i.test(report) ||
+      /14\s*\+\s*4/i.test(report) ||
+      /Max\s+Points/i.test(report) ||
+      /Cost\s+18\s+points/i.test(report));
+  if (!looksFabricated) return report;
+
+  const replaced = report.replace(
+    /##\s*EVALUATION CRITERIA BREAKDOWN\b[\s\S]*?(?=\n##\s+|\s*$)/i,
+    `${UNDISCLOSED_EVAL_SECTION}\n\n`
+  );
+  if (replaced !== report) return replaced;
+  return `${report.trim()}\n\n${UNDISCLOSED_EVAL_SECTION}\n`;
+}
+
 function StageOneReport({
   report,
   skipDecisionMatrix,
@@ -114,7 +175,13 @@ function StageOneReport({
   report: string;
   skipDecisionMatrix?: boolean;
 }) {
-  const sections = report
+  // Hide legacy "AI Fit Score" lines from older Stage 1 reports.
+  const withoutFit = report.replace(
+    /^[ \t]*[-*]?[ \t]*\*?AI Fit Score\*?:?[^\n]*/gim,
+    ""
+  );
+  const cleanedReport = scrubFabricatedEvalWeights(withoutFit);
+  const sections = cleanedReport
     .trim()
     .split(/\n(?=## )/)
     .map((section) => section.trim())
@@ -211,6 +278,26 @@ function DecisionMatrixTable({
   );
 }
 
+function LeanNoGoReasons({ reasons }: { reasons: string[] }) {
+  if (!reasons.length) return null;
+
+  return (
+    <div className="rounded-xl border border-zo-error/40 bg-zo-error/5 p-5">
+      <h3 className="font-heading text-base font-bold text-zo-error">
+        Why this is leaning No-Go
+      </h3>
+      <p className="mt-1 text-xs text-zo-text-muted">
+        Overall Go Score is below 3/5 — address these before pursuing.
+      </p>
+      <ul className="mt-3 list-disc space-y-2 pl-5 text-sm font-medium text-zo-text-secondary">
+        {reasons.map((reason) => (
+          <li key={reason}>{reason}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function providerLabel(provider: string | undefined): string | null {
   if (!provider) return null;
   if (provider === "content-gate") {
@@ -246,6 +333,7 @@ export function GoNoGoAnalysisPanel({
   const scoresPending = needsInput || overallGoScore === null;
   const hasMatrix = (analysis.decisionMatrix?.length ?? 0) > 0;
   const actionFlags = analysis.actionFlags ?? [];
+  const leanNoGoReasons = buildLeanNoGoReasons(analysis, overallGoScore);
   const conditionsTitle =
     recommendation === "no_go"
       ? "No-Go Notes & Override Conditions"
@@ -268,19 +356,6 @@ export function GoNoGoAnalysisPanel({
           )}
         </div>
         <div className="flex flex-wrap items-end gap-4">
-          {!scoresPending && !isMissingScore(fitScore) && (
-            <div className="text-right">
-              <p className="text-xs font-bold uppercase tracking-wide text-zo-text-muted">
-                AI Fit Score
-              </p>
-              <p className="font-heading text-xl font-bold text-foreground">
-                {fitScore}
-                <span className="ml-1 text-sm font-normal text-zo-text-muted">
-                  / 5
-                </span>
-              </p>
-            </div>
-          )}
           {!scoresPending && !isMissingScore(worthScore) && (
             <div className="text-right">
               <p className="text-xs font-bold uppercase tracking-wide text-zo-text-muted">
@@ -332,6 +407,10 @@ export function GoNoGoAnalysisPanel({
 
       {!needsInput && hasMatrix && (
         <DecisionMatrixTable matrix={analysis.decisionMatrix!} />
+      )}
+
+      {!needsInput && leanNoGoReasons.length > 0 && (
+        <LeanNoGoReasons reasons={leanNoGoReasons} />
       )}
 
       {analysis.stageOneReport && !needsInput && (

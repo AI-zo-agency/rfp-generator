@@ -8,7 +8,11 @@ import re
 _PRIORITY_PATTERNS: tuple[str, ...] = (
     r"table\s+of\s+contents",
     r"proposal\s+format|submission\s+requirements|instructions\s+to\s+(?:offerors|proposers|vendors)",
-    r"evaluation\s+criteria|scoring|points?\s+will\s+be",
+    r"evaluation\s+criteria|scoring|points?\s+will\s+be|overall\s+capabilities|brand\s+marketing\s+plan",
+    r"cost\s+points?\s+conversion|price\s+reasonableness|familiarity\s+with",
+    r"(?:fixed[\s-]?price|not\s+to\s+exceed|NTE|contract\s+(?:ceiling|value|amount)|"
+    r"maximum\s+(?:contract|compensation|budget)|total\s+(?:contract|project)\s+value)",
+    r"year\s*(?:1|2|3|one|two|three).{0,40}\$[\d,]+",
     r"\breferences?\b",
     r"three\s+customers?",
     r"two[- ]year|like\s+institution|community\s+college",
@@ -30,6 +34,7 @@ _PRIORITY_PATTERNS: tuple[str, ...] = (
     r"must be returned with (?:the )?proposal",
     r"vendor\s+qualification|financial\s+stability",
     r"awards?\s*(?:and|&)\s*recognition",
+    r"offeror must (?:have|establish).{0,60}office|office in Oceania",
 )
 
 _REFERENCE_SPEC_RE = re.compile(

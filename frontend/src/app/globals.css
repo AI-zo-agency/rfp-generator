@@ -3355,3 +3355,132 @@ h4 {
       0 10px 32px rgba(239, 80, 24, 0.16);
   }
 }
+
+/* Go/No-Go analysis loading — matrix meter */
+.go-nogo-loading-meter {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+  height: 36px;
+  padding: 0 2px;
+}
+
+.go-nogo-loading-bar {
+  display: block;
+  width: 5px;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(
+    180deg,
+    var(--zo-orange) 0%,
+    var(--zo-coral) 55%,
+    rgba(239, 80, 24, 0.25) 100%
+  );
+  transform-origin: bottom center;
+  animation: go-nogo-bar-wave 1.15s ease-in-out infinite;
+}
+
+.go-nogo-loading-scan {
+  position: absolute;
+  inset: -4px -6px;
+  border-radius: 10px;
+  border: 1px solid rgba(239, 80, 24, 0.22);
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.go-nogo-loading-scan::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 28%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(239, 80, 24, 0.2),
+    transparent
+  );
+  animation: go-nogo-scan-sweep 1.8s ease-in-out infinite;
+}
+
+.go-nogo-loading-steps {
+  display: grid;
+  grid-template-areas: "stack";
+}
+
+.go-nogo-loading-steps > span {
+  grid-area: stack;
+  opacity: 0;
+  animation: go-nogo-step-cycle 4.5s ease-in-out infinite;
+}
+
+.go-nogo-loading-steps > span:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.go-nogo-loading-steps > span:nth-child(2) {
+  animation-delay: 1.5s;
+}
+
+.go-nogo-loading-steps > span:nth-child(3) {
+  animation-delay: 3s;
+}
+
+@keyframes go-nogo-bar-wave {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+    opacity: 0.45;
+  }
+  45% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes go-nogo-scan-sweep {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(360%);
+  }
+}
+
+@keyframes go-nogo-step-cycle {
+  0%,
+  8% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  16%,
+  28% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  36%,
+  100% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .go-nogo-loading-bar,
+  .go-nogo-loading-scan::after,
+  .go-nogo-loading-steps > span {
+    animation: none;
+  }
+
+  .go-nogo-loading-bar {
+    opacity: 0.7;
+    transform: scaleY(0.7);
+  }
+
+  .go-nogo-loading-steps > span:first-child {
+    opacity: 1;
+  }
+}
+

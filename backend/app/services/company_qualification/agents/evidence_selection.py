@@ -11,6 +11,10 @@ from app.services.company_qualification.schemas import (
     EvidenceSelectionResult,
     ProposalContext,
 )
+from app.services.evidence_trust.client_list import ClientListRegistry
+from app.services.evidence_trust.gate import ClaimIntent, GateDecision, gate_client_for_claim
+from app.services.evidence_trust.load_client_list import load_client_list_registry
+from app.services.evidence_trust.provenance import is_win_eligible, provenance_block_reason
 from app.services.llm import LlmError
 
 logger = logging.getLogger(__name__)
@@ -28,6 +32,63 @@ def _heuristic_select(candidates: list[EvidenceCandidate], limit: int = 4) -> li
     return titles
 
 
+def _infer_services_claim(proposal_context: ProposalContext, rfp_context: str) -> str:
+    blob = " ".join(
+        [
+            " ".join(proposal_context.services_requested or []),
+            proposal_context.summary or "",
+            (rfp_context or "")[:2000],
+        ]
+    ).casefold()
+    if any(t in blob for t in ("website", "web site", "web redesign", "web development")):
+        return "website_build"
+    if "mci" in blob or ("meeting" in blob and "conference" in blob):
+        return "tourism_mci"
+    if any(t in blob for t in ("leisure", "visitor", "destination marketing", "tourism")):
+        if "exclud" in blob and "mci" in blob:
+            return "tourism_leisure"
+        return "destination_marketing"
+    return "experience"
+
+
+def prefilter_evidence_candidates(
+    candidates: list[EvidenceCandidate],
+    *,
+    registry: ClientListRegistry,
+    claim: str,
+) -> tuple[list[EvidenceCandidate], list[str]]:
+    """Drop Confirm / wrong work-type / non-win provenance before LLM selection."""
+    intent = ClaimIntent(slot="case_study", claim=claim, require_win_provenance=True)
+    kept: list[EvidenceCandidate] = []
+    notes: list[str] = []
+    for c in candidates:
+        hit = {
+            "source": c.source or c.title,
+            "title": c.title,
+            "excerpt": c.snippet,
+            "content": c.snippet,
+            "metadata": {"fileName": c.source or c.title},
+        }
+        if not is_win_eligible(hit):
+            reason = provenance_block_reason(hit) or "not win-eligible"
+            notes.append(f"dropped {c.title}: {reason}")
+            continue
+        client = None
+        blob = f"{c.title}\n{c.snippet}".casefold()
+        for entry in sorted(registry.entries, key=lambda e: len(e.name), reverse=True):
+            if entry.name.casefold() in blob:
+                client = entry.name
+                break
+        if client:
+            gated = gate_client_for_claim(client, registry=registry, intent=intent)
+            if gated.decision != GateDecision.ALLOW:
+                reason = gated.rejected[0][1] if gated.rejected else gated.decision.value
+                notes.append(f"dropped {c.title} ({client}): {reason}")
+                continue
+        kept.append(c)
+    return kept, notes
+
+
 async def run_evidence_selection_agent(
     *,
     proposal_context: ProposalContext,
@@ -38,8 +99,33 @@ async def run_evidence_selection_agent(
     if not candidates:
         return EvidenceSelectionResult(candidatesConsidered=0, selectedStudies=[]), ""
 
+    claim = _infer_services_claim(proposal_context, rfp_context)
+    filtered = candidates
+    try:
+        registry = await load_client_list_registry()
+        if registry.entries:
+            filtered, filter_notes = prefilter_evidence_candidates(
+                candidates, registry=registry, claim=claim
+            )
+            for note in filter_notes[:12]:
+                logger.info("Evidence prefilter: %s", note)
+    except Exception as exc:
+        logger.warning("Evidence ClientList prefilter skipped: %s", exc)
+        filtered = candidates
+
+    if not filtered:
+        logger.warning(
+            "Evidence selection: all %d candidates gated out for claim=%s",
+            len(candidates),
+            claim,
+        )
+        return (
+            EvidenceSelectionResult(candidatesConsidered=len(candidates), selectedStudies=[]),
+            "evidence_trust_gate",
+        )
+
     catalog_lines = []
-    for i, c in enumerate(candidates, 1):
+    for i, c in enumerate(filtered, 1):
         catalog_lines.append(
             f"{i}. TITLE: {c.title}\n   SNIPPET: {c.snippet[:400]}\n   SOURCE: {c.source}"
         )
@@ -62,7 +148,10 @@ async def run_evidence_selection_agent(
                         f"- Do NOT select work for '{rfp_client}' — that is the CURRENT client.\n"
                         "- ONLY titles from the candidate catalog below.\n"
                         "- Return 3–5 studies maximum. Never return more than 5.\n"
-                        "- Omit weak or irrelevant examples.\n\n"
+                        "- Omit weak or irrelevant examples.\n"
+                        f"- Required claim applicability: '{claim}' — do not pick nearest-topic "
+                        "work that does not actually deliver that work type.\n"
+                        "- Never treat finalist/loss files as wins.\n\n"
                         "Return JSON:\n"
                         '{"selectedStudies":["Exact Title 1"],'
                         '"scores":[{"title":"...","score":0.85,"rationale":"..."}]}'
@@ -76,7 +165,7 @@ async def run_evidence_selection_agent(
                         f"servicesRequested: {proposal_context.services_requested}\n"
                         f"summary: {(proposal_context.summary or '')[:280]}\n\n"
                         f"RFP requirements summary:\n{rfp_context[:8000]}\n\n"
-                        f"Candidate catalog ({len(candidates)} items):\n{catalog[:40000]}"
+                        f"Candidate catalog ({len(filtered)} items, pre-gated):\n{catalog[:40000]}"
                     ),
                 },
             ],
@@ -92,7 +181,7 @@ async def run_evidence_selection_agent(
         return (
             EvidenceSelectionResult(
                 candidatesConsidered=len(candidates),
-                selectedStudies=_heuristic_select(candidates),
+                selectedStudies=_heuristic_select(filtered),
                 scores=[],
             ),
             "heuristic",
@@ -100,15 +189,17 @@ async def run_evidence_selection_agent(
 
     selected = raw.get("selectedStudies") or raw.get("selected_studies") or []
     selected = [str(s).strip() for s in selected if str(s).strip()]
-    allowed = {c.title.casefold(): c.title for c in candidates}
+    allowed = {c.title.casefold(): c.title for c in filtered}
     normalized: list[str] = []
     for title in selected:
-        canonical = allowed.get(title.casefold(), title)
+        canonical = allowed.get(title.casefold())
+        if not canonical:
+            continue
         if canonical not in normalized:
             normalized.append(canonical)
     normalized = normalized[:5]
     if not normalized:
-        normalized = _heuristic_select(candidates)
+        normalized = _heuristic_select(filtered)
 
     scores_raw = raw.get("scores") or []
     scores: list[EvidenceScore] = []

@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote
 
 from app.models.proposal import ProposalDraft, ProposalDraftSnapshot
 
-_MAX_SNAPSHOTS = 8
+_MAX_SNAPSHOTS = 12
 
 # These labels clutter the menu and/or restore empty pre-chat states (data loss UX).
 _HIDDEN_SNAPSHOT_LABEL = re.compile(
@@ -18,10 +19,29 @@ _HIDDEN_SNAPSHOT_LABEL = re.compile(
 )
 
 
+def normalize_snapshot_saved_at(value: str | None) -> str:
+    """Normalize ISO savedAt keys so restore/GET match across FE/proxy encoding."""
+    key = unquote(unquote((value or "").strip()))
+    key = re.sub(
+        r"(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(\d{2}:\d{2})$",
+        r"\1+\2",
+        key,
+    )
+    if key.endswith("Z"):
+        key = key[:-1] + "+00:00"
+    return key
+
+
 def filled_count(draft: ProposalDraft | None) -> int:
     if not draft:
         return 0
     return sum(1 for s in draft.sections or [] if (s.content or "").strip())
+
+
+def snapshot_has_content(snap: ProposalDraftSnapshot | None) -> bool:
+    if not snap:
+        return False
+    return any((s.content or "").strip() for s in snap.sections or [])
 
 
 def is_user_facing_snapshot_label(label: str | None) -> bool:
@@ -37,12 +57,15 @@ def prune_clutter_snapshots(draft: ProposalDraft) -> ProposalDraft:
     if not snaps:
         return draft
     kept = [s for s in snaps if is_user_facing_snapshot_label(s.label)]
+    # Prefer contentful snapshots — drop hollow slim shells that cannot restore.
+    kept = [s for s in kept if snapshot_has_content(s) or (s.scan_summary is not None)]
     # Drop consecutive duplicates with the same label (same second spam).
     deduped: list[ProposalDraftSnapshot] = []
     for snap in kept:
         if deduped and (deduped[-1].label or "") == (snap.label or ""):
-            # Keep the newer of the pair.
-            deduped[-1] = snap
+            # Keep the newer / contentful of the pair.
+            if snapshot_has_content(snap) or not snapshot_has_content(deduped[-1]):
+                deduped[-1] = snap
             continue
         deduped.append(snap)
     if len(deduped) > _MAX_SNAPSHOTS:
@@ -119,17 +142,29 @@ def restore_proposal_snapshot(
     *,
     saved_at: str,
 ) -> ProposalDraft | None:
+    key = normalize_snapshot_saved_at(saved_at)
+    target: ProposalDraftSnapshot | None = None
     for snap in draft.snapshots or []:
-        if snap.saved_at != saved_at:
-            continue
-        # Slim / corrupted snapshots have empty section bodies — never wipe live draft.
-        if not any((s.content or "").strip() for s in snap.sections or []):
-            return None
-        now = datetime.now(timezone.utc).isoformat()
-        return draft.model_copy(
-            update={
-                "sections": [s.model_copy(deep=True) for s in snap.sections],
-                "updated_at": now,
-            }
+        if normalize_snapshot_saved_at(snap.saved_at) == key:
+            target = snap
+            break
+    if target is None:
+        return None
+    # Slim / corrupted snapshots have empty section bodies — never wipe live draft.
+    if not snapshot_has_content(target):
+        return None
+
+    working = draft
+    # Keep a recoverable live checkpoint in the Saved version menu (archives are FE-hidden).
+    if filled_count(draft) > 0:
+        working = push_proposal_snapshot(
+            draft, label="Live draft (before restore)"
         )
-    return None
+
+    now = datetime.now(timezone.utc).isoformat()
+    return working.model_copy(
+        update={
+            "sections": [s.model_copy(deep=True) for s in target.sections],
+            "updated_at": now,
+        }
+    )

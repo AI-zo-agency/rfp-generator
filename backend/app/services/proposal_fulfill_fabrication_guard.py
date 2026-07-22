@@ -6,12 +6,16 @@ import re
 from datetime import datetime, timezone
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
+from app.services.evidence_trust.client_list import ClientListRegistry
 
 # Known hallucinations from structure pass (extend as needed).
 _FABRICATION_MARKERS: tuple[str, ...] = (
     "queensland tourism",
     "tourism fiji",
     "south australian tourism commission",
+    "travel oregon",
+    "visit bend",
+    "city of sisters",
 )
 
 _CASE_STUDY_HEADER_RE = re.compile(r"Case Study\s+\d+\s*:", re.I)
@@ -22,6 +26,8 @@ _QUAL_REFERENCE_TITLE_HINTS: tuple[str, ...] = (
     "contractor reference",
     "experience & contractor",
     "contractor references",
+    "references",
+    "client reference",
 )
 
 
@@ -58,7 +64,6 @@ def _case_study_line_invented(line: str, portfolio_names: list[str]) -> bool:
         ncf = name.casefold()
         if ncf in cf or cf in ncf:
             return False
-        # Token overlap for "Deschutes Brewery" vs "Deschutes"
         tokens = [t for t in re.split(r"\W+", ncf) if len(t) >= 5]
         if tokens and all(t in cf for t in tokens[:1]):
             return False
@@ -88,10 +93,13 @@ def honest_qual_verify_body(section: ProposalSection, requirements: list[str]) -
         "Geography-specific case studies if the RFP requires them",
         "Contractor references with real contact relationships only",
     ]
-    req_lines = "\n".join(f"- [VERIFY: {b} — paste from verified Section 3 / KB only]" for b in bullets)
+    req_lines = "\n".join(
+        f"- [VERIFY: {b} — no verified ClientList/KB match; do not invent names or emails]"
+        for b in bullets
+    )
     return (
-        f"[VERIFY: Draft content for {title} — insufficient evidence in corpus. "
-        "Scan RFP will not invent clients, case studies, or reference relationships.]\n\n"
+        f"[VERIFY: {title} — no verified source found after ClientList + KB gate. "
+        "Do not invent clients, case studies, reference names, or emails.]\n\n"
         f"### Requirements still needed from Sonja / verified portfolio\n\n{req_lines}\n"
     )
 
@@ -111,8 +119,12 @@ def _requirements_for_section(
 def repair_fabricated_qualifications(
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
+    *,
+    registry: ClientListRegistry | None = None,
 ) -> tuple[ProposalDraft, list[str], list[str]]:
-    """Revert qual/reference sections that invent Oceania case studies or fake refs."""
+    """Revert inventing qual/refs; optionally FLAG Confirm / claim mismatches."""
+    from app.services.evidence_trust.claim_validator import validate_and_flag_section
+
     logs: list[str] = []
     human: list[str] = []
     portfolio = portfolio_client_names(draft)
@@ -120,10 +132,34 @@ def repair_fabricated_qualifications(
     changed = False
 
     for idx, section in enumerate(sections):
-        if not _title_is_qual_or_reference(section.title or ""):
-            continue
         body = section.content or ""
         if not body.strip():
+            continue
+
+        if registry and registry.entries:
+            updated, report = validate_and_flag_section(
+                body,
+                registry=registry,
+                slot=section.title or section.id,
+                allowed_client_names=set(portfolio) or None,
+            )
+            if updated != body:
+                sections[idx] = section.model_copy(
+                    update={"content": updated, "status": "generated"}
+                )
+                body = updated
+                changed = True
+                if report.notes:
+                    logs.append(
+                        f"Evidence trust ({section.title}): " + "; ".join(report.notes[:4])
+                    )
+                if report.clients_flagged:
+                    human.append(
+                        f"“{section.title}” flagged ClientList issues: "
+                        + ", ".join(report.clients_flagged[:5])
+                    )
+
+        if not _title_is_qual_or_reference(section.title or ""):
             continue
         if not section_has_invented_qual_content(body, portfolio):
             continue
@@ -136,7 +172,7 @@ def repair_fabricated_qualifications(
         )
         human.append(
             f"“{section.title}” had fabricated case studies or references — reverted to [VERIFY]. "
-            "Paste real work from Section 3 or KB; do not invent tourism-board engagements."
+            "Paste real work from Section 3 or KB; do not invent contacts."
         )
         changed = True
 
@@ -144,3 +180,17 @@ def repair_fabricated_qualifications(
         return draft, logs, human
     now = datetime.now(timezone.utc).isoformat()
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs, human
+
+
+async def repair_fabricated_qualifications_async(
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+) -> tuple[ProposalDraft, list[str], list[str]]:
+    registry: ClientListRegistry | None = None
+    try:
+        from app.services.evidence_trust.load_client_list import load_client_list_registry
+
+        registry = await load_client_list_registry()
+    except Exception:
+        registry = None
+    return repair_fabricated_qualifications(draft, research, registry=registry)

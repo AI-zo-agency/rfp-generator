@@ -3,10 +3,14 @@ import { NextResponse } from "next/server";
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
+    const contentType = request.headers.get("content-type") ?? "";
     const response = await backendFetch("/rfps/extract-due-date", {
       method: "POST",
-      body: formData,
+      // Forward raw multipart bytes — do not re-wrap FormData for undici.
+      body: Buffer.from(await request.arrayBuffer()),
+      headers: {
+        "Content-Type": contentType || "multipart/form-data",
+      },
     });
 
     const text = await response.text();

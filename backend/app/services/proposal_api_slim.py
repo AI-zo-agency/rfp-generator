@@ -50,18 +50,51 @@ def merge_snapshots_for_save(
     existing: ProposalDraft | None,
 ) -> ProposalDraft:
     """Client autosave sends slim snapshots — restore full section copies from DB."""
+    from app.services.proposal_draft_snapshots import (
+        normalize_snapshot_saved_at,
+        snapshot_has_content,
+    )
+
     if not existing or not existing.snapshots:
-        return incoming
+        # Never persist hollow snapshot shells from a first/empty client write.
+        incoming_snaps = incoming.snapshots or []
+        kept = [s for s in incoming_snaps if snapshot_has_content(s)]
+        if kept == list(incoming_snaps):
+            return incoming
+        return incoming.model_copy(update={"snapshots": kept})
+
     by_saved_at = {s.saved_at: s for s in existing.snapshots}
+    by_norm = {
+        normalize_snapshot_saved_at(s.saved_at): s for s in existing.snapshots
+    }
     merged: list[ProposalDraftSnapshot] = []
     incoming_snaps = incoming.snapshots or []
     if not incoming_snaps:
         return incoming.model_copy(update={"snapshots": list(existing.snapshots)})
+
+    seen_norm: set[str] = set()
     for snap in incoming_snaps:
-        if (not snap.sections) and snap.saved_at in by_saved_at:
-            merged.append(by_saved_at[snap.saved_at])
-        else:
+        norm = normalize_snapshot_saved_at(snap.saved_at)
+        prior = by_saved_at.get(snap.saved_at) or by_norm.get(norm)
+        incoming_empty = not snapshot_has_content(snap)
+        if incoming_empty and prior is not None and snapshot_has_content(prior):
+            merged.append(prior)
+            seen_norm.add(normalize_snapshot_saved_at(prior.saved_at))
+            continue
+        if incoming_empty and prior is None:
+            # Skip brand-new hollow shells — they can never be restored.
+            continue
+        merged.append(snap)
+        seen_norm.add(norm)
+
+    # Keep server-only contentful snapshots the client omitted (stale slim list).
+    for snap in existing.snapshots:
+        norm = normalize_snapshot_saved_at(snap.saved_at)
+        if norm in seen_norm:
+            continue
+        if snapshot_has_content(snap):
             merged.append(snap)
+
     return incoming.model_copy(update={"snapshots": merged})
 
 

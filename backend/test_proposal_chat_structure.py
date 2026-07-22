@@ -380,6 +380,32 @@ class ChatStructureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.additions[0].member_name, "Ron Comer")
         self.assertEqual(plan.deletions[0].section_id, "section-2-bio-brian")
 
+    def test_fill_verify_from_kb_only_does_not_create_kb_only_tab(self) -> None:
+        from app.services.proposal_chat_structure import (
+            _heuristic_section_replace_plan,
+            _is_in_place_kb_or_verify_edit,
+        )
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec(
+                    "rfp-form-3-references",
+                    "Form 3 — References",
+                    "[VERIFY: contact name]\n[VERIFY: phone]",
+                ),
+            ],
+            updatedAt="2026-07-22T00:00:00+00:00",
+        )
+        message = "Fill [VERIFY] tags from KB only."
+        self.assertTrue(_is_in_place_kb_or_verify_edit(message))
+        plan = _heuristic_section_replace_plan(
+            message,
+            draft,
+            focus_section_id="rfp-form-3-references",
+        )
+        self.assertIsNone(plan)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,7 +60,7 @@ from app.services.proposal_budget_playbook import (
 
 logger = logging.getLogger(__name__)
 
-SECTION_CHAT_ADVISORY_PROMPT = """You are a zö agency proposal editor assistant in a chat with the user.
+SECTION_CHAT_ADVISORY_PROMPT = """You are a zö agency proposal editor assistant — sharp, thorough, and honest.
 
 You may receive the FULL proposal manuscript digest plus one focus section and optionally a highlighted excerpt.
 
@@ -70,9 +70,10 @@ Rules:
 3. If the user asks whether something meets the RFP, cite specific RFP asks and gaps.
 4. You may disagree or push back when their request would weaken compliance or accuracy.
 5. Do NOT rewrite the section in this turn — explain what you would change and why, or answer the question.
-6. Be concise (2–6 short paragraphs max). Use **bold** for key RFP requirements.
+6. Be concise but thorough (use bullets when auditing). Use **bold** for key RFP requirements.
 7. If they need an edit, tell them to ask explicitly (e.g. "update 1.1 to…" or use Revise content on an excerpt).
 8. Budget/pricing/fees: follow the pricing playbook when provided — refuse invented numbers and reverse-engineered totals (option C); flag out-of-guide scope with [PRICING FLAG: … — Sonja review required].
+9. For duplicates / fabrication / ClientList trust: prefer directing them to say **check duplicates**, **remove duplicates**, or **remove fabricated content** so the system can run the full content→RFP→KB pipeline (you cannot fake that audit from this advisory turn alone).
 
 Return ONLY JSON: {"reply": "markdown message for the chat"}"""
 
@@ -1250,6 +1251,46 @@ async def improve_proposal_section(
     )
 
     research = await aget_research_cache(rfp_id)
+
+    # Powerful chat ops: duplicate audit / fabrication purge (content → RFP → KB)
+    from app.services.proposal_chat_ops import classify_chat_op, run_chat_ops
+
+    chat_op = classify_chat_op(user_message)
+    if chat_op != "none" and not selection_mode:
+        before_ids = [(s.id, s.content or "") for s in draft.sections]
+        updated_draft, ops_report = await run_chat_ops(
+            kind=chat_op,
+            draft=draft,
+            rfp=rfp,
+            rfp_context=rfp_context,
+            research=research,
+        )
+        provider = _provider_name()
+        if research is None:
+            research = ProposalResearchCache(
+                rfpId=rfp_id,
+                updatedAt=datetime.now(timezone.utc).isoformat(),
+                provider=provider,
+            )
+        after_ids = [(s.id, s.content or "") for s in updated_draft.sections]
+        changed = before_ids != after_ids
+        draft = updated_draft
+
+        focus = _find_draft_section(draft, section_id) or (
+            draft.sections[0] if draft.sections else None
+        )
+        if focus is None:
+            raise ProposalError("Draft has no sections.", status_code=400)
+
+        if changed and persist:
+            draft = await _persist_section_improve_draft(
+                draft,
+                research,
+                section_title=focus.title,
+            )
+            focus = _find_draft_section(draft, section_id) or focus
+
+        return focus, draft, research, provider, ops_report.reply, changed
 
     # When not pinned to a Revise-content excerpt, resolve structural asks
     # (add/delete sections) before rewriting the focused tab.

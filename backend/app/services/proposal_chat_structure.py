@@ -74,7 +74,9 @@ Return ONLY JSON:
 }
 
 Rules:
-1. Prefer "edit" when they want to change prose in an existing tab (improve, rewrite, fill VERIFY).
+1. Prefer "edit" when they want to change prose in an existing tab (improve, rewrite, fill VERIFY,
+   fill gaps from KB / "KB only"). NEVER create a new sidebar tab titled "Kb Only" or similar —
+   that phrase means knowledge-base source constraint, not a section name.
 2. Use "add_sections" when they want NEW sidebar items (more bios, more case studies, new form, new custom tab).
    - Team bios → kind "bio", title like "2.2 — First Last"; memberName only if user/RFP named them.
    - Our Work / case studies → kind "case_study", caseStudyName required.
@@ -239,6 +241,50 @@ def _find_bio_by_person_name(
     return hit
 
 
+def _is_in_place_kb_or_verify_edit(text: str) -> bool:
+    """True when the user wants to fill/edit the current tab — not add a sidebar section.
+
+    Catches: "Fill [VERIFY] tags from KB only" which previously became a new tab titled
+    "Kb Only" via the two-word replace heuristic.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    # Explicit rename / swap still wins.
+    if re.search(
+        r"\binstead\s+of\b|\breplace\s+.+\s+with\b|\bswap\s+(?:out\s+)?.+\s+(?:for|with)\b|"
+        r"\bchange\s+.+\s+to\b",
+        raw,
+        re.I | re.S,
+    ):
+        return False
+    # "…and get Ron Comer bio" is a real section swap — not in-place fill.
+    if re.search(
+        r"\b([A-Za-z][a-z']+)\s+([A-Za-z][a-z']+)\s+(?:bio|resume)\b",
+        raw,
+        re.I,
+    ):
+        return False
+    if re.search(
+        r"\b([A-Za-z][a-z']+)\s+([A-Za-z][a-z']+)(?:\s+[A-Za-z][a-z']+)?\s+case\s*study\b",
+        raw,
+        re.I,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"(?i)"
+            r"(?:fill|resolve|clear|complete).{0,60}\[?\s*VERIFY|"
+            r"\[VERIFY|"
+            r"from\s+(?:the\s+)?(?:KB|knowledge[\s-]?base)\s+only|"
+            r"\bKB[\s-]?only\b|"
+            r"knowledge[\s-]?base\s+only|"
+            r"fill\s+(?:all\s+)?(?:the\s+)?(?:verify(?:\s+tags?)?|gaps|placeholders)",
+            raw,
+        )
+    )
+
+
 def _extract_swap_labels_from_text(text: str) -> list[str]:
     """Labels the user might want as the NEW section (names, clients, titles)."""
     stop_first = {
@@ -269,6 +315,14 @@ def _extract_swap_labels_from_text(text: str) -> list[str]:
         "this",
         "that",
         "more",
+        "kb",
+        "knowledge",
+        "base",
+        "only",
+        "placeholder",
+        "placeholders",
+        "gap",
+        "gaps",
     }
     stop_last = {
         "bio",
@@ -286,6 +340,9 @@ def _extract_swap_labels_from_text(text: str) -> list[str]:
         "case",
         "form",
         "overview",
+        "kb",
+        "only",
+        "base",
     }
     found: list[str] = []
 
@@ -310,6 +367,8 @@ def _extract_swap_labels_from_text(text: str) -> list[str]:
         label = _clean_section_label(" ".join(p.capitalize() for p in parts))
         if len(label) < 3:
             return
+        if label.casefold() in {"kb only", "knowledge base", "verify tags"}:
+            return
         if label.casefold() not in {n.casefold() for n in found}:
             found.append(label)
 
@@ -332,9 +391,10 @@ def _extract_swap_labels_from_text(text: str) -> list[str]:
     if found:
         return found
 
-    # Fallback two-word labels when replace/get intent is present
+    # Fallback two-word labels when replace/get intent is present.
+    # Do NOT trigger on "verify" / "fill" alone — that created bogus tabs like "Kb Only".
     if re.search(
-        r"\b(instead|replace|swap|change|get|put|use|add|verify)\b",
+        r"\b(instead|replace|swap|change|get|put|use|add)\b",
         text or "",
         re.I,
     ):
@@ -362,6 +422,8 @@ def _heuristic_section_replace_plan(
     text = (user_message or "").strip()
     if not text:
         return None
+    if _is_in_place_kb_or_verify_edit(text):
+        return None
 
     old_label = ""
     new_label = ""
@@ -385,7 +447,7 @@ def _heuristic_section_replace_plan(
         named = _extract_swap_labels_from_text(text)
         swap_intent = bool(
             re.search(
-                r"\b(instead|replace|swap|change|get|put|use|add|verify|there)\b",
+                r"\b(instead|replace|swap|change|get|put|use|add|there)\b",
                 text,
                 re.I,
             )
@@ -393,6 +455,8 @@ def _heuristic_section_replace_plan(
         if swap_intent and named:
             for candidate in named:
                 if focus_label and candidate.casefold() == focus_label.casefold():
+                    continue
+                if candidate.casefold() in {"kb only", "knowledge base", "verify tags"}:
                     continue
                 new_label = candidate
                 break
@@ -402,6 +466,8 @@ def _heuristic_section_replace_plan(
     if not new_label or len(new_label) < 3:
         return None
     if old_label and old_label.casefold() == new_label.casefold():
+        return None
+    if new_label.casefold() in {"kb only", "knowledge base", "verify tags"}:
         return None
 
     target: ProposalSection | None = None
@@ -477,6 +543,13 @@ async def plan_chat_structure_action(
     rfp_context: str,
 ) -> StructurePlan:
     """Decide edit vs add/delete sections vs ask the user."""
+    if _is_in_place_kb_or_verify_edit(user_message):
+        return StructurePlan(
+            action="edit",
+            editSectionId=focus_section_id,
+            assistantNote="Filling VERIFY/gaps from KB in the current section (no new tab).",
+        )
+
     heuristic = _heuristic_section_replace_plan(
         user_message, draft, focus_section_id=focus_section_id
     )
@@ -493,7 +566,9 @@ async def plan_chat_structure_action(
         f"User message:\n{user_message.strip()}\n\n"
         "CRITICAL: If the user wants a DIFFERENT sidebar section/person/case study than the "
         "focus tab title, you MUST use add_sections with deletions for the old tab and "
-        "additions for the new one. NEVER action=edit that puts new content under the old title."
+        "additions for the new one. NEVER action=edit that puts new content under the old title.\n"
+        "CRITICAL: Phrases like 'from KB only', 'fill VERIFY', or 'knowledge base only' mean "
+        "edit the focus section in place — NEVER add_sections with title 'Kb Only'."
     )
     try:
         raw, _ = await llm.chat_json(
@@ -537,6 +612,37 @@ async def plan_chat_structure_action(
         )
         if forced is not None:
             return forced
+    # Guard: LLM sometimes invents a "Kb Only" tab from "from KB only".
+    if plan.action == "add_sections":
+        bogus = {
+            "kb only",
+            "knowledge base",
+            "knowledge base only",
+            "verify",
+            "verify tags",
+        }
+        cleaned: list[StructureAddition] = []
+        for addition in plan.additions:
+            title_cf = _section_label(addition.title or "").casefold()
+            member_cf = (addition.member_name or "").casefold()
+            case_cf = (addition.case_study_name or "").casefold()
+            if title_cf in bogus or member_cf in bogus or case_cf in bogus:
+                logger.warning(
+                    "Rejected bogus structure addition %r from message %r",
+                    addition.title,
+                    user_message[:120],
+                )
+                continue
+            cleaned.append(addition)
+        if not cleaned and _is_in_place_kb_or_verify_edit(user_message):
+            return StructurePlan(
+                action="edit",
+                editSectionId=focus_section_id,
+                assistantNote="Filling VERIFY/gaps from KB in the current section (no new tab).",
+            )
+        plan.additions = cleaned
+        if not plan.additions and not plan.deletions:
+            return StructurePlan(action="edit", editSectionId=focus_section_id)
     return plan
 
 

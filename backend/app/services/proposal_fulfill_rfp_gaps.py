@@ -487,10 +487,12 @@ async def _run_fulfill_rfp_gaps_body(
 
     try:
         from app.services.proposal_fulfill_fabrication_guard import (
-            repair_fabricated_qualifications,
+            repair_fabricated_qualifications_async,
         )
 
-        draft, fab_logs, fab_human = repair_fabricated_qualifications(draft, research)
+        draft, fab_logs, fab_human = await repair_fabricated_qualifications_async(
+            draft, research
+        )
         report["logs"].extend(fab_logs)
         report["humanDecisionGaps"].extend(fab_human)
         if fab_logs:

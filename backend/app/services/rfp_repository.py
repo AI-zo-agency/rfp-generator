@@ -452,6 +452,39 @@ def save_go_no_go_analysis(rfp_id: str, analysis: GoNoGoAnalysis) -> RfpRecord |
     return get_rfp(rfp_id)
 
 
+def clear_go_no_go_analysis(rfp_id: str) -> RfpRecord | None:
+    """Remove prior Stage 1 results so a re-run does not show stale scores mid-flight."""
+    if _use_supabase():
+        return sb.clear_go_no_go_analysis(rfp_id)
+
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE rfps
+            SET fit_score = NULL,
+                worth_score = NULL,
+                go_no_go = NULL,
+                go_no_go_analysis = NULL,
+                stage = 'go_no_go',
+                status = 'new',
+                last_activity = ?,
+                last_activity_note = ?
+            WHERE id = ? OR external_id = ?
+            """,
+            (
+                now,
+                "Go/No-Go re-run in progress — previous analysis cleared.",
+                rfp_id,
+                rfp_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            return None
+
+    return get_rfp(rfp_id)
+
+
 def mark_rfp_go(rfp_id: str) -> bool:
     if _use_supabase():
         return sb.mark_rfp_go(rfp_id)

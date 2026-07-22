@@ -20,6 +20,10 @@ from app.services import llm, supermemory
 from app.services.rfp_content import combine_rfp_text, load_local_rfp_text, resolve_rfp_pdf_path
 from app.services.pdf_text import IMAGE_ONLY_TEXT_THRESHOLD
 from app.services.rfp_repository import get_rfp_pdf_path
+from app.services.evidence_trust.rfp_hard_facts import (
+    evaluation_table_is_reliable,
+    extract_rfp_hard_facts,
+)
 from app.services.proposal_rfp_excerpt import build_priority_rfp_excerpt
 
 EVALUATION_QUESTIONS: list[tuple[str, str]] = [
@@ -96,7 +100,8 @@ SCORING_RUBRIC = """SCORING (integers 0–5, or null if insufficientData) — de
 CRITICAL: Do NOT reuse the same scores across different RFPs. Do NOT default to 3/2. Each score must reflect
 this solicitation's scope match, contract value, evaluation weights, geography, compliance risks, and competition.
 
-fitScore ("AI Fit Score") — capability + sector + compliance + team vs KB:
+fitScore (internal only — do NOT show as "AI Fit Score" in stageOneReport or summary):
+  Capability + sector + compliance + team vs KB. Keep for JSON compatibility; Overall Go Score is what users see.
   5 = near-perfect documented match (scope, sector case studies, compliance, team)
   4 = strong match with minor gaps
   3 = in-lane but meaningful gaps (registration, sector proof, experience minimums)
@@ -107,10 +112,12 @@ fitScore ("AI Fit Score") — capability + sector + compliance + team vs KB:
 worthScore ("Worth It Score") — financial return vs pursuit effort:
   5 = high disclosed value, favorable fee structure, strong win path
   4 = solid value and reasonable effort
-  3 = moderate value or mixed signals
-  2 = modest/undisclosed budget, heavy compliance/demo/travel overhead, or steep competition
+  3 = moderate value or mixed signals (including right-sized public-sector scopes with undisclosed budget)
+  2 = modest value with heavy pursuit overhead OR clearly poor economics
   1 = poor return relative to effort
   0 = not worth pursuing
+  Do NOT set Worth ≤ 2 solely because budget is undisclosed when the scope is otherwise in-lane and
+  pursuit effort is normal. Undisclosed budget alone → usually Worth 3 (mixed), not 2.
 
 decisionMatrix — exactly 5 rows; each score is independent (they will often differ):
   1. Technical Capability Match — scope execution per KB
@@ -122,6 +129,26 @@ decisionMatrix — exactly 5 rows; each score is independent (they will often di
 Overall Go Score = arithmetic average of the 5 decisionMatrix scores (not fitScore/worthScore).
 Use the full 0–5 range. Strong RFPs with local presence and high contract value should score 4–5 on several dimensions.
 Weak or distant low-value RFPs should score 1–2 on Financial Viability and Win Probability.
+
+EVIDENCE CALIBRATION (accurate — neither reject-everything NOR invent pessimism):
+- Score each matrix row against THIS RFP's stated requirements and the KB excerpts returned for the searches run.
+- Do not invent KB proof. Missing evidence for a required capability → discount that row and note the gap.
+- FLOORS when KB proof is strong: If KB returns a near-direct case study for the RFP's core scope
+  (same work type + sector/use-case, e.g. coalition health communications for a health-policy RFP),
+  Technical Capability Match should normally be ≥ 4 and Win Probability should not be ≤ 2 unless
+  there is a separate structural blocker (office DQ, deadline, out-of-lane, disqualifying compliance).
+- Do NOT invent evaluation point weights, percentages, or totals. If HARD FACTS say evaluation points
+  were not found, write "RFP does not disclose a point-weighted table" and score Financial/Win from
+  real signals only (scope fit, competition, logistics, disclosed budget). Never invent "62% cost"
+  or duplicate Cost/Experience rows to justify a low score.
+- Do NOT invent team-member names. Only cite people who appear in KB excerpts (bios/org). Unknown
+  roles → [FLAG FOR SONJA: assign …], never a fabricated name.
+- Fixable gaps (state registration, insurance verify, assign social lead) → prefer recommendation=review
+  with conditions; do not tank Overall into the 2.x range solely for those.
+- Do not auto-recommend no_go solely because Overall < 3; use "review" when gaps are fixable.
+- Prefer "no_go" only for: out-of-lane scope, disqualifying verified compliance failure, deadline passed
+  with late-submission DQ, or clearly poor fit+worth with no credible path.
+- When Overall < 3, criticalGaps MUST list concrete RFP/KB-backed reasons (not invented point math).
 
 HARD CAPS (do not overscore):
 - If the RFP requires the Offeror to have/establish an office in a geography where KB shows no
@@ -171,6 +198,23 @@ EVIDENCE HYGIENE (mandatory — these errors have changed real Go/No-Go outcomes
    matching destination/leisure proof without an explicit mismatch note and score discount.
 5. Prefer "review" over "go" when (a) Offeror-office legality is unresolved or (b) reusable
    experience depends on 07_FIN / competitor-contaminated files.
+6. HARD RFP FACTS: If the user prompt lists CONTRACT VALUE or EVALUATION CRITERIA / POINTS
+   extracted from the RFP body, you MUST use those numbers in EXECUTIVE SUMMARY, Financial
+   Viability, Win Probability, and the evaluation table. NEVER write "budget not disclosed",
+   "contract value not disclosed", or "RFP does not specify point allocations" when those
+   extractions are present. Guessing from transaction-fee caps while ignoring an explicit
+   ceiling is an analytical error.
+7. NEVER INVENT EVALUATION MATH: If HARD FACTS say the evaluation point table was not found,
+   do NOT fabricate Category/Max Points rows, percentages, or totals (no duplicate Cost/Experience
+   rows, no "62% cost-heavy"). State that weights are undisclosed and score without them.
+8. NEVER INVENT PEOPLE: Do not name team members unless they appear in the KB excerpts provided.
+   Common documented leads include Sonja Anderson, Todd Anderson, Ron Comer, Ella Lindau,
+   Curt Schultz, Justin Bronson, Gil Aranowitz — but ONLY cite a name if the KB excerpt supports it.
+   Unknown roles → [FLAG FOR SONJA: assign …], never invent a Project Lead name.
+9. NEAR-DIRECT CASE STUDIES: Scan KB excerpts for closest work-type matches (e.g. Recovery Network
+   of Oregon / RNO for coalition health/stigma communications). If present, cite them as Verified
+   and raise Technical Capability / Win Probability accordingly — do not mark "health policy" as a
+   Gap while ignoring that proof.
 
 """ + SCORING_RUBRIC + """
 
@@ -193,7 +237,8 @@ stageOneReport — comprehensive Markdown matching a senior analyst brief. Be ex
 
 ## EXECUTIVE SUMMARY
 Open with deadline status vs today's date when relevant. Client, project, solicitation number, deadline (with timezone if stated),
-contract value/term, AI Fit Score X/5 (1-sentence why), Worth It Score X/5 (1-sentence why), Recommendation label.
+contract value/term, Worth It Score X/5 (1-sentence why), Overall Go Score X/5 (matrix average, 1-sentence why), Recommendation label.
+Do NOT mention "AI Fit Score" or fitScore in the report text.
 
 ## COMPLIANCE SNAPSHOT
 ### Mandatory Documents Required
@@ -220,8 +265,11 @@ If RFP requires Offeror office establishment, call it out as structural (not a s
 Markdown table when helpful: RFP Requirement | zö Capability (KB source + 03_CS/06_WON/07_FIN) | Status (Verified/Gap/[VERIFY])
 
 ## EVALUATION CRITERIA BREAKDOWN
-Table: Category | Max Points | zö Strength | Vulnerability — use actual point weights from the RFP.
-Include scoring formulas when stated (e.g., cost scoring). Note highest-weight sections and where to concentrate effort.
+If HARD FACTS include evaluation point rows: Table Category | Max Points | zö Strength | Vulnerability
+using ONLY those extracted weights (they must sum consistently — never invent extra Cost/Experience rows).
+If HARD FACTS say point allocations were NOT found: write clearly that the RFP does not disclose a
+point-weighted table (pass/fail + scored question groups are fine to describe narratively). Do NOT
+invent percentages or point totals. Note where effort should concentrate based on question groups only.
 
 ## COMPETITIVE CONTEXT
 Likely competitors, zö positioning advantages (bullets), red flags for this client type (bullets).
@@ -243,7 +291,7 @@ Return ONLY valid JSON.
   "fitScore": 0,
   "worthScore": 0,
   "recommendation": "go",
-  "summary": "2-3 sentence executive summary for the dashboard",
+  "summary": "2-3 sentence executive summary for the dashboard (mention Worth It + Overall; never say AI Fit Score)",
   "stageOneReport": "## EXECUTIVE SUMMARY\\n...",
   "decisionMatrix": [
     {"dimension": "Technical Capability Match", "score": 0, "notes": "RFP-specific rationale citing scope and KB"},
@@ -273,29 +321,51 @@ Return ONLY valid JSON.
 }"""
 
 KB_QUERY_PLANNER_PROMPT = """You plan targeted Supermemory knowledge-base searches for zö agency Go/No-Go analysis.
-Given an RFP excerpt, return 12-16 specific search queries to retrieve verified facts about zö.
+Given an RFP excerpt, return 14-20 specific search queries. Cover ALL four passes below that apply to THIS RFP.
 
-REQUIRED QUERY TYPES (include all that apply to THIS RFP):
-1. Agency-level certifications only — WBENC, WOSB, COBID, insurance (01_companyfacts). Explicitly
-   search whether Google Ads / Meta Ads certs are individual specialist credentials vs agency-wide.
-2. Offeror / office / geography — if RFP requires a local or Oceania/Hawaii/region office for the
-   Offeror (prime), search for zö physical office locations and Hawaii/Oceania presence. Also search
-   for subcontractor/JV language ONLY as separate queries — do not conflate them with Offeror office.
-3. Won vs finalist provenance — separate queries:
-   - "06_WON" + sector/destination keywords for wins
-   - "07_FIN" + same keywords to surface finalist/loss files that must NOT be counted as wins
-4. Destination / leisure tourism vs MCI — if RFP is leisure destination or excludes MCI/meetings,
-   search leisure/visitor destination case studies AND separately San Francisco Travel / meetings
-   conference references so the analyst can flag MCI mismatch.
-5. Case studies (03_CS) for municipal/destination/tourism clients named in or analogous to the RFP.
-6. Team bios for specialized roles the RFP names (cultural advisor, Oceania specialist, account lead).
-7. Pricing/commission models if budget/media spend is material.
-8. Compliance/registration/insurance for the RFP jurisdiction.
+PASS 1 — RFP-driven capability searches (map solicitation scope → KB proof):
+- Core deliverables / service categories named in the RFP (communications, social marketing, web, brand, media, etc.)
+- Sector + use-case (higher education, health policy, public sector, tourism, municipal, coalition, stigma, etc.)
+- Geography / registration / insurance / preference law for the buyer state
+- Team roles the RFP names (account lead, social media, creative, PM)
+
+PASS 2 — Verification / roster / client-list hygiene:
+- 01_ClientList_Approved Public Yes Confirm status for analogous clients
+- 04_Bio / MasterTemplate org roster for named roles (never invent people later)
+- 01_companyfacts certifications (WBENC/WOSB agency-level only; Google/Meta as individual vs agency)
+- Pricing guide verified vs proposed anchors if budget/media spend matters
+
+PASS 3 — Claim↔tag / provenance:
+- Separate 03_CS and 06_WON queries for wins matching the RFP work type
+- Separate 07_FIN queries so finalist/loss files are surfaced and NOT counted as wins
+- Work-type tagged searches (do not rely on brand-only clients for web claims, etc.)
+- If RFP excludes MCI/meetings, search leisure destination AND SF Travel/MCI separately for mismatch detection
+- Near-direct analogs: health coalition / Recovery Network of Oregon / stigma / multi-language when health RFP
+
+PASS 4 — Human-gate surfacing (still search so flags have context):
+- Offeror office / establish presence requirements
+- Conflicts / prior work for this buyer or university system
+- Insurance / E-Verify / reciprocal preference
+
+REQUIRED QUERY TYPES (include all that apply):
+1. Agency-level certifications — WBENC, WOSB, COBID, insurance (01_companyfacts)
+2. Offeror / office / geography vs subcontractor/JV as SEPARATE queries
+3. Won vs finalist provenance (06_WON + 07_FIN with sector keywords)
+4. Case studies (03_CS) closest to RFP scope — not only same sector label
+5. Team bios (04_Bio) for specialized roles
+6. Compliance/registration for the RFP jurisdiction
+7. ClientList Approved entries matching work type
 
 Use the client name, location, sector, and specific deliverables from the RFP in your queries.
-Prefer filename/bucket tokens when useful: 01_companyfacts, 03_CS, 04_Bio, 06_WON, 07_FIN.
+Prefer filename/bucket tokens: 01_companyfacts, 01_ClientList, 03_CS, 04_Bio, 06_WON, 07_FIN.
 Do NOT include HTML, JavaScript errors, or portal boilerplate in queries.
 Return ONLY JSON: {"queries": ["query 1", "query 2", ...]}"""
+
+
+DOCUMENTED_TEAM_SEARCH = (
+    "zö agency 04_Bio MasterTemplate team roster Sonja Anderson Todd Anderson Ron Comer "
+    "Ella Lindau Curt Schultz Justin Bronson Gil Aranowitz"
+)
 
 
 def _deterministic_evidence_queries(rfp: RfpRecord, content: RfpContentInfo) -> list[str]:
@@ -304,6 +374,7 @@ def _deterministic_evidence_queries(rfp: RfpRecord, content: RfpContentInfo) -> 
     sector = (rfp.sector or "").strip()
     client = (rfp.client or "").strip()
     location = (rfp.location or "").strip()
+    title = (rfp.title or "").strip()
 
     queries = [
         "zö agency 01_companyfacts WBENC WOSB certifications agency-level verified",
@@ -313,6 +384,8 @@ def _deterministic_evidence_queries(rfp: RfpRecord, content: RfpContentInfo) -> 
         "zö agency 03_CS Deschutes Brewery Oregon Employment Department City of Umatilla case studies",
         "zö agency San Francisco Travel reference meetings conference MCI tourism",
         "zö agency office locations Hawaii Oceania physical presence geography",
+        DOCUMENTED_TEAM_SEARCH,
+        "zö agency 01_ClientList_Approved Public Yes Confirm work type tags",
     ]
     if sector:
         queries.append(f"zö agency 03_CS {sector} case study won experience")
@@ -320,8 +393,11 @@ def _deterministic_evidence_queries(rfp: RfpRecord, content: RfpContentInfo) -> 
         queries.append(f"zö agency 07_FIN {sector} finalist proposal loss")
     if client:
         queries.append(f"zö agency {client} case study reference 03_CS 06_WON")
+        queries.append(f"zö agency prior work conflict {client} university system")
     if location:
         queries.append(f"zö agency {location} office registration vendor presence")
+    if title:
+        queries.append(f"zö agency 03_CS capabilities matching {title[:120]}")
 
     if re.search(
         r"\boffice\b.{0,80}(?:Oceania|Hawai|Hawaii|Must have or must establish)|"
@@ -366,6 +442,40 @@ def _deterministic_evidence_queries(rfp: RfpRecord, content: RfpContentInfo) -> 
             "zö agency platform certifications Google Ads Meta Ads individual vs company"
         )
 
+    # Health / coalition / social marketing — catch near-direct proof (e.g. RNO)
+    if re.search(
+        r"health\s+polic|ARCHI|public\s+health|stigma|coalition|social\s+market|"
+        r"behavioral\s+health|recovery|substance|community\s+engagement|"
+        r"lived\s+experience|multi-?language|peer\s+support",
+        sample,
+        re.IGNORECASE,
+    ) or re.search(
+        r"health\s+polic|social\s+market|ARCHI|coalition",
+        f"{title} {client} {sector}",
+        re.IGNORECASE,
+    ):
+        queries.extend(
+            [
+                "zö agency Recovery Network of Oregon RNO coalition stigma communications case study 03_CS",
+                "zö agency Oregon Recovers health stigma social marketing multi-language 03_CS 06_WON",
+                "zö agency health policy communications public health coalition campaign case study",
+                "zö agency social marketing communications strategy public sector 03_CS",
+                "zö agency culturally sensitive messaging community engagement lived experience",
+            ]
+        )
+
+    if re.search(
+        r"higher\s+education|universit|college|GSU|Georgia\s+State",
+        f"{sample} {title} {client}",
+        re.IGNORECASE,
+    ):
+        queries.extend(
+            [
+                "zö agency University of Idaho Benedictine higher education case study ClientList",
+                "zö agency university college higher education communications marketing 03_CS",
+            ]
+        )
+
     return queries
 
 
@@ -406,19 +516,63 @@ def _annotate_go_no_go_hit(hit: dict[str, Any]) -> dict[str, Any]:
     return annotated
 
 
-def _format_go_no_go_kb_hits(hits: list[dict[str, Any]], *, max_chars: int) -> str:
+def _format_go_no_go_kb_hits(
+    hits: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    queries: list[str] | None = None,
+) -> str:
     annotated = [_annotate_go_no_go_hit(hit) for hit in hits]
-    header = (
+    header_parts = [
         "KB PROVENANCE LEGEND (apply before scoring):\n"
         "- 06_WON = win / reusable zö proposal material\n"
         "- 07_FIN = finalist/loss — NOT a win; never cite as documented won experience\n"
         "- Individual Google/Meta Ads certs ≠ agency-wide Verified capability\n"
-        "- Offeror office requirements are prime obligations unless RFP says otherwise\n\n"
-    )
+        "- Offeror office requirements are prime obligations unless RFP says otherwise\n"
+    ]
+    if queries:
+        listed = "\n".join(f"- {q}" for q in queries[:40])
+        header_parts.append(
+            f"\nKB SEARCHES RUN ({min(len(queries), 40)} of {len(queries)} shown) — "
+            "score ONLY from returned excerpts; missing proof is a gap, not a yes:\n"
+            f"{listed}\n"
+        )
+    header_parts.append("\n")
+    header = "".join(header_parts)
     body = supermemory.format_search_hits(annotated, max_chars=max(0, max_chars - len(header)))
     if not body:
         return body
     return header + body
+
+
+def _merge_kb_hits_round_robin(
+    results: list[list[dict[str, Any]]],
+    *,
+    max_hits: int = 120,
+) -> list[dict[str, Any]]:
+    """Interleave hits across queries so later planned searches are not starved."""
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    index = 0
+    while len(merged) < max_hits:
+        progressed = False
+        for hits in results:
+            if index >= len(hits):
+                continue
+            hit = hits[index]
+            key = str(hit.get("id") or hit.get("customId") or hit.get("content", "")[:80])
+            progressed = True
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(hit)
+            if len(merged) >= max_hits:
+                break
+        if not progressed:
+            break
+        index += 1
+    return merged
+
 
 KB_SEARCH_LIMIT = 8
 KB_CONTEXT_MAX_CHARS = 45_000
@@ -635,8 +789,8 @@ def _build_scope_search_query(rfp: RfpRecord, content: RfpContentInfo) -> str:
 
 
 def _build_scoring_factors(rfp: RfpRecord, content: RfpContentInfo) -> str:
+    """Authoritative hard facts from FULL RFP text — never claim these are undisclosed if found."""
     text = combine_rfp_text(content.description, content.pdf_text)
-    sample = text[:25_000]
     lines = [
         f"- Client: {rfp.client}",
         f"- Sector: {rfp.sector}",
@@ -645,41 +799,72 @@ def _build_scoring_factors(rfp: RfpRecord, content: RfpContentInfo) -> str:
     if rfp.estimated_value is not None:
         lines.append(f"- Estimated value (metadata): ${rfp.estimated_value:,}")
 
-    budgets = re.findall(
-        r"\$[\d,]+(?:\.\d+)?(?:\s*(?:million|billion|M|B|K|thousand))?",
-        sample,
-        flags=re.IGNORECASE,
-    )
-    if budgets:
-        unique_budgets = list(dict.fromkeys(budgets))[:6]
-        lines.append(f"- Dollar amounts in RFP: {', '.join(unique_budgets)}")
+    hard = extract_rfp_hard_facts(text)
+    if hard["contract_value_lines"]:
+        lines.append("- CONTRACT VALUE (from RFP body — authoritative; do NOT say 'not disclosed'):")
+        lines.extend(f"  • {row}" for row in hard["contract_value_lines"][:12])
+    else:
+        lines.append(
+            "- Contract value: not found by extractor as a ceiling/budget — say budget is undisclosed. "
+            "Do NOT cite small-business gross-receipts thresholds (e.g. $30M eligibility) as "
+            "'a contract value reference found'."
+        )
 
-    point_weights = re.findall(
-        r"(\d{1,3})\s*(?:points?|pts?\.?)(?:\s*(?:out of|/)\s*(\d{1,3}))?",
-        sample,
-        flags=re.IGNORECASE,
-    )
-    if point_weights:
-        formatted = [
-            f"{weight}{f'/{total}' if total else ''}"
-            for weight, total in point_weights[:8]
-        ]
-        lines.append(f"- Evaluation point weights in RFP: {', '.join(formatted)}")
+    eligibility = hard.get("eligibility_dollar_lines") or []
+    if eligibility:
+        lines.append(
+            "- VENDOR/SMALL-BUSINESS ELIGIBILITY DOLLARS (NOT contract value — never cite as opportunity size):"
+        )
+        lines.extend(f"  • {row}" for row in eligibility[:6])
+
+    if hard["evaluation_lines"]:
+        lines.append(
+            "- EVALUATION CRITERIA / POINTS (from RFP body — authoritative; "
+            "do NOT say points are unspecified):"
+        )
+        lines.extend(f"  • {row}" for row in hard["evaluation_lines"][:16])
+        if hard.get("evaluation_total"):
+            lines.append(f"  • Detected point total ≈ {hard['evaluation_total']}")
+    else:
+        lines.append(
+            "- Evaluation point table: NOT FOUND in RFP body by extractor. "
+            "You MUST say point allocations are undisclosed. "
+            "FORBIDDEN: inventing Category/Max Points tables, percentages "
+            "(e.g. '62% cost'), duplicate Cost/Experience rows, or totals like '29 points'. "
+            "Score Financial Viability and Win Probability WITHOUT invented weight math."
+        )
+
+    if hard["other_dollar_amounts"]:
+        lines.append(
+            "- Other dollar amounts in RFP: " + ", ".join(hard["other_dollar_amounts"][:10])
+        )
 
     term_matches = re.findall(
         r"(\d+)\s*(?:-|\s)?\s*(?:month|year)s?",
-        sample[:8_000],
+        text[:12_000],
         flags=re.IGNORECASE,
     )
     if term_matches:
-        lines.append(f"- Term lengths mentioned: {', '.join(term_matches[:4])}")
+        lines.append(
+            f"- Term lengths mentioned: {', '.join(list(dict.fromkeys(term_matches))[:6])}"
+        )
 
     lines.append(
-        "- Calibrate fitScore, worthScore, and each decisionMatrix row from these "
-        "RFP-specific signals — scores must differ when contract value, geography, "
-        "evaluation weights, or compliance risk differ."
+        "- REQUIRED: Quote contract value and evaluation weights in EXECUTIVE SUMMARY and "
+        "EVALUATION CRITERIA BREAKDOWN when extracted above. Financial Viability and Win "
+        "Probability MUST use these numbers when present — never invent 'budget unknown' or "
+        "'no point allocations' when they appear here. When evaluation points were NOT found, "
+        "do not invent them; do not depress scores with fake cost-weight percentages."
+    )
+    lines.append(
+        "- TEAM NAMES: Only cite people appearing in KB excerpts. Never invent Project Leads "
+        "(e.g. do not invent 'Drew Stone'). Use [FLAG FOR SONJA: assign role] instead."
     )
     return "\n".join(lines)
+
+
+# Back-compat alias for tests / callers still importing the private name.
+_extract_rfp_hard_facts = extract_rfp_hard_facts
 
 
 _LATE_SUBMISSION_RE = re.compile(
@@ -899,17 +1084,13 @@ async def _gather_knowledge_context(
 
     results = await asyncio.gather(*(run_query(query) for query in unique_queries))
 
-    seen: set[str] = set()
-    merged: list[dict[str, Any]] = []
-    for hits in results:
-        for hit in hits:
-            key = str(hit.get("id") or hit.get("customId") or hit.get("content", "")[:80])
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(hit)
+    merged = _merge_kb_hits_round_robin(list(results))
 
-    formatted = _format_go_no_go_kb_hits(merged, max_chars=KB_CONTEXT_MAX_CHARS)
+    formatted = _format_go_no_go_kb_hits(
+        merged,
+        max_chars=KB_CONTEXT_MAX_CHARS,
+        queries=unique_queries,
+    )
     logger.info(
         "Supermemory KB search for %s: %d queries, %d unique hits, %d chars",
         rfp.id,
@@ -1139,10 +1320,277 @@ def _normalize_dimension_flags(raw: dict[str, Any]) -> None:
                 flag["severity"] = _normalize_flag_severity(flag.get("severity"))
 
 
+_INVENTED_EVAL_WEIGHT_RE = re.compile(
+    r"(?:weighted\s+at\s+\d{1,3}\s*%|"
+    r"\d{1,3}\s*%\s*(?:of\s+)?(?:total\s+)?(?:points?|cost)|"
+    r"\(\s*\d{1,3}\s*%\s*\)|"
+    r"\d{1,3}\s*%\s*cost-?weighted|"
+    r"cost-?weighted|"
+    r"\d{1,3}\s+of\s+\d{1,3}\s*points?|"
+    r"cost-?heavy\s+evaluation|"
+    r"heavy\s+cost\s+weight|"
+    r"cost\s+(?:evaluation\s+)?weight(?:ed|ing)|"
+    r"Max\s+Points|"
+    r"points?\s*\(\d{1,3}\s*%\)|"
+    r"points?\s*\(\s*\d+\s*\+\s*\d+\s*\)|"
+    r"Total:\s*\d+\s*points|"
+    r"Total\s+\d+\s*points|"
+    r"Cost\s+\d+\s+points|"
+    r"Experience\s+\d+\s+points|"
+    r"combined,?\s*requiring\s+competitive\s+pricing)",
+    re.IGNORECASE,
+)
+_INVENTED_PERSON_RE = re.compile(r"\bDrew\s+Stone\b", re.IGNORECASE)
+_NAME_SPELLING_FIXES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bElla\s+Lindeau\b", re.IGNORECASE), "Ella Lindau"),
+    (re.compile(r"\bLindeau\b", re.IGNORECASE), "Lindau"),
+]
+_MISATTRIBUTED_CONTRACT_VALUE_RE = re.compile(
+    r"(?:contract\s+value[^\n.]{0,80})?(?:only\s+)?\$?\s*30\s*million[^\n.]{0,100}"
+    r"(?:reference|found|mentioned|gross\s+receipts)?|"
+    r"only\s+\$?\s*30\s*million\s+reference\s+found",
+    re.IGNORECASE,
+)
+_EVAL_SECTION_RE = re.compile(
+    r"(##\s*EVALUATION CRITERIA BREAKDOWN\b.*?)(?=\n##\s+|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_DISCLOSED_EVAL_SECTION = (
+    "## EVALUATION CRITERIA BREAKDOWN\n"
+    "Point-weighted scoring is **not disclosed** in this RFP. "
+    "The solicitation uses question groups (pass/fail and scored items) without published "
+    "category point totals or percentages.\n\n"
+    "Cost-sensitivity is therefore **unknowable from the RFP text**. "
+    "Do not invent a weighted scoring table. Describe question groups narratively only "
+    "when they appear in the RFP body.\n"
+)
+
+
+def _text_blob_for_invention_scan(raw: dict[str, Any]) -> str:
+    parts: list[str] = [
+        str(raw.get("summary") or ""),
+        str(raw.get("stageOneReport") or ""),
+    ]
+    for key in ("criticalGaps", "conditions", "actionFlags"):
+        values = raw.get(key)
+        if isinstance(values, list):
+            parts.extend(str(v) for v in values if v)
+    matrix = raw.get("decisionMatrix")
+    if isinstance(matrix, list):
+        for row in matrix:
+            if isinstance(row, dict):
+                parts.append(str(row.get("notes") or ""))
+    return "\n".join(parts)
+
+
+def _apply_name_spelling_fixes(text: str) -> str:
+    fixed = text
+    for pattern, replacement in _NAME_SPELLING_FIXES:
+        fixed = pattern.sub(replacement, fixed)
+    return fixed
+
+
+def _scrub_string_list(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    cleaned: list[str] = []
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        text = _apply_name_spelling_fixes(item.strip())
+        if not text:
+            continue
+        if _INVENTED_EVAL_WEIGHT_RE.search(text):
+            continue
+        if _MISATTRIBUTED_CONTRACT_VALUE_RE.search(text):
+            continue
+        cleaned.append(text)
+    return cleaned
+
+
+def _strip_invented_eval_claims_from_text(text: str) -> str:
+    """Remove sentences/lines that assert fabricated point weights or %."""
+    if not text:
+        return text
+    kept: list[str] = []
+    for line in text.splitlines():
+        if _INVENTED_EVAL_WEIGHT_RE.search(line):
+            # Drop table rows / weight claims entirely.
+            continue
+        kept.append(line)
+    cleaned = "\n".join(kept)
+    # Also drop orphaned markdown table headers left behind.
+    cleaned = re.sub(
+        r"(?im)^\s*\|\s*Category\s*\|\s*Max Points.*$\n?(?:^\s*\|[^\n]*$\n?)*",
+        "",
+        cleaned,
+    )
+    return cleaned
+
+
+def _replace_undisclosed_eval_section(report: str) -> str:
+    cleaned = _strip_invented_eval_claims_from_text(report)
+    if _EVAL_SECTION_RE.search(cleaned):
+        return _EVAL_SECTION_RE.sub(_DISCLOSED_EVAL_SECTION.strip() + "\n\n", cleaned, count=1)
+    # Section missing but invented weights elsewhere — insert truthful section before FINAL REC.
+    insert_at = re.search(r"\n##\s+FINAL RECOMMENDATION\b", cleaned, re.IGNORECASE)
+    if insert_at:
+        idx = insert_at.start()
+        return cleaned[:idx] + "\n\n" + _DISCLOSED_EVAL_SECTION + cleaned[idx:]
+    if "EVALUATION CRITERIA" not in cleaned.upper():
+        return cleaned.rstrip() + "\n\n" + _DISCLOSED_EVAL_SECTION
+    return cleaned
+
+
+def _scrub_invented_eval_and_people(
+    raw: dict[str, Any],
+    *,
+    evaluation_points_found: bool,
+) -> None:
+    """Mechanically remove fabrication failure modes that survive the LLM pass."""
+    blob = _text_blob_for_invention_scan(raw)
+    gaps = raw.setdefault("criticalGaps", [])
+    if not isinstance(gaps, list):
+        gaps = []
+        raw["criticalGaps"] = gaps
+
+    report = str(raw.get("stageOneReport") or "")
+    summary = str(raw.get("summary") or "")
+
+    has_invented_eval_language = bool(_INVENTED_EVAL_WEIGHT_RE.search(blob))
+    # If extractor did not find a reliable published table, ANY point/% table in the
+    # report is treated as fabrication — even if the model reuses the same fake 29/62.
+    invented_weights = (not evaluation_points_found) and (
+        has_invented_eval_language
+        or bool(
+            re.search(
+                r"Max\s+Points|points?\s*\(\d{1,3}\s*%\)|Total\s*:?\s*\d+\s*points|"
+                r"Cost\s+\d+\s+points|62\s*%",
+                report,
+                re.I,
+            )
+        )
+    )
+    invented_person = bool(_INVENTED_PERSON_RE.search(blob))
+    misattributed_contract = bool(_MISATTRIBUTED_CONTRACT_VALUE_RE.search(blob))
+
+    if invented_weights:
+        report = _replace_undisclosed_eval_section(report)
+        summary = _strip_invented_eval_claims_from_text(summary)
+        summary = _INVENTED_EVAL_WEIGHT_RE.sub("", summary)
+        summary = re.sub(r"\s{2,}", " ", summary).strip(" .")
+        if summary and not summary.endswith("."):
+            summary += "."
+        if not summary:
+            summary = (
+                "Point-weighted evaluation criteria are not disclosed in the RFP; "
+                "scores reflect scope fit, KB evidence, and logistics only."
+            )
+        matrix = raw.get("decisionMatrix")
+        if isinstance(matrix, list):
+            for row in matrix:
+                if not isinstance(row, dict):
+                    continue
+                dim = str(row.get("dimension") or "").casefold()
+                notes = str(row.get("notes") or "")
+                if dim in {"financial viability", "win probability"} and (
+                    _INVENTED_EVAL_WEIGHT_RE.search(notes)
+                    or "62%" in notes
+                    or int(row.get("score") or 0) <= 2
+                ):
+                    score = int(row.get("score") or 0)
+                    if score <= 2:
+                        row["score"] = min(3, score + 1)
+                    row["notes"] = (
+                        "Point-weighted evaluation table not disclosed in RFP — "
+                        "score based on scope fit, competition, and logistics only."
+                    )
+                elif _INVENTED_EVAL_WEIGHT_RE.search(notes):
+                    row["notes"] = _INVENTED_EVAL_WEIGHT_RE.sub("", notes).strip()
+        worth = raw.get("worthScore")
+        if isinstance(worth, int) and worth <= 2:
+            raw["worthScore"] = 3
+        gaps[:] = [
+            g
+            for g in gaps
+            if isinstance(g, str) and not _INVENTED_EVAL_WEIGHT_RE.search(g)
+        ]
+
+    if misattributed_contract:
+        report = _MISATTRIBUTED_CONTRACT_VALUE_RE.sub(
+            "Contract value not disclosed in RFP",
+            report,
+        )
+        summary = _MISATTRIBUTED_CONTRACT_VALUE_RE.sub(
+            "Contract value not disclosed in RFP",
+            summary,
+        )
+        report = re.sub(
+            r"Contract\s+[Vv]alue:\s*Not disclosed in RFP\s*\([^)]*\$?\s*30\s*million[^)]*\)",
+            "Contract Value: Not disclosed in RFP",
+            report,
+            flags=re.IGNORECASE,
+        )
+        msg = (
+            "Contract value not disclosed — do not treat small-business gross-receipts "
+            "thresholds (e.g. $30M eligibility) as opportunity size."
+        )
+        if not any(isinstance(g, str) and "gross-receipts" in g.lower() for g in gaps):
+            gaps.append(msg)
+
+    if invented_person:
+        msg = (
+            "[VERIFY: 'Drew Stone' is not a documented zö team member — "
+            "remove from staffing claims; FLAG SONJA to assign Project Lead]"
+        )
+        if not any(isinstance(g, str) and "Drew Stone" in g for g in gaps):
+            gaps.append(msg)
+        report = _INVENTED_PERSON_RE.sub(
+            "[FLAG FOR SONJA: assign Project Lead — unverified name removed]",
+            report,
+        )
+        matrix = raw.get("decisionMatrix")
+        if isinstance(matrix, list):
+            for row in matrix:
+                if isinstance(row, dict) and _INVENTED_PERSON_RE.search(
+                    str(row.get("notes") or "")
+                ):
+                    row["notes"] = _INVENTED_PERSON_RE.sub(
+                        "[unverified name removed — assign via Sonja]",
+                        str(row.get("notes") or ""),
+                    )
+
+    report = _apply_name_spelling_fixes(report)
+    summary = _apply_name_spelling_fixes(summary)
+    raw["stageOneReport"] = report
+    if summary:
+        raw["summary"] = summary
+    raw["criticalGaps"] = _scrub_string_list(gaps) if invented_weights else [
+        _apply_name_spelling_fixes(g) if isinstance(g, str) else g for g in gaps
+    ]
+    raw["conditions"] = [
+        _apply_name_spelling_fixes(c) if isinstance(c, str) else c
+        for c in (raw.get("conditions") or [])
+        if isinstance(c, str)
+    ]
+    if isinstance(raw.get("actionFlags"), list):
+        raw["actionFlags"] = [
+            _apply_name_spelling_fixes(f) if isinstance(f, str) else f
+            for f in raw["actionFlags"]
+            if isinstance(f, str)
+        ]
+    matrix = raw.get("decisionMatrix")
+    if isinstance(matrix, list):
+        for row in matrix:
+            if isinstance(row, dict) and isinstance(row.get("notes"), str):
+                row["notes"] = _apply_name_spelling_fixes(row["notes"])
+
+
 def _apply_hard_rules(
     raw: dict[str, Any],
     *,
     deadline: dict[str, Any] | None = None,
+    evaluation_points_found: bool = False,
 ) -> dict[str, Any]:
     if raw.get("insufficientData"):
         raw["recommendation"] = None
@@ -1196,6 +1644,11 @@ def _apply_hard_rules(
 
     raw["decisionMatrix"] = _normalize_decision_matrix(raw.get("decisionMatrix"))
     _normalize_dimension_flags(raw)
+    _scrub_invented_eval_and_people(
+        raw, evaluation_points_found=evaluation_points_found
+    )
+    # Re-normalize matrix after possible score bumps in scrubber.
+    raw["decisionMatrix"] = _normalize_decision_matrix(raw.get("decisionMatrix"))
 
     if deadline is not None:
         raw["deadline"] = deadline
@@ -1313,6 +1766,10 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
     kb_context = await _gather_knowledge_context(rfp, content)
     rfp_context = _build_rfp_context(rfp, content)
     deadline_info = _assess_deadline(rfp, content)
+    hard_facts = extract_rfp_hard_facts(
+        combine_rfp_text(content.description, content.pdf_text)
+    )
+    evaluation_points_found = evaluation_table_is_reliable(hard_facts)
 
     thin_rfp_note = ""
     if content.metadata_only:
@@ -1330,14 +1787,21 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
 ## Deadline check (authoritative — use today's date)
 {_build_deadline_context(deadline_info)}
 
-## Scoring factors for THIS RFP (extracted from this solicitation — use to calibrate scores)
+## Scoring factors / HARD FACTS for THIS RFP (extracted from full solicitation text)
 {_build_scoring_factors(rfp, content)}
 
-Write a detailed stageOneReport in Markdown following the required section structure (compliance snapshot with mandatory documents, capability yes/gap lists, evaluation point tables, competitive context, flags).
+Write a detailed stageOneReport in Markdown following the required section structure (compliance snapshot with mandatory documents, capability yes/gap lists, evaluation criteria, competitive context, flags).
 Populate decisionMatrix with all 5 dimensions — derive each score dynamically from THIS RFP's budget, geography,
-evaluation criteria weights, compliance risks, KB evidence, and competitive position. No default or template scores.
+evaluation criteria weights (ONLY if listed in HARD FACTS), compliance risks, KB evidence, and competitive position.
+No default or template scores. Do not invent pessimistic point tables to justify low scores.
+If HARD FACTS list a contract ceiling / year budgets, Financial Viability MUST cite them (do not say undisclosed).
+If HARD FACTS list evaluation point rows, Win Probability and the EVALUATION CRITERIA table MUST use them.
+If HARD FACTS say evaluation points were NOT found, say so — never invent %.
+When KB includes a near-direct case study for the core scope (e.g. Recovery Network of Oregon for
+coalition/health communications), cite it as Verified and score Technical Capability ≥ 4 unless a
+separate structural blocker exists. Fixable registration/team flags → review, not a 2.x Overall.
 Use [FLAG FOR ROLE: ...] and [FLAG: ...] for every item needing human confirmation before submission.
-Use tables with pipe characters for evaluation criteria and capability assessment.
+Use tables with pipe characters for capability assessment; evaluation point tables ONLY when HARD FACTS provide them.
 Cite specific RFP requirements and specific knowledge-base evidence. Tag uncertain items [VERIFY].
 
 EVIDENCE DISCIPLINE FOR THIS RUN:
@@ -1345,6 +1809,12 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 - Google/Meta Ads on one person ≠ agency Verified.
 - 07_FIN ≠ won experience; flag Resonance/competitor text if present.
 - MCI-mismatched tourism refs need an explicit discount note.
+- Never invent "budget unknown" when HARD FACTS show a ceiling.
+- Never invent evaluation % / point totals when HARD FACTS say not found.
+- Never invent team names; never invent "Drew Stone".
+- Spell Ella Lindau correctly (not Lindeau).
+- Undisclosed budget alone ≠ Worth 2 and Financial 2 — usually Worth ~3 when scope is in-lane.
+- Never cite small-business gross-receipts thresholds (e.g. $30M) as contract value.
 
 ## RFP
 {rfp_context}
@@ -1361,8 +1831,12 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
     analysis: GoNoGoAnalysis | None = None
     for attempt in range(2):
         try:
-            raw, provider = await llm.chat_json(messages, max_tokens=12_000, temperature=0.45)
-            normalized = _apply_hard_rules(raw, deadline=deadline_info)
+            raw, provider = await llm.chat_json(messages, max_tokens=12_000, temperature=0.25)
+            normalized = _apply_hard_rules(
+                raw,
+                deadline=deadline_info,
+                evaluation_points_found=evaluation_points_found,
+            )
             normalized = _coerce_go_no_go_raw(normalized)
             analysis = GoNoGoAnalysis.model_validate({**normalized, "provider": provider})
             break
@@ -1420,11 +1894,8 @@ def analysis_activity_note(analysis: GoNoGoAnalysis) -> str:
         "review": "Review (Go With Conditions)",
     }[analysis.recommendation or "review"]
     overall = compute_overall_go_score(analysis)
-    fit = analysis.fit_score
     worth = analysis.worth_score
     score_bits: list[str] = []
-    if fit is not None:
-        score_bits.append(f"Fit {fit}/5")
     if worth is not None:
         score_bits.append(f"Worth {worth}/5")
     if overall is not None:

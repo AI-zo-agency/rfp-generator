@@ -138,6 +138,26 @@ class ProposalDraftSnapshotTests(unittest.TestCase):
             )
         )
 
+    def test_restore_matches_z_suffix_saved_at(self) -> None:
+        draft = _draft(_section("form-2", "Chat filled Form 2"))
+        draft = push_after_section_edit_snapshot(draft, section_title="Form 2")
+        saved_at = (draft.snapshots or [])[-1].saved_at
+        z_key = saved_at.replace("+00:00", "Z")
+        emptied = draft.model_copy(
+            update={"sections": [_section("form-2", "LIVE CHANGED")]}
+        )
+        restored = restore_proposal_snapshot(emptied, saved_at=z_key)
+        assert restored is not None
+        self.assertIn(
+            "Chat filled Form 2",
+            next(s for s in restored.sections if s.id == "form-2").content,
+        )
+        labels = [s.label for s in restored.snapshots or []]
+        self.assertTrue(
+            any("Live draft (before restore)" == lab for lab in labels),
+            labels,
+        )
+
     def test_filled_count(self) -> None:
         draft = _draft(_section("a", "x"), _section("b", ""))
         self.assertEqual(filled_count(draft), 1)

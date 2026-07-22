@@ -19,9 +19,9 @@ interface SectionEditChatProps {
 }
 
 const QUICK_PROMPTS = [
-  "This section is not well — re-search with more detailed queries and rewrite.",
-  "Find firm history, employee count, and organizational structure in the KB.",
-  "Add more case studies and verified outcomes relevant to this RFP.",
+  "Check duplicates thoroughly.",
+  "Remove fabricated content (content → RFP → KB).",
+  "Fill [VERIFY] tags from KB only.",
   "Make this more specific to the client and less generic.",
 ];
 

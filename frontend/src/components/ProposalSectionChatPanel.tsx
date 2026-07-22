@@ -43,10 +43,10 @@ interface ProposalSectionChatPanelProps {
 }
 
 const QUICK_PROMPTS = [
-  "Does this meet the RFP?",
+  "Check duplicates thoroughly.",
+  "Remove fabricated content (content → RFP → KB).",
   "Fill [VERIFY] tags from KB only.",
-  "More client-specific — less generic.",
-  "Add 2 more team bios per RFP.",
+  "Does this meet the RFP?",
 ];
 
 const SECTION_PIN_LABEL = "Improve this section";

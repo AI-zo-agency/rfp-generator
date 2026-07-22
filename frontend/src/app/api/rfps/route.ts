@@ -65,12 +65,18 @@ export async function POST(request: Request) {
     const contentType = request.headers.get("content-type") ?? "";
     const isMultipart = contentType.includes("multipart/form-data");
 
+    // Forward the raw body. Re-wrapping request.formData() into undici fetch
+    // can stringify as "[object FormData]" (undici may not recognize Next's FormData).
+    const body = isMultipart
+      ? Buffer.from(await request.arrayBuffer())
+      : await request.text();
+
     const response = await backendFetch("/rfps", {
       method: "POST",
-      body: isMultipart ? await request.formData() : await request.text(),
-      headers: isMultipart
-        ? undefined
-        : { "Content-Type": contentType || "application/json" },
+      body,
+      headers: {
+        "Content-Type": contentType || "application/json",
+      },
       timeoutMs: 0,
     });
 

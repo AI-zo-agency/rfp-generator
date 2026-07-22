@@ -54,7 +54,9 @@ export function ProposalVersionCompare({
       setLoadedSnapshot(null);
       return;
     }
-    const hasBodies = (selectedSnapshot.sections?.length ?? 0) > 0;
+    const hasBodies = (selectedSnapshot.sections ?? []).some((s) =>
+      Boolean(s.content?.trim())
+    );
     if (hasBodies) {
       setLoadedSnapshot(selectedSnapshot);
       return;

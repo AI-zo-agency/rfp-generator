@@ -919,6 +919,7 @@ export function ProposalDraftWorkspace({
         !confirm(
           `Load checkpoint “${label}”?\n\n` +
             "This replaces the FULL live proposal with that saved copy.\n" +
+            "Your current live draft is kept as “Live draft (before restore)” in Saved versions.\n" +
             "Example: an earlier Form 2 checkpoint will clear Form 3/References if they were added later."
         )
       ) {
@@ -967,18 +968,11 @@ export function ProposalDraftWorkspace({
     [restoreSnapshotAt, outline.snapshots, outline.sections, rfp.id, applyOutlineFromServer]
   );
 
-  const handleSnapshotDropdownChange = useCallback(
-    async (savedAt: string) => {
-      if (!savedAt || savedAt === restoreSnapshotAt) return;
-      const previous = restoreSnapshotAt;
-      setRestoreSnapshotAt(savedAt);
-      const ok = await handleRestoreSnapshot(savedAt);
-      if (!ok) {
-        setRestoreSnapshotAt(previous);
-      }
-    },
-    [restoreSnapshotAt, handleRestoreSnapshot]
-  );
+  const handleSnapshotDropdownChange = useCallback((savedAt: string) => {
+    // Selecting a version only updates compare target — Restore button loads it.
+    if (!savedAt) return;
+    setRestoreSnapshotAt(savedAt);
+  }, []);
 
   useEffect(() => {
     const snaps = outline.snapshots ?? [];
@@ -1995,7 +1989,7 @@ export function ProposalDraftWorkspace({
                 <select
                   value={restoreSnapshotAt}
                   onChange={(e) =>
-                    void handleSnapshotDropdownChange(e.target.value)
+                    handleSnapshotDropdownChange(e.target.value)
                   }
                   disabled={
                     isRestoringSnapshot ||
@@ -2003,11 +1997,11 @@ export function ProposalDraftWorkspace({
                     (outline.snapshots?.length ?? 0) === 0
                   }
                   className="proposal-snapshot-select"
-                  aria-label="Load a saved proposal checkpoint"
+                  aria-label="Choose a saved proposal version to compare"
                   aria-busy={isRestoringSnapshot}
                   title={
                     (outline.snapshots?.length ?? 0) > 0
-                      ? "Select a checkpoint to load that full proposal (confirm first)."
+                      ? "Select a checkpoint to compare. Click Restore to load it as the live draft."
                       : "Versions appear after chat improve, Scan RFP, or when a draft checkpoint is saved."
                   }
                 >

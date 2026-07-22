@@ -204,18 +204,9 @@ async def get_proposal_snapshot_path(rfp_id: str, saved_at: str) -> dict[str, ob
 
 
 def _normalize_snapshot_saved_at(value: str) -> str:
-    from urllib.parse import unquote
+    from app.services.proposal_draft_snapshots import normalize_snapshot_saved_at
 
-    key = unquote(unquote((value or "").strip()))
-    # Path/query decoders sometimes turn '+' into space in "+00:00".
-    key = re.sub(
-        r"(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(\d{2}:\d{2})$",
-        r"\1+\2",
-        key,
-    )
-    if key.endswith("Z"):
-        key = key[:-1] + "+00:00"
-    return key
+    return normalize_snapshot_saved_at(value)
 
 
 async def _get_proposal_snapshot(rfp_id: str, saved_at: str) -> dict[str, object]:
