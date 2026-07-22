@@ -6,6 +6,7 @@ Runs after Sections 1–3, Phase 3 drafting, and at the start of self-edit.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -27,6 +28,10 @@ from app.services.proposal_manual_flags import _replace_verify_tags_from_blob
 from app.services.proposal_section_quality import word_count
 
 logger = logging.getLogger(__name__)
+
+# Cap concurrent section fact-checks / KB queries (I/O bound; avoid rate-limit storms).
+FACT_CHECK_SECTION_PARALLEL = 4
+FACT_CHECK_KB_QUERY_PARALLEL = 4
 
 _FALSE_VERIFY_STUB_RE = re.compile(
     r"\[VERIFY:\s*Draft content for .+?insufficient evidence in corpus",
@@ -100,6 +105,102 @@ class FactCheckReport:
     duplicates_removed: int = 0
     metric_flags: int = 0
     logs: list[str] = field(default_factory=list)
+
+
+def _is_legal_attestation_section(section: ProposalSection) -> bool:
+    """E-Verify / disclosure / affidavit — never let LLM re-assert as settled fact."""
+    title = (section.title or "").casefold()
+    body = (section.content or "")[:900].casefold()
+    hints = (
+        "e-verify",
+        "affidavit",
+        "disclosure statement",
+        "conflict of interest",
+        "contractor affidavit",
+        "penalty of perjury",
+        "non-collusion",
+    )
+    return any(h in title or h in body for h in hints)
+
+
+def _priority_kb_queries(
+    section: ProposalSection,
+    *,
+    rfp: RfpRecord,
+    rfp_context: str = "",
+) -> list[str]:
+    """Deterministic queries for known legal / critique gaps (not title mash / LLM filler)."""
+    from app.services.evidence_trust.legal_attestation_gate import (
+        rfp_needs_health_coalition_proof,
+    )
+
+    title = (section.title or "").casefold()
+    body = (section.content or "").casefold()
+    sid = section.id or ""
+    out: list[str] = []
+
+    if _is_legal_attestation_section(section) or "e-verify" in title or "e-verify" in body:
+        out.append("01_companyfacts zö agency E-Verify enrollment compliance")
+        out.append("01_companyfacts zö agency federal contractor certifications affidavits")
+
+    if "disclosure" in title or "conflict" in title or "conflict of interest" in body:
+        out.append("01_companyfacts zö agency conflict of interest disclosure")
+
+    if any(
+        h in title
+        for h in ("staffing", "personnel", "hours", "cost proposal", "budget", "pricing")
+    ) or re.search(r"\b(?:400|320|280|200|160)\s*hours?\b", body):
+        out.append("01_PricingGuide zö agency staffing hours rates annual allocation")
+        out.append("01_companyfacts zö agency pricing guide project management hours")
+
+    if "10-year" in body or "corporate-creative" in body or "who we are" in title:
+        out.append("01_companyfacts zö agency founded August 21 2013 years in business")
+
+    refs_or_exp = any(
+        h in title
+        for h in (
+            "reference",
+            "previous experience",
+            "past performance",
+            "case stud",
+            "our work",
+            "relevant experience",
+        )
+    ) or sid.startswith("section-3")
+    if rfp_needs_health_coalition_proof(rfp, rfp_context) and refs_or_exp:
+        out.append(
+            "03_CS Recovery Network of Oregon RNO Oregon Recovers coalition stigma health"
+        )
+        out.append(
+            "Recovery Network of Oregon zö agency case study outcomes references contact"
+        )
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for q in out:
+        key = q.casefold()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(q)
+    return deduped
+
+
+def _merge_query_lists(*groups: list[str], limit: int = 6) -> list[str]:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for group in groups:
+        for q in group:
+            text = (q or "").strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(text[:240])
+            if len(merged) >= limit:
+                return merged
+    return merged
 
 
 def _eval_percent_claimed_without_rfp(content: str, rfp_text: str) -> list[str]:
@@ -458,7 +559,10 @@ async def _plan_kb_queries(
     retrieval_focus: list[str],
     rfp: RfpRecord,
     mapped: RfpSectionMap | None = None,
+    rfp_context: str = "",
 ) -> list[str]:
+    priority = _priority_kb_queries(section, rfp=rfp, rfp_context=rfp_context)
+    planned: list[str] = []
     if llm.is_configured():
         try:
             from app.services.proposal_langchain_agents import (
@@ -473,30 +577,33 @@ async def _plan_kb_queries(
                 section_title=section.title or "",
                 requirements=requirements,
                 retrieval_focus=retrieval_focus,
-                prior_queries=[],
+                prior_queries=priority,
                 user_message=(
-                    "Fact-check pass: plan Supermemory queries to gather zö KB evidence "
-                    "needed to satisfy the mapped RFP requirements (not generic filler)."
+                    "Fact-check pass: plan Supermemory queries from the mapped RFP "
+                    "requirements and this section's draft gaps. Prefer specific "
+                    "01_companyfacts / 03_CS / 04_Bio queries. For health/coalition RFPs "
+                    "include Recovery Network of Oregon when experience/references are "
+                    "needed. NEVER plan queries that would invent E-Verify enrollment or "
+                    "conflict-free disclosures — those stay VERIFY unless companyfacts "
+                    "explicitly confirm."
                 ),
                 current_content=section.content or "",
             )
-            if planned:
-                return planned
         except Exception as exc:  # noqa: BLE001
             logger.warning("Query planner failed for %s: %s", section.id, exc)
 
-    queries: list[str] = []
+    fallback: list[str] = []
     for req in requirements[:3]:
         q = f"zö agency {req}".strip()
         if q:
-            queries.append(q[:240])
+            fallback.append(q[:240])
     for focus in retrieval_focus[:2]:
         f = str(focus).strip()
         if f:
-            queries.append(f[:240])
-    if not queries:
-        queries.append(_kb_query_for_section(section, rfp, mapped=mapped))
-    return queries[:4]
+            fallback.append(f[:240])
+    if not priority and not planned and not fallback:
+        fallback.append(_kb_query_for_section(section, rfp, mapped=mapped))
+    return _merge_query_lists(priority, planned or [], fallback, limit=6)
 
 
 async def _gather_kb_context(
@@ -506,17 +613,27 @@ async def _gather_kb_context(
     rfp: RfpRecord,
     mapped: RfpSectionMap | None = None,
 ) -> tuple[str, list[str]]:
+    if not queries:
+        return await _kb_blob_for_section(fallback_section, rfp, mapped=mapped)
+
+    sem = asyncio.Semaphore(FACT_CHECK_KB_QUERY_PARALLEL)
+
+    async def _one(query: str) -> tuple[str, str, list[str]]:
+        async with sem:
+            context, sources, _ = await retrieve_for_question(
+                query,
+                limit=6,
+                max_chars=18_000,
+                threshold=0.32,
+            )
+            return query, context, sources
+
+    results = await asyncio.gather(*[_one(q) for q in queries])
     seen_sources: set[str] = set()
     parts: list[str] = []
     all_sources: list[str] = []
-    for query in queries:
-        context, sources, _ = await retrieve_for_question(
-            query,
-            limit=6,
-            max_chars=18_000,
-            threshold=0.32,
-        )
-        if context.startswith("(No matching"):
+    for query, context, sources in results:
+        if not context or context.startswith("(No matching"):
             continue
         parts.append(f"### Retrieval: {query}\n{context}")
         for label in sources:
@@ -584,6 +701,11 @@ async def _run_requirement_aligned_fact_check_agent(
         "may use RFP + plan context without 03_CS case studies.\n"
         "5. If there are gaps, fabrications, or generic boilerplate, rewrite to satisfy "
         "requirements using KB evidence and brand voice. Do not invent a generic section.\n"
+        "6. LEGAL ATTESTATIONS: Never assert E-Verify enrollment or 'no conflicts of "
+        "interest' as fact. Keep or insert [VERIFY: … Sonja/Operations must confirm]. "
+        "For health/coalition RFPs, prefer Recovery Network of Oregon in experience/"
+        "references when KB supports it; otherwise FLAG for Sonja. Never invent staffing "
+        "hours or a '10-year partnership' credential (founded 2013).\n"
         f"{specs_note}\n"
         f"{ANTI_HALLUCINATION_RULES}\n\n"
         f"{voice_block}\n\n"
@@ -648,10 +770,28 @@ def _kb_query_for_section(
     title_cf = title.casefold()
     client_hint = _client_from_section_title(title)
 
+    if _is_legal_attestation_section(section) or "e-verify" in title_cf:
+        return "01_companyfacts zö agency E-Verify enrollment compliance"[:240]
+    if "disclosure" in title_cf or "conflict" in title_cf:
+        return "01_companyfacts zö agency conflict of interest disclosure"[:240]
+    if any(h in title_cf for h in ("reference", "previous experience", "past performance")):
+        from app.services.evidence_trust.legal_attestation_gate import (
+            rfp_needs_health_coalition_proof,
+        )
+
+        if rfp_needs_health_coalition_proof(rfp):
+            return (
+                "03_CS Recovery Network of Oregon RNO Oregon Recovers coalition"
+            )[:240]
+        return "03_CS zö agency client references past performance contacts"[:240]
+
     if mapped and mapped.retrieval_focus:
         focus = " ".join(str(f).strip() for f in mapped.retrieval_focus[:2] if str(f).strip())
-        if focus:
+        # Avoid vague mash like "methodology won_proposals" as the sole query.
+        if focus and not re.search(r"(?i)\bwon_proposals?\b", focus):
             return f"zö agency {focus}"[:240]
+        if focus:
+            return f"01_companyfacts 03_CS zö agency {focus}"[:240]
 
     if sid.startswith("section-3-work") or "case study" in title_cf:
         name = client_hint or title
@@ -668,13 +808,13 @@ def _kb_query_for_section(
         if "business" in title_cf and "information" in title_cf:
             return "01_companyfacts zö agency business information insurance financial stability"[:240]
         if "who we are" in title_cf:
-            return "01_companyfacts zö agency company overview differentiators"[:240]
+            return "01_companyfacts zö agency company overview differentiators founded 2013"[:240]
         topic = client_hint or title
         return f"01_companyfacts zö agency {topic}"[:240]
 
     terms = _question_terms(client_hint or title)
     core = " ".join(terms[:8])
-    return f"zö agency {core}"[:240]
+    return f"01_companyfacts 03_CS zö agency {core}"[:240]
 
 
 async def _kb_blob_for_section(
@@ -850,6 +990,193 @@ async def _flag_unverified_metrics_in_case_study(
     return section, False
 
 
+async def _fact_check_one_section(
+    section: ProposalSection,
+    *,
+    rfp: RfpRecord,
+    rfp_context: str,
+    research: ProposalResearchCache | None,
+    brand_voice: dict[str, Any] | None,
+) -> tuple[ProposalSection, FactCheckReport]:
+    """Fact-check a single section; returns section + per-section report deltas."""
+    report = FactCheckReport(sections_checked=1)
+    current = section
+    mapped = _resolve_mapped_section(section, research)
+    requirements = _requirements_for_section(section, mapped)
+    retrieval_focus = list(mapped.retrieval_focus) if mapped else []
+    rfp_excerpt = _rfp_excerpt_for_section(
+        rfp_context,
+        section_title=section.title or "",
+        requirements=requirements,
+    )
+    if not rfp_excerpt.strip():
+        rfp_excerpt = (rfp_context or "")[:35_000]
+
+    bad_pcts = _eval_percent_claimed_without_rfp(current.content or "", rfp_context)
+    if bad_pcts:
+        current, fixed = await _repair_eval_percentages(current, rfp_context)
+        if fixed:
+            report.eval_repairs += 1
+            report.logs.append(
+                f"Repaired unsupported evaluation weights ({', '.join(bad_pcts)}) "
+                f"in {section.title}"
+            )
+
+    if current.id.startswith("section-2-bio"):
+        current, bio_fills, bio_logs = await _fact_check_bio_subsections(current)
+        if bio_fills:
+            report.verify_tags_filled += bio_fills
+        report.logs.extend(bio_logs)
+
+    # Legal attestations: deterministic gate only — do not LLM-rewrite into sworn claims.
+    if _is_legal_attestation_section(current):
+        from app.services.evidence_trust.legal_attestation_gate import (
+            gate_section_legal_attestations,
+        )
+
+        current, legal = gate_section_legal_attestations(current, force=True)
+        report.logs.extend(legal.logs)
+        priority = _priority_kb_queries(
+            current, rfp=rfp, rfp_context=rfp_context
+        ) or [_kb_query_for_section(current, rfp, mapped=mapped)]
+        kb_context, sources = await _gather_kb_context(
+            priority,
+            fallback_section=current,
+            rfp=rfp,
+            mapped=mapped,
+        )
+        if kb_context:
+            new_body, fills = _replace_verify_tags_from_blob(
+                current.content or "",
+                kb_context,
+            )
+            if fills:
+                report.verify_tags_filled += fills
+                current = current.model_copy(update={"content": new_body})
+                report.logs.append(
+                    f"Filled {fills} non-locked VERIFY tag(s) in {section.title} "
+                    f"from KB ({', '.join(sources[:3])})"
+                )
+        return current, report
+
+    kb_context = ""
+    sources: list[str] = []
+
+    if _should_run_requirement_agent(current, mapped, current.content or ""):
+        queries = await _plan_kb_queries(
+            section=current,
+            requirements=requirements,
+            retrieval_focus=retrieval_focus,
+            rfp=rfp,
+            mapped=mapped,
+            rfp_context=rfp_context,
+        )
+        kb_context, sources = await _gather_kb_context(
+            queries,
+            fallback_section=current,
+            rfp=rfp,
+            mapped=mapped,
+        )
+        if _is_whole_section_draft_stub(current.content or "") and not kb_context.strip():
+            logger.info(
+                "KB fact-check: skipping stub repair for %s — no KB evidence found",
+                section.id,
+            )
+            return current, report
+        current, agent_fixed, notes = await _run_requirement_aligned_fact_check_agent(
+            current,
+            requirements=requirements,
+            retrieval_focus=retrieval_focus,
+            rfp_excerpt=rfp_excerpt,
+            kb_context=kb_context,
+            rfp=rfp,
+            brand_voice=brand_voice,
+        )
+        if agent_fixed:
+            report.requirement_repairs += 1
+            detail = notes or "Requirement-aligned KB rewrite"
+            report.logs.append(
+                f"Smart fact-check ({detail}) in {section.title} "
+                f"[KB: {', '.join(sources[:3]) or 'n/a'}]"
+            )
+            if _INSUFFICIENT_EVIDENCE_RE.search(current.content or ""):
+                report.stubs_repaired += 1
+    else:
+        # Still inject priority queries (RNO / hours / founded) even on light path.
+        priority = _priority_kb_queries(current, rfp=rfp, rfp_context=rfp_context)
+        if priority:
+            kb_context, sources = await _gather_kb_context(
+                priority,
+                fallback_section=current,
+                rfp=rfp,
+                mapped=mapped,
+            )
+        else:
+            kb_context, sources = await _kb_blob_for_section(
+                current, rfp, mapped=mapped
+            )
+
+    if kb_context:
+        new_body, fills = _replace_verify_tags_from_blob(
+            current.content or "",
+            kb_context,
+        )
+        if fills:
+            report.verify_tags_filled += fills
+            current = current.model_copy(update={"content": new_body})
+            report.logs.append(
+                f"Filled {fills} VERIFY tag(s) in {section.title} "
+                f"from KB ({', '.join(sources[:3])})"
+            )
+
+        if _INSUFFICIENT_EVIDENCE_RE.search(current.content or ""):
+            current, stub_fixed = await _repair_false_verify_stub(
+                current,
+                kb_context,
+                rfp_excerpt,
+            )
+            if stub_fixed:
+                report.stubs_repaired += 1
+                report.logs.append(
+                    f"Replaced false insufficient-evidence stub in {section.title}"
+                )
+    elif _INSUFFICIENT_EVIDENCE_RE.search(current.content or ""):
+        kb_context, sources = await _kb_blob_for_section(current, rfp, mapped=mapped)
+        if kb_context:
+            current, stub_fixed = await _repair_false_verify_stub(
+                current,
+                kb_context,
+                rfp_excerpt,
+            )
+            if stub_fixed:
+                report.stubs_repaired += 1
+                report.logs.append(
+                    f"Replaced false insufficient-evidence stub in {section.title}"
+                )
+
+    if current.id.startswith("section-3-work-"):
+        if not kb_context:
+            kb_context, _ = await _kb_blob_for_section(current, rfp, mapped=mapped)
+        if kb_context:
+            current, metric_fixed = await _flag_unverified_metrics_in_case_study(
+                current,
+                kb_context,
+            )
+            if metric_fixed:
+                report.metric_flags += 1
+                report.logs.append(f"Scrubbed unverified metrics in {section.title}")
+
+    # Always scrub hours / decade filler even outside attestation titles.
+    from app.services.evidence_trust.legal_attestation_gate import (
+        gate_section_legal_attestations,
+    )
+
+    current, filler = gate_section_legal_attestations(current)
+    report.logs.extend(filler.logs)
+
+    return current, report
+
+
 async def run_kb_fact_check_pass(
     draft: ProposalDraft,
     *,
@@ -864,7 +1191,6 @@ async def run_kb_fact_check_pass(
     """
     only_set = set(only_section_ids) if only_section_ids else None
     report = FactCheckReport()
-    updated: list[ProposalSection] = []
     brand_voice = _brand_voice_payload(research)
     scope = (
         f"{len(only_set)} targeted"
@@ -872,154 +1198,91 @@ async def run_kb_fact_check_pass(
         else str(len(draft.sections))
     )
     logger.info(
-        "KB fact-check pass for %s — %s section(s), mapped_rfp_sections=%d",
+        "KB fact-check pass for %s — %s section(s), mapped_rfp_sections=%d, "
+        "section_parallel=%d",
         draft.rfp_id,
         scope,
         len(research.rfp_sections) if research and research.rfp_sections else 0,
+        FACT_CHECK_SECTION_PARALLEL,
     )
 
-    for section in draft.sections:
+    # Preserve original order; process eligible sections concurrently.
+    indexed = list(enumerate(draft.sections))
+    results: list[ProposalSection | None] = [None] * len(draft.sections)
+    work: list[tuple[int, ProposalSection]] = []
+    for idx, section in indexed:
         if only_set is not None and section.id not in only_set:
-            updated.append(section)
+            results[idx] = section
             continue
+        work.append((idx, section))
 
-        report.sections_checked += 1
-        current = section
-        mapped = _resolve_mapped_section(section, research)
-        requirements = _requirements_for_section(section, mapped)
-        retrieval_focus = list(mapped.retrieval_focus) if mapped else []
-        rfp_excerpt = _rfp_excerpt_for_section(
-            rfp_context,
-            section_title=section.title or "",
-            requirements=requirements,
-        )
-        if not rfp_excerpt.strip():
-            rfp_excerpt = (rfp_context or "")[:35_000]
+    sem = asyncio.Semaphore(FACT_CHECK_SECTION_PARALLEL)
 
-        bad_pcts = _eval_percent_claimed_without_rfp(current.content or "", rfp_context)
-        if bad_pcts:
-            current, fixed = await _repair_eval_percentages(current, rfp_context)
-            if fixed:
-                report.eval_repairs += 1
-                report.logs.append(
-                    f"Repaired unsupported evaluation weights ({', '.join(bad_pcts)}) "
-                    f"in {section.title}"
-                )
-
-        if current.id.startswith("section-2-bio"):
-            current, bio_fills, bio_logs = await _fact_check_bio_subsections(current)
-            if bio_fills:
-                report.verify_tags_filled += bio_fills
-            report.logs.extend(bio_logs)
-
-        kb_context = ""
-        sources: list[str] = []
-
-        if _should_run_requirement_agent(current, mapped, current.content or ""):
-            queries = await _plan_kb_queries(
-                section=current,
-                requirements=requirements,
-                retrieval_focus=retrieval_focus,
+    async def _run(idx: int, section: ProposalSection) -> tuple[int, ProposalSection, FactCheckReport]:
+        async with sem:
+            updated, partial = await _fact_check_one_section(
+                section,
                 rfp=rfp,
-                mapped=mapped,
-            )
-            kb_context, sources = await _gather_kb_context(
-                queries,
-                fallback_section=current,
-                rfp=rfp,
-                mapped=mapped,
-            )
-            # Skip expensive LLM agent when section is a whole-stub AND KB returned nothing useful
-            if _is_whole_section_draft_stub(current.content or "") and not kb_context.strip():
-                logger.info(
-                    "KB fact-check: skipping stub repair for %s — no KB evidence found",
-                    section.id,
-                )
-                updated.append(current)
-                continue
-            current, agent_fixed, notes = await _run_requirement_aligned_fact_check_agent(
-                current,
-                requirements=requirements,
-                retrieval_focus=retrieval_focus,
-                rfp_excerpt=rfp_excerpt,
-                kb_context=kb_context,
-                rfp=rfp,
+                rfp_context=rfp_context,
+                research=research,
                 brand_voice=brand_voice,
             )
-            if agent_fixed:
-                report.requirement_repairs += 1
-                detail = notes or "Requirement-aligned KB rewrite"
-                report.logs.append(
-                    f"Smart fact-check ({detail}) in {section.title} "
-                    f"[KB: {', '.join(sources[:3]) or 'n/a'}]"
-                )
-                if _INSUFFICIENT_EVIDENCE_RE.search(current.content or ""):
-                    report.stubs_repaired += 1
-        else:
-            kb_context, sources = await _kb_blob_for_section(current, rfp, mapped=mapped)
+            return idx, updated, partial
 
-        if kb_context:
-            new_body, fills = _replace_verify_tags_from_blob(
-                current.content or "",
-                kb_context,
-            )
-            if fills:
-                report.verify_tags_filled += fills
-                current = current.model_copy(update={"content": new_body})
-                report.logs.append(
-                    f"Filled {fills} VERIFY tag(s) in {section.title} "
-                    f"from KB ({', '.join(sources[:3])})"
-                )
+    if work:
+        gathered = await asyncio.gather(*[_run(i, s) for i, s in work])
+        for idx, updated, partial in gathered:
+            results[idx] = updated
+            report.sections_checked += partial.sections_checked
+            report.verify_tags_filled += partial.verify_tags_filled
+            report.stubs_repaired += partial.stubs_repaired
+            report.eval_repairs += partial.eval_repairs
+            report.requirement_repairs += partial.requirement_repairs
+            report.metric_flags += partial.metric_flags
+            report.logs.extend(partial.logs)
 
-            if _INSUFFICIENT_EVIDENCE_RE.search(current.content or ""):
-                current, stub_fixed = await _repair_false_verify_stub(
-                    current,
-                    kb_context,
-                    rfp_excerpt,
-                )
-                if stub_fixed:
-                    report.stubs_repaired += 1
-                    report.logs.append(
-                        f"Replaced false insufficient-evidence stub in {section.title}"
-                    )
-        elif _INSUFFICIENT_EVIDENCE_RE.search(current.content or ""):
-            kb_context, sources = await _kb_blob_for_section(current, rfp, mapped=mapped)
-            if kb_context:
-                current, stub_fixed = await _repair_false_verify_stub(
-                    current,
-                    kb_context,
-                    rfp_excerpt,
-                )
-                if stub_fixed:
-                    report.stubs_repaired += 1
-                    report.logs.append(
-                        f"Replaced false insufficient-evidence stub in {section.title}"
-                    )
-
-        if current.id.startswith("section-3-work-"):
-            if not kb_context:
-                kb_context, _ = await _kb_blob_for_section(current, rfp, mapped=mapped)
-            if kb_context:
-                current, metric_fixed = await _flag_unverified_metrics_in_case_study(
-                    current,
-                    kb_context,
-                )
-                if metric_fixed:
-                    report.metric_flags += 1
-                    report.logs.append(f"Scrubbed unverified metrics in {section.title}")
-
-        updated.append(current)
+    updated_sections = [s for s in results if s is not None]
+    if len(updated_sections) != len(draft.sections):
+        # Safety: never drop sections if a race left a hole.
+        updated_sections = [
+            results[i] if results[i] is not None else draft.sections[i]
+            for i in range(len(draft.sections))
+        ]
 
     run_s3_dedupe = only_set is None or any(
         sid.startswith("section-3-work-") for sid in only_set
     )
     if run_s3_dedupe:
-        updated, dupes = _dedupe_section3_case_studies(updated)
+        updated_sections, dupes = _dedupe_section3_case_studies(updated_sections)
     else:
         dupes = 0
     report.duplicates_removed = dupes
     if dupes:
         report.logs.append(f"Removed {dupes} duplicate Section 3 case study card(s)")
+
+    draft = draft.model_copy(update={"sections": updated_sections})
+
+    # Manuscript-level legal / RNO gate after parallel section work.
+    from app.services.evidence_trust.legal_attestation_gate import (
+        apply_legal_attestation_gates,
+    )
+
+    draft, legal_report = apply_legal_attestation_gates(
+        draft,
+        rfp=rfp,
+        rfp_context=rfp_context,
+    )
+    if legal_report.logs:
+        report.logs.extend(legal_report.logs)
+        logger.info(
+            "Legal attestation gate for %s: everify=%d conflicts=%d hours=%d filler=%d rno=%d",
+            draft.rfp_id,
+            legal_report.everify_flags,
+            legal_report.conflict_flags,
+            legal_report.hours_flags,
+            legal_report.filler_flags,
+            legal_report.rno_flags,
+        )
 
     if report.logs:
         logger.info(
@@ -1033,7 +1296,7 @@ async def run_kb_fact_check_pass(
             report.duplicates_removed,
         )
 
-    return draft.model_copy(update={"sections": updated}), report
+    return draft, report
 
 
 async def run_kb_fact_check_section_ids(

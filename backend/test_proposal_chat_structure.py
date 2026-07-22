@@ -407,5 +407,95 @@ class ChatStructureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(plan)
 
 
+class AddCaseStudyHeuristicTests(unittest.TestCase):
+    def test_add_rno_in_case_studies_does_not_replace_previous_experience(self) -> None:
+        from app.services.proposal_chat_structure import (
+            _heuristic_add_case_study_plan,
+            _heuristic_section_replace_plan,
+        )
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec("section-1-who", "1.1 — Who We Are"),
+                _sec("section-3-work-deschutes", "3.1 — Deschutes Brewery", "case"),
+                _sec("rfp-prev", "Previous Experience", "old"),
+            ],
+            updatedAt="2026-07-22T00:00:00+00:00",
+        )
+        message = (
+            "Recovery Network of Oregon is still nowhere in this document. "
+            "add this section in Case studies."
+        )
+        replace = _heuristic_section_replace_plan(
+            message, draft, focus_section_id="section-1-who"
+        )
+        self.assertIsNone(replace)
+        plan = _heuristic_add_case_study_plan(message, draft)
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.action, "add_sections")
+        self.assertEqual(plan.deletions, [])
+        self.assertEqual(plan.additions[0].kind, "case_study")
+        self.assertEqual(
+            plan.additions[0].case_study_name, "Recovery Network of Oregon"
+        )
+
+    def test_add_rno_when_already_present_opens_edit(self) -> None:
+        from app.services.proposal_chat_structure import _heuristic_add_case_study_plan
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec(
+                    "section-3-work-rno",
+                    "3.2 — Recovery Network of Oregon",
+                    "RNO coalition work",
+                ),
+            ],
+            updatedAt="2026-07-22T00:00:00+00:00",
+        )
+        plan = _heuristic_add_case_study_plan(
+            "add Recovery Network of Oregon in case studies",
+            draft,
+        )
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.action, "edit")
+        self.assertEqual(plan.edit_section_id, "section-3-work-rno")
+
+
+class AttestationInPlaceTests(unittest.TestCase):
+    def test_everify_ask_is_in_place_not_structure(self) -> None:
+        from app.services.proposal_chat_structure import (
+            _is_bogus_structure_title,
+            _is_in_place_kb_or_verify_edit,
+            _heuristic_section_replace_plan,
+        )
+
+        msg = (
+            "E-Verify must not be asserted — Sonja or Ella must confirm. "
+            "Use HUMAN SIGN-OFF / VERIFY, do not invent compliance."
+        )
+        self.assertTrue(_is_in_place_kb_or_verify_edit(msg))
+        self.assertTrue(
+            _is_bogus_structure_title(
+                "placeholder: '[HUMAN SIGN-OFF REQUIRED: E-Verify enrollment…]'"
+            )
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec("rfp-everify", "Contractor Affidavit (E-Verify)", "we maintain E-Verify"),
+            ],
+            updatedAt="2026-07-22T00:00:00+00:00",
+        )
+        self.assertIsNone(
+            _heuristic_section_replace_plan(
+                msg, draft, focus_section_id="rfp-everify"
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

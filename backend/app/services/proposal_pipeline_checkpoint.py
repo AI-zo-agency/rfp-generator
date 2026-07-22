@@ -215,16 +215,28 @@ async def record_phase_started(rfp_id: str, phase: str) -> None:
     research = await _ensure_research(rfp_id)
     prior = research.pipeline_checkpoint
     phase_label = PHASE_LABELS.get(phase, phase)
+    # Self-edit: seed step 1 immediately so the UI doesn't flash "Final polish"
+    # from the phase title containing the word "polish".
+    if phase == "phase-3-6-self-edit":
+        activity_label = "Senior editor: Checking facts"
+        activity_detail = "Starting fact check…"
+        step_index: int | None = 1
+        step_total: int | None = 5
+    else:
+        activity_label = phase_label
+        activity_detail = None
+        step_index = None
+        step_total = None
     checkpoint = ProposalPipelineCheckpoint(
         lastCompletedPhase=prior.last_completed_phase if prior else None,
         inProgressPhase=phase,
         lastFailedPhase=None,
         lastError=None,
         resumeFromPhase=phase,
-        activityLabel=phase_label,
-        activityDetail=None,
-        stepIndex=None,
-        stepTotal=None,
+        activityLabel=activity_label,
+        activityDetail=activity_detail,
+        stepIndex=step_index,
+        stepTotal=step_total,
         updatedAt=_now_iso(),
     )
     await _save_checkpoint(rfp_id, checkpoint)

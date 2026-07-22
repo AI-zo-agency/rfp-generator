@@ -59,6 +59,20 @@ interface ProposalSectionTreeProps {
   onDeleteSection?: (sectionId: string) => void;
 }
 
+function sectionListLabel(
+  section: OutlineSection,
+  manuscriptIndexById: Map<string, number>,
+): string {
+  const title = (section.title || "").trim();
+  // Already numbered like "3.1 — Deschutes" or "2.2 — Gil"
+  if (/^\d+(\.\d+)?\s*[—\-–.:]/.test(title) || /^\d+\.\d+/.test(title)) {
+    return title;
+  }
+  const n = manuscriptIndexById.get(section.id);
+  if (n == null) return title;
+  return `${n}. ${title}`;
+}
+
 function SectionRow({
   section,
   depth,
@@ -67,6 +81,7 @@ function SectionRow({
   flagCount,
   hasRevision,
   canDelete,
+  listLabel,
   sectionButtonRefs,
   onSelectSection,
   onOpenRevision,
@@ -79,6 +94,7 @@ function SectionRow({
   flagCount: number;
   hasRevision: boolean;
   canDelete: boolean;
+  listLabel: string;
   sectionButtonRefs: React.MutableRefObject<Map<string, HTMLButtonElement>>;
   onSelectSection: (sectionId: string) => void;
   onOpenRevision: (sectionId: string) => void;
@@ -126,7 +142,7 @@ function SectionRow({
               : "font-medium text-foreground"
           }`}
         >
-          {section.title}
+          {listLabel}
         </span>
       </button>
       {canDelete && onDeleteSection ? (
@@ -154,6 +170,7 @@ function SectionGroup({
   manualFillFlags,
   sectionRevisions,
   canDelete,
+  manuscriptIndexById,
   sectionButtonRefs,
   collapsed,
   onToggle,
@@ -167,6 +184,7 @@ function SectionGroup({
   manualFillFlags: ManualFillFlag[];
   sectionRevisions: Record<string, SectionRevisionRecord>;
   canDelete: boolean;
+  manuscriptIndexById: Map<string, number>;
   sectionButtonRefs: React.MutableRefObject<Map<string, HTMLButtonElement>>;
   collapsed: boolean;
   onToggle: () => void;
@@ -211,6 +229,7 @@ function SectionGroup({
               flagCount={sectionManualFillCount(section.id, manualFillFlags)}
               hasRevision={Boolean(sectionRevisions[section.id])}
               canDelete={canDelete}
+              listLabel={sectionListLabel(section, manuscriptIndexById)}
               sectionButtonRefs={sectionButtonRefs}
               onSelectSection={onSelectSection}
               onOpenRevision={onOpenRevision}
@@ -225,6 +244,7 @@ function SectionGroup({
 
 export function ProposalSectionTree({
   sections,
+  manuscriptIndexById,
   selectedSectionId,
   highlightedSectionId,
   manualFillFlags,
@@ -267,6 +287,7 @@ export function ProposalSectionTree({
             manualFillFlags={manualFillFlags}
             sectionRevisions={sectionRevisions}
             canDelete={canDelete}
+            manuscriptIndexById={manuscriptIndexById}
             sectionButtonRefs={sectionButtonRefs}
             collapsed={collapsedGroups.has(node.id)}
             onToggle={() =>
@@ -291,6 +312,7 @@ export function ProposalSectionTree({
             flagCount={sectionManualFillCount(node.section.id, manualFillFlags)}
             hasRevision={Boolean(sectionRevisions[node.section.id])}
             canDelete={canDelete}
+            listLabel={sectionListLabel(node.section, manuscriptIndexById)}
             sectionButtonRefs={sectionButtonRefs}
             onSelectSection={onSelectSection}
             onOpenRevision={onOpenRevision}

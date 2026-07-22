@@ -40,18 +40,26 @@ Run a deep knowledge-base search and write full submission-ready prose for every
 Remove [VERIFY] when evidence supports the answer. Use [E#] citations. Keep zö first-person narrative voice (we/our).
 Do not return the same placeholder text.
 
+LEGAL ATTESTATIONS — DO NOT "CLEAN UP" THESE:
+- NEVER assert E-Verify enrollment / participation as fact. If the section is an E-Verify Affidavit or mentions penalty of perjury, keep or insert [VERIFY: E-Verify enrollment — unconfirmed in KB — Sonja/Operations must confirm]. Do not convert an open Go/No-Go question into a sworn certification.
+- NEVER assert "we have no conflicts of interest" or "no financial relationships that would create conflicts." Keep [VERIFY: conflict-of-interest disclosure — must be confirmed by Sonja/leadership].
+- Do not invent annual staffing hours (400/320/280/200/160 etc.) without KB evidence — keep [VERIFY: staffing hours].
+- Do not invent a "10-year corporate-creative partnership" — agency founded 2013 (13 years as of 2026).
+- For health/coalition/stigma RFPs: include Recovery Network of Oregon (RNO) in references / previous experience / case studies when comparable work is required; if missing, add [FLAG FOR SONJA: Add Recovery Network of Oregon…].
+
 ANTI-DUPLICATION: This section has ONE job. Do NOT re-copy Who We Are, full bios, full case studies, FEIN/certs,
 or brand story from other sections. One short cross-reference is OK — then add NEW detail only. Prefer concise prose.
 
 Senior editor priorities (fix if present):
-1. Grammar: "We were established …, and is organized" → use "and are organized" or "organized as …"
-2. Pronouns: never "of we" or "across we" — use "our firm", "zö agency", or "our studio"
-3. Subcontractors: if cost proposal lists translation partners, Company Background must NOT claim "no subcontractors" — zö self-performs marketing/communications; translation partners are scoped separately
-4. RFP compliance: reference contact phones and emails, workforce diversity %, budget hours table, PSA acknowledgments — never defer to unnamed attachments or "upon request"
-5. Budget: never $0 agency revenue when commission applies — agencyRevenueEstimate must equal commission rate × pass-through or agency_fee line items
-6. MWBE and Personnel: use identical workforce % — one HR-verified figure
-7. References: full contact block (name, title, phone, email) — not "contact on request"
-8. Dedup: strip repeated company bio / case study dumps that already live in Sections 1–3
+1. Legal attestations first: E-Verify + conflict disclosure must stay VERIFY until a named human confirms
+2. Grammar: "We were established …, and is organized" → use "and are organized" or "organized as …"
+3. Pronouns: never "of we" or "across we" — use "our firm", "zö agency", or "our studio"
+4. Subcontractors: if cost proposal lists translation partners, Company Background must NOT claim "no subcontractors" — zö self-performs marketing/communications; translation partners are scoped separately
+5. RFP compliance: reference contact phones and emails, workforce diversity %, budget hours table, PSA acknowledgments — never defer to unnamed attachments or "upon request"
+6. Budget: never $0 agency revenue when commission applies — agencyRevenueEstimate must equal commission rate × pass-through or agency_fee line items
+7. MWBE and Personnel: use identical workforce % — one HR-verified figure
+8. References: full contact block (name, title, phone, email) — not "contact on request"; prefer RNO for health/coalition RFPs
+9. Dedup: strip repeated company bio / case study dumps that already live in Sections 1–3
 """
 
 
@@ -717,6 +725,16 @@ async def run_self_edit_loop(
 
     from app.services.proposal_common import load_rfp_for_proposal
     from app.services.proposal_kb_fact_checker import run_kb_fact_check_pass
+    from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
+
+    await record_pipeline_activity(
+        rfp_id,
+        label="Senior editor: Checking facts",
+        detail="Scanning for invented claims, weak citations, and knowledge-base mismatches",
+        step_index=1,
+        step_total=5,
+        in_progress_phase="phase-3-6-self-edit",
+    )
 
     _, _, rfp_context = load_rfp_for_proposal(rfp_id)
     draft, fc_report = await run_kb_fact_check_pass(
@@ -736,8 +754,22 @@ async def run_self_edit_loop(
             rfp_id,
             len(fc_report.logs),
         )
+        await record_pipeline_activity(
+            rfp_id,
+            label="Senior editor: Checking facts",
+            detail=f"{len(fc_report.logs)} issue(s) found — next: find gaps and fix sections",
+            step_index=1,
+            step_total=5,
+        )
     else:
         report_preface = None
+        await record_pipeline_activity(
+            rfp_id,
+            label="Senior editor: Checking facts",
+            detail="No fact issues found — continuing to find gaps and fix sections",
+            step_index=1,
+            step_total=5,
+        )
 
     budget = research.budget if research else None
     report = SelfEditReport()
@@ -853,14 +885,14 @@ async def run_self_edit_loop(
 
         from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
 
-        # Senior Editor ticket pass (Phase 3 single-section) before weak-section repair.
+        # Coverage / dedupe pass before weak-section repair.
         if iteration == 1:
             await record_pipeline_activity(
                 rfp_id,
-                label="Senior editor: ticket pass",
-                detail="Dedupe + RFP coverage tickets → Phase 3 single-section redraft",
-                step_index=iteration,
-                step_total=max_iterations,
+                label="Senior editor: Finding gaps",
+                detail="Looking for missing RFP answers and repeated content to fix",
+                step_index=2,
+                step_total=5,
             )
             draft, research = await _run_senior_editor_ticket_pass(
                 rfp_id=rfp_id,
@@ -900,15 +932,18 @@ async def run_self_edit_loop(
 
         kpi_in_batch = any(s.id in lock_ids for s in weak)
         first_title = weak[0].title if weak else "sections"
+        titles = ", ".join(s.title for s in weak[:3])
+        if len(weak) > 3:
+            titles += f" +{len(weak) - 3} more"
         await record_pipeline_activity(
             rfp_id,
-            label=f"Senior editor: {first_title}",
+            label=f"Senior editor: Fixing {first_title}",
             detail=(
-                f"Iteration {iteration}/{max_iterations} · {len(weak)} section(s)"
+                f"Pass {iteration}/{max_iterations} · fixing {len(weak)} section(s): {titles}"
                 + (" · KPI / lock alignment" if kpi_in_batch else "")
             ),
-            step_index=iteration,
-            step_total=max_iterations,
+            step_index=3,
+            step_total=5,
         )
 
         # Remaining weak sections: Section Repair without re-running Senior Editor fact hunt.
@@ -996,6 +1031,15 @@ async def run_self_edit_loop(
             rfp_id,
             len(verify_sections),
         )
+        from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
+
+        await record_pipeline_activity(
+            rfp_id,
+            label="Senior editor: Clearing placeholders",
+            detail=f"Resolving leftover [VERIFY] tags in {len(verify_sections)} section(s)",
+            step_index=4,
+            step_total=5,
+        )
         verify_sections.sort(key=weakness_score, reverse=True)
         verify_sections = verify_sections[:MAX_WEAK_SECTIONS_PER_ITERATION]
         results = await asyncio.gather(
@@ -1051,6 +1095,15 @@ async def run_self_edit_loop(
         from app.services.proposal_rfp_compliance import run_rfp_compliance_polish_pass
 
         try:
+            from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
+
+            await record_pipeline_activity(
+                rfp_id,
+                label="Senior editor: Final polish",
+                detail="Fixing blockers, compliance gaps, and cross-section consistency",
+                step_index=5,
+                step_total=5,
+            )
             draft, polish_logs = await run_submission_polish_pass(
                 rfp_id,
                 rfp=rfp,
@@ -1100,6 +1153,28 @@ async def run_self_edit_loop(
             update={"updated_at": datetime.now(timezone.utc).isoformat()}
         )
         await asave_research_cache(research)
+
+    # Final legal attestation gate — VERIFY cleanup / polish must not re-assert
+    # E-Verify, conflict disclosures, invented hours, or omit RNO on health RFPs.
+    from app.services.evidence_trust.legal_attestation_gate import (
+        apply_legal_attestation_gates,
+    )
+
+    draft, legal_report = apply_legal_attestation_gates(
+        draft,
+        rfp=rfp,
+        rfp_context=rfp_context,
+    )
+    if legal_report.logs:
+        await asave_proposal_draft(draft)
+        for line in legal_report.logs:
+            report.section_logs.append(
+                {
+                    "sectionId": "",
+                    "iteration": "legal-attestation-gate",
+                    "detail": line,
+                }
+            )
 
     remaining_locks = scan_manuscript_lock_issues(draft=draft, research=research)
     if remaining_locks:

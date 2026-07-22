@@ -356,16 +356,41 @@ async def _section_chat_advisory_reply(
     )
 
 REFINE_QUERIES_PROMPT = """Plan 5-6 NEW Supermemory search queries to improve ONE proposal section.
+
+FIRST: restate what the user is asking for (one line). THEN map that ask to the listed RFP
+requirements and [VERIFY] gaps. ONLY THEN invent search queries that chase those facts.
+
 Prior queries failed or returned insufficient evidence. User feedback describes what is wrong or missing.
 
 Rules:
+- Queries must follow from the understood ask + RFP needs — not random keyword mash.
 - Queries must be MORE SPECIFIC and DIFFERENT from all prior queries (never repeat or lightly rephrase).
 - Use document-type hints where relevant: 01 companyfacts, 02 master template, 03_CS case studies, 04 bio, certifications, org chart, references.
 - Target the exact gaps: firm legal name, Bend address, phone/email contacts, employee count, philosophy, tourism/DMO experience, org structure, case studies, fees, etc.
 - Include "zö agency" + field name + doc hint in each query. Add client name and sector when relevant.
 - If [VERIFY: ...] fields or RFP requirements are listed, dedicate at least one query per missing field.
+- Legal attestations (E-Verify, conflicts): search companyfacts only; do not plan queries that assume enrollment is proven.
 
 Return ONLY JSON: {"queries": ["detailed query 1", "detailed query 2", "detailed query 3", "detailed query 4", "detailed query 5"]}"""
+
+SECTION_IMPROVE_PLAN_PROMPT = """You are the first step of a proposal section improve — BEFORE any KB search or rewrite.
+
+Read the user message, the section draft, and the RFP requirements for THIS section.
+Understand the ask correctly. Do not jump to rewriting.
+
+Return ONLY JSON:
+{
+  "understoodAsk": "One sentence: what the user wants done to this section",
+  "editorInstruction": "Clear instruction for the rewriter — address the ask, cover listed RFP needs, fill VERIFY from KB only when evidenced, keep unconfirmed legal attestations as [VERIFY: …]",
+  "kbQueries": ["3-6 targeted Supermemory queries derived from the understood ask + RFP needs + VERIFY gaps"],
+  "rfpNeedsAddressed": ["short phrases of RFP requirements this edit must cover"]
+}
+
+Rules:
+- understoodAsk must reflect the user's actual request (not a generic 'improve section').
+- kbQueries must chase specific facts those needs require (zö agency + field + doc hint like 01 companyfacts).
+- Never invent E-Verify enrollment as a searchable 'confirmed' fact — search companyfacts; leave enrollment VERIFY unless facts prove it.
+- If the user only wants VERIFY tags filled, say so in editorInstruction and keep surrounding prose intact."""
 
 SECTION_REDRAFT_PROMPT = """Rewrite ONE zö agency proposal section based on user feedback and evidence.
 
@@ -536,6 +561,80 @@ async def _plan_selection_edit(
             "replace the section with a short summary or contact block."
         )
     return editor_instruction, queries
+
+
+async def _plan_section_improve(
+    *,
+    section: ProposalSection,
+    rfp: RfpRecord,
+    rfp_section: RfpSectionMap | None,
+    user_message: str,
+    prior_queries: list[str],
+) -> tuple[str, str, list[str]]:
+    """LLM understands the user ask + RFP needs first, then plans KB queries.
+
+    Returns (understood_ask, editor_instruction, kb_queries).
+    """
+    requirements = rfp_section.requirements if rfp_section else []
+    retrieval_focus = rfp_section.retrieval_focus if rfp_section else []
+    gaps = _gap_fields_from_text(section.content or "")
+    raw, _ = await llm.chat_json(
+        [
+            {"role": "system", "content": SECTION_IMPROVE_PLAN_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Client: {rfp.client}\n"
+                    f"Sector: {rfp.sector}\n"
+                    f"RFP: {rfp.title}\n"
+                    f"Section: {section.title}\n"
+                    f"Requirements:\n"
+                    + ("\n".join(f"- {r}" for r in requirements) or "- (none mapped)")
+                    + f"\nRetrieval focus: {retrieval_focus}\n"
+                    f"VERIFY gaps in draft: {gaps or '(none)'}\n"
+                    f"Prior queries (DO NOT repeat):\n"
+                    + ("\n".join(f"- {q}" for q in prior_queries[:20]) or "- (none)")
+                    + f"\n\nUser message:\n{user_message.strip()}\n\n"
+                    f"Current draft excerpt:\n{(section.content or '')[:3500]}"
+                ),
+            },
+        ],
+        max_tokens=1200,
+        temperature=0.2,
+    )
+    understood = str(raw.get("understoodAsk") or "").strip()
+    editor_instruction = str(raw.get("editorInstruction") or user_message).strip()
+    queries_raw = raw.get("kbQueries") or raw.get("queries") or []
+    used = {q.strip().lower() for q in prior_queries}
+    queries: list[str] = []
+    for q in queries_raw:
+        text = str(q).strip()[:240]
+        key = text.lower()
+        if text and key not in used:
+            queries.append(text)
+            used.add(key)
+    queries = queries[:6]
+    if not understood:
+        understood = user_message.strip()[:200] or f"Improve {section.title}"
+    if not editor_instruction:
+        editor_instruction = user_message.strip() or f"Improve {section.title} against RFP requirements."
+    if not queries:
+        # Fall back to refined planner if understand-step returned no queries.
+        queries = await _plan_refined_queries(
+            section=section,
+            rfp_section=rfp_section,
+            rfp=rfp,
+            prior_queries=prior_queries,
+            user_message=user_message,
+            current_content=section.content or "",
+        )
+    logger.info(
+        "Section improve understood ask for %s: %r → %d KB queries",
+        section.id,
+        understood[:160],
+        len(queries),
+    )
+    return understood, editor_instruction, queries
 
 
 async def _fetch_kb_blob_for_selection(
@@ -1221,6 +1320,119 @@ async def _persist_section_improve_draft(
     return to_save
 
 
+def _find_attestation_section(
+    draft: ProposalDraft, preferred_id: str | None = None
+) -> ProposalSection | None:
+    """Prefer real E-Verify / disclosure tabs over bogus placeholder tabs."""
+    from app.services.proposal_chat_structure import _is_bogus_structure_title
+
+    if preferred_id:
+        hit = _find_draft_section(draft, preferred_id)
+        if hit and not _is_bogus_structure_title(hit.title):
+            title = (hit.title or "").casefold()
+            body = (hit.content or "")[:500].casefold()
+            if any(
+                k in title or k in body
+                for k in ("e-verify", "affidavit", "disclosure", "conflict of interest")
+            ):
+                return hit
+
+    ranked: list[tuple[int, ProposalSection]] = []
+    for section in draft.sections:
+        if _is_bogus_structure_title(section.title):
+            continue
+        title = (section.title or "").casefold()
+        body = (section.content or "")[:600].casefold()
+        score = 0
+        if "e-verify" in title or "e-verify" in body:
+            score += 50
+        if "affidavit" in title:
+            score += 30
+        if "disclosure" in title or "conflict" in title:
+            score += 20
+        if score:
+            ranked.append((score, section))
+    if not ranked:
+        return _find_draft_section(draft, preferred_id) if preferred_id else None
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1]
+
+
+async def _apply_attestation_inplace_fix(
+    *,
+    draft: ProposalDraft,
+    section_id: str,
+    user_message: str,
+) -> tuple[ProposalDraft, ProposalSection, str]:
+    """Gate E-Verify / disclosure in place; remove accidental placeholder tabs."""
+    from app.services.evidence_trust.legal_attestation_gate import (
+        gate_section_legal_attestations,
+    )
+    from app.services.proposal_chat_structure import _is_bogus_structure_title
+
+    target = _find_attestation_section(draft, section_id) or _find_draft_section(
+        draft, section_id
+    )
+    if target is None:
+        raise ProposalError(f"Section {section_id} not found in draft.", status_code=404)
+
+    # Drop bogus 'placeholder: HUMAN SIGN-OFF…' sidebar tabs created by bad chat plans.
+    cleaned_sections = [
+        s
+        for s in draft.sections
+        if not _is_bogus_structure_title(s.title) or s.id == target.id
+    ]
+    if target.id not in {s.id for s in cleaned_sections}:
+        cleaned_sections.append(target)
+
+    gated, report = gate_section_legal_attestations(target, force=True)
+    body = (gated.content or "").strip()
+    # If prior chat turned the body into shouty PLACEHOLDER spam, reset to a clean VERIFY form.
+    shouty = body.count("PLACEHOLDER") >= 2 or body.count("HUMAN SIGN-OFF") >= 2
+    if shouty or len(body) < 40:
+        gated = gated.model_copy(
+            update={
+                "content": (
+                    f"### {gated.title}\n\n"
+                    "Contractor / offeror identification (legal name, FEIN, contacts) as "
+                    "required by the RFP form.\n\n"
+                    "[VERIFY: E-Verify enrollment — unconfirmed in KB — Sonja Anderson or "
+                    "Ella Lindau / Operations must confirm before any sworn affidavit or "
+                    "penalty-of-perjury attestation]\n\n"
+                    "Do not assert active E-Verify participation until that confirmation "
+                    "is recorded. Keep required signature/date blocks blank for human sign-off.\n"
+                ),
+                "status": "outline",
+            }
+        )
+        report.logs.append("Reset shouty placeholder body → clean VERIFY affidavit form")
+
+    sections = [
+        gated if s.id == gated.id else s for s in cleaned_sections
+    ]
+    # Ensure gated section present after filter
+    if gated.id not in {s.id for s in sections}:
+        sections.append(gated)
+
+    updated = draft.model_copy(
+        update={
+            "sections": sections,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    removed = len(draft.sections) - len(cleaned_sections)
+    bits = [
+        f"Updated **{gated.title}** in place — unconfirmed E-Verify / disclosure stays "
+        "[VERIFY] for Sonja/Ella (no new sidebar tab)."
+    ]
+    if removed:
+        bits.append(f"Removed {removed} bogus placeholder tab(s).")
+    if report.logs:
+        bits.append(report.logs[0])
+    del user_message  # used for routing only
+    return updated, gated, " ".join(bits)
+
+
 async def improve_proposal_section(
     rfp_id: str,
     section_id: str,
@@ -1648,6 +1860,7 @@ async def improve_proposal_section(
     provider = _provider_name()
     evidence_added = 0
     query_count = 0
+    understood_ask = ""
 
     if is_static:
         prior_queries = []
@@ -1659,18 +1872,18 @@ async def improve_proposal_section(
             rfp=rfp,
             prior_queries=prior_queries,
         )
-        queries = await _plan_refined_queries(
+        understood_ask, editor_instruction, planned = await _plan_section_improve(
             section=section,
-            rfp_section=rfp_section,
             rfp=rfp,
-            prior_queries=[*prior_queries, *seeded],
+            rfp_section=rfp_section,
             user_message=query_focus,
-            current_content=section.content,
+            prior_queries=[*prior_queries, *seeded],
         )
-        # Prefer gap seeds first, then planner queries, then fallbacks.
+        user_message = editor_instruction
+        # Prefer gap seeds first, then understood-ask queries, then fallbacks.
         merged_q: list[str] = []
         used_q = {q.strip().lower() for q in prior_queries}
-        for q in [*seeded, *queries]:
+        for q in [*seeded, *planned]:
             key = q.strip().lower()
             if q.strip() and key not in used_q:
                 merged_q.append(q.strip()[:240])
@@ -1723,14 +1936,14 @@ async def improve_proposal_section(
         prior_queries = (research.section_queries or {}).get(section_id, [])
         rfp_section = _find_rfp_section(research, section_id)
 
-        queries = await _plan_refined_queries(
+        understood_ask, editor_instruction, queries = await _plan_section_improve(
             section=section,
-            rfp_section=rfp_section,
             rfp=rfp,
-            prior_queries=prior_queries,
+            rfp_section=rfp_section,
             user_message=query_focus,
-            current_content=section.content,
+            prior_queries=prior_queries,
         )
+        user_message = editor_instruction
         if not queries:
             title = section.title
             queries = [
@@ -1805,6 +2018,23 @@ async def improve_proposal_section(
             }
         )
 
+    # After LLM rewrite: scrub invented E-Verify / conflict claims, keep VERIFY tags.
+    try:
+        from app.services.evidence_trust.legal_attestation_gate import (
+            gate_section_legal_attestations,
+        )
+
+        gated_content, _gate_flags = gate_section_legal_attestations(
+            updated_section.content or "",
+            section_title=updated_section.title or "",
+        )
+        if gated_content != (updated_section.content or ""):
+            updated_section = updated_section.model_copy(
+                update={"content": gated_content}
+            )
+    except Exception:
+        logger.exception("Legal attestation gate failed after section improve")
+
     merged_sections = [
         updated_section if s.id == section_id else s for s in draft.sections
     ]
@@ -1838,6 +2068,8 @@ async def improve_proposal_section(
             f"added {evidence_added} evidence item(s) to the corpus, preserved brand voice, "
             f"and rewrote **{section.title}** ({word_count_result} words)."
         )
+    if understood_ask:
+        assistant_message = f"**Understood:** {understood_ask}\n\n{assistant_message}"
     if remaining_gaps:
         assistant_message += (
             " Still needs manual/KB fill: "

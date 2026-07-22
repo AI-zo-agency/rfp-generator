@@ -261,6 +261,12 @@ def _replace_verify_tags_from_blob(content: str, blob: str) -> tuple[str, int]:
         def repl(match: re.Match[str]) -> str:
             nonlocal count
             field = (match.group(1) or "").casefold()
+            from app.services.evidence_trust.legal_attestation_gate import (
+                is_locked_legal_verify_tag,
+            )
+
+            if is_locked_legal_verify_tag(match.group(1) or ""):
+                return match.group(0)
             if not any(k in field for k in keywords):
                 return match.group(0)
             replacement = value
@@ -297,6 +303,12 @@ def _replace_verify_tags_from_blob(content: str, blob: str) -> tuple[str, int]:
 
         def insurance_repl(match: re.Match[str]) -> str:
             nonlocal fills
+            from app.services.evidence_trust.legal_attestation_gate import (
+                is_locked_legal_verify_tag,
+            )
+
+            if is_locked_legal_verify_tag(match.group(1) or ""):
+                return match.group(0)
             field = (match.group(1) or "").casefold()
             if any(k in field for k in ("insurance", "liability", "umbrella", "coverage", "limit")):
                 fills += 1

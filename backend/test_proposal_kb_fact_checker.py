@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from app.models.proposal import ProposalResearchCache, ProposalSection, RfpSectionMap
 from app.services.proposal_kb_fact_checker import (
     _dedupe_section3_case_studies,
     _eval_percent_claimed_without_rfp,
+    _is_legal_attestation_section,
     _kb_query_for_section,
+    _merge_query_lists,
+    _priority_kb_queries,
     _reject_destructive_fact_check_rewrite,
     _requirements_for_section,
     _resolve_mapped_section,
@@ -17,7 +21,6 @@ from app.services.proposal_kb_fact_checker import (
     _should_run_requirement_agent,
     _split_bio_subsections,
 )
-from types import SimpleNamespace
 
 
 class EvalPercentTests(unittest.TestCase):
@@ -180,6 +183,65 @@ class BioSubsectionTests(unittest.TestCase):
             content="**Work History**\n- [VERIFY: Work History]",
         )
         self.assertFalse(_should_run_requirement_agent(sec, None, sec.content))
+
+
+class PriorityQueryTests(unittest.TestCase):
+    def test_everify_section_gets_companyfacts_query(self) -> None:
+        sec = ProposalSection(
+            id="section-20",
+            title="20. E-Verify Affidavit",
+            content="zö maintains active participation in the federal E-Verify system.",
+        )
+        self.assertTrue(_is_legal_attestation_section(sec))
+        rfp = SimpleNamespace(
+            title="ARCHI Health Policy",
+            client="GSU",
+            sector="Public Health",
+        )
+        qs = _priority_kb_queries(sec, rfp=rfp)  # type: ignore[arg-type]
+        self.assertTrue(any("E-Verify" in q for q in qs))
+
+    def test_health_rfp_references_prioritize_rno(self) -> None:
+        sec = ProposalSection(
+            id="section-18",
+            title="18. References",
+            content="Oregon Employment Department",
+        )
+        rfp = SimpleNamespace(
+            title="ARCHI stigma coalition communications",
+            client="Georgia State University",
+            sector="Public Health",
+        )
+        qs = _priority_kb_queries(sec, rfp=rfp)  # type: ignore[arg-type]
+        blob = " ".join(qs)
+        self.assertIn("Recovery Network of Oregon", blob)
+
+    def test_merge_prefers_priority_over_vague_focus(self) -> None:
+        merged = _merge_query_lists(
+            ["03_CS Recovery Network of Oregon RNO"],
+            ["zö agency methodology won_proposals"],
+            limit=3,
+        )
+        self.assertEqual(merged[0], "03_CS Recovery Network of Oregon RNO")
+        self.assertEqual(len(merged), 2)
+
+    def test_kb_query_avoids_bare_won_proposals_mash(self) -> None:
+        rfp = SimpleNamespace(
+            title="Website RFP",
+            client="City",
+            sector="Technology",
+        )
+        mapped = RfpSectionMap(
+            id="x",
+            title="Approach",
+            retrievalFocus=["methodology won_proposals"],
+        )
+        q = _kb_query_for_section(
+            ProposalSection(id="form-approach", title="Approach", content=""),
+            rfp,  # type: ignore[arg-type]
+            mapped=mapped,
+        )
+        self.assertIn("01_companyfacts", q)
 
 
 if __name__ == "__main__":

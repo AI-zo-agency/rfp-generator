@@ -2567,6 +2567,12 @@ h4 {
   max-height: 100%;
 }
 
+.proposal-pipeline-progress--editor {
+  background:
+    linear-gradient(135deg, rgba(239, 80, 24, 0.06), rgba(255, 255, 255, 0.95) 42%),
+    #fafbfc;
+}
+
 .proposal-workspace-body {
   flex: 1 1 0;
   min-height: 0;

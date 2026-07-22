@@ -46,6 +46,88 @@ export interface ProposalPipelineCheckpoint {
 
 export const FULFILL_SCAN_PHASE = "fulfill-scan";
 
+/** Live substeps shown while Senior editor polish runs (maps to backend activity labels). */
+export const SENIOR_EDITOR_SUBSTEPS = [
+  {
+    id: "fact-check",
+    label: "Check facts",
+    hint: "Flag invented or unsupported claims",
+  },
+  {
+    id: "tickets",
+    label: "Find gaps",
+    hint: "Spot missing RFP answers",
+  },
+  {
+    id: "repair",
+    label: "Fix sections",
+    hint: "Rewrite weak or incomplete parts",
+  },
+  {
+    id: "verify",
+    label: "Clear placeholders",
+    hint: "Resolve leftover [VERIFY] tags",
+  },
+  {
+    id: "polish",
+    label: "Final polish",
+    hint: "Compliance and consistency check",
+  },
+] as const;
+
+export function seniorEditorSubstepIndex(
+  activityLabel: string | null | undefined,
+  stepIndex?: number | null
+): number {
+  // Prefer backend stepIndex (1-based) — avoids misreading phase titles like
+  // "Senior editor polish" as the Final polish substep.
+  if (typeof stepIndex === "number" && stepIndex >= 1) {
+    return Math.min(
+      Math.max(stepIndex - 1, 0),
+      SENIOR_EDITOR_SUBSTEPS.length - 1
+    );
+  }
+
+  const a = (activityLabel || "").toLowerCase().trim();
+  if (!a) return 0;
+  // Phase-level title only — run just started, still on first card.
+  if (a === "senior editor polish" || a === "senior editor") return 0;
+
+  if (
+    a.includes("fact-check") ||
+    a.includes("kb fact") ||
+    a.includes("checking facts") ||
+    a.includes("check facts")
+  ) {
+    return 0;
+  }
+  if (
+    a.includes("ticket") ||
+    a.includes("finding gaps") ||
+    a.includes("find gaps")
+  ) {
+    return 1;
+  }
+  if (
+    a.includes("verify") ||
+    a.includes("placeholder") ||
+    a.includes("clearing placeholders")
+  ) {
+    return 3;
+  }
+  if (a.includes("final polish") || a.includes("submission polish")) {
+    return 4;
+  }
+  if (
+    a.includes("repairing") ||
+    a.includes("fixing") ||
+    a.includes("fix sections")
+  ) {
+    return 2;
+  }
+  return 0;
+}
+
 const SECTION_DRAFT_FAILURE_MARKER =
   "[VERIFY: Section drafting failed — needs manual regeneration]";
 
@@ -85,7 +167,7 @@ export const FULFILL_SCAN_STEP_LABELS = [
   "Budget",
   "Repairs",
   "Contractor KPIs",
-  "KB fact-check",
+  "Check facts",
   "Pre-submit",
 ] as const;
 

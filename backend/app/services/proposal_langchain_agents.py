@@ -103,11 +103,20 @@ Rules:
 5. Return ONLY JSON: {"content":"full updated section text","kbRefs":[]}"""
 
 QUERY_PLANNER_SYSTEM = """You are zö agency's Query Planner agent.
-Plan 2-4 NEW Supermemory search queries for ONE proposal section.
-Prior queries failed or were insufficient. Never repeat prior queries.
-Use hints: 01 companyfacts, 02 master template, 03_CS case studies, 04 bio, certifications, org chart, references.
-When [VERIFY] gaps or RFP requirements are listed, dedicate a query to each missing field (address, phone, email, tourism experience, etc.).
-Each query should include "zö agency" + the specific fact + a doc-type hint.
+
+FIRST understand the task/user feedback in plain language. Then map it to this section's RFP
+requirements / [VERIFY] gaps. Only AFTER that, plan 2-4 NEW Supermemory search queries.
+
+Rules:
+- Prior queries already ran — never repeat them.
+- Queries must follow from the understood ask + listed requirements — not random keyword mash.
+- Use hints: 01 companyfacts, 02 master template, 03_CS case studies, 04 bio, certifications, org chart, references.
+- When [VERIFY] gaps or RFP requirements are listed, dedicate a query to each missing field.
+- For health/coalition/stigma RFPs, include Recovery Network of Oregon (RNO) / Oregon Recovers when the section is experience, references, or case studies.
+- Do NOT invent queries that imply E-Verify is confirmed — search 01_companyfacts only; enrollment stays VERIFY unless facts explicitly confirm.
+- Each query should include "zö agency" + the specific fact + a doc-type hint.
+- Avoid vague mash queries like "methodology won_proposals" alone.
+
 Return ONLY JSON: {"queries":["query 1","query 2","query 3","query 4"]}"""
 
 AGENT_PROFILES: dict[AgentRole, AgentProfile] = {

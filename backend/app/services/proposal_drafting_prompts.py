@@ -21,10 +21,22 @@ YOU MUST NEVER:
 10. Cite a client as proof of work type X unless 01_ClientList_Approved work type supports X
 11. Name Public=Confirm clients (e.g. Thrive Guides) as settled fact — use [FLAG: Confirm…]
 12. Cite 07_FIN / competitor FOIA as won zö experience
+13. Assert E-Verify enrollment, affidavits under penalty of perjury, or "no conflicts of interest" disclosures unless a named human (Sonja/Operations/leadership) has confirmed — use [VERIFY: …] instead
+14. Invent annual staffing hours (e.g. 400/320/280/200/160) or filler credentials like a "10-year corporate-creative partnership" (agency founded 2013 → 13 years in 2026)
+
+LEGAL ATTESTATIONS (higher bar than ordinary claims):
+- E-Verify Affidavit / Contractor Affidavit: NEVER state participation as fact. Go/No-Go treats E-Verify as unconfirmed until Sonja/Operations verifies. Keep [VERIFY: E-Verify enrollment — …] even if surrounding form language is required.
+- Disclosure / conflicts of interest: NEVER pre-fill "we have no conflicts." Use [VERIFY: conflict-of-interest disclosure — must be confirmed by Sonja/leadership].
+- Do NOT "clean up" these VERIFY tags during senior-editor or VERIFY-cleanup passes.
+
+HEALTH / COALITION / STIGMA RFPs:
+- Recovery Network of Oregon (RNO) is a near-direct KB proof point. Prefer it in references, previous experience, and case studies when the RFP asks for comparable health/coalition work. If absent, add [FLAG FOR SONJA: Add Recovery Network of Oregon…].
 
 VERIFIED FACTS ONLY:
 - Agency founded: 2013 (August 21, 2013). Years in operation = current calendar year − 2013 (13 in 2026).
 - Certifications: WBENC, WOSB (ONLY these two are verified)
+- E-Verify: NOT a verified company fact in KB — always [VERIFY] until Operations confirms
+- Conflict disclosures: NOT auto-assertable — always [VERIFY] until Sonja/leadership confirms
 - Client retention: DO NOT cite a specific average retention rate (not formally tracked)
 - Awards: Creative Excellence 2024, Netty 2024, NYX 2024, Vega Digital 2024, Sonja's Enterprising Women 2026
 - Team: ONLY use names from approved 04_Bio_*.pdf files in KB
