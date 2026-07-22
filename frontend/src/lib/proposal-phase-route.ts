@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { longRunningFetch } from "@/lib/long-running-fetch";
 import {
-  PROPOSAL_STAGE_MAX_DURATION_SEC,
   PROPOSAL_STAGE_TIMEOUT_MS,
 } from "@/lib/proposal-stage-timeout";
 
@@ -10,7 +9,8 @@ const BACKEND_URL =
   process.env.BACKEND_URL ||
   "http://localhost:8001";
 
-export const proposalStageMaxDuration = PROPOSAL_STAGE_MAX_DURATION_SEC;
+/** Re-export for callers that want the literal ceiling (seconds). */
+export const proposalStageMaxDuration = 3600;
 
 export async function proxyProposalPhasePost(
   rfpId: string,

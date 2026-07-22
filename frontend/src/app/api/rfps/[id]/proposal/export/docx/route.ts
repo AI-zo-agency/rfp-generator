@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { longRunningFetch } from "@/lib/long-running-fetch";
 import { PROPOSAL_STAGE_TIMEOUT_MS } from "@/lib/proposal-stage-timeout";
-
 export const runtime = "nodejs";
 export const maxDuration = 120;
 

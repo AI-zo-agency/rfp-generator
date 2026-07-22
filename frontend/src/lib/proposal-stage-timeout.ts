@@ -31,14 +31,12 @@ export const PROPOSAL_STAGE_TIMEOUT_MS = envMs(
 );
 
 /**
- * Next.js route segment config (seconds). Platforms that honor maxDuration
- * (e.g. Vercel) need a finite ceiling; self-hosted Railway/Docker ignore this.
- * 3600 = 1 hour when the platform allows it; clamp externally if needed.
+ * Next.js route segment config (seconds). Must be a numeric literal so Next
+ * can statically analyze `export const maxDuration = …` in route files.
+ * Platforms that honor maxDuration (e.g. Vercel) use this ceiling;
+ * self-hosted Railway/Docker typically ignore it.
  */
-export const PROPOSAL_STAGE_MAX_DURATION_SEC = envMs(
-  "PROPOSAL_STAGE_MAX_DURATION_SEC",
-  3600
-);
+export const PROPOSAL_STAGE_MAX_DURATION_SEC = 3600;
 
 /** Soft ceiling only when a finite AbortSignal is required by a caller. */
 export const PROPOSAL_STAGE_FALLBACK_TIMEOUT_MS = 60 * 60 * 1000;

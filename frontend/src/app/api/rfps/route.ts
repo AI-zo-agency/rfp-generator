@@ -2,10 +2,9 @@ import { backendFetch } from "@/lib/backend-api";
 import { withDashboardPdfUrl } from "@/lib/rfp-pdf";
 import { computeStats } from "@/lib/mock-rfps";
 import type { DashboardStats, RfpRecord } from "@/types/rfp";
-import { PROPOSAL_STAGE_MAX_DURATION_SEC } from "@/lib/proposal-stage-timeout";
 import { NextResponse } from "next/server";
 
-export const maxDuration = PROPOSAL_STAGE_MAX_DURATION_SEC;
+export const maxDuration = 3600;
 export const runtime = "nodejs";
 
 export async function GET() {

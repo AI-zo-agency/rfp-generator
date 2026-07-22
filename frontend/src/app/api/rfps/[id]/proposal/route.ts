@@ -1,6 +1,5 @@
 import { loadProposalBundleFromSupabase } from "@/lib/proposal-supabase-read";
 import { longRunningFetch } from "@/lib/long-running-fetch";
-import { PROPOSAL_STAGE_MAX_DURATION_SEC } from "@/lib/proposal-stage-timeout";
 import { NextResponse } from "next/server";
 
 const BACKEND_URL =
@@ -8,7 +7,7 @@ const BACKEND_URL =
   process.env.BACKEND_URL ||
   "http://localhost:8001";
 
-export const maxDuration = PROPOSAL_STAGE_MAX_DURATION_SEC;
+export const maxDuration = 3600;
 export const runtime = "nodejs";
 
 /**
