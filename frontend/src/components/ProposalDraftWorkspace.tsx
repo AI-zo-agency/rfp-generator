@@ -29,15 +29,12 @@ import {
   runPhase4FinalizeGaps,
   runFulfillRfpGaps,
   restoreProposalSnapshot,
-  listProposalArchives,
-  restoreProposalArchive,
   stopProposalGeneration,
   downloadProposalDocx,
   saveProposalDraft,
   startLiveDraftPolling,
   fullProposalProgressFromInFlight,
   type FullProposalProgress,
-  type ProposalDraftArchiveMeta,
   type ProposalPipelineStatus,
 } from "@/lib/proposal-api";
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
@@ -227,11 +224,6 @@ export function ProposalDraftWorkspace({
   const [isFulfillingRfpGaps, setIsFulfillingRfpGaps] = useState(false);
   const [isRestoringSnapshot, setIsRestoringSnapshot] = useState(false);
   const [restoreSnapshotAt, setRestoreSnapshotAt] = useState("");
-  const [draftArchives, setDraftArchives] = useState<ProposalDraftArchiveMeta[]>(
-    []
-  );
-  const [selectedArchiveId, setSelectedArchiveId] = useState("");
-  const [isRestoringArchive, setIsRestoringArchive] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [isResettingDraft, setIsResettingDraft] = useState(false);
   const [gapResolveNotice, setGapResolveNotice] = useState<string | null>(null);
@@ -912,18 +904,6 @@ export function ProposalDraftWorkspace({
     [rfp.id, manualFillCount, applyOutlineFromServer]
   );
 
-  const refreshDraftArchives = useCallback(async () => {
-    try {
-      const archives = await listProposalArchives(rfp.id);
-      setDraftArchives(archives);
-      setSelectedArchiveId((prev) =>
-        archives.some((a) => a.id === prev) ? prev : (archives[0]?.id ?? "")
-      );
-    } catch {
-      // Archives are optional until migration is applied.
-    }
-  }, [rfp.id]);
-
   const handleRestoreSnapshot = useCallback(
     async (savedAtOverride?: string) => {
       const savedAt = savedAtOverride ?? restoreSnapshotAt;
@@ -995,57 +975,6 @@ export function ProposalDraftWorkspace({
     },
     [restoreSnapshotAt, handleRestoreSnapshot]
   );
-
-  useEffect(() => {
-    if (!hydrated) return;
-    void refreshDraftArchives();
-  }, [hydrated, refreshDraftArchives, outline.updatedAt]);
-
-  const handleRestoreArchive = useCallback(
-    async (archiveIdOverride?: string) => {
-      const archiveId = archiveIdOverride ?? selectedArchiveId;
-      if (!archiveId) return false;
-      const meta = draftArchives.find((a) => a.id === archiveId);
-      const label = meta?.label || meta?.reason || "archived manuscript";
-      if (
-        !confirm(
-          `Restore archived manuscript "${label}"?\n\nCurrent live draft will be archived first, then replaced.`
-        )
-      ) {
-        return false;
-      }
-      setIsRestoringArchive(true);
-      setGapResolveError(null);
-      try {
-        const restored = await restoreProposalArchive(rfp.id, archiveId);
-        applyOutlineFromServer(restored);
-        setGapResolveNotice(`Restored archived manuscript "${label}".`);
-        setActiveTab("outline");
-        await refreshDraftArchives();
-        return true;
-      } catch (error) {
-        setGapResolveError(
-          error instanceof Error ? error.message : "Archive restore failed"
-        );
-        return false;
-      } finally {
-        setIsRestoringArchive(false);
-      }
-    },
-    [
-      selectedArchiveId,
-      draftArchives,
-      rfp.id,
-      applyOutlineFromServer,
-      refreshDraftArchives,
-    ]
-  );
-
-  const handleArchiveDropdownChange = useCallback((archiveId: string) => {
-    // Selection only — restore requires the explicit Restore archive action.
-    if (!archiveId) return;
-    setSelectedArchiveId(archiveId);
-  }, []);
 
   useEffect(() => {
     const snaps = outline.snapshots ?? [];
@@ -1577,7 +1506,7 @@ export function ProposalDraftWorkspace({
     setGenerateNotice(
       resetFailed
         ? "Local outline cleared, but server wipe failed — try Reset again before generating."
-        : "Reset complete. Manuscript archived when one existed; live draft cleared."
+        : "Reset complete. Live draft and research cache cleared."
     );
     setFullProposalProgress(null);
     setLiveLatestSectionTitle(null);
@@ -1588,15 +1517,6 @@ export function ProposalDraftWorkspace({
       await saveProposalDraft(rfp.id, defaults);
     } catch {
       // Non-fatal — DB reset already cleared content
-    }
-
-    // Refresh archive list so the just-archived manuscript appears for rollback.
-    try {
-      const archives = await listProposalArchives(rfp.id);
-      setDraftArchives(archives);
-      setSelectedArchiveId(archives[0]?.id ?? "");
-    } catch {
-      // Non-fatal
     } finally {
       setIsResettingDraft(false);
     }
@@ -2769,16 +2689,14 @@ export function ProposalDraftWorkspace({
                   This will:
                 </p>
                 <ul className="mt-2 list-disc space-y-1.5 pl-5 text-sm leading-relaxed text-zo-text-secondary">
-                  <li>Archive the current filled manuscript (if any) for rollback</li>
+                  <li>Clear the live draft sections</li>
                   <li>
-                    Delete live sections, pipeline checkpoints, and research cache
-                    from Supabase
+                    Delete pipeline checkpoints and research cache from Supabase
                   </li>
                   <li>Cancel any generation currently running</li>
                 </ul>
                 <p className="mt-3 text-sm leading-relaxed text-zo-text-muted">
-                  You can restore a filled manuscript from Archives after reset.
-                  Research is not archived separately.
+                  Use Saved version to load an earlier checkpoint if one exists.
                 </p>
                 <div className="mt-6 flex flex-wrap justify-end gap-2">
                   <button
