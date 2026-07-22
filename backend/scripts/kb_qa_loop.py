@@ -13,7 +13,7 @@ Usage:
   cd backend && source .venv/bin/activate
   python scripts/kb_qa_loop.py
 
-  python scripts/kb_qa_loop.py --question "What are Rachel Rice key accounts?" --sources
+  python scripts/kb_qa_loop.py --question "By any chance do we have client name Travel Oregon" --sources
   python scripts/kb_qa_loop.py --question "..." --no-llm
   python scripts/kb_qa_loop.py -Q "Financial Stability" --sources --queries
 """

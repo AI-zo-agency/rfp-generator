@@ -256,6 +256,10 @@ export function ProposalDraftWorkspace({
   const contentScrollRef = useRef<HTMLDivElement | null>(null);
   const submitScrollRef = useRef<HTMLDivElement | null>(null);
   const liveContentFingerprintRef = useRef<Map<string, number>>(new Map());
+  const outlineRef = useRef(outline);
+  useEffect(() => {
+    outlineRef.current = outline;
+  }, [outline]);
   const [sectionRevisions, setSectionRevisions] = useState<SectionRevisionMap>({});
   const [revisionDrawerSectionId, setRevisionDrawerSectionId] = useState<string | null>(
     null
@@ -1012,7 +1016,7 @@ export function ProposalDraftWorkspace({
   const handleLiveDraftUpdate = useCallback((draft: ProposalOutline) => {
     setHydrated(true);
     applyOutlineFromServer(draft);
-    setActiveTab("content");
+    // Do not force Review tab on each poll — user may be on Sections or Submit while generating.
     const withContent = draft.sections.filter((s) => s.content?.trim());
     setLiveGeneratedCount(withContent.length);
 
@@ -1076,8 +1080,13 @@ export function ProposalDraftWorkspace({
   const handleResearchPoll = useCallback((updated: ProposalResearch | null) => {
     if (!updated) return;
     setResearch(updated);
-    setPipelineStatus(buildPipelineStatus(outline, updated));
-  }, [outline]);
+    setPipelineStatus(buildPipelineStatus(outlineRef.current, updated));
+  }, []);
+
+  const handleLiveDraftUpdateRef = useRef(handleLiveDraftUpdate);
+  const handleResearchPollRef = useRef(handleResearchPoll);
+  handleLiveDraftUpdateRef.current = handleLiveDraftUpdate;
+  handleResearchPollRef.current = handleResearchPoll;
 
   /** Resume live manuscript updates when user reopens during backend generation. */
   useEffect(() => {
@@ -1101,12 +1110,11 @@ export function ProposalDraftWorkspace({
     );
     setGenerateNotice(pipelineServerStillWorkingMessage(phase));
     setGenerateError(null);
-    setActiveTab("content");
     const stop = startLiveDraftPolling(
       rfp.id,
-      handleLiveDraftUpdate,
+      (draft) => handleLiveDraftUpdateRef.current(draft),
       (updated) => {
-        handleResearchPoll(updated);
+        handleResearchPollRef.current(updated);
         const live = updated?.pipelineCheckpoint?.inProgressPhase;
         if (live && live !== FULFILL_SCAN_PHASE) {
           setGenerateNotice(pipelineServerStillWorkingMessage(live));
@@ -1125,8 +1133,6 @@ export function ProposalDraftWorkspace({
     isFullProposalRunning,
     research?.pipelineCheckpoint?.inProgressPhase,
     rfp.id,
-    handleLiveDraftUpdate,
-    handleResearchPoll,
   ]);
 
   const rfpTabProgress = useMemo(() => {

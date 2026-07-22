@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import re
@@ -33,12 +35,14 @@ EVALUATION_QUESTIONS: list[tuple[str, str]] = [
     (
         "sector_fit",
         "Does the client type match zö's primary sectors (government/municipal, higher ed, "
-        "healthcare, corporate, nonprofit) based on documented experience?",
+        "healthcare, corporate, nonprofit) based on documented experience? Separate leisure/"
+        "destination tourism from MCI/meetings work when the RFP excludes MCI.",
     ),
     (
         "compliance_certs",
         "Are required certifications (WBENC, WOSB, COBID, DBE, etc.) listed — and does zö hold "
-        "each one per the knowledge base?",
+        "each one as an agency-level credential per the knowledge base? Individual platform "
+        "certs (Google Ads, Meta Ads) on one specialist do NOT count as agency-wide Verified.",
     ),
     (
         "compliance_registration",
@@ -51,9 +55,22 @@ EVALUATION_QUESTIONS: list[tuple[str, str]] = [
         "or flagged against the knowledge base?",
     ),
     (
+        "offeror_presence",
+        "Does the RFP require the Offeror (prime) to have or establish a physical office / "
+        "local presence? If yes, treat this as a structural Offeror requirement — a "
+        "subcontractor or Attachment-03 partner does NOT automatically satisfy 'Offeror must "
+        "have or establish an office.' Flag for counsel/leadership before scoring as fixable.",
+    ),
+    (
         "team_roles",
         "What roles or specialized expertise does the RFP require — and are matching approved "
         "bios documented in the knowledge base?",
+    ),
+    (
+        "evidence_provenance",
+        "For every destination/tourism/municipal proof cited: is the source 03_CS or 06_WON "
+        "(zö win/case study) vs 07_FIN (finalist/loss)? Do not treat 07_FIN as won experience. "
+        "Flag competitor-authored content (e.g. Resonance) if it appears in KB excerpts.",
     ),
     (
         "worth_it",
@@ -104,7 +121,18 @@ decisionMatrix — exactly 5 rows; each score is independent (they will often di
 
 Overall Go Score = arithmetic average of the 5 decisionMatrix scores (not fitScore/worthScore).
 Use the full 0–5 range. Strong RFPs with local presence and high contract value should score 4–5 on several dimensions.
-Weak or distant low-value RFPs should score 1–2 on Financial Viability and Win Probability."""
+Weak or distant low-value RFPs should score 1–2 on Financial Viability and Win Probability.
+
+HARD CAPS (do not overscore):
+- If the RFP requires the Offeror to have/establish an office in a geography where KB shows no
+  zö office, Resource Availability must be ≤ 2/5 until counsel/leadership confirms a compliant path.
+  Do NOT score this as a routine "hire a local sub" fix — Offeror ≠ subcontractor unless the RFP
+  expressly allows it.
+- Technical Capability Match must discount MCI/meetings references when the RFP excludes MCI, and
+  must not count 07_FIN finalist/loss files as won destination experience. Thin leisure-tourism
+  proof after those discounts → Technical Capability usually ≤ 2–3/5, not 4–5.
+- Prefer recommendation=review (not go) when an Offeror-office structural gap OR contaminated/
+  competitor KB evidence remains unresolved."""
 
 SYSTEM_PROMPT = """You are the Stage 1 Fit Analyst for zö agency (full-service marketing, branding, and media buying).
 
@@ -125,12 +153,34 @@ If scope, deliverables, budget, compliance, or team requirements are missing:
 OUT OF LANE (no_go only when explicit):
 Scope clearly outside marketing/branding/communications (engineering, legal, clinical, software dev, construction).
 
+EVIDENCE HYGIENE (mandatory — these errors have changed real Go/No-Go outcomes):
+1. Offeror office / local presence: If the RFP says the Offeror must have or establish an office,
+   that is a PRIME obligation. Do NOT reframe it as "engage an Oceania/local subcontractor and
+   document in Attachment 03" unless the RFP text expressly allows subcontractors to satisfy the
+   Offeror office requirement. Add a critical condition for counsel/Sonja before recommending Go.
+2. Individual vs agency certifications: Google Ads / Meta Ads (and similar platform certs) belonging
+   to one specialist (e.g. Vishal Nihlani) are personal credentials. Mark capability rows Verified
+   for agency-wide platform certification ONLY if KB shows an agency-level credential. Otherwise
+   Status = Gap or [VERIFY: individual only — not agency-wide].
+3. Filename provenance: 06_WON = won/usable zö win material; 07_FIN = finalist/loss — NOT a win.
+   Never cite 07_FIN work (e.g. City of San Leandro) as documented won destination-marketing
+   experience. If excerpts credit another agency (e.g. Resonance) or a non-zö case study sitting
+   inside a FIN file, flag as contaminated/competitor intelligence — not zö experience.
+4. MCI mismatch: If the RFP excludes meetings/conventions/incentives (MCI) or leisure-only
+   destination work, do not count meetings-heavy references (e.g. San Francisco Travel) as
+   matching destination/leisure proof without an explicit mismatch note and score discount.
+5. Prefer "review" over "go" when (a) Offeror-office legality is unresolved or (b) reusable
+   experience depends on 07_FIN / competitor-contaminated files.
+
 """ + SCORING_RUBRIC + """
 
 RECOMMENDATION:
-- "go": strong fit and worthwhile; deadline not passed (or extension confirmed)
+- "go": strong fit and worthwhile; deadline not passed (or extension confirmed); no unresolved
+  Offeror-office structural gap; tourism/destination proof is 03_CS/06_WON (not 07_FIN alone)
 - "no_go": out-of-lane OR disqualifying verified compliance gap OR poor fit + low worth OR proposal deadline passed with late-submission disqualification
-- "review": Go With Conditions — fixable gaps or mixed signals; also use when deadline passed but re-solicit/override may be possible
+- "review": Go With Conditions — fixable gaps or mixed signals; DEFAULT when Offeror-office
+  requirement needs legal read, or when sector proof is thin after stripping MCI-mismatched /
+  07_FIN citations; also use when deadline passed but re-solicit/override may be possible
 
 DEADLINE CHECK (required — use today's date provided in the user prompt):
 - Compare proposal deadline from the RFP (and metadata due date) against today's date.
@@ -159,11 +209,15 @@ Use [FLAG FOR NAME/ROLE: ...] for human follow-up on registration, certification
 ## CAPABILITY ASSESSMENT
 ### Technical and Service Requirements vs. zö Capabilities
 When the RFP lists service categories or deliverables, enumerate each with "— Yes" or "— Gap" and KB evidence.
+Never mark Google Ads / Meta Ads (or similar) as agency Verified unless KB shows agency-level certs.
 ### Required Industry Experience vs. Documented Experience
 Sector/client-type match with named case studies from KB; flag thin reference depth.
+Cite 03_CS / 06_WON only as wins. Label any 07_FIN citation as finalist/loss. Note MCI mismatches.
 ### Required Team Roles vs. Actual Team
 Map RFP roles to documented zö team members; [FLAG: ...] for account lead or presentation assignments.
-Markdown table when helpful: RFP Requirement | zö Capability (KB source) | Status (Verified/Gap/[VERIFY])
+### Offeror presence / office requirements
+If RFP requires Offeror office establishment, call it out as structural (not a staffing/sub fix) with owner flag.
+Markdown table when helpful: RFP Requirement | zö Capability (KB source + 03_CS/06_WON/07_FIN) | Status (Verified/Gap/[VERIFY])
 
 ## EVALUATION CRITERIA BREAKDOWN
 Table: Category | Max Points | zö Strength | Vulnerability — use actual point weights from the RFP.
@@ -219,18 +273,152 @@ Return ONLY valid JSON.
 }"""
 
 KB_QUERY_PLANNER_PROMPT = """You plan targeted Supermemory knowledge-base searches for zö agency Go/No-Go analysis.
-Given an RFP excerpt, return 10-12 specific search queries to retrieve verified facts about zö's:
-- certifications (WBENC, WOSB, COBID, etc.)
-- state registrations and insurance
-- capabilities matching the RFP scope (media buying, creative, digital, geo-fencing, etc.)
-- case studies and won proposals in similar sectors/clients
-- team bios for roles the RFP requires
-- pricing/commission models if relevant
-- compliance and submission experience
+Given an RFP excerpt, return 12-16 specific search queries to retrieve verified facts about zö.
+
+REQUIRED QUERY TYPES (include all that apply to THIS RFP):
+1. Agency-level certifications only — WBENC, WOSB, COBID, insurance (01_companyfacts). Explicitly
+   search whether Google Ads / Meta Ads certs are individual specialist credentials vs agency-wide.
+2. Offeror / office / geography — if RFP requires a local or Oceania/Hawaii/region office for the
+   Offeror (prime), search for zö physical office locations and Hawaii/Oceania presence. Also search
+   for subcontractor/JV language ONLY as separate queries — do not conflate them with Offeror office.
+3. Won vs finalist provenance — separate queries:
+   - "06_WON" + sector/destination keywords for wins
+   - "07_FIN" + same keywords to surface finalist/loss files that must NOT be counted as wins
+4. Destination / leisure tourism vs MCI — if RFP is leisure destination or excludes MCI/meetings,
+   search leisure/visitor destination case studies AND separately San Francisco Travel / meetings
+   conference references so the analyst can flag MCI mismatch.
+5. Case studies (03_CS) for municipal/destination/tourism clients named in or analogous to the RFP.
+6. Team bios for specialized roles the RFP names (cultural advisor, Oceania specialist, account lead).
+7. Pricing/commission models if budget/media spend is material.
+8. Compliance/registration/insurance for the RFP jurisdiction.
 
 Use the client name, location, sector, and specific deliverables from the RFP in your queries.
+Prefer filename/bucket tokens when useful: 01_companyfacts, 03_CS, 04_Bio, 06_WON, 07_FIN.
 Do NOT include HTML, JavaScript errors, or portal boilerplate in queries.
 Return ONLY JSON: {"queries": ["query 1", "query 2", ...]}"""
+
+
+def _deterministic_evidence_queries(rfp: RfpRecord, content: RfpContentInfo) -> list[str]:
+    """Always-on Supermemory queries that prevent known Go/No-Go evidence mistakes."""
+    sample = combine_rfp_text(content.description, content.pdf_text)[:25_000]
+    sector = (rfp.sector or "").strip()
+    client = (rfp.client or "").strip()
+    location = (rfp.location or "").strip()
+
+    queries = [
+        "zö agency 01_companyfacts WBENC WOSB certifications agency-level verified",
+        "zö agency Google Ads Meta Ads certification Vishal Nihlani PPC individual credential not agency",
+        "zö agency 06_WON won proposal destination tourism leisure visitor marketing",
+        "zö agency 07_FIN finalist loss San Leandro destination marketing not a win",
+        "zö agency 03_CS Deschutes Brewery Oregon Employment Department City of Umatilla case studies",
+        "zö agency San Francisco Travel reference meetings conference MCI tourism",
+        "zö agency office locations Hawaii Oceania physical presence geography",
+    ]
+    if sector:
+        queries.append(f"zö agency 03_CS {sector} case study won experience")
+        queries.append(f"zö agency 06_WON {sector} proposal past performance")
+        queries.append(f"zö agency 07_FIN {sector} finalist proposal loss")
+    if client:
+        queries.append(f"zö agency {client} case study reference 03_CS 06_WON")
+    if location:
+        queries.append(f"zö agency {location} office registration vendor presence")
+
+    if re.search(
+        r"\boffice\b.{0,80}(?:Oceania|Hawai|Hawaii|Must have or must establish)|"
+        r"(?:Oceania|Hawai|Hawaii).{0,80}\boffice\b|"
+        r"Offeror must (?:have|establish).{0,40}office",
+        sample,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        queries.extend(
+            [
+                "zö agency Offeror office Oceania Hawaii establish physical location",
+                "zö agency Hawaii Oceania partner joint venture subcontractor Attachment 03",
+            ]
+        )
+
+    if re.search(
+        r"\bMCI\b|meetings?.{0,20}convention|exclude.{0,40}(?:meeting|convention|incentive)|"
+        r"destination brand|visitor arrivals|leisure travel|tourism authorit",
+        sample,
+        re.IGNORECASE,
+    ):
+        queries.extend(
+            [
+                "zö agency destination brand leisure tourism visitor marketing 03_CS 06_WON",
+                "zö agency MCI meetings incentives convention marketing experience",
+                "zö agency San Francisco Travel Association meetings destination marketing",
+            ]
+        )
+
+    if re.search(
+        r"cultural advisor|Oceania.{0,40}specialist|Hawaii.{0,40}specialist|"
+        r"indigenous|Native Hawaiian|malama",
+        sample,
+        re.IGNORECASE,
+    ):
+        queries.append(
+            "zö agency cultural advisor Oceania Hawaii market specialist team bio 04_Bio"
+        )
+
+    if re.search(r"Google Ads|Meta Ads|platform certif", sample, re.IGNORECASE):
+        queries.append(
+            "zö agency platform certifications Google Ads Meta Ads individual vs company"
+        )
+
+    return queries
+
+
+def _annotate_go_no_go_hit(hit: dict[str, Any]) -> dict[str, Any]:
+    """Tag FIN vs WON and competitor markers so the analyst cannot misread provenance."""
+    metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+    title = str(
+        hit.get("title")
+        or metadata.get("title")
+        or metadata.get("fileName")
+        or hit.get("customId")
+        or ""
+    )
+    body = supermemory.hit_text(hit)[:4000]
+    label_cf = title.casefold()
+    body_cf = body.casefold()
+    tags: list[str] = []
+    if "07_fin" in label_cf or re.search(r"\b07[_-]?fin\b", label_cf):
+        tags.append(
+            "PROVENANCE: 07_FIN = FINALIST/LOSS — do NOT count as won zö experience"
+        )
+    if "06_won" in label_cf or re.search(r"\b06[_-]?won\b", label_cf):
+        tags.append("PROVENANCE: 06_WON = won material — verify content is zö's")
+    if "03_cs" in label_cf:
+        tags.append("PROVENANCE: 03_CS case study")
+    if "resonance" in body_cf or "resonance" in label_cf:
+        tags.append(
+            "WARNING: excerpt may credit Resonance (competitor) — not zö experience"
+        )
+    if "lynchburg" in body_cf and ("resonance" in body_cf or "07_fin" in label_cf):
+        tags.append(
+            "WARNING: Lynchburg Economic Development content may be competitor CI"
+        )
+    if not tags:
+        return hit
+    annotated = dict(hit)
+    annotated["title"] = f"{title} [{' | '.join(tags)}]"
+    return annotated
+
+
+def _format_go_no_go_kb_hits(hits: list[dict[str, Any]], *, max_chars: int) -> str:
+    annotated = [_annotate_go_no_go_hit(hit) for hit in hits]
+    header = (
+        "KB PROVENANCE LEGEND (apply before scoring):\n"
+        "- 06_WON = win / reusable zö proposal material\n"
+        "- 07_FIN = finalist/loss — NOT a win; never cite as documented won experience\n"
+        "- Individual Google/Meta Ads certs ≠ agency-wide Verified capability\n"
+        "- Offeror office requirements are prime obligations unless RFP says otherwise\n\n"
+    )
+    body = supermemory.format_search_hits(annotated, max_chars=max(0, max_chars - len(header)))
+    if not body:
+        return body
+    return header + body
 
 KB_SEARCH_LIMIT = 8
 KB_CONTEXT_MAX_CHARS = 45_000
@@ -635,7 +823,7 @@ async def _plan_knowledge_base_queries(
                 rfp.id,
                 provider,
             )
-            return planned[:12]
+            return planned[:16]
     except llm.LlmError as exc:
         logger.warning("KB query planning failed for %s: %s", rfp.id, exc)
     return []
@@ -686,6 +874,7 @@ async def _gather_knowledge_context(
         )
     if re.search(r"housing authority|HUD|public housing", rfp_sample, re.IGNORECASE):
         queries.append("zö agency housing authority HUD public housing case study")
+    queries.extend(_deterministic_evidence_queries(rfp, content))
     queries.extend(planned)
 
     seen_queries: set[str] = set()
@@ -720,7 +909,7 @@ async def _gather_knowledge_context(
             seen.add(key)
             merged.append(hit)
 
-    formatted = supermemory.format_search_hits(merged, max_chars=KB_CONTEXT_MAX_CHARS)
+    formatted = _format_go_no_go_kb_hits(merged, max_chars=KB_CONTEXT_MAX_CHARS)
     logger.info(
         "Supermemory KB search for %s: %d queries, %d unique hits, %d chars",
         rfp.id,
@@ -1150,6 +1339,12 @@ evaluation criteria weights, compliance risks, KB evidence, and competitive posi
 Use [FLAG FOR ROLE: ...] and [FLAG: ...] for every item needing human confirmation before submission.
 Use tables with pipe characters for evaluation criteria and capability assessment.
 Cite specific RFP requirements and specific knowledge-base evidence. Tag uncertain items [VERIFY].
+
+EVIDENCE DISCIPLINE FOR THIS RUN:
+- Offeror office ≠ automatic subcontractor fix.
+- Google/Meta Ads on one person ≠ agency Verified.
+- 07_FIN ≠ won experience; flag Resonance/competitor text if present.
+- MCI-mismatched tourism refs need an explicit discount note.
 
 ## RFP
 {rfp_context}
