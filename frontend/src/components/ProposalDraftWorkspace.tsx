@@ -2080,7 +2080,7 @@ export function ProposalDraftWorkspace({
                 Sections
               </p>
             </div>
-            <ul className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
+            <ul className="custom-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
               <ProposalSectionTree
                 sections={outline.sections}
                 manuscriptIndexById={manuscriptIndexById}
@@ -2098,20 +2098,20 @@ export function ProposalDraftWorkspace({
               />
             </ul>
 
-            <div className="shrink-0 border-t border-zo-border bg-[var(--zo-input-bg)] p-3">
-              <div className="flex gap-2">
+            <div className="shrink-0 border-t border-zo-border bg-[var(--zo-input-bg)] p-2">
+              <div className="flex min-w-0 items-stretch gap-1.5">
                 <input
                   type="text"
                   value={newSectionTitle}
                   onChange={(e) => setNewSectionTitle(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && addCustomSection()}
                   placeholder="New section title…"
-                  className="min-w-0 flex-1 zo-input px-3 py-2 text-sm outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
+                  className="min-w-0 flex-1 zo-input px-2.5 py-2 text-sm outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10"
                 />
                 <button
                   type="button"
                   onClick={addCustomSection}
-                  className="zo-btn shrink-0 !px-3 !py-2"
+                  className="zo-btn shrink-0 !px-2.5 !py-2"
                 >
                   Add
                 </button>
