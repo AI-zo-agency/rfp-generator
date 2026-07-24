@@ -25,6 +25,10 @@ async def chat_json_with_repair(
     *,
     max_tokens: int | None = None,
     temperature: float = 0.2,
+    tier: llm.LlmTier = "heavy",
+    node_name: str | None = None,
+    rfp_id: str | None = None,
+    run_id: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """chat_json with one repair pass on JSON parse failure."""
     try:
@@ -32,6 +36,10 @@ async def chat_json_with_repair(
             messages,
             max_tokens=max_tokens,
             temperature=temperature,
+            tier=tier,
+            node_name=node_name,
+            rfp_id=rfp_id,
+            run_id=run_id,
         )
     except LlmError as exc:
         if not is_json_parse_failure(exc):
@@ -52,4 +60,8 @@ async def chat_json_with_repair(
             repair_messages,
             max_tokens=max_tokens,
             temperature=min(temperature, 0.15),
+            tier=tier,
+            node_name=node_name,
+            rfp_id=rfp_id,
+            run_id=run_id,
         )

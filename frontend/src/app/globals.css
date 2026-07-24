@@ -870,6 +870,11 @@ h4 {
   min-height: 0;
   height: 100%;
   overflow: hidden;
+  /* Default: stacked — safe for zoomed / narrow workspace cards */
+  grid-template-columns: 1fr;
+  grid-template-rows: auto minmax(0, 1fr) minmax(14rem, 32vh);
+  gap: 0;
+  padding: 0;
 }
 
 /* Grid children default to min-height:auto — breaks flex fill for the editor */
@@ -878,15 +883,64 @@ h4 {
   min-width: 0;
 }
 
-@media (min-width: 1024px) {
+.proposal-outline-layout .proposal-section-list {
+  grid-column: 1;
+  grid-row: 1;
+  max-height: min(42vh, 16rem);
+}
+
+.proposal-outline-layout .proposal-editor-pane {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.proposal-outline-layout .proposal-assistant-pane {
+  grid-column: 1;
+  grid-row: 3;
+  min-height: 14rem;
+  background: #fff;
+}
+
+/* Mid-width workspace (zoomed laptop): sections + editor side-by-side, assistant below */
+@container proposal-workspace (min-width: 720px) {
   .proposal-outline-layout {
-    grid-template-columns: minmax(0, 15.5rem) minmax(0, 1fr) minmax(16rem, 22rem);
-    gap: 1rem;
+    grid-template-columns: minmax(12rem, 15rem) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(12rem, 30vh);
+    gap: 0.65rem;
+    padding: 0.5rem;
   }
 
   .proposal-outline-layout .proposal-section-list {
     grid-column: 1;
     grid-row: 1;
+    max-height: none;
+  }
+
+  .proposal-outline-layout .proposal-editor-pane {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .proposal-outline-layout .proposal-assistant-pane {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-height: 12rem;
+  }
+}
+
+/* Wide workspace only: true 3-column (needs ~15rem + editor + ~15rem + gaps) */
+@container proposal-workspace (min-width: 1100px) {
+  .proposal-outline-layout {
+    grid-template-columns: minmax(13rem, 15.5rem) minmax(0, 1fr) minmax(15rem, 20rem);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.65rem;
+  }
+
+  .proposal-outline-layout .proposal-section-list {
+    grid-column: 1;
+    grid-row: 1;
+    max-height: none;
   }
 
   .proposal-outline-layout .proposal-editor-pane {
@@ -897,40 +951,16 @@ h4 {
   .proposal-outline-layout .proposal-assistant-pane {
     grid-column: 3;
     grid-row: 1;
+    min-height: 0;
     background: #fff;
   }
 }
 
-@media (min-width: 1280px) {
+@container proposal-workspace (min-width: 1400px) {
   .proposal-outline-layout {
     grid-template-columns: minmax(0, 17rem) minmax(0, 1fr) minmax(18rem, 24rem);
-    gap: 1.5rem;
-  }
-}
-
-@media (max-width: 1023px) {
-  .proposal-outline-layout {
-    grid-template-columns: 1fr !important;
-    grid-template-rows: auto minmax(0, 1fr) minmax(16rem, 28vh);
-  }
-
-  .proposal-outline-layout .proposal-section-list {
-    max-height: min(42vh, 16rem);
-    grid-row: 1;
-  }
-
-  .proposal-outline-layout .proposal-editor-pane {
-    grid-row: 2;
-  }
-
-  .proposal-outline-layout .proposal-assistant-pane {
-    grid-row: 3;
-    min-height: 16rem;
-    background: #fff;
-  }
-
-  .proposal-content-jump-strip {
-    display: flex;
+    gap: 1.25rem;
+    padding: 0.75rem;
   }
 }
 
@@ -945,6 +975,13 @@ h4 {
   border-bottom: 1px solid rgba(17, 24, 39, 0.08);
   background: #fafbfc;
   scrollbar-width: thin;
+}
+
+/* Show jump chips when the side “On this page” nav is not visible */
+@container proposal-workspace (max-width: 1099px) {
+  .proposal-content-jump-strip {
+    display: flex;
+  }
 }
 
 .proposal-content-jump-chip {
@@ -1136,9 +1173,31 @@ h4 {
   display: none;
 }
 
-@media (min-width: 1024px) {
+@container proposal-workspace (min-width: 720px) {
+  .proposal-outline-layout.is-editor-focus {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(12rem, 30vh);
+  }
+
+  .proposal-outline-layout.is-editor-focus .proposal-editor-pane {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .proposal-outline-layout.is-editor-focus .proposal-assistant-pane {
+    grid-column: 1;
+    grid-row: 2;
+  }
+}
+
+@container proposal-workspace (min-width: 1100px) {
   .proposal-outline-layout.is-editor-focus {
     grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .proposal-outline-layout.is-editor-focus .proposal-assistant-pane {
+    display: none;
   }
 }
 
@@ -1877,12 +1936,20 @@ h4 {
 }
 
 @media (max-height: 820px) {
+  /* Only constrain the section list when layout is stacked (narrow container).
+     Wide 2/3-col layouts need the full pane height. */
   .proposal-outline-layout .proposal-section-list {
     max-height: min(34vh, 12rem);
   }
 
   .proposal-section-chat-quick {
     display: none;
+  }
+}
+
+@container proposal-workspace (min-width: 720px) {
+  .proposal-outline-layout .proposal-section-list {
+    max-height: none;
   }
 }
 
@@ -2388,19 +2455,36 @@ h4 {
   padding: 0.5rem;
 }
 
-@media (min-width: 1024px) {
+@container proposal-workspace (min-width: 1100px) {
   .proposal-content-layout {
     flex-direction: row;
     align-items: stretch;
     gap: 0.75rem;
     padding: 0.65rem;
   }
+
+  .proposal-on-page-nav {
+    display: flex;
+    flex: 0 0 14rem;
+    width: 14rem;
+    max-width: 14rem;
+    align-self: stretch;
+    min-height: 0;
+    max-height: none;
+    overflow: hidden;
+  }
 }
 
-@media (min-width: 1280px) {
+@container proposal-workspace (min-width: 1400px) {
   .proposal-content-layout {
     gap: 1rem;
     padding: 0.75rem;
+  }
+
+  .proposal-on-page-nav {
+    flex-basis: 15rem;
+    width: 15rem;
+    max-width: 15rem;
   }
 }
 
@@ -2459,6 +2543,8 @@ h4 {
 }
 
 @media (min-width: 1024px) {
+  /* Kept as fallback only when container queries are unsupported;
+     primary behavior is @container proposal-workspace above. */
   .proposal-on-page-nav {
     display: flex;
     flex: 0 0 15rem;
@@ -2468,6 +2554,20 @@ h4 {
     min-height: 0;
     max-height: none;
     overflow: hidden;
+  }
+}
+
+@supports (container-type: inline-size) {
+  @media (min-width: 1024px) {
+    .proposal-on-page-nav {
+      display: none;
+    }
+  }
+
+  @container proposal-workspace (min-width: 1100px) {
+    .proposal-on-page-nav {
+      display: flex;
+    }
   }
 }
 
@@ -2579,6 +2679,10 @@ h4 {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  /* Layout columns must follow available workspace width (after sidebar + zoom),
+     not the viewport — otherwise 125% laptop zoom still hits lg: 3-col and crushes panes. */
+  container-type: inline-size;
+  container-name: proposal-workspace;
 }
 
 .proposal-workspace-tab {
@@ -2773,6 +2877,7 @@ h4 {
   padding: 0.5rem 0.75rem;
   align-items: center;
   gap: 0.65rem 0.75rem;
+  min-width: 0;
 }
 
 .proposal-tab-actions-toolbar {
@@ -2781,6 +2886,8 @@ h4 {
   align-items: center;
   justify-content: flex-end;
   gap: 0.625rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .proposal-toolbar-btn {

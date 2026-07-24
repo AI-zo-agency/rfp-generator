@@ -28,6 +28,12 @@ class StructureAddition(BaseModel):
         default=None, alias="insertAfterSectionId"
     )
     draft_hint: str | None = Field(default=None, alias="draftHint")
+    extract_from_section_id: str | None = Field(
+        default=None, alias="extractFromSectionId"
+    )
+    remove_extracted_from_source: bool = Field(
+        default=True, alias="removeExtractedFromSource"
+    )
 
     model_config = {"populate_by_name": True}
 
@@ -61,12 +67,14 @@ Return ONLY JSON:
   "editSectionId": "section id to rewrite when action is edit (or null)",
   "additions": [
     {
-      "title": "2.2 — Name" or descriptive title,
+      "title": "short sidebar title only (e.g. Project Staff Planning) — NOT the full user sentence",
       "kind": "bio" | "case_study" | "custom" | "rfp",
       "memberName": "Full Name for bios only",
       "caseStudyName": "Client/project name for case studies only",
       "insertAfterSectionId": "existing section id to insert after, or null",
-      "draftHint": "optional short note of what to write"
+      "draftHint": "optional short note of what to write",
+      "extractFromSectionId": "section id to move content FROM when splitting (or null)",
+      "removeExtractedFromSource": true
     }
   ],
   "deletions": [{"sectionId": "...", "title": "..."}],
@@ -75,15 +83,22 @@ Return ONLY JSON:
 
 Rules:
 1. Prefer "edit" when they want to change prose in an existing tab (improve, rewrite, fill VERIFY,
-   fill gaps from KB / "KB only"). NEVER create a new sidebar tab titled "Kb Only" or similar —
-   that phrase means knowledge-base source constraint, not a section name.
-2. Use "add_sections" when they want NEW sidebar items (more bios, more case studies, new form, new custom tab).
+   fill gaps from KB / "KB only", remove/replace unsourced numbers/hours/percentages/year claims
+   with qualitative wording, fix factual inconsistencies). NEVER create a new sidebar tab from
+   mid-sentence phrases like "Figures In", "Kb Only", "Qualitative Language", or similar.
+2. Use "add_sections" when they want NEW sidebar items (more bios, more case studies, new form,
+   new custom/RFP tab, OR split a subsection into its own H2/sidebar section).
    - Team bios → kind "bio", title like "2.2 — First Last"; memberName only if user/RFP named them.
    - Our Work / case studies → kind "case_study", caseStudyName required.
    - "Add X in/to case studies / Our Work" → ALWAYS add_sections kind case_study. NEVER delete
      Previous Experience, References, forms, or other RFP tabs to "make room".
+   - Split / move content into its own section (e.g. "Create a new H2/section titled Project
+     Staff Planning; move staff content out of Evaluation Metrics") → action=add_sections,
+     kind "rfp" (or "custom"), short title only, insertAfterSectionId = source section id,
+     extractFromSectionId = source section id, removeExtractedFromSource = true,
+     draftHint = what to extract. Do NOT action=edit that only deletes text without adding a tab.
    - Other new tabs → kind "custom" or "rfp".
-3. Use "delete_sections" when they clearly ask to remove/delete a section.
+3. Use "delete_sections" when they clearly ask to remove/delete a section from the sidebar.
 4. Use "clarify" when intent is ambiguous (e.g. "add more people" with no count,
    "fix section 2" could mean rewrite or add, delete without naming which).
    Ask one concise question — do not guess destructive deletes.
@@ -92,17 +107,27 @@ Rules:
    use add_sections with kind "bio" and memberName null — backend picks real roster
    people and drafts full bios in one pass.
 7. insertAfterSectionId should be the last related sibling when possible (last bio / last case study).
+   For splits, insertAfterSectionId should be the source section being split.
 8. Prefer concrete names only when the user or RFP clearly names them.
-9. "Instead of X add/use Y" / "replace X with Y" for ANY section type (bio, case study,
-   form, custom) → include BOTH deletions for X and additions for Y. Infer kind from
+9. "Instead of X add/use Y" / "replace X with Y" for SIDEBAR SECTIONS (named people, case studies,
+   form titles) → include BOTH deletions for X and additions for Y. Infer kind from
    the section being replaced (bio tab → bio + memberName; Our Work → case_study;
    otherwise custom/rfp). NEVER action=edit that rewrites Y's content under X's title.
-   EXCEPTION: "add Y to case studies" is NOT a replace of Previous Experience / forms.
+   If you must action=edit a case-study tab because the user asked to swap the body in place,
+   the rewritten markdown MUST open with an H2 for the NEW client/project, and the sidebar
+   title will be synced from that heading — still prefer delete+add when the case study
+   identity changes.
+   EXCEPTION A: "add Y to case studies" is NOT a replace of Previous Experience / forms.
+   EXCEPTION B: "replace [numbers/figures/hours/%/claims] with qualitative language" (or
+   "remove unsourced figures") is ALWAYS action=edit on the focus section — never rename
+   or delete the sidebar tab.
 10. Ignore the focus section when the user clearly names a different sidebar title/person —
     structure changes are proposal-wide.
 11. NEVER create a sidebar tab titled placeholder / HUMAN SIGN-OFF / [VERIFY: …]. For E-Verify,
     affidavits, conflict disclosure, or "do not assert until Sonja confirms" → action=edit on
     the existing form/affidavit section. Keep the form; insert [VERIFY] tags in place.
+12. addition.title must be a short sidebar label (typically under 60 characters). Never paste
+    the user's full instruction as the title.
 """
 
 
@@ -149,6 +174,148 @@ def renumber_dynamic_group_titles(sections: list[ProposalSection]) -> list[Propo
             continue
         out.append(section)
     return out
+
+
+_GENERIC_CASE_HEADINGS = frozenset(
+    {
+        "client overview",
+        "challenge",
+        "solution",
+        "our approach",
+        "solution / our approach",
+        "approach",
+        "results",
+        "why relevant",
+        "why it matters",
+        "outcomes",
+        "overview",
+    }
+)
+
+
+def _title_case_case_study_name(raw: str) -> str:
+    text = re.sub(r"\s+", " ", (raw or "").strip(" #\t-–—"))
+    text = re.sub(r"^#+\s*", "", text).strip()
+    if not text:
+        return ""
+    # Prefer the client/project name before a colon when present.
+    if ":" in text and len(text.split(":", 1)[0].strip()) >= 4:
+        left, right = text.split(":", 1)
+        left = left.strip()
+        right = right.strip()
+        # "City of X: Project Name" → keep both if short enough
+        if right and len(left) + len(right) < 70:
+            text = f"{left}: {right}"
+        else:
+            text = left
+    if text.isupper() and len(text) > 4:
+        small = {"of", "the", "and", "a", "an", "for", "to", "in", "on"}
+        parts: list[str] = []
+        for i, word in enumerate(text.casefold().split()):
+            if i > 0 and word in small:
+                parts.append(word)
+            else:
+                parts.append(word[:1].upper() + word[1:] if word else word)
+        text = " ".join(parts)
+    if len(text) > 72:
+        text = text[:69].rstrip() + "…"
+    return text
+
+
+def _is_generic_case_heading(label: str) -> bool:
+    key = re.sub(r"[^a-z0-9\s/]", "", (label or "").casefold())
+    key = re.sub(r"\s+", " ", key).strip()
+    return key in _GENERIC_CASE_HEADINGS or key.startswith("why relevant")
+
+
+def infer_case_study_name_from_content(content: str) -> str | None:
+    """Best-effort client/project label from case-study body (heading or lead line)."""
+    text = (content or "").strip()
+    if not text:
+        return None
+
+    # Prefer a lead title line (ALL CAPS / City of …) before generic ### subsections.
+    for line in text.splitlines()[:8]:
+        candidate = line.strip().strip("*_").strip()
+        if not candidate or candidate.startswith("["):
+            continue
+        if candidate.startswith("#"):
+            heading_text = re.sub(r"^#+\s*", "", candidate).strip()
+            if _is_generic_case_heading(heading_text):
+                continue
+            name = _title_case_case_study_name(heading_text)
+            if name and len(name) >= 3 and not _is_generic_case_heading(name):
+                return name
+            continue
+        looks_like_title = (
+            candidate.isupper()
+            or bool(re.match(r"(?i)^city\s+of\s+\w+", candidate))
+            or (":" in candidate[:90] and len(candidate) < 120)
+        )
+        if looks_like_title:
+            name = _title_case_case_study_name(candidate)
+            if name and len(name) >= 3 and not _is_generic_case_heading(name):
+                return name
+        # First non-heading prose line that isn't a title → stop scanning lead.
+        if not candidate.startswith("#"):
+            break
+
+    for match in re.finditer(r"^#{1,2}\s+(.+)$", text, re.M):
+        name = _title_case_case_study_name(match.group(1))
+        if name and len(name) >= 3 and not _is_generic_case_heading(name):
+            return name
+    return None
+
+
+def _case_study_labels_match(a: str, b: str) -> bool:
+    """True when both labels refer to the same case study client/project."""
+    na = re.sub(r"[^a-z0-9\s]", " ", (a or "").casefold())
+    nb = re.sub(r"[^a-z0-9\s]", " ", (b or "").casefold())
+    na = re.sub(r"\s+", " ", na).strip()
+    nb = re.sub(r"\s+", " ", nb).strip()
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if na in nb or nb in na:
+        return True
+    # Compare core "city of X" / first two content words
+    city_a = re.search(r"city of ([a-z0-9][\w\s]{1,40})", na)
+    city_b = re.search(r"city of ([a-z0-9][\w\s]{1,40})", nb)
+    if city_a and city_b:
+        return city_a.group(1).split()[0] == city_b.group(1).split()[0]
+    wa = [w for w in na.split() if w not in {"the", "a", "an", "of", "and"}][:3]
+    wb = [w for w in nb.split() if w not in {"the", "a", "an", "of", "and"}][:3]
+    return bool(wa and wb and wa == wb)
+
+
+def sync_case_study_title_from_content(section: ProposalSection) -> ProposalSection:
+    """
+    When Our Work body is rewritten to a different case study, update the sidebar title.
+    Keeps the existing 3.N index prefix.
+    """
+    if not section.id.startswith("section-3-work-"):
+        return section
+    if section.id == "section-3-work-placeholder":
+        return section
+    inferred = infer_case_study_name_from_content(section.content or "")
+    if not inferred:
+        return section
+    old_label = _section_label(section.title or "")
+    if _case_study_labels_match(old_label, inferred):
+        return section
+    prefix_match = re.match(r"^(3\.\d+)\s*[—\-–:]", section.title or "")
+    prefix = prefix_match.group(1) if prefix_match else "3.x"
+    new_title = f"{prefix} — {inferred}"
+    if new_title == section.title:
+        return section
+    logger.info(
+        "Synced case-study title %r → %r (id=%s)",
+        section.title,
+        new_title,
+        section.id,
+    )
+    return section.model_copy(update={"title": new_title})
 
 
 def _insert_after(
@@ -314,14 +481,39 @@ def _is_in_place_kb_or_verify_edit(text: str) -> bool:
     )
 
 
+def _is_in_place_manual_fill_edit(text: str) -> bool:
+    """True when the user wants to resolve MANUAL FILL tags in place — not add a tab.
+
+    Parallel to VERIFY in-place detection; does not change VERIFY logic.
+    """
+    from app.services.proposal_manual_flags import is_manual_fill_request
+
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if re.search(
+        r"\binstead\s+of\b|\breplace\s+.+\s+with\b|\bswap\s+(?:out\s+)?.+\s+(?:for|with)\b",
+        raw,
+        re.I | re.S,
+    ):
+        # "replace X with Y" for people/case studies still wins unless clearly a MANUAL FILL ask.
+        if not is_manual_fill_request(raw):
+            return False
+    if re.search(
+        r"\b([A-Za-z][a-z']+)\s+([A-Za-z][a-z']+)\s+(?:bio|resume)\b",
+        raw,
+        re.I,
+    ):
+        return False
+    return is_manual_fill_request(raw)
+
+
 def _is_bogus_structure_title(title: str | None) -> bool:
     """Reject sidebar titles that are VERIFY/placeholder instructions, not real tabs."""
     t = (title or "").strip()
     if not t:
         return True
     cf = t.casefold()
-    if len(t) > 80:
-        return True
     markers = (
         "human sign-off",
         "human sign off",
@@ -334,8 +526,27 @@ def _is_bogus_structure_title(title: str | None) -> bool:
         "enrollment status must",
         "kb only",
         "knowledge base only",
+        "figures in",
+        "qualitative language",
     )
     return any(m in cf for m in markers)
+
+
+def _sanitize_addition_title(raw: str | None, *, fallback: str = "New section") -> str:
+    """Keep sidebar titles short; never use the full user instruction as a tab name."""
+    title = _section_label((raw or "").strip()) or (raw or "").strip()
+    if not title:
+        title = fallback
+    # Drop trailing instruction clauses pasted into the title.
+    title = re.split(r"[;(]| — | - ", title, maxsplit=1)[0].strip()
+    title = re.sub(
+        r"(?i)^(create|add|make|new)\s+(a\s+)?(new\s+)?(h2\s+)?section\s+(titled|called|named)\s+",
+        "",
+        title,
+    ).strip(" .,;:-")
+    if len(title) > 60:
+        title = title[:57].rstrip() + "…"
+    return title or fallback
 
 
 def _extract_swap_labels_from_text(text: str) -> list[str]:
@@ -471,111 +682,13 @@ def _heuristic_section_replace_plan(
     *,
     focus_section_id: str | None = None,
 ) -> StructurePlan | None:
-    """Deterministic 'instead of X → Y' for ANY section kind — rename tab, don't rewrite under old title."""
-    text = (user_message or "").strip()
-    if not text:
-        return None
-    if _is_in_place_kb_or_verify_edit(text):
-        return None
-    # "Add X in case studies" is an ADD, never a replace of Previous Experience / forms.
-    if _is_add_to_case_studies_intent(text):
-        return None
+    """Deprecated.
 
-    old_label = ""
-    new_label = ""
-    patterns = (
-        r"instead\s+of\s+(.+?)\s+(?:[,:]?\s*)?(?:add|use|put|include|with)\s+(.+?)\s*$",
-        r"replace\s+(.+?)\s+with\s+(.+?)\s*$",
-        r"swap\s+(?:out\s+)?(.+?)\s+(?:for|with)\s+(.+?)\s*$",
-        r"change\s+(.+?)\s+to\s+(.+?)\s*$",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            old_label = _clean_section_label(match.group(1))
-            new_label = _clean_section_label(match.group(2))
-            break
-
-    focus = next((s for s in draft.sections if s.id == focus_section_id), None)
-    focus_label = _section_label(focus.title) if focus else ""
-
-    if not new_label:
-        named = _extract_swap_labels_from_text(text)
-        swap_intent = bool(
-            re.search(
-                r"\b(instead|replace|swap|change|get|put|use)\b",
-                text,
-                re.I,
-            )
-        )
-        # Bare "add" alone is not replace intent (handled by add-case-study heuristic).
-        if swap_intent and named:
-            for candidate in named:
-                if focus_label and candidate.casefold() == focus_label.casefold():
-                    continue
-                if candidate.casefold() in {"kb only", "knowledge base", "verify tags"}:
-                    continue
-                new_label = candidate
-                break
-            if new_label and focus and focus_label:
-                old_label = focus_label
-
-    if not new_label or len(new_label) < 3:
-        return None
-    if old_label and old_label.casefold() == new_label.casefold():
-        return None
-    if new_label.casefold() in {"kb only", "knowledge base", "verify tags"}:
-        return None
-
-    target: ProposalSection | None = None
-    if old_label:
-        target = _find_section_by_label(draft.sections, old_label)
-    if target is None and focus is not None:
-        if focus_label.casefold() != new_label.casefold():
-            # Only auto-replace focus when the message clearly asks for a different entity
-            if re.search(
-                r"\b(instead|replace|swap|change|get|put|use)\b", text, re.I
-            ):
-                target = focus
-                old_label = focus_label or old_label or "current section"
-
-    if target is None:
-        return None
-
-    if _section_label(target.title).casefold() == new_label.casefold():
-        return None
-
-    kind = _infer_addition_kind(target)
-    if kind == "bio":
-        add_title = f"2.x — {new_label}"
-    elif kind == "case_study":
-        add_title = f"3.x — {new_label}"
-    else:
-        add_title = new_label
-    addition = StructureAddition(
-        kind=kind,
-        title=add_title,
-        memberName=new_label if kind == "bio" else None,
-        caseStudyName=new_label if kind == "case_study" else None,
-        insertAfterSectionId=None,
-        draftHint=f"Replace prior section with {new_label}",
-    )
-
-    logger.info(
-        "Section replace heuristic: %s (%s) → %s [%s]",
-        old_label or target.title,
-        target.id,
-        new_label,
-        kind,
-    )
-    return StructurePlan(
-        action="add_sections",
-        deletions=[
-            StructureDeletion(sectionId=target.id, title=target.title),
-        ],
-        additions=[addition],
-        assistantNote=f"Replacing {_section_label(target.title) or old_label} with {new_label}.",
-    )
+    Section rename/swap must be planned by the LLM in plan_chat_structure_action.
+    Regex "replace X with Y" falsely deleted real tabs (e.g. Project Staffing Plan →
+    "Figures In" from "replace with qualitative language"). Always return None.
+    """
+    return None
 
 
 # Back-compat name used by tests / callers
@@ -763,18 +876,13 @@ async def plan_chat_structure_action(
 ) -> StructurePlan:
     """Decide edit vs add/delete sections vs ask the user.
 
-    Always prefer LLM understanding of the ask. Safety coerce (VERIFY / bogus titles →
-    in-place edit) runs AFTER the plan so we never skip intent understanding.
+    Prefer LLM understanding of the ask. Only the case-study ADD shortcut and
+    post-plan safety coerce (VERIFY / MANUAL FILL / bogus titles) remain —
+    never regex-guess section renames from "replace … with …".
     """
     add_case = _heuristic_add_case_study_plan(user_message, draft)
     if add_case is not None:
         return add_case
-
-    heuristic = _heuristic_section_replace_plan(
-        user_message, draft, focus_section_id=focus_section_id
-    )
-    if heuristic is not None:
-        return heuristic
 
     focus = next((s for s in draft.sections if s.id == focus_section_id), None)
     prompt = (
@@ -790,7 +898,12 @@ async def plan_chat_structure_action(
         "CRITICAL: Phrases like 'from KB only', 'fill VERIFY', or 'knowledge base only' mean "
         "edit the focus section in place — NEVER add_sections with title 'Kb Only'.\n"
         "CRITICAL: 'Add X in/to case studies' → add_sections kind=case_study ONLY. "
-        "Do NOT delete Previous Experience, References, or forms."
+        "Do NOT delete Previous Experience, References, or forms.\n"
+        "CRITICAL: Removing or replacing unsourced hours/percentages/year claims with "
+        "qualitative language is ALWAYS action=edit — NEVER rename or delete the sidebar tab.\n"
+        "CRITICAL: 'Create a new H2/section titled X; move content out of Y' → action=add_sections "
+        "with short title X, extractFromSectionId=Y's id, removeExtractedFromSource=true. "
+        "Never action=edit that only patches inside Y without adding the new tab."
     )
     try:
         raw, _ = await llm.chat_json(
@@ -800,6 +913,8 @@ async def plan_chat_structure_action(
             ],
             max_tokens=1200,
             temperature=0.1,
+            tier="light",
+            node_name="chat_structure_plan",
         )
     except LlmError as exc:
         logger.warning("Structure plan LLM failed: %s — defaulting to edit", exc)
@@ -813,36 +928,30 @@ async def plan_chat_structure_action(
 
     plan = _coerce_add_case_study_plan(plan, user_message, draft)
 
-    # Safety / VERIFY / E-Verify asks must never become a new placeholder tab.
-    if _is_in_place_kb_or_verify_edit(user_message) or (
-        plan.action == "add_sections"
-        and any(
-            _is_bogus_structure_title(a.title)
-            or _is_bogus_structure_title(a.case_study_name)
-            or _is_bogus_structure_title(a.member_name)
-            for a in plan.additions
+    # Only VERIFY / MANUAL FILL / E-Verify safety asks force in-place edit.
+    # Do NOT coerce real add_sections (e.g. split into Project Staff Planning) just
+    # because a title was long or slightly malformed — sanitize titles instead.
+    in_place_safety = _is_in_place_kb_or_verify_edit(
+        user_message
+    ) or _is_in_place_manual_fill_edit(user_message)
+    if in_place_safety and plan.action in {"add_sections", "delete_sections"}:
+        logger.info(
+            "Coercing structure plan → in-place edit (attestation/VERIFY/MANUAL FILL safety)"
         )
-    ):
-        if plan.action in {"add_sections", "delete_sections"} and (
-            _is_in_place_kb_or_verify_edit(user_message)
-            or any(
-                _is_bogus_structure_title(a.title)
-                or _is_bogus_structure_title(a.case_study_name)
-                or _is_bogus_structure_title(a.member_name)
-                for a in plan.additions
+        note = (
+            "Editing the current section in place — keeping the form and "
+            "flagging unconfirmed items with [VERIFY] (no new sidebar tab)."
+        )
+        if _is_in_place_manual_fill_edit(user_message):
+            note = (
+                "Editing the current section in place — resolving [MANUAL FILL] "
+                "tags only from user-provided or KB facts (no new sidebar tab)."
             )
-        ):
-            logger.info(
-                "Coercing structure plan → in-place edit (attestation/VERIFY safety)"
-            )
-            return StructurePlan(
-                action="edit",
-                editSectionId=focus_section_id,
-                assistantNote=(
-                    "Editing the current section in place — keeping the form and "
-                    "flagging unconfirmed items with [VERIFY] (no new sidebar tab)."
-                ),
-            )
+        return StructurePlan(
+            action="edit",
+            editSectionId=focus_section_id,
+            assistantNote=note,
+        )
 
     if plan.action == "clarify" and not (plan.clarify_question or "").strip():
         plan.clarify_question = (
@@ -865,11 +974,6 @@ async def plan_chat_structure_action(
         add_case = _heuristic_add_case_study_plan(user_message, draft)
         if add_case is not None:
             return add_case
-        forced = _heuristic_section_replace_plan(
-            user_message, draft, focus_section_id=focus_section_id
-        )
-        if forced is not None:
-            return forced
     # Guard: LLM sometimes invents a "Kb Only" tab from "from KB only".
     if plan.action == "add_sections":
         bogus = {
@@ -878,10 +982,19 @@ async def plan_chat_structure_action(
             "knowledge base only",
             "verify",
             "verify tags",
+            "figures in",
+            "qualitative language",
+            "qualitative",
         }
         cleaned: list[StructureAddition] = []
         for addition in plan.additions:
-            title_cf = _section_label(addition.title or "").casefold()
+            sanitized_title = _sanitize_addition_title(
+                addition.title,
+                fallback=_sanitize_addition_title(
+                    addition.case_study_name or addition.member_name or "New section"
+                ),
+            )
+            title_cf = _section_label(sanitized_title).casefold()
             member_cf = (addition.member_name or "").casefold()
             case_cf = (addition.case_study_name or "").casefold()
             if title_cf in bogus or member_cf in bogus or case_cf in bogus:
@@ -892,7 +1005,7 @@ async def plan_chat_structure_action(
                 )
                 continue
             if (
-                _is_bogus_structure_title(addition.title)
+                _is_bogus_structure_title(sanitized_title)
                 or _is_bogus_structure_title(addition.case_study_name)
                 or _is_bogus_structure_title(addition.member_name)
             ):
@@ -901,15 +1014,45 @@ async def plan_chat_structure_action(
                     addition.title,
                 )
                 continue
-            cleaned.append(addition)
-        if not cleaned and _is_in_place_kb_or_verify_edit(user_message):
+            # Default extract source when user asked to split/move and LLM omitted id.
+            extract_id = addition.extract_from_section_id
+            if not extract_id and re.search(
+                r"(?i)\b(move|extract|split|separate|own\s+section|new\s+(?:h2\s+)?section)\b",
+                user_message or "",
+            ):
+                extract_id = focus_section_id
+            insert_after = addition.insert_after_section_id or extract_id
+            cleaned.append(
+                addition.model_copy(
+                    update={
+                        "title": sanitized_title,
+                        "extract_from_section_id": extract_id,
+                        "insert_after_section_id": insert_after,
+                    }
+                )
+            )
+        if not cleaned and (
+            _is_in_place_kb_or_verify_edit(user_message)
+            or _is_in_place_manual_fill_edit(user_message)
+        ):
             return StructurePlan(
                 action="edit",
                 editSectionId=focus_section_id,
-                assistantNote="Filling VERIFY/gaps from KB in the current section (no new tab).",
+                assistantNote=(
+                    "Filling MANUAL FILL / VERIFY gaps from KB or your message "
+                    "in the current section (no new tab)."
+                    if _is_in_place_manual_fill_edit(user_message)
+                    else "Filling VERIFY/gaps from KB in the current section (no new tab)."
+                ),
             )
         plan.additions = cleaned
         if not plan.additions and not plan.deletions:
+            return StructurePlan(action="edit", editSectionId=focus_section_id)
+        # Destructive structure with deletions but no valid additions → edit, do not delete.
+        if plan.deletions and not plan.additions:
+            logger.warning(
+                "Structure plan had deletions with no valid additions — coercing to edit"
+            )
             return StructurePlan(action="edit", editSectionId=focus_section_id)
     return plan
 
@@ -1097,6 +1240,78 @@ def _build_stub_section(
         status="outline",
         designerNote=hint or None,
     )
+
+
+EXTRACT_SPLIT_PROMPT = """You split one proposal section into two.
+
+Return ONLY JSON:
+{
+  "newSectionContent": "markdown for the NEW section only — moved/extracted material",
+  "sourceSectionContent": "markdown for the ORIGINAL section with extracted material removed"
+}
+
+Rules:
+1. Move the material the user asked to extract into newSectionContent (verbatim when possible).
+2. Leave related but non-extracted material in sourceSectionContent.
+3. Do not invent facts. Do not add [VERIFY] tags for moved prose that already exists.
+4. Preserve MANUAL FILL and VERIFY tags exactly where they belong.
+5. newSectionContent must be non-empty if the source contains matching material.
+"""
+
+
+async def _split_section_content(
+    *,
+    source: ProposalSection,
+    new_title: str,
+    draft_hint: str | None,
+) -> tuple[str, str]:
+    """LLM-split source content into (new_section_body, remaining_source_body)."""
+    source_body = (source.content or "").strip()
+    if not source_body:
+        return "", source_body
+    hint = (draft_hint or "").strip() or f"Move content for “{new_title}” into its own section."
+    try:
+        raw, _ = await llm.chat_json(
+            [
+                {"role": "system", "content": EXTRACT_SPLIT_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Source section title: {source.title}\n"
+                        f"New section title: {new_title}\n"
+                        f"Extract instruction: {hint}\n\n"
+                        f"Source section content:\n{source_body[:14000]}"
+                    ),
+                },
+            ],
+            max_tokens=6000,
+            temperature=0.1,
+            tier="light",
+            node_name="chat_structure_split",
+        )
+    except LlmError as exc:
+        logger.warning("Section split LLM failed: %s", exc)
+        return "", source_body
+
+    new_body = str(
+        (raw or {}).get("newSectionContent")
+        or (raw or {}).get("new_section_content")
+        or ""
+    ).strip()
+    remaining = str(
+        (raw or {}).get("sourceSectionContent")
+        or (raw or {}).get("source_section_content")
+        or ""
+    ).strip()
+    if not new_body:
+        return "", source_body
+    if not remaining:
+        # If model emptied the source entirely, keep original unless new equals whole source.
+        if new_body.strip() == source_body.strip():
+            remaining = ""
+        else:
+            remaining = source_body
+    return new_body, remaining
 
 
 def _resolve_deletion_id(
@@ -1527,25 +1742,77 @@ async def apply_chat_structure_plan(
                 continue
 
             # custom / rfp
-            title = (addition.title or "New section").strip()
+            title = _sanitize_addition_title(addition.title or "New section")
             sec_id = f"{'rfp' if kind == 'rfp' else 'custom'}-{_slug(title)}"
             n = 2
             base = sec_id
             while sec_id in existing_ids:
                 sec_id = f"{base}-{n}"
                 n += 1
-            new_sec = _build_stub_section(
-                section_id=sec_id,
-                title=title,
-                kind=kind,
-                draft_hint=addition.draft_hint,
+
+            extract_id = addition.extract_from_section_id
+            source_sec = (
+                next((s for s in sections if s.id == extract_id), None)
+                if extract_id
+                else None
             )
-            sections = _insert_after(
-                sections, new_sec, addition.insert_after_section_id
+            moved_body = ""
+            if source_sec is not None:
+                moved_body, remaining = await _split_section_content(
+                    source=source_sec,
+                    new_title=title,
+                    draft_hint=addition.draft_hint,
+                )
+                if moved_body and addition.remove_extracted_from_source:
+                    sections = [
+                        (
+                            s.model_copy(
+                                update={
+                                    "content": remaining,
+                                    "status": "generated" if remaining.strip() else s.status,
+                                }
+                            )
+                            if s.id == source_sec.id
+                            else s
+                        )
+                        for s in sections
+                    ]
+                    notes.append(
+                        f"Moved staff/content out of **{source_sec.title}** into **{title}**"
+                    )
+
+            if moved_body.strip():
+                new_sec = ProposalSection(
+                    id=sec_id,
+                    title=title,
+                    wordTarget=max(400, min(900, len(moved_body.split()))),
+                    required=True,
+                    custom=kind == "custom",
+                    source="rfp" if kind == "rfp" else "generated",
+                    mode="write",
+                    content=moved_body,
+                    status="generated",
+                    designerNote=(addition.draft_hint or f"Split from {source_sec.title}")
+                    if source_sec
+                    else addition.draft_hint,
+                )
+            else:
+                new_sec = _build_stub_section(
+                    section_id=sec_id,
+                    title=title,
+                    kind=kind,
+                    draft_hint=addition.draft_hint,
+                )
+            after = addition.insert_after_section_id or (
+                source_sec.id if source_sec else None
             )
+            sections = _insert_after(sections, new_sec, after)
             existing_ids.add(new_sec.id)
             focus = new_sec
-            notes.append(f"Added section **{new_sec.title}**")
+            if moved_body.strip():
+                notes.append(f"Added section **{new_sec.title}** with moved content")
+            else:
+                notes.append(f"Added section **{new_sec.title}**")
 
         sections = renumber_dynamic_group_titles(sections)
         # refresh focus after renumber

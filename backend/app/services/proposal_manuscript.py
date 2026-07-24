@@ -69,6 +69,16 @@ def manuscript_sections_for_export(sections: list["ProposalSection"]) -> list["P
     return sorted(out, key=manuscript_rank)
 
 
+def strip_evidence_citation_markers(text: str) -> str:
+    """Remove internal evidence markers ([E1], **[E14]**, etc.) from client-facing prose."""
+    if not text:
+        return text
+    cleaned = re.sub(r"\s*\*{0,2}\[E\d+\]\*{0,2}", "", text)
+    # Clean doubled spaces left by marker removal (keep newlines).
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned
+
+
 def plain_text_for_export(markdown: str) -> str:
     """Strip markdown markers for plain Google Docs text (keep list markers)."""
     text = markdown or ""
@@ -76,8 +86,7 @@ def plain_text_for_export(markdown: str) -> str:
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
     text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
-    # Internal evidence markers ([E1], [E2], …) — not for client-facing copy
-    text = re.sub(r"\s*\[E\d+\]", "", text)
+    text = strip_evidence_citation_markers(text)
     return text.strip()
 
 
@@ -87,7 +96,7 @@ def _strip_inline_md(text: str) -> str:
     t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
     t = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", t)
     t = re.sub(r"`([^`]+)`", r"\1", t)
-    t = re.sub(r"\s*\[E\d+\]", "", t)
+    t = strip_evidence_citation_markers(t)
     return t.strip()
 
 

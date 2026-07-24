@@ -162,6 +162,47 @@ class ProposalDraftSnapshotTests(unittest.TestCase):
         draft = _draft(_section("a", "x"), _section("b", ""))
         self.assertEqual(filled_count(draft), 1)
 
+    def test_before_structure_change_snapshot_is_restorable(self) -> None:
+        from app.services.proposal_draft_snapshots import (
+            push_before_structure_change_snapshot,
+        )
+
+        draft = _draft(
+            _section("rfp-sec-9", "STAFFING BODY WITH 25% AND 60%"),
+            _section("other", "keep me"),
+        )
+        # Force unique titles for section helper — content is what matters.
+        draft.sections[0] = ProposalSection(
+            id="rfp-sec-9",
+            title="Project Staffing Plan",
+            content="STAFFING BODY WITH 25% AND 60%",
+            source="rfp",
+        )
+        draft = push_before_structure_change_snapshot(
+            draft, section_title="Project Staffing Plan"
+        )
+        wiped = draft.model_copy(
+            update={
+                "sections": [
+                    ProposalSection(
+                        id="rfp-figures-in",
+                        title="Figures In",
+                        content="stub",
+                        source="rfp",
+                    )
+                ]
+            }
+        )
+        # Keep snapshots from the pre-structure checkpoint.
+        wiped = wiped.model_copy(update={"snapshots": list(draft.snapshots or [])})
+        saved_at = (draft.snapshots or [])[-1].saved_at
+        restored = restore_proposal_snapshot(wiped, saved_at=saved_at)
+        assert restored is not None
+        titles = [s.title for s in restored.sections]
+        self.assertIn("Project Staffing Plan", titles)
+        body = next(s for s in restored.sections if s.id == "rfp-sec-9").content
+        self.assertIn("25%", body)
+
 
 if __name__ == "__main__":
     unittest.main()

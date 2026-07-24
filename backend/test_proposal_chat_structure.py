@@ -13,7 +13,9 @@ from app.services.proposal_chat_structure import (
     _is_placeholder_member_name,
     _pick_roster_members,
     apply_chat_structure_plan,
+    infer_case_study_name_from_content,
     renumber_dynamic_group_titles,
+    sync_case_study_title_from_content,
 )
 
 
@@ -42,6 +44,29 @@ class ChatStructureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(titles[2], "2.2 — Todd Anderson")
         self.assertEqual(titles[3], "3.1 — Acme")
         self.assertEqual(titles[4], "3.2 — Beta")
+
+    def test_sync_case_study_title_when_body_swaps_client(self) -> None:
+        section = _sec(
+            "section-3-work-04-03_cs_city-of-umatilla_digital-campaign_",
+            "3.4 — City of Umatilla Digital Campaign 2006",
+            content=(
+                "CITY OF SAN LEANDRO: CITY BRAND ASSESSMENT AND MARKETING PLAN\n\n"
+                "### Client overview\n"
+                "The City of San Leandro, California needed a brand assessment.\n"
+            ),
+        )
+        synced = sync_case_study_title_from_content(section)
+        self.assertTrue(synced.title.startswith("3.4 — "))
+        self.assertIn("San Leandro", synced.title)
+        self.assertNotIn("Umatilla", synced.title)
+
+    def test_infer_case_study_name_from_heading(self) -> None:
+        name = infer_case_study_name_from_content(
+            "## City of San Leandro: Brand Assessment\n\nWe partnered with San Leandro."
+        )
+        self.assertIsNotNone(name)
+        assert name is not None
+        self.assertIn("San Leandro", name)
 
     def test_placeholder_detection(self) -> None:
         self.assertTrue(_is_placeholder_member_name(None))
@@ -318,67 +343,45 @@ class ChatStructureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(focus.title, "2.2 — Ron Comer")
         self.assertIn("Full drafted bio", focus.content)
 
-    def test_heuristic_instead_of_bio_replace(self) -> None:
-        from app.services.proposal_chat_structure import _heuristic_bio_replace_plan
+    def test_regex_replace_heuristic_disabled_for_prose_and_bios(self) -> None:
+        """Structure swaps must be LLM-planned — regex must not rename tabs."""
+        from app.services.proposal_chat_structure import (
+            _heuristic_bio_replace_plan,
+            _heuristic_section_replace_plan,
+        )
 
         draft = ProposalDraft(
             rfpId="rfp-1",
             sections=[
                 _sec("section-2-bio-brian", "2.2 — Brian Niles", "### Brian\n"),
-            ],
-            updatedAt="2026-07-22T00:00:00+00:00",
-        )
-        plan = _heuristic_bio_replace_plan(
-            "Instead of Brian Niles bio add Ron Comer bio",
-            draft,
-            focus_section_id="section-2-bio-brian",
-        )
-        self.assertIsNotNone(plan)
-        assert plan is not None
-        self.assertEqual(plan.action, "add_sections")
-        self.assertEqual(plan.deletions[0].section_id, "section-2-bio-brian")
-        self.assertEqual(plan.additions[0].member_name, "Ron Comer")
-
-    def test_heuristic_replace_case_study(self) -> None:
-        from app.services.proposal_chat_structure import _heuristic_section_replace_plan
-
-        draft = ProposalDraft(
-            rfpId="rfp-1",
-            sections=[
+                _sec("rfp-sec-9", "Project Staffing Plan", "Ron allocates 25%."),
                 _sec("section-3-work-deschutes", "3.1 — Deschutes Brewery", "case"),
             ],
             updatedAt="2026-07-22T00:00:00+00:00",
         )
-        plan = _heuristic_section_replace_plan(
-            "Instead of Deschutes Brewery add Hampton Lumber",
-            draft,
-            focus_section_id="section-3-work-deschutes",
+        prose = (
+            "The 25% and 60% figures in this section are also unsourced — "
+            "remove them or replace with qualitative language."
         )
-        self.assertIsNotNone(plan)
-        assert plan is not None
-        self.assertEqual(plan.additions[0].kind, "case_study")
-        self.assertEqual(plan.additions[0].case_study_name, "Hampton Lumber")
-        self.assertEqual(plan.deletions[0].section_id, "section-3-work-deschutes")
-
-    def test_heuristic_get_ron_bio_on_brian_tab(self) -> None:
-        from app.services.proposal_chat_structure import _heuristic_bio_replace_plan
-
-        draft = ProposalDraft(
-            rfpId="rfp-1",
-            sections=[
-                _sec("section-2-bio-brian", "2.2 — Brian Niles", "### Brian\n"),
-            ],
-            updatedAt="2026-07-22T00:00:00+00:00",
+        self.assertIsNone(
+            _heuristic_section_replace_plan(
+                prose, draft, focus_section_id="rfp-sec-9"
+            )
         )
-        plan = _heuristic_bio_replace_plan(
-            "see section 2.2 and fill all verify tags and get ron comer bio there",
-            draft,
-            focus_section_id="section-2-bio-brian",
+        self.assertIsNone(
+            _heuristic_bio_replace_plan(
+                "Instead of Brian Niles bio add Ron Comer bio",
+                draft,
+                focus_section_id="section-2-bio-brian",
+            )
         )
-        self.assertIsNotNone(plan)
-        assert plan is not None
-        self.assertEqual(plan.additions[0].member_name, "Ron Comer")
-        self.assertEqual(plan.deletions[0].section_id, "section-2-bio-brian")
+        self.assertIsNone(
+            _heuristic_section_replace_plan(
+                "Instead of Deschutes Brewery add Hampton Lumber",
+                draft,
+                focus_section_id="section-3-work-deschutes",
+            )
+        )
 
     def test_fill_verify_from_kb_only_does_not_create_kb_only_tab(self) -> None:
         from app.services.proposal_chat_structure import (
@@ -495,6 +498,85 @@ class AttestationInPlaceTests(unittest.TestCase):
                 msg, draft, focus_section_id="rfp-everify"
             )
         )
+
+
+class SplitSectionTests(unittest.IsolatedAsyncioTestCase):
+    def test_sanitize_long_instruction_title(self) -> None:
+        from app.services.proposal_chat_structure import _sanitize_addition_title
+
+        title = _sanitize_addition_title(
+            "Create a new H2 section titled Project Staff Planning "
+            "(separate from Evaluation Metrics); move that staff content"
+        )
+        self.assertEqual(title, "Project Staff Planning")
+        self.assertFalse(len(title) > 60)
+
+    def test_long_title_is_not_bogus_just_for_length(self) -> None:
+        from app.services.proposal_chat_structure import _is_bogus_structure_title
+
+        # Length alone must not reject a real section name (coerce used to).
+        self.assertFalse(
+            _is_bogus_structure_title(
+                "Project Staff Planning and Continuity Assurance Overview Extra"
+            )
+        )
+
+    async def test_split_move_applies_extracted_content(self) -> None:
+        from app.services.proposal_chat_structure import (
+            StructureAddition,
+            StructurePlan,
+            apply_chat_structure_plan,
+        )
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec(
+                    "rfp-sec-8",
+                    "Evaluation Metrics",
+                    "## Evaluation Metrics\n\nScorecards here.\n\n"
+                    "## Project Staff Planning\n\nRon leads staffing.\n\n"
+                    "Team allocation details.",
+                ),
+            ],
+            updatedAt="2026-07-23T00:00:00+00:00",
+        )
+        plan = StructurePlan(
+            action="add_sections",
+            additions=[
+                StructureAddition(
+                    title="Project Staff Planning",
+                    kind="rfp",
+                    insertAfterSectionId="rfp-sec-8",
+                    extractFromSectionId="rfp-sec-8",
+                    removeExtractedFromSource=True,
+                    draftHint="Move Project Staff Planning out of Evaluation Metrics",
+                )
+            ],
+            assistantNote="Splitting Project Staff Planning into its own section.",
+        )
+
+        async def _fake_split(**kwargs):
+            return (
+                "## Project Staff Planning\n\nRon leads staffing.\n\nTeam allocation details.",
+                "## Evaluation Metrics\n\nScorecards here.",
+            )
+
+        with patch(
+            "app.services.proposal_chat_structure._split_section_content",
+            new=AsyncMock(side_effect=_fake_split),
+        ):
+            updated, focus, message = await apply_chat_structure_plan(
+                draft=draft, plan=plan, rfp_client="GSU"
+            )
+
+        self.assertEqual(focus.title, "Project Staff Planning")
+        self.assertIn("Ron leads staffing", focus.content or "")
+        source = next(s for s in updated.sections if s.id == "rfp-sec-8")
+        self.assertIn("Scorecards", source.content or "")
+        self.assertNotIn("Ron leads staffing", source.content or "")
+        self.assertEqual(len(updated.sections), 2)
+        self.assertIn("Moved", message)
 
 
 if __name__ == "__main__":

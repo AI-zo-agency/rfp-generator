@@ -85,6 +85,23 @@ def init_proposal_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_proposal_draft_archives_rfp_archived
                 ON proposal_draft_archives (rfp_id, archived_at DESC);
+            CREATE TABLE IF NOT EXISTS llm_call_log (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                rfp_id TEXT NOT NULL DEFAULT '',
+                node_name TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                tier TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL DEFAULT '',
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                tokens_estimated INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_llm_call_log_run_id ON llm_call_log (run_id);
+            CREATE INDEX IF NOT EXISTS idx_llm_call_log_rfp_id ON llm_call_log (rfp_id);
             """
         )
 

@@ -81,16 +81,18 @@ Rules:
 {"content":"full section prose","kbRefs":["E1"],"designerNote":null}"""
 
 USER_REVISE_SYSTEM = """You are zö agency's User Revise agent (editor chat / Revise content flow).
-The user gave explicit feedback. Search KB with tools for missing facts, then rewrite ONE section.
+The user gave explicit feedback. Search KB only as needed, then update ONE section.
 
 Rules:
-1. Directly address the user's edit request.
-2. Call tools for deeper KB search — more specific than the first draft pass (firm address, contacts, tourism/DMO proof, philosophy).
-3. Improve substantially — never return the same [VERIFY] placeholder if tools found support.
-4. PRESERVE zö BRAND VOICE from the voice block: first person we/our, warm, confident, proof-led — never flatten into generic consultant prose.
-5. Budget/fee edits (option C): never output $0 agency revenue when commission applies — use rate × pass-through or [VERIFY: Sonja confirm rate]. Refuse invented numbers and reverse-engineered totals to hit a target; flag out-of-guide scope with [PRICING FLAG: … — Sonja review required]. One-time setup lines must not be ×12 without a monthly guide line.
-6. Reference edits: full contact block (name, title, phone, email) — never defer to "on request".
-7. Return ONLY JSON: {"content":"...","kbRefs":["E1"],"designerNote":null}"""
+1. FIRST understand the user's ask. Prefer the SMALLEST change that fully satisfies it.
+2. Do NOT rewrite unrelated paragraphs, add new intros, or expand the section unless the user asked for that.
+3. Call tools for KB search only when the ask needs facts that are missing from the draft.
+4. Never return the same [VERIFY] placeholder if tools found support for that field.
+5. PRESERVE zö BRAND VOICE: first person we/our, warm, confident, proof-led — never flatten into generic consultant prose.
+6. Budget/fee edits (option C): never output $0 agency revenue when commission applies — use rate × pass-through or [VERIFY: Sonja confirm rate]. Refuse invented numbers and reverse-engineered totals to hit a target; flag out-of-guide scope with [PRICING FLAG: … — Sonja review required]. One-time setup lines must not be ×12 without a monthly guide line.
+7. Reference edits: full contact block (name, title, phone, email) — never defer to "on request".
+8. NEVER put citation markers like [E1], [E14], or **[E3]** in the prose — client-facing text only.
+9. Return ONLY JSON: {"content":"...","kbRefs":[],"designerNote":null}"""
 
 SURGICAL_FIX_SYSTEM = """You are zö agency's Surgical Fix agent (pre-submit review auto-fix).
 Patch ONE section to clear listed review issues — minimal diff, preserve strong prose.
@@ -143,7 +145,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         label="User Revise",
         temperature=0.35,
         max_tokens=4096,
-        max_tool_rounds=4,
+        max_tool_rounds=2,
         system_prompt=USER_REVISE_SYSTEM,
         tier="heavy",
     ),
@@ -213,16 +215,18 @@ def _salvage_content_string(text: str) -> str:
 
 def content_from_agent_payload(parsed: dict[str, Any], raw_text: str = "") -> str:
     """Normalize agent JSON to section prose."""
+    from app.services.proposal_manuscript import strip_evidence_citation_markers
+
     for key in ("content", "sectionContent", "section_content", "text", "prose"):
         val = parsed.get(key)
         if isinstance(val, str) and val.strip():
-            return val.strip()
+            return strip_evidence_citation_markers(val.strip())
     salvaged = _salvage_content_string(raw_text)
     if salvaged:
-        return salvaged
+        return strip_evidence_citation_markers(salvaged)
     stripped = raw_text.strip()
     if stripped and not stripped.startswith("{"):
-        return stripped
+        return strip_evidence_citation_markers(stripped)
     return ""
 
 

@@ -4,7 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { improveProposalSection } from "@/lib/proposal-api";
 import {
   messageLooksStructural,
-  resolveSectionFromMention,
+  messageTargetsBios,
+  pinnedSectionConflictsWithMessage,
+  resolveChatTarget,
 } from "@/lib/proposal-section-resolve";
 import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import type { SectionRevisionRecord } from "./DraftSectionEditor";
@@ -108,14 +110,26 @@ export function ProposalSectionChatPanel({
       const trimmed = message.trim();
       if (!trimmed || isRunning || sections.length === 0) return;
 
-      // Revise content / Improve full section pins the excerpt target.
-      // Otherwise: parse any section the user names; else the section they're viewing.
-      const targetSection = reference?.sectionId
-        ? sections.find((s) => s.id === reference.sectionId) ??
-          resolveSectionFromMention(sections, trimmed, viewingSectionId)
-        : resolveSectionFromMention(sections, trimmed, viewingSectionId);
+      // 1) Explicit pin (Revise excerpt / Improve full section) wins when it
+      //    matches the ask. 2) Otherwise resolve from the query. 3) If ambiguous,
+      //    ask the user which section — do not guess the open tab.
+      let activeReference = reference;
+      if (
+        activeReference &&
+        pinnedSectionConflictsWithMessage(trimmed, activeReference.sectionId)
+      ) {
+        activeReference = null;
+        onSetReference(null);
+      }
 
-      if (!targetSection) return;
+      const pinnedSection = activeReference?.sectionId
+        ? sections.find((s) => s.id === activeReference.sectionId) ?? null
+        : null;
+
+      const resolution = resolveChatTarget(sections, trimmed, {
+        viewingSectionId: viewingSectionId,
+        pinnedSection,
+      });
 
       const userMsg: SectionChatMessage = {
         id: `u-${Date.now()}`,
@@ -125,24 +139,43 @@ export function ProposalSectionChatPanel({
       const nextMessages = [...messages, userMsg];
       onMessagesChange(nextMessages);
       setInput("");
+
+      if (!resolution) return;
+
+      if (resolution.kind === "clarify") {
+        onMessagesChange([
+          ...nextMessages,
+          {
+            id: `c-${Date.now()}`,
+            role: "assistant",
+            content: resolution.question,
+          },
+        ]);
+        return;
+      }
+
+      const targetSection = resolution.section;
+
       setIsRunning(true);
       setError(null);
       setStatusLine(
-        reference?.mode === "selection"
+        activeReference?.mode === "selection" &&
+          activeReference.sectionId === targetSection.id
           ? `Editing excerpt in ${targetSection.title}…`
-          : reference?.mode === "section" &&
-              reference.sectionId === targetSection.id
+          : activeReference?.mode === "section" &&
+              activeReference.sectionId === targetSection.id
             ? `Improving ${targetSection.title}…`
-            : messageLooksStructural(trimmed)
+            : messageLooksStructural(trimmed) || messageTargetsBios(trimmed)
               ? `Updating proposal sections…`
-              : `Reading full proposal · focusing ${targetSection.title}…`
+              : `Working on ${targetSection.title}…`
       );
       onBusyChange?.(true);
 
       const contentBefore = targetSection.content;
       const selectionForRequest =
-        reference?.mode === "selection" && reference.sectionId === targetSection.id
-          ? reference.selection
+        activeReference?.mode === "selection" &&
+        activeReference.sectionId === targetSection.id
+          ? activeReference.selection
           : undefined;
 
       try {
@@ -204,6 +237,7 @@ export function ProposalSectionChatPanel({
       onRevisionRecorded,
       onFocusSection,
       onSectionUpdated,
+      onSetReference,
       reference,
       rfpId,
       sections,
@@ -245,7 +279,9 @@ export function ProposalSectionChatPanel({
       <div ref={scrollRef} className="proposal-section-chat-messages custom-scrollbar">
         {messages.length === 0 ? (
           <p className="text-zo-text-muted">
-            Ask about the proposal or request an edit by section name.
+            Ask by section name, or say what to change (e.g. case studies). If I&apos;m unsure
+            which tab, I&apos;ll ask. You can also pin with{" "}
+            <strong>Revise content</strong> or <strong>Improve full section</strong>.
           </p>
         ) : (
           messages.map((msg) => (

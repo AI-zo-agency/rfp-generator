@@ -472,7 +472,13 @@ def with_agent_logging(
             return {}
 
         try:
-            result = await handler(state)
+            from app.services.llm_call_context import llm_call_context
+
+            with llm_call_context(
+                rfp_id=str(state.get("rfp_id") or ""),
+                node_name=meta.node_id,
+            ):
+                result = await handler(state)
             log_agent_complete(
                 meta,
                 cq_mode=cq_mode,

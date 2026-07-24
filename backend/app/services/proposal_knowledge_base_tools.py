@@ -416,30 +416,46 @@ async def gather_proposal_kb_for_sections(
     rfp_location: str | None,
     rfp_context: str,
     skip_company: bool = False,
+    buckets: tuple[str, ...] | None = None,
 ) -> dict[str, tuple[str, list[str]]]:
     """Run targeted Supermemory queries grouped for Sections 1–3.
 
     When skip_company=True (Company Qualification S1 path), the company bucket is
     omitted — Section 1 uses JIT Company Truth retrieval instead.
+
+    Pass buckets=(...) to gather only specific buckets (e.g. voice-only for chat).
     """
     if not supermemory.is_configured():
         empty = "(Supermemory not configured.)", []
         return {key: empty for key in PROPOSAL_KB_BUCKETS}
 
-    planned = await _plan_proposal_kb_queries(
-        rfp_title=rfp_title,
-        rfp_client=rfp_client,
-        rfp_sector=rfp_sector,
-        rfp_location=rfp_location,
-        rfp_excerpt=rfp_context,
-    )
-    topic = _rfp_topic_queries(rfp_client, rfp_sector, rfp_context)
+    if buckets is not None:
+        active_buckets = tuple(b for b in buckets if b in PROPOSAL_KB_BUCKETS)
+    elif skip_company:
+        active_buckets = ("zo_voice", "bios", "case_studies")
+    else:
+        active_buckets = PROPOSAL_KB_BUCKETS
+    if not active_buckets:
+        return {key: ("", []) for key in PROPOSAL_KB_BUCKETS}
 
-    active_buckets = (
-        ("zo_voice", "bios", "case_studies")
-        if skip_company
-        else PROPOSAL_KB_BUCKETS
-    )
+    voice_only = active_buckets == ("zo_voice",)
+    if voice_only:
+        # Chat/voice refresh must not fan out into bios/company/case-study planning.
+        planned = {key: [] for key in PROPOSAL_KB_BUCKETS}
+        planned["zo_voice"] = [
+            f"zö agency brand voice tone proposal writing style {rfp_client}",
+            f"zö agency writing style public sector proposals {rfp_sector}",
+            "zö agency voice and tone guidelines RFP response",
+        ]
+    else:
+        planned = await _plan_proposal_kb_queries(
+            rfp_title=rfp_title,
+            rfp_client=rfp_client,
+            rfp_sector=rfp_sector,
+            rfp_location=rfp_location,
+            rfp_excerpt=rfp_context,
+        )
+    topic = _rfp_topic_queries(rfp_client, rfp_sector, rfp_context)
 
     bucket_queries: dict[str, list[str]] = {}
     total_queries = 0
@@ -452,6 +468,8 @@ async def gather_proposal_kb_for_sections(
                     f"{bucket.replace('_', ' ')} {rfp_title[:80]}"
                 ).strip()
             ]
+        if voice_only:
+            merged = merged[:3]
         bucket_queries[bucket] = merged
         total_queries += len(bucket_queries[bucket])
 
@@ -461,7 +479,7 @@ async def gather_proposal_kb_for_sections(
         rfp_sector,
         total_queries,
         len(active_buckets),
-        " (company skipped — CQ S1 JIT)" if skip_company else "",
+        " (company skipped — CQ S1 JIT)" if skip_company and buckets is None else "",
     )
 
     # Buckets run in parallel; within each bucket queries run sequentially.
@@ -469,36 +487,22 @@ async def gather_proposal_kb_for_sections(
         "Gathering %d KB buckets in parallel (per-bucket queries are sequential)...",
         len(active_buckets),
     )
-    if skip_company:
-        zo_voice, bios, case_studies = await asyncio.gather(
-            _gather_bucket("zo_voice", bucket_queries["zo_voice"]),
-            _gather_bucket("bios", bucket_queries["bios"]),
-            _gather_bucket("case_studies", bucket_queries["case_studies"]),
-        )
-        company = ("", [])
-    else:
-        zo_voice, company, bios, case_studies = await asyncio.gather(
-            _gather_bucket("zo_voice", bucket_queries["zo_voice"]),
-            _gather_bucket("company", bucket_queries["company"]),
-            _gather_bucket("bios", bucket_queries["bios"]),
-            _gather_bucket("case_studies", bucket_queries["case_studies"]),
-        )
+
+    gathered: dict[str, tuple[str, list[str]]] = {
+        key: ("", []) for key in PROPOSAL_KB_BUCKETS
+    }
+    results = await asyncio.gather(
+        *[_gather_bucket(bucket, bucket_queries[bucket]) for bucket in active_buckets]
+    )
+    for bucket, result in zip(active_buckets, results):
+        gathered[bucket] = result
 
     logger.info(
-        "Proposal KB gathered for %s: voice=%d co=%d bio=%d cs=%d chars",
+        "Proposal KB gathered for %s: %s",
         rfp_client,
-        len(zo_voice[0]),
-        len(company[0]),
-        len(bios[0]),
-        len(case_studies[0]),
+        ", ".join(f"{b}={len(gathered[b][0])} chars" for b in active_buckets),
     )
-
-    return {
-        "zo_voice": zo_voice,
-        "company": company,
-        "bios": bios,
-        "case_studies": case_studies,
-    }
+    return gathered
 
 
 def _is_case_study_source(file_name: str) -> bool:

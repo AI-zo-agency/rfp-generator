@@ -455,7 +455,14 @@ class ProposalSectionImproveResponse(BaseModel):
 
 class SectionChatTurn(BaseModel):
     role: str = Field(pattern="^(user|assistant)$")
-    content: str = Field(max_length=4000)
+    content: str = Field(max_length=12_000)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _truncate_content(cls, value: object) -> object:
+        if isinstance(value, str) and len(value) > 12_000:
+            return value[:11_900] + "\n…[truncated]"
+        return value
 
 
 class SectionImproveRequest(BaseModel):
@@ -469,6 +476,14 @@ class SectionImproveRequest(BaseModel):
         default_factory=list, alias="conversationHistory"
     )
     proposal_wide: bool = Field(default=False, alias="proposalWide")
+
+    @field_validator("conversation_history", mode="before")
+    @classmethod
+    def _cap_history(cls, value: object) -> object:
+        """Keep the last N turns so long chats do not fail validation."""
+        if not isinstance(value, list):
+            return value
+        return value[-12:]
 
 
 class ProposalPhase3Response(BaseModel):

@@ -2,15 +2,25 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any, Literal
 
 import httpx
 
 from app.core.config import settings
+from app.services.llm_call_context import (
+    get_llm_node_name,
+    get_llm_rfp_id,
+    get_llm_run_id,
+)
+from app.services.llm_pricing import estimate_cost_usd, estimate_tokens_from_chars
 
 logger = logging.getLogger(__name__)
 
 LlmTier = Literal["heavy", "light"]
+
+# content, usage dict (prompt_tokens / completion_tokens / estimated)
+_LlmPostResult = tuple[str, dict[str, Any]]
 
 # Process-local: once Fireworks returns 412, never call it again this process.
 _FIREWORKS_SUSPENDED = False
@@ -130,8 +140,36 @@ async def _post_gemini_chat(
     if not isinstance(content, str) or not content.strip():
         raise LlmError(f"Gemini returned empty content")
     
-    logger.info("LLM success: provider=Gemini model=%s response_chars=%d", model, len(content))
-    return content.strip()
+    usage_meta = data.get("usageMetadata") or data.get("usage_metadata") or {}
+    prompt_tokens = int(
+        usage_meta.get("promptTokenCount")
+        or usage_meta.get("prompt_token_count")
+        or 0
+    )
+    completion_tokens = int(
+        usage_meta.get("candidatesTokenCount")
+        or usage_meta.get("candidates_token_count")
+        or 0
+    )
+    estimated = False
+    if prompt_tokens <= 0 and completion_tokens <= 0:
+        # Estimate when Gemini omits usageMetadata.
+        msg_chars = sum(len(m.get("content") or "") for m in messages)
+        prompt_tokens = estimate_tokens_from_chars(msg_chars)
+        completion_tokens = estimate_tokens_from_chars(len(content))
+        estimated = True
+    logger.info(
+        "LLM success: provider=Gemini model=%s response_chars=%d usage=%s estimated=%s",
+        model,
+        len(content),
+        {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+        estimated,
+    )
+    return content.strip(), {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "estimated": estimated,
+    }
 
 
 async def _post_chat(
@@ -227,13 +265,26 @@ async def _post_chat(
             raise LlmError(f"{provider} returned empty content")
 
         usage = data.get("usage") or {}
+        prompt_tokens = int(
+            usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        )
+        completion_tokens = int(
+            usage.get("completion_tokens") or usage.get("output_tokens") or 0
+        )
+        estimated = False
+        if prompt_tokens <= 0 and completion_tokens <= 0:
+            msg_chars = sum(len(m.get("content") or "") for m in messages)
+            prompt_tokens = estimate_tokens_from_chars(msg_chars)
+            completion_tokens = estimate_tokens_from_chars(len(content))
+            estimated = True
         logger.info(
-            "LLM success: provider=%s model=%s response_chars=%d finish_reason=%s usage=%s",
+            "LLM success: provider=%s model=%s response_chars=%d finish_reason=%s usage=%s estimated=%s",
             provider,
             model,
             len(content),
             finish_reason or "?",
             usage if usage else "{}",
+            estimated,
         )
         if finish_reason in {"length", "max_tokens"}:
             logger.warning(
@@ -255,11 +306,62 @@ async def _post_chat(
             )
             raise LlmError(f"{provider} returned truncated response (only {len(content)} chars)")
 
-        return content.strip()
+        return content.strip(), {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "estimated": estimated,
+        }
 
     if last_error:
         raise last_error
     raise LlmError(f"{provider} request failed after retries", status_code=429)
+
+
+def _record_successful_call(
+    *,
+    model: str,
+    tier: LlmTier,
+    provider: str,
+    usage: dict[str, Any],
+    latency_ms: int,
+    node_name: str | None,
+    rfp_id: str | None,
+    run_id: str | None,
+) -> None:
+    """Persist cost/token row — never raises."""
+    try:
+        from app.services.llm_call_log import record_llm_call
+
+        inp = int(usage.get("prompt_tokens") or 0)
+        out = int(usage.get("completion_tokens") or 0)
+        estimated = bool(usage.get("estimated"))
+        cost = estimate_cost_usd(model=model, input_tokens=inp, output_tokens=out)
+        record_llm_call(
+            run_id=run_id if run_id is not None else get_llm_run_id(),
+            rfp_id=rfp_id if rfp_id is not None else get_llm_rfp_id(),
+            node_name=node_name if node_name is not None else get_llm_node_name(),
+            model=model,
+            tier=tier,
+            provider=provider,
+            input_tokens=inp,
+            output_tokens=out,
+            cost_usd=cost,
+            latency_ms=latency_ms,
+            tokens_estimated=estimated,
+        )
+        logger.info(
+            "LLM cost: node=%s model=%s tier=%s in=%d out=%d cost_usd=%.6f latency_ms=%d estimated=%s",
+            node_name if node_name is not None else get_llm_node_name() or "unknown",
+            model,
+            tier,
+            inp,
+            out,
+            cost,
+            latency_ms,
+            estimated,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM cost record failed (non-fatal): %s", str(exc)[:200])
 
 
 async def chat_json(
@@ -268,34 +370,49 @@ async def chat_json(
     max_tokens: int | None = None,
     temperature: float = 0.2,
     tier: LlmTier = "heavy",
+    node_name: str | None = None,
+    rfp_id: str | None = None,
+    run_id: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
     openrouter_model = resolve_llm_model(tier)
     skip_fireworks_fallback = False
+    started = time.perf_counter()
 
     # Try Gemini first if API key is configured and not skipped by preferences
     gemini_key = settings.gemini_api_key.strip()
     skip_gemini = settings.llm_prefer_openrouter or settings.llm_prefer_fireworks
     if gemini_key and not _is_placeholder_key(gemini_key) and not skip_gemini:
         try:
-            raw = await _post_gemini_chat(
+            raw, usage = await _post_gemini_chat(
                 api_key=gemini_key,
                 model=settings.gemini_model,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
+            _record_successful_call(
+                model=settings.gemini_model,
+                tier=tier,
+                provider="gemini",
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                node_name=node_name,
+                rfp_id=rfp_id,
+                run_id=run_id,
+            )
             return _parse_json_response(raw), "gemini"
         except LlmError as exc:
             errors.append(str(exc))
             logger.info("Gemini failed: %s", str(exc)[:200])
+            started = time.perf_counter()
 
     openrouter_key = _openrouter_key()
     skip_openrouter = settings.llm_prefer_fireworks
     if openrouter_key and not skip_openrouter:
         try:
-            raw = await _post_chat(
+            raw, usage = await _post_chat(
                 base_url=settings.openrouter_base_url,
                 api_key=openrouter_key,
                 model=openrouter_model,
@@ -308,6 +425,16 @@ async def chat_json(
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
+            _record_successful_call(
+                model=openrouter_model,
+                tier=tier,
+                provider="openrouter",
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                node_name=node_name,
+                rfp_id=rfp_id,
+                run_id=run_id,
+            )
             return _parse_json_response(raw), "openrouter"
         except LlmError as exc:
             errors.append(str(exc))
@@ -319,14 +446,16 @@ async def chat_json(
                 logger.info(
                     "Skipping Fireworks fallback after OpenRouter JSON failure (avoid duplicate spend)"
                 )
+            started = time.perf_counter()
 
     fireworks_key = _fireworks_key()
+    fireworks_failed = False
     if fireworks_key and not _FIREWORKS_SUSPENDED and not skip_fireworks_fallback:
         try:
             # Scale with caller request — hard cap 8192 (pricing budgets need room).
             requested = max_tokens or 4096
             fireworks_tokens = min(requested, 8192)
-            raw = await _post_chat(
+            raw, usage = await _post_chat(
                 base_url=settings.fireworks_base_url,
                 api_key=fireworks_key,
                 model=settings.fireworks_model,
@@ -335,8 +464,19 @@ async def chat_json(
                 max_tokens=fireworks_tokens,
                 temperature=temperature,
             )
+            _record_successful_call(
+                model=settings.fireworks_model,
+                tier=tier,
+                provider="fireworks",
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                node_name=node_name,
+                rfp_id=rfp_id,
+                run_id=run_id,
+            )
             return _parse_json_response(raw), "fireworks"
         except LlmError as exc:
+            fireworks_failed = True
             # If Fireworks account is suspended (412), don't count it as a provider failure
             if exc.status_code == 412:
                 _FIREWORKS_SUSPENDED = True
@@ -344,7 +484,67 @@ async def chat_json(
             else:
                 errors.append(str(exc))
     elif _FIREWORKS_SUSPENDED:
+        fireworks_failed = True
         logger.debug("Fireworks skipped (account previously suspended)")
+
+    # Prefer-Fireworks skipped OpenRouter/Gemini above — if Fireworks is down, fall back.
+    if settings.llm_prefer_fireworks and (fireworks_failed or _FIREWORKS_SUSPENDED):
+        if openrouter_key:
+            try:
+                started = time.perf_counter()
+                logger.info("Falling back to OpenRouter after Fireworks unavailable")
+                raw, usage = await _post_chat(
+                    base_url=settings.openrouter_base_url,
+                    api_key=openrouter_key,
+                    model=openrouter_model,
+                    messages=messages,
+                    provider="OpenRouter",
+                    extra_headers={
+                        "HTTP-Referer": settings.app_url,
+                        "X-Title": settings.app_name,
+                    },
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                _record_successful_call(
+                    model=openrouter_model,
+                    tier=tier,
+                    provider="openrouter",
+                    usage=usage,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    node_name=node_name,
+                    rfp_id=rfp_id,
+                    run_id=run_id,
+                )
+                return _parse_json_response(raw), "openrouter"
+            except LlmError as exc:
+                errors.append(str(exc))
+                logger.info("OpenRouter fallback failed: %s", str(exc)[:200])
+        if gemini_key and not _is_placeholder_key(gemini_key):
+            try:
+                started = time.perf_counter()
+                logger.info("Falling back to Gemini after Fireworks unavailable")
+                raw, usage = await _post_gemini_chat(
+                    api_key=gemini_key,
+                    model=settings.gemini_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                _record_successful_call(
+                    model=settings.gemini_model,
+                    tier=tier,
+                    provider="gemini",
+                    usage=usage,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    node_name=node_name,
+                    rfp_id=rfp_id,
+                    run_id=run_id,
+                )
+                return _parse_json_response(raw), "gemini"
+            except LlmError as exc:
+                errors.append(str(exc))
+                logger.info("Gemini fallback failed: %s", str(exc)[:200])
 
     if not errors:
         raise LlmError(
@@ -364,6 +564,9 @@ async def chat_json_soft(
     max_tokens: int | None = None,
     temperature: float = 0.2,
     tier: LlmTier = "heavy",
+    node_name: str | None = None,
+    rfp_id: str | None = None,
+    run_id: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """One LLM JSON call. On failure return ({}, \"failed\") — never retry, never raise."""
     try:
@@ -372,6 +575,9 @@ async def chat_json_soft(
             max_tokens=max_tokens,
             temperature=temperature,
             tier=tier,
+            node_name=node_name,
+            rfp_id=rfp_id,
+            run_id=run_id,
         )
     except LlmError as exc:
         logger.warning("chat_json_soft: %s", str(exc)[:220])
@@ -384,17 +590,21 @@ async def chat_text(
     max_tokens: int | None = None,
     temperature: float = 0.2,
     tier: LlmTier = "heavy",
+    node_name: str | None = None,
+    rfp_id: str | None = None,
+    run_id: str | None = None,
 ) -> tuple[str, str]:
     """Plain-text chat completion (no JSON response format)."""
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
     openrouter_model = resolve_llm_model(tier)
+    started = time.perf_counter()
 
     gemini_key = settings.gemini_api_key.strip()
     skip_gemini = settings.llm_prefer_openrouter or settings.llm_prefer_fireworks
     if gemini_key and not _is_placeholder_key(gemini_key) and not skip_gemini:
         try:
-            raw = await _post_gemini_chat(
+            raw, usage = await _post_gemini_chat(
                 api_key=gemini_key,
                 model=settings.gemini_model,
                 messages=messages,
@@ -402,15 +612,26 @@ async def chat_text(
                 temperature=temperature,
                 json_mode=False,
             )
+            _record_successful_call(
+                model=settings.gemini_model,
+                tier=tier,
+                provider="gemini",
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                node_name=node_name,
+                rfp_id=rfp_id,
+                run_id=run_id,
+            )
             return raw, "gemini"
         except LlmError as exc:
             errors.append(str(exc))
+            started = time.perf_counter()
 
     openrouter_key = _openrouter_key()
     skip_openrouter = settings.llm_prefer_fireworks
     if openrouter_key and not skip_openrouter:
         try:
-            raw = await _post_chat(
+            raw, usage = await _post_chat(
                 base_url=settings.openrouter_base_url,
                 api_key=openrouter_key,
                 model=openrouter_model,
@@ -424,16 +645,28 @@ async def chat_text(
                 temperature=temperature,
                 json_mode=False,
             )
+            _record_successful_call(
+                model=openrouter_model,
+                tier=tier,
+                provider="openrouter",
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                node_name=node_name,
+                rfp_id=rfp_id,
+                run_id=run_id,
+            )
             return raw, "openrouter"
         except LlmError as exc:
             errors.append(str(exc))
+            started = time.perf_counter()
 
     fireworks_key = _fireworks_key()
+    fireworks_failed = False
     if fireworks_key and not _FIREWORKS_SUSPENDED:
         try:
             requested = max_tokens or 4096
             fireworks_tokens = min(requested, 8192)
-            raw = await _post_chat(
+            raw, usage = await _post_chat(
                 base_url=settings.fireworks_base_url,
                 api_key=fireworks_key,
                 model=settings.fireworks_model,
@@ -443,12 +676,83 @@ async def chat_text(
                 temperature=temperature,
                 json_mode=False,
             )
+            _record_successful_call(
+                model=settings.fireworks_model,
+                tier=tier,
+                provider="fireworks",
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                node_name=node_name,
+                rfp_id=rfp_id,
+                run_id=run_id,
+            )
             return raw, "fireworks"
         except LlmError as exc:
+            fireworks_failed = True
             if exc.status_code == 412:
                 _FIREWORKS_SUSPENDED = True
                 logger.warning("Fireworks account suspended - skipping for future calls")
             elif exc.status_code != 412:
+                errors.append(str(exc))
+    elif _FIREWORKS_SUSPENDED:
+        fireworks_failed = True
+
+    if settings.llm_prefer_fireworks and (fireworks_failed or _FIREWORKS_SUSPENDED):
+        if openrouter_key:
+            try:
+                started = time.perf_counter()
+                logger.info("Falling back to OpenRouter after Fireworks unavailable")
+                raw, usage = await _post_chat(
+                    base_url=settings.openrouter_base_url,
+                    api_key=openrouter_key,
+                    model=openrouter_model,
+                    messages=messages,
+                    provider="OpenRouter",
+                    extra_headers={
+                        "HTTP-Referer": settings.app_url,
+                        "X-Title": settings.app_name,
+                    },
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    json_mode=False,
+                )
+                _record_successful_call(
+                    model=openrouter_model,
+                    tier=tier,
+                    provider="openrouter",
+                    usage=usage,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    node_name=node_name,
+                    rfp_id=rfp_id,
+                    run_id=run_id,
+                )
+                return raw, "openrouter"
+            except LlmError as exc:
+                errors.append(str(exc))
+        if gemini_key and not _is_placeholder_key(gemini_key):
+            try:
+                started = time.perf_counter()
+                logger.info("Falling back to Gemini after Fireworks unavailable")
+                raw, usage = await _post_gemini_chat(
+                    api_key=gemini_key,
+                    model=settings.gemini_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    json_mode=False,
+                )
+                _record_successful_call(
+                    model=settings.gemini_model,
+                    tier=tier,
+                    provider="gemini",
+                    usage=usage,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    node_name=node_name,
+                    rfp_id=rfp_id,
+                    run_id=run_id,
+                )
+                return raw, "gemini"
+            except LlmError as exc:
                 errors.append(str(exc))
 
     if not errors:

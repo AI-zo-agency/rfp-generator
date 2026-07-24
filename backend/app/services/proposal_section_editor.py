@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -41,6 +42,12 @@ from app.services.proposal_manual_flags import (
     _PHONE_RE,
     _replace_verify_tags_from_blob,
     _section_corpus_blob,
+    extract_manual_fill_tags,
+    fill_manual_fill_tags,
+    is_manual_fill_request,
+    mask_manual_fill_tags,
+    missing_manual_fill_placeholders,
+    unmask_manual_fill_tags,
 )
 from app.services.proposal_evidence_corpus import merge_hits_into_corpus
 from app.services.proposal_retrieval_graph import (
@@ -58,6 +65,36 @@ from app.services.proposal_budget_playbook import (
     user_asks_budget_explanation,
 )
 
+_MANUAL_FILL_PRESERVE_CONSTRAINT = (
+    "CRITICAL HARD CONSTRAINT — PROTECTED MANUAL FILL PLACEHOLDERS:\n"
+    "The text contains «MFILL_N» tokens. These stand for protected [MANUAL FILL …] "
+    "tags that MUST appear in your output EXACTLY as «MFILL_N» (same index). "
+    "Do not resolve, paraphrase, delete, invent content for, or replace them. "
+    "Copy every «MFILL_N» token through unchanged.\n"
+)
+
+
+def _mask_manual_fill_for_rewrite(text: str) -> tuple[str, list[str]]:
+    """Mask MANUAL FILL tags before an incidental LLM rewrite."""
+    if not extract_manual_fill_tags(text or ""):
+        return text, []
+    return mask_manual_fill_tags(text)
+
+
+def _unmask_manual_fill_checked(output: str, originals: list[str], *, attempt: int) -> str:
+    """Restore masked MANUAL FILL tags; raise if the model dropped any placeholder."""
+    if not originals:
+        return output
+    missing = missing_manual_fill_placeholders(output or "", originals)
+    if missing:
+        raise ProposalError(
+            "Rewrite dropped protected MANUAL FILL tag(s): "
+            + ", ".join(missing[:4])
+            + f" (attempt {attempt})",
+            status_code=422,
+        )
+    return unmask_manual_fill_tags(output, originals)
+
 logger = logging.getLogger(__name__)
 
 SECTION_CHAT_ADVISORY_PROMPT = """You are a zö agency proposal editor assistant — sharp, thorough, and honest.
@@ -68,39 +105,85 @@ Rules:
 1. Answer from the RFP requirements and the proposal as a whole — do not invent compliance facts.
 2. If the user asks about another section or the whole draft, use the manuscript digest.
 3. If the user asks whether something meets the RFP, cite specific RFP asks and gaps.
-4. You may disagree or push back when their request would weaken compliance or accuracy.
-5. Do NOT rewrite the section in this turn — explain what you would change and why, or answer the question.
-6. Be concise but thorough (use bullets when auditing). Use **bold** for key RFP requirements.
-7. If they need an edit, tell them to ask explicitly (e.g. "update 1.1 to…" or use Revise content on an excerpt).
-8. Budget/pricing/fees: follow the pricing playbook when provided — refuse invented numbers and reverse-engineered totals (option C); flag out-of-guide scope with [PRICING FLAG: … — Sonja review required].
-9. For duplicates / fabrication / ClientList trust: prefer directing them to say **check duplicates**, **remove duplicates**, or **remove fabricated content** so the system can run the full content→RFP→KB pipeline (you cannot fake that audit from this advisory turn alone).
+4. When the user asks to check / evaluate / list which case studies (or sections) do NOT meet the RFP:
+   - Review EVERY Our Work / case-study section in the manuscript digest (not only the focus tab).
+   - Return a clear pass/fail (or partial) list with the sidebar title and the unmet RFP expectations.
+   - Do NOT rewrite any section in this turn.
+5. You may disagree or push back when their request would weaken compliance or accuracy.
+6. Do NOT rewrite the section in this turn — explain what you would change and why, or answer the question.
+7. Be concise but thorough (use bullets when auditing). Use **bold** for key RFP requirements.
+8. If they need an edit, tell them to ask explicitly (e.g. "replace 3.3 with a tourism case study from KB" or use Revise content on an excerpt).
+9. Budget/pricing/fees: follow the pricing playbook when provided — refuse invented numbers and reverse-engineered totals (option C); flag out-of-guide scope with [PRICING FLAG: … — Sonja review required].
+10. For duplicates / fabrication / ClientList trust: prefer directing them to say **check duplicates**, **remove duplicates**, or **remove fabricated content** so the system can run the full content→RFP→KB pipeline (you cannot fake that audit from this advisory turn alone).
 
 Return ONLY JSON: {"reply": "markdown message for the chat"}"""
 
+# Explicit mutate verbs — required before we rewrite a section.
 _EDIT_INTENT_RE = re.compile(
     r"\b("
-    r"change|fix|update|rewrite|revise|edit|improve|shorten|lengthen|add|remove|replace|fill|"
-    r"make it|make this|patch|insert|delete|correct|align"
+    r"change|fix|update|rewrite|revise|edit|improve|shorten|lengthen|"
+    r"remove|replace|fill|patch|insert|delete|correct|align|"
+    r"make\s+it|make\s+this|swap|redraft|regenerate|"
+    r"add\s+(?:a\s+|the\s+|this\s+|new\s+)?"
+    r"(?:section|paragraph|sentence|case\s*study|bio|bullet|row|line)"
     r")\b",
+    re.I,
+)
+
+# Evaluate / list / audit — answer in chat only, never rewrite.
+_ADVISORY_INTENT_RE = re.compile(
+    r"\b("
+    r"check|evaluate|assess|review|audit|analy[sz]e|compare|"
+    r"list\s+which|which\s+(?:ones?|don'?t|do\s+not|fail|meet)|"
+    r"don'?t\s+meet|do\s+not\s+meet|does\s+not\s+meet|"
+    r"meet(?:s)?\s+(?:the\s+)?(?:rfp|expectation|requirement)|"
+    r"fit(?:s)?\s+(?:the\s+)?(?:rfp|expectation)|"
+    r"gap(?:s)?(?:\s+analysis)?|what'?s\s+missing|"
+    r"tell\s+me|show\s+me|explain|why|should\s+we|"
+    r"does\s+(?:this|it|they)|do\s+(?:they|these|any)|"
+    r"are\s+(?:they|these|any)|is\s+this"
+    r")\b",
+    re.I,
+)
+
+_FOLLOW_WITH_MUTATE_RE = re.compile(
+    r"\b(?:then|and)\s+(?:please\s+)?(?:fix|rewrite|replace|update|remove|improve|edit)\b",
     re.I,
 )
 
 
 def _wants_section_edit(user_message: str) -> bool:
+    """True only when the user clearly asks to mutate draft text.
+
+    Default is advisory. Phrases like "check all case studies… list which don't"
+    must NOT trigger a rewrite of the focused tab.
+    """
     text = user_message.strip()
     if not text:
         return False
-    if _EDIT_INTENT_RE.search(text):
+
+    advisory = bool(_ADVISORY_INTENT_RE.search(text))
+    mutate = bool(_EDIT_INTENT_RE.search(text))
+
+    if advisory and not mutate:
+        return False
+    if advisory and mutate and not _FOLLOW_WITH_MUTATE_RE.search(text):
+        # "check and review" / "evaluate fit then tell me" → still advisory
+        # Require an explicit "then fix/replace/…" to mutate after an audit ask.
+        return False
+    if mutate:
         return True
     if text.endswith("?"):
         return False
-    lower = text.casefold()
     if re.search(
-        r"\b(why|explain|what does|is this|does this|compliant|requirement|argue|push back|should we)\b",
-        lower,
+        r"\b(why|explain|what does|is this|does this|compliant|requirement|"
+        r"argue|push back|should we)\b",
+        text,
+        re.I,
     ):
         return False
-    return True
+    # Safe default: answer in chat; do not rewrite.
+    return False
 
 
 def _compose_chat_user_message(
@@ -206,6 +289,56 @@ def _manuscript_digest(draft: ProposalDraft, *, max_chars: int = 12000) -> str:
     return "".join(lines)
 
 
+def _message_needs_case_study_clarify(user_message: str) -> bool:
+    """True when the ask is about case studies but no specific sidebar title is required yet."""
+    text = user_message or ""
+    if re.search(r"\bcase\s*stud(?:y|ies)\b", text, re.I):
+        return True
+    if re.search(
+        r"\breplace\b.{0,80}\b(existing|current|these|those)\b.{0,40}\b(case|work|stud)",
+        text,
+        re.I,
+    ):
+        return True
+    if re.search(r"\b(existing|current|these|those)\s+\d*\s*case\s*stud", text, re.I):
+        return True
+    return False
+
+
+def _is_our_work_section(section: ProposalSection | None) -> bool:
+    if section is None:
+        return False
+    sid = section.id or ""
+    return sid.startswith("section-3-work-") and sid != "section-3-work-placeholder"
+
+
+def _case_study_clarify_reply(
+    draft: ProposalDraft,
+    *,
+    open_section: ProposalSection | None,
+) -> str:
+    cases = [
+        s
+        for s in draft.sections
+        if _is_our_work_section(s)
+    ]
+    lines = [f"{i + 1}. **{s.title}**" for i, s in enumerate(cases[:8])]
+    open_note = ""
+    if open_section and not _is_our_work_section(open_section):
+        open_note = (
+            f", or say you meant the open section (**{open_section.title}**)"
+        )
+        lines.append(f"{len(lines) + 1}. **{open_section.title}** (open tab)")
+    return (
+        "You mentioned case studies, but I won't guess from the open tab. "
+        f"Pick an Our Work piece{open_note}.\n\n"
+        + "\n".join(lines)
+        + "\n\nReply with the section number or title "
+        "(e.g. `3.1` or the full sidebar name). "
+        "Or use **Revise content** / **Improve full section** to pin the tab yourself."
+    )
+
+
 def _resolve_section_from_message(
     draft: ProposalDraft,
     user_message: str,
@@ -277,7 +410,408 @@ def _resolve_section_from_message(
                 return default
             return bios[-1]
 
+    # Cross-tab: user quotes or paraphrases a claim that lives in another section.
+    content_hit = _resolve_section_by_content_needle(draft, text, default_section_id)
+    if content_hit is not None:
+        return content_hit
+
     return default
+
+
+def _content_needles_from_message(user_message: str) -> list[str]:
+    """Extract distinctive phrases likely to appear in manuscript content."""
+    needles: list[str] = []
+    text = user_message or ""
+    for match in re.finditer(r"[\"'“”‘']([^\"'“”‘']{10,160})[\"'“”‘']", text):
+        phrase = match.group(1).strip()
+        if phrase:
+            needles.append(phrase)
+    for match in re.finditer(
+        r"\b(\d{1,2}-year\s+[\w\-]+(?:\s+[\w\-]+){0,8})",
+        text,
+        re.I,
+    ):
+        needles.append(match.group(1).strip())
+    cleaned: list[str] = []
+    meta_tail = re.compile(
+        r"\s+\b(claim|claims|statement|wording|phrase|reference|text|language|"
+        r"mention|mentions|sentence|paragraph)\b.*$",
+        re.I,
+    )
+    for needle in needles:
+        cleaned.append(meta_tail.sub("", needle).strip() or needle)
+    # Dedupe while preserving order; longer phrases first for specificity.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for needle in sorted(cleaned, key=len, reverse=True):
+        key = needle.casefold()
+        if key in seen or len(key) < 10:
+            continue
+        seen.add(key)
+        unique.append(needle)
+    return unique
+
+
+def _resolve_section_by_content_needle(
+    draft: ProposalDraft,
+    user_message: str,
+    default_section_id: str,
+) -> ProposalSection | None:
+    """Find the section whose body contains a distinctive phrase from the ask."""
+    needles = _content_needles_from_message(user_message)
+    if not needles:
+        return None
+
+    def _candidates(needle: str) -> list[str]:
+        words = needle.split()
+        out: list[str] = []
+        for end in range(len(words), 2, -1):
+            out.append(" ".join(words[:end]))
+        return out
+
+    hits: list[ProposalSection] = []
+    for needle in needles:
+        for candidate in _candidates(needle):
+            n = candidate.casefold()
+            if len(n) < 10:
+                continue
+            matched = [
+                section
+                for section in draft.sections
+                if n in (section.content or "").casefold()
+            ]
+            if matched:
+                for section in matched:
+                    if not any(h.id == section.id for h in hits):
+                        hits.append(section)
+                break
+        if hits:
+            break
+    if not hits:
+        return None
+    if len(hits) == 1:
+        return hits[0]
+    others = [h for h in hits if h.id != default_section_id]
+    return others[0] if others else hits[0]
+
+
+EDIT_SCOPE_PLAN_PROMPT = """You plan how to apply a user's edit to ONE proposal section.
+
+Scan the ENTIRE Current section content. Identify EVERY passage that the user's ask
+requires changing — not just the first match.
+
+Default: surgical PATCH(es). Choose full_rewrite ONLY when the user clearly wants the
+whole section regenerated or the change cannot be localized.
+
+Return ONLY JSON:
+{
+  "understoodAsk": "one sentence restating the user goal",
+  "mode": "patch" | "full_rewrite",
+  "patches": [
+    {
+      "anchorExcerpt": "verbatim contiguous text from Current section content",
+      "editorInstruction": "precise instruction for THIS passage only"
+    }
+  ],
+  "kbQueries": ["0-4 optional Supermemory queries needed for these edits"]
+}
+
+Rules:
+1. Prefer mode=patch. Emit one patches[] entry per distinct passage that must change.
+2. If the user asks to remove/replace unsourced numbers, fabricated figures, percentages,
+   year claims, or similar — scan the WHOLE section and list EVERY matching instance
+   (hours, %, years, dollar amounts, partnership-tenure claims, etc. that fit the ask).
+   Do not stop after the first hit. One ask → one patches[] entry per distinct passage.
+3. Each anchorExcerpt MUST be copied verbatim from Current section content — usually one
+   paragraph or a few sentences, NEVER the entire section, NEVER overlapping duplicates.
+4. Do not invent facts. If sourcing from KB is required, list kbQueries; if the ask is only
+   remove / make qualitative, return "kbQueries": [].
+5. For full_rewrite, return "patches": [] and put the rewrite instruction in understoodAsk.
+"""
+
+
+@dataclass
+class EditScopePatch:
+    anchor_excerpt: str
+    editor_instruction: str
+
+
+@dataclass
+class EditScopePlan:
+    understood_ask: str
+    mode: str  # patch | full_rewrite
+    patches: list[EditScopePatch]
+    kb_queries: list[str]
+
+    @property
+    def anchor_excerpt(self) -> str:
+        return self.patches[0].anchor_excerpt if self.patches else ""
+
+    @property
+    def editor_instruction(self) -> str:
+        if not self.patches:
+            return self.understood_ask
+        if len(self.patches) == 1:
+            return self.patches[0].editor_instruction
+        return "; ".join(
+            p.editor_instruction for p in self.patches if p.editor_instruction.strip()
+        )
+
+
+def _parse_edit_scope_patches(raw: dict[str, Any], user_message: str) -> list[EditScopePatch]:
+    """Accept patches[] or legacy single anchorExcerpt shape."""
+    patches: list[EditScopePatch] = []
+    raw_patches = raw.get("patches")
+    if isinstance(raw_patches, list):
+        for item in raw_patches:
+            if not isinstance(item, dict):
+                continue
+            anchor = str(
+                item.get("anchorExcerpt") or item.get("anchor_excerpt") or ""
+            ).strip()
+            instr = str(
+                item.get("editorInstruction")
+                or item.get("editor_instruction")
+                or ""
+            ).strip()
+            if len(anchor) >= 8:
+                patches.append(
+                    EditScopePatch(
+                        anchor_excerpt=anchor,
+                        editor_instruction=instr or user_message.strip(),
+                    )
+                )
+    if patches:
+        return patches
+
+    anchor = str(raw.get("anchorExcerpt") or raw.get("anchor_excerpt") or "").strip()
+    instr = str(
+        raw.get("editorInstruction") or raw.get("editor_instruction") or user_message
+    ).strip()
+    if len(anchor) >= 8:
+        patches.append(
+            EditScopePatch(
+                anchor_excerpt=anchor,
+                editor_instruction=instr or user_message.strip(),
+            )
+        )
+    return patches
+
+
+def _locate_anchor_in_content(
+    content: str,
+    anchor: str,
+    *,
+    max_chars: int = 1200,
+    tight: bool = False,
+) -> tuple[int, int] | None:
+    """Map an LLM-provided anchor string to a span in section content.
+
+    tight=True: sentence-bounded around the match (for multi-patch plans so
+    neighboring figures in the same paragraph stay separately editable).
+    """
+    body = content or ""
+    needle = (anchor or "").strip()
+    if not body.strip() or len(needle) < 8:
+        return None
+
+    match_start = -1
+    match_end = -1
+
+    idx = body.find(needle)
+    if idx < 0:
+        idx = body.casefold().find(needle.casefold())
+    if idx >= 0:
+        match_start = idx
+        match_end = idx + len(needle)
+    else:
+        # LLM may normalize whitespace; match word sequence with flexible gaps.
+        words = [w for w in re.split(r"\s+", needle) if w]
+        if len(words) >= 3:
+            pattern = re.compile(
+                r"\s+".join(re.escape(w) for w in words),
+                re.IGNORECASE,
+            )
+            found = pattern.search(body)
+            if found:
+                match_start = found.start()
+                match_end = found.end()
+            else:
+                # Progressively shorten from the end until a hit.
+                for end in range(len(words) - 1, 2, -1):
+                    pattern = re.compile(
+                        r"\s+".join(re.escape(w) for w in words[:end]),
+                        re.IGNORECASE,
+                    )
+                    found = pattern.search(body)
+                    if found:
+                        match_start = found.start()
+                        match_end = found.end()
+                        break
+    if match_start < 0:
+        return None
+
+    if tight:
+        # Sentence containing the match (not the whole paragraph).
+        start = 0
+        for i in range(match_start - 1, -1, -1):
+            if body[i] in ".!?\n":
+                start = i + 1
+                while start < match_start and body[start].isspace():
+                    start += 1
+                break
+        end = len(body)
+        # If the needle already includes terminal punctuation, stop there.
+        search_from = max(match_start, match_end - 1)
+        for i in range(search_from, len(body)):
+            if body[i] in ".!?":
+                end = i + 1
+                break
+            if body[i] == "\n":
+                end = i
+                break
+        if end <= start:
+            start, end = match_start, match_end
+        if end - start > max_chars:
+            start, end = match_start, match_end
+        if start >= end:
+            return None
+        if len(body) >= 40 and (end - start) >= int(len(body) * 0.75):
+            # Still too wide — fall back to exact needle span.
+            start, end = match_start, match_end
+        if len(body) >= 40 and (end - start) >= int(len(body) * 0.75):
+            return None
+        return start, end
+
+    para_start = body.rfind("\n\n", 0, match_start)
+    start = 0 if para_start < 0 else para_start + 2
+    para_end = body.find("\n\n", match_end)
+    end = len(body) if para_end < 0 else para_end
+
+    if end - start > max_chars:
+        left = body.rfind(". ", max(start, match_start - max_chars // 2), match_start)
+        right = body.find(". ", match_end, min(end, match_end + max_chars // 2))
+        start = start if left < 0 else left + 2
+        end = end if right < 0 else right + 1
+
+    if end - start > max_chars:
+        mid = (match_start + match_end) // 2
+        start = max(0, mid - max_chars // 2)
+        end = min(len(body), start + max_chars)
+        if start > 0 and not body[start - 1].isspace():
+            space = body.find(" ", start, end)
+            if space > 0:
+                start = space + 1
+
+    if start >= end:
+        return None
+    # Never treat "almost the whole section" as a patch span.
+    if len(body) >= 40 and (end - start) >= int(len(body) * 0.75):
+        return None
+    return start, end
+
+
+def _merge_overlapping_located_patches(
+    located: list[tuple[int, int, EditScopePatch]],
+) -> list[tuple[int, int, EditScopePatch]]:
+    """Merge overlapping/abutting spans so one rewrite covers them."""
+    if not located:
+        return []
+    ordered = sorted(located, key=lambda t: (t[0], t[1]))
+    merged: list[tuple[int, int, EditScopePatch]] = []
+    for start, end, patch in ordered:
+        if not merged:
+            merged.append((start, end, patch))
+            continue
+        prev_start, prev_end, prev_patch = merged[-1]
+        if start <= prev_end:
+            combined = (
+                f"{prev_patch.editor_instruction.rstrip('. ')}. "
+                f"{patch.editor_instruction}"
+            ).strip()
+            merged[-1] = (
+                prev_start,
+                max(prev_end, end),
+                EditScopePatch(
+                    anchor_excerpt=prev_patch.anchor_excerpt,
+                    editor_instruction=combined,
+                ),
+            )
+        else:
+            merged.append((start, end, patch))
+    return merged
+
+
+def _locate_planned_patches(
+    content: str,
+    patches: list[EditScopePatch],
+) -> list[tuple[int, int, EditScopePatch]]:
+    """Locate every planned patch; use tight spans when multiple patches."""
+    if not patches:
+        return []
+    tight = len(patches) > 1
+    located: list[tuple[int, int, EditScopePatch]] = []
+    for patch in patches:
+        span = _locate_anchor_in_content(
+            content,
+            patch.anchor_excerpt,
+            tight=tight,
+        )
+        if span is None and tight:
+            # Fall back to paragraph expand if tight miss.
+            span = _locate_anchor_in_content(content, patch.anchor_excerpt, tight=False)
+        if span is None:
+            logger.info(
+                "Edit-scope patch anchor not found: %r",
+                patch.anchor_excerpt[:100],
+            )
+            continue
+        located.append((span[0], span[1], patch))
+    return _merge_overlapping_located_patches(located)
+
+
+async def _plan_edit_scope(
+    *,
+    section: ProposalSection,
+    rfp: RfpRecord,
+    user_message: str,
+) -> EditScopePlan:
+    """LLM understands the ask and chooses patch vs full rewrite (no keyword rules)."""
+    content = section.content or ""
+    raw, _ = await llm.chat_json(
+        [
+            {"role": "system", "content": EDIT_SCOPE_PLAN_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Client: {rfp.client}\n"
+                    f"Section: {section.title}\n\n"
+                    f"User message:\n{user_message.strip()}\n\n"
+                    f"Current section content:\n{content[:12000]}"
+                ),
+            },
+        ],
+        max_tokens=1600,
+        temperature=0.1,
+        tier="light",
+        node_name="chat_edit_scope_plan",
+    )
+    mode = str(raw.get("mode") or "patch").strip().casefold()
+    if mode not in {"patch", "full_rewrite"}:
+        mode = "patch"
+    queries_raw = raw.get("kbQueries") or raw.get("kb_queries") or []
+    queries: list[str] = []
+    if isinstance(queries_raw, list):
+        queries = [str(q).strip()[:240] for q in queries_raw if str(q).strip()][:4]
+    patches = _parse_edit_scope_patches(raw if isinstance(raw, dict) else {}, user_message)
+    if mode == "full_rewrite":
+        patches = []
+    return EditScopePlan(
+        understood_ask=str(raw.get("understoodAsk") or raw.get("understood_ask") or "").strip(),
+        mode=mode,
+        patches=patches,
+        kb_queries=queries,
+    )
 
 
 async def _section_chat_advisory_reply(
@@ -424,14 +958,15 @@ Rules:
 4. Use ONLY facts from KB excerpts when provided. Use [VERIFY: specific field] if a fact is still missing.
 5. Do NOT invent reference contacts, phone numbers, or metrics.
 6. Keep markdown structure inside the excerpt (lists, table rows) if the selection had them.
-7. Return ONLY JSON: {"replacement": "revised excerpt text only"}
-8. Budget/pricing excerpts: NEVER change agency revenue or commission lines to $0 — use commission rate × pass-through or canonical fee from section context; if unknown use [VERIFY: Sonja confirm commission rate and annual media estimate].
-9. Do NOT reverse-engineer dollar amounts to hit a user-requested total — each line must trace to the Pricing Guide; suggest tier/scope changes instead (option C).
-10. One-time setup/development lines must not be multiplied by 12 unless the excerpt is explicitly a monthly recurring service from the guide.
-11. Reference excerpts: include name, title, phone, and email — never "contact on request" or deferral language.
-12. PSA/compliance excerpts: add specific acknowledgment language when user asks — cover insurance, living wage, MacBride, Title VI, Chapter 63, audit rights as applicable.
-13. NEVER shorten the excerpt. Preserve every paragraph, heading, list item, and sentence the user did not ask to change.
-14. When the user asks to fill gaps, placeholders, or [VERIFY] tags: ONLY replace those tags with KB facts — do not rewrite or summarize the surrounding prose."""
+7. NEVER insert citation markers like [E1], [E14], or **[E3]** into the excerpt.
+8. Return ONLY JSON: {"replacement": "revised excerpt text only"}
+9. Budget/pricing excerpts: NEVER change agency revenue or commission lines to $0 — use commission rate × pass-through or canonical fee from section context; if unknown use [VERIFY: Sonja confirm commission rate and annual media estimate].
+10. Do NOT reverse-engineer dollar amounts to hit a user-requested total — each line must trace to the Pricing Guide; suggest tier/scope changes instead (option C).
+11. One-time setup/development lines must not be multiplied by 12 unless the excerpt is explicitly a monthly recurring service from the guide.
+12. Reference excerpts: include name, title, phone, and email — never "contact on request" or deferral language.
+13. PSA/compliance excerpts: add specific acknowledgment language when user asks — cover insurance, living wage, MacBride, Title VI, Chapter 63, audit rights as applicable.
+14. NEVER shorten the excerpt. Preserve every paragraph, heading, list item, and sentence the user did not ask to change.
+15. When the user asks to fill gaps, placeholders, or [VERIFY] tags: ONLY replace those tags with KB facts — do not rewrite or summarize the surrounding prose."""
 
 SELECTION_KB_PLAN_PROMPT = """You plan a surgical edit to ONE highlighted excerpt inside a zö agency proposal section.
 
@@ -446,12 +981,17 @@ Return ONLY JSON:
 
 Rules:
 - preserveFullExcerpt must be true when the selection is long or the user wants gaps/placeholders filled — the editor must NOT shorten or summarize.
-- kbQueries must target the specific missing facts in the excerpt, not repeat the user's chat message verbatim."""
+- kbQueries must target the specific missing facts in the excerpt, not repeat the user's chat message verbatim.
+- If the instruction only removes, strips, or makes wording qualitative (no new facts needed), return "kbQueries": []."""
 
 STATIC_SECTION_REDRAFT_PROMPT = """Improve ONE static zö proposal section (company overview, team bios, or case studies).
 
 Use ONLY the knowledge-base excerpts provided. For pull/select sections, include [DESIGNER NOTE: ...] where layout applies.
 Address the user's feedback. Do not invent clients, metrics, addresses, phones, or emails.
+
+When rewriting an Our Work / case study to a DIFFERENT client or project from the KB:
+- Open the markdown with an H2 for the NEW case study (e.g. `## City of San Leandro: Brand Assessment`).
+- Do not keep the old client's name in the leading heading.
 
 NARRATIVE REGISTER: first person we/our — never "The Vendor" or third-person procurement language.
 PRESERVE the full BRAND VOICE block — zö core voice + RFP adaptation are mandatory.
@@ -544,15 +1084,21 @@ async def _plan_selection_edit(
         temperature=0.2,
     )
     editor_instruction = str(raw.get("editorInstruction") or user_message).strip()
-    queries_raw = raw.get("kbQueries") or raw.get("queries") or []
-    queries = [str(q).strip()[:240] for q in queries_raw if str(q).strip()][:5]
-    if not queries:
+    if "kbQueries" in raw:
+        queries_raw = raw.get("kbQueries") or []
+    elif "queries" in raw:
+        queries_raw = raw.get("queries") or []
+    else:
+        queries_raw = None
+    if queries_raw is None:
         gap_hint = _gap_fields_from_text(excerpt)[:1]
         queries = [
             f"zö agency {section.title} {rfp.client} {gap_hint[0] if gap_hint else user_message}"[
                 :240
             ],
         ]
+    else:
+        queries = [str(q).strip()[:240] for q in queries_raw if str(q).strip()][:5]
     if near_full:
         editor_instruction = (
             f"{editor_instruction}\n\n"
@@ -854,8 +1400,13 @@ async def _improve_section_selection(
     working_excerpt: str | None = None,
     research: ProposalResearchCache | None = None,
     compliance_user_message: str = "",
+    lean: bool = False,
 ) -> tuple[ProposalSection, str, int]:
-    """Surgical excerpt edit — full section context, splice replacement only."""
+    """Surgical excerpt edit — splice replacement only.
+
+    lean=True: minimal prompt (excerpt + short neighbors only) — for planned patches
+    that do not need a second KB fan-out or full-section dump.
+    """
     content = section.content or ""
     if not _selection_bounds_valid(
         content,
@@ -877,47 +1428,104 @@ async def _improve_section_selection(
     )
     voice_block = format_brand_voice_block(
         brand_voice,
-        kb_zo_voice=kb_zo_voice,
+        kb_zo_voice="" if lean else kb_zo_voice,
         rfp_client=rfp.client,
         register=register,
     )
 
-    user_block = (
-        f"BRAND VOICE (mandatory):\n{voice_block}\n\n"
-        f"Client: {rfp.client}\n"
-        f"Sector: {rfp.sector}\n"
-        f"RFP: {rfp.title}\n"
-        f"Section: {section.title}\n"
-        f"Register: {register}\n\n"
-        f"User instruction:\n{user_message.strip()}\n\n"
-        f"Selected excerpt (replace ONLY this span):\n\"\"\"{excerpt}\"\"\"\n\n"
-        f"Full section (context — do NOT rewrite outside the excerpt):\n\"\"\"{content[:14000]}\"\"\"\n\n"
-        f"RFP excerpt:\n{rfp_context[:3000]}\n\n"
-    )
-    if evidence:
-        user_block += f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
-    if kb_block.strip():
-        user_block += f"KB excerpts:\n{kb_block[:8000]}\n\n"
-    if avoidance_block:
-        user_block += f"{avoidance_block}\n\n"
-    ask_for_compliance = compliance_user_message.strip() or user_message.strip()
-    if should_apply_budget_playbook(section, ask_for_compliance):
-        user_block += f"{budget_playbook_prompt_block(research=research)}\n\n"
+    # Protect MANUAL FILL tags from incidental rewrite (mask → validate → unmask).
+    masked_excerpt, mfill_originals = _mask_manual_fill_for_rewrite(excerpt)
+    masked_content, content_mfill = _mask_manual_fill_for_rewrite(content)
+    if content_mfill and not mfill_originals:
+        mfill_originals = []
+    system_prompt = SELECTION_EDIT_PROMPT
+    if mfill_originals or content_mfill:
+        system_prompt = f"{SELECTION_EDIT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
 
-    raw, provider = await llm.chat_json(
-        [
-            {"role": "system", "content": SELECTION_EDIT_PROMPT},
-            {"role": "user", "content": user_block},
-        ],
-        max_tokens=2048,
-        temperature=0.25,
-    )
-    replacement = str(raw.get("replacement") or raw.get("content") or "").strip()
-    if not replacement:
-        raise ProposalError(
-            "Selection edit did not return replacement text. Try a more specific instruction.",
-            status_code=422,
+    ask_for_compliance = compliance_user_message.strip() or user_message.strip()
+    neighbor_before = content[max(0, selection_start - 280) : selection_start]
+    neighbor_after = content[selection_end : min(len(content), selection_end + 280)]
+    replacement = ""
+    provider = _provider_name()
+    last_mfill_error: ProposalError | None = None
+    for attempt in (1, 2):
+        if lean:
+            user_block = (
+                f"Client: {rfp.client}\n"
+                f"Section: {section.title}\n\n"
+                f"User instruction:\n{user_message.strip()}\n\n"
+                f"Text immediately before excerpt:\n\"\"\"{neighbor_before}\"\"\"\n\n"
+                f"Selected excerpt (replace ONLY this span):\n\"\"\"{masked_excerpt}\"\"\"\n\n"
+                f"Text immediately after excerpt:\n\"\"\"{neighbor_after}\"\"\"\n\n"
+                "Return ONLY the revised excerpt. Do not rewrite surrounding text.\n"
+            )
+        else:
+            user_block = (
+                f"BRAND VOICE (mandatory):\n{voice_block}\n\n"
+                f"Client: {rfp.client}\n"
+                f"Sector: {rfp.sector}\n"
+                f"RFP: {rfp.title}\n"
+                f"Section: {section.title}\n"
+                f"Register: {register}\n\n"
+                f"User instruction:\n{user_message.strip()}\n\n"
+                f"Selected excerpt (replace ONLY this span):\n\"\"\"{masked_excerpt}\"\"\"\n\n"
+                f"Full section (context — do NOT rewrite outside the excerpt):\n"
+                f"\"\"\"{masked_content[:8000]}\"\"\"\n\n"
+                f"RFP excerpt:\n{rfp_context[:2000]}\n\n"
+            )
+            if evidence:
+                user_block += f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
+            if kb_block.strip():
+                user_block += f"KB excerpts:\n{kb_block[:4000]}\n\n"
+            if avoidance_block:
+                user_block += f"{avoidance_block}\n\n"
+            if should_apply_budget_playbook(section, ask_for_compliance):
+                user_block += f"{budget_playbook_prompt_block(research=research)}\n\n"
+        if attempt == 2 and (mfill_originals or content_mfill):
+            user_block = (
+                f"RETRY: Your previous output dropped protected «MFILL_N» tokens. "
+                f"Copy every «MFILL_N» through unchanged.\n\n{user_block}"
+            )
+
+        raw, provider = await llm.chat_json(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_block},
+            ],
+            max_tokens=2048 if not lean else 1200,
+            temperature=0.25,
+            node_name="chat_excerpt_edit",
+            tier="light" if lean else "heavy",
         )
+        replacement = str(raw.get("replacement") or raw.get("content") or "").strip()
+        if not replacement:
+            raise ProposalError(
+                "Selection edit did not return replacement text. Try a more specific instruction.",
+                status_code=422,
+            )
+        try:
+            # Only excerpt placeholders must survive in the replacement span.
+            replacement = _unmask_manual_fill_checked(
+                replacement, mfill_originals, attempt=attempt
+            )
+            last_mfill_error = None
+            break
+        except ProposalError as exc:
+            last_mfill_error = exc
+            logger.warning(
+                "Selection edit MANUAL FILL preserve failed attempt %d: %s",
+                attempt,
+                str(exc)[:200],
+            )
+            if attempt >= 2:
+                raise ProposalError(
+                    "Rewrite removed protected [MANUAL FILL] tag(s) twice. "
+                    "Ask to fill those tags explicitly with a real value or KB fact, "
+                    "or edit a span that does not include them.",
+                    status_code=422,
+                ) from exc
+    if last_mfill_error and not replacement:
+        raise last_mfill_error
 
     refusal = refuse_noncompliant_budget_edit(ask_for_compliance, replacement)
     if refusal:
@@ -960,22 +1568,23 @@ async def _improve_section_selection(
             status_code=422,
         )
 
-    replacement = enforce_narrative_voice(
-        replacement,
-        section_id=section.id,
-        title=section.title,
-        zo_mode=section.mode,
-    )
-    new_content = enforce_narrative_voice(
-        _splice_selection(
-            content,
-            start=selection_start,
-            end=selection_end,
-            replacement=replacement,
-        ),
-        section_id=section.id,
-        title=section.title,
-        zo_mode=section.mode,
+    if not lean:
+        replacement = enforce_narrative_voice(
+            replacement,
+            section_id=section.id,
+            title=section.title,
+            zo_mode=section.mode,
+        )
+    from app.services.proposal_manuscript import strip_evidence_citation_markers
+
+    replacement = strip_evidence_citation_markers(replacement)
+    # Pure splice — do not run strip/voice on the full section (that mutates prefix/suffix
+    # and falsely trips the before/after guards).
+    new_content = _splice_selection(
+        content,
+        start=selection_start,
+        end=selection_end,
+        replacement=replacement,
     )
 
     if new_content[:selection_start] != content[:selection_start]:
@@ -1100,84 +1709,83 @@ async def _redraft_rfp_section(
             "Do not return stubs, error text, or unchanged placeholder content.\n"
         )
 
-    user_block = (
-        f"BRAND VOICE (mandatory — maintain throughout):\n{voice_block}\n\n"
-        f"Client: {rfp.client}\n"
-        f"Sector: {rfp.sector}\n"
-        f"RFP: {rfp.title}\n"
-        f"Section: {section.title}\n"
-        f"Word target: {section.word_target}\n"
-        f"Requirements:\n"
-        + "\n".join(f"- {r}" for r in requirements)
-        + rewrite_note
-        + f"\n\nUser edit request:\n{user_message}\n\n"
-        f"Previous draft:\n{prior_for_agent[:3000] if prior_for_agent else '(none — write from scratch)'}\n\n"
-        f"RFP excerpt:\n{rfp_context[:4000]}\n\n"
-        f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
-        + (f"{avoidance_block}\n\n" if avoidance_block else "")
-        + (f"zö Sections 1–3 reference:\n{zo_context[:3000]}\n" if zo_context else "")
-    )
-    if bio_kb.strip():
-        user_block += (
-            f"\n\n=== 04_Bio approved file (use for Work History, education, accounts) ===\n"
-            f"{bio_kb[:50_000]}\n"
+    # Protect MANUAL FILL tags in the prior draft from incidental rewrite.
+    source_for_tags = prior_content or original_content
+    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(source_for_tags)
+    # Keep prior_for_agent length behavior but on masked text when tags exist.
+    if mfill_originals:
+        prior_for_agent, _ = prior_content_for_redraft(
+            section.model_copy(update={"content": masked_prior})
         )
-    if should_apply_budget_playbook(section, user_message):
-        user_block += f"\n{budget_playbook_prompt_block(research=research)}\n"
+    redraft_system = SECTION_REDRAFT_PROMPT
+    if mfill_originals:
+        redraft_system = f"{SECTION_REDRAFT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
 
     max_tokens = 8192 if section.word_target >= 1500 else 6144
+    content = ""
+    provider = _provider_name()
+    raw: dict[str, Any] = {}
 
-    try:
-        from app.services.proposal_langchain_agents import (
-            AgentRole,
-            content_from_agent_payload,
-            redraft_section_agent,
+    for attempt in (1, 2):
+        user_block = (
+            f"BRAND VOICE (mandatory — maintain throughout):\n{voice_block}\n\n"
+            f"Client: {rfp.client}\n"
+            f"Sector: {rfp.sector}\n"
+            f"RFP: {rfp.title}\n"
+            f"Section: {section.title}\n"
+            f"Word target: {section.word_target}\n"
+            f"Requirements:\n"
+            + "\n".join(f"- {r}" for r in requirements)
+            + rewrite_note
+            + f"\n\nUser edit request:\n{user_message}\n\n"
+            f"Previous draft:\n{prior_for_agent[:3000] if prior_for_agent else '(none — write from scratch)'}\n\n"
+            f"RFP excerpt:\n{rfp_context[:4000]}\n\n"
+            f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
+            + (f"{avoidance_block}\n\n" if avoidance_block else "")
+            + (f"zö Sections 1–3 reference:\n{zo_context[:3000]}\n" if zo_context else "")
         )
+        if attempt == 2 and mfill_originals:
+            user_block = (
+                "RETRY: Previous output dropped protected «MFILL_N» tokens. "
+                "Copy every «MFILL_N» through unchanged.\n\n"
+                + user_block
+            )
+        if bio_kb.strip():
+            user_block += (
+                f"\n\n=== 04_Bio approved file (use for Work History, education, accounts) ===\n"
+                f"{bio_kb[:50_000]}\n"
+            )
+        if should_apply_budget_playbook(section, user_message):
+            user_block += f"\n{budget_playbook_prompt_block(research=research)}\n"
 
-        raw, provider, _tools = await redraft_section_agent(
-            role=AgentRole.USER_REVISE,
-            rfp_id=rfp.id,
-            rfp_title=rfp.title,
-            rfp_client=rfp.client,
-            user_content=user_block,
-        )
-    except Exception as exc:
-        logger.warning("User Revise agent failed, falling back to chat_json: %s", exc)
-        raw, provider = await llm.chat_json(
-            [
-                {"role": "system", "content": SECTION_REDRAFT_PROMPT},
-                {"role": "user", "content": user_block},
-            ],
-            max_tokens=max_tokens,
-            temperature=0.4,
-        )
+        try:
+            from app.services.proposal_langchain_agents import (
+                AgentRole,
+                content_from_agent_payload,
+                redraft_section_agent,
+            )
 
-    content = enforce_narrative_voice(
-        content_from_agent_payload(raw if isinstance(raw, dict) else {}),
-        section_id=section.id,
-        title=section.title,
-        zo_mode=section.mode,
-    )
+            raw, provider, _tools = await redraft_section_agent(
+                role=AgentRole.USER_REVISE,
+                rfp_id=rfp.id,
+                rfp_title=rfp.title,
+                rfp_client=rfp.client,
+                user_content=user_block,
+            )
+        except Exception as exc:
+            logger.warning("User Revise agent failed, falling back to chat_json: %s", exc)
+            raw, provider = await llm.chat_json(
+                [
+                    {"role": "system", "content": redraft_system},
+                    {"role": "user", "content": user_block},
+                ],
+                max_tokens=max_tokens,
+                temperature=0.4,
+                node_name="chat_full_redraft",
+            )
 
-    refusal = refuse_noncompliant_budget_edit(user_message, content)
-    if refusal:
-        raise ProposalError(refusal, status_code=422)
+        from app.services.proposal_langchain_agents import content_from_agent_payload
 
-    if redraft_is_inadequate(section, content, original_content=original_content):
-        logger.warning(
-            "User Revise output too short for %s (%d words, keys=%s) — retrying chat_json",
-            section.id,
-            word_count(content),
-            list(raw.keys()) if isinstance(raw, dict) else [],
-        )
-        raw, provider = await llm.chat_json(
-            [
-                {"role": "system", "content": SECTION_REDRAFT_PROMPT},
-                {"role": "user", "content": user_block},
-            ],
-            max_tokens=max_tokens,
-            temperature=0.35,
-        )
         content = enforce_narrative_voice(
             content_from_agent_payload(raw if isinstance(raw, dict) else {}),
             section_id=section.id,
@@ -1185,12 +1793,59 @@ async def _redraft_rfp_section(
             zo_mode=section.mode,
         )
 
-    if redraft_is_inadequate(section, content, original_content=original_content):
-        raise ProposalError(
-            f"Section revise did not produce enough content ({word_count(content)} words). "
-            "Try a more specific instruction or re-run Phase 3 for this section.",
-            status_code=422,
-        )
+        refusal = refuse_noncompliant_budget_edit(user_message, content)
+        if refusal:
+            raise ProposalError(refusal, status_code=422)
+
+        if redraft_is_inadequate(section, content, original_content=original_content):
+            logger.warning(
+                "User Revise output too short for %s (%d words, keys=%s) — retrying chat_json",
+                section.id,
+                word_count(content),
+                list(raw.keys()) if isinstance(raw, dict) else [],
+            )
+            raw, provider = await llm.chat_json(
+                [
+                    {"role": "system", "content": redraft_system},
+                    {"role": "user", "content": user_block},
+                ],
+                max_tokens=max_tokens,
+                temperature=0.35,
+                node_name="chat_full_redraft",
+            )
+            content = enforce_narrative_voice(
+                content_from_agent_payload(raw if isinstance(raw, dict) else {}),
+                section_id=section.id,
+                title=section.title,
+                zo_mode=section.mode,
+            )
+
+        if redraft_is_inadequate(section, content, original_content=original_content):
+            raise ProposalError(
+                f"Section revise did not produce enough content ({word_count(content)} words). "
+                "Try a more specific instruction or re-run Phase 3 for this section.",
+                status_code=422,
+            )
+
+        try:
+            content = _unmask_manual_fill_checked(
+                content, mfill_originals, attempt=attempt
+            )
+            break
+        except ProposalError as exc:
+            logger.warning(
+                "Full redraft MANUAL FILL preserve failed attempt %d: %s",
+                attempt,
+                str(exc)[:200],
+            )
+            if attempt >= 2:
+                raise ProposalError(
+                    "Rewrite removed protected [MANUAL FILL] tag(s) twice. "
+                    "Ask to fill those tags explicitly with a real value or KB fact, "
+                    "or edit a span that does not include them.",
+                    status_code=422,
+                ) from exc
+
     if bio_kb.strip():
         content, _ = _apply_bio_work_history_kb_fill(section, content, bio_kb)
         content = enforce_narrative_voice(
@@ -1204,7 +1859,11 @@ async def _redraft_rfp_section(
     updated = section.model_copy(
         update={
             "content": content,
-            "designer_note": raw.get("designerNote") or raw.get("designer_note"),
+            "designer_note": (
+                (raw.get("designerNote") or raw.get("designer_note"))
+                if isinstance(raw, dict)
+                else None
+            ),
             "status": "generated",
             "kb_refs": [],
         }
@@ -1250,35 +1909,70 @@ async def _improve_static_section(
     )
 
     prior = section.content or ""
-    user_content = (
-        f"BRAND VOICE (mandatory — maintain throughout; do not genericize):\n{voice_block}\n\n"
-        f"Section: {section.title}\n"
-        f"Mode: {section.mode}\n"
-        f"Client: {rfp.client}\n"
-        f"Sector: {rfp.sector}\n"
-        f"User request:\n{user_message}\n\n"
-        f"Previous content (preserve zö voice while improving — fill gaps from KB):\n"
-        f"{prior[:9000]}\n\n"
-        f"KB excerpts:\n{'---'.join(kb_parts)[:14000]}\n\n"
-        f"RFP excerpt:\n{rfp_context[:5000]}"
-    )
-    if avoidance_block:
-        user_content += f"\n\n{avoidance_block}"
+    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(prior)
+    system_prompt = STATIC_SECTION_REDRAFT_PROMPT
+    if mfill_originals:
+        system_prompt = f"{STATIC_SECTION_REDRAFT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
 
-    raw, provider = await llm.chat_json(
-        [
-            {"role": "system", "content": STATIC_SECTION_REDRAFT_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        max_tokens=4096,
-        temperature=0.28,
-    )
-    content = enforce_narrative_voice(
-        str(raw.get("content", "")).strip(),
-        section_id=section.id,
-        title=section.title,
-        register="narrative",
-    )
+    content = ""
+    provider = _provider_name()
+    raw: dict[str, Any] = {}
+    for attempt in (1, 2):
+        user_content = (
+            f"BRAND VOICE (mandatory — maintain throughout; do not genericize):\n{voice_block}\n\n"
+            f"Section: {section.title}\n"
+            f"Mode: {section.mode}\n"
+            f"Client: {rfp.client}\n"
+            f"Sector: {rfp.sector}\n"
+            f"User request:\n{user_message}\n\n"
+            f"Previous content (preserve zö voice while improving — fill gaps from KB):\n"
+            f"{masked_prior[:9000]}\n\n"
+            f"KB excerpts:\n{'---'.join(kb_parts)[:14000]}\n\n"
+            f"RFP excerpt:\n{rfp_context[:5000]}"
+        )
+        if attempt == 2 and mfill_originals:
+            user_content = (
+                "RETRY: Previous output dropped protected «MFILL_N» tokens. "
+                "Copy every «MFILL_N» through unchanged.\n\n"
+                + user_content
+            )
+        if avoidance_block:
+            user_content += f"\n\n{avoidance_block}"
+
+        raw, provider = await llm.chat_json(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            max_tokens=4096,
+            temperature=0.28,
+            node_name="chat_full_redraft",
+        )
+        content = enforce_narrative_voice(
+            str(raw.get("content", "")).strip(),
+            section_id=section.id,
+            title=section.title,
+            register="narrative",
+        )
+        try:
+            content = _unmask_manual_fill_checked(
+                content, mfill_originals, attempt=attempt
+            )
+            break
+        except ProposalError as exc:
+            logger.warning(
+                "Static rewrite MANUAL FILL preserve failed attempt %d: %s",
+                attempt,
+                str(exc)[:200],
+            )
+            if attempt >= 2:
+                raise ProposalError(
+                    "Rewrite removed protected [MANUAL FILL] tag(s) twice. "
+                    "Ask to fill those tags explicitly with a real value or KB fact, "
+                    "or edit a span that does not include them.",
+                    status_code=422,
+                ) from exc
+
     # Prefer deterministic KB fill for remaining VERIFY tags after rewrite
     bio_kb = await _bio_kb_context_for_section(section)
     if bio_kb.strip():
@@ -1504,6 +2198,80 @@ async def improve_proposal_section(
 
         return focus, draft, research, provider, ops_report.reply, changed
 
+    # Case-study replace/improve without a named Our Work tab: ask — never rewrite
+    # whatever happens to be open (e.g. Who We Are).
+    focus_for_clarify = _find_draft_section(draft, section_id)
+    if (
+        not selection_mode
+        and _message_needs_case_study_clarify(user_message)
+        and not _is_our_work_section(focus_for_clarify)
+        and not re.search(
+            r"\b\d+\.\d+\b|"
+            r"(?:section\s*)?\d+\.\d+\s*[—–-]|"
+            r"\b(oregon\s+employment|umatilla|san\s+leandro)\b",
+            user_message,
+            re.I,
+        )
+    ):
+        cases = [s for s in draft.sections if _is_our_work_section(s)]
+        if len(cases) != 1:
+            provider = _provider_name()
+            if research is None:
+                research = ProposalResearchCache(
+                    rfpId=rfp_id,
+                    updatedAt=datetime.now(timezone.utc).isoformat(),
+                    provider=provider,
+                )
+            section = focus_for_clarify or (
+                draft.sections[0] if draft.sections else None
+            )
+            if section is None:
+                raise ProposalError("Draft has no sections.", status_code=400)
+            return (
+                section,
+                draft,
+                research,
+                provider,
+                _case_study_clarify_reply(draft, open_section=focus_for_clarify),
+                False,
+            )
+
+    # Advisory / audit asks ("check all case studies… list which don't") must never
+    # rewrite a focused tab. Answer in chat first — skip structure + improve.
+    if not selection_mode and not _wants_section_edit(user_message):
+        section = _find_draft_section(draft, section_id) or (
+            draft.sections[0] if draft.sections else None
+        )
+        if section is None:
+            raise ProposalError("Draft has no sections.", status_code=400)
+        requirements_block = _rfp_section_requirements_block(research, section.id)
+        manuscript_digest = _manuscript_digest(draft) if proposal_wide else ""
+        if manuscript_digest:
+            rfp_context = f"{rfp_context}\n\n{manuscript_digest}"
+        if requirements_block:
+            rfp_context = (
+                f"{rfp_context}\n\n--- Mapped section requirements ---\n{requirements_block}"
+            )
+        reply = await _section_chat_advisory_reply(
+            section=section,
+            rfp=rfp,
+            rfp_context=rfp_context,
+            user_message=user_message,
+            conversation_history=conversation_history,
+            selection_text=selection_text,
+            requirements_block=requirements_block,
+            manuscript_digest=manuscript_digest,
+            research=research,
+        )
+        provider = _provider_name()
+        if research is None:
+            research = ProposalResearchCache(
+                rfpId=rfp_id,
+                updatedAt=datetime.now(timezone.utc).isoformat(),
+                provider=provider,
+            )
+        return section, draft, research, provider, reply, False
+
     # When not pinned to a Revise-content excerpt, resolve structural asks
     # (add/delete sections) before rewriting the focused tab.
     if not selection_mode:
@@ -1535,6 +2303,19 @@ async def improve_proposal_section(
             return focus, draft, research, provider, question, False
 
         if structure_plan.action in {"add_sections", "delete_sections"}:
+            from app.services.proposal_draft_snapshots import (
+                push_before_structure_change_snapshot,
+            )
+
+            focus_before = _find_draft_section(draft, section_id)
+            pre_title = (
+                (focus_before.title if focus_before else None) or "proposal"
+            )
+            # Always checkpoint the live manuscript BEFORE destructive structure
+            # so Saved versions can undo a bad rename/delete (e.g. staffing → stub).
+            draft = push_before_structure_change_snapshot(
+                draft, section_title=pre_title
+            )
             updated_draft, focus, assistant_message = await apply_chat_structure_plan(
                 draft=draft,
                 plan=structure_plan,
@@ -1620,6 +2401,119 @@ async def improve_proposal_section(
         return section, draft, research, provider, reply, False
 
     latest_user_ask = user_message.strip()
+
+    # Explicit MANUAL FILL resolution — never invent; user text then KB only.
+    if is_manual_fill_request(latest_user_ask):
+        target_text = section.content or ""
+        sel_start = selection_start
+        sel_end = selection_end
+        if (
+            selection_mode
+            and sel_start is not None
+            and sel_end is not None
+            and sel_end > sel_start
+        ):
+            target_text = (section.content or "")[sel_start:sel_end]
+
+        if extract_manual_fill_tags(target_text):
+            evidence_blob = ""
+            if research and research.evidence_corpus:
+                evidence_blob = _section_corpus_blob(
+                    research.evidence_corpus, section_id
+                )
+            supplemental = _draft_supplemental_blob(draft)
+            kb_blob = "\n\n".join(
+                part for part in (evidence_blob, supplemental, rfp_context[:8000]) if part.strip()
+            )
+            filled, fill_log, remaining = fill_manual_fill_tags(
+                target_text,
+                user_message=latest_user_ask,
+                kb_blob=kb_blob,
+            )
+            if fill_log:
+                if selection_mode and sel_start is not None and sel_end is not None:
+                    new_content = _splice_selection(
+                        section.content or "",
+                        start=sel_start,
+                        end=sel_end,
+                        replacement=filled,
+                    )
+                else:
+                    new_content = filled
+                # Factual substitution only — never brand-voice / tone the resolved value
+                # or regenerate surrounding prose as part of MANUAL FILL resolution.
+                updated_section = section.model_copy(
+                    update={"content": new_content, "status": "generated"}
+                )
+                provider = "manual-fill"
+                if research is None:
+                    research = ProposalResearchCache(
+                        rfpId=rfp_id,
+                        updatedAt=datetime.now(timezone.utc).isoformat(),
+                        provider=provider,
+                    )
+                else:
+                    research = research.model_copy(update={"provider": provider})
+                merged_sections = [
+                    updated_section if s.id == section_id else s for s in draft.sections
+                ]
+                now = datetime.now(timezone.utc).isoformat()
+                updated_draft = draft.model_copy(
+                    update={
+                        "sections": merged_sections,
+                        "updated_at": now,
+                        "provider": provider,
+                    }
+                )
+                if persist:
+                    updated_draft = await _persist_section_improve_draft(
+                        updated_draft,
+                        research,
+                        section_title=section.title,
+                    )
+                sources = ", ".join(
+                    f"`{e['tag']}` ← {e['source']}" for e in fill_log[:6]
+                )
+                assistant_message = (
+                    f"Resolved **{len(fill_log)}** MANUAL FILL tag(s) from "
+                    f"explicit sources ({sources})."
+                )
+                if remaining:
+                    assistant_message += (
+                        " Still open (no user value or KB match): "
+                        + ", ".join(f"`{t}`" for t in remaining[:6])
+                        + "."
+                    )
+                return (
+                    updated_section,
+                    updated_draft,
+                    research,
+                    provider,
+                    assistant_message,
+                    True,
+                )
+
+            # Nothing filled — explain gap, do not invent, do not fall through to
+            # a general rewrite that could silently resolve the tags.
+            provider = _provider_name()
+            if research is None:
+                research = ProposalResearchCache(
+                    rfpId=rfp_id,
+                    updatedAt=datetime.now(timezone.utc).isoformat(),
+                    provider=provider,
+                )
+            gap_list = ", ".join(
+                f"`{t.text}`" for t in extract_manual_fill_tags(target_text)[:6]
+            )
+            reply = (
+                "I found MANUAL FILL tag(s) but could not resolve them from your message "
+                "or the knowledge base: "
+                f"{gap_list}. "
+                "Provide the value in chat (e.g. “fill [MANUAL FILL: Title] with Director”) "
+                "or add the fact to Supermemory — I will not invent it."
+            )
+            return section, draft, research, provider, reply, False
+
     query_focus = _query_focus_message(
         latest_user_ask,
         section=section,
@@ -1641,18 +2535,174 @@ async def improve_proposal_section(
             else None
         ),
     )
-    # Always refresh KB voice samples for chat revises so tone stays grounded.
-    from app.services.proposal_brand_voice import fetch_zo_voice_excerpt
+    # Do NOT refresh full proposal KB (bios/company/case studies) on every chat turn —
+    # that gather is for Sections 1–3 generation. Chat patches use targeted queries only.
 
-    fresh_voice = await fetch_zo_voice_excerpt(
-        rfp_title=rfp.title,
-        rfp_client=rfp.client,
-        rfp_sector=rfp.sector,
-        rfp_location=rfp.location,
-        rfp_context=rfp_context,
-    )
-    if fresh_voice.strip():
-        kb_zo_voice = fresh_voice
+    # LLM understands the ask → prefers surgical patch(es) over full-section rewrite.
+    scope_plan: EditScopePlan | None = None
+    planned_spans: list[tuple[int, int, EditScopePatch]] | None = None
+    if not selection_mode:
+        try:
+            scope_plan = await _plan_edit_scope(
+                section=section,
+                rfp=rfp,
+                user_message=latest_user_ask,
+            )
+            if scope_plan.mode == "patch" and scope_plan.patches:
+                planned_spans = _locate_planned_patches(
+                    section.content or "",
+                    scope_plan.patches,
+                )
+                if planned_spans:
+                    logger.info(
+                        "Edit-scope plan → %d patch(es) for %s / %s ask=%r",
+                        len(planned_spans),
+                        rfp_id,
+                        section_id,
+                        (scope_plan.understood_ask or latest_user_ask)[:80],
+                    )
+                    if len(planned_spans) == 1:
+                        selection_start, selection_end, only = planned_spans[0]
+                        selection_text = (section.content or "")[
+                            selection_start:selection_end
+                        ]
+                        selection_mode = True
+                        user_message = only.editor_instruction
+                else:
+                    logger.info(
+                        "Edit-scope plan asked patch but no anchors found in %s — "
+                        "falling back to full rewrite",
+                        section_id,
+                    )
+            elif scope_plan.mode == "full_rewrite":
+                logger.info(
+                    "Edit-scope plan → full_rewrite for %s / %s ask=%r",
+                    rfp_id,
+                    section_id,
+                    (scope_plan.understood_ask or latest_user_ask)[:80],
+                )
+                if scope_plan.editor_instruction.strip():
+                    user_message = scope_plan.editor_instruction
+        except Exception:
+            logger.exception(
+                "Edit-scope planning failed for %s / %s — continuing with default path",
+                rfp_id,
+                section_id,
+            )
+
+    # Multi-patch planned edits: apply every located passage in one turn (end→start).
+    if (
+        planned_spans
+        and len(planned_spans) > 1
+        and not selection_mode
+    ):
+        kb_queries = list((scope_plan.kb_queries if scope_plan else None) or [])
+        kb_block = ""
+        contact_fact_blob = ""
+        if kb_queries:
+            kb_block, contact_fact_blob = await _fetch_kb_blob_for_selection(
+                kb_queries,
+                evidence_blob="",
+                supplemental_blob="",
+            )
+        fact_blob = contact_fact_blob
+        working_section = section
+        provider = _provider_name()
+        total_kb_fills = 0
+        applied = 0
+        # End→start so earlier char offsets stay valid after each splice.
+        for start, end, patch in sorted(planned_spans, key=lambda t: t[0], reverse=True):
+            content_now = working_section.content or ""
+            if start < 0 or end > len(content_now) or start >= end:
+                logger.warning(
+                    "Skipping stale patch span %d-%d after prior edit in %s",
+                    start,
+                    end,
+                    section_id,
+                )
+                continue
+            sel_text = content_now[start:end]
+            working_section, provider, kb_fills = await _improve_section_selection(
+                section=working_section,
+                rfp=rfp,
+                rfp_context=rfp_context,
+                user_message=patch.editor_instruction,
+                selection_start=start,
+                selection_end=end,
+                selection_text=sel_text,
+                brand_voice=brand_voice_dict,
+                kb_zo_voice=kb_zo_voice,
+                evidence=[],
+                kb_block=kb_block,
+                fact_blob=fact_blob,
+                avoidance_block="",
+                research=research,
+                compliance_user_message=latest_user_ask,
+                lean=True,
+            )
+            total_kb_fills += kb_fills
+            applied += 1
+
+        if applied == 0:
+            logger.info(
+                "Multi-patch plan produced no applied edits for %s — falling through",
+                section_id,
+            )
+        else:
+            if research is None:
+                research = ProposalResearchCache(
+                    rfpId=rfp_id,
+                    updatedAt=datetime.now(timezone.utc).isoformat(),
+                    provider=provider,
+                )
+            else:
+                research = research.model_copy(update={"provider": provider})
+            merged_sections = [
+                working_section if s.id == section_id else s for s in draft.sections
+            ]
+            now = datetime.now(timezone.utc).isoformat()
+            updated_draft = draft.model_copy(
+                update={
+                    "sections": merged_sections,
+                    "updated_at": now,
+                    "provider": provider,
+                }
+            )
+            if persist:
+                updated_draft = await _persist_section_improve_draft(
+                    updated_draft,
+                    research,
+                    section_title=section.title,
+                )
+            before_words = word_count(before_section.content or "")
+            after_words = word_count(working_section.content or "")
+            assistant_message = (
+                f"Updated **{applied}** passage(s) in **{section.title}** "
+                f"({before_words} → {after_words} words). "
+                f"Scanned the full section for matching issues; surrounding text unchanged."
+            )
+            if total_kb_fills > 0:
+                assistant_message = (
+                    f"Filled **{total_kb_fills}** verified fact(s) and updated "
+                    f"**{applied}** passage(s) in **{section.title}** "
+                    f"({before_words} → {after_words} words)."
+                )
+            logger.info(
+                "Multi-patch section edit complete for %s / %s: %d patches (%d → %d words)",
+                rfp_id,
+                section_id,
+                applied,
+                before_words,
+                after_words,
+            )
+            return (
+                working_section,
+                updated_draft,
+                research,
+                provider,
+                assistant_message,
+                True,
+            )
 
     if selection_mode:
         logger.info(
@@ -1666,19 +2716,32 @@ async def improve_proposal_section(
         excerpt = (section.content or "")[selection_start:selection_end]
         full_content = section.content or ""
         gap_fields = _gap_fields_from_text(excerpt)
-        editor_instruction, kb_queries = await _plan_selection_edit(
-            section=section,
-            rfp=rfp,
-            user_message=user_message,
-            excerpt=excerpt,
-            full_content=full_content,
-            selection_start=selection_start,
-            selection_end=selection_end,
+        planned_patch = bool(
+            scope_plan
+            and scope_plan.mode == "patch"
+            and selection_start is not None
+            and selection_end is not None
         )
+        if planned_patch:
+            # Reuse edit-scope plan — no second planner LLM, no shotgun KB.
+            editor_instruction = scope_plan.editor_instruction or user_message
+            kb_queries = list(scope_plan.kb_queries or [])
+            lean_patch = True
+        else:
+            editor_instruction, kb_queries = await _plan_selection_edit(
+                section=section,
+                rfp=rfp,
+                user_message=user_message,
+                excerpt=excerpt,
+                full_content=full_content,
+                selection_start=selection_start,
+                selection_end=selection_end,
+            )
+            lean_patch = False
         evidence_blob = ""
         avoidance_block = ""
         evidence: list[EvidenceItem] = []
-        if research:
+        if research and not lean_patch:
             avoidance_block = format_avoidance_block(
                 research.writing_avoidances,
                 research.loss_lessons,
@@ -1688,33 +2751,45 @@ async def improve_proposal_section(
                 evidence_blob = _section_corpus_blob(research.evidence_corpus, section_id)
 
         logger.info(
-            "Selection KB plan for %s / %s gaps=%r queries=%r",
+            "Selection KB plan for %s / %s gaps=%r queries=%r lean=%s",
             rfp_id,
             section_id,
             gap_fields,
             kb_queries,
+            lean_patch,
         )
-        supplemental = _draft_supplemental_blob(draft)
-        kb_block, contact_fact_blob = await _fetch_kb_blob_for_selection(
-            kb_queries,
-            evidence_blob=evidence_blob,
-            supplemental_blob=supplemental,
-        )
-        kb_block, contact_fact_blob = await _merge_bio_kb_into_blobs(
-            section,
-            kb_block=kb_block,
-            fact_blob=contact_fact_blob,
-        )
+        kb_block = ""
+        contact_fact_blob = ""
+        if kb_queries:
+            supplemental = "" if lean_patch else _draft_supplemental_blob(draft)
+            kb_block, contact_fact_blob = await _fetch_kb_blob_for_selection(
+                kb_queries,
+                evidence_blob=evidence_blob,
+                supplemental_blob=supplemental,
+            )
+            if not lean_patch:
+                kb_block, contact_fact_blob = await _merge_bio_kb_into_blobs(
+                    section,
+                    kb_block=kb_block,
+                    fact_blob=contact_fact_blob,
+                )
         fact_blob = "\n\n".join(
-            part for part in (full_content, contact_fact_blob) if part.strip()
+            part
+            for part in (
+                ("" if lean_patch else full_content),
+                contact_fact_blob,
+            )
+            if part.strip()
         )
 
         excerpt = (section.content or "")[selection_start:selection_end]
-        excerpt, bio_wh_fills = _apply_bio_work_history_kb_fill(
-            section,
-            excerpt,
-            contact_fact_blob,
-        )
+        bio_wh_fills = 0
+        if not lean_patch:
+            excerpt, bio_wh_fills = _apply_bio_work_history_kb_fill(
+                section,
+                excerpt,
+                contact_fact_blob,
+            )
 
         logger.info(
             "Selection fact blob for %s / %s: %d chars, phones=%s emails=%s",
@@ -1728,16 +2803,11 @@ async def improve_proposal_section(
         working_excerpt, pre_fills = _replace_verify_tags_from_blob(excerpt, fact_blob)
         pre_fills += bio_wh_fills
         if pre_fills > 0 and not _gap_fields_from_text(working_excerpt):
-            new_content = enforce_narrative_voice(
-                _splice_selection(
-                    full_content,
-                    start=selection_start,
-                    end=selection_end,
-                    replacement=working_excerpt,
-                ),
-                section_id=section.id,
-                title=section.title,
-                zo_mode=section.mode,
+            new_content = _splice_selection(
+                full_content,
+                start=selection_start,
+                end=selection_end,
+                replacement=working_excerpt,
             )
             updated_section = section.model_copy(
                 update={"content": new_content, "status": "generated"}
@@ -1801,6 +2871,7 @@ async def improve_proposal_section(
             working_excerpt=working_excerpt if pre_fills > 0 else None,
             research=research,
             compliance_user_message=user_message,
+            lean=lean_patch,
         )
         if research is None:
             research = ProposalResearchCache(
@@ -1927,10 +2998,22 @@ async def improve_proposal_section(
                 provider=provider,
             )
     else:
-        if not research or not research.evidence_corpus:
-            raise ProposalError(
-                "Phase 2 research required for RFP sections. Run KB retrieval first.",
-                status_code=400,
+        # RFP sections: live-search KB for this turn. An empty Phase 2 corpus is OK —
+        # chat used to hard-fail here, which blocked cross-tab edits on finished drafts.
+        if research is None:
+            research = ProposalResearchCache(
+                rfpId=rfp_id,
+                updatedAt=datetime.now(timezone.utc).isoformat(),
+                evidenceCorpus=[],
+                rfpSections=[],
+            )
+        prior_corpus = list(research.evidence_corpus or [])
+        if not prior_corpus:
+            logger.info(
+                "Section improve for %s / %s: empty evidence corpus — "
+                "bootstrapping via live KB search this turn",
+                rfp_id,
+                section_id,
             )
 
         prior_queries = (research.section_queries or {}).get(section_id, [])
@@ -1960,8 +3043,8 @@ async def improve_proposal_section(
             all_hits.extend(hits)
             logger.info("Section refine search %s: %d hits for %r", section_id, len(hits), query[:60])
 
-        prior_corpus_len = len(research.evidence_corpus)
-        corpus = _merge_hits_into_corpus(research.evidence_corpus, all_hits, section_id)
+        prior_corpus_len = len(prior_corpus)
+        corpus = _merge_hits_into_corpus(prior_corpus, all_hits, section_id)
         evidence_added = len(corpus) - prior_corpus_len
         section_evidence = _evidence_for_section(section_id, corpus)
 
@@ -1994,9 +3077,12 @@ async def improve_proposal_section(
             research=research,
         )
 
-        new_queries = {**research.section_queries, section_id: [*prior_queries, *queries]}
+        new_queries = {
+            **(research.section_queries or {}),
+            section_id: [*prior_queries, *queries],
+        }
         updated_rfp_sections: list[RfpSectionMap] = []
-        for s in research.rfp_sections:
+        for s in research.rfp_sections or []:
             if s.id == section_id:
                 updated_rfp_sections.append(
                     s.model_copy(
@@ -2012,32 +3098,54 @@ async def improve_proposal_section(
             update={
                 "evidence_corpus": corpus,
                 "section_queries": new_queries,
-                "rfp_sections": updated_rfp_sections,
+                "rfp_sections": updated_rfp_sections or list(research.rfp_sections or []),
                 "provider": provider,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
         )
 
     # After LLM rewrite: scrub invented E-Verify / conflict claims, keep VERIFY tags.
+    # Also strip internal evidence markers ([E1], **[E14]**, …) — never client-facing.
+    from app.services.proposal_manuscript import strip_evidence_citation_markers
+    from app.services.proposal_chat_structure import (
+        renumber_dynamic_group_titles,
+        sync_case_study_title_from_content,
+    )
+
+    updated_section = updated_section.model_copy(
+        update={
+            "content": strip_evidence_citation_markers(updated_section.content or ""),
+            "kb_refs": [],
+        }
+    )
+    # Case-study body swapped (e.g. Umatilla → San Leandro) must update the sidebar title.
+    updated_section = sync_case_study_title_from_content(updated_section)
     try:
         from app.services.evidence_trust.legal_attestation_gate import (
             gate_section_legal_attestations,
         )
 
-        gated_content, _gate_flags = gate_section_legal_attestations(
-            updated_section.content or "",
-            section_title=updated_section.title or "",
-        )
-        if gated_content != (updated_section.content or ""):
+        gated_section, _gate_flags = gate_section_legal_attestations(updated_section)
+        if (gated_section.content or "") != (updated_section.content or ""):
+            updated_section = gated_section
             updated_section = updated_section.model_copy(
-                update={"content": gated_content}
+                update={
+                    "content": strip_evidence_citation_markers(
+                        updated_section.content or ""
+                    )
+                }
             )
+            updated_section = sync_case_study_title_from_content(updated_section)
     except Exception:
         logger.exception("Legal attestation gate failed after section improve")
 
     merged_sections = [
         updated_section if s.id == section_id else s for s in draft.sections
     ]
+    merged_sections = renumber_dynamic_group_titles(merged_sections)
+    updated_section = next(
+        (s for s in merged_sections if s.id == section_id), updated_section
+    )
 
     now = datetime.now(timezone.utc).isoformat()
     updated_draft = draft.model_copy(
@@ -2051,22 +3159,27 @@ async def improve_proposal_section(
         updated_draft = await _persist_section_improve_draft(
             updated_draft,
             research,
-            section_title=section.title,
+            section_title=updated_section.title,
         )
 
     word_count_result = word_count(updated_section.content)
     remaining_gaps = _gap_fields_from_text(updated_section.content or "")
+    title_for_msg = updated_section.title or section.title
     if is_static:
         assistant_message = (
             f"Ran **{query_count}** gap-targeted KB queries (VERIFY fields + RFP asks), "
-            f"re-applied zö brand voice, and rewrote **{section.title}** "
+            f"re-applied zö brand voice, and rewrote **{title_for_msg}** "
             f"({word_count_result} words)."
         )
     else:
         assistant_message = (
             f"Ran {query_count} new Supermemory queries (different from prior searches), "
             f"added {evidence_added} evidence item(s) to the corpus, preserved brand voice, "
-            f"and rewrote **{section.title}** ({word_count_result} words)."
+            f"and rewrote **{title_for_msg}** ({word_count_result} words)."
+        )
+    if title_for_msg != section.title:
+        assistant_message += (
+            f" Sidebar title updated from **{section.title}** → **{title_for_msg}**."
         )
     if understood_ask:
         assistant_message = f"**Understood:** {understood_ask}\n\n{assistant_message}"

@@ -2,23 +2,248 @@
 
 from __future__ import annotations
 
+import logging
 import re
+from dataclasses import dataclass
 from typing import Literal
 
 from app.models.proposal import ManualFillFlag, ProposalDraft, ProposalResearchCache
 from app.models.rfp import RfpRecord
 from app.services.proposal_rfp_compliance import ComplianceGap, scan_rfp_compliance_gaps
 
-MANUAL_FILL_TAG_RE = re.compile(r"\[MANUAL\s+FILL:[^\]]+\]", re.I)
+logger = logging.getLogger(__name__)
+
+# Colon-form, bare [MANUAL FILL], and [MANUAL FILL or N/A] (budget/questionnaire stubs).
+MANUAL_FILL_TAG_RE = re.compile(r"\[MANUAL\s+FILL[^\]]*\]", re.I)
 VERIFY_TAG_RE = re.compile(r"\[VERIFY:\s*([^\]]+)\]", re.I)
 PLACEHOLDER_TAG_RE = re.compile(r"\[(?:PLACEHOLDER|INSERT|TBD)[^\]]+\]", re.I)
 GENERIC_VERIFY_RE = re.compile(r"\[VERIFY\]", re.I)
+
+_MANUAL_FILL_REQUEST_RE = re.compile(
+    r"(?is)"
+    r"(?:fill|resolve|clear|complete|provide|enter|set|replace).{0,80}"
+    r"(?:\[?\s*MANUAL\s+FILL|manual\s+fills?|manual[\s-]?fill\s+tags?)|"
+    r"\[MANUAL\s+FILL|"
+    r"\bmanual\s+fills?\b|"
+    r"fill\s+(?:all\s+)?(?:the\s+)?(?:manual(?:\s+fill)?(?:\s+tags?)?|gaps|placeholders)",
+)
+
+_MFILL_PLACEHOLDER_RE = re.compile(r"«MFILL_(\d+)»")
+_USER_WITH_VALUE_RE = re.compile(
+    r"(?is)(?:fill|set|use|replace|enter|provide|resolve).{0,120}?"
+    r"(?:with|to|as|=|:)\s*[\"']?(.+?)[\"']?\s*$"
+)
+_USER_IS_VALUE_RE = re.compile(
+    r"(?is)\b(?:is|are|=|:)\s*[\"']?([^\"'\n]{1,200})[\"']?\s*$"
+)
 _FEIN_RE = re.compile(r"\b\d{2}-\d{7}\b")
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE_RE = re.compile(
     r"(?:\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\d{3}[-.\s]\d{3}[-.\s]\d{4})",
     re.I,
 )
+
+
+@dataclass(frozen=True)
+class ManualFillTag:
+    """One MANUAL FILL span in manuscript text."""
+
+    text: str
+    start: int
+    end: int
+    description: str
+
+
+def extract_manual_fill_tags(text: str) -> list[ManualFillTag]:
+    """Find all MANUAL FILL tags (colon-form, bare, and 'or N/A' variants)."""
+    tags: list[ManualFillTag] = []
+    for match in MANUAL_FILL_TAG_RE.finditer(text or ""):
+        raw = match.group(0)
+        inner = raw[1:-1].strip() if raw.startswith("[") and raw.endswith("]") else raw
+        # Strip leading "MANUAL FILL" / "MANUAL FILL:" for the description.
+        desc = re.sub(r"(?i)^MANUAL\s+FILL\s*:?\s*", "", inner).strip()
+        tags.append(
+            ManualFillTag(
+                text=raw,
+                start=match.start(),
+                end=match.end(),
+                description=desc,
+            )
+        )
+    return tags
+
+
+def is_manual_fill_request(text: str) -> bool:
+    """True when the user is explicitly asking to resolve MANUAL FILL tags."""
+    return bool(_MANUAL_FILL_REQUEST_RE.search(text or ""))
+
+
+def mask_manual_fill_tags(content: str) -> tuple[str, list[str]]:
+    """Replace MANUAL FILL tags with «MFILL_N» placeholders for LLM rewrites.
+
+    Returns (masked_content, original_tag_texts_in_order).
+    """
+    tags = extract_manual_fill_tags(content)
+    if not tags:
+        return content, []
+    originals = [t.text for t in tags]
+    # Replace from end so offsets stay valid.
+    masked = content
+    for index, tag in enumerate(reversed(tags)):
+        real_index = len(tags) - 1 - index
+        placeholder = f"«MFILL_{real_index}»"
+        masked = masked[: tag.start] + placeholder + masked[tag.end :]
+    return masked, originals
+
+
+def unmask_manual_fill_tags(content: str, originals: list[str]) -> str:
+    """Restore «MFILL_N» placeholders to original MANUAL FILL tags."""
+    if not originals:
+        return content
+
+    def repl(match: re.Match[str]) -> str:
+        idx = int(match.group(1))
+        if 0 <= idx < len(originals):
+            return originals[idx]
+        return match.group(0)
+
+    return _MFILL_PLACEHOLDER_RE.sub(repl, content)
+
+
+def missing_manual_fill_placeholders(content: str, originals: list[str]) -> list[str]:
+    """Return original tags whose «MFILL_N» placeholder is missing from content."""
+    missing: list[str] = []
+    for index, tag in enumerate(originals):
+        if f"«MFILL_{index}»" not in content and tag not in content:
+            missing.append(tag)
+    return missing
+
+
+def manual_fill_tags_preserved(before: str, after: str) -> bool:
+    """True when every MANUAL FILL tag text from before still appears in after."""
+    before_tags = [t.text for t in extract_manual_fill_tags(before)]
+    if not before_tags:
+        return True
+    after_text = after or ""
+    return all(tag in after_text for tag in before_tags)
+
+
+def _user_supplied_value_for_tag(user_message: str, tag: ManualFillTag) -> str | None:
+    """Extract an explicit value from the user message for this MANUAL FILL tag."""
+    msg = (user_message or "").strip()
+    if not msg:
+        return None
+
+    # "fill [MANUAL FILL: Title] with Director of Marketing"
+    escaped = re.escape(tag.text)
+    direct = re.search(
+        rf"(?is){escaped}.{{0,40}}?(?:with|to|as|=|:)\s*[\"']?(.+?)[\"']?\s*$",
+        msg,
+    )
+    if direct:
+        value = direct.group(1).strip().rstrip(".")
+        if value and value.casefold() not in tag.text.casefold():
+            return value
+
+    # Description keywords appear in message + a with/to/is value.
+    desc = (tag.description or "").strip()
+    desc_tokens = [
+        t
+        for t in re.findall(r"[A-Za-z]{3,}", desc)
+        if t.casefold() not in {"sonja", "ella", "the", "and", "for", "from", "with"}
+    ]
+    if desc_tokens and any(tok.casefold() in msg.casefold() for tok in desc_tokens[:4]):
+        with_match = _USER_WITH_VALUE_RE.search(msg)
+        if with_match:
+            value = with_match.group(1).strip().rstrip(".")
+            if value and "[" not in value:
+                return value
+        is_match = _USER_IS_VALUE_RE.search(msg)
+        if is_match:
+            value = is_match.group(1).strip().rstrip(".")
+            if value and "[" not in value and len(value) < 200:
+                return value
+
+    # Single-tag shortcut: "the budget is $45,000" / "use $45,000" when only one tag.
+    return None
+
+
+def _kb_value_for_manual_fill(tag: ManualFillTag, blob: str) -> str | None:
+    """Best-effort KB lookup for a MANUAL FILL description — never invents."""
+    if not (blob or "").strip():
+        return None
+    field = (tag.description or tag.text).casefold()
+    if any(k in field for k in ("fein", "ein", "tax id", "federal employer")):
+        m = _FEIN_RE.search(blob)
+        return m.group(0) if m else None
+    if "email" in field or "e-mail" in field:
+        emails = _EMAIL_RE.findall(blob)
+        return next(
+            (e for e in emails if "zo" in e.casefold() or "sonja" in e.casefold()),
+            emails[0] if emails else None,
+        )
+    if any(k in field for k in ("phone", "telephone", "fax", "direct line")):
+        phones = _PHONE_RE.findall(blob)
+        return phones[0] if phones else None
+    return None
+
+
+def fill_manual_fill_tags(
+    content: str,
+    *,
+    user_message: str = "",
+    kb_blob: str = "",
+) -> tuple[str, list[dict[str, str]], list[str]]:
+    """Resolve MANUAL FILL tags from user text then KB. Never invents.
+
+    Returns (updated_content, fill_log, remaining_tag_texts).
+    fill_log entries: {"tag", "value", "source"} where source is user|kb.
+    """
+    tags = extract_manual_fill_tags(content)
+    if not tags:
+        return content, [], []
+
+    fill_log: list[dict[str, str]] = []
+    remaining: list[str] = []
+    updated = content
+    single_tag = len(tags) == 1
+
+    for tag in reversed(tags):
+        value: str | None = _user_supplied_value_for_tag(user_message, tag)
+        source = "user"
+        if not value and single_tag:
+            # One tag in the excerpt/section: accept "with X" / "is X" / bare value-ish line.
+            with_match = _USER_WITH_VALUE_RE.search(user_message or "")
+            if with_match:
+                candidate = with_match.group(1).strip().rstrip(".")
+                if candidate and "[" not in candidate:
+                    value = candidate
+            if not value:
+                is_match = _USER_IS_VALUE_RE.search(user_message or "")
+                if is_match:
+                    candidate = is_match.group(1).strip().rstrip(".")
+                    if candidate and "[" not in candidate and len(candidate) < 200:
+                        value = candidate
+        if not value:
+            value = _kb_value_for_manual_fill(tag, kb_blob)
+            source = "kb"
+        if not value:
+            remaining.append(tag.text)
+            continue
+        updated = updated[: tag.start] + value + updated[tag.end :]
+        fill_log.append({"tag": tag.text, "value": value, "source": source})
+        logger.info(
+            "MANUAL FILL resolved source=%s tag=%r value=%r",
+            source,
+            tag.text[:80],
+            value[:80],
+        )
+
+    fill_log.reverse()
+    remaining.reverse()
+    still = [t.text for t in extract_manual_fill_tags(updated)]
+    return updated, fill_log, still
+
 
 _GAP_OWNER: dict[str, str] = {
     "insurance": "Sonja",

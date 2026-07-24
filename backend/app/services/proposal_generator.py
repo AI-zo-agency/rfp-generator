@@ -1981,69 +1981,94 @@ async def generate_full_proposal(
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
-    logger.info("Full proposal pipeline starting for %s", rfp_id)
+    import uuid
 
-    _draft, brand_voice, _research = await generate_sections_1_3(rfp_id)
-    await run_phase2_retrieval(rfp_id)
-    draft, research = await run_phase3_drafting(rfp_id)
-    draft, research, edit_report = await run_phase3_6_self_edit(rfp_id)
-    draft, research, _budget = await run_phase3_5_budget(rfp_id)
+    from app.services.llm_call_context import llm_call_context
+    from app.services.llm_call_log import (
+        format_cost_breakdown_log,
+        get_run_cost_breakdown,
+    )
 
-    if brand_voice and not research.brand_voice:
-        research = research.model_copy(update={"brand_voice": brand_voice})
-        await asave_research_cache(research)
+    run_id = str(uuid.uuid4())
+    logger.info(
+        "Full proposal pipeline starting for %s run_id=%s",
+        rfp_id,
+        run_id,
+    )
 
-    rfp = get_rfp(rfp_id)
-    if rfp:
-        extra_issues = self_edit_exhausted_issues(edit_report.section_logs, draft)
-        review = run_presubmit_review(
-            rfp=rfp,
+    with llm_call_context(rfp_id=rfp_id, run_id=run_id):
+        _draft, brand_voice, _research = await generate_sections_1_3(rfp_id)
+        await run_phase2_retrieval(rfp_id)
+        draft, research = await run_phase3_drafting(rfp_id)
+        draft, research, edit_report = await run_phase3_6_self_edit(rfp_id)
+        draft, research, _budget = await run_phase3_5_budget(rfp_id)
+
+        if brand_voice and not research.brand_voice:
+            research = research.model_copy(update={"brand_voice": brand_voice})
+            await asave_research_cache(research)
+
+        rfp = get_rfp(rfp_id)
+        if rfp:
+            extra_issues = self_edit_exhausted_issues(edit_report.section_logs, draft)
+            review = run_presubmit_review(
+                rfp=rfp,
+                draft=draft,
+                research=research,
+                extra_issues=extra_issues,
+            )
+            from app.services.proposal_ending_report import (
+                build_proposal_ending_report,
+                ending_report_as_dict,
+            )
+
+            now = datetime.now(timezone.utc).isoformat()
+            research_for_ending = research.model_copy(
+                update={
+                    "presubmit_review": review,
+                    "updated_at": now,
+                }
+            )
+            ending = build_proposal_ending_report(
+                rfp=rfp, draft=draft, research=research_for_ending
+            )
+            research = research_for_ending.model_copy(
+                update={
+                    "ending_report": ending_report_as_dict(ending),
+                    "updated_at": now,
+                }
+            )
+            await asave_research_cache(research)
+            logger.info(
+                "Phase 4 pre-submit review (auto) for %s: %d issues, ready=%s, ending_reqs=%d/%d",
+                rfp_id,
+                len(review.issues),
+                review.ready_to_submit,
+                ending.requirements_covered,
+                ending.requirements_total,
+            )
+
+        assert_manuscript_ready(
             draft=draft,
             research=research,
-            extra_issues=extra_issues,
-        )
-        from app.services.proposal_ending_report import (
-            build_proposal_ending_report,
-            ending_report_as_dict,
+            rfp=rfp,
+            require_budget=True,
         )
 
-        now = datetime.now(timezone.utc).isoformat()
-        research_for_ending = research.model_copy(
-            update={
-                "presubmit_review": review,
-                "updated_at": now,
-            }
-        )
-        ending = build_proposal_ending_report(
-            rfp=rfp, draft=draft, research=research_for_ending
-        )
-        research = research_for_ending.model_copy(
-            update={
-                "ending_report": ending_report_as_dict(ending),
-                "updated_at": now,
-            }
-        )
-        await asave_research_cache(research)
+        try:
+            breakdown = get_run_cost_breakdown(run_id)
+            logger.info("%s", format_cost_breakdown_log(breakdown))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "LLM cost breakdown unavailable for run_id=%s: %s",
+                run_id,
+                str(exc)[:200],
+            )
+
         logger.info(
-            "Phase 4 pre-submit review (auto) for %s: %d issues, ready=%s, ending_reqs=%d/%d",
+            "Full proposal complete for %s: %d sections, budget tier=%s, run_id=%s",
             rfp_id,
-            len(review.issues),
-            review.ready_to_submit,
-            ending.requirements_covered,
-            ending.requirements_total,
+            len(draft.sections),
+            research.budget.pricing_tier if research.budget else "n/a",
+            run_id,
         )
-
-    assert_manuscript_ready(
-        draft=draft,
-        research=research,
-        rfp=rfp,
-        require_budget=True,
-    )
-
-    logger.info(
-        "Full proposal complete for %s: %d sections, budget tier=%s",
-        rfp_id,
-        len(draft.sections),
-        research.budget.pricing_tier if research.budget else "n/a",
-    )
-    return draft, brand_voice, research
+        return draft, brand_voice, research

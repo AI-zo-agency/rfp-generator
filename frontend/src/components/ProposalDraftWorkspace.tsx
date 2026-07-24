@@ -931,6 +931,8 @@ export function ProposalDraftWorkspace({
       try {
         const restored = await restoreProposalSnapshot(rfp.id, savedAt);
         applyOutlineFromServer(restored);
+        // Persist immediately so a stale autosave cannot resurrect the bad draft.
+        await saveProposalDraft(rfp.id, restored);
         setRestoreSnapshotAt(savedAt);
 
         const beforeById = new Map(
@@ -968,11 +970,16 @@ export function ProposalDraftWorkspace({
     [restoreSnapshotAt, outline.snapshots, outline.sections, rfp.id, applyOutlineFromServer]
   );
 
-  const handleSnapshotDropdownChange = useCallback((savedAt: string) => {
-    // Selecting a version only updates compare target — Restore button loads it.
-    if (!savedAt) return;
-    setRestoreSnapshotAt(savedAt);
-  }, []);
+  const handleSnapshotDropdownChange = useCallback(
+    (savedAt: string) => {
+      // Selecting a version loads it as the live draft (with confirm).
+      // Compare still uses the selected checkpoint after restore.
+      if (!savedAt) return;
+      setRestoreSnapshotAt(savedAt);
+      void handleRestoreSnapshot(savedAt);
+    },
+    [handleRestoreSnapshot]
+  );
 
   useEffect(() => {
     const snaps = outline.snapshots ?? [];
@@ -1997,11 +2004,11 @@ export function ProposalDraftWorkspace({
                     (outline.snapshots?.length ?? 0) === 0
                   }
                   className="proposal-snapshot-select"
-                  aria-label="Choose a saved proposal version to compare"
+                  aria-label="Choose a saved proposal version to restore"
                   aria-busy={isRestoringSnapshot}
                   title={
                     (outline.snapshots?.length ?? 0) > 0
-                      ? "Select a checkpoint to compare. Click Restore to load it as the live draft."
+                      ? "Select a checkpoint to restore it as the live draft (confirm first). Compare updates after restore."
                       : "Versions appear after chat improve, Scan RFP, or when a draft checkpoint is saved."
                   }
                 >
@@ -2072,7 +2079,7 @@ export function ProposalDraftWorkspace({
             </div>
           </div>
           <div
-            className="proposal-outline-layout grid min-h-0 min-w-0 flex-1 gap-0 overflow-hidden lg:gap-4 lg:p-3 xl:gap-6"
+            className="proposal-outline-layout grid min-h-0 min-w-0 flex-1 overflow-hidden"
           >
           <div className="proposal-section-list flex min-h-0 min-w-0 flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-2xl lg:border lg:border-zo-border/80">
             <div className="flex shrink-0 items-center justify-between border-b border-zo-border/60 px-3 py-2.5">

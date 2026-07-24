@@ -50,6 +50,41 @@ export function apiDraftToOutline(draft: ApiProposalDraft): ProposalOutline {
   };
 }
 
+/** FastAPI may return detail as string, list of validation errors, or object. */
+export function formatApiDetail(
+  detail: unknown,
+  fallback = "Request failed"
+): string {
+  if (detail == null) return fallback;
+  if (typeof detail === "string") return detail.trim() || fallback;
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object") {
+          const row = item as { msg?: unknown; loc?: unknown; message?: unknown };
+          const msg = row.msg ?? row.message;
+          if (typeof msg === "string" && msg.trim()) {
+            const loc = Array.isArray(row.loc)
+              ? row.loc.filter((p) => p !== "body").join(".")
+              : "";
+            return loc ? `${loc}: ${msg}` : msg;
+          }
+        }
+        return null;
+      })
+      .filter((p): p is string => Boolean(p));
+    return parts.length > 0 ? parts.join("; ") : fallback;
+  }
+  if (typeof detail === "object") {
+    const row = detail as { message?: unknown; msg?: unknown; detail?: unknown };
+    if (typeof row.message === "string") return row.message;
+    if (typeof row.msg === "string") return row.msg;
+    if (typeof row.detail === "string") return row.detail;
+  }
+  return fallback;
+}
+
 function slimSnapshotsForSave(
   snapshots: ProposalOutline["snapshots"]
 ): ProposalOutline["snapshots"] {
@@ -1573,11 +1608,21 @@ export async function improveProposalSection(
           ? {
               selectionStart: options.selection.start,
               selectionEnd: options.selection.end,
-              selectionText: options.selection.text,
+              selectionText: options.selection.text.slice(0, 8000),
             }
           : {}),
         ...(options?.conversationHistory?.length
-          ? { conversationHistory: options.conversationHistory }
+          ? {
+              conversationHistory: options.conversationHistory
+                .slice(-12)
+                .map((turn) => ({
+                  role: turn.role,
+                  content:
+                    turn.content.length > 11_900
+                      ? `${turn.content.slice(0, 11_900)}\n…[truncated]`
+                      : turn.content,
+                })),
+            }
           : {}),
         ...(options?.proposalWide ? { proposalWide: true } : {}),
       }),
@@ -1585,7 +1630,7 @@ export async function improveProposalSection(
   );
   const text = await res.text();
   let data: {
-    detail?: string;
+    detail?: unknown;
     section?: OutlineSection;
     draft?: ApiProposalDraft;
     research?: ProposalResearch;
@@ -1598,7 +1643,7 @@ export async function improveProposalSection(
     throw new Error("Invalid response from server (section improve may have timed out).");
   }
   if (!res.ok) {
-    throw new Error(data.detail ?? "Section improve failed");
+    throw new Error(formatApiDetail(data.detail, "Section improve failed"));
   }
   if (!data.section || !data.draft) {
     throw new Error("No section data returned from server");

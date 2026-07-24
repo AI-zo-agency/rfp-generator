@@ -9,7 +9,7 @@ from urllib.parse import unquote
 
 from app.models.proposal import ProposalDraft, ProposalDraftSnapshot
 
-_MAX_SNAPSHOTS = 12
+_MAX_SNAPSHOTS = 20
 
 # These labels clutter the menu and/or restore empty pre-chat states (data loss UX).
 _HIDDEN_SNAPSHOT_LABEL = re.compile(
@@ -119,6 +119,21 @@ def push_after_section_edit_snapshot(
     title = (section_title or "section").strip()[:48] or "section"
     cleaned = prune_clutter_snapshots(draft)
     return push_proposal_snapshot(cleaned, label=f"Saved after chat — {title}")
+
+
+def push_before_structure_change_snapshot(
+    draft: ProposalDraft,
+    *,
+    section_title: str,
+) -> ProposalDraft:
+    """Checkpoint BEFORE add/delete/rename so Restore can undo a bad structure swap."""
+    title = (section_title or "section").strip()[:48] or "section"
+    if filled_count(draft) <= 0:
+        return draft
+    cleaned = prune_clutter_snapshots(draft)
+    return push_proposal_snapshot(
+        cleaned, label=f"Before structure change — {title}"
+    )
 
 
 def attach_scan_summary_to_latest_before_scan(

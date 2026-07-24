@@ -814,14 +814,27 @@ async def _draft_batch_once(
     ) else 8192
 
     async with state["llm_semaphore"]:
-        raw, provider = await chat_json_with_repair(
-            [
-                {"role": "system", "content": DRAFT_BATCH_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=draft_max_tokens,
-            temperature=0.35,
-        )
+        from app.services.llm_call_context import llm_call_context
+
+        draft_node = "draft_sections"
+        if batch:
+            sid = str(batch[0].get("id") or "").strip()
+            title = str(batch[0].get("title") or "").strip()
+            draft_node = f"draft_sections:{sid or title or 'section'}"
+        with llm_call_context(
+            rfp_id=str(state.get("rfp_id") or ""),
+            node_name=draft_node,
+        ):
+            raw, provider = await chat_json_with_repair(
+                [
+                    {"role": "system", "content": DRAFT_BATCH_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=draft_max_tokens,
+                temperature=0.35,
+                node_name=draft_node,
+                rfp_id=str(state.get("rfp_id") or "") or None,
+            )
 
     results: list[dict[str, Any]] = []
     drafted = raw.get("sections", [])

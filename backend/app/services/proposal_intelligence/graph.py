@@ -95,22 +95,36 @@ def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
     async def node(state: IntelligenceGraphState) -> dict[str, Any]:
         if state.get("error"):
             return {}
+        from app.services.llm_call_context import llm_call_context
+
         log_intel_event("node_enter", node=name, rfp_id=state.get("rfp_id"))
         plan = _load_plan(state)
         try:
-            plan = await _with_sem(
-                fn(
-                    plan=plan,
-                    rfp_context=state.get("rfp_context") or "",
-                    rfp_meta=_meta(state),
+            with llm_call_context(
+                rfp_id=str(state.get("rfp_id") or ""),
+                node_name=name,
+            ):
+                plan = await _with_sem(
+                    fn(
+                        plan=plan,
+                        rfp_context=state.get("rfp_context") or "",
+                        rfp_meta=_meta(state),
+                    )
                 )
-            )
         except TypeError:
             # Agents that don't take rfp_context
             try:
-                plan = await _with_sem(fn(plan=plan, rfp_meta=_meta(state)))
+                with llm_call_context(
+                    rfp_id=str(state.get("rfp_id") or ""),
+                    node_name=name,
+                ):
+                    plan = await _with_sem(fn(plan=plan, rfp_meta=_meta(state)))
             except TypeError:
-                plan = await _with_sem(fn(plan=plan))
+                with llm_call_context(
+                    rfp_id=str(state.get("rfp_id") or ""),
+                    node_name=name,
+                ):
+                    plan = await _with_sem(fn(plan=plan))
         except IntelligenceError as exc:
             log_intel_event("node_fail", node=name, error=str(exc)[:200])
             return {"error": str(exc), "plan": _dump_plan(plan)}
@@ -130,14 +144,20 @@ async def _delivery_parallel(state: IntelligenceGraphState) -> dict[str, Any]:
     """Fan-out independent delivery planners under a shared semaphore."""
     if state.get("error"):
         return {}
+    from app.services.llm_call_context import llm_call_context
+
     log_intel_event("node_enter", node="delivery_parallel")
     plan = _load_plan(state)
     meta = _meta(state)
 
-    async def _one(runner):  # type: ignore[no-untyped-def]
+    async def _one(runner, node_name: str):  # type: ignore[no-untyped-def]
         async with _LLM_SEMAPHORE:
             try:
-                return await runner(plan=plan, rfp_meta=meta)
+                with llm_call_context(
+                    rfp_id=str(state.get("rfp_id") or ""),
+                    node_name=node_name,
+                ):
+                    return await runner(plan=plan, rfp_meta=meta)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("delivery parallel agent failed: %s", exc)
                 return plan
@@ -145,12 +165,12 @@ async def _delivery_parallel(state: IntelligenceGraphState) -> dict[str, Any]:
     # Run sequentially under semaphore via gather of locked coroutines —
     # each updates different delivery branches on the shared plan object.
     await asyncio.gather(
-        _one(run_methodology_planner),
-        _one(run_budget_planner),
-        _one(run_risk_planner),
-        _one(run_qa_planner),
-        _one(run_communication_planner),
-        _one(run_training_planner),
+        _one(run_methodology_planner, "methodology_planner"),
+        _one(run_budget_planner, "budget_planner"),
+        _one(run_risk_planner, "risk_planner"),
+        _one(run_qa_planner, "qa_planner"),
+        _one(run_communication_planner, "communication_planner"),
+        _one(run_training_planner, "training_planner"),
     )
     log_intel_event("node_exit", node="delivery_parallel")
     return {"plan": _dump_plan(plan), "provider": plan.metadata.provider or ""}

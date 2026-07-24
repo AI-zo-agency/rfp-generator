@@ -284,14 +284,16 @@ async def fetch_zo_voice_excerpt(
     rfp_location: str | None,
     rfp_context: str,
 ) -> str:
+    """Fetch voice samples only — never the full bios/company/case-study gather."""
     bundles = await proposal_knowledge_base_tools.gather_proposal_kb_for_sections(
         rfp_title=rfp_title,
         rfp_client=rfp_client,
         rfp_sector=rfp_sector,
         rfp_location=rfp_location,
         rfp_context=rfp_context,
+        buckets=("zo_voice",),
     )
-    text, _sources = bundles["zo_voice"]
+    text, _sources = bundles.get("zo_voice", ("", []))
     return text[:8000]
 
 

@@ -47,6 +47,8 @@ async def safe_chat_json(
             messages,
             max_tokens=max_tokens,
             temperature=temperature,
+            # Prefer explicit agent names; fall back to graph contextvar node_name.
+            node_name=agent_name if agent_name and agent_name != "agent" else None,
         )
         if isinstance(raw, dict):
             return raw, provider
