@@ -1,6 +1,7 @@
 import { supabase } from "@/lib/supabase-direct";
 import { withDashboardPdfUrl } from "@/lib/rfp-pdf";
 import { mapSupabaseRfpRow } from "@/lib/supabase-rfp-map";
+import { revalidatePath } from "next/cache";
 import { NextResponse } from "next/server";
 import { longRunningFetch } from "@/lib/long-running-fetch";
 
@@ -58,6 +59,11 @@ export async function DELETE(
       cache: "no-store",
     });
     const data = await response.json();
+    if (response.ok) {
+      revalidatePath("/");
+      revalidatePath("/rfps");
+      revalidatePath("/proposals");
+    }
     return NextResponse.json(data, { status: response.status });
   } catch (error) {
     const message =

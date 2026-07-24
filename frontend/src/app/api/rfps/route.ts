@@ -2,10 +2,12 @@ import { backendFetch } from "@/lib/backend-api";
 import { withDashboardPdfUrl } from "@/lib/rfp-pdf";
 import { computeStats } from "@/lib/mock-rfps";
 import type { DashboardStats, RfpRecord } from "@/types/rfp";
+import { revalidatePath } from "next/cache";
 import { NextResponse } from "next/server";
 
 export const maxDuration = 3600;
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
@@ -107,6 +109,11 @@ export async function POST(request: Request) {
             : "Failed to create RFP";
       return NextResponse.json({ error: detail }, { status: response.status });
     }
+
+    // Bust RSC cache so Active RFPs / dashboard counts include the new row.
+    revalidatePath("/");
+    revalidatePath("/rfps");
+    revalidatePath("/proposals");
 
     return NextResponse.json(
       { ok: true, rfp: data },

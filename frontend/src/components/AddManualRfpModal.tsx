@@ -121,10 +121,13 @@ export function AddManualRfpModal({ open, onClose }: AddManualRfpModalProps) {
       onClose();
       form.reset();
       resetForm();
-      router.refresh();
-      if (data.rfp?.id) {
-        router.push(`/rfps/${data.rfp.id}`);
+      const newId = data.rfp?.id;
+      // Hard navigation so list/dashboard cannot keep a stale RSC payload.
+      if (newId) {
+        window.location.assign(`/rfps/${newId}`);
+        return;
       }
+      router.refresh();
     } catch {
       setError("Network error. Please try again.");
       setSubmitting(false);
