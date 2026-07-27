@@ -135,8 +135,9 @@ export function ProposalSectionChatPanel({
         onSetReference(null);
       }
 
-      const pinnedSection = activeReference?.sectionId
-        ? sections.find((s) => s.id === activeReference.sectionId) ?? null
+      const pinnedSectionId = activeReference?.sectionId;
+      const pinnedSection = pinnedSectionId
+        ? sections.find((s) => s.id === pinnedSectionId) ?? null
         : null;
 
       const resolution = resolveChatTarget(sections, trimmed, {
