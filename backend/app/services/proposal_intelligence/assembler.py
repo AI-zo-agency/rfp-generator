@@ -47,13 +47,22 @@ def _zo_mode_for_title(title: str) -> str:
 
 def derive_legacy_fields(plan: ProposalExecutionPlan) -> dict[str, Any]:
     """Derive rfpSections / sectionQueries / proofPoints. Never returns evidenceCorpus."""
+    from app.services.proposal_outline_dedup import filter_lean_outline_sections
+
     plans_by_id = {p.section_id: p for p in plan.writing.section_plans.plans}
     retrieval_by_id = {e.section_id: e for e in plan.writing.retrieval_plan.entries}
+
+    # Near-dup + static only — outline already lean-filtered with RFP context upstream.
+    lean_sections, _dropped = filter_lean_outline_sections(
+        list(plan.writing.proposal_outline.sections),
+        rfp_context="",
+        drop_generic_filler=False,
+    )
 
     rfp_sections: list[RfpSectionMap] = []
     section_queries: dict[str, list[str]] = {}
 
-    for section in sorted(plan.writing.proposal_outline.sections, key=lambda s: s.order):
+    for section in lean_sections:
         brief = plans_by_id.get(section.id)
         entry = retrieval_by_id.get(section.id)
         requirements: list[str] = []

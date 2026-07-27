@@ -44,17 +44,26 @@ evaluation/scored sections, page-by-page demands). For each section return:
 CRITICAL — RFP-PRIMARY (not a static template for every bid):
 - Methodology, Timeline, Budget narrative, Approach, References appear ONLY when THIS RFP demands them.
 - Do NOT invent generic tabs that are not in the RFP.
-- Do NOT skip a scored/required tab because zö already has Sections 1–3 — map it and set duplicateOfStaticSection if it overlaps.
+- OMIT tabs that only restate zö static Sections 1–3 identity blocks (Who We Are, Company History +
+  Client Roster, Org Structure, Business Info, generic Team Overview bios). Those are already drafted
+  before Phase 3.
+- DO map scored RFP-specific asks with FULL buyer wording (never shorten to boring labels like
+  "Price" or "Portfolio"): Sample Work Portfolio, ONE Agency Requirements capability matrix
+  (merge G.1–G.16 / Section III A.1–12 into a single tab — never one tab per G.#), Qualifications/
+  Experience when the RFP TOC names that evaluation tab, References forms, Pricing forms, Addenda.
+- TITLES MUST NOT BE SIMPLIFIED — copy the RFP TOC / submission heading fully (keep 4.2 etc.).
 - Phase 3 drafts zö Sections 1–3 first, then ONLY RFP-mapped tabs from this list (dynamic per solicitation).
 - For References: quote required count, institution type (e.g. two-year public), and contact fields from the RFP.
 - For Pricing/Quotation forms: when the RFP includes a form or forbids alterations, map it as its own tab — do not substitute a custom Section A/B/C/D outline.
 
 MANDATORY SUBMISSION SCAN (every RFP):
 - Read "Documents to be Submitted" / Section IV (or equivalent) and list EVERY item: narrative tabs,
-  signed forms, addenda acknowledgement, Excel/pricing attachments, references, certifications.
-- Vendor qualification blocks: if RFP asks for financial stability, awards/recognitions, higher-ed
-  commitment as scored narrative, map each as its own section with requirement bullets quoting RFP text.
+  signed forms, addenda acknowledgement, Excel/pricing attachments, references, certifications,
+  closing / commitment statements.
+- Vendor qualification blocks: map scored narrative asks the RFP names; omit pure identity/roster
+  rewrites already covered by Sections 1–3.
 - Acknowledgement of Addenda: always map when the RFP says it must be returned with the proposal.
+- Always include Offeror Commitment & Closing Statement when closing the proposal.
 
 Include compliance/admin sections when they need narrative OR a checklist section in the proposal.
 
@@ -70,7 +79,7 @@ Return ONLY JSON:
       "zoMode": "select",
       "evaluationWeight": 25,
       "sectionType": "experience",
-      "duplicateOfStaticSection": "section-3"
+      "duplicateOfStaticSection": null
     }
   ]
 }"""
@@ -173,6 +182,12 @@ async def _analyze_rfp(state: RetrievalGraphState) -> dict[str, Any]:
         sections_raw = raw.get("sections", [])
         sections: list[dict[str, Any]] = []
         if isinstance(sections_raw, list):
+            from app.services.proposal_outline_dedup import filter_lean_outline_sections
+            from app.services.proposal_voice_enforcement import (
+                should_skip_rfp_section_as_static_duplicate,
+            )
+
+            parsed: list[dict[str, Any]] = []
             for index, item in enumerate(sections_raw):
                 if not isinstance(item, dict):
                     continue
@@ -183,9 +198,61 @@ async def _analyze_rfp(state: RetrievalGraphState) -> dict[str, Any]:
                             "id": item.get("id") or f"rfp-sec-{index + 1}",
                         }
                     )
-                    sections.append(section.model_dump(by_alias=True))
+                    if should_skip_rfp_section_as_static_duplicate(
+                        title=section.title or "",
+                        duplicate_of_static_section=section.duplicate_of_static_section,
+                    ):
+                        logger.info(
+                            "RFP analysis skipping static-duplicate tab: %s",
+                            section.title,
+                        )
+                        continue
+                    parsed.append(section.model_dump(by_alias=True))
                 except Exception:
                     continue
+            sections, dropped = filter_lean_outline_sections(
+                parsed,
+                rfp_context=state.get("rfp_context") or "",
+            )
+            if dropped:
+                logger.info(
+                    "RFP analysis lean-outline dropped %d tab(s): %s",
+                    len(dropped),
+                    dropped[:12],
+                )
+            from app.services.proposal_outline_dedup import (
+                merge_closing_components_into_outline,
+            )
+
+            merged, closing_added = merge_closing_components_into_outline(
+                sections,
+                rfp_context=state.get("rfp_context") or "",
+            )
+            # Convert OutlineSection objects back to dicts for retrieval state.
+            sections = []
+            for item in merged:
+                if isinstance(item, dict):
+                    sections.append(item)
+                elif hasattr(item, "model_dump"):
+                    dump = item.model_dump(by_alias=True)
+                    sections.append(
+                        {
+                            "id": dump.get("id"),
+                            "title": dump.get("title"),
+                            "requirements": [
+                                dump.get("conditionalReason")
+                                or f"Address {dump.get('title')} per RFP"
+                            ],
+                            "retrievalFocus": ["company facts", "references", "pricing"],
+                            "zoMode": "write",
+                        }
+                    )
+            if closing_added:
+                logger.info(
+                    "RFP analysis added %d closing tab(s): %s",
+                    len(closing_added),
+                    closing_added[:12],
+                )
         if not sections:
             sections = _fallback_sections(state)
         logger.info(
@@ -212,15 +279,19 @@ async def _analyze_rfp(state: RetrievalGraphState) -> dict[str, Any]:
 
 
 def _fallback_sections(state: RetrievalGraphState) -> list[dict[str, Any]]:
-    """Minimal section map when LLM analysis fails."""
+    """Minimal section map when LLM analysis fails — never invent Company/Team/Work tabs."""
     client = state["rfp_client"]
     sector = state["rfp_sector"]
     templates = [
-        ("rfp-sec-1", "Company Overview", "pull", ["certifications", "company overview"]),
-        ("rfp-sec-2", "Team & Personnel", "select", ["team bios", "key personnel"]),
-        ("rfp-sec-3", "Relevant Experience", "select", ["case studies", sector]),
-        ("rfp-sec-4", "Technical Approach", "write", ["methodology", "approach"]),
-        ("rfp-sec-5", "Scope & Deliverables", "write", ["scope", "deliverables"]),
+        ("rfp-sec-1", "Technical Approach & Scope of Work", "write", ["methodology", "approach"]),
+        ("rfp-sec-2", "Cost Proposal / Fee Schedule", "write", ["pricing", "fee schedule"]),
+        ("rfp-closing-references", "References", "select", ["references", "past clients"]),
+        (
+            "rfp-closing-commitment",
+            "Offeror Commitment & Closing Statement",
+            "write",
+            ["closing", "commitment"],
+        ),
     ]
     result: list[dict[str, Any]] = []
     for sid, title, mode, focus in templates:

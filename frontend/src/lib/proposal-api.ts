@@ -793,7 +793,10 @@ export async function generateFullProposalStaged(
       snapshot.pipelineStatus?.resumeFromPhase ??
       resolveResumePhase(draft, research));
 
-  if (draft && !staticSections1to3Complete(draft)) {
+  // Keep incomplete 1–3 from blocking an explicit Intelligence+ start.
+  const skipStaticGate =
+    options?.startFrom === "phase-2" || options?.forceRerunFromStart === true;
+  if (draft && !staticSections1to3Complete(draft) && !skipStaticGate) {
     resumeFrom = "sections-1-3";
   }
 
@@ -850,6 +853,40 @@ export async function generateFullProposalStaged(
       onProgress?.("phase-2");
       research = await runPhase2Retrieval(rfpId, signal);
       ({ draft, research } = await refreshProposalSnapshot(rfpId));
+      // Seed RFP tabs from fresh Intelligence so the sidebar updates before Phase 3.
+      if (draft && research?.rfpSections?.length) {
+        const isStatic = (id: string) =>
+          id.startsWith("section-1-") ||
+          id.startsWith("section-2-") ||
+          id.startsWith("section-3-");
+        const rebuilt: ProposalOutline = {
+          ...draft,
+          sections: [
+            ...draft.sections.filter((s) => isStatic(s.id)),
+            ...research.rfpSections
+              .filter((mapped) => !isStatic(mapped.id))
+              .map((mapped) => ({
+                id: mapped.id,
+                title: mapped.title,
+                pageLimit: mapped.pageLimit ?? undefined,
+                wordTarget: mapped.pageLimit
+                  ? Math.max(300, mapped.pageLimit * 350)
+                  : 800,
+                required: true,
+                custom: false,
+                content: "",
+                status: "outline" as const,
+                source: "rfp" as const,
+                mode: mapped.zoMode ?? ("write" as const),
+              })),
+          ],
+          updatedAt: new Date().toISOString(),
+        };
+        draft = rebuilt;
+        await saveProposalDraft(rfpId, draft);
+        options?.onDraftUpdate?.(draft);
+        options?.onResearchUpdate?.(research);
+      }
     }
   }
 
@@ -868,6 +905,16 @@ export async function generateFullProposalStaged(
     }
   }
 
+  if (run("phase-3-5-budget")) {
+    if (!(await skipIfPhaseAlreadyFinished("phase-3-5-budget"))) {
+      throwIfAborted(signal);
+      onProgress?.("phase-3-5-budget");
+      const budgeted = await runPhase3_5BudgetWithRecovery(rfpId, signal);
+      research = budgeted.research;
+      if (budgeted.draft) draft = budgeted.draft;
+    }
+  }
+
   if (run("phase-3-6-self-edit")) {
     if (!(await skipIfPhaseAlreadyFinished("phase-3-6-self-edit"))) {
       throwIfAborted(signal);
@@ -880,16 +927,6 @@ export async function generateFullProposalStaged(
       );
       draft = edited.draft;
       research = edited.research;
-    }
-  }
-
-  if (run("phase-3-5-budget")) {
-    if (!(await skipIfPhaseAlreadyFinished("phase-3-5-budget"))) {
-      throwIfAborted(signal);
-      onProgress?.("phase-3-5-budget");
-      const budgeted = await runPhase3_5BudgetWithRecovery(rfpId, signal);
-      research = budgeted.research;
-      if (budgeted.draft) draft = budgeted.draft;
     }
   }
 
@@ -1146,6 +1183,34 @@ export async function resetProposal(rfpId: string): Promise<void> {
   }
 }
 
+/** Keep Sections 1–3; delete Intelligence / RFP tabs / budget / review for a clean Phase 2 rebuild. */
+export async function restartProposalFromIntelligence(
+  rfpId: string
+): Promise<ProposalOutline> {
+  const res = await fetch(
+    `/api/rfps/${rfpId}/proposal/restart-from-intelligence`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    }
+  );
+  const text = await res.text();
+  let data: { detail?: string; draft?: ApiProposalDraft } = {};
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from restart-from-intelligence.");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Failed to clear Intelligence for restart");
+  }
+  if (!data.draft) {
+    throw new Error("No draft returned after clearing Intelligence");
+  }
+  return apiDraftToOutline(data.draft);
+}
+
 export async function generateProposalSections1to3(
   rfpId: string,
   signal?: AbortSignal
@@ -1385,12 +1450,16 @@ export async function runPhase4FinalizeGaps(
 
 export async function runFulfillRfpGaps(
   rfpId: string,
-  options?: { useLlm?: boolean; signal?: AbortSignal }
+  options?: { useLlm?: boolean; mode?: string; signal?: AbortSignal }
 ): Promise<{
   review: PreSubmitReview;
   research: ProposalResearch;
   draft: ProposalOutline;
   fulfillReport: {
+    mode?: string;
+    sectionsScanned?: number;
+    verifyTagsRemoved?: number;
+    verifyTagsKept?: number;
     closingDetected?: string[];
     closingDetectedSections?: Array<{ id: string; title: string }>;
     closingAlreadyPresent?: Array<{ id: string; title: string }>;
@@ -1406,7 +1475,10 @@ export async function runFulfillRfpGaps(
   const res = await fetch(`/api/rfps/${rfpId}/proposal/fulfill-rfp-gaps`, {
     ...proposalPostInit(options?.signal),
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ useLlm: options?.useLlm ?? true }),
+    body: JSON.stringify({
+      useLlm: options?.useLlm ?? true,
+      mode: options?.mode ?? "verify_scrub_only",
+    }),
   });
   const text = await res.text();
   let data: {

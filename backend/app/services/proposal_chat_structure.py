@@ -58,6 +58,12 @@ class StructurePlan(BaseModel):
 
 STRUCTURE_PLAN_PROMPT = """You plan structural changes to a zö agency proposal outline (sidebar sections).
 
+You receive the FULL proposal (outline + section text). Read the WHOLE proposal and the user
+query first. Decide the action from that — never from which tab happens to be open in the UI.
+
+The "UI open tab" is incidental browser state. It is NOT the target unless the user explicitly
+says "this section", "this tab", "the open section", or names that section's title.
+
 The user may want to EDIT one section, ADD new sidebar sections, DELETE sections, or you may need to CLARIFY.
 
 Return ONLY JSON:
@@ -119,10 +125,10 @@ Rules:
    identity changes.
    EXCEPTION A: "add Y to case studies" is NOT a replace of Previous Experience / forms.
    EXCEPTION B: "replace [numbers/figures/hours/%/claims] with qualitative language" (or
-   "remove unsourced figures") is ALWAYS action=edit on the focus section — never rename
-   or delete the sidebar tab.
-10. Ignore the focus section when the user clearly names a different sidebar title/person —
-    structure changes are proposal-wide.
+   "remove unsourced figures") is ALWAYS action=edit on the named section (or clarify which) —
+   never rename or delete the sidebar tab, and never default to the UI open tab.
+10. ALWAYS read the full proposal manuscript + outline. Ignore the UI open tab unless the user
+    clearly points at it ("this section" / exact title). Structure changes are proposal-wide.
 11. NEVER create a sidebar tab titled placeholder / HUMAN SIGN-OFF / [VERIFY: …]. For E-Verify,
     affidavits, conflict disclosure, or "do not assert until Sonja confirms" → action=edit on
     the existing form/affidavit section. Keep the form; insert [VERIFY] tags in place.
@@ -347,6 +353,35 @@ def _outline_digest(draft: ProposalDraft) -> str:
     return "\n".join(lines)
 
 
+def _proposal_manuscript_for_chat(
+    draft: ProposalDraft, *, max_chars: int = 14000
+) -> str:
+    """Full-proposal text for structure / chat planning (not just the open tab)."""
+    lines: list[str] = [
+        "FULL PROPOSAL (read all of this before deciding; UI open tab is irrelevant):",
+        "",
+        "OUTLINE:",
+        _outline_digest(draft),
+        "",
+        "SECTION TEXT:",
+    ]
+    used = sum(len(line) + 1 for line in lines)
+    for section in draft.sections:
+        title = section.title or section.id
+        body = (section.content or "").strip()
+        if not body:
+            block = f"\n### {title} [{section.id}]\n(empty)\n"
+        else:
+            snippet = body[:1100] + ("…" if len(body) > 1100 else "")
+            block = f"\n### {title} [{section.id}]\n{snippet}\n"
+        if used + len(block) > max_chars:
+            lines.append("\n…(additional sections omitted)")
+            break
+        lines.append(block)
+        used += len(block)
+    return "".join(lines)
+
+
 def _section_label(title: str) -> str:
     """Human label from a sidebar title (strip 2.1 — prefix)."""
     text = (title or "").strip()
@@ -414,6 +449,23 @@ def _find_bio_by_person_name(
     return hit
 
 
+def _is_in_place_section_budget_fill(
+    text: str, focus: ProposalSection | None
+) -> bool:
+    """Fill budget/investment VERIFY cells in the open tab — not a new sidebar section."""
+    from app.services.proposal_budget_playbook import (
+        section_has_budget_verify_tags,
+        section_is_budget_related,
+        user_asks_section_budget_fill,
+    )
+
+    if focus is None or section_is_budget_related(focus):
+        return False
+    return user_asks_section_budget_fill(text) and section_has_budget_verify_tags(
+        focus.content or ""
+    )
+
+
 def _is_in_place_kb_or_verify_edit(text: str) -> bool:
     """True when the user wants to fill/edit the current tab — not add a sidebar section.
 
@@ -421,10 +473,17 @@ def _is_in_place_kb_or_verify_edit(text: str) -> bool:
     "Kb Only" via the two-word replace heuristic.
     Also catches E-Verify / disclosure / human sign-off safety asks — those must EDIT
     the affidavit in place, never create a new 'placeholder: HUMAN SIGN-OFF' tab.
+    Also catches "remove VERIFY tags if not required" — scrub in place, no new tab.
     """
     raw = (text or "").strip()
     if not raw:
         return False
+    from app.services.proposal_verify_optional_scrub import (
+        user_asks_scrub_optional_verify,
+    )
+
+    if user_asks_scrub_optional_verify(raw):
+        return True
     # Explicit rename / swap of real people or case studies still wins — but not
     # "replace E-Verify with a placeholder / VERIFY tag".
     if re.search(
@@ -727,9 +786,84 @@ _KNOWN_CASE_CLIENT_RE = re.compile(
     r")\b"
 )
 
+_ADD_BIO_INTENT_RE = re.compile(
+    r"(?is)"
+    r"(?:add|create|insert|include)\s+"
+    r"(?:a\s+)?(?:new\s+)?(?:another\s+)?(?:more\s+)?"
+    r"(?:team\s+)?(?:bio(?:graphy)?|resume)s?\b"
+    r"|"
+    r"(?:add|create|insert|include)\s+"
+    r"(?:a\s+)?(?:new\s+)?(?:bio(?:graphy)?\s+)?section\s+"
+    r"for\s+[A-Za-z][a-z']+\s+[A-Za-z][a-z']+"
+    r"|"
+    r"\balongside\b.{0,120}\b(?:bio|team|resume)\b"
+    r"|"
+    r"(?:add|create|insert|include).{0,80}\b(?:bio|resume)\b"
+)
+
 
 def _is_add_to_case_studies_intent(text: str) -> bool:
     return bool(_ADD_CASE_STUDY_INTENT_RE.search(text or ""))
+
+
+def _is_add_bio_intent(text: str) -> bool:
+    """True when the user wants a NEW team bio tab — not rewrite an existing one."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if re.search(
+        r"\b(?:replace|swap|instead\s+of|change\s+.+\s+to)\b",
+        raw,
+        re.I,
+    ):
+        # "replace X with Y" is a swap unless they explicitly want both kept.
+        if not re.search(
+            r"\balongside\b|\bin\s+addition\b|\bkeep\b.{0,50}\b(?:existing|current)\b",
+            raw,
+            re.I,
+        ):
+            return False
+    return bool(_ADD_BIO_INTENT_RE.search(raw))
+
+
+def is_add_section_intent(text: str) -> bool:
+    """True when the user wants a NEW sidebar tab — any kind (bio, case study, custom, RFP).
+
+    Used to route away from full_rewrite on the open tab. In-place VERIFY/KB fills are excluded.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if _is_in_place_kb_or_verify_edit(raw) or _is_in_place_manual_fill_edit(raw):
+        return False
+    if _is_add_bio_intent(raw) or _is_add_to_case_studies_intent(raw):
+        return True
+    if re.search(
+        r"\b(?:replace|swap|instead\s+of|change\s+.+\s+to)\b",
+        raw,
+        re.I,
+    ):
+        if not re.search(
+            r"\balongside\b|\bin\s+addition\b|\bkeep\b.{0,50}\b(?:existing|current)\b|"
+            r"\bwithout\s+(?:removing|deleting|replacing)\b",
+            raw,
+            re.I,
+        ):
+            return False
+    generic_patterns = (
+        r"(?is)\b(?:add|create|insert|make|include)\s+"
+        r"(?:a\s+)?(?:new\s+)?(?:another\s+)?(?:more\s+)?"
+        r"(?:sidebar\s+)?(?:section|tab|h2)\b",
+        r"(?is)\b(?:add|create|insert)\s+(?:a\s+)?(?:new\s+)?"
+        r"(?:section\s+)?(?:for|titled|called|named)\b",
+        r"(?is)\balongside\b.{0,160}\b(?:section|tab|existing|current)\b",
+        r"(?is)\bnew\s+(?:sidebar\s+)?(?:section|tab)\b",
+        r"(?is)\b(?:split|separate)\b.{0,80}\b(?:into\s+)?(?:its\s+own\s+)?"
+        r"(?:section|tab|h2)\b",
+        r"(?is)\b(?:move|extract)\b.{0,80}\b(?:into\s+)?(?:its\s+own\s+)?"
+        r"(?:section|tab)\b",
+    )
+    return any(re.search(p, raw) for p in generic_patterns)
 
 
 def _extract_case_study_name_from_add_message(text: str) -> str | None:
@@ -761,6 +895,260 @@ def _extract_case_study_name_from_add_message(text: str) -> str | None:
             if name and len(name) >= 3 and "case stud" not in name.casefold():
                 return name
     return None
+
+
+def _extract_generic_section_title_from_add_message(text: str) -> str | None:
+    """Pull a short sidebar title from a generic 'add section' message."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    patterns = (
+        r'(?is)(?:section|tab|h2)\s+(?:for|titled|called|named)\s+["\']?(.+?)["\']?'
+        r"(?:\s+alongside|\s+in\s+addition|\s+after|\s*$|[.;])",
+        r'(?is)(?:add|create|insert|make)\s+(?:a\s+)?(?:new\s+)?(?:section\s+)?'
+        r'(?:for|titled|called|named)\s+["\']?(.+?)["\']?'
+        r"(?:\s+alongside|\s+in\s+addition|\s+after|\s*$|[.;])",
+        r"(?is)(?:add|create|insert|make)\s+(?:a\s+)?(?:new\s+)?"
+        r"(.+?)\s+(?:section|tab)\s+(?:alongside|in\s+addition|after)\b",
+        r"(?is)(?:create|add)\s+(?:a\s+)?(?:new\s+)?(?:h2\s+)?section\s+"
+        r"(?:titled|called|named)\s+(.+?)(?:\s*;|\s*—|\s*-\s|\s*$|[.;])",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, raw)
+        if not match:
+            continue
+        label = _clean_section_label(match.group(1))
+        label = _sanitize_addition_title(label, fallback="")
+        if label and len(label) >= 3 and not _is_bogus_structure_title(label):
+            return label
+    return None
+
+
+def _heuristic_add_generic_section_plan(
+    user_message: str,
+    draft: ProposalDraft,
+    *,
+    focus_section_id: str | None = None,
+) -> StructurePlan | None:
+    """Generic 'add new section/tab' → new sidebar item (never rewrite the open tab)."""
+    text = (user_message or "").strip()
+    if not text or not is_add_section_intent(text):
+        return None
+    if _is_add_bio_intent(text) or _is_add_to_case_studies_intent(text):
+        return None
+    title = _extract_generic_section_title_from_add_message(text)
+    if not title:
+        return None
+    focus = next(
+        (s for s in draft.sections if s.id == focus_section_id),
+        None,
+    )
+    kind: Literal["bio", "case_study", "custom", "rfp"] = (
+        _infer_addition_kind(focus) if focus else "custom"
+    )
+    if kind in {"bio", "case_study"}:
+        kind = "custom"
+    insert_after = focus_section_id
+    if focus and kind == "rfp":
+        insert_after = focus.id
+    elif not insert_after:
+        insert_after = draft.sections[-1].id if draft.sections else None
+    logger.info("Generic section ADD heuristic: %r (after=%s)", title, insert_after)
+    return StructurePlan(
+        action="add_sections",
+        additions=[
+            StructureAddition(
+                kind=kind,
+                title=title,
+                insertAfterSectionId=insert_after,
+                draftHint=text[:500],
+            )
+        ],
+        assistantNote=f"Adding new sidebar section **{title}** (existing tabs unchanged).",
+    )
+
+
+def _coerce_add_section_plan(
+    plan: StructurePlan,
+    user_message: str,
+    draft: ProposalDraft,
+    *,
+    focus_section_id: str,
+) -> StructurePlan:
+    """If the user asked to ADD a tab, never leave the planner on action=edit."""
+    if not is_add_section_intent(user_message):
+        return plan
+    if plan.action == "add_sections" and plan.additions:
+        return plan
+    generic = _heuristic_add_generic_section_plan(
+        user_message, draft, focus_section_id=focus_section_id
+    )
+    if generic is not None:
+        return generic
+    title = _extract_generic_section_title_from_add_message(user_message)
+    if not title:
+        return StructurePlan(
+            action="clarify",
+            clarify_question=(
+                "I can add a **new sidebar section** without changing existing tabs. "
+                "What short title should the new section have, and what should it cover?"
+            ),
+        )
+    focus = next((s for s in draft.sections if s.id == focus_section_id), None)
+    kind = _infer_addition_kind(focus) if focus else "custom"
+    if kind in {"bio", "case_study"}:
+        kind = "custom"
+    return StructurePlan(
+        action="add_sections",
+        additions=[
+            StructureAddition(
+                kind=kind,
+                title=title,
+                insertAfterSectionId=focus_section_id,
+                draftHint=user_message[:500],
+            )
+        ],
+        assistantNote=f"Adding new sidebar section **{title}** (existing tabs unchanged).",
+    )
+
+
+def _extract_bio_member_name_from_add_message(text: str) -> str | None:
+    """Pull roster name from an 'add bio alongside …' message."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    patterns = (
+        r"(?is)(?:bio(?:graphy)?\s+)?(?:section\s+)?(?:for|of)\s+"
+        r"([A-Za-z][a-z']+)\s+([A-Za-z][a-z']+)",
+        r"(?is)\b([A-Za-z][a-z']+)\s+([A-Za-z][a-z']+)\s+(?:bio|resume)\b",
+        r"(?is)(?:add|create|insert|include).{0,40}?\b([A-Za-z][a-z']+)\s+([A-Za-z][a-z']+)\b",
+    )
+    stop = {
+        "a",
+        "an",
+        "the",
+        "new",
+        "another",
+        "more",
+        "bio",
+        "section",
+        "team",
+        "existing",
+        "current",
+        "alongside",
+        "add",
+        "create",
+    }
+    for pattern in patterns:
+        for match in re.finditer(pattern, raw):
+            first = match.group(1).strip()
+            last = match.group(2).strip()
+            if first.casefold() in stop or last.casefold() in stop:
+                continue
+            label = _clean_section_label(f"{first} {last}")
+            if label and len(label) >= 3:
+                return label
+    labels = _extract_swap_labels_from_text(raw)
+    return labels[0] if labels else None
+
+
+def _bio_already_present(
+    draft: ProposalDraft, name: str
+) -> ProposalSection | None:
+    needle = (name or "").casefold()
+    if not needle:
+        return None
+    for section in _bio_sections(draft.sections):
+        blob = f"{section.title}\n{section.content or ''}".casefold()
+        if needle in blob:
+            return section
+    return None
+
+
+def _heuristic_add_bio_plan(
+    user_message: str,
+    draft: ProposalDraft,
+) -> StructurePlan | None:
+    """'Add Ron Comer bio alongside Letitia' → new 2.N tab (never stuff into 2.3)."""
+    text = (user_message or "").strip()
+    if not text or not _is_add_bio_intent(text):
+        return None
+    name = _extract_bio_member_name_from_add_message(text)
+    if not name:
+        return None
+    existing = _bio_already_present(draft, name)
+    if existing:
+        return StructurePlan(
+            action="edit",
+            editSectionId=existing.id,
+            assistantNote=(
+                f"**{name}** already has a bio tab — opening it to improve "
+                "(no duplicate tab)."
+            ),
+        )
+    bios = _bio_sections(draft.sections)
+    after = bios[-1].id if bios else None
+    logger.info("Bio ADD heuristic: %s (after=%s)", name, after)
+    return StructurePlan(
+        action="add_sections",
+        additions=[
+            StructureAddition(
+                kind="bio",
+                title=f"2.x — {name}",
+                memberName=name,
+                insertAfterSectionId=after,
+                draftHint=(
+                    f"Draft full bio for {name} from 04 bio KB — title, experience, "
+                    "relevance to this RFP. Do not remove other team bios."
+                ),
+            )
+        ],
+        assistantNote=(
+            f"Adding **{name}** as a new team bio tab alongside existing bios."
+        ),
+    )
+
+
+def _coerce_add_bio_plan(
+    plan: StructurePlan,
+    user_message: str,
+    draft: ProposalDraft,
+) -> StructurePlan:
+    """If user asked to add a bio, force ADD bio and never rewrite an existing tab in place."""
+    if not _is_add_bio_intent(user_message):
+        return plan
+    forced = _heuristic_add_bio_plan(user_message, draft)
+    if forced is not None:
+        return forced
+    if plan.action != "add_sections" or not plan.additions:
+        return plan
+    additions: list[StructureAddition] = []
+    for addition in plan.additions:
+        member = (
+            addition.member_name
+            or _extract_bio_member_name_from_add_message(user_message)
+            or _section_label(addition.title or "")
+            or "Team member"
+        ).strip()
+        additions.append(
+            addition.model_copy(
+                update={
+                    "kind": "bio",
+                    "member_name": member,
+                    "title": f"2.x — {member}",
+                    "case_study_name": None,
+                }
+            )
+        )
+    return plan.model_copy(
+        update={
+            "action": "add_sections",
+            "deletions": [],
+            "additions": additions,
+            "assistant_note": plan.assistant_note
+            or "Adding team bio tab(s) alongside existing bios.",
+        }
+    )
 
 
 def _case_study_already_present(
@@ -884,19 +1272,38 @@ async def plan_chat_structure_action(
     if add_case is not None:
         return add_case
 
+    add_bio = _heuristic_add_bio_plan(user_message, draft)
+    if add_bio is not None:
+        return add_bio
+
+    add_generic = _heuristic_add_generic_section_plan(
+        user_message, draft, focus_section_id=focus_section_id
+    )
+    if add_generic is not None:
+        return add_generic
+
     focus = next((s for s in draft.sections if s.id == focus_section_id), None)
+    manuscript = _proposal_manuscript_for_chat(draft)
     prompt = (
         f"RFP: {rfp_title} — {rfp_client}\n\n"
-        f"Focus section id: {focus_section_id}\n"
-        f"Focus section title: {(focus.title if focus else '')}\n\n"
-        f"Current outline:\n{_outline_digest(draft)}\n\n"
-        f"RFP context (short):\n{rfp_context[:4000]}\n\n"
+        f"UI open tab id (IGNORE unless user says this/current section): {focus_section_id}\n"
+        f"UI open tab title (IGNORE unless user says this/current section): "
+        f"{(focus.title if focus else '')}\n\n"
+        f"{manuscript}\n\n"
+        f"RFP context (short):\n{rfp_context[:3000]}\n\n"
         f"User message:\n{user_message.strip()}\n\n"
+        "CRITICAL: Read the FULL proposal manuscript above and the user query first. "
+        "The UI open tab is browser state only — NEVER treat it as the edit/add target "
+        "unless the user explicitly says this section / this tab / the open section, "
+        "or names that exact title.\n"
         "CRITICAL: If the user wants a DIFFERENT sidebar section/person/case study than the "
-        "focus tab title, you MUST use add_sections with deletions for the old tab and "
+        "open tab title, you MUST use add_sections with deletions for the old tab and "
         "additions for the new one. NEVER action=edit that puts new content under the old title.\n"
+        "CRITICAL: 'Add a new section/tab/H2' / 'create section titled X' → ALWAYS "
+        "action=add_sections (even if a different tab is currently open).\n"
         "CRITICAL: Phrases like 'from KB only', 'fill VERIFY', or 'knowledge base only' mean "
-        "edit the focus section in place — NEVER add_sections with title 'Kb Only'.\n"
+        "edit the relevant named section in place — NEVER add_sections with title 'Kb Only'. "
+        "If they did not name a section and did not say 'this section', ask clarify.\n"
         "CRITICAL: 'Add X in/to case studies' → add_sections kind=case_study ONLY. "
         "Do NOT delete Previous Experience, References, or forms.\n"
         "CRITICAL: Removing or replacing unsourced hours/percentages/year claims with "
@@ -927,16 +1334,22 @@ async def plan_chat_structure_action(
         return StructurePlan(action="edit", editSectionId=focus_section_id)
 
     plan = _coerce_add_case_study_plan(plan, user_message, draft)
+    plan = _coerce_add_bio_plan(plan, user_message, draft)
+    plan = _coerce_add_section_plan(
+        plan, user_message, draft, focus_section_id=focus_section_id
+    )
 
     # Only VERIFY / MANUAL FILL / E-Verify safety asks force in-place edit.
     # Do NOT coerce real add_sections (e.g. split into Project Staff Planning) just
     # because a title was long or slightly malformed — sanitize titles instead.
-    in_place_safety = _is_in_place_kb_or_verify_edit(
-        user_message
-    ) or _is_in_place_manual_fill_edit(user_message)
-    if in_place_safety and plan.action in {"add_sections", "delete_sections"}:
+    in_place_safety = (
+        _is_in_place_kb_or_verify_edit(user_message)
+        or _is_in_place_manual_fill_edit(user_message)
+        or _is_in_place_section_budget_fill(user_message, focus)
+    )
+    if in_place_safety and plan.action in {"add_sections", "delete_sections", "clarify"}:
         logger.info(
-            "Coercing structure plan → in-place edit (attestation/VERIFY/MANUAL FILL safety)"
+            "Coercing structure plan → in-place edit (attestation/VERIFY/MANUAL FILL/budget safety)"
         )
         note = (
             "Editing the current section in place — keeping the form and "
@@ -946,6 +1359,11 @@ async def plan_chat_structure_action(
             note = (
                 "Editing the current section in place — resolving [MANUAL FILL] "
                 "tags only from user-provided or KB facts (no new sidebar tab)."
+            )
+        elif _is_in_place_section_budget_fill(user_message, focus):
+            note = (
+                "Filling budget/investment [VERIFY] figures in the open section — "
+                "no new sidebar tab."
             )
         return StructurePlan(
             action="edit",
@@ -974,6 +1392,14 @@ async def plan_chat_structure_action(
         add_case = _heuristic_add_case_study_plan(user_message, draft)
         if add_case is not None:
             return add_case
+        add_bio = _heuristic_add_bio_plan(user_message, draft)
+        if add_bio is not None:
+            return add_bio
+        add_generic = _heuristic_add_generic_section_plan(
+            user_message, draft, focus_section_id=focus_section_id
+        )
+        if add_generic is not None:
+            return add_generic
     # Guard: LLM sometimes invents a "Kb Only" tab from "from KB only".
     if plan.action == "add_sections":
         bogus = {

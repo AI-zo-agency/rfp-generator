@@ -11,6 +11,9 @@ interface SectionRevisionCompareProps {
   after: string;
   summary?: string;
   instruction?: string;
+  /** When live draft still shows Before (stale overwrite), offer to re-apply After. */
+  showReapply?: boolean;
+  onReapply?: () => void;
   onDismiss: () => void;
 }
 
@@ -31,6 +34,8 @@ export function SectionRevisionCompare({
   after,
   summary,
   instruction,
+  showReapply = false,
+  onReapply,
   onDismiss,
 }: SectionRevisionCompareProps) {
   const [theme, setTheme] = useState<RevisionCompareTheme>("warm");
@@ -40,12 +45,13 @@ export function SectionRevisionCompare({
   const wordsBefore = countWords(before);
   const wordsAfter = countWords(after);
   const wordDelta = wordsAfter - wordsBefore;
+  const identical =
+    (before || "").replace(/\s+/g, " ").trim() ===
+    (after || "").replace(/\s+/g, " ").trim();
 
   useEffect(() => {
     setSelectedHunk(0);
   }, [before, after]);
-
-  if (hunks.length === 0) return null;
 
   const active = hunks[selectedHunk] ?? hunks[0];
 
@@ -58,9 +64,13 @@ export function SectionRevisionCompare({
         <div className="min-w-0 flex-1">
           <p className="proposal-revision-eyebrow">What changed</p>
           <p className="proposal-revision-stats">
-            {hunks.length} block{hunks.length === 1 ? "" : "s"} ·{" "}
-            {wordDelta >= 0 ? "+" : ""}
-            {wordDelta} words ({wordsBefore} → {wordsAfter})
+            {identical
+              ? "No text change in this section"
+              : hunks.length === 0
+                ? `Full section compare · ${wordDelta >= 0 ? "+" : ""}${wordDelta} words (${wordsBefore} → ${wordsAfter})`
+                : `${hunks.length} block${hunks.length === 1 ? "" : "s"} · ${
+                    wordDelta >= 0 ? "+" : ""
+                  }${wordDelta} words (${wordsBefore} → ${wordsAfter})`}
           </p>
           {instruction ? (
             <p className="proposal-revision-request-inline">
@@ -69,6 +79,16 @@ export function SectionRevisionCompare({
           ) : null}
         </div>
         <div className="proposal-revision-drawer-header-actions">
+          {showReapply && onReapply ? (
+            <button
+              type="button"
+              onClick={onReapply}
+              className="zo-btn !py-1.5 !px-2.5 !text-xs"
+              title="Live draft still has the Before text — put After into the section"
+            >
+              Apply After to draft
+            </button>
+          ) : null}
           <div className="proposal-revision-theme-picker">
             {THEME_OPTIONS.map((opt) => (
               <button
@@ -103,39 +123,72 @@ export function SectionRevisionCompare({
         </div>
       ) : null}
 
-      {hunks.length > 1 ? (
-        <div className="proposal-revision-hunk-tabs" role="tablist" aria-label="Changed blocks">
-          {hunks.map((hunk, index) => (
-            <button
-              key={`${hunk.type}-${index}`}
-              type="button"
-              role="tab"
-              aria-selected={selectedHunk === index}
-              className={`proposal-revision-hunk-tab proposal-revision-hunk--${hunk.type} ${
-                selectedHunk === index ? "is-selected" : ""
-              }`}
-              onClick={() => setSelectedHunk(index)}
-            >
-              {hunkLabel(hunk.type)} {index + 1}
-            </button>
-          ))}
+      {identical ? (
+        <div className="proposal-revision-compare-stage">
+          <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
+            <p className="proposal-revision-stage-label">Current section</p>
+            <div className="proposal-revision-stage-body whitespace-pre-wrap">
+              {(after || before || "").trim() || "(empty)"}
+            </div>
+            <p className="mt-3 text-xs text-zo-text-muted">
+              This apply did not change this section&apos;s text (patch skipped or
+              only other sections were updated). Open a section that actually
+              changed, or ask again to apply the fix here.
+            </p>
+          </div>
         </div>
-      ) : null}
-
-      <div className="proposal-revision-compare-stage">
-        {active.before ? (
+      ) : hunks.length === 0 ? (
+        <div className="proposal-revision-compare-stage">
           <div className="proposal-revision-stage-col proposal-revision-stage-col--before">
             <p className="proposal-revision-stage-label">Before</p>
-            <div className="proposal-revision-stage-body">{active.before}</div>
+            <div className="proposal-revision-stage-body whitespace-pre-wrap">
+              {(before || "").trim() || "(empty)"}
+            </div>
           </div>
-        ) : null}
-        {active.after ? (
           <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
             <p className="proposal-revision-stage-label">After</p>
-            <div className="proposal-revision-stage-body">{active.after}</div>
+            <div className="proposal-revision-stage-body whitespace-pre-wrap">
+              {(after || "").trim() || "(empty)"}
+            </div>
           </div>
-        ) : null}
-      </div>
+        </div>
+      ) : (
+        <>
+          {hunks.length > 1 ? (
+            <div className="proposal-revision-hunk-tabs" role="tablist" aria-label="Changed blocks">
+              {hunks.map((hunk, index) => (
+                <button
+                  key={`${hunk.type}-${index}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={selectedHunk === index}
+                  className={`proposal-revision-hunk-tab proposal-revision-hunk--${hunk.type} ${
+                    selectedHunk === index ? "is-selected" : ""
+                  }`}
+                  onClick={() => setSelectedHunk(index)}
+                >
+                  {hunkLabel(hunk.type)} {index + 1}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="proposal-revision-compare-stage">
+            {active?.before ? (
+              <div className="proposal-revision-stage-col proposal-revision-stage-col--before">
+                <p className="proposal-revision-stage-label">Before</p>
+                <div className="proposal-revision-stage-body">{active.before}</div>
+              </div>
+            ) : null}
+            {active?.after ? (
+              <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
+                <p className="proposal-revision-stage-label">After</p>
+                <div className="proposal-revision-stage-body">{active.after}</div>
+              </div>
+            ) : null}
+          </div>
+        </>
+      )}
     </section>
   );
 }

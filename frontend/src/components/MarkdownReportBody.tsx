@@ -63,9 +63,22 @@ export function stripManuscriptDisplayArtifacts(text: string): string {
   return t.trim();
 }
 
-/** Strip internal KB evidence markers ([E1], [E2], …) from client-facing copy. */
+/** Strip internal KB evidence markers ([E1], [E12, E13], …) from client-facing copy. */
 export function stripEvidenceCitations(text: string): string {
-  return stripManuscriptDisplayArtifacts(text).replace(/\s*\[E\d+\]/g, "");
+  let t = stripManuscriptDisplayArtifacts(text);
+  // Comma lists: [E12, E13, E14]
+  t = t.replace(/\s*\*{0,2}\[\s*E\d+(?:\s*[,;]\s*E\d+)+\s*\]\*{0,2}/gi, "");
+  // Singles: [E1], **[E14]**
+  t = t.replace(/\s*\*{0,2}\[E\d+\]\*{0,2}/gi, "");
+  // Orphaned References lines that only listed evidence ids
+  t = t.replace(
+    /^\s*\**\s*References?\s*\**\s*:?\s*\**\s*(?:\[?\s*E\d+(?:\s*[,;]\s*E\d+)*\s*\]?)?\s*$/gim,
+    ""
+  );
+  t = t.replace(/\[PRICING FLAG:[^\]]*\]/gi, "");
+  t = t.replace(/[ \t]{2,}/g, " ");
+  t = t.replace(/\n{3,}/g, "\n\n");
+  return t.trim();
 }
 
 function isTableRow(line: string): boolean {

@@ -124,4 +124,50 @@ def is_strict_improvement(
         return True
     if _GRAMMAR_GLITCH_RE.search(before.content) and not _GRAMMAR_GLITCH_RE.search(after.content):
         return True
+    # Honest integrity: replace unsourced % / numbers with [VERIFY] (more tags = intentional).
+    if is_integrity_verify_flagging(before, after):
+        return True
+    return False
+
+
+_PERCENT_FIGURE_RE = re.compile(r"\b\d{1,3}(?:\.\d+)?\s*%")
+_VERIFY_PERCENT_RE = re.compile(
+    r"\[VERIFY:[^\]]*(?:percent|%|allocation|fte|time)[^\]]*\]",
+    re.I,
+)
+
+
+def is_integrity_verify_flagging(
+    before: ProposalSection,
+    after: ProposalSection,
+) -> bool:
+    """True when the patch mainly flags unsourced claims with [VERIFY] (not a rewrite).
+
+    The weakness scorer treats more VERIFY tags as worse — but users often ask to
+    replace invented percentages/figures with [VERIFY]. That must count as improvement.
+    """
+    prior = before.content or ""
+    new = after.content or ""
+    if not new.strip() or new.strip() == prior.strip():
+        return False
+
+    bv, av = verify_count(prior), verify_count(new)
+    if av <= bv:
+        return False
+
+    bw, aw = word_count(prior), word_count(new)
+    if bw >= 80 and aw < int(bw * 0.7):
+        return False
+
+    if _VERIFY_PERCENT_RE.search(new) and (
+        _PERCENT_FIGURE_RE.findall(new) != _PERCENT_FIGURE_RE.findall(prior)
+        or len(_PERCENT_FIGURE_RE.findall(new)) < len(_PERCENT_FIGURE_RE.findall(prior))
+    ):
+        return True
+
+    before_pcts = len(_PERCENT_FIGURE_RE.findall(prior))
+    after_pcts = len(_PERCENT_FIGURE_RE.findall(new))
+    if before_pcts > 0 and after_pcts < before_pcts:
+        return True
+
     return False

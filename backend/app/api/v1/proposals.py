@@ -376,6 +376,75 @@ async def reset_proposal_endpoint(rfp_id: str) -> dict[str, object]:
     }
 
 
+@router.post("/{rfp_id}/proposal/restart-from-intelligence")
+async def restart_from_intelligence_endpoint(rfp_id: str) -> dict[str, object]:
+    """Keep Sections 1–3; delete Intelligence / RFP tabs / budget / review so Phase 2 rebuilds clean."""
+    if not rfp_exists(rfp_id):
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    from datetime import datetime, timezone
+
+    from app.services.proposal_draft_archives import (
+        REASON_BEFORE_RESET,
+        archive_filled_draft,
+    )
+    from app.services.proposal_generator import _static_sections_from_draft
+    from app.services.proposal_generation_cancel import clear_generation_cancel
+    from app.services.proposal_repository import (
+        aget_proposal_draft,
+        asave_proposal_draft,
+    )
+    from app.models.proposal import ProposalDraft
+
+    current = await aget_proposal_draft(rfp_id)
+    try:
+        await archive_filled_draft(
+            current,
+            reason=REASON_BEFORE_RESET,
+            label="Before Start from Intelligence",
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "Failed to archive draft before restart-from-intelligence for %s", rfp_id
+        )
+
+    page_limit = None
+    if current and current.sections:
+        page_limit = next(
+            (s.page_limit for s in current.sections if s.page_limit),
+            None,
+        )
+    static = _static_sections_from_draft(current, page_limit)
+    now = datetime.now(timezone.utc).isoformat()
+    stripped = ProposalDraft(
+        rfpId=rfp_id,
+        sections=static,
+        updatedAt=now,
+        generatedAt=current.generated_at if current else None,
+        provider=current.provider if current else None,
+        snapshots=current.snapshots if current else [],
+    )
+    await asave_proposal_draft(stripped)
+
+    try:
+        await adelete_research_cache(rfp_id)
+    except Exception:
+        pass
+    await clear_pipeline_checkpoint(rfp_id)
+    clear_generation_cancel(rfp_id)
+
+    return {
+        "ok": True,
+        "draft": slim_draft_for_api(stripped),
+        "message": (
+            "Cleared Intelligence, RFP tabs, budget, and review. "
+            "Sections 1–3 kept. Ready to rebuild from Phase 2."
+        ),
+    }
+
+
 @router.post("/{rfp_id}/proposal/stop")
 async def stop_proposal_generation_endpoint(rfp_id: str) -> dict[str, object]:
     """Request cooperative stop — ends current LLM/Supermemory work and saves checkpoint."""
@@ -662,10 +731,13 @@ async def fulfill_rfp_gaps_endpoint(
     from app.services.proposal_fulfill_rfp_gaps import run_fulfill_rfp_gaps
 
     use_llm = body.use_llm if body else True
+    mode = (body.mode if body and getattr(body, "mode", None) else None) or (
+        "verify_scrub_only"
+    )
     try:
         async with cancel_generation_on_disconnect(rfp_id, request):
             review, research, draft, fulfill_report = await run_fulfill_rfp_gaps(
-                rfp_id, use_llm=use_llm
+                rfp_id, use_llm=use_llm, mode=mode
             )
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc

@@ -22,6 +22,7 @@ import {
   PROPOSAL_INITIAL_LOAD_TIMEOUT_MS,
   recoverProposalDraftIfSaved,
   resetProposal,
+  restartProposalFromIntelligence,
   runPhase3Drafting,
   runPhase3_5BudgetWithRecovery,
   runPhase3_6SelfEditWithRecovery,
@@ -330,6 +331,9 @@ export function ProposalDraftWorkspace({
         updatedDraft.sections.map((section) => section.id)
       );
       const authoritativeCount = updatedDraft.sections.length;
+      const improvedById = new Map(
+        updatedDraft.sections.map((section) => [section.id, section] as const)
+      );
       void fetchProposalDraft(rfp.id).then((snap) => {
         if (!snap.draft) return;
         const snapIds = new Set(snap.draft.sections.map((section) => section.id));
@@ -341,6 +345,35 @@ export function ProposalDraftWorkspace({
         ) {
           const repaired: ProposalOutline = {
             ...updatedDraft,
+            updatedAt: new Date().toISOString(),
+          };
+          applyOutlineFromServer(repaired);
+          void saveProposalDraft(rfp.id, repaired);
+          return;
+        }
+        // In-flight autosave can also overwrite the improve save with pre-edit
+        // bodies (e.g. VERIFY tags). Prefer the improve response for any section
+        // whose content still disagrees with what chat just wrote.
+        let contentRegressed = false;
+        const mergedSections = snap.draft.sections.map((section) => {
+          const improved = improvedById.get(section.id);
+          if (!improved) return section;
+          if ((improved.content || "") === (section.content || "")) {
+            return section;
+          }
+          contentRegressed = true;
+          return {
+            ...section,
+            ...improved,
+            content: improved.content,
+            status: improved.status ?? section.status,
+          };
+        });
+        if (contentRegressed) {
+          const repaired: ProposalOutline = {
+            ...snap.draft,
+            ...updatedDraft,
+            sections: mergedSections,
             updatedAt: new Date().toISOString(),
           };
           applyOutlineFromServer(repaired);
@@ -1195,7 +1228,7 @@ export function ProposalDraftWorkspace({
   const handleFulfillRfpGaps = useCallback(async () => {
     if (
       !confirm(
-        "Scan the full RFP for anything still missing?\n\nWalks the uploaded PDF, submission checklist, **budget** (reconcile + fee sync), and **contractor KPIs** (Section 2.3). Adds missing closing sections. Team bios and case studies stay unchanged.\n\nA saved version is stored before each scan.\n\nUses AI tokens."
+        "Scan RFP — remove optional [VERIFY] tags only?\n\nReads every section with [VERIFY], checks the RFP, and removes tags that are not critically required.\n\nDoes NOT invent facts. Does NOT add sections, budget, or KPIs.\n\nA saved version is stored first."
       )
     ) {
       return;
@@ -1213,74 +1246,42 @@ export function ProposalDraftWorkspace({
     );
     try {
       const { review, research: updatedResearch, draft, fulfillReport } =
-        await runFulfillRfpGaps(rfp.id, { signal: abort.signal });
+        await runFulfillRfpGaps(rfp.id, {
+          signal: abort.signal,
+          mode: "verify_scrub_only",
+        });
       setPresubmitReview(review);
       setResearch(updatedResearch);
       applyOutlineFromServer(draft);
       await saveProposalDraft(rfp.id, draft);
-      const addedSections = fulfillReport.closingAddedSections ?? [];
-      const narrativeAdded =
-        fulfillReport.submissionDeliverablesAdded?.length ??
-        fulfillReport.submissionNarrativesAdded?.length ??
-        0;
-      const added =
-        addedSections.length ||
-        (fulfillReport.closingAdded?.length ?? 0) ||
-        narrativeAdded;
-      const human = fulfillReport.humanDecisionGaps?.length ?? 0;
-      const addedTitles = addedSections.map((s) => s.title).filter(Boolean);
-      const detectedSections =
-        fulfillReport.closingDetectedSections ??
-        (fulfillReport.closingDetected ?? []).map((id) => ({ id, title: id }));
-      const alreadyPresent = fulfillReport.closingAlreadyPresent ?? [];
-      const inPlaceFixes = fulfillReport.inPlaceFixCount ?? 0;
-      const detectedLabels = detectedSections.map((s) => s.title).filter(Boolean);
+      const removed = fulfillReport.verifyTagsRemoved ?? 0;
+      const kept = fulfillReport.verifyTagsKept ?? 0;
+      const scanned = fulfillReport.sectionsScanned ?? 0;
       setGapResolveNotice(
-        `RFP scan done — ${detectedLabels.length} closing item(s) found in PDF` +
-          (detectedLabels.length ? ` (${detectedLabels.join(", ")})` : "") +
-          `; ${added} new section(s)` +
-          (addedTitles.length ? `: ${addedTitles.join(", ")}` : "") +
-          (alreadyPresent.length
-            ? `; ${alreadyPresent.length} already in proposal (KPI/insurance/typos updated in place`
-            : "") +
-          (inPlaceFixes ? `, ${inPlaceFixes} in-place fix(es)` : "") +
-          (alreadyPresent.length ? ")" : "") +
-          (human ? `; ${human} need a human decision.` : ".") +
-          " Saved version: Sections tab → saved version menu."
+        scanned === 0
+          ? "No [VERIFY] tags found in the manuscript."
+          : `VERIFY scrub done — scanned ${scanned} section(s); removed ${removed} optional tag(s); kept ${kept} RFP-critical tag(s). Saved version available.`
       );
       setGenerateNotice(
-        addedTitles.length
-          ? `Added from RFP — open Review: ${addedTitles.join(", ")}`
-          : detectedLabels.length || inPlaceFixes
-            ? `RFP scan finished — ${detectedLabels.length} closing items matched; ${inPlaceFixes} in-place fixes. Qualifications stay [VERIFY] until real KB/Section 3 content — Scan will not invent case studies.`
-            : "RFP scan finished — review the updated proposal."
+        scanned === 0
+          ? "No [VERIFY] tags to clean."
+          : `Removed ${removed} optional [VERIFY] tag(s); kept ${kept} only if critically required by the RFP.`
       );
       setGenerateError(null);
       setActiveTab("content");
-      const jumpId =
-        addedSections[0]?.id ||
-        draft.sections.find((s) => s.id.startsWith("rfp-closing-"))?.id ||
-        draft.sections.find((s) => s.id.startsWith("rfp-qual-"))?.id ||
-        null;
-      if (jumpId) {
-        setSelectedSectionId(jumpId);
-        window.setTimeout(() => {
-          scrollToManuscriptSection(jumpId);
-        }, 120);
-      }
     } catch (error) {
       if (
         abort.signal.aborted ||
         (error instanceof DOMException && error.name === "AbortError")
       ) {
         setGenerateNotice(
-          "Scan RFP stopped — partial changes may be saved; check Sections → saved version menu."
+          "VERIFY scrub stopped — partial changes may be saved; check Sections → saved version menu."
         );
         setGenerateError(null);
         return;
       }
       const message =
-        error instanceof Error ? error.message : "RFP scan failed";
+        error instanceof Error ? error.message : "VERIFY scrub failed";
       setGapResolveError(message);
       setGenerateError(message);
     } finally {
@@ -1290,11 +1291,12 @@ export function ProposalDraftWorkspace({
       stopScanPoll();
       setIsFulfillingRfpGaps(false);
     }
-  }, [rfp.id, applyOutlineFromServer, scrollToManuscriptSection, handleLiveDraftUpdate, handleResearchPoll]);
+  }, [rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll]);
 
   const handleGenerateFullProposal = useCallback(async (options?: { startAfterSections1to3?: boolean }) => {
     // Continue = resume from checkpoint (e.g. budget failure).
     // Fresh / regenerate-from-done = forceRestart from Sections 1–3.
+    // startAfterSections1to3 = Start from Intelligence (keep 1–3, re-run Phase 2+).
     const startAfterSections1to3 = Boolean(options?.startAfterSections1to3);
     const hasManuscriptContent = countSectionsWithContent(outline) > 0;
     // Never "resume" an empty outline — that is always a forceRestart generate.
@@ -1305,13 +1307,9 @@ export function ProposalDraftWorkspace({
       Boolean(pipelineStatus);
 
     if (startAfterSections1to3) {
-      if (!staticSections1to3Complete(outline)) {
-        setGenerateError("Draft Sections 1–3 first, then start after Sections 1–3.");
-        return;
-      }
       if (
         !confirm(
-          "Start after Sections 1–3?\n\nThis keeps the existing Sections 1–3 and runs Phase 2 intelligence, RFP drafting, budget, and review."
+          "Start from Intelligence?\n\nThis DELETES existing Intelligence, RFP tabs, Budget, and Review — then rebuilds them.\nSections 1–3 are kept."
         )
       ) {
         return;
@@ -1362,6 +1360,41 @@ export function ProposalDraftWorkspace({
       setLiveLatestSectionTitle(null);
       setSelectedSectionId(defaults.sections[0]?.id ?? null);
       setActiveTab("content");
+    } else if (startAfterSections1to3) {
+      // Wipe stale Intelligence / RFP tabs before Phase 2 rebuilds a lean outline.
+      try {
+        try {
+          await stopProposalGeneration(rfp.id);
+        } catch {
+          // Best-effort: nothing may be running.
+        }
+        const stripped = await restartProposalFromIntelligence(rfp.id);
+        saveGenerationRef.current += 1;
+        skipNextSaveRef.current = true;
+        liveContentFingerprintRef.current = new Map();
+        applyOutlineFromServer(stripped);
+        setResearch(null);
+        setBudget(null);
+        setPresubmitReview(null);
+        setPipelineStatus(null);
+        setSectionRevisions({});
+        persistStoredRevisions(rfp.id, {});
+        setLiveGeneratedCount(countSectionsWithContent(stripped));
+        setLiveLatestSectionTitle(null);
+        setSelectedSectionId(stripped.sections[0]?.id ?? null);
+        setActiveTab("content");
+        setGenerateNotice(
+          "Cleared previous Intelligence / RFP tabs. Rebuilding from Phase 2…"
+        );
+      } catch (error) {
+        setIsFullProposalRunning(false);
+        setGenerateError(
+          error instanceof Error
+            ? error.message
+            : "Failed to clear previous Intelligence before restart."
+        );
+        return;
+      }
     } else {
       setLiveGeneratedCount(countSectionsWithContent(outline));
       setLiveLatestSectionTitle(null);
@@ -1473,7 +1506,7 @@ export function ProposalDraftWorkspace({
         setFullProposalProgress(null);
       }
     }
-  }, [rfp, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, applyOutlineFromServer]);
+  }, [rfp, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, handleResearchPoll, applyOutlineFromServer]);
 
   const handleResetOutline = async () => {
     setIsResettingDraft(true);
@@ -1553,20 +1586,20 @@ export function ProposalDraftWorkspace({
       setFullProposalProgress("phase-3");
       const { draft: drafted, research: afterPhase3 } = await runPhase3Drafting(rfp.id);
 
+      setFullProposalProgress("phase-3-5-budget");
+      const { draft: budgetedDraft, research: afterBudget, budget } =
+        await runPhase3_5BudgetWithRecovery(rfp.id);
+
       setFullProposalProgress("phase-3-6-self-edit");
       const { draft: polished, research: afterEdit } =
         await runPhase3_6SelfEditWithRecovery(rfp.id);
 
-      setFullProposalProgress("phase-3-5-budget");
-      const { draft, research: updatedResearch, budget } =
-        await runPhase3_5BudgetWithRecovery(rfp.id);
-
       setFullProposalProgress("phase-4-review");
       const { research: reviewedResearch } = await runPhase4PreSubmitReview(rfp.id);
 
-      const finalDraft = draft ?? polished ?? drafted;
+      const finalDraft = polished ?? budgetedDraft ?? drafted;
       applyOutlineFromServer(finalDraft);
-      setResearch(reviewedResearch ?? updatedResearch ?? afterEdit ?? afterPhase3);
+      setResearch(reviewedResearch ?? afterEdit ?? afterBudget ?? afterPhase3);
       if (budget) setBudget(budget);
       setPresubmitReview(reviewedResearch.presubmitReview ?? null);
       await saveProposalDraft(rfp.id, finalDraft);
@@ -2063,6 +2096,15 @@ export function ProposalDraftWorkspace({
             ) : null}
             <button
               type="button"
+              onClick={() => void handleGenerateFullProposal({ startAfterSections1to3: true })}
+              disabled={anyPipelineRunning}
+              className="proposal-toolbar-btn disabled:opacity-60"
+              title="Deletes existing Intelligence / RFP tabs / Budget / Review, keeps Sections 1–3, then rebuilds from Phase 2"
+            >
+              Start from Intelligence
+            </button>
+            <button
+              type="button"
               onClick={() => void handlePrimaryPipeline()}
               disabled={anyPipelineRunning}
               className="zo-btn proposal-toolbar-btn disabled:opacity-60"
@@ -2260,10 +2302,10 @@ export function ProposalDraftWorkspace({
                     !outline.sections.some((s) => s.content.trim())
                   }
                   className="zo-btn !py-2 !px-3 !text-sm disabled:opacity-40"
-                  title="Read the full RFP and add missing sections (Acknowledgement of Addenda, forms, attachments, etc.)"
+                  title="Only removes [VERIFY] tags that are not critically required by the RFP — never invents, does not add sections"
                 >
                   {isFulfillingRfpGaps
-                    ? "Scanning RFP…"
+                    ? "Scrubbing VERIFY…"
                     : "Scan RFP & add missing pieces"}
                 </button>
                 <button
@@ -2667,6 +2709,29 @@ export function ProposalDraftWorkspace({
                   after={activeRevision.after}
                   summary={activeRevision.summary}
                   instruction={activeRevision.instruction}
+                  showReapply={
+                    !!revisionDrawerSection &&
+                    (revisionDrawerSection.content || "") !==
+                      (activeRevision.after || "") &&
+                    (activeRevision.after || "").trim().length > 0
+                  }
+                  onReapply={() => {
+                    if (!revisionDrawerSectionId || !activeRevision.after) return;
+                    setOutline((prev) => ({
+                      ...prev,
+                      sections: prev.sections.map((s) =>
+                        s.id === revisionDrawerSectionId
+                          ? {
+                              ...s,
+                              content: activeRevision.after,
+                              status: "generated" as const,
+                            }
+                          : s
+                      ),
+                      updatedAt: new Date().toISOString(),
+                    }));
+                    setRevisionDrawerSectionId(null);
+                  }}
                   onDismiss={() => dismissSectionRevision(revisionDrawerSectionId)}
                 />
               </div>

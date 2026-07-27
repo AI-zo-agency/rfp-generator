@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { improveProposalSection } from "@/lib/proposal-api";
 import {
+  messageLooksOutlineStructure,
+  messageLooksProposalWide,
   messageLooksStructural,
   messageTargetsBios,
   pinnedSectionConflictsWithMessage,
@@ -48,6 +50,7 @@ const QUICK_PROMPTS = [
   "Check duplicates thoroughly.",
   "Remove fabricated content (content → RFP → KB).",
   "Fill [VERIFY] tags from KB only.",
+  "Remove [VERIFY] tags if not required by the RFP.",
   "Does this meet the RFP?",
 ];
 
@@ -122,13 +125,27 @@ export function ProposalSectionChatPanel({
         onSetReference(null);
       }
 
+      // Structural add/delete: clear an unrelated pin so we don't rewrite the open tab.
+      if (
+        messageLooksOutlineStructure(trimmed) &&
+        activeReference &&
+        activeReference.mode !== "selection"
+      ) {
+        activeReference = null;
+        onSetReference(null);
+      }
+
       const pinnedSection = activeReference?.sectionId
         ? sections.find((s) => s.id === activeReference.sectionId) ?? null
         : null;
 
       const resolution = resolveChatTarget(sections, trimmed, {
         viewingSectionId: viewingSectionId,
-        pinnedSection,
+        pinnedSection: messageLooksOutlineStructure(trimmed) ? null : pinnedSection,
+        conversationHistory: messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
       });
 
       const userMsg: SectionChatMessage = {
@@ -155,23 +172,42 @@ export function ProposalSectionChatPanel({
       }
 
       const targetSection = resolution.section;
+      // Stale Improve pin on another tab must not keep redirecting status/API.
+      if (
+        activeReference &&
+        activeReference.sectionId !== targetSection.id &&
+        resolution.reason !== "pinned"
+      ) {
+        activeReference = null;
+        onSetReference(null);
+      }
+
+      const proposalWideAsk =
+        resolution.reason === "proposal-wide" ||
+        resolution.reason === "outline-structure" ||
+        messageLooksProposalWide(trimmed);
 
       setIsRunning(true);
       setError(null);
       setStatusLine(
-        activeReference?.mode === "selection" &&
-          activeReference.sectionId === targetSection.id
-          ? `Editing excerpt in ${targetSection.title}…`
-          : activeReference?.mode === "section" &&
-              activeReference.sectionId === targetSection.id
-            ? `Improving ${targetSection.title}…`
-            : messageLooksStructural(trimmed) || messageTargetsBios(trimmed)
-              ? `Updating proposal sections…`
-              : `Working on ${targetSection.title}…`
+        proposalWideAsk
+          ? "Reviewing the full proposal…"
+          : /apply these fixes|patch-wise across|across the proposal/i.test(trimmed)
+            ? "Applying patch-wise fixes across the proposal…"
+            : activeReference?.mode === "selection" &&
+                activeReference.sectionId === targetSection.id
+              ? `Editing excerpt in ${targetSection.title}…`
+              : activeReference?.mode === "section" &&
+                  activeReference.sectionId === targetSection.id
+                ? `Improving ${targetSection.title}…`
+                : messageLooksOutlineStructure(trimmed) ||
+                    messageLooksStructural(trimmed) ||
+                    messageTargetsBios(trimmed)
+                  ? `Updating proposal outline…`
+                  : `Working on ${targetSection.title}…`
       );
       onBusyChange?.(true);
 
-      const contentBefore = targetSection.content;
       const selectionForRequest =
         activeReference?.mode === "selection" &&
         activeReference.sectionId === targetSection.id
@@ -186,7 +222,8 @@ export function ProposalSectionChatPanel({
         const result = await improveProposalSection(rfpId, targetSection.id, trimmed, {
           selection: selectionForRequest,
           conversationHistory: history,
-          proposalWide: !selectionForRequest,
+          // Always send whole-proposal context unless editing a pinned excerpt.
+          proposalWide: true,
         });
 
         onMessagesChange([
@@ -199,21 +236,35 @@ export function ProposalSectionChatPanel({
         ]);
 
         if (result.draftChanged) {
+          const beforeById = new Map(
+            sections.map((s) => [s.id, s.content || ""] as const)
+          );
           onSectionUpdated(result.draft, result.research);
-          const focusId = result.section?.id || targetSection.id;
-          const contentAfter =
-            result.section.content ??
-            result.draft.sections.find((s) => s.id === focusId)?.content ??
-            contentBefore;
-          onFocusSection?.(focusId);
-          onRevisionRecorded?.(focusId, {
-            before: focusId === targetSection.id ? contentBefore : "",
-            after: contentAfter,
-            summary: result.assistantMessage,
-            instruction: trimmed,
-            updatedAt: Date.now(),
+
+          const changed = result.draft.sections.filter((s) => {
+            const prev = beforeById.get(s.id);
+            return prev !== undefined && (s.content || "") !== prev;
           });
-          onRevisionDrawerOpenChange?.(focusId, true);
+
+          for (const s of changed) {
+            onRevisionRecorded?.(s.id, {
+              before: beforeById.get(s.id) || "",
+              after: s.content || "",
+              summary: result.assistantMessage,
+              instruction: trimmed,
+              updatedAt: Date.now(),
+            });
+          }
+
+          const focusId =
+            changed.find((s) => s.id === targetSection.id)?.id ||
+            changed[0]?.id ||
+            result.section?.id ||
+            targetSection.id;
+          onFocusSection?.(focusId);
+          if (changed.length > 0) {
+            onRevisionDrawerOpenChange?.(focusId, true);
+          }
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Chat request failed";

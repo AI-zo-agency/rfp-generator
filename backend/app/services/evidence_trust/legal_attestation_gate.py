@@ -17,7 +17,7 @@ from app.services.evidence_trust.flags import verify_gap
 # Locked VERIFY tags must never be auto-filled by KB blob substitution.
 LEGAL_VERIFY_LOCK_RE = re.compile(
     r"(?i)e-?verify|perjury|conflict\s+of\s+interest|disclosure\s+statement|"
-    r"attestation|affidavit|staffing\s+hours|invented\s+hours|"
+    r"attestation|affidavit|staffing\s+hours|invented\s+hours|percent\s*time|"
     r"gross-receipts|sonja|operations\s+confirm|confirm\s+with\s+(?:sonja|ella|operations)",
 )
 
@@ -96,6 +96,25 @@ _HOURS_VERIFY = verify_gap(
     "or remove invented annual hours",
 )
 
+_PERCENT_TIME_VERIFY = "[VERIFY: percent time]"
+
+_PERCENT_TIME_CONTEXT_RE = re.compile(
+    r"(?i)percent[-\s]?time|%\s*time|fte\b|allocation\s*%|"
+    r"percent-time\s+commitments|dedicated\s+allocation|"
+    r"of\s+(?:their|his|her|our)\s+time",
+)
+
+# Markdown table cells like | 10% | or | 25-30% |
+_TABLE_PCT_CELL_RE = re.compile(
+    r"(\|\s*)(\d{1,3}(?:\s*[-–—]\s*\d{1,3})?\s*%)(\s*\|)"
+)
+
+# Prose: "35% of their time" / "commits 25% time"
+_PROSE_PCT_TIME_RE = re.compile(
+    r"(?i)\b(\d{1,3}(?:\s*[-–—]\s*\d{1,3})?\s*%)(\s+"
+    r"(?:of\s+(?:their|his|her|our)\s+time|time(?:\s+commitment)?|FTE|allocation))\b"
+)
+
 _RNO_FLAG = (
     "[FLAG FOR SONJA: Add Recovery Network of Oregon (RNO) — near-direct coalition "
     "health/stigma communications proof with metrics; strongest KB match for this RFP "
@@ -108,6 +127,7 @@ class LegalAttestationReport:
     everify_flags: int = 0
     conflict_flags: int = 0
     hours_flags: int = 0
+    percent_time_flags: int = 0
     filler_flags: int = 0
     rno_flags: int = 0
     logs: list[str] = field(default_factory=list)
@@ -175,6 +195,35 @@ def _flag_invented_hours(content: str) -> tuple[str, int]:
 
     updated, n = _STAFFING_HOURS_RE.subn(_repl, content, count=3)
     return updated, n
+
+
+def _flag_invented_percent_time(content: str) -> tuple[str, int]:
+    """Replace invented percent-time / FTE % figures with [VERIFY: percent time]."""
+    if not content or not _PERCENT_TIME_CONTEXT_RE.search(content):
+        return content, 0
+
+    flags = 0
+    updated = content
+
+    def _table_repl(match: re.Match[str]) -> str:
+        nonlocal flags
+        flags += 1
+        return f"{match.group(1)}{_PERCENT_TIME_VERIFY}{match.group(3)}"
+
+    updated = _TABLE_PCT_CELL_RE.sub(_table_repl, updated)
+
+    def _prose_repl(match: re.Match[str]) -> str:
+        nonlocal flags
+        flags += 1
+        return f"{_PERCENT_TIME_VERIFY}{match.group(2)}"
+
+    updated = _PROSE_PCT_TIME_RE.sub(_prose_repl, updated)
+    return updated, flags
+
+
+def scrub_invented_percent_time(content: str) -> tuple[str, int]:
+    """Public wrapper — replace invented percent-time cells with [VERIFY: percent time]."""
+    return _flag_invented_percent_time(content)
 
 
 def _fix_ten_year_filler(content: str) -> tuple[str, int]:
@@ -265,6 +314,13 @@ def gate_section_legal_attestations(
             f"Flagged unverified staffing hours in {section.title}"
         )
 
+    content, n = _flag_invented_percent_time(content)
+    if n:
+        report.percent_time_flags += n
+        report.logs.append(
+            f"Flagged invented percent-time / FTE figures in {section.title} → VERIFY"
+        )
+
     content, n = _fix_ten_year_filler(content)
     if n:
         report.filler_flags += n
@@ -315,6 +371,43 @@ def ensure_rno_flagged_for_health_rfp(
     return draft.model_copy(update={"sections": sections}), report
 
 
+def strip_rno_flags_when_not_health_rfp(
+    draft: ProposalDraft,
+    *,
+    rfp: RfpRecord | object | None,
+    rfp_context: str = "",
+) -> tuple[ProposalDraft, LegalAttestationReport]:
+    """Remove Recovery Network of Oregon FLAGS left over from health RFPs on other bids."""
+    report = LegalAttestationReport()
+    if rfp_needs_health_coalition_proof(rfp, rfp_context):
+        return draft, report
+
+    flag_re = re.compile(
+        r"\n*\s*\[FLAG FOR SONJA:[^\]]*Recovery Network of Oregon[^\]]*\]\s*",
+        re.I | re.S,
+    )
+    changed = False
+    sections: list[ProposalSection] = []
+    for section in draft.sections:
+        body = section.content or ""
+        if not flag_re.search(body):
+            sections.append(section)
+            continue
+        updated = flag_re.sub("\n\n", body)
+        updated = re.sub(r"\n{3,}", "\n\n", updated).strip() + "\n"
+        sections.append(section.model_copy(update={"content": updated}))
+        changed = True
+        report.logs.append(
+            f"Removed cross-RFP Recovery Network of Oregon FLAG from {section.title} "
+            "(not a health/coalition RFP)"
+        )
+        report.rno_flags += 1
+
+    if not changed:
+        return draft, report
+    return draft.model_copy(update={"sections": sections}), report
+
+
 def apply_legal_attestation_gates(
     draft: ProposalDraft,
     *,
@@ -334,6 +427,10 @@ def apply_legal_attestation_gates(
         combined.logs.extend(report.logs)
 
     draft = draft.model_copy(update={"sections": updated})
+    draft, strip_report = strip_rno_flags_when_not_health_rfp(
+        draft, rfp=rfp, rfp_context=rfp_context
+    )
+    combined.logs.extend(strip_report.logs)
     draft, rno_report = ensure_rno_flagged_for_health_rfp(
         draft, rfp=rfp, rfp_context=rfp_context
     )

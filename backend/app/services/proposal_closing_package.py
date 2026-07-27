@@ -175,10 +175,20 @@ _CLOSING_CATALOG: list[tuple[str, str, str, str, tuple[str, ...], str]] = [
             r"\bbusiness\s+registration\b",
             r"\bbond(?:ing|s)?\b",
             r"\battach(?:ment|ed)\b.*\binsurance",
+            r"\brequired\s+attachments?\b",
+            r"\bmust\s+(?:be\s+)?(?:attached|included|submitted).{0,80}\b(?:exhibit|appendix|form|schedule)\b",
+            r"\bexhibit\s+[A-Z0-9]+\b",
+            r"\bappendix\s+[A-Z0-9]+\b",
+            r"\battach(?:ment)?\s+\d+\b",
+            r"\bsubmission\s+checklist\b",
+            r"\bdocuments?\s+to\s+(?:be\s+)?(?:submitted|included|attached)\b",
+            r"\bcomplete\s+and\s+return\b",
         ),
         (
             "Checklist of insurance certificates and attachments THIS RFP requires "
-            "(limits, additional insured, COI timing). Use RFP-stated minimums when present. "
+            "(limits, additional insured, COI timing, exhibits, appendices, W-9). "
+            "Use RFP-stated minimums when present. "
+            "List every named attachment/exhibit from the submission instructions. "
             "Mark physical file attachments as [MANUAL FILL: attach PDF]."
         ),
     ),
@@ -212,23 +222,96 @@ _CLOSING_CATALOG: list[tuple[str, str, str, str, tuple[str, ...], str]] = [
             r"\bcommitment\s+to\s+(?:perform|deliver|the\s+work)\b",
             r"\bsummary\s+of\s+(?:the\s+)?(?:offer|proposal)\b",
             r"\bconclud(?:e|ing)\s+(?:remarks?|statement)\b",
+            r"\bwe\s+(?:look\s+forward|welcome\s+the\s+opportunity)\b",
+            r"\bauthorization\s+to\s+(?:submit|bind)\b",
+            r"\bproposal\s+validity\b",
+            r"\boffer\s+remains\s+valid\b",
         ),
         (
-            "Write a concise, confident closing that helps THIS bid win: restates fit to the "
-            "RFP's stated goals, confirms capacity and timeline commitment, and invites next "
-            "steps. Use only verified zö strengths (team, method, relevant work). "
-            "No invented awards, clients, or metrics. End ready for authorized signature if required."
+            "Write a concise, confident CLOSING for THIS proposal (compulsory end section). "
+            "Restate fit to the buyer's stated goals, confirm capacity and timeline, "
+            "reaffirm validity period if the RFP states one, and invite next steps. "
+            "Use only verified zö strengths (team, method, relevant work). "
+            "No invented awards, clients, or metrics. "
+            "Do NOT repeat full case studies or Section 1 identity. "
+            "End ready for authorized signature if required."
         ),
     ),
 ]
 
 
-def detect_closing_components(rfp_text: str) -> list[ClosingComponent]:
-    """Return closing components whose patterns appear in this RFP's text."""
+def _build_closing_component(
+    *,
+    comp_id: str,
+    title: str,
+    section_id: str,
+    kind: str,
+    match_hint: str,
+    base_instructions: str,
+    rfp_text: str,
+) -> ClosingComponent:
+    draft_instructions = base_instructions
+    if comp_id == "references":
+        spec = extract_reference_requirement_summary(rfp_text)
+        if spec:
+            draft_instructions = (
+                "The RFP specifies reference requirements — state them accurately:\n"
+                f"{spec}\n\n"
+                f"{base_instructions}\n"
+                "NEVER write that the RFP does not specify reference count, institution type, "
+                "or contact fields when the RFP text above does. If zö lacks a qualifying "
+                "reference (e.g. two-year public college), say so plainly and use "
+                "[MANUAL FILL: leadership decision before submission]."
+            )
+    elif comp_id == "pricing_form" and rfp_forbids_quotation_form_changes(rfp_text):
+        draft_instructions = (
+            f"{base_instructions}\n"
+            "CRITICAL: This RFP disqualifies bids that alter the official Quotation/Pricing "
+            "Proposal Form. Do NOT invent Section A/B/C/D structure or add commission/scope "
+            "clauses on the form. List only the buyer's form field labels with responses; "
+            "put narrative budget rationale in a separate subsection."
+        )
+    return ClosingComponent(
+        id=comp_id,
+        title=title,
+        section_id=section_id,
+        kind=kind,
+        match_hint=match_hint,
+        draft_instructions=draft_instructions,
+    )
+
+
+def detect_closing_components(
+    rfp_text: str,
+    *,
+    always_include_commitment: bool = True,
+) -> list[ClosingComponent]:
+    """Return closing components whose patterns appear in this RFP's text.
+
+    Always includes Offeror Commitment & Closing Statement unless disabled —
+    every proposal must close properly even when the RFP never says \"closing\".
+    """
     text = (rfp_text or "").strip()
     if not text:
+        # Still return compulsory closing so empty/thin extracts do not skip it.
+        if always_include_commitment:
+            for row in _CLOSING_CATALOG:
+                if row[0] == "offeror_commitment":
+                    return [
+                        _build_closing_component(
+                            comp_id=row[0],
+                            title=row[1],
+                            section_id=row[2],
+                            kind=row[3],
+                            match_hint="(compulsory proposal close)",
+                            base_instructions=row[5],
+                            rfp_text="",
+                        )
+                    ]
         return []
+
     found: list[ClosingComponent] = []
+    found_ids: set[str] = set()
     for comp_id, title, section_id, kind, patterns, base_instructions in _CLOSING_CATALOG:
         matched = None
         for pat in patterns:
@@ -238,37 +321,35 @@ def detect_closing_components(rfp_text: str) -> list[ClosingComponent]:
                 break
         if not matched:
             continue
-        draft_instructions = base_instructions
-        if comp_id == "references":
-            spec = extract_reference_requirement_summary(text)
-            if spec:
-                draft_instructions = (
-                    "The RFP specifies reference requirements — state them accurately:\n"
-                    f"{spec}\n\n"
-                    f"{base_instructions}\n"
-                    "NEVER write that the RFP does not specify reference count, institution type, "
-                    "or contact fields when the RFP text above does. If zö lacks a qualifying "
-                    "reference (e.g. two-year public college), say so plainly and use "
-                    "[MANUAL FILL: leadership decision before submission]."
-                )
-        elif comp_id == "pricing_form" and rfp_forbids_quotation_form_changes(text):
-            draft_instructions = (
-                f"{base_instructions}\n"
-                "CRITICAL: This RFP disqualifies bids that alter the official Quotation/Pricing "
-                "Proposal Form. Do NOT invent Section A/B/C/D structure or add commission/scope "
-                "clauses on the form. List only the buyer's form field labels with responses; "
-                "put narrative budget rationale in a separate subsection."
-            )
         found.append(
-            ClosingComponent(
-                id=comp_id,
+            _build_closing_component(
+                comp_id=comp_id,
                 title=title,
                 section_id=section_id,
                 kind=kind,
                 match_hint=matched,
-                draft_instructions=draft_instructions,
+                base_instructions=base_instructions,
+                rfp_text=text,
             )
         )
+        found_ids.add(comp_id)
+
+    if always_include_commitment and "offeror_commitment" not in found_ids:
+        for row in _CLOSING_CATALOG:
+            if row[0] == "offeror_commitment":
+                found.append(
+                    _build_closing_component(
+                        comp_id=row[0],
+                        title=row[1],
+                        section_id=row[2],
+                        kind=row[3],
+                        match_hint="(compulsory proposal close)",
+                        base_instructions=row[5],
+                        rfp_text=text,
+                    )
+                )
+                break
+
     logger.info(
         "Closing package for this RFP: %s",
         ", ".join(c.id for c in found) or "(none matched)",

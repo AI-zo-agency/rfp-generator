@@ -28,15 +28,18 @@ MASTER_TEAM_ROSTER_DOC = "02_MasterTemplate_OrgStructure_AllTeamBios.pdf"
 MASTER_TEAM_ROSTER_CHAR_LIMIT = 500_000
 
 PROPOSAL_QUERY_PLANNER_PROMPT = """You plan targeted Supermemory knowledge-base searches for zö agency proposal Sections 1–3.
+The KB contains ONLY zö agency materials (company facts, bios, case studies, pricing guide) —
+it does NOT contain the RFP buyer / prospect. Never search as if the buyer lives in the KB.
+
 Given the RFP excerpt, return 10–14 specific queries to retrieve:
 - zö brand voice / proposal writing tone (zoVoiceQueries)
 - company overview, certifications, insurance, org facts for Section 1 (companyQueries)
 - team bios 04_Bio_ and roles the RFP requires (bioQueries)
 - master team roster 02_MasterTemplate_OrgStructure_AllTeamBios.pdf for org structure (bioQueries)
-- case studies 03_CS_ and won proposals 06_ matching sector/client/scope (caseStudyQueries)
+- case studies 03_CS_ and won proposals 06_ matching sector/scope themes (caseStudyQueries)
 
-Use client name, location, sector, and specific deliverables from the RFP in queries.
-Do NOT include HTML or portal boilerplate in queries.
+Frame every query around zö capabilities + RFP theme (sector, deliverables, audience type).
+Do NOT use the RFP client/buyer name as the search subject. Do NOT include HTML or portal boilerplate.
 
 Return ONLY JSON:
 {
@@ -47,14 +50,230 @@ Return ONLY JSON:
 }"""
 
 
+_CLIENT_ORG_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "of",
+        "for",
+        "inc",
+        "llc",
+        "ltd",
+        "corp",
+        "co",
+        "college",
+        "university",
+        "community",
+        "valley",
+        "state",
+        "city",
+        "county",
+        "district",
+        "board",
+        "agency",
+        "department",
+        "office",
+        "school",
+        "schools",
+        "public",
+        "maine",
+        "oregon",
+        "florida",
+        "california",
+        "texas",
+        "new",
+        "york",
+    }
+)
+
+
+def _significant_tokens(text: str) -> list[str]:
+    return [
+        t
+        for t in re.split(r"\W+", (text or "").casefold())
+        if len(t) > 2 and t not in _CLIENT_ORG_STOPWORDS
+    ]
+
+
+def normalize_zo_kb_query(
+    query: str,
+    *,
+    rfp_client: str = "",
+    rfp_sector: str = "",
+    rfp_title: str = "",
+) -> str:
+    """Rewrite KB search queries so they target zö materials, not the RFP buyer.
+
+    Supermemory holds zö companyfacts / bios / case studies / pricing guide.
+    Queries like "KVCC … community college marketing" waste tokens — strip buyer
+    subject and reframe as zö capability + sector/theme.
+    """
+    raw = (query or "").strip()
+    if not raw:
+        theme = (rfp_sector or "marketing communications").strip()
+        return f"zö agency {theme} company facts case studies capabilities"[:220]
+
+    lower = raw.casefold()
+    # Pricing guide: keep ONLY guide + pricing vocabulary — never buyer/RFP title.
+    if "00_guide_pricing" in lower or "00_guide" in lower:
+        return sanitize_pricing_guide_query(
+            raw, rfp_client=rfp_client, rfp_title=rfp_title
+        )
+
+    if re.search(r"\b(01[_ ]?companyfacts|02[_ ]?master|03[_ ]?cs|04[_ ]?bio)\b", lower):
+        stripped = _strip_buyer_phrases(
+            raw, rfp_client=rfp_client, rfp_title=rfp_title
+        )
+        if "zö" not in stripped.casefold() and "zo agency" not in stripped.casefold():
+            stripped = f"zö agency {stripped}"
+        return stripped[:240]
+
+    client = (rfp_client or "").strip()
+    client_tokens = set(_significant_tokens(client))
+    title_tokens = set(_significant_tokens(rfp_title))
+    buyer_tokens = client_tokens | title_tokens
+    q_tokens = _significant_tokens(raw)
+
+    topical = _strip_buyer_phrases(raw, rfp_client=rfp_client, rfp_title=rfp_title)
+
+    # Buyer-as-subject: first tokens heavily overlap the RFP client/title.
+    buyer_as_subject = False
+    if buyer_tokens and q_tokens:
+        head = q_tokens[: min(5, len(q_tokens))]
+        overlap = sum(1 for t in head if t in buyer_tokens)
+        if overlap >= 1 and (
+            q_tokens[0] in buyer_tokens or overlap >= 2 or len(topical) < 18
+        ):
+            buyer_as_subject = True
+
+    if buyer_as_subject or len(topical) < 12:
+        leftover = " ".join(t for t in q_tokens if t not in buyer_tokens)
+        theme_bits: list[str] = []
+        seen: set[str] = set()
+        for bit in (
+            (rfp_sector or "").strip(),
+            leftover[:80],
+            "marketing communications capabilities case studies references",
+        ):
+            for word in bit.split():
+                key = word.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                theme_bits.append(word)
+        topical = " ".join(theme_bits).strip()
+
+    if "zö" not in topical.casefold() and "zo agency" not in topical.casefold():
+        topical = f"zö agency {topical}"
+
+    # Drop leftover bare client acronyms still sitting as the first word.
+    if buyer_tokens:
+        first = _significant_tokens(topical)
+        if first and first[0] in buyer_tokens:
+            topical = re.sub(
+                rf"^\s*(?:zö agency\s+)?{re.escape(first[0])}\b",
+                "zö agency",
+                topical,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            topical = re.sub(r"\s+", " ", topical).strip()
+            if not topical.casefold().startswith("zö") and not topical.casefold().startswith(
+                "zo "
+            ):
+                topical = f"zö agency {topical}"
+
+    normalized = topical[:220].strip()
+    if normalized.casefold() != raw.casefold():
+        logger.info(
+            "KB query normalized (buyer→zö): %r → %r",
+            raw[:120],
+            normalized[:120],
+        )
+    return normalized or f"zö agency {(rfp_sector or 'capabilities').strip()}"[:220]
+
+
+_DEFAULT_PRICING_QUERY = (
+    "00_Guide_Pricing tier ranges Low Average High discovery strategy "
+    "content digital media project management fees"
+)
+
+
+def _strip_buyer_phrases(
+    text: str,
+    *,
+    rfp_client: str = "",
+    rfp_title: str = "",
+) -> str:
+    out = text or ""
+    for phrase in (rfp_client, rfp_title):
+        phrase = (phrase or "").strip()
+        if len(phrase) >= 3:
+            out = re.sub(re.escape(phrase), " ", out, flags=re.IGNORECASE)
+    buyer_tokens = set(_significant_tokens(rfp_client)) | set(
+        _significant_tokens(rfp_title)
+    )
+    for tok in sorted(buyer_tokens, key=len, reverse=True):
+        out = re.sub(rf"\b{re.escape(tok)}\b", " ", out, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", out).strip(" -–,")
+
+
+def sanitize_pricing_guide_query(
+    topic: str,
+    *,
+    rfp_client: str = "",
+    rfp_title: str = "",
+) -> str:
+    """Keep the agent's pricing query; only strip RFP buyer/title contamination.
+
+    Do not whitelist-tokenize the query — that drops guide line numbers and
+    phrases (e.g. 'short projects', '5-8 percent') and hurts retrieval.
+    """
+    raw = (topic or "").strip()
+    cleaned = _strip_buyer_phrases(
+        raw, rfp_client=rfp_client, rfp_title=rfp_title
+    )
+    cleaned = re.sub(
+        r"\b(marketing\s+plan|request\s+for\s+proposal|rfp|solicitation)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–,")
+    if not cleaned:
+        out = _DEFAULT_PRICING_QUERY
+    elif re.search(r"\b00[_ ]?guide[_ ]?pricing\b", cleaned, re.I):
+        out = cleaned
+    else:
+        out = f"00_Guide_Pricing {cleaned}"
+    # Normalize accidental glued guide line ids (9.19.2 → 9.1 9.2)
+    out = re.sub(r"\b(\d+\.\d+)(\d+\.\d+)\b", r"\1 \2", out)
+    if out.casefold() != raw.casefold():
+        logger.info(
+            "Pricing guide query sanitized: %r → %r",
+            raw[:120],
+            out[:120],
+        )
+    return out[:220]
+
+
 async def search_knowledge_base(
     query: str,
     *,
     limit: int = 6,
     category: str | None = None,
     max_chars: int | None = None,
+    rfp_client: str = "",
+    rfp_sector: str = "",
+    rfp_title: str = "",
 ) -> tuple[str, list[str]]:
     """Search Supermemory and return full indexed documents (not single chunks)."""
+    normalized = normalize_zo_kb_query(
+        query,
+        rfp_client=rfp_client,
+        rfp_sector=rfp_sector,
+        rfp_title=rfp_title,
+    )
     filters: dict[str, Any] | None = None
     if category:
         filters = {
@@ -64,7 +283,7 @@ async def search_knowledge_base(
             ]
         }
     return await search_and_fetch_full(
-        query,
+        normalized,
         limit=limit,
         max_chars=max_chars or SEARCH_CHARACTER_LIMIT,
         filters=filters,
@@ -311,15 +530,13 @@ async def fetch_case_study_candidates_jit(
     max_chars: int = 400_000,
 ) -> tuple[str, list[str]]:
     """JIT case-study index for Evidence Selection — no bulk upfront retrieval."""
-    # Sector/service cues only — NEVER the current RFP client (that is not past work).
-    sector = (rfp_sector or "government").strip()
-    queries = [
-        f"03_CS_ {sector} case study project outcomes",
-        f"06_WON_ {sector} proposal past performance",
-        "03_CS_ government municipal digital campaign results",
-        "03_CS_ state agency media outdoor recreation campaign",
-    ]
-    del rfp_client, rfp_context, max_chars
+    # Requirement themes — NEVER the current RFP client (that is not past work).
+    del rfp_client, max_chars
+    queries = build_case_study_candidate_queries(
+        rfp_sector=rfp_sector,
+        rfp_context=rfp_context,
+        max_queries=6,
+    )
 
     seen_sources: set[str] = set()
     parts: list[str] = []
@@ -510,28 +727,154 @@ def _is_case_study_source(file_name: str) -> bool:
     return lowered.startswith("03_cs") or "03_cs_" in lowered or "case study" in lowered
 
 
+_CASE_THEME_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"\b(public\s+awareness|behavior\s+change|community\s+outreach|"
+            r"social\s+marketing|health\s+communication)\b",
+            re.I,
+        ),
+        "public awareness marketing campaign outcomes",
+    ),
+    (
+        re.compile(
+            r"\b(digital\s+campaign|media\s+buy|media\s+planning|paid\s+media|"
+            r"geofenc|programmatic|ppc|sem)\b",
+            re.I,
+        ),
+        "digital media campaign paid media results",
+    ),
+    (
+        re.compile(
+            r"\b(social\s+media|content\s+strategy|instagram|facebook|tiktok)\b",
+            re.I,
+        ),
+        "social media strategy content campaign results",
+    ),
+    (
+        re.compile(
+            r"\b(brand(?:ing)?|visual\s+identity|creative\s+direction|graphic\s+design)\b",
+            re.I,
+        ),
+        "brand identity creative campaign case study",
+    ),
+    (
+        re.compile(
+            r"\b(tourism|destination|visitor|leisure|hospitality|event\s+marketing)\b",
+            re.I,
+        ),
+        "tourism destination visitor event marketing campaign",
+    ),
+    (
+        re.compile(
+            r"\b(municipal|county|city\s+of|government|public\s+sector)\b",
+            re.I,
+        ),
+        "municipal government public sector campaign results",
+    ),
+    (
+        re.compile(
+            r"\b(research|analytics|formative|audience\s+testing|kpi)\b",
+            re.I,
+        ),
+        "research analytics audience campaign measurement outcomes",
+    ),
+]
+
+
+def extract_case_study_search_themes(
+    *,
+    rfp_sector: str = "",
+    rfp_context: str = "",
+    services_requested: list[str] | None = None,
+    max_themes: int = 6,
+) -> list[str]:
+    """Derive KB search themes from RFP services/requirements (not the buyer name)."""
+    services = [s.strip() for s in (services_requested or []) if str(s).strip()]
+    blob = " ".join(
+        [
+            " ".join(services),
+            (rfp_context or "")[:12_000],
+            (rfp_sector or ""),
+        ]
+    )
+    themes: list[str] = []
+    seen: set[str] = set()
+
+    def _add(theme: str) -> None:
+        key = theme.casefold()
+        if key in seen or not theme.strip():
+            return
+        seen.add(key)
+        themes.append(theme.strip())
+
+    for service in services[:8]:
+        _add(service)
+    for pattern, theme in _CASE_THEME_PATTERNS:
+        if pattern.search(blob):
+            _add(theme)
+        if len(themes) >= max_themes:
+            break
+
+    sector = (rfp_sector or "government").strip()
+    _add(f"{sector} case study project outcomes")
+    _add("government municipal digital campaign results")
+    return themes[:max_themes]
+
+
+def build_case_study_candidate_queries(
+    *,
+    rfp_sector: str = "",
+    rfp_context: str = "",
+    services_requested: list[str] | None = None,
+    max_queries: int = 8,
+) -> list[str]:
+    """Requirement-aware 03_CS_ queries — mirrors kb_qa_loop topical breadth."""
+    themes = extract_case_study_search_themes(
+        rfp_sector=rfp_sector,
+        rfp_context=rfp_context,
+        services_requested=services_requested,
+        max_themes=max_queries,
+    )
+    queries = [f"03_CS_ {theme} successful case study" for theme in themes]
+    # Always include the master case-study digest so Bend Water / OED / etc. surface.
+    queries.append("03_CS_AllCaseStudies public awareness marketing campaign outcomes")
+    # Deduplicate while preserving order.
+    out: list[str] = []
+    seen: set[str] = set()
+    for q in queries:
+        key = q.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+    return out[:max_queries]
+
+
 async def search_evidence_candidate_index(
     *,
     rfp_client: str,
     rfp_sector: str,
     rfp_context: str = "",
-    limit_per_query: int = 5,
+    services_requested: list[str] | None = None,
+    limit_per_query: int = 6,
 ) -> list[dict[str, str]]:
-    """Lightweight evidence index — search hit titles/snippets only, no full doc fetch."""
+    """Lightweight evidence index — search hit titles/snippets only, no full doc fetch.
+
+    Queries are built from RFP services/requirements (like kb_qa_loop topical search),
+    not only a fixed sector string. Never searches the current buyer name as a past client.
+    """
     from app.services.company_qualification.schemas import EvidenceCandidate
 
     if not supermemory.is_configured():
         return []
 
-    # Sector cues only — never current client name or raw RFP title (not past performance).
-    sector = (rfp_sector or "government").strip()
-    queries = [
-        f"03_CS_ {sector} case study project outcomes",
-        "03_CS_ government municipal digital campaign results",
-        "03_CS_ state agency media outdoor recreation campaign",
-        f"03_CS_ {sector} past performance outcomes",
-    ]
-    del rfp_client, rfp_context
+    del rfp_client  # never search current prospect as past performance
+    queries = build_case_study_candidate_queries(
+        rfp_sector=rfp_sector,
+        rfp_context=rfp_context,
+        services_requested=services_requested,
+    )
 
     seen_titles: set[str] = set()
     candidates: list[dict[str, str]] = []
@@ -571,7 +914,11 @@ async def search_evidence_candidate_index(
                 )
             )
 
-    logger.info("Evidence candidate index: %d unique case studies", len(candidates))
+    logger.info(
+        "Evidence candidate index: %d unique case studies from %d RFP-theme queries",
+        len(candidates),
+        len(queries),
+    )
     return candidates
 
 

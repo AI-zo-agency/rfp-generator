@@ -1,0 +1,289 @@
+"""Budget playbook chat guards — reverse-engineer vs legitimate Cost fills."""
+
+from __future__ import annotations
+
+import unittest
+
+from app.models.proposal import BudgetLineItem, ProposalBudget
+from app.services.proposal_budget_content import fill_section_budget_verify_from_canonical
+from app.services.proposal_budget_playbook import (
+    refuse_noncompliant_budget_edit,
+    section_has_budget_verify_tags,
+    user_asked_reverse_engineered_total,
+    user_asks_budget_rebuild,
+    user_asks_global_cost_rebuild,
+    user_asks_section_budget_fill,
+)
+
+
+class ReverseEngineerGuardTests(unittest.TestCase):
+    def test_fill_budget_is_not_reverse_engineering(self) -> None:
+        self.assertFalse(
+            user_asked_reverse_engineered_total("here fill budget part!")
+        )
+        self.assertIsNone(
+            refuse_noncompliant_budget_edit("here fill budget part!", "Cost table…")
+        )
+
+    def test_reconcile_cost_section_is_not_reverse_engineering(self) -> None:
+        msg = (
+            "Reconcile and complete the Cost of base proposal section so the "
+            "figures match the Pricing Guide and canonical budget."
+        )
+        self.assertFalse(user_asked_reverse_engineered_total(msg))
+
+    def test_explicit_dollar_target_is_refused(self) -> None:
+        msg = "Make the total hit $75000 by adjusting line items."
+        self.assertTrue(user_asked_reverse_engineered_total(msg))
+        self.assertIsNotNone(refuse_noncompliant_budget_edit(msg, "…"))
+
+    def test_fit_total_to_dollar_is_refused(self) -> None:
+        self.assertTrue(
+            user_asked_reverse_engineered_total("Fit the budget total to $50,000")
+        )
+
+    def test_match_alone_with_budget_word_not_enough(self) -> None:
+        self.assertFalse(
+            user_asked_reverse_engineered_total(
+                "Match the budget narrative to the fee table from the guide."
+            )
+        )
+
+
+class BudgetRebuildAskTests(unittest.TestCase):
+    def test_fill_budget_detected(self) -> None:
+        self.assertTrue(user_asks_budget_rebuild("here fill budget part!"))
+        self.assertTrue(
+            user_asks_budget_rebuild(
+                "Reconcile and complete the Cost of base proposal section"
+            )
+        )
+        self.assertFalse(user_asks_budget_rebuild("make the Oregon Employment case warmer"))
+
+    def test_implement_budget_table_here_is_section_local_not_stage35(self) -> None:
+        from app.services.proposal_budget_playbook import user_asks_insert_budget_table
+
+        msg = "implement budget table here"
+        self.assertTrue(user_asks_insert_budget_table(msg))
+        self.assertTrue(user_asks_section_budget_fill(msg))
+        self.assertFalse(user_asks_global_cost_rebuild(msg))
+        self.assertFalse(user_asks_budget_rebuild(msg))
+
+    def test_add_fee_table_this_section_is_local(self) -> None:
+        from app.services.proposal_budget_playbook import user_asks_insert_budget_table
+
+        msg = "add the fee table to this section only"
+        self.assertTrue(user_asks_insert_budget_table(msg))
+        self.assertFalse(user_asks_global_cost_rebuild(msg))
+
+    def test_here_fill_budget_is_section_local_not_global(self) -> None:
+        msg = "here fill budget part!"
+        self.assertTrue(user_asks_section_budget_fill(msg))
+        self.assertFalse(user_asks_global_cost_rebuild(msg))
+
+    def test_here_fill_investment_is_section_local_not_global(self) -> None:
+        msg = "here fill Investment part!"
+        self.assertTrue(user_asks_section_budget_fill(msg))
+        self.assertFalse(user_asks_global_cost_rebuild(msg))
+
+    def test_cost_of_base_is_global_rebuild(self) -> None:
+        msg = "Reconcile and complete the Cost of base proposal section"
+        self.assertTrue(user_asks_global_cost_rebuild(msg))
+
+    def test_summary_reconcile_is_not_stage_35_rebuild(self) -> None:
+        from app.services.proposal_budget_playbook import (
+            user_asks_budget_summary_reconcile,
+        )
+
+        msg = (
+            "Section 13 and Section 14 both state agency revenue, client "
+            "pass-through, and total invoicing as the identical figure "
+            "($248,764.30). Recalculate: agency revenue = professional fees + "
+            "commission, pass-through = $112,500 net media, total = sum of both. "
+            "Fix all three summary blocks in Sections 13 and 14 to match the "
+            "line-item table, which is already correct."
+        )
+        self.assertTrue(user_asks_budget_summary_reconcile(msg))
+        self.assertFalse(user_asks_budget_rebuild(msg))
+        self.assertFalse(user_asks_global_cost_rebuild(msg))
+
+    def test_year1_summary_paragraph_ask_is_not_rebuild(self) -> None:
+        from app.services.proposal_budget_playbook import (
+            user_asks_budget_summary_reconcile,
+        )
+
+        msg = (
+            "Section 14's investment summary paragraph repeats $325,242.66 as "
+            "agency fee, pass-through, reimbursables, AND total — these must be "
+            "different numbers. Recalculate from the line-item table and rewrite "
+            "the summary paragraph."
+        )
+        self.assertTrue(user_asks_budget_summary_reconcile(msg))
+        self.assertFalse(user_asks_global_cost_rebuild(msg))
+
+
+class BudgetSummaryReconcileProseTests(unittest.TestCase):
+    def test_rewrites_duplicated_year1_block(self) -> None:
+        from app.services.proposal_budget_content import reconcile_budget_summary_prose
+
+        content = (
+            "Total Year 1 agency fee: $248,764.30. "
+            "Client media pass-through billed at net: $248,764.30. "
+            "Direct travel/reimbursables: $248,764.30. "
+            "Total Year 1 client invoicing: $248,764.30. 30 ($248,764.\n\n"
+            "Base-year proposed fees: $248,764\n"
+        )
+        budget = ProposalBudget(
+            rfpId="rfp-1",
+            updatedAt="2026-07-22T00:00:00+00:00",
+            pricingTier="Average",
+            lineItems=[
+                BudgetLineItem(
+                    id="1",
+                    description="Professional fees",
+                    category="Fees",
+                    quantity=1,
+                    unit="project",
+                    rate=120000,
+                    extended=120000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="2",
+                    description="Agency commission",
+                    category="Media",
+                    quantity=1,
+                    unit="project",
+                    rate=16875,
+                    extended=16875,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="3",
+                    description="Net media buy",
+                    category="Media",
+                    quantity=1,
+                    unit="project",
+                    rate=112500,
+                    extended=112500,
+                    lineItemType="client_passthrough",
+                ),
+            ],
+            agencyFeeSubtotal=136875,
+            clientMediaPassthrough=112500,
+            directExpensesTotal=0,
+            agencyRevenueEstimate=136875,
+            totalClientInvoicing=249375,
+        )
+        out, n = reconcile_budget_summary_prose(content, budget)
+        self.assertGreater(n, 0)
+        self.assertIn("agency fee: $136,875", out)
+        self.assertIn("pass-through billed at net: $112,500", out)
+        self.assertIn("client invoicing: $249,375", out)
+        self.assertNotIn("30 ($248,764", out)
+        # All four categories must not share one identical dollar string as before.
+        self.assertNotRegex(
+            out,
+            r"agency fee: \$248,764\.30\..*pass-through.*\$248,764\.30",
+        )
+
+
+class SectionBudgetVerifyFillTests(unittest.TestCase):
+    def test_detects_budget_verify_tags(self) -> None:
+        body = (
+            "| Discovery and audit | Work | $[VERIFY: budget figure] |\n"
+            "| Total |  | $[VERIFY: total budget figure] |"
+        )
+        self.assertTrue(section_has_budget_verify_tags(body))
+        self.assertFalse(section_has_budget_verify_tags("Just a narrative case study."))
+
+    def test_fills_total_and_phase_from_canonical(self) -> None:
+        content = (
+            "| Discovery and audit | Listening | $[VERIFY: budget figure] |\n"
+            "| Strategy and positioning | Framework | $[VERIFY: budget figure] |\n"
+            "| Total estimated investment |  | $[VERIFY: total budget figure] |\n"
+        )
+        budget = ProposalBudget(
+            rfpId="rfp-1",
+            updatedAt="2026-07-22T00:00:00+00:00",
+            pricingTier="Average",
+            lineItems=[
+                BudgetLineItem(
+                    id="1",
+                    description="Phase 1 discovery stakeholder sessions",
+                    category="Discovery",
+                    quantity=1,
+                    unit="project",
+                    rate=10000,
+                    extended=10000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="2",
+                    description="Phase 2 messaging framework strategy",
+                    category="Strategy",
+                    quantity=1,
+                    unit="project",
+                    rate=20000,
+                    extended=20000,
+                    lineItemType="agency_fee",
+                ),
+            ],
+            agencyRevenueEstimate=30000,
+        )
+        filled, n = fill_section_budget_verify_from_canonical(content, budget)
+        self.assertGreaterEqual(n, 1)
+        self.assertIn("$30,000", filled)
+        self.assertNotIn("[VERIFY: total budget figure]", filled)
+        self.assertNotIn("$$", filled)
+
+
+class InsertBudgetTablePreserveProseTests(unittest.TestCase):
+    def test_appends_table_without_wiping_prose(self) -> None:
+        from app.services.proposal_budget_content import insert_budget_table_into_section
+
+        prose = (
+            "## General Requirements Compliance\n\n"
+            "We honor SOW, timelines, budgets, reporting, and records retention "
+            "under an on-call task-order model.\n"
+        )
+        table = (
+            "## Proposed Investment\n\n"
+            "**Total proposed investment: $120,000**\n\n"
+            "## Fee Detail by Phase\n\n"
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| Discovery | Audit | $10,000 |\n"
+            "| **Total** | | **$10,000** |\n"
+        )
+        out, action = insert_budget_table_into_section(prose, table)
+        self.assertEqual(action, "inserted")
+        self.assertIn("We honor SOW, timelines, budgets", out)
+        self.assertIn("| Phase | Deliverable | Amount |", out)
+        self.assertIn("Proposed Investment", out)
+
+    def test_replaces_existing_fee_block_only(self) -> None:
+        from app.services.proposal_budget_content import insert_budget_table_into_section
+
+        prose = (
+            "Compliance narrative stays.\n\n"
+            "## Proposed Investment\n\n"
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| Old | Row | $1 |\n"
+        )
+        table = (
+            "## Fee Detail by Phase\n\n"
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| New | Row | $99 |\n"
+        )
+        out, action = insert_budget_table_into_section(prose, table)
+        self.assertEqual(action, "replaced")
+        self.assertIn("Compliance narrative stays.", out)
+        self.assertIn("$99", out)
+        self.assertNotIn("$1", out)
+
+
+if __name__ == "__main__":
+    unittest.main()

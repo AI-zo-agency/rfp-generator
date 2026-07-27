@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from app.services import llm
 from app.services.company_qualification.schemas import (
@@ -30,6 +31,24 @@ def _heuristic_select(candidates: list[EvidenceCandidate], limit: int = 4) -> li
         if len(titles) >= limit:
             break
     return titles
+
+
+def _min_case_studies_for_rfp(rfp_context: str, proposal_context: ProposalContext) -> int:
+    """RFP portfolio language → at least 2; otherwise still prefer 2 when available."""
+    blob = " ".join(
+        [
+            " ".join(proposal_context.services_requested or []),
+            proposal_context.summary or "",
+            (rfp_context or "")[:6000],
+        ]
+    ).casefold()
+    if re.search(
+        r"\b(minimum\s+(?:of\s+)?two|at\s+least\s+two|sample\s+work\s+portfolio|"
+        r"two\s+recent\s+campaigns|two\s+case\s+stud)\b",
+        blob,
+    ):
+        return 2
+    return 2
 
 
 def _infer_services_claim(proposal_context: ProposalContext, rfp_context: str) -> str:
@@ -130,6 +149,7 @@ async def run_evidence_selection_agent(
             f"{i}. TITLE: {c.title}\n   SNIPPET: {c.snippet[:400]}\n   SOURCE: {c.source}"
         )
     catalog = "\n\n".join(catalog_lines)
+    min_studies = _min_case_studies_for_rfp(rfp_context, proposal_context)
 
     try:
         raw, provider = await llm.chat_json(
@@ -138,7 +158,7 @@ async def run_evidence_selection_agent(
                     "role": "system",
                     "content": (
                         "You are the Evidence Selection Agent for zö agency Section 3.\n"
-                        "SELECT the strongest 3–5 past case studies for THIS RFP.\n"
+                        "SELECT the strongest past case studies for THIS RFP.\n"
                         "You are scoring metadata/snippets only — full documents are fetched later.\n"
                         "Compact JSON only — no markdown fences. Finish every brace.\n"
                         "Rationale ≤8 words each.\n\n"
@@ -147,13 +167,16 @@ async def run_evidence_selection_agent(
                         "STRICT RULES:\n"
                         f"- Do NOT select work for '{rfp_client}' — that is the CURRENT client.\n"
                         "- ONLY titles from the candidate catalog below.\n"
-                        "- Return 3–5 studies maximum. Never return more than 5.\n"
-                        "- Omit weak or irrelevant examples.\n"
+                        f"- Return AT LEAST {min_studies} and at most 5 studies. "
+                        "If the RFP asks for a sample portfolio / minimum two campaigns, "
+                        "returning only one study is a HARD FAILURE.\n"
+                        "- Prefer distinct clients and campaign types (do not pick two near-duplicates).\n"
+                        "- Omit weak or irrelevant examples only AFTER the minimum is met.\n"
                         f"- Required claim applicability: '{claim}' — do not pick nearest-topic "
                         "work that does not actually deliver that work type.\n"
                         "- Never treat finalist/loss files as wins.\n\n"
                         "Return JSON:\n"
-                        '{"selectedStudies":["Exact Title 1"],'
+                        '{"selectedStudies":["Exact Title 1","Exact Title 2"],'
                         '"scores":[{"title":"...","score":0.85,"rationale":"..."}]}'
                     ),
                 },
@@ -163,7 +186,8 @@ async def run_evidence_selection_agent(
                         f"proposalType: {proposal_context.proposal_type}\n"
                         f"industry: {proposal_context.industry}\n"
                         f"servicesRequested: {proposal_context.services_requested}\n"
-                        f"summary: {(proposal_context.summary or '')[:280]}\n\n"
+                        f"summary: {(proposal_context.summary or '')[:280]}\n"
+                        f"minimumStudiesRequired: {min_studies}\n\n"
                         f"RFP requirements summary:\n{rfp_context[:8000]}\n\n"
                         f"Candidate catalog ({len(filtered)} items, pre-gated):\n{catalog[:40000]}"
                     ),
@@ -181,7 +205,9 @@ async def run_evidence_selection_agent(
         return (
             EvidenceSelectionResult(
                 candidatesConsidered=len(candidates),
-                selectedStudies=_heuristic_select(filtered),
+                selectedStudies=_heuristic_select(
+                    filtered, limit=max(min_studies, 3)
+                ),
                 scores=[],
             ),
             "heuristic",
@@ -198,8 +224,15 @@ async def run_evidence_selection_agent(
         if canonical not in normalized:
             normalized.append(canonical)
     normalized = normalized[:5]
+    if len(normalized) < min_studies:
+        # Backfill from catalog so portfolio RFPs never ship with a single case.
+        for title in _heuristic_select(filtered, limit=5):
+            if title not in normalized:
+                normalized.append(title)
+            if len(normalized) >= min_studies:
+                break
     if not normalized:
-        normalized = _heuristic_select(filtered)
+        normalized = _heuristic_select(filtered, limit=max(min_studies, 3))
 
     scores_raw = raw.get("scores") or []
     scores: list[EvidenceScore] = []

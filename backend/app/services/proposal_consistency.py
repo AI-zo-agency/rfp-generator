@@ -19,7 +19,10 @@ from app.services.proposal_budget_validation import (
     sum_line_items_extended,
     validate_budget_canonical,
 )
-from app.services.proposal_section_quality import is_strict_improvement
+from app.services.proposal_section_quality import (
+    is_integrity_verify_flagging,
+    is_strict_improvement,
+)
 
 _CITED_EVIDENCE_RE = re.compile(r"\[E(\d+)\]")
 _NAME_TITLE_RE = re.compile(
@@ -35,6 +38,10 @@ _DRAFT_FAILURE_RE = re.compile(
 )
 _VERIFY_BEFORE_SUBMIT_RE = re.compile(
     r"\bverify\b[^.\n]{0,60}\b(before\s+submission|before\s+submitting|submission)\b",
+    re.I,
+)
+_TEAM_SIZE_RE = re.compile(
+    r"\b(?:team\s+of\s+(\d+)|(\d+)[\s-]*person\s+team|(\d+)\s+team\s+members)\b",
     re.I,
 )
 
@@ -144,6 +151,11 @@ def patch_improves_section(
     if regression_vs_prior(before, after):
         return False
 
+    # Intentional integrity flagging: replace unsourced %/figures with [VERIFY].
+    # Weakness scorer treats more VERIFY tags as worse — override that here.
+    if is_integrity_verify_flagging(before, after):
+        return True
+
     before_verify = verify_count(before.content or "")
     after_verify = verify_count(after.content or "")
     if before_verify > 0 and after_verify < before_verify and after.content.strip():
@@ -168,6 +180,9 @@ def patch_improves_section(
         rfp=rfp,
     )
     if issue_score(after_issues) > issue_score(before_issues):
+        # More [VERIFY] from integrity flagging can raise issue score — still OK.
+        if is_integrity_verify_flagging(before, after):
+            return True
         return False
 
     if budget and introduces_unauthorized_dollars(after.content, budget):
@@ -251,13 +266,64 @@ def scan_manuscript_consistency(
                         )
                     )
 
+        from app.services.proposal_budget_sync import collect_deterministic_budget_mismatches
+
+        for mismatch in collect_deterministic_budget_mismatches(draft, budget):
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="consistency",
+                    message=(
+                        mismatch.note
+                        or (
+                            f"Budget claim '{mismatch.claimed_field}' contradicts canonical "
+                            f"{mismatch.canonical_value}"
+                        )
+                    ),
+                    sectionId=mismatch.section_id,
+                    sectionTitle=mismatch.section_title,
+                    excerpt=(mismatch.sentence or "")[:160],
+                )
+            )
+
+        for mismatch in budget.narrative_mismatches or []:
+            if mismatch.matches:
+                continue
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="consistency",
+                    message=(
+                        mismatch.note
+                        or (
+                            f"Stored budget grounding mismatch on '{mismatch.claimed_field}'"
+                        )
+                    ),
+                    sectionId=mismatch.section_id,
+                    sectionTitle=mismatch.section_title,
+                    excerpt=(mismatch.sentence or "")[:160],
+                )
+            )
+
     name_titles: dict[str, set[str]] = {}
+    team_sizes: dict[int, list[str]] = {}
     for section in draft.sections:
         if not section.content.strip():
             continue
         for name, title in _NAME_TITLE_RE.findall(section.content):
             key = name.strip().casefold()
             name_titles.setdefault(key, set()).add(title.strip())
+        for match in _TEAM_SIZE_RE.finditer(section.content):
+            raw = next((g for g in match.groups() if g), None)
+            if not raw:
+                continue
+            try:
+                size = int(raw)
+            except ValueError:
+                continue
+            if size < 2 or size > 200:
+                continue
+            team_sizes.setdefault(size, []).append(section.title or section.id)
 
     for name_key, titles in name_titles.items():
         if len(titles) < 2:
@@ -271,6 +337,19 @@ def scan_manuscript_consistency(
                     f"Team member '{display_name}' has conflicting titles across sections: "
                     f"{'; '.join(sorted(titles)[:4])}"
                 ),
+            )
+        )
+
+    if len(team_sizes) > 1:
+        summary = "; ".join(
+            f"team of {size} ({', '.join(titles[:2])})"
+            for size, titles in sorted(team_sizes.items())
+        )
+        issues.append(
+            PreSubmitIssue(
+                severity="warning",
+                category="consistency",
+                message=f"Conflicting team-size claims across sections: {summary}",
             )
         )
 
@@ -371,5 +450,10 @@ def scan_manuscript_consistency(
 
 
 def _usd_display(budget: ProposalBudget) -> str:
-    value = budget.agency_revenue_estimate or 0
+    value = (
+        budget.total_client_invoicing
+        or budget.agency_revenue_estimate
+        or budget.lump_sum_total
+        or 0
+    )
     return f"{value:,.0f}"

@@ -21,8 +21,8 @@ PIPELINE_PHASES: tuple[str, ...] = (
     "sections-1-3",
     "phase-2",
     "phase-3",
-    "phase-3-6-self-edit",
     "phase-3-5-budget",
+    "phase-3-6-self-edit",
     "phase-4-review",
 )
 
@@ -215,13 +215,12 @@ async def record_phase_started(rfp_id: str, phase: str) -> None:
     research = await _ensure_research(rfp_id)
     prior = research.pipeline_checkpoint
     phase_label = PHASE_LABELS.get(phase, phase)
-    # Self-edit: seed step 1 immediately so the UI doesn't flash "Final polish"
-    # from the phase title containing the word "polish".
+    # Self-edit: seed step 1 immediately so the UI doesn't flash wrong substep.
     if phase == "phase-3-6-self-edit":
-        activity_label = "Senior editor: Checking facts"
-        activity_detail = "Starting fact check…"
+        activity_label = "Senior editor: Removing duplicates"
+        activity_detail = "Scanning sections for repeated content…"
         step_index: int | None = 1
-        step_total: int | None = 5
+        step_total: int | None = 3
     else:
         activity_label = phase_label
         activity_detail = None
@@ -544,6 +543,8 @@ async def resolve_resume_phase(
         if cp.last_failed_phase and cp.last_failed_phase in PIPELINE_PHASES:
             if cp.last_failed_phase == "phase-3-6-self-edit":
                 err = (cp.last_error or "").lower()
+                # Budget runs before senior editor — if editor failed on VERIFY but budget
+                # is missing, finish budget first then return to editor.
                 if ("verify" in err or "placeholder" in err) and not phase_is_complete(
                     draft=draft, research=research, phase="phase-3-5-budget"
                 ):

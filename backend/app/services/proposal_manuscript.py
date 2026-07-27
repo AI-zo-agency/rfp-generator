@@ -70,13 +70,49 @@ def manuscript_sections_for_export(sections: list["ProposalSection"]) -> list["P
 
 
 def strip_evidence_citation_markers(text: str) -> str:
-    """Remove internal evidence markers ([E1], **[E14]**, etc.) from client-facing prose."""
+    """Remove internal evidence markers from client-facing prose.
+
+    Handles single markers ([E1], **[E14]**), comma lists ([E12, E13, E14]),
+    and orphaned 'References:' lines that only listed evidence ids.
+    """
     if not text:
         return text
-    cleaned = re.sub(r"\s*\*{0,2}\[E\d+\]\*{0,2}", "", text)
+    cleaned = text
+    # Comma / semicolon lists inside one bracket: [E12, E13, E14, E15]
+    cleaned = re.sub(
+        r"\s*\*{0,2}\[\s*E\d+(?:\s*[,;]\s*E\d+)+\s*\]\*{0,2}",
+        "",
+        cleaned,
+        flags=re.I,
+    )
+    # Single markers: [E1], **[E14]**
+    cleaned = re.sub(r"\s*\*{0,2}\[E\d+\]\*{0,2}", "", cleaned, flags=re.I)
+    # Orphaned references lines (with or without leftover bold markers).
+    cleaned = re.sub(
+        r"(?im)^\s*\**\s*References?\s*\**\s*:?\s*\**\s*"
+        r"(?:\[?\s*E\d+(?:\s*[,;]\s*E\d+)*\s*\]?)?\s*$",
+        "",
+        cleaned,
+    )
     # Clean doubled spaces left by marker removal (keep newlines).
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned
+
+
+def strip_internal_pricing_flags(text: str) -> str:
+    """Remove [PRICING FLAG: …] blocks — internal Sonja notes, not client prose."""
+    if not text:
+        return text
+    cleaned = re.sub(r"(?is)\[PRICING FLAG:[^\]]*\]", "", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+def scrub_client_facing_section_artifacts(text: str) -> str:
+    """Strip evidence markers + pricing flags from manuscript section bodies."""
+    return strip_internal_pricing_flags(strip_evidence_citation_markers(text or ""))
 
 
 def plain_text_for_export(markdown: str) -> str:

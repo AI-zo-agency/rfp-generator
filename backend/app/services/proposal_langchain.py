@@ -222,10 +222,22 @@ def build_proposal_tools(
     rfp_id: str,
     title: str,
     client: str,
+    sector: str = "",
 ) -> list[StructuredTool]:
     async def search_knowledge_base(query: str) -> str:
-        """Search zö verified knowledge base for company facts, certifications, capabilities."""
-        text, _ = await proposal_knowledge_base_tools.search_knowledge_base(query)
+        """Search zö verified KB for company facts, bios, case studies, certifications.
+
+        KB is ONLY about zö — never query with the RFP buyer as the subject.
+        Ask what zö can provide (capabilities, case studies, bios) matching RFP themes.
+        For buyer requirements use search_rfp_requirements. For budget use
+        search_rfp_requirements + search_pricing_guide.
+        """
+        text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
+            query,
+            rfp_client=client,
+            rfp_sector=sector,
+            rfp_title=title,
+        )
         return text
 
     async def search_master_template(section: str) -> str:
@@ -233,14 +245,20 @@ def build_proposal_tools(
         text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
             f"zö agency master template 02_ {section} company overview team case study",
             limit=5,
+            rfp_client=client,
+            rfp_sector=sector,
+            rfp_title=title,
         )
         return text
 
-    async def search_case_studies(sector: str, scope: str) -> str:
+    async def search_case_studies(sector_hint: str, scope: str) -> str:
         """Search verified case studies (03_CS_) by sector and scope similarity."""
         text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
-            f"03 case study {sector} {scope} zö agency confirmed outcomes",
+            f"03 case study {sector_hint or sector} {scope} zö agency confirmed outcomes",
             limit=6,
+            rfp_client=client,
+            rfp_sector=sector,
+            rfp_title=title,
         )
         return text
 
@@ -249,21 +267,63 @@ def build_proposal_tools(
         text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
             f"04 bio team {roles} zö agency approved personnel",
             limit=6,
+            rfp_client=client,
+            rfp_sector=sector,
+            rfp_title=title,
         )
         return text
 
     async def search_rfp_requirements(topic: str) -> str:
-        """Search the ingested RFP document for requirements on a topic."""
+        """Search THIS RFP for buyer requirements (scope, scoring, forms, references format)."""
         text, _ = await proposal_knowledge_base_tools.search_rfp_document(rfp_id, title, client)
         if topic.strip():
             return f"Topic: {topic}\n\n{text[:8000]}"
         return text[:8000]
 
+    async def search_pricing_guide(topic: str = "") -> str:
+        """Search ONLY 00_Guide_Pricing (Low/Average/High tiers, menu rates, PM floor).
+
+        Pass pricing vocabulary only (tiers, rates, PM floor). NEVER pass the RFP
+        client name or RFP title — the guide has no client-specific prices.
+        """
+        hint = proposal_knowledge_base_tools.sanitize_pricing_guide_query(
+            topic or "tier ranges Low Average High discovery strategy fees",
+            rfp_client=client,
+            rfp_title=title,
+        )
+        text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
+            hint,
+            limit=8,
+            category="pricing",
+            max_chars=12_000,
+            rfp_client=client,
+            rfp_sector=sector,
+            rfp_title=title,
+        )
+        if text and not text.startswith("("):
+            return text
+        text2, _ = await proposal_knowledge_base_tools.search_knowledge_base(
+            hint,
+            limit=8,
+            category="reference",
+            max_chars=12_000,
+            rfp_client=client,
+            rfp_sector=sector,
+            rfp_title=title,
+        )
+        return text2 or "(No 00_Guide_Pricing content found.)"
+
     return [
         StructuredTool.from_function(
             coroutine=search_knowledge_base,
             name="search_knowledge_base",
-            description="Search zö verified knowledge base.",
+            description=(
+                "Search zö KB ONLY (company facts, bios, case studies). "
+                "Query what zö can provide for the RFP theme — NEVER search for the "
+                "RFP buyer/prospect by name (they are not in the KB). "
+                "Buyer requirements → search_rfp_requirements. "
+                "Budget → search_rfp_requirements + search_pricing_guide."
+            ),
         ),
         StructuredTool.from_function(
             coroutine=search_master_template,
@@ -273,7 +333,10 @@ def build_proposal_tools(
         StructuredTool.from_function(
             coroutine=search_case_studies,
             name="search_case_studies",
-            description="Search verified case studies (03_CS_).",
+            description=(
+                "Search verified zö case studies (03_CS_) by sector/scope theme — "
+                "not by RFP buyer name."
+            ),
         ),
         StructuredTool.from_function(
             coroutine=search_team_bios,
@@ -283,7 +346,20 @@ def build_proposal_tools(
         StructuredTool.from_function(
             coroutine=search_rfp_requirements,
             name="search_rfp_requirements",
-            description="Search the source RFP for requirements and evaluation criteria.",
+            description=(
+                "Search THIS RFP PDF for buyer requirements — scope, scoring, fee forms, "
+                "reference format, past-performance rules. Use this for anything about "
+                "what the buyer demands (not zö facts)."
+            ),
+        ),
+        StructuredTool.from_function(
+            coroutine=search_pricing_guide,
+            name="search_pricing_guide",
+            description=(
+                "Search 00_Guide_Pricing only — Low/Average/High tiers and approved rate menu. "
+                "Args: pricing terms ONLY (e.g. 'Average tier PM floor discovery'). "
+                "NEVER include RFP client name or RFP title."
+            ),
         ),
     ]
 
@@ -295,9 +371,11 @@ async def run_tool_research_agent(
     client: str,
     rfp_excerpt: str,
     questions: list[dict[str, str]],
+    sector: str = "",
 ) -> tuple[list[dict[str, Any]], str]:
     system = """You are a proposal research agent for zö agency.
 Use the provided tools to answer each research question using ONLY verified knowledge-base and RFP content.
+KB tools = zö facts only. Never search KB with the RFP buyer as the subject — use search_rfp_requirements for buyer demands.
 Call tools selectively — batch related questions when possible to save tokens.
 When finished, respond with ONLY valid JSON:
 {"answers":[{"id":"...","answer":"...","sources":["tool:search_knowledge_base"]}]}
@@ -310,7 +388,7 @@ Research questions:
 {json.dumps(questions, indent=2)}
 """
 
-    tools = build_proposal_tools(rfp_id, title, client)
+    tools = build_proposal_tools(rfp_id, title, client, sector=sector)
     final_text, provider, _tool_log = await run_tool_agent_loop(
         system_prompt=system,
         user_content=user,

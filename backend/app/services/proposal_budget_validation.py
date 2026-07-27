@@ -68,8 +68,10 @@ _PM_RATIO_MIN = 0.05
 _PM_RATIO_MAX = 0.08
 _PM_RATIO_TARGET = 0.065
 _PM_GUIDE_FLOOR = 7500.0
+# Only true campaign-specific / pilot PM may sit under the $7,500 engagement floor.
+# Do NOT match "short project" alone — guide 9.1 ("short projects 3–6 months") is $7,500–$12,000.
 _PM_CAMPAIGN_SPECIFIC_RE = re.compile(
-    r"campaign-specific|short project|3[\s-]*6\s*month|pilot",
+    r"campaign-specific|\b9\.2\b|\bpilot\b",
     re.I,
 )
 
@@ -86,6 +88,8 @@ _MONTH_UNIT_RE = re.compile(r"\b(month|months|mo)\b", re.I)
 
 # Year / NTE / "Annual Allocation" rows are the RFP budget ENVELOPE, not billable work.
 # Summing them with Discovery/Strategy/etc. double-counts and blows past hard caps (e.g. HTA $2.95M).
+# IMPORTANT: do NOT match colloquial "budget envelope" in notes ("small-college budget envelope") —
+# that false-positive stripped real Phase/PM rows, invented a tiny hard cap, and crushed fees ~20×.
 _BUDGET_ENVELOPE_LINE_RE = re.compile(
     r"^\s*annual\s+allocation\b|"
     r"\ballocation\s+year\s*\d+\b|"
@@ -94,25 +98,56 @@ _BUDGET_ENVELOPE_LINE_RE = re.compile(
     r"\bmaximum\s+compensation\b|"
     r"\bnot[\s-]*to[\s-]*exceed\b|"
     r"\bnte\b|"
-    r"\bbudget\s+(?:ceiling|cap|envelope)\b|"
+    r"\bbudget\s+(?:ceiling|cap)\b|"
     r"\btotal\s+available\s+(?:budget|funding)\b",
     re.I,
 )
+_STRONG_ENVELOPE_CAP_RE = re.compile(
+    r"^\s*annual\s+allocation\b|"
+    r"\ballocation\s+year\s*\d+\b|"
+    r"\byear\s*[123]\s+(?:allocation|ceiling|cap|envelope|budget)\b|"
+    r"\b(?:y1|y2|y3)\s+(?:allocation|ceiling|cap|envelope)\b|"
+    r"\bmaximum\s+compensation\b|"
+    r"\bnot[\s-]*to[\s-]*exceed\b|"
+    r"\bnte\b|"
+    r"\btotal\s+available\s+(?:budget|funding)\b",
+    re.I,
+)
+_WORK_DELIVERABLE_LINE_RE = re.compile(
+    r"\b(phase\s*[1-4]|discovery|strategy|tactical|roadmap|handoff|"
+    r"project\s+management|account\s+management|stakeholder|brand\s+audit|"
+    r"messaging|digital\s+marketing|content\s+marketing|implementation\s+roadmap)\b",
+    re.I,
+)
+# Refuse auto-scale that would crush a real guide build into a token fee (KVCC $67k → $3k).
+_ABSURD_HARD_CAP_SCALE_FACTOR = 0.40
 
 
 def is_budget_envelope_line_item(item: BudgetLineItem) -> bool:
-    """True when the row is an RFP funding envelope / yearly cap, not a cost line."""
+    """True when the row is an RFP funding envelope / yearly cap, not a cost line.
+
+    Notes are intentionally ignored — LLM notes often say "budget envelope" while
+    describing real deliverables.
+    """
     blob = " ".join(
         part
-        for part in (
-            item.category or "",
-            item.description or "",
-            item.notes or "",
-            item.role_title or "",
-        )
+        for part in (item.category or "", item.description or "", item.role_title or "")
         if part
     )
-    return bool(_BUDGET_ENVELOPE_LINE_RE.search(blob))
+    if not _BUDGET_ENVELOPE_LINE_RE.search(blob):
+        return False
+    # Work deliverables that happen to mention "budget" must stay as fee lines.
+    if _WORK_DELIVERABLE_LINE_RE.search(blob) and not _STRONG_ENVELOPE_CAP_RE.search(blob):
+        return False
+    return True
+
+
+def is_strong_budget_envelope_row(item: BudgetLineItem) -> bool:
+    """True for Year/NTE/Annual Allocation rows safe to use when inferring rfpBudgetCap."""
+    blob = " ".join(
+        part for part in (item.category or "", item.description or "") if part
+    )
+    return bool(_STRONG_ENVELOPE_CAP_RE.search(blob))
 
 
 def strip_budget_envelope_line_items(
@@ -141,7 +176,11 @@ def scale_line_items_to_hard_cap(
     hard_cap: float,
     direct_expenses: float = 0.0,
 ) -> tuple[list[BudgetLineItem], list[str]]:
-    """Proportionally scale agency_fee rows so agency revenue stays at or under hard_cap."""
+    """Proportionally scale agency_fee rows so agency revenue stays at or under hard_cap.
+
+    Refuses absurd compression (e.g. guide build crushed to a few thousand) — that almost
+    always means a bogus hard_cap, not a real RFP ceiling.
+    """
     if hard_cap <= 0:
         return line_items, []
     _, agency_fee, _ = split_line_item_totals(line_items)
@@ -158,6 +197,14 @@ def scale_line_items_to_hard_cap(
         ]
 
     factor = target_agency / agency_fee
+    if factor < _ABSURD_HARD_CAP_SCALE_FACTOR:
+        return line_items, [
+            f"[PRICING FLAG: REFUSED auto-scale of agency fees {_usd(agency_fee)} → "
+            f"{_usd(target_agency)} (factor {factor:.2f}) under hard cap {_usd(hard_cap)} — "
+            "cap looks inconsistent with the guide build; kept original fees — Sonja confirm "
+            "RFP ceiling before submission]"
+        ]
+
     scaled: list[BudgetLineItem] = []
     for item in line_items:
         if infer_line_item_type(item) == "client_passthrough":
@@ -481,7 +528,23 @@ def _is_pm_line_item(item: BudgetLineItem) -> bool:
 
 def _pm_needs_engagement_floor(item: BudgetLineItem) -> bool:
     """Full-engagement PM lines must meet guide dollar floor; campaign-specific rows may be smaller."""
-    return not bool(_PM_CAMPAIGN_SPECIFIC_RE.search(item.description or ""))
+    blob = " ".join(
+        part
+        for part in (
+            item.description,
+            item.role_title or "",
+            item.rate_source or "",
+            item.notes or "",
+            item.category or "",
+        )
+        if part
+    )
+    if _PM_CAMPAIGN_SPECIFIC_RE.search(blob):
+        return False
+    # Guide 9.2 is campaign-specific PM ($5k–$8.5k Average) — below full-engagement floor is OK.
+    if re.search(r"\b9\.2\b", blob):
+        return False
+    return True
 
 
 def collect_pm_floor_violations(budget: ProposalBudget) -> list[str]:
@@ -500,6 +563,42 @@ def collect_pm_floor_violations(budget: ProposalBudget) -> list[str]:
     return violations
 
 
+def _raise_pm_items_to_floor(
+    line_items: list[BudgetLineItem],
+) -> tuple[list[BudgetLineItem], float, float]:
+    """Bump engagement-floor PM rows up to $_PM_GUIDE_FLOOR. Returns (items, old_total, new_total)."""
+    adjusted: list[BudgetLineItem] = []
+    old_pm = 0.0
+    new_pm = 0.0
+    for item in line_items:
+        if not _is_pm_line_item(item):
+            adjusted.append(item)
+            continue
+        ext = float(item.extended or 0)
+        old_pm += ext
+        if _pm_needs_engagement_floor(item) and 0 < ext < _PM_GUIDE_FLOOR:
+            new_ext = _PM_GUIDE_FLOOR
+            rate, qty = item.rate, item.quantity
+            if rate is not None and qty is not None and float(qty) > 0:
+                adjusted.append(
+                    item.model_copy(
+                        update={
+                            "extended": new_ext,
+                            "rate": round(new_ext / float(qty), 2),
+                        }
+                    )
+                )
+            else:
+                adjusted.append(
+                    item.model_copy(update={"extended": new_ext, "rate": new_ext})
+                )
+            new_pm += new_ext
+        else:
+            adjusted.append(item)
+            new_pm += ext
+    return adjusted, old_pm, new_pm
+
+
 def adjust_pm_line_items_to_guide(
     line_items: list[BudgetLineItem],
     agency_base: float,
@@ -509,6 +608,7 @@ def adjust_pm_line_items_to_guide(
     Ratio is PM / total_agency (including PM). Target is computed from non-PM agency
     fees so scaling lands inside the band (scaling against an inclusive base leaves
     4.9% stuck just under 5% after a one-shot bump).
+    Also auto-raises engagement PM rows that sit below the $7,500 guide floor.
     """
     base = float(agency_base or 0)
     if base <= 0:
@@ -543,10 +643,11 @@ def adjust_pm_line_items_to_guide(
             and 0 < float(item.extended or 0) < _PM_GUIDE_FLOOR
         ]
         if floor_violations:
-            ext = float(floor_violations[0].extended or 0)
-            return line_items, (
-                f"[PRICING FLAG: PM ratio in band but dollar amount {_usd(ext)} is below "
-                f"00_Guide_Pricing engagement floor {_usd(_PM_GUIDE_FLOOR)} — raise PM or Sonja review]"
+            raised, old_pm, new_pm = _raise_pm_items_to_floor(line_items)
+            return raised, (
+                f"[PRICING FLAG: Project management auto-raised from {_usd(old_pm)} "
+                f"to {_usd(new_pm)} to meet 00_Guide_Pricing engagement floor "
+                f"{_usd(_PM_GUIDE_FLOOR)} — Sonja confirm before submission]"
             )
         return line_items, None
 
@@ -567,15 +668,16 @@ def adjust_pm_line_items_to_guide(
     needs_floor = any(
         _pm_needs_engagement_floor(line_items[i]) for i in pm_indices
     )
-    if ratio < _PM_RATIO_MIN and needs_floor:
-        target_pm = max(target_pm, _PM_GUIDE_FLOOR)
-
+    # High ratio: never auto-cut below the engagement floor — leave and flag.
     if ratio > _PM_RATIO_MAX and needs_floor and target_pm < _PM_GUIDE_FLOOR:
         return line_items, (
             f"[PRICING FLAG: PM is {ratio * 100:.1f}% of agency fees at {_usd(pm_total)} "
             f"(guide 5–8%) — do not auto-cut PM below 00_Guide_Pricing floor "
             f"{_usd(_PM_GUIDE_FLOOR)}; reduce scope/tier or Sonja review]"
         )
+    # Low ratio: scale up, and meet the dollar floor when this is full-engagement PM.
+    if ratio < _PM_RATIO_MIN and needs_floor:
+        target_pm = max(target_pm, _PM_GUIDE_FLOOR)
 
     scale = target_pm / pm_total
 
@@ -626,15 +728,28 @@ def reconcile_proposal_budget(
     line_items, _envelope_rows, envelope_notes = strip_budget_envelope_line_items(line_items)
     flags.extend(envelope_notes)
 
-    # Infer / keep hard cap — envelope sum is a useful fallback when LLM omitted rfpBudgetCap.
+    # Drop duplicate travel: if travel lines already exist, zero matching directExpensesTotal.
+    from app.services.proposal_budget_content import dedupe_travel_vs_direct_expenses
+
+    budget = dedupe_travel_vs_direct_expenses(
+        budget.model_copy(update={"line_items": line_items, "pricing_flags": flags})
+    )
+    line_items = list(budget.line_items)
+    flags = list(budget.pricing_flags or [])
+
+    # Infer / keep hard cap — only from strong Year/NTE/Annual Allocation rows.
+    # Never treat stripped work rows (false envelope matches) as the RFP ceiling.
     hard_cap = budget.rfp_budget_cap
-    if hard_cap is None and _envelope_rows:
+    strong_envelope_rows = [i for i in _envelope_rows if is_strong_budget_envelope_row(i)]
+    inferred_cap_from_envelope = False
+    if hard_cap is None and strong_envelope_rows:
         envelope_sum = round(
-            sum(float(i.extended or 0) for i in _envelope_rows if i.extended),
+            sum(float(i.extended or 0) for i in strong_envelope_rows if i.extended),
             2,
         )
         if envelope_sum > 0:
             hard_cap = envelope_sum
+            inferred_cap_from_envelope = True
             flags.append(
                 f"[PRICING FLAG: rfpBudgetCap set from stripped yearly allocation total "
                 f"({_usd(envelope_sum)}) — confirm against RFP Section compensation cap]"
@@ -647,6 +762,16 @@ def reconcile_proposal_budget(
     line_items, pm_note = adjust_pm_line_items_to_guide(line_items, float(agency_base or 0))
     if pm_note:
         flags.append(pm_note)
+    # Last resort: engagement PM still under the guide floor (e.g. high-ratio no-cut path)
+    # must not hard-fail Stage 3.5 — raise dollars and flag for Sonja.
+    raised_items, old_pm, new_pm = _raise_pm_items_to_floor(line_items)
+    if new_pm > old_pm + 0.01:
+        line_items = raised_items
+        flags.append(
+            f"[PRICING FLAG: Project management auto-raised from {_usd(old_pm)} "
+            f"to {_usd(new_pm)} to meet 00_Guide_Pricing engagement floor "
+            f"{_usd(_PM_GUIDE_FLOOR)} — Sonja confirm before submission]"
+        )
 
     if hard_cap is not None and float(hard_cap) > 0:
         line_items, cap_notes = scale_line_items_to_hard_cap(
@@ -655,6 +780,21 @@ def reconcile_proposal_budget(
             direct_expenses=float(budget.direct_expenses_total or 0),
         )
         flags.extend(cap_notes)
+        # Persisted bogus caps (e.g. $10.5k from false envelope strip) must not stick.
+        if any("REFUSED auto-scale" in n for n in cap_notes):
+            flags.append(
+                f"[PRICING FLAG: Cleared unreliable rfpBudgetCap {_usd(float(hard_cap))} "
+                "after refusing absurd fee compression — confirm real RFP ceiling with Sonja]"
+            )
+            hard_cap = None
+            # Drop stale "set from stripped yearly allocation" notes that caused this.
+            flags = [
+                f
+                for f in flags
+                if "rfpBudgetCap set from stripped yearly allocation" not in f
+            ]
+        elif inferred_cap_from_envelope:
+            pass  # keep inferred cap when scale succeeded or wasn't needed
 
     line_sum, agency_fee, passthrough = split_line_item_totals(line_items)
     direct = round(float(budget.direct_expenses_total or 0), 2)
@@ -698,6 +838,9 @@ def reconcile_proposal_budget(
     }
     if hard_cap is not None:
         updates["rfp_budget_cap"] = float(hard_cap)
+    elif budget.rfp_budget_cap is not None:
+        # Explicitly clear a refused/bogus cap so it does not persist on the research budget.
+        updates["rfp_budget_cap"] = None
 
     computed = agency_revenue
     requires_lump_hourly = rfp_requires_lump_sum_and_hourly(rfp_sections, rfp_context)

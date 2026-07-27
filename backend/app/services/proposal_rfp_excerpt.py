@@ -269,3 +269,41 @@ def evaluation_and_kpi_excerpt(rfp_text: str, *, max_chars: int = 36_000) -> str
         if used >= max_chars:
             break
     return "\n\n---\n\n".join(parts)
+
+
+def budget_and_cost_excerpt(rfp_text: str, *, max_chars: int = 28_000) -> str:
+    """RFP language about budget ceiling, cost scoring, fee forms, and quote requirements."""
+    body = (rfp_text or "").strip()
+    if not body:
+        return ""
+    patterns = (
+        r"(?:fixed[\s-]?price|not\s+to\s+exceed|NTE|contract\s+(?:ceiling|value|amount)|"
+        r"maximum\s+(?:contract|compensation|budget)|total\s+(?:contract|project)\s+value)",
+        r"budget|funding|appropriat|available\s+funds|estimated\s+(?:value|cost|budget)",
+        r"cost\s+(?:of\s+)?(?:base\s+)?proposal|cost\s+factor|cost\s+points|price\s+reasonableness",
+        r"pricing\s+proposal\s+form|cost\s+proposal\s+form|schedule\s+of\s+fees|quotation",
+        r"company\s+quote|detailed\s+specifications\s+and\s+pricing|fee\s+schedule",
+        r"hourly.{0,80}monthly.{0,80}annual|lump\s+sum|fixed[\s-]?fee",
+        r"evaluation\s+criteria.{0,200}cost|cost.{0,80}evaluation",
+        r"year\s*(?:1|2|3|one|two|three).{0,40}\$[\d,]+",
+        r"\$[\d,]{3,}",
+    )
+    windows: list[tuple[int, int]] = []
+    span = 4500
+    for pat in patterns:
+        for m in re.finditer(pat, body, flags=re.I | re.S):
+            windows.append((max(0, m.start() - span), min(len(body), m.end() + span)))
+    merged = _merge_windows(windows)
+    if not merged:
+        return build_priority_rfp_excerpt(body, max_chars=max_chars)
+    parts: list[str] = []
+    used = 0
+    for start, end in merged:
+        chunk = body[start:end]
+        if used + len(chunk) > max_chars:
+            chunk = chunk[: max_chars - used]
+        parts.append(chunk)
+        used += len(chunk)
+        if used >= max_chars:
+            break
+    return "\n\n---\n\n".join(parts)

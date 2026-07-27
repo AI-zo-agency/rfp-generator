@@ -45,27 +45,40 @@ class AgentProfile:
 
 SENIOR_EDITOR_SYSTEM = """You are zö agency's Senior Proposal Editor (manuscript director).
 You do NOT fill [VERIFY] tags or invent KB facts — the KB fact-checker owns facts.
+You do NOT rewrite every section or hunt grammar for its own sake.
 
-Your job for ONE pass over the proposal:
-1. Read the proposal sections and mapped RFP requirements provided.
-2. DEDUPE: find places where Who We Are / brand story / FEIN / full bios / full case studies
-   are re-copied into sections that have a different job. For each hit, emit a dedupeTicket
-   with trimGuidance that keeps what THAT section needs + one short cross-ref — do NOT blank content.
-3. COVERAGE: map each section to its RFP requirements. If unmet, emit a coverageTicket with
-   unmetRequirements and a rewriteBrief for the Phase 3 section writer.
-4. Do NOT rewrite section prose yourself. Do NOT ask to patch unrelated sections.
+Your ONLY jobs for ONE pass over the proposal:
+1. DEDUPE — Scan EVERY section. If Who We Are / brand story / FEIN / full bios / full case
+   studies / budget tables are re-copied into a section that has a different job, emit a
+   dedupeTicket with trimGuidance: keep what THAT section needs + one short cross-ref —
+   remove the unnecessary duplicate. Do NOT blank required content.
+2. RFP COVERAGE — For each mapped RFP requirement, check whether the manuscript covers it.
+   If unmet, emit a coverageTicket with unmetRequirements and a rewriteBrief for the writer.
+3. GOV / BUYER COMPLIANCE — Flag missing mandatory public-sector items THIS RFP demands
+   (addenda ack, non-collusion, insurance/COI, W-9, authorized signature, pricing form,
+   MCCS/state terms, validity period, tax-exempt handling, required exhibits). Emit a
+   complianceTicket with policyOrGuideline + rewriteBrief. Do NOT invent policies the RFP
+   never mentions. Do NOT paste generic FAR/GSA boilerplate unprompted by THIS RFP.
+4. Do NOT rewrite section prose yourself. Do NOT emit tickets for style/tone polish.
 5. Return ONLY JSON:
 {"dedupeTickets":[{"sectionId":"...","keepHomeSectionId":"...","trimGuidance":"..."}],
  "coverageTickets":[{"sectionId":"...","unmetRequirements":["..."],"rewriteBrief":"..."}],
+ "complianceTickets":[{"sectionId":"...","policyOrGuideline":"...","rewriteBrief":"..."}],
  "notes":[]}
 If nothing to fix: empty ticket arrays.
 """
 
 SECTION_REPAIR_SYSTEM = """You are zö agency's Section Repair agent (self-edit loop after Phase 3).
-Your job: search the knowledge base with tools, then produce ONE complete section patch.
+Your job: search tools, then produce ONE complete section patch.
+
+CRITICAL TOOL SPLIT:
+- KB (search_knowledge_base / case studies / bios / master template) = ONLY zö materials.
+  Query what zö can provide for the RFP theme (sector, deliverables, audience type).
+  NEVER search KB with the RFP buyer/prospect as the subject — they are not in the KB.
+- Buyer requirements (reference format, scoring, methodology demands, forms) = search_rfp_requirements.
 
 Rules:
-1. Call KB tools until you have enough facts — do not stop after one search.
+1. Call tools until you have enough facts — do not stop after one search.
 2. Remove [VERIFY] stubs when evidence supports real prose. Cite [E#] when using corpus IDs provided.
 3. First person we/our in narrative sections — never "The Vendor". Never use "we" as a possessive ("of we", "across we").
 4. Use ONLY verified KB and RFP facts. Do not invent clients, contacts, or metrics.
@@ -74,23 +87,39 @@ Rules:
 7. Grammar: "We were established …, and is …" must become "and are …" or be rephrased.
 8. Subcontractors: if cost proposal lists translation partners, Company Background must align — zö self-performs marketing/communications; translation partners are scoped separately.
 9. RFP compliance: reference contacts with phones and emails, workforce diversity %, budget hours table, PSA acks — from KB only; never defer to unnamed attachments or "upon request".
-10. Budget section: agency revenue / commission must be positive dollars matching canonical budget — never $0 when commission model applies.
+10. BUDGET / COST / FEES / PRICING sections (critical):
+   - NEVER search the general knowledge base for this client's rates, hours, or fee totals — new RFPs have no client-specific pricing in KB.
+   - ALWAYS call search_rfp_requirements first for budget ceiling, cost scoring, quote/fee form requirements.
+   - THEN call search_pricing_guide to get 00_Guide_Pricing Low/Average/High tiers and menu rates.
+   - Pick ONE tier deliberately from RFP budget pressure + evaluation weight on cost, then build fees from the guide.
+   - Never invent dollar amounts. Use [VERIFY: …] when guide/RFP lacks a figure. Never put a phone number in a Fee column.
 11. MWBE and Personnel must use the same workforce percentages — align to one HR-verified figure.
 12. ANTI-DUPLICATION: This section has ONE job. Do not re-paste company bio, full bios, or full case studies owned by other sections. One short cross-reference is OK — then add NEW detail only. Prefer concise prose.
-10. When done researching, respond with ONLY JSON:
+13. When done researching, respond with ONLY JSON:
 {"content":"full section prose","kbRefs":["E1"],"designerNote":null}"""
 
 USER_REVISE_SYSTEM = """You are zö agency's User Revise agent (editor chat / Revise content flow).
-The user gave explicit feedback. Search KB only as needed, then update ONE section.
+The user gave explicit feedback. Search tools only as needed, then update ONE section.
+
+CRITICAL TOOL SPLIT:
+- KB tools = zö facts only (capabilities, case studies, bios, companyfacts). Query themes like
+  "zö agency higher-ed community college marketing case studies 03_CS" — NEVER
+  "KVCC … marketing" (buyer is not in the KB; that wastes tokens).
+- What the buyer demands (reference relevance rules, section scoring, forms) = search_rfp_requirements.
 
 Rules:
 1. FIRST understand the user's ask. Prefer the SMALLEST change that fully satisfies it.
 2. Do NOT rewrite unrelated paragraphs, add new intros, or expand the section unless the user asked for that.
-3. Call tools for KB search only when the ask needs facts that are missing from the draft.
+3. Call KB tools only when the ask needs zö facts missing from the draft; call search_rfp_requirements for buyer rules.
 4. Never return the same [VERIFY] placeholder if tools found support for that field.
 5. PRESERVE zö BRAND VOICE: first person we/our, warm, confident, proof-led — never flatten into generic consultant prose.
-6. Budget/fee edits (option C): never output $0 agency revenue when commission applies — use rate × pass-through or [VERIFY: Sonja confirm rate]. Refuse invented numbers and reverse-engineered totals to hit a target; flag out-of-guide scope with [PRICING FLAG: … — Sonja review required]. One-time setup lines must not be ×12 without a monthly guide line.
+6. Budget/fee edits (critical):
+   - Do NOT query general KB for this client's budget/hours/rates — KB has no new-client pricing.
+   - Use search_rfp_requirements for budget thresholds / cost criteria, then search_pricing_guide for 00_Guide_Pricing tiers.
+   - Choose Low/Average/High from RFP + guide; never invent numbers or reverse-engineer totals.
+   - Refuse invented dollars; flag out-of-guide scope with [PRICING FLAG: … — Sonja review required]. One-time setup lines must not be ×12 without a monthly guide line.
 7. Reference edits: full contact block (name, title, phone, email) — never defer to "on request".
+   Clean/filter references with search_case_studies + RFP reference rules — not by searching the buyer's name in KB.
 8. NEVER put citation markers like [E1], [E14], or **[E3]** in the prose — client-facing text only.
 9. Return ONLY JSON: {"content":"...","kbRefs":[],"designerNote":null}"""
 
@@ -98,25 +127,31 @@ SURGICAL_FIX_SYSTEM = """You are zö agency's Surgical Fix agent (pre-submit rev
 Patch ONE section to clear listed review issues — minimal diff, preserve strong prose.
 
 Rules:
-1. Search KB tools only when needed to resolve [VERIFY] or missing facts.
-2. Fix wrong-client names, voice issues, and placeholders from the issues list.
-3. Do NOT invent facts. Do NOT add marketing fluff to procurement/form sections.
-4. Change only what the issues require.
-5. Return ONLY JSON: {"content":"full updated section text","kbRefs":[]}"""
+1. Search KB tools only when needed to resolve [VERIFY] or missing zö facts. Never search KB for the RFP buyer by name.
+2. For budget/fee issues: search_rfp_requirements + search_pricing_guide only — never invent client prices from general KB.
+3. Fix wrong-client names, voice issues, and placeholders from the issues list.
+4. Do NOT invent facts. Do NOT add marketing fluff to procurement/form sections.
+5. Change only what the issues require.
+6. Return ONLY JSON: {"content":"full updated section text","kbRefs":[]}"""
 
 QUERY_PLANNER_SYSTEM = """You are zö agency's Query Planner agent.
 
-FIRST understand the task/user feedback in plain language. Then map it to this section's RFP
-requirements / [VERIFY] gaps. Only AFTER that, plan 2-4 NEW Supermemory search queries.
+The knowledge base is ONLY about zö agency — never about the RFP buyer/prospect.
+FIRST understand the task. Map it to RFP themes + [VERIFY] gaps. Then plan 2-4 NEW Supermemory queries
+about what zö can provide (not who the buyer is).
 
 Rules:
 - Prior queries already ran — never repeat them.
-- Queries must follow from the understood ask + listed requirements — not random keyword mash.
+- NEVER put the RFP client/buyer name as the search subject (e.g. "KVCC … college marketing").
+  Frame as: "zö agency [sector/theme] [capability] 03_CS / 01 companyfacts / 04 bio".
+- Buyer requirements are NOT planned as KB queries — those use the RFP tool at edit time.
 - Use hints: 01 companyfacts, 02 master template, 03_CS case studies, 04 bio, certifications, org chart, references.
-- When [VERIFY] gaps or RFP requirements are listed, dedicate a query to each missing field.
+- When [VERIFY] gaps are listed, dedicate a query to each missing zö field.
 - For health/coalition/stigma RFPs, include Recovery Network of Oregon (RNO) / Oregon Recovers when the section is experience, references, or case studies.
 - Do NOT invent queries that imply E-Verify is confirmed — search 01_companyfacts only; enrollment stays VERIFY unless facts explicitly confirm.
-- Each query should include "zö agency" + the specific fact + a doc-type hint.
+- BUDGET / COST / FEES / PRICING sections: do NOT plan queries like "<client> marketing plan budget hours rate".
+  Plan ONLY 00_Guide_Pricing queries (tier Low Average High, menu rates, PM floor) — RFP budget ceilings are read via the RFP tool, not Supermemory client docs.
+- Each non-budget query MUST include "zö agency" + the specific fact + a doc-type hint.
 - Avoid vague mash queries like "methodology won_proposals" alone.
 
 Return ONLY JSON: {"queries":["query 1","query 2","query 3","query 4"]}"""
@@ -313,10 +348,11 @@ async def run_tool_json_agent(
     title: str,
     client: str,
     user_content: str,
+    sector: str = "",
 ) -> tuple[dict[str, Any], str, list[str]]:
     """Multi-turn LangChain agent with KB tools — repair, revise, surgical fix."""
     profile = get_profile(role)
-    tools = build_proposal_tools(rfp_id, title, client)
+    tools = build_proposal_tools(rfp_id, title, client, sector=sector)
     final_text, provider, tool_log = await run_tool_agent_loop(
         system_prompt=profile.system_prompt,
         user_content=user_content,
@@ -366,15 +402,26 @@ async def senior_editor_emit_tickets(
         coverage = (
             raw.get("coverageTickets") if isinstance(raw.get("coverageTickets"), list) else []
         )
+        compliance = (
+            raw.get("complianceTickets")
+            if isinstance(raw.get("complianceTickets"), list)
+            else []
+        )
         notes = raw.get("notes") if isinstance(raw.get("notes"), list) else []
         return {
             "dedupeTickets": [t for t in dedupe if isinstance(t, dict)],
             "coverageTickets": [t for t in coverage if isinstance(t, dict)],
+            "complianceTickets": [t for t in compliance if isinstance(t, dict)],
             "notes": [str(n) for n in notes if str(n).strip()],
         }
     except (LlmError, Exception) as exc:
         logger.warning("Senior editor ticket pass failed: %s", exc)
-        return {"dedupeTickets": [], "coverageTickets": [], "notes": [str(exc)]}
+        return {
+            "dedupeTickets": [],
+            "coverageTickets": [],
+            "complianceTickets": [],
+            "notes": [str(exc)],
+        }
 
 
 async def senior_editor_patch_instructions(
@@ -403,6 +450,13 @@ async def senior_editor_patch_instructions(
             parts.append(brief)
         if isinstance(unmet, list) and unmet:
             parts.append("Unmet: " + "; ".join(str(u) for u in unmet[:8]))
+    for t in tickets.get("complianceTickets") or []:
+        brief = str(t.get("rewriteBrief") or "").strip()
+        policy = str(t.get("policyOrGuideline") or "").strip()
+        if policy:
+            parts.append(f"Compliance: {policy}")
+        if brief:
+            parts.append(brief)
     for t in tickets.get("dedupeTickets") or []:
         guide = str(t.get("trimGuidance") or "").strip()
         if guide:
@@ -421,7 +475,24 @@ async def plan_section_queries_agent(
     prior_queries: list[str],
     user_message: str,
     current_content: str,
+    rfp_title: str = "",
 ) -> list[str]:
+    title_cf = (section_title or "").casefold()
+    ask_cf = (user_message or "").casefold()
+    is_budget = any(
+        k in title_cf or k in ask_cf
+        for k in ("budget", "pricing", "cost of", "fee", "compensation", "cost proposal")
+    )
+    if is_budget:
+        # Never plan client-specific budget KB queries — pricing lives in the guide + RFP.
+        guide_queries = [
+            "00_Guide_Pricing tier ranges Low Average High discovery strategy content digital media project management",
+            "00_Guide_Pricing 9.1 9.2 Project Management 5-8 percent floor Average tier",
+            "00_Guide_Pricing transparent compensation pass-through agency fees qualifying language",
+        ]
+        used = {q.strip().lower() for q in prior_queries}
+        return [q for q in guide_queries if q.lower() not in used][:4]
+
     try:
         raw, _ = await run_json_agent(
             AgentRole.QUERY_PLANNER,
@@ -442,8 +513,15 @@ async def plan_section_queries_agent(
             return []
         used = {q.strip().lower() for q in prior_queries}
         cleaned: list[str] = []
+        from app.services.proposal_knowledge_base_tools import normalize_zo_kb_query
+
         for query in queries:
-            text = str(query).strip()
+            text = normalize_zo_kb_query(
+                str(query).strip(),
+                rfp_client=rfp_client,
+                rfp_sector=rfp_sector,
+                rfp_title=rfp_title,
+            )
             if text and text.lower() not in used:
                 cleaned.append(text[:240])
                 used.add(text.lower())
@@ -460,10 +538,12 @@ async def redraft_section_agent(
     rfp_title: str,
     rfp_client: str,
     user_content: str,
+    rfp_sector: str = "",
 ) -> tuple[dict[str, Any], str, list[str]]:
     """KB tool agent → JSON with content field."""
     return await run_tool_json_agent(
         role=role,
+        sector=rfp_sector,
         rfp_id=rfp_id,
         title=rfp_title,
         client=rfp_client,

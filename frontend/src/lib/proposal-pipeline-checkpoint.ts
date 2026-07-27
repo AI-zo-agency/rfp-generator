@@ -5,8 +5,8 @@ export type PipelinePhase =
   | "sections-1-3"
   | "phase-2"
   | "phase-3"
-  | "phase-3-6-self-edit"
   | "phase-3-5-budget"
+  | "phase-3-6-self-edit"
   | "phase-4-review"
   | "complete";
 
@@ -16,8 +16,8 @@ export const PIPELINE_PHASE_ORDER: PipelinePhase[] = [
   "sections-1-3",
   "phase-2",
   "phase-3",
-  "phase-3-6-self-edit",
   "phase-3-5-budget",
+  "phase-3-6-self-edit",
   "phase-4-review",
 ];
 
@@ -49,29 +49,19 @@ export const FULFILL_SCAN_PHASE = "fulfill-scan";
 /** Live substeps shown while Senior editor polish runs (maps to backend activity labels). */
 export const SENIOR_EDITOR_SUBSTEPS = [
   {
-    id: "fact-check",
-    label: "Check facts",
-    hint: "Flag invented or unsupported claims",
+    id: "dedupe",
+    label: "Remove duplicates",
+    hint: "Cut repeated case studies and rehashed content",
   },
   {
-    id: "tickets",
-    label: "Find gaps",
-    hint: "Spot missing RFP answers",
+    id: "coverage",
+    label: "Coverage & compliance",
+    hint: "RFP gaps and required gov/buyer policies",
   },
   {
-    id: "repair",
-    label: "Fix sections",
-    hint: "Rewrite weak or incomplete parts",
-  },
-  {
-    id: "verify",
-    label: "Clear placeholders",
-    hint: "Resolve leftover [VERIFY] tags",
-  },
-  {
-    id: "polish",
-    label: "Final polish",
-    hint: "Compliance and consistency check",
+    id: "legal",
+    label: "Legal gates",
+    hint: "Keep attestation VERIFYs honest",
   },
 ] as const;
 
@@ -94,14 +84,15 @@ export function seniorEditorSubstepIndex(
   if (a === "senior editor polish" || a === "senior editor") return 0;
 
   if (
-    a.includes("fact-check") ||
-    a.includes("kb fact") ||
-    a.includes("checking facts") ||
-    a.includes("check facts")
+    a.includes("duplicate") ||
+    a.includes("removing duplicates") ||
+    a.includes("dedupe")
   ) {
     return 0;
   }
   if (
+    a.includes("coverage") ||
+    a.includes("compliance") ||
     a.includes("ticket") ||
     a.includes("finding gaps") ||
     a.includes("find gaps")
@@ -109,19 +100,9 @@ export function seniorEditorSubstepIndex(
     return 1;
   }
   if (
-    a.includes("verify") ||
-    a.includes("placeholder") ||
-    a.includes("clearing placeholders")
-  ) {
-    return 3;
-  }
-  if (a.includes("final polish") || a.includes("submission polish")) {
-    return 4;
-  }
-  if (
-    a.includes("repairing") ||
-    a.includes("fixing") ||
-    a.includes("fix sections")
+    a.includes("legal") ||
+    a.includes("attestation") ||
+    a.includes("final polish")
   ) {
     return 2;
   }
@@ -161,22 +142,17 @@ function phase3SectionContentUsable(content: string | undefined | null): boolean
   return true;
 }
 
+/** UI chip labels for the Scan RFP button (VERIFY scrub only). */
 export const FULFILL_SCAN_STEP_LABELS = [
-  "Closing & submission",
-  "RFP structure",
-  "Budget",
-  "Repairs",
-  "Contractor KPIs",
-  "Check facts",
-  "Pre-submit",
+  "Remove optional [VERIFY]",
 ] as const;
 
 export const FULL_PROPOSAL_STEP_LABELS: { phase: PipelinePhase; label: string }[] = [
   { phase: "sections-1-3", label: "Sections 1–3" },
   { phase: "phase-2", label: "Intelligence" },
   { phase: "phase-3", label: "RFP tabs" },
-  { phase: "phase-3-6-self-edit", label: "Senior editor" },
   { phase: "phase-3-5-budget", label: "Budget" },
+  { phase: "phase-3-6-self-edit", label: "Senior editor" },
   { phase: "phase-4-review", label: "Review" },
 ];
 
@@ -413,7 +389,7 @@ export function shouldRunPhase(
 }
 
 export function inProgressPhaseLabel(phase: PipelineInProgressPhase): string {
-  if (phase === FULFILL_SCAN_PHASE) return "Scan RFP";
+  if (phase === FULFILL_SCAN_PHASE) return "Scan RFP — VERIFY scrub";
   return PIPELINE_PHASE_LABELS[phase];
 }
 

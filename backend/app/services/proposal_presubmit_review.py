@@ -136,6 +136,40 @@ def _scan_rfp_contradictions(
                     sectionTitle=section.title,
                 )
             )
+        if "reference" in title_cf and re.search(
+            r"(?i)(?:available|provided|contact).{0,40}(?:upon|on)\s+request|"
+            r"upon\s+request",
+            content,
+        ):
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="compliance",
+                    message=(
+                        "References section withholds contact details ('upon request'). "
+                        "Many RFPs prohibit withholding reference contacts — put name, "
+                        "title, phone, and email from KB or use [VERIFY: contact fields]."
+                    ),
+                    sectionId=section.id,
+                    sectionTitle=section.title,
+                )
+            )
+        if re.search(
+            r"(?i)pre-?cleared|agreed\s+to\s+respond\s+to\s+reference",
+            content,
+        ):
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="accuracy",
+                    message=(
+                        "Unverified claim that references were pre-cleared or agreed to "
+                        "respond — cut unless KB evidence confirms it."
+                    ),
+                    sectionId=section.id,
+                    sectionTitle=section.title,
+                )
+            )
 
     excerpt = evaluation_and_kpi_excerpt(rfp_text)
     facts = parse_scoring_facts_from_rfp(excerpt or rfp_text)

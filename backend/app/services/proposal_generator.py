@@ -25,7 +25,7 @@ from app.services.proposal_brand_voice import format_register_block
 from app.services.proposal_langchain import run_tool_research_agent
 from app.services.proposal_voice_enforcement import (
     enforce_narrative_voice,
-    is_duplicate_static_rfp_section,
+    should_skip_rfp_section_as_static_duplicate,
 )
 from app.services.proposal_repository import (
     aget_proposal_draft,
@@ -37,7 +37,10 @@ from app.services.proposal_common import aload_rfp_for_proposal
 from app.services.proposal_drafting_graph import run_drafting_graph
 from app.services.proposal_budget_content import incorporate_budget_into_draft
 from app.services.proposal_budget_editor import run_budget_editor_pass
-from app.services.proposal_budget_sync import align_fee_narrative_with_budget
+from app.services.proposal_budget_sync import (
+    align_fee_narrative_with_budget,
+    run_budget_grounding_check,
+)
 from app.services.proposal_consistency import self_edit_exhausted_issues
 from app.services.proposal_fee_justification import generate_fee_justification_memo
 from app.services.proposal_loss_lessons import build_loss_lessons_for_rfp
@@ -296,8 +299,10 @@ async def _fill_static_section(
 ) -> ProposalSection:
     query = str(section_def.get("knowledge_base_query", "zö agency"))
     text, sources = await proposal_knowledge_base_tools.search_knowledge_base(
-        f"{query} {rfp.sector} {rfp.client}",
+        f"{query} {rfp.sector}",
         limit=6,
+        rfp_client=rfp.client,
+        rfp_sector=rfp.sector,
     )
 
     mode = section.mode
@@ -450,6 +455,7 @@ async def generate_proposal(rfp_id: str) -> tuple[ProposalDraft, ProposalResearc
         rfp_id=rfp.id,
         title=rfp.title,
         client=rfp.client,
+        sector=rfp.sector,
         rfp_excerpt=rfp_context,
         questions=question_payload,
     )
@@ -865,7 +871,10 @@ async def _persist_phase3_partial(
     for mapped in rfp_sections:
         if mapped.id in drafted_ids:
             continue
-        if is_duplicate_static_rfp_section(mapped.title):
+        if should_skip_rfp_section_as_static_duplicate(
+            title=mapped.title or "",
+            duplicate_of_static_section=mapped.duplicate_of_static_section,
+        ):
             continue
         prior = prior_content_by_id.get(mapped.id, "")
         stubs.append(
@@ -1493,6 +1502,11 @@ async def generate_sections_1_3(
         generatedAt=now,
         provider=provider,
     )
+    from app.services.proposal_integrity_guards import apply_manuscript_integrity_guards
+
+    draft, integrity_logs = apply_manuscript_integrity_guards(draft)
+    for line in integrity_logs[:8]:
+        logger.info("Sections 1–3 integrity: %s — %s", rfp_id, line)
     await asave_proposal_draft(draft)
 
     prior_research = await aget_research_cache(rfp_id)
@@ -1648,6 +1662,11 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
         generatedAt=now,
         provider=provider,
     )
+    from app.services.proposal_integrity_guards import apply_manuscript_integrity_guards
+
+    draft, integrity_logs = apply_manuscript_integrity_guards(draft)
+    for line in integrity_logs[:12]:
+        logger.info("Phase 3 integrity: %s — %s", rfp_id, line)
     await asave_proposal_draft(draft)
 
     updated_research = research.model_copy(
@@ -1678,32 +1697,53 @@ async def run_phase3_5_budget_reconcile(
 
     budget, research = await reconcile_cached_budget(rfp_id)
     rfp_context = load_rfp_for_proposal(rfp_id)[2]
-    from app.services.proposal_budget_content import rfp_wants_blended_pricing_form
+    from app.services.proposal_budget_content import (
+        prepare_budget_for_client_display,
+        reconcile_draft_budget_summaries,
+        rfp_wants_blended_pricing_form,
+    )
 
     if rfp_wants_blended_pricing_form(rfp_context):
         budget = budget.model_copy(update={"budget_format": "blended_rate_form"})
-    draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
-    if not draft:
-        raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
-    draft = await align_fee_narrative_with_budget(
-        rfp_id=rfp_id,
-        draft=draft,
-        budget=budget,
-    )
-    await asave_proposal_draft(draft)
-
+    # Final math BEFORE narrative sync so fee claims cannot drift after.
     budget = run_budget_editor_pass(
         budget,
         rfp_sections=research.rfp_sections if research else [],
         rfp_context=rfp_context[:28_000],
     )
+    budget = prepare_budget_for_client_display(budget)
     research = research.model_copy(update={"budget": budget})
     await asave_research_cache(research)
-    final_draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
-    if final_draft:
-        draft = final_draft
-        await asave_proposal_draft(draft)
+
+    draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
+    if not draft:
+        raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
+
+    draft, _ = reconcile_draft_budget_summaries(draft, budget)
+    draft = await align_fee_narrative_with_budget(
+        rfp_id=rfp_id,
+        draft=draft,
+        budget=budget,
+    )
+    mismatches = await run_budget_grounding_check(
+        rfp_id=rfp_id,
+        draft=draft,
+        budget=budget,
+    )
+    if mismatches:
+        budget = budget.model_copy(update={"narrative_mismatches": mismatches})
+        research = research.model_copy(update={"budget": budget})
+        await asave_research_cache(research)
+        raise ProposalError(
+            "Budget grounding check found unresolved pricing contradictions. "
+            "Resolve pricing mismatches before continuing.",
+            status_code=422,
+        )
+    budget = budget.model_copy(update={"narrative_mismatches": []})
+    research = research.model_copy(update={"budget": budget})
+    await asave_research_cache(research)
+    await asave_proposal_draft(draft)
 
     logger.info(
         "Budget reconcile complete for %s: revenue=%s, passthrough=%s, invoicing=%s",
@@ -1746,10 +1786,32 @@ async def run_phase3_5_budget(
     await _assert_proposal_not_reset(rfp_id)
 
     rfp_context = load_rfp_for_proposal(rfp_id)[2]
-    from app.services.proposal_budget_content import rfp_wants_blended_pricing_form
+    from app.services.proposal_budget_content import (
+        prepare_budget_for_client_display,
+        reconcile_draft_budget_summaries,
+        rfp_wants_blended_pricing_form,
+    )
 
     if rfp_wants_blended_pricing_form(rfp_context):
         budget = budget.model_copy(update={"budget_format": "blended_rate_form"})
+
+    # Final math first — then manuscript sync/grounding against the frozen totals.
+    try:
+        budget = run_budget_editor_pass(
+            budget,
+            rfp_sections=research.rfp_sections if research else [],
+            rfp_context=rfp_context[:28_000],
+        )
+    except Exception as exc:
+        logger.exception("Budget editor pass failed for %s: %s", rfp_id, exc)
+        raise ProposalError(
+            f"Budget editor pass failed: {exc}",
+            status_code=502,
+        ) from exc
+
+    budget = prepare_budget_for_client_display(budget)
+    await _assert_proposal_not_reset(rfp_id)
+    if research:
         research = research.model_copy(update={"budget": budget})
         await asave_research_cache(research)
 
@@ -1757,37 +1819,34 @@ async def run_phase3_5_budget(
     if not draft:
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
+    draft, _ = reconcile_draft_budget_summaries(draft, budget)
     draft = await align_fee_narrative_with_budget(
         rfp_id=rfp_id,
         draft=draft,
         budget=budget,
     )
-    await _assert_proposal_not_reset(rfp_id)
-    await asave_proposal_draft(draft)
-
-    # Re-render budget section after fee sync so narrative totals stay aligned
-    try:
-        budget = run_budget_editor_pass(
-            budget,
-            rfp_sections=research.rfp_sections if research else [],
-            rfp_context=load_rfp_for_proposal(rfp_id)[2][:28_000],
-        )
-    except Exception as exc:
-        logger.exception("Budget editor pass after fee sync failed for %s: %s", rfp_id, exc)
+    # Phase 3.5d — block pipeline if manuscript pricing claims contradict canonical budget.
+    mismatches = await run_budget_grounding_check(
+        rfp_id=rfp_id,
+        draft=draft,
+        budget=budget,
+    )
+    if mismatches:
+        budget = budget.model_copy(update={"narrative_mismatches": mismatches})
+        if research:
+            research = research.model_copy(update={"budget": budget})
+            await asave_research_cache(research)
         raise ProposalError(
-            f"Budget editor pass failed after fee sync: {exc}",
-            status_code=502,
-        ) from exc
-
-    await _assert_proposal_not_reset(rfp_id)
+            "Budget grounding check found unresolved pricing contradictions. "
+            "Resolve pricing mismatches before senior editor / Phase 4.",
+            status_code=422,
+        )
+    budget = budget.model_copy(update={"narrative_mismatches": []})
     if research:
         research = research.model_copy(update={"budget": budget})
         await asave_research_cache(research)
-    final_draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
-    if final_draft:
-        draft = final_draft
-        await _assert_proposal_not_reset(rfp_id)
-        await asave_proposal_draft(draft)
+    await _assert_proposal_not_reset(rfp_id)
+    await asave_proposal_draft(draft)
 
     logger.info(
         "Phase 3.5 budget complete for %s: tier=%s, %d line items, revenue=%s",
@@ -1977,7 +2036,7 @@ async def run_phase4_finalize_gaps(
 async def generate_full_proposal(
     rfp_id: str,
 ) -> tuple[ProposalDraft, ProposalBrandVoice, ProposalResearchCache]:
-    """Full pipeline: Sections 1–3 → Phase 2 retrieval → Phase 3 drafting → Phase 3.5 budget."""
+    """Full pipeline: Sections 1–3 → Phase 2 → Phase 3 draft → Budget → Senior editor."""
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
@@ -2000,8 +2059,63 @@ async def generate_full_proposal(
         _draft, brand_voice, _research = await generate_sections_1_3(rfp_id)
         await run_phase2_retrieval(rfp_id)
         draft, research = await run_phase3_drafting(rfp_id)
-        draft, research, edit_report = await run_phase3_6_self_edit(rfp_id)
         draft, research, _budget = await run_phase3_5_budget(rfp_id)
+
+        # Compulsory closing + RFP-demanded forms/attachments (before senior editor).
+        rfp = get_rfp(rfp_id)
+        if rfp:
+            from app.services.proposal_fulfill_rfp_gaps import (
+                ensure_closing_sections,
+                _merge_closing_into_research_map,
+            )
+            from app.services.proposal_rfp_submission_requirements import (
+                ensure_all_rfp_submission_requirements,
+                merge_deliverables_into_research,
+            )
+            from app.services.rfp_content import combine_rfp_text, load_local_rfp_text
+
+            _desc, pdf_text, _pdf_exists, _missing, _pages, _img = load_local_rfp_text(
+                rfp, max_chars=250_000
+            )
+            full_rfp_text = combine_rfp_text(
+                _desc or (rfp.description or ""), pdf_text, max_chars=250_000
+            )
+            if len(full_rfp_text.strip()) < 200:
+                full_rfp_text = load_rfp_for_proposal(rfp_id)[2]
+
+            draft, closing_added, close_logs = await ensure_closing_sections(
+                draft=draft,
+                rfp=rfp,
+                rfp_text=full_rfp_text,
+            )
+            research = _merge_closing_into_research_map(research, closing_added) or research
+            for line in close_logs[:8]:
+                logger.info("Full proposal closing: %s — %s", rfp_id, line)
+
+            try:
+                draft, deliverables_added, sub_logs, _checklist = (
+                    await ensure_all_rfp_submission_requirements(
+                        draft=draft,
+                        rfp=rfp,
+                        rfp_text=full_rfp_text,
+                        research=research,
+                    )
+                )
+                research = merge_deliverables_into_research(research, deliverables_added) or research
+                for line in sub_logs[:8]:
+                    logger.info("Full proposal submission: %s — %s", rfp_id, line)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Full proposal submission attach pass skipped for %s: %s",
+                    rfp_id,
+                    exc,
+                )
+
+            await _assert_proposal_not_reset(rfp_id)
+            await asave_proposal_draft(draft)
+            await asave_research_cache(research)
+
+        draft, research, edit_report = await run_phase3_6_self_edit(rfp_id)
 
         if brand_voice and not research.brand_voice:
             research = research.model_copy(update={"brand_voice": brand_voice})

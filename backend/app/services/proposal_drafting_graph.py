@@ -27,6 +27,7 @@ from app.services.proposal_drafting_prompts import (
 from app.services.proposal_voice_enforcement import (
     enforce_narrative_voice,
     is_duplicate_static_rfp_section,
+    should_skip_rfp_section_as_static_duplicate,
 )
 from app.services.proposal_intelligence.log import log_intel_event
 from app.services import llm
@@ -62,6 +63,7 @@ YOU MUST NEVER:
 7. Spell names incorrectly (check exact spelling in bio file evidence)
 8. Claim "X years of Y experience" unless that exact phrasing is in verified evidence
 9. Invent agency hourly rates, fee tables, or markups not grounded in 00_Guide_Pricing evidence / pricing plan
+10. Invent percent-time / FTE / "X% of their time" allocations for named people (e.g. 10%/35%/25%) — omit the column if the RFP does not require it; if required use [VERIFY: percent time] only
 
 VERIFIED FACTS ONLY (from evidence corpus):
 - Agency: founded August 21, 2013; years in operation = current year − 2013 (13 in 2026). Never say a different year count than Business Information.
@@ -70,6 +72,7 @@ VERIFIED FACTS ONLY (from evidence corpus):
 - Awards: Creative Excellence 2024, Netty 2024, NYX 2024, Vega Digital 2024, Sonja's Enterprising Women 2026
 - Team: ONLY names from 04_Bio_*.pdf files in evidence
 - Insurance/Certifications: Keep SHORT and CONCISE, list coverage types only, use [VERIFY: amounts] for dollar figures
+- Percent-time / FTE: NOT a verified KB fact for pursuit staffing — never invent; omit or [VERIFY]
 
 IF YOU CANNOT VERIFY A COMPANY FACT IN EVIDENCE:
 - Use [VERIFY: specific field needed] instead of inventing
@@ -102,7 +105,7 @@ Rules (strict):
 17. Personnel: when RFP requires workforce diversity data, state headcount and minority/female percentages (from KB) or [VERIFY].
 18. Budget section: when RFP requires staff hours per task, add hours table OR commission-model explanation with transparency estimates.
 19. PSA/contract items in the RFP (insurance, living wage, MacBride, Title VI, audit rights, etc.) need brief acknowledgment sentences in the proposal.
-20. References: NEVER "contact on request", "upon request", or "through the Bureau" — include name, title, organization, phone, and email from KB or [VERIFY: specific contact fields].
+20. References: NEVER "contact on request", "upon request", "available upon request", or "through the Bureau" — include name, title, organization, phone, and email from KB or [VERIFY: specific contact fields]. Never claim references were "pre-cleared" or "agreed to respond" unless KB evidence says so.
 21. Workforce: MWBE/diversity and Project Personnel sections must use identical headcount and % female/minority — one precise figure from HR/KB.
 22. Budget SUMMARY line-item fee tables (agency fees by role/hour) are built in Phase 3.5. Do NOT invent those tables or $0 placeholders. NEVER refuse to write the Budget section itself.
 23. Insurance RFPs: include a limits table (RFP requires | current policy | gap | bind-before-execution action) with ACORD fields when specified.
@@ -117,9 +120,13 @@ Rules (strict):
 32. References sections: restate the RFP's required reference count and institution type when the RFP specifies them. Never claim the RFP is silent on references if requirements list three customers, two-year public, or NJ public-college reference tables. If zö lacks a qualifying reference, state the gap honestly and use [MANUAL FILL: leadership decision] — do not deny the requirement exists.
 33. KPI scope: When the RFP distinguishes agency-wide/strategic-plan KPIs from CONTRACTOR-scored KPIs, commit ONLY to the contractor set (with numeric targets from Section 2 / monitoring). Never substitute the buyer's four agency KPIs for the three contractor KPIs.
 34. Cost scoring: If the RFP uses inverse cost scoring (lowest responsive price gets maximum cost points), never claim that bidding at the published ceiling earns the highest cost rating — state the tradeoff honestly.
-35. Cost weight: Use the RFP's stated criteria points for cost/price (sum Criteria #4 + #5 when both exist) — do not round to a generic "10%".
+35. Cost weight: Use the RFP's stated criteria points for cost/price (sum Criteria #4 + #5 when both exist) — do not round to a generic "10%". When cost/price is ≥25% of total points, narrative must not claim Average tier — Low tier is required by the Pricing Guide Decision Guide.
 36. Budget container: When the RFP requires Attachment 01 / Excel budget worksheet, the narrative budget section must point to that file — not replace it with a PDF cost-category table.
-37. ANTI-DUPLICATION: Each section has ONE job. Do not re-write Who We Are, full bios, full case studies, FEIN/address/certs, or brand story that belongs in Sections 1–3 or another RFP tab. One brief cross-reference is OK — then add NEW RFP-specific detail only. Prefer concise prose within wordTarget.
+37. ANTI-DUPLICATION: Each section has ONE job. Do not re-write Who We Are, full bios, full case studies, FEIN/address/certs, or brand story that belongs in Sections 1–3 or another RFP tab. Do not paraphrase another RFP tab (Approach≠Methodology rewrite; Past Performance≠Sample Work dump). One brief cross-reference is OK — then add NEW RFP-specific detail only. Prefer concise, concrete prose within wordTarget — no generic agency marketing filler.
+38. HOURLY RATES: Never invent individual ZO member $/hr. If a staff-hours table is required, use labor-category / work rates from 00_Guide_Pricing evidence, or [VERIFY: hourly rate — {role}]. namedPerson is a staffing note only.
+38. PERCENT-TIME / FTE: Never invent percent-time columns or reuse static % grids from other proposals. If the RFP does not require percent-time/FTE, omit that column entirely (Role | Name | experience only). If the RFP requires it, every cell is [VERIFY: percent time] — never invent 10%/35%/25%/25-30%.
+39. LENGTH: Hit the scored RFP asks, then stop. Do not pad to wordTarget with filler when the requirement is already met. Evaluators skim — dense and short beats long and repetitive.
+40. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Why Relevant may connect to THIS RFP; facts must stay faithful to evidence [E#].
 
 Return ONLY JSON:
 {
@@ -159,17 +166,18 @@ class DraftingGraphState(TypedDict, total=False):
 def _word_target(section: dict[str, Any]) -> int:
     page_limit = section.get("pageLimit") or section.get("page_limit")
     if isinstance(page_limit, int) and page_limit > 0:
-        return max(400, page_limit * 350)
+        # Cap so page limits do not explode into unreadably long tabs.
+        return min(1200, max(350, page_limit * 300))
     weight = section.get("evaluationWeight") or section.get("evaluation_weight")
     if isinstance(weight, (int, float)) and weight > 0:
         w = int(weight)
         if w >= 30:
-            return max(1400, w * 55)
+            return min(1100, max(900, w * 40))
         if w >= 20:
-            return max(1000, w * 48)
+            return min(900, max(700, w * 36))
         if w >= 10:
-            return max(700, w * 42)
-        return max(500, w * 40)
+            return min(700, max(500, w * 32))
+        return min(550, max(400, w * 30))
     return DEFAULT_WORD_TARGET
 
 
@@ -209,7 +217,10 @@ def partition_phase3_sections(
     to_draft: list[RfpSectionMap] = []
     already: list[ProposalSection] = []
     for mapped in rfp_sections:
-        if is_duplicate_static_rfp_section(mapped.title):
+        if should_skip_rfp_section_as_static_duplicate(
+            title=mapped.title or "",
+            duplicate_of_static_section=mapped.duplicate_of_static_section,
+        ):
             continue
         existing = existing_by_id.get(mapped.id)
         if existing and _phase3_content_is_usable(existing.content):
@@ -791,6 +802,26 @@ async def _draft_batch_once(
                     "capabilities without inventing false project names or metrics.\n\n"
                 )
             title_lower = str(payload.get("title") or "").lower()
+            if any(
+                k in title_lower
+                for k in (
+                    "team qualification",
+                    "agency team",
+                    "staffing",
+                    "personnel",
+                    "key personnel",
+                    "project team",
+                )
+            ):
+                user_content += (
+                    f"TEAM / STAFFING SECTION {payload.get('sectionId')}: "
+                    "Do NOT invent percent-time / FTE percentages. If the RFP does not "
+                    "require percent-time or dedicated FTE %, omit that column entirely "
+                    "(Role | Name | relevant experience only — names from approved bios). "
+                    "If the RFP requires percent-time, every cell must be "
+                    "[VERIFY: percent time] — never invent 10%/35%/25% grids or reuse "
+                    "static tables from other proposals.\n\n"
+                )
             if any(k in title_lower for k in ("budget", "pricing", "fees", "cost")):
                 user_content += (
                     f"BUDGET NARRATIVE REQUIRED for {payload.get('sectionId')}: "
@@ -946,12 +977,26 @@ async def _draft_batch_once(
 async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
     sections = state.get("rfp_sections") or []
     skipped = [
-        s for s in sections if is_duplicate_static_rfp_section(str(s.get("title") or ""))
+        s
+        for s in sections
+        if should_skip_rfp_section_as_static_duplicate(
+            title=str(s.get("title") or ""),
+            duplicate_of_static_section=(
+                str(s.get("duplicateOfStaticSection") or s.get("duplicate_of_static_section") or "")
+                or None
+            ),
+        )
     ]
     sections = [
         s
         for s in sections
-        if not is_duplicate_static_rfp_section(str(s.get("title") or ""))
+        if not should_skip_rfp_section_as_static_duplicate(
+            title=str(s.get("title") or ""),
+            duplicate_of_static_section=(
+                str(s.get("duplicateOfStaticSection") or s.get("duplicate_of_static_section") or "")
+                or None
+            ),
+        )
     ]
     sections = order_sections_for_phase3_draft(sections)
     if skipped:

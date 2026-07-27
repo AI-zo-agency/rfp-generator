@@ -14,10 +14,12 @@ AGENT = "resource_planner"
 _SYSTEM = """Resource Planner. Allocate roles and effort by phase.
 Return JSON only:
 {
-  "allocations": [{"role": "string", "allocationPct": 50, "phase": "string"}],
+  "allocations": [{"role": "string", "allocationPct": null, "phase": "string"}],
   "confidence": 0.0
 }
 No proposal prose. Do not invent named people — roles only.
+Do NOT invent allocationPct / percent-time / FTE figures — leave allocationPct null
+unless the RFP explicitly states a required %. Never copy static 10/35/25 grids.
 """
 
 

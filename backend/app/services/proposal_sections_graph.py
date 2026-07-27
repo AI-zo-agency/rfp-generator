@@ -2009,15 +2009,17 @@ async def _select_evidence(state: SectionsGraphState) -> dict[str, Any]:
     if not context_raw:
         return {}
 
+    proposal_context = ProposalContext.model_validate(context_raw)
     candidate_rows = await proposal_knowledge_base_tools.search_evidence_candidate_index(
         rfp_client=state["rfp_client"],
         rfp_sector=state["rfp_sector"],
         rfp_context=state["rfp_context"],
+        services_requested=list(proposal_context.services_requested or []),
     )
     candidates = [EvidenceCandidate.model_validate(row) for row in candidate_rows]
 
     selection, provider = await run_evidence_selection_agent(
-        proposal_context=ProposalContext.model_validate(context_raw),
+        proposal_context=proposal_context,
         rfp_context=state["rfp_context"],
         rfp_client=state["rfp_client"],
         candidates=candidates,
@@ -2079,6 +2081,9 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
     proposal_context = (
         ProposalContext.model_validate(context_raw) if context_raw else ProposalContext()
     )
+    from app.services.proposal_section_dedup import format_prior_sections_block
+
+    prior_digest = format_prior_sections_block(existing, max_sections=14)
 
     for i, study in enumerate(selected_studies, 1):
         safe_id = study.lower()[:40].replace(" ", "-").replace("/", "-")
@@ -2094,6 +2099,7 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
             rfp_client=rfp_client,
             brand_voice_block=_proposal_voice_block(merged_state),
             kb_sources=case_sources,
+            prior_sections_digest=prior_digest,
         )
 
         content = _sanitize_content(str(raw.get("content") or "").strip())

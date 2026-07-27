@@ -197,6 +197,47 @@ class ProposalBudgetValidationTests(unittest.TestCase):
             any("envelope row" in f.lower() or "allocation" in f.lower() for f in reconciled.pricing_flags)
         )
 
+    def test_kvcc_false_envelope_notes_do_not_crush_fees(self) -> None:
+        """Colloquial 'budget envelope' in notes must not strip roadmap/PM or invent a $10.5k cap."""
+        budget = ProposalBudget(
+            rfpId="kvcc-crush",
+            updatedAt="2026-07-27T00:00:00Z",
+            rfpBudgetCap=10_500,  # persisted bogus cap from prior bug
+            directExpensesTotal=7_500,
+            lineItems=[
+                _line(item_id="L1", description="Phase 1 Discovery — Stakeholder interviews", extended=12_000),
+                _line(item_id="L2", description="Phase 1 Discovery — Brand audit", extended=8_500),
+                _line(item_id="L7", description="Phase 2 Strategy — Messaging framework", extended=7_500),
+                _line(item_id="L10", description="Phase 3 Tactical — Digital / social / content plan", extended=18_000),
+                BudgetLineItem(
+                    id="L11",
+                    category="Strategy",
+                    description="Phase 4 Roadmap — Implementation Roadmap bundle",
+                    extended=14_000,
+                    notes="Scoped for KVCC's small-college budget envelope",
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="L12",
+                    category="Account & Project Management",
+                    description="Project Management — KVCC engagement (4-phase)",
+                    extended=7_500,
+                    notes="Fits community college budget envelope",
+                    lineItemType="agency_fee",
+                ),
+            ],
+            agencyRevenueEstimate=74_500,
+            lineItemSum=67_000,
+        )
+        reconciled = reconcile_proposal_budget(budget)
+        ids = {i.id for i in reconciled.line_items}
+        self.assertIn("L11", ids)
+        self.assertIn("L12", ids)
+        fees = sum(float(i.extended or 0) for i in reconciled.line_items)
+        self.assertGreaterEqual(fees, 60_000)
+        self.assertIsNone(reconciled.rfp_budget_cap)
+        self.assertTrue(any("REFUSED auto-scale" in f for f in reconciled.pricing_flags))
+
     def test_scales_over_cap_work_lines_to_hard_cap(self) -> None:
         budget = ProposalBudget(
             rfpId="cap-scale",
@@ -229,6 +270,62 @@ class ProposalBudgetValidationTests(unittest.TestCase):
         self.assertIn("do not auto-cut", note.lower())
         pm_total = sum(float(i.extended or 0) for i in adjusted if "project management" in i.description.lower())
         self.assertGreaterEqual(pm_total, 6_675 - 0.01)
+
+    def test_pm_in_band_auto_raises_to_engagement_floor(self) -> None:
+        """KVCC-style: 5–8% band but $5,500 PM must bump to $7,500 — not hard-fail Stage 3.5."""
+        items = [
+            _line(item_id="fees", description="Phase delivery fees", extended=94_500),
+            _line(
+                item_id="L16",
+                description="Project management — engagement",
+                extended=5_500,
+                category="Account & Project Management",
+            ),
+        ]
+        adjusted, note = adjust_pm_line_items_to_guide(items, agency_base=100_000)
+        self.assertIsNotNone(note)
+        self.assertIn("auto-raised", note.lower())
+        pm = next(i for i in adjusted if i.id == "L16")
+        self.assertGreaterEqual(float(pm.extended or 0), 7_500 - 0.01)
+
+    def test_campaign_specific_pm_exempt_from_engagement_floor(self) -> None:
+        items = [
+            _line(item_id="fees", description="Campaign creative", extended=94_500),
+            _line(
+                item_id="L16",
+                description="Project management — campaign-specific (guide 9.2)",
+                extended=5_500,
+                category="Account & Project Management",
+            ),
+        ]
+        adjusted, note = adjust_pm_line_items_to_guide(items, agency_base=100_000)
+        pm = next(i for i in adjusted if i.id == "L16")
+        self.assertEqual(float(pm.extended or 0), 5_500)
+        self.assertIsNone(note)
+
+    def test_guide_9_1_short_project_pm_still_meets_floor(self) -> None:
+        """9.1 Average is $7,500–$12,000 — 'short projects' must not exempt the engagement floor."""
+        items = [
+            _line(item_id="fees", description="Phase delivery fees", extended=94_500),
+            BudgetLineItem(
+                id="PM-1",
+                category="Account & Project Management",
+                description="Project management — multi-phase engagement",
+                extended=5_818.43,
+                rateSource="9.1 Project Management short projects 3–6 months — Average",
+                lineItemType="agency_fee",
+            ),
+        ]
+        budget = ProposalBudget(
+            rfpId="pm-91",
+            updatedAt="2026-07-27T00:00:00Z",
+            lineItems=items,
+            agencyRevenueEstimate=100_318.43,
+        )
+        reconciled = reconcile_proposal_budget(budget)
+        pm = next(i for i in reconciled.line_items if i.id == "PM-1")
+        self.assertGreaterEqual(float(pm.extended or 0), 7_500 - 0.01)
+
 
     def test_one_time_setup_times_twelve_flags_violation(self) -> None:
         budget = ProposalBudget(

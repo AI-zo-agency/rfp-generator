@@ -508,6 +508,7 @@ Current section (minimal edits only):
             rfp_id=rfp.id,
             rfp_title=rfp.title,
             rfp_client=rfp.client,
+            rfp_sector=rfp.sector,
             user_content=user_block,
         )
     except Exception as exc:

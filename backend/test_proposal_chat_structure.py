@@ -468,7 +468,128 @@ class AddCaseStudyHeuristicTests(unittest.TestCase):
         self.assertEqual(plan.edit_section_id, "section-3-work-rno")
 
 
+class AddBioHeuristicTests(unittest.TestCase):
+    def test_add_ron_comer_alongside_creates_new_bio_tab(self) -> None:
+        from app.services.proposal_chat_structure import _heuristic_add_bio_plan
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec("section-2-bio-letitia", "2.3 — Letitia Hopper", "Letitia bio"),
+            ],
+            updatedAt="2026-07-22T00:00:00+00:00",
+        )
+        message = (
+            "Add a new bio section for Ron Comer alongside the existing "
+            "Letitia Hopper section."
+        )
+        plan = _heuristic_add_bio_plan(message, draft)
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.action, "add_sections")
+        self.assertEqual(plan.deletions, [])
+        self.assertEqual(plan.additions[0].kind, "bio")
+        self.assertEqual(plan.additions[0].member_name, "Ron Comer")
+        self.assertEqual(plan.additions[0].insert_after_section_id, "section-2-bio-letitia")
+
+    def test_add_bio_when_already_present_opens_edit(self) -> None:
+        from app.services.proposal_chat_structure import _heuristic_add_bio_plan
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec("section-2-bio-ron", "2.2 — Ron Comer", "Ron bio"),
+            ],
+            updatedAt="2026-07-22T00:00:00+00:00",
+        )
+        plan = _heuristic_add_bio_plan(
+            "Add Ron Comer bio alongside the team",
+            draft,
+        )
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.action, "edit")
+        self.assertEqual(plan.edit_section_id, "section-2-bio-ron")
+
+
+class AddGenericSectionTests(unittest.TestCase):
+    def test_is_add_section_intent_for_custom_tab(self) -> None:
+        from app.services.proposal_chat_structure import is_add_section_intent
+
+        self.assertTrue(
+            is_add_section_intent(
+                "Add a new section titled Project Timeline alongside the existing section."
+            )
+        )
+        self.assertFalse(is_add_section_intent("Fill [VERIFY] tags from KB only."))
+
+    def test_generic_add_creates_new_custom_tab(self) -> None:
+        from app.services.proposal_chat_structure import _heuristic_add_generic_section_plan
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec("custom-compliance", "Submission Compliance", "compliance prose"),
+            ],
+            updatedAt="2026-07-22T00:00:00+00:00",
+        )
+        message = (
+            "Add a new section titled Project Timeline alongside the existing "
+            "Submission Compliance section."
+        )
+        plan = _heuristic_add_generic_section_plan(
+            message, draft, focus_section_id="custom-compliance"
+        )
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.action, "add_sections")
+        self.assertEqual(plan.additions[0].kind, "custom")
+        self.assertEqual(plan.additions[0].title, "Project Timeline")
+        self.assertEqual(plan.additions[0].insert_after_section_id, "custom-compliance")
+
+    def test_coerce_edit_plan_to_add_sections(self) -> None:
+        from app.services.proposal_chat_structure import (
+            StructurePlan,
+            _coerce_add_section_plan,
+        )
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[_sec("rfp-timeline", "Implementation Timeline", "timeline")],
+            updatedAt="2026-07-22T00:00:00+00:00",
+        )
+        wrong = StructurePlan(action="edit", editSectionId="rfp-timeline")
+        message = "Create a new section titled Staffing Plan alongside Implementation Timeline."
+        coerced = _coerce_add_section_plan(
+            wrong, message, draft, focus_section_id="rfp-timeline"
+        )
+        self.assertEqual(coerced.action, "add_sections")
+        self.assertEqual(coerced.additions[0].title, "Staffing Plan")
+        self.assertEqual(coerced.deletions, [])
+
+
 class AttestationInPlaceTests(unittest.TestCase):
+    def test_here_fill_investment_is_in_place_on_open_case_study(self) -> None:
+        from app.services.proposal_chat_structure import _is_in_place_section_budget_fill
+
+        section = ProposalSection(
+            id="cs-oregon",
+            title="3.3 — Oregon Employment",
+            content=(
+                "| Phase | Scope | Investment |\n"
+                "| Discovery | Audit | $[VERIFY: budget figure] |\n"
+            ),
+            status="generated",
+        )
+        self.assertTrue(
+            _is_in_place_section_budget_fill("here fill Investment part!", section)
+        )
+        self.assertFalse(
+            _is_in_place_section_budget_fill(
+                "add a new Investment sidebar tab", section
+            )
+        )
+
     def test_everify_ask_is_in_place_not_structure(self) -> None:
         from app.services.proposal_chat_structure import (
             _is_bogus_structure_title,

@@ -30,6 +30,39 @@ _STATIC_RFP_DUPLICATE_RES = (
     re.compile(r"(case\s+stud|our\s+work|past\s+performance|relevant\s+experience)", re.IGNORECASE),
 )
 
+# Titles fully owned by zö static Sections 1–3 — do not draft again in Phase 3.
+_STATIC_COVERED_TITLE_RES = (
+    re.compile(r"\bwho\s+we\s+are\b", re.IGNORECASE),
+    re.compile(r"\bour\s+promise\b", re.IGNORECASE),
+    re.compile(r"\bcompany\s+history\b", re.IGNORECASE),
+    re.compile(r"\bfirm\s+history\b", re.IGNORECASE),
+    re.compile(r"\bfirm\s+(?:overview|profile|background)\b", re.IGNORECASE),
+    re.compile(r"\babout\s+(?:the\s+)?(?:firm|agency|company|proposer|vendor)\b", re.IGNORECASE),
+    re.compile(r"\bclient\s+roster\b", re.IGNORECASE),
+    re.compile(r"\bcore\s+services\b", re.IGNORECASE),
+    re.compile(r"\borganizational?\s+structure\b", re.IGNORECASE),
+    re.compile(r"\bbusiness\s+information\b", re.IGNORECASE),
+    re.compile(r"\bcertifications?\b", re.IGNORECASE),
+    re.compile(r"\binsurance\s+information\b", re.IGNORECASE),
+    re.compile(r"\bcompany\s+overview\b", re.IGNORECASE),
+    # Section 2 owns full bios — including RFP TOC titles that restate Team Overview
+    # with Contract Manager / POC / Personnel Bios/Resumes.
+    re.compile(
+        r"\bteam\s+overview\b(?:\s*[—\-–:].*)?\b("
+        r"bios?|resumes?|personnel|contract\s+manager|point\s+of\s+contact|"
+        r"primary\s+contact|staff(?:ing)?"
+        r")\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*team\s+overview\s*$", re.IGNORECASE),
+    re.compile(r"\bpersonnel\s+bios?(?:\s*/\s*resumes?)?\b", re.IGNORECASE),
+    re.compile(r"\b(?:staff|team)\s+(?:member\s+)?(?:bios?|resumes?)\b", re.IGNORECASE),
+    # Bios-only tabs (Section 2) — do NOT match scored RFP headings like
+    # "Qualifications and Experience of the Firm and Key Personnel".
+    re.compile(r"^\s*(?:key\s+personnel|team\s+bios?)\s*$", re.IGNORECASE),
+    re.compile(r"^\s*staff(?:ing)?\s+(?:bios|resumes|qualifications)\s*$", re.IGNORECASE),
+)
+
 
 def contains_vendor_language(content: str) -> bool:
     return bool(
@@ -157,6 +190,24 @@ def is_duplicate_static_rfp_section(title: str) -> bool:
     t = title.strip()
     if not t:
         return False
+    # Explicit company/team/identity titles → owned by static 1–3.
+    if any(pattern.search(t) for pattern in _STATIC_COVERED_TITLE_RES):
+        # Keep scored portfolio / sample-work tabs (need Section 3 depth).
+        if re.search(
+            r"\b(sample\s+work|portfolio|minimum\s+two|recent\s+campaign)\b",
+            t,
+            re.IGNORECASE,
+        ):
+            return False
+        # Keep RFP-scored capability / agency-requirements matrices.
+        if re.search(
+            r"\b(agency\s+requirements?|capability\s+matrix|service\s+capability|"
+            r"scope\s+of\s+work|statement\s+of\s+work)\b",
+            t,
+            re.IGNORECASE,
+        ):
+            return False
+        return True
     hits = sum(1 for pattern in _STATIC_RFP_DUPLICATE_RES if pattern.search(t))
     if hits >= 2:
         return True
@@ -183,3 +234,22 @@ def is_duplicate_static_rfp_section(title: str) -> bool:
     ):
         return True
     return False
+
+
+def should_skip_rfp_section_as_static_duplicate(
+    *,
+    title: str,
+    duplicate_of_static_section: str | None = None,
+) -> bool:
+    """True when intelligence/drafting must omit this tab (already covered by Sections 1–3)."""
+    dup = (duplicate_of_static_section or "").strip().casefold()
+    if dup in {"section-1", "section-2", "section-3", "1", "2", "3"}:
+        if re.search(
+            r"\b(sample\s+work|portfolio|minimum\s+two|recent\s+campaign|"
+            r"agency\s+requirements?|capability\s+matrix)\b",
+            title or "",
+            re.IGNORECASE,
+        ):
+            return is_duplicate_static_rfp_section(title)
+        return True
+    return is_duplicate_static_rfp_section(title)

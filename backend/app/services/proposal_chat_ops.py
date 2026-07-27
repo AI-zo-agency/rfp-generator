@@ -406,7 +406,7 @@ async def _kb_support_blob_for_section(
         from app.services import proposal_knowledge_base_tools
 
         queries = [
-            f"zö agency {rfp.client} {section.title} 03_CS 01_ClientList verified facts",
+            f"zö agency {rfp.sector} {section.title} 03_CS 01_ClientList verified facts",
             f"zö agency {(section.content or '')[:120]} case study reference",
         ]
         parts: list[str] = []
@@ -414,6 +414,8 @@ async def _kb_support_blob_for_section(
             text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
                 query=q[:220],
                 limit=6,
+                rfp_client=rfp.client,
+                rfp_sector=rfp.sector,
             )
             if text:
                 parts.append(text[:8000])

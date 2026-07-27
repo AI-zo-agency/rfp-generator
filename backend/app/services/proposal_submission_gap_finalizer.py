@@ -47,7 +47,7 @@ _GAP_EVIDENCE_QUERIES: dict[str, list[str]] = {
     ],
     "budget": [
         "00_Guide_Pricing project management account management fee percentage agency",
-        "zö agency 07_FIN burdened hourly rates fee schedule",
+        "00_Guide_Pricing labor category hourly rate card Low Average High",
     ],
     "psa_acknowledgment": [
         "zö agency insurance workers compensation compliance contract acknowledgments",
@@ -167,6 +167,54 @@ def _apply_kb_fills_to_section(
     return draft.model_copy(update={"sections": sections, "updated_at": now}), fills
 
 
+async def _scrub_optional_verify_after_fills(
+    rfp_id: str,
+    *,
+    rfp: RfpRecord,
+    draft: ProposalDraft,
+    logs: list[str],
+) -> tuple[ProposalDraft, list[str]]:
+    """Drop remaining [VERIFY] tags the RFP does not require (never invent)."""
+    try:
+        from app.services.go_no_go_service import (
+            _assess_rfp_content,
+            combine_rfp_text,
+        )
+        from app.services.proposal_verify_optional_scrub import (
+            scrub_draft_optional_verify_tags,
+        )
+
+        content_info = _assess_rfp_content(rfp)
+        rfp_text = combine_rfp_text(
+            content_info.description or "",
+            content_info.pdf_text or "",
+        )
+        scrubbed_sections, scrub_logs = await scrub_draft_optional_verify_tags(
+            list(draft.sections),
+            rfp_text=rfp_text or "",
+        )
+        if scrub_logs:
+            logs.extend(scrub_logs)
+        by_old = {s.id: (s.content or "") for s in draft.sections}
+        changed = any(
+            by_old.get(s.id, "") != (s.content or "") for s in scrubbed_sections
+        )
+        if changed:
+            draft = draft.model_copy(
+                update={
+                    "sections": scrubbed_sections,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            await asave_proposal_draft(draft)
+    except Exception:
+        logger.exception(
+            "Optional VERIFY scrub failed during finalize for %s (non-fatal)",
+            rfp_id,
+        )
+    return draft, logs
+
+
 async def run_submission_gap_finalize_pass(
     rfp_id: str,
     *,
@@ -176,7 +224,7 @@ async def run_submission_gap_finalize_pass(
 ) -> tuple[ProposalDraft, list[str], ProposalResearchCache | None]:
     """
     KB-only gap resolve: Supermemory search per flag cluster, deterministic VERIFY fills,
-    budget reconcile when cached, then MANUAL FILL handoff for anything still open.
+    budget reconcile when cached, optional VERIFY scrub, then MANUAL FILL handoff.
     No senior editor / surgical LLM pass.
     """
     if rfp is None:
@@ -186,12 +234,15 @@ async def run_submission_gap_finalize_pass(
         raise ProposalError("No proposal draft for gap finalize pass.", status_code=400)
     research = research if research is not None else await aget_research_cache(rfp_id)
 
+    logs: list[str] = []
     gaps = scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
     if not gaps:
         logger.info("Gap finalize for %s: no compliance gaps", rfp_id)
-        return draft, [], research
+        draft, logs = await _scrub_optional_verify_after_fills(
+            rfp_id, rfp=rfp, draft=draft, logs=logs
+        )
+        return draft, logs, research
 
-    logs: list[str] = []
     corpus = list(research.evidence_corpus) if research else []
     updated_corpus, _, global_hits = await _fetch_gap_evidence(
         gaps,
@@ -216,6 +267,9 @@ async def run_submission_gap_finalize_pass(
     gaps = scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
     if not gaps:
         logger.info("Gap finalize for %s: corpus fills cleared all gaps", rfp_id)
+        draft, logs = await _scrub_optional_verify_after_fills(
+            rfp_id, rfp=rfp, draft=draft, logs=logs
+        )
         return draft, logs + ["corpus-fills:all gaps cleared"], research
 
     draft, research, budget_log = await _maybe_reconcile_budget_from_cache(
@@ -229,6 +283,9 @@ async def run_submission_gap_finalize_pass(
         gaps = scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
         if not gaps:
             logger.info("Gap finalize for %s: budget reconcile cleared all gaps", rfp_id)
+            draft, logs = await _scrub_optional_verify_after_fills(
+                rfp_id, rfp=rfp, draft=draft, logs=logs
+            )
             return draft, logs, research
 
     by_section: dict[str, list[ComplianceGap]] = {}
@@ -273,6 +330,10 @@ async def run_submission_gap_finalize_pass(
             logs.append(
                 f"finalize:{section_id}: kb-query — {section_hits} hit(s), no deterministic fill"
             )
+
+    draft, logs = await _scrub_optional_verify_after_fills(
+        rfp_id, rfp=rfp, draft=draft, logs=logs
+    )
 
     remaining = scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
     draft = apply_finalize_handoff_to_draft(draft, remaining)

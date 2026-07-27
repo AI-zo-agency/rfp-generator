@@ -111,6 +111,40 @@ class HoursAndFillerTests(unittest.TestCase):
         self.assertIn("[VERIFY:", updated.content or "")
         self.assertIn("staffing hours", (updated.content or "").casefold())
 
+    def test_flags_invented_percent_time_table(self) -> None:
+        section = ProposalSection(
+            id="agency-team",
+            title="Agency team qualifications",
+            content=(
+                "The percent-time commitments below are the commitments CVVB can hold us to.\n\n"
+                "| Role | Name | Percent-Time |\n"
+                "| --- | --- | --- |\n"
+                "| Executive Sponsor | Sonja Anderson | 10% |\n"
+                "| Account Manager | Ron Comer | 35% |\n"
+                "| Creative Lead | Curt Schultz | 25-30% |\n"
+            ),
+        )
+        updated, report = gate_section_legal_attestations(section, force=True)
+        self.assertGreaterEqual(report.percent_time_flags, 1)
+        self.assertIn("[VERIFY: percent time]", updated.content or "")
+        self.assertNotIn("| 10% |", updated.content or "")
+        self.assertNotIn("| 35% |", updated.content or "")
+
+    def test_scrub_invented_percent_time_public(self) -> None:
+        from app.services.evidence_trust.legal_attestation_gate import (
+            scrub_invented_percent_time,
+        )
+
+        body = (
+            "| Role | Percent-Time |\n"
+            "| Sonja | 10% |\n"
+            "| Ron | 35% |\n"
+        )
+        scrubbed, n = scrub_invented_percent_time(body)
+        self.assertEqual(n, 2)
+        self.assertNotIn("10%", scrubbed)
+        self.assertIn("[VERIFY: percent time]", scrubbed)
+
     def test_replaces_ten_year_filler(self) -> None:
         section = ProposalSection(
             id="section-1",
@@ -170,6 +204,34 @@ class RnoFlagTests(unittest.TestCase):
         )
         _, report = apply_legal_attestation_gates(draft, rfp=_rfp())  # type: ignore[arg-type]
         self.assertEqual(report.rno_flags, 0)
+
+    def test_strips_rno_flag_on_non_health_rfp(self) -> None:
+        draft = _draft(
+            ProposalSection(
+                id="section-3-work-deschutes",
+                title="3.1 — Deschutes Brewery",
+                content=(
+                    "Deschutes Brewery case study.\n\n"
+                    "[FLAG FOR SONJA: Add Recovery Network of Oregon (RNO) — near-direct "
+                    "coalition health/stigma communications proof with metrics; strongest "
+                    "KB match for this RFP scope; prefer for references / previous "
+                    "experience / case studies]\n"
+                ),
+            ),
+        )
+        updated, report = apply_legal_attestation_gates(
+            draft,
+            rfp=_rfp(
+                title="KVCC Marketing Plan",
+                client="KVCC",
+                sector="Higher Education",
+            ),  # type: ignore[arg-type]
+            rfp_context="community college enrollment marketing plan",
+        )
+        blob = "\n".join(s.content or "" for s in updated.sections)
+        self.assertNotIn("Recovery Network of Oregon", blob)
+        self.assertNotIn("FLAG FOR SONJA", blob)
+        self.assertTrue(any("cross-RFP" in log for log in report.logs))
 
 
 if __name__ == "__main__":

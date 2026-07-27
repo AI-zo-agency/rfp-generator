@@ -17,7 +17,8 @@ FEE_MEMO_PROMPT = """Write an INTERNAL fee justification memo for zö agency lea
 
 Include:
 1. Pricing posture — best value positioning; if budget cap known, target ~5–8% under cap (never look underscoped)
-2. Role-hour defense — table of named roles, hours, rates, extended totals tied to deliverables
+2. Role-hour defense — table of labor categories / classifications, hours, rates, extended totals tied to deliverables.
+   Use 00_Guide_Pricing work rates only. Do NOT invent individual ZO person hourly rates (not in KB).
 3. Risk flags — what could cause scope creep or evaluator pushback
 4. Tier rationale — why Low/Average/High was selected
 
@@ -26,7 +27,7 @@ Return ONLY JSON:
   "markdown": "full memo in Markdown",
   "pricingPosture": "one sentence",
   "targetVsCap": "e.g. 7% under $500k cap or 'cap unknown'",
-  "roleHoursSummary": ["Brand Strategist: 40h @ $X = $Y — message architecture"],
+  "roleHoursSummary": ["Brand Strategist (guide labor category): 40h @ $X = $Y — message architecture"],
   "internalNotes": ["bullet for Sonja/Curt/Ella"]
 }"""
 

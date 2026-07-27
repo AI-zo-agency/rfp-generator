@@ -229,14 +229,19 @@ async def inventory_rfp_submission_requirements(
                     "content": (
                         "You read ONE RFP's submission instructions (any government, college, "
                         "nonprofit, or commercial buyer). List EVERY deliverable the proposer must "
-                        "submit — narrative sections, forms, attachments, signatures, addenda ack.\n\n"
+                        "submit — narrative sections, forms, attachments, exhibits, appendices, "
+                        "signatures, addenda ack, insurance certificates, W-9, pricing forms.\n\n"
                         "Rules:\n"
                         "- Use the RFP's own titles/labels.\n"
-                        "- signed_form / notarized form → mustInManuscript=false (checklist only).\n"
-                        "- narrative_proposal → mustInManuscript=true (needs prose or ack in PDF).\n"
-                        "- attachment (Excel, COI PDF) → mustInManuscript=false unless RFP wants a "
-                        "cover paragraph in the proposal.\n"
-                        "- Do NOT invent items not in the excerpt.\n\n"
+                        "- Be thorough: if Section/Exhibit/Attachment/Form is named as required "
+                        "for submission, include it.\n"
+                        "- signed_form / notarized form → kind=signed_form "
+                        "(proposal gets a MANUAL FILL checklist tab).\n"
+                        "- narrative_proposal → mustInManuscript=true (needs prose in PDF).\n"
+                        "- attachment (Excel, COI PDF, exhibits) → kind=attachment "
+                        "(proposal gets a checklist tab with [MANUAL FILL: attach file]).\n"
+                        "- Do NOT invent items not in the excerpt.\n"
+                        "- Prefer more items over fewer when the RFP checklist is dense.\n\n"
                         "Return JSON:\n"
                         "{\n"
                         '  "items": [\n'
@@ -298,7 +303,7 @@ def detect_missing_submission_deliverables(
     *,
     research: ProposalResearchCache | None = None,
 ) -> list[SubmissionDeliverable]:
-    """Missing required manuscript items vs LLM inventory + Phase 2 map."""
+    """Missing required items vs LLM inventory — narratives + form/attachment tabs."""
     manuscript = _manuscript_blob(draft)
     mapped_titles = {
         (m.title or "").casefold()
@@ -307,7 +312,14 @@ def detect_missing_submission_deliverables(
     missing: list[SubmissionDeliverable] = []
 
     for item in inventory:
-        if not item.must_in_manuscript:
+        # Always surface demanded forms/attachments as checklist tabs so Scan
+        # cannot silently drop them. Narratives still require must_in_manuscript.
+        wants_tab = item.must_in_manuscript or item.kind in (
+            "signed_form",
+            "attachment",
+            "signature_block",
+        )
+        if not wants_tab:
             continue
         if item.section_id in {s.id for s in draft.sections}:
             sec = next(s for s in draft.sections if s.id == item.section_id)
@@ -316,7 +328,7 @@ def detect_missing_submission_deliverables(
         if _title_covered_in_draft(item.title, draft):
             continue
         req_text = item.draft_instructions or item.title
-        if requirement_likely_covered(req_text, manuscript):
+        if item.must_in_manuscript and requirement_likely_covered(req_text, manuscript):
             continue
         if item.title.casefold() in mapped_titles and any(
             s.content.strip()
@@ -324,6 +336,24 @@ def detect_missing_submission_deliverables(
             if (s.title or "").casefold() == item.title.casefold()
         ):
             continue
+        # Forms/attachments that are already covered by closing package tabs
+        # (references, addenda, COI, signature) should not duplicate.
+        if item.kind in ("signed_form", "attachment", "signature_block"):
+            title_cf = item.title.casefold()
+            closing_needles = (
+                "addenda",
+                "non-collusion",
+                "certificate of insurance",
+                "authorized signature",
+                "w-9",
+                "pricing proposal form",
+            )
+            if any(n in title_cf for n in closing_needles) and any(
+                n in " | ".join(s.title.casefold() for s in draft.sections)
+                for n in closing_needles
+                if n in title_cf
+            ):
+                continue
         missing.append(item)
 
     return missing
@@ -340,6 +370,14 @@ async def _draft_generic_deliverable(
         f"{item.draft_instructions}\n\n"
         f"[MANUAL FILL: complete per RFP — {item.title}]"
     )
+    if item.kind in ("signed_form", "attachment"):
+        stub = (
+            f"## {item.title}\n\n"
+            f"This RFP requires **{item.title}** as a submission deliverable.\n\n"
+            f"- Status: **[MANUAL FILL: attach signed/complete file on buyer template]**\n"
+            f"- RFP cite: {item.rfp_citation or 'see submission instructions'}\n"
+            f"- Notes: {item.draft_instructions or 'Follow buyer form exactly; do not invent fields.'}\n"
+        )
     if not llm.is_configured():
         return stub
     try:
@@ -349,7 +387,10 @@ async def _draft_generic_deliverable(
                     "role": "system",
                     "content": (
                         "Draft ONE proposal section for zö agency matching THIS RFP submission item.\n"
-                        "Use only RFP + verified zö facts. Signed external forms → checklist + [MANUAL FILL].\n"
+                        "Use only RFP + verified zö facts.\n"
+                        "If kind is signed_form or attachment: write a short compliance checklist "
+                        "with [MANUAL FILL: attach …] — do NOT invent signatures or file contents.\n"
+                        "If kind is narrative_proposal: write substantive prose.\n"
                         'Return JSON: {"content": "markdown"}'
                     ),
                 },
@@ -562,13 +603,24 @@ def list_submission_checklist_from_rfp(rfp_text: str) -> list[str]:
         (r"affirmative action", "Affirmative Action Questionnaire (signed)"),
         (r"assurance of compliance", "Assurance of Compliance (signed)"),
         (r"non[- ]?collusion", "Non-Collusion Affidavit (often notarized)"),
-        (r"statement of ownership", "Statement of Ownership Disclosure"),
-        (r"vendor questionnaire", "Vendor / Contractor Questionnaire"),
+        (r"statement of ownership|ownership disclosure", "Statement of Ownership Disclosure"),
+        (r"vendor questionnaire|contractor questionnaire", "Vendor / Contractor Questionnaire"),
         (r"financial stability", "Financial stability narrative (in proposal body)"),
         (r"awards?\s*(?:and|&)\s*recognition", "Awards & recognitions (in proposal body)"),
         (r"closing\s+statement|offeror.?s?\s+statement|commitment\s+to\s+(?:perform|deliver)", "Offeror commitment / closing statement"),
+        (r"certificate(?:s)?\s+of\s+insurance|\bCOI\b", "Certificate(s) of Insurance"),
+        (r"\bW[- ]?9\b", "IRS Form W-9"),
+        (r"pricing\s+proposal\s+form|cost\s+proposal\s+form|quotation\s*/?\s*pricing", "Official pricing / quotation form"),
+        (r"authorized\s+(?:representative|signatory|signature)|signature\s+(?:block|page)", "Authorized signature page"),
+        (r"exemplar\s+agreement|sample\s+(?:agreement|contract)|exceptions?\s+to\s+(?:the\s+)?(?:agreement|contract)", "Contract / agreement acknowledgment"),
+        (r"contractor vendor certification|\bCVC\b|exhibit\s+h\b", "Contractor Vendor Certification / Exhibit H"),
+        (r"required\s+attachments?|documents?\s+to\s+(?:be\s+)?(?:submitted|included|attached)|submission\s+checklist", "Required attachments checklist"),
+        (r"\bexhibit\s+[A-Z0-9]+\b|\bappendix\s+[A-Z0-9]+\b|\battachment\s+\d+\b", "Named exhibits / appendices / attachments"),
     )
     for pat, label in patterns:
         if re.search(pat, text, re.I) and label not in found:
             found.append(label)
+    # Compulsory close always appears on the checklist.
+    if "Offeror commitment / closing statement" not in found:
+        found.append("Offeror commitment / closing statement")
     return found

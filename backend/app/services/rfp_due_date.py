@@ -34,16 +34,46 @@ _MONTHS = {
     "dec": 12,
 }
 
-_CONTEXT_RE = re.compile(
+# Strong signals for the actual proposal submission deadline (prefer these).
+_PROPOSAL_DEADLINE_RE = re.compile(
     r"(?:"
-    r"due\s+date|proposal\s+due(?:\s+date)?|submission\s+deadline|"
-    r"deadline\s+for\s+(?:submissions?|proposals?)|closing\s+date|"
-    r"bids?\s+(?:due|must\s+be\s+received)|responses?\s+due|"
-    r"must\s+be\s+received\s+by|submit(?:ted)?\s+by|no\s+later\s+than"
+    r"proposal\s+deadline|"
+    r"proposals?\s+(?:are\s+)?due|"
+    r"proposal\s+due(?:\s+date)?|"
+    r"submission\s+deadline|"
+    r"deadline\s+for\s+(?:submissions?|proposals?)|"
+    r"closing\s+date|"
+    r"bids?\s+(?:due|must\s+be\s+received)|"
+    r"responses?\s+due|"
+    r"must\s+be\s+received\s+by|"
+    r"(?:will\s+be\s+)?received\s+up\s+to|"
+    r"will\s+be\s+received|"
+    r"submit(?:ted)?\s+by|"
+    r"no\s+later\s+than"
+    r")"
+    r"[\s:.\-]*"
+    r"([^\n.;]{6,80})",
+    re.I,
+)
+
+# Weaker / generic "due date" — often Q&A or pre-bid.
+_GENERIC_DUE_RE = re.compile(
+    r"(?:"
+    r"due\s+date|"
+    r"due\s+on|"
+    r"due:"
     r")"
     r"[\s:.\-]*"
     r"([^\n.;]{6,48})",
     re.I,
+)
+
+# Demote matches whose nearby context is clearly not the proposal deadline.
+_DEMOTE_CONTEXT_RE = re.compile(
+    r"(?i)\b("
+    r"q\s*&\s*a|questions?|pre[- ]?bid|pre[- ]?proposal|"
+    r"site\s+visit|conference|addenda?\s+due|intent\s+to\s+bid"
+    r")\b"
 )
 
 _ISO_RE = re.compile(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b")
@@ -111,19 +141,53 @@ def _parse_fragment(fragment: str) -> str | None:
     return None
 
 
+def _window_around(text: str, start: int, end: int, radius: int = 80) -> str:
+    return text[max(0, start - radius) : min(len(text), end + radius)]
+
+
+def _score_match(
+    *,
+    iso: str,
+    priority: int,
+    context: str,
+) -> tuple[int, str]:
+    """Higher score wins. Demote Q&A / pre-bid; prefer proposal-deadline phrasing."""
+    score = priority
+    if _DEMOTE_CONTEXT_RE.search(context):
+        score -= 50
+    return score, iso
+
+
 def extract_due_date_from_text(text: str) -> str | None:
-    """Return ISO date (YYYY-MM-DD) when a due-date phrase is found."""
+    """Return ISO date (YYYY-MM-DD) when a due-date phrase is found.
+
+    Prefers proposal-deadline wording (e.g. "will be received … on August 31")
+    over Q&A / pre-bid due dates that often appear earlier in the notice.
+    """
     if not text.strip():
         return None
 
-    candidates: list[str] = []
-    for match in _CONTEXT_RE.finditer(text):
+    scored: list[tuple[int, str]] = []
+
+    for match in _PROPOSAL_DEADLINE_RE.finditer(text):
+        parsed = _parse_fragment(match.group(1))
+        if not parsed:
+            # Cover pages often put the date after "ON" outside a tight capture;
+            # also try the next ~80 chars after the phrase.
+            parsed = _parse_fragment(text[match.end() : match.end() + 80])
+        if parsed:
+            ctx = _window_around(text, match.start(), match.end())
+            scored.append(_score_match(iso=parsed, priority=100, context=ctx))
+
+    for match in _GENERIC_DUE_RE.finditer(text):
         parsed = _parse_fragment(match.group(1))
         if parsed:
-            candidates.append(parsed)
+            ctx = _window_around(text, match.start(), match.end())
+            scored.append(_score_match(iso=parsed, priority=40, context=ctx))
 
-    if candidates:
-        return candidates[0]
+    if scored:
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[0][1]
 
     # Fallback: first plausible future date anywhere in the document.
     for pattern in (_ISO_RE, _MONTH_NAME_RE, _DAY_MONTH_RE, _SLASH_RE):

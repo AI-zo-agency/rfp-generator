@@ -44,6 +44,7 @@ LEGAL ATTESTATIONS — DO NOT "CLEAN UP" THESE:
 - NEVER assert E-Verify enrollment / participation as fact. If the section is an E-Verify Affidavit or mentions penalty of perjury, keep or insert [VERIFY: E-Verify enrollment — unconfirmed in KB — Sonja/Operations must confirm]. Do not convert an open Go/No-Go question into a sworn certification.
 - NEVER assert "we have no conflicts of interest" or "no financial relationships that would create conflicts." Keep [VERIFY: conflict-of-interest disclosure — must be confirmed by Sonja/leadership].
 - Do not invent annual staffing hours (400/320/280/200/160 etc.) without KB evidence — keep [VERIFY: staffing hours].
+- Do not invent percent-time / FTE % (10%/35%/25% etc.) — omit the column if RFP does not require it, else [VERIFY: percent time].
 - Do not invent a "10-year corporate-creative partnership" — agency founded 2013 (13 years as of 2026).
 - For health/coalition/stigma RFPs: include Recovery Network of Oregon (RNO) in references / previous experience / case studies when comparable work is required; if missing, add [FLAG FOR SONJA: Add Recovery Network of Oregon…].
 
@@ -201,7 +202,10 @@ def _requirements_by_section_id(research: ProposalResearchCache | None) -> dict[
 def _ticket_rewrite_brief(ticket: dict[str, Any]) -> str:
     brief = str(ticket.get("rewriteBrief") or ticket.get("trimGuidance") or "").strip()
     unmet = ticket.get("unmetRequirements") or []
+    policy = str(ticket.get("policyOrGuideline") or "").strip()
     parts = [brief] if brief else []
+    if policy:
+        parts.append(f"Mandatory RFP/gov requirement: {policy}")
     if isinstance(unmet, list) and unmet:
         parts.append("Unmet RFP requirements:\n" + "\n".join(f"- {u}" for u in unmet[:12]))
     return "\n".join(parts).strip()
@@ -346,7 +350,7 @@ async def _run_senior_editor_ticket_pass(
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
     report: SelfEditReport,
-    max_tickets: int = 3,
+    max_tickets: int = 8,
 ) -> tuple[ProposalDraft, ProposalResearchCache | None]:
     """Emit Senior Editor tickets and dispatch Phase 3 single-section redrafts."""
     from app.services.proposal_langchain_agents import senior_editor_emit_tickets
@@ -357,12 +361,13 @@ async def _run_senior_editor_ticket_pass(
         manuscript_digest=_manuscript_digest_for_senior_editor(draft),
         requirements_by_section=_requirements_by_section_id(research),
     )
+    # Dedupe first (remove bloat), then coverage, then gov compliance.
     coverage = list(tickets.get("coverageTickets") or [])
     dedupe = list(tickets.get("dedupeTickets") or [])
-    # Coverage first, then dedupe; unique by sectionId.
+    compliance = list(tickets.get("complianceTickets") or [])
     ordered: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for raw in [*coverage, *dedupe]:
+    for raw in [*dedupe, *coverage, *compliance]:
         if not isinstance(raw, dict):
             continue
         sid = str(raw.get("sectionId") or "").strip()
@@ -381,6 +386,16 @@ async def _run_senior_editor_ticket_pass(
         )
         return draft, research
 
+    report.section_logs.append(
+        {
+            "section": "senior-editor",
+            "detail": (
+                f"{len(dedupe)} dedupe / {len(coverage)} coverage / "
+                f"{len(compliance)} compliance ticket(s); applying {len(ordered)}"
+            ),
+        }
+    )
+
     for ticket in ordered:
         sid = str(ticket.get("sectionId") or "")
         brief = _ticket_rewrite_brief(ticket)
@@ -397,11 +412,18 @@ async def _run_senior_editor_ticket_pass(
             report.sections_improved += 1
         else:
             report.sections_unchanged += 1
+        kind = (
+            "dedupe"
+            if ticket in dedupe
+            else "compliance"
+            if ticket in compliance
+            else "coverage"
+        )
         report.section_logs.append(
             {
                 "sectionId": sid,
                 "detail": detail,
-                "ticket": "coverage" if ticket in coverage else "dedupe",
+                "ticket": kind,
             }
         )
     return draft, research
@@ -482,12 +504,33 @@ async def _repair_one_section(
             f"[{e.id}] {e.source}\n{e.excerpt[:1500]}" for e in pool
         )
 
+    budget_context = ""
+    from app.services.proposal_budget_playbook import (
+        build_budget_repair_context,
+        should_apply_budget_playbook,
+    )
+
+    if should_apply_budget_playbook(before, message):
+        try:
+            from app.services.proposal_common import load_rfp_for_proposal
+
+            rfp_text = load_rfp_for_proposal(rfp_id)[2]
+            budget_context = await build_budget_repair_context(
+                rfp=rfp,
+                rfp_text=rfp_text,
+                research=research,
+                user_message=message,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Budget repair context skipped for %s: %s", section_id, exc)
+
     user_content = (
         f"Client: {rfp_client}\nRFP: {rfp_title}\n"
         f"Section: {before.title}\nWord target: {before.word_target}\n"
         f"Requirements:\n" + "\n".join(f"- {r}" for r in requirements)
         + f"\n\nRepair task:\n{message}\n\n"
-        f"{_locks_brief_for_repair(research)}\n\n"
+        + (f"{budget_context}\n\n" if budget_context else "")
+        + f"{_locks_brief_for_repair(research)}\n\n"
         f"{_dedup_brief_for_repair(draft, section_id=section_id)}\n\n"
         f"Previous draft:\n{before.content[:5000]}\n\n"
         f"Evidence corpus (cite as [E#]):\n{evidence_block or '(search tools for more)'}"
@@ -501,6 +544,7 @@ async def _repair_one_section(
             rfp_id=rfp_id,
             rfp_title=rfp_title,
             rfp_client=rfp_client,
+            rfp_sector=rfp.sector,
             user_content=user_content,
         )
     except Exception as exc:
@@ -685,7 +729,12 @@ async def run_self_edit_loop(
     time_budget_sec: int = SELF_EDIT_TIME_BUDGET_SEC,
     parallel: int = SELF_EDIT_PARALLEL,
 ) -> tuple[ProposalDraft, ProposalResearchCache | None, SelfEditReport]:
-    """KB gap-fill + section-wise patches with strict improvement gate."""
+    """Focused senior editor: dedupe + RFP coverage + mandatory gov/buyer compliance.
+
+    Unused kwargs kept for API compatibility with callers.
+    """
+    del max_iterations, time_budget_sec, parallel
+
     draft = await aget_proposal_draft(rfp_id)
     if not draft:
         raise ProposalError("No proposal draft for self-edit.", status_code=400)
@@ -710,452 +759,78 @@ async def run_self_edit_loop(
             )
 
     research = await aget_research_cache(rfp_id)
-    rfp: RfpRecord | None = None
-    rfp_client = ""
-    rfp_title = ""
+    from app.services.proposal_integrity_guards import apply_manuscript_integrity_guards
+
+    draft, integrity_logs = apply_manuscript_integrity_guards(draft)
+    if integrity_logs:
+        await asave_proposal_draft(draft)
+        for line in integrity_logs[:12]:
+            logger.info("Self-edit integrity preflight %s: %s", rfp_id, line)
+
     try:
-        rfp, _, _ = await aload_rfp_for_proposal(rfp_id)
-        rfp_client = rfp.client
-        rfp_title = rfp.title
+        rfp, _, rfp_context = await aload_rfp_for_proposal(rfp_id)
     except ProposalError:
-        pass
+        raise ProposalError("RFP not found for self-edit.", status_code=404) from None
 
-    if not rfp:
-        raise ProposalError("RFP not found for self-edit.", status_code=404)
-
-    from app.services.proposal_common import load_rfp_for_proposal
-    from app.services.proposal_kb_fact_checker import run_kb_fact_check_pass
     from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
+    from app.services.proposal_section_dedup import compress_duplicate_case_study_sections
 
+    report = SelfEditReport(iterations_run=1)
+
+    # Step 1 — deterministic cross-section case-study compression
     await record_pipeline_activity(
         rfp_id,
-        label="Senior editor: Checking facts",
-        detail="Scanning for invented claims, weak citations, and knowledge-base mismatches",
+        label="Senior editor: Removing duplicates",
+        detail="Scanning sections for repeated case studies and cutting unnecessary copies",
         step_index=1,
-        step_total=5,
+        step_total=3,
         in_progress_phase="phase-3-6-self-edit",
     )
-
-    _, _, rfp_context = load_rfp_for_proposal(rfp_id)
-    draft, fc_report = await run_kb_fact_check_pass(
-        draft,
-        rfp=rfp,
-        rfp_context=rfp_context,
-        research=research,
-    )
-    if fc_report.logs:
+    sections, cross_dupes = compress_duplicate_case_study_sections(list(draft.sections))
+    if cross_dupes:
+        draft = draft.model_copy(
+            update={
+                "sections": sections,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         await asave_proposal_draft(draft)
-        report_preface = SelfEditReport(
-            stopped_reason="",
-            section_logs=[{"section": "fact-check", "detail": log} for log in fc_report.logs[:20]],
-        )
-        logger.info(
-            "KB fact-check before self-edit for %s: %d log lines",
-            rfp_id,
-            len(fc_report.logs),
-        )
-        await record_pipeline_activity(
-            rfp_id,
-            label="Senior editor: Checking facts",
-            detail=f"{len(fc_report.logs)} issue(s) found — next: find gaps and fix sections",
-            step_index=1,
-            step_total=5,
-        )
-    else:
-        report_preface = None
-        await record_pipeline_activity(
-            rfp_id,
-            label="Senior editor: Checking facts",
-            detail="No fact issues found — continuing to find gaps and fix sections",
-            step_index=1,
-            step_total=5,
-        )
-
-    budget = research.budget if research else None
-    report = SelfEditReport()
-    if report_preface and report_preface.section_logs:
-        report.section_logs.extend(report_preface.section_logs)
-    deadline = time.monotonic() + time_budget_sec
-    sem = asyncio.Semaphore(parallel)
-    zero_improve_streak = 0
-    zero_flag_streak = 0
-    flags_at_start = _total_manuscript_flags(draft, research, rfp)
-    from app.services.proposal_manuscript_locks import scan_manuscript_lock_issues
-
-    lock_issues_at_start = scan_manuscript_lock_issues(draft=draft, research=research)
-    if flags_at_start <= TARGET_FLAG_COUNT and not lock_issues_at_start:
-        report.stopped_reason = "flag_target_met"
-        logger.info(
-            "Self-edit skipped for %s: %d flags already at target (≤%d)",
-            rfp_id,
-            flags_at_start,
-            TARGET_FLAG_COUNT,
-        )
-        return draft, research, report
-
-    def _time_left() -> bool:
-        return time.monotonic() < deadline
-
-    from app.services.proposal_manuscript_cleanup import sections_with_submission_blockers
-    from app.services.proposal_manuscript_locks import scan_manuscript_lock_issues
-    from app.services.proposal_rfp_compliance import sections_with_compliance_gaps
-
-    async def _run_one(sid: str, use_senior: bool) -> tuple[str, bool, str]:
-        async with sem:
-            return await _repair_one_section(
-                rfp_id,
-                sid,
-                use_senior_editor=use_senior,
-                rfp=rfp,
-                rfp_client=rfp_client,
-                rfp_title=rfp_title,
-                budget=budget,
-            )
-
-    for iteration in range(1, max_iterations + 1):
-        from app.services.proposal_generation_cancel import check_generation_cancelled
-
-        await check_generation_cancelled(rfp_id)
-        if not _time_left():
-            report.stopped_reason = "time_budget"
-            break
-
-        draft = await aget_proposal_draft(rfp_id) or draft
-        blocker_ids = sections_with_submission_blockers(draft, research)
-        compliance_ids = sections_with_compliance_gaps(draft, research, rfp)
-        lock_ids = {
-            i.section_id
-            for i in scan_manuscript_lock_issues(draft=draft, research=research)
-            if i.section_id
-        }
-        # KPI gaps may attach to first reporting section; also target all reporting tabs
-        if any(
-            i.category == "manuscript_locks" and "KPI" in (i.message or "")
-            for i in scan_manuscript_lock_issues(draft=draft, research=research)
-        ):
-            for s in draft.sections:
-                title_l = s.title.casefold()
-                if any(
-                    m in title_l
-                    for m in (
-                        "methodolog",
-                        "report",
-                        "analytics",
-                        "optimiz",
-                        "measurement",
-                        "kpi",
-                        "metric",
-                    )
-                ):
-                    lock_ids.add(s.id)
-        weak = [
-            s
-            for s in draft.sections
-            if is_weak_section(s)
-            or s.id in blocker_ids
-            or s.id in compliance_ids
-            or s.id in lock_ids
-        ]
-        if not weak:
-            report.stopped_reason = "all_sections_ok"
-            break
-
-        weak.sort(key=weakness_score, reverse=True)
-        # Prefer lock-conflict sections first
-        weak.sort(key=lambda s: (0 if s.id in lock_ids else 1, -weakness_score(s)))
-        if len(weak) > MAX_WEAK_SECTIONS_PER_ITERATION:
-            weak = weak[:MAX_WEAK_SECTIONS_PER_ITERATION]
-        report.iterations_run = iteration
-        report.sections_targeted += len(weak)
-
-        flags_before = _total_manuscript_flags(draft, research, rfp)
-        remaining_locks = scan_manuscript_lock_issues(draft=draft, research=research)
-        if flags_before <= TARGET_FLAG_COUNT and not remaining_locks:
-            report.stopped_reason = "flag_target_met"
-            break
-
-        logger.info(
-            "Self-edit iteration %d for %s: %d weak sections, %d flags (parallel=%d)",
-            iteration,
-            rfp_id,
-            len(weak),
-            flags_before,
-            parallel,
-        )
-
-        from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
-
-        # Coverage / dedupe pass before weak-section repair.
-        if iteration == 1:
-            await record_pipeline_activity(
-                rfp_id,
-                label="Senior editor: Finding gaps",
-                detail="Looking for missing RFP answers and repeated content to fix",
-                step_index=2,
-                step_total=5,
-            )
-            draft, research = await _run_senior_editor_ticket_pass(
-                rfp_id=rfp_id,
-                rfp=rfp,
-                draft=draft,
-                research=research,
-                report=report,
-            )
-            draft = await aget_proposal_draft(rfp_id) or draft
-            research = await aget_research_cache(rfp_id) or research
-            flags_after_tickets = _total_manuscript_flags(draft, research, rfp)
-            if flags_after_tickets <= TARGET_FLAG_COUNT:
-                report.stopped_reason = "flag_target_met"
-                break
-            # Refresh weak set after ticket redrafts
-            blocker_ids = sections_with_submission_blockers(draft, research)
-            compliance_ids = sections_with_compliance_gaps(draft, research, rfp)
-            lock_ids = {
-                i.section_id
-                for i in scan_manuscript_lock_issues(draft=draft, research=research)
-                if i.section_id
+        report.section_logs.append(
+            {
+                "section": "dedupe",
+                "detail": f"Compressed {cross_dupes} duplicate case-study rewrite(s)",
             }
-            weak = [
-                s
-                for s in draft.sections
-                if is_weak_section(s)
-                or s.id in blocker_ids
-                or s.id in compliance_ids
-                or s.id in lock_ids
-            ]
-            weak.sort(key=lambda s: (0 if s.id in lock_ids else 1, -weakness_score(s)))
-            if len(weak) > MAX_WEAK_SECTIONS_PER_ITERATION:
-                weak = weak[:MAX_WEAK_SECTIONS_PER_ITERATION]
-            if not weak:
-                report.stopped_reason = "all_sections_ok"
-                break
-
-        kpi_in_batch = any(s.id in lock_ids for s in weak)
-        first_title = weak[0].title if weak else "sections"
-        titles = ", ".join(s.title for s in weak[:3])
-        if len(weak) > 3:
-            titles += f" +{len(weak) - 3} more"
-        await record_pipeline_activity(
-            rfp_id,
-            label=f"Senior editor: Fixing {first_title}",
-            detail=(
-                f"Pass {iteration}/{max_iterations} · fixing {len(weak)} section(s): {titles}"
-                + (" · KPI / lock alignment" if kpi_in_batch else "")
-            ),
-            step_index=3,
-            step_total=5,
         )
 
-        # Remaining weak sections: Section Repair without re-running Senior Editor fact hunt.
-        tasks = [_run_one(s.id, False) for s in weak]
-        results = await asyncio.gather(*tasks)
-
-        improved_this_round = 0
-        for sid, improved, detail in results:
-            log_entry: dict[str, str] = {
-                "sectionId": sid,
-                "iteration": str(iteration),
-                "detail": detail,
-            }
-            if not improved:
-                log_entry["status"] = "self_edit_exhausted"
-                logger.warning("Self-edit section %s: %s", sid, detail)
-            report.section_logs.append(log_entry)
-            if improved:
-                improved_this_round += 1
-                report.sections_improved += 1
-            else:
-                report.sections_unchanged += 1
-
-        draft = await aget_proposal_draft(rfp_id) or draft
-        research = await aget_research_cache(rfp_id) or research
-        flags_after = _total_manuscript_flags(draft, research, rfp)
-
-        logger.info(
-            "Self-edit iteration %d done: %d improved, %d unchanged, flags %d→%d",
-            iteration,
-            improved_this_round,
-            len(weak) - improved_this_round,
-            flags_before,
-            flags_after,
-        )
-
-        if flags_after <= TARGET_FLAG_COUNT:
-            report.stopped_reason = "flag_target_met"
-            break
-
-        if flags_after >= flags_before:
-            zero_flag_streak += 1
-            if zero_flag_streak >= MAX_ZERO_IMPROVEMENT_ITERATIONS:
-                report.stopped_reason = "flags_stalled"
-                logger.info(
-                    "Self-edit stopping for %s: flag count stalled at %d",
-                    rfp_id,
-                    flags_after,
-                )
-                break
-        else:
-            zero_flag_streak = 0
-
-        if improved_this_round == 0:
-            zero_improve_streak += 1
-            if not any(verify_count(s.content or "") > 0 for s in draft.sections):
-                report.stopped_reason = "no_improvement"
-                break
-            if zero_improve_streak >= MAX_ZERO_IMPROVEMENT_ITERATIONS:
-                logger.info(
-                    "Self-edit stopping main loop after %d zero-improvement iterations",
-                    zero_improve_streak,
-                )
-                report.stopped_reason = "no_improvement"
-                break
-        else:
-            zero_improve_streak = 0
-
-    # Dedicated VERIFY loop — skip senior editor (faster); stop after one failed round
-    verify_round = 0
-    while _time_left() and verify_round < 1:
-        draft = await aget_proposal_draft(rfp_id) or draft
-        verify_sections = [
-            s for s in draft.sections if verify_count(s.content or "") > 0
-        ]
-        if not verify_sections:
-            if report.stopped_reason == "no_improvement":
-                report.stopped_reason = "all_sections_ok"
-            break
-
-        verify_round += 1
-        logger.info(
-            "Self-edit VERIFY round %d for %s: %d sections with placeholders",
-            verify_round,
-            rfp_id,
-            len(verify_sections),
-        )
-        from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
-
-        await record_pipeline_activity(
-            rfp_id,
-            label="Senior editor: Clearing placeholders",
-            detail=f"Resolving leftover [VERIFY] tags in {len(verify_sections)} section(s)",
-            step_index=4,
-            step_total=5,
-        )
-        verify_sections.sort(key=weakness_score, reverse=True)
-        verify_sections = verify_sections[:MAX_WEAK_SECTIONS_PER_ITERATION]
-        results = await asyncio.gather(
-            *[_run_one(s.id, False) for s in verify_sections]
-        )
-        improved_verify = 0
-        for sid, improved, detail in results:
-            report.section_logs.append(
-                {
-                    "sectionId": sid,
-                    "iteration": f"verify-{verify_round}",
-                    "detail": detail,
-                    "status": "" if improved else "self_edit_exhausted",
-                }
-            )
-            if improved:
-                improved_verify += 1
-                report.sections_improved += 1
-            else:
-                report.sections_unchanged += 1
-
-        if improved_verify == 0:
-            report.stopped_reason = "verify_exhausted"
-            break
-
-    if not report.stopped_reason:
-        report.stopped_reason = "max_iterations"
-
+    # Step 2 — one Senior Editor ticket pass (dedupe / coverage / gov compliance)
+    await record_pipeline_activity(
+        rfp_id,
+        label="Senior editor: Coverage & compliance",
+        detail="Checking RFP coverage, duplicates, and required gov/buyer policies",
+        step_index=2,
+        step_total=3,
+        in_progress_phase="phase-3-6-self-edit",
+    )
+    draft, research = await _run_senior_editor_ticket_pass(
+        rfp_id=rfp_id,
+        rfp=rfp,
+        draft=draft,
+        research=research,
+        report=report,
+        max_tickets=8,
+    )
     draft = await aget_proposal_draft(rfp_id) or draft
-    research = await aget_research_cache(rfp_id)
+    research = await aget_research_cache(rfp_id) or research
 
-    skip_polish = report.stopped_reason in {
-        "flag_target_met",
-        "flags_stalled",
-        "no_improvement",
-        "time_budget",
-    }
-
-    if not _time_left() or skip_polish:
-        if skip_polish:
-            logger.info(
-                "Self-edit for %s: skipping polish passes (stopped=%s)",
-                rfp_id,
-                report.stopped_reason,
-            )
-        else:
-            logger.warning(
-                "Self-edit for %s: skipping polish passes (time budget exhausted)",
-                rfp_id,
-            )
-    else:
-        from app.services.proposal_submission_polish import run_submission_polish_pass
-        from app.services.proposal_rfp_compliance import run_rfp_compliance_polish_pass
-
-        try:
-            from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
-
-            await record_pipeline_activity(
-                rfp_id,
-                label="Senior editor: Final polish",
-                detail="Fixing blockers, compliance gaps, and cross-section consistency",
-                step_index=5,
-                step_total=5,
-            )
-            draft, polish_logs = await run_submission_polish_pass(
-                rfp_id,
-                rfp=rfp,
-                draft=draft,
-                research=research,
-            )
-            for line in polish_logs:
-                report.section_logs.append(
-                    {"sectionId": "", "iteration": "submission-polish", "detail": line}
-                )
-        except Exception as exc:
-            logger.warning("Submission polish pass failed for %s: %s", rfp_id, exc)
-
-        if _time_left():
-            try:
-                draft, compliance_logs = await run_rfp_compliance_polish_pass(
-                    rfp_id,
-                    rfp=rfp,
-                    draft=draft,
-                    research=research,
-                )
-                for line in compliance_logs:
-                    report.section_logs.append(
-                        {"sectionId": "", "iteration": "rfp-compliance-polish", "detail": line}
-                    )
-            except Exception as exc:
-                logger.warning("RFP compliance polish pass failed for %s: %s", rfp_id, exc)
-
-        if _time_left() and research and research.budget:
-            try:
-                from app.services.proposal_generator import run_phase3_5_budget_reconcile
-
-                draft, research, _ = await run_phase3_5_budget_reconcile(rfp_id)
-                budget = research.budget
-                logger.info("Post-self-edit budget reconcile complete for %s", rfp_id)
-            except ProposalError as exc:
-                logger.warning("Post-self-edit budget reconcile skipped for %s: %s", rfp_id, exc)
-            except Exception as exc:
-                logger.warning(
-                    "Post-self-edit budget reconcile skipped for %s: %s",
-                    rfp_id,
-                    exc,
-                )
-
-    if research:
-        research = research.model_copy(
-            update={"updated_at": datetime.now(timezone.utc).isoformat()}
-        )
-        await asave_research_cache(research)
-
-    # Final legal attestation gate — VERIFY cleanup / polish must not re-assert
-    # E-Verify, conflict disclosures, invented hours, or omit RNO on health RFPs.
+    # Step 3 — legal attestation gate only (no VERIFY hunt / polish / budget reconcile)
+    await record_pipeline_activity(
+        rfp_id,
+        label="Senior editor: Legal gates",
+        detail="Ensuring E-Verify / conflict / attestation VERIFYs stay honest",
+        step_index=3,
+        step_total=3,
+        in_progress_phase="phase-3-6-self-edit",
+    )
     from app.services.evidence_trust.legal_attestation_gate import (
         apply_legal_attestation_gates,
     )
@@ -1176,28 +851,35 @@ async def run_self_edit_loop(
                 }
             )
 
+    from app.services.proposal_manuscript_locks import scan_manuscript_lock_issues
+
     remaining_locks = scan_manuscript_lock_issues(draft=draft, research=research)
     if remaining_locks:
-        summary = "; ".join(
-            (i.message or "")[:160] for i in remaining_locks[:4]
+        # Soft-fail: log locks but do not block the whole pipeline — Scan RFP / review own them.
+        summary = "; ".join((i.message or "")[:160] for i in remaining_locks[:4])
+        report.section_logs.append(
+            {
+                "section": "manuscript-locks",
+                "detail": f"Remaining locks (non-blocking): {summary}",
+            }
         )
-        report.stopped_reason = "manuscript_locks_failed"
-        logger.error(
-            "Self-edit for %s FAILED manuscript locks (%d): %s",
+        logger.warning(
+            "Senior editor for %s left %d manuscript lock(s): %s",
             rfp_id,
             len(remaining_locks),
             summary,
         )
-        raise ProposalError(
-            "Senior editor could not clear manuscript locks (primary contact / RFQ KPIs): "
-            + summary,
-            status_code=422,
-        )
 
+    if research:
+        research = research.model_copy(
+            update={"updated_at": datetime.now(timezone.utc).isoformat()}
+        )
+        await asave_research_cache(research)
+
+    report.stopped_reason = "focused_pass_complete"
     logger.info(
-        "Self-edit for %s: %d iterations, %d improved, stopped=%s",
+        "Self-edit for %s: focused pass, %d improved, stopped=%s",
         rfp_id,
-        report.iterations_run,
         report.sections_improved,
         report.stopped_reason,
     )

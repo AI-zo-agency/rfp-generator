@@ -83,6 +83,43 @@ class BudgetLineItem(BaseModel):
     line_item_type: BudgetLineItemType | None = Field(default=None, alias="lineItemType")
 
 
+class BudgetLineGrounding(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    line_item_id: str = Field(alias="lineItemId")
+    deliverable: str = ""
+    guide_sku: str = Field(default="", alias="guideSku")
+    rfp_requirement: str = Field(default="", alias="rfpRequirement")
+    tier_chosen: str = Field(default="", alias="tierChosen")
+    tier_rationale: str = Field(default="", alias="tierRationale")
+    amount: float | None = None
+    field_type: BudgetLineItemType | None = Field(default=None, alias="fieldType")
+    derivation: str = ""
+    grounded: bool = False
+    note: str = ""
+
+
+class PricingAuditFlag(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    severity: Literal["low", "medium", "high", "blocker"] = "medium"
+    concern: str
+    line_item_id: str | None = Field(default=None, alias="lineItemId")
+    note: str = ""
+
+
+class BudgetNarrativeMismatch(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    section_title: str = Field(default="", alias="sectionTitle")
+    sentence: str
+    claimed_field: str = Field(default="", alias="claimedField")
+    canonical_value: float | None = Field(default=None, alias="canonicalValue")
+    matches: bool = True
+    note: str = ""
+
+
 class VerifiedRate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -256,6 +293,15 @@ class ProposalBudget(BaseModel):
     form_annual_rate: float | None = Field(default=None, alias="formAnnualRate")
     form_rate_notes: str = Field(default="", alias="formRateNotes")
     pricing_flags: list[str] = Field(default_factory=list, alias="pricingFlags")
+    pricing_audit_flags: list[PricingAuditFlag] = Field(
+        default_factory=list, alias="pricingAuditFlags"
+    )
+    line_item_grounding: list[BudgetLineGrounding] = Field(
+        default_factory=list, alias="lineItemGrounding"
+    )
+    narrative_mismatches: list[BudgetNarrativeMismatch] = Field(
+        default_factory=list, alias="narrativeMismatches"
+    )
     qualifying_language: str = Field(default="", alias="qualifyingLanguage")
     scope_adjustments: list[str] = Field(default_factory=list, alias="scopeAdjustments")
     scope_summary: str = Field(default="", alias="scopeSummary")
@@ -526,6 +572,7 @@ class PreSubmitAutoFixRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     use_llm: bool = Field(default=True, alias="useLlm")
+    mode: str = Field(default="verify_scrub_only", alias="mode")
 
 
 class ProposalFulfillGapsResponse(BaseModel):

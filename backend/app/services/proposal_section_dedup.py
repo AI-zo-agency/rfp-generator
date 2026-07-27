@@ -26,11 +26,19 @@ OWNED BY RFP TABS (write only the part THIS tab scores):
 
 RULES:
 1. If a fact already appears in a prior section digests block below, do NOT paste it again.
-2. One brief cross-reference is OK ("As detailed in Section 2…") then ADD new detail only.
+2. One brief cross-reference is OK ("As detailed in Section 3.1…") then ADD new detail only.
 3. Prefer concise paragraphs over repeating brand story, MWBE status, or office locations.
-4. Case study names: at most one short proof sentence outside Section 3 — no full rewrite.
-5. Cut filler openers ("We are excited…", "As a full-service agency…") when Section 1 already covers identity.
-6. Stay within wordTarget — denser beats longer when facts would otherwise repeat.
+4. Case study names: at most one short proof sentence outside Section 3 — NEVER paste Challenge /
+   Solution / Results blocks, client quotes, or metric lists that already appear in Section 3.
+5. Past performance / references tabs: use a summary TABLE plus 2–3 sentences per project — NOT
+   full case-study rewrites. Point readers to Section 3 for narrative detail.
+6. Each KB case study may appear IN FULL exactly once (its Section 3 tab only).
+7. Cut filler openers ("We are excited…", "As a full-service agency…") when Section 1 already covers identity.
+8. Stay within wordTarget — denser beats longer when facts would otherwise repeat.
+9. Do NOT create near-duplicate RFP tabs that restate the same proof already covered by
+   Sections 1–3 or another scored tab. One section, one job, then stop.
+10. Evaluators skim — hit the scored asks, then stop. Prefer tables and short bullets over essay
+    padding. Never invent length with filler when the RFP ask is already covered.
 """
 
 
@@ -94,3 +102,120 @@ def format_prior_sections_block(
 
 def format_anti_duplication_rules() -> str:
     return ANTI_DUPLICATION_RULES
+
+
+def _client_key_from_title(title: str) -> str:
+    raw = (title or "").strip()
+    if "—" in raw:
+        raw = raw.split("—", 1)[1].strip()
+    elif " - " in raw:
+        raw = raw.split(" - ", 1)[1].strip()
+    raw = re.sub(r"^[\d.]+\s*", "", raw).strip()
+    tokens = [t for t in re.split(r"\W+", raw.casefold()) if len(t) >= 4]
+    generic = {
+        "city",
+        "county",
+        "state",
+        "digital",
+        "campaign",
+        "department",
+        "employment",
+        "brewery",
+        "case",
+        "study",
+    }
+    for t in tokens:
+        if t not in generic:
+            return t
+    return tokens[0] if tokens else ""
+
+
+def _distinctive_paragraphs(content: str, *, min_len: int = 60) -> list[str]:
+    paras: list[str] = []
+    for block in re.split(r"\n\s*\n", content or ""):
+        text = re.sub(r"\s+", " ", block.strip())
+        if len(text) >= min_len and not text.startswith("[VERIFY"):
+            paras.append(text)
+    if not paras:
+        for line in (content or "").splitlines():
+            text = re.sub(r"\s+", " ", line.strip())
+            if len(text) >= min_len and not text.startswith("#"):
+                paras.append(text)
+    return paras
+
+
+def _plain_for_match(text: str) -> str:
+    return re.sub(r"\*+", "", text).strip()
+
+
+def compress_duplicate_case_study_sections(
+    sections: list[Any],
+) -> tuple[list[Any], int]:
+    """Replace full case-study rewrites outside Section 3 with short pointers."""
+    from app.models.proposal import ProposalSection
+
+    s3_cards: list[tuple[str, str, str, list[str]]] = []
+    for section in sections:
+        if not isinstance(section, ProposalSection):
+            continue
+        if not section.id.startswith("section-3-work-") or section.id.endswith("placeholder"):
+            continue
+        key = _client_key_from_title(section.title or "")
+        if not key:
+            continue
+        paras = _distinctive_paragraphs(section.content or "")
+        s3_cards.append((key, section.id, section.title or "", paras))
+
+    if not s3_cards:
+        return sections, 0
+
+    compressed = 0
+    out: list[Any] = []
+    for section in sections:
+        if not isinstance(section, ProposalSection):
+            out.append(section)
+            continue
+        if section.id.startswith("section-3-work-"):
+            out.append(section)
+            continue
+        body = section.content or ""
+        if not body.strip():
+            out.append(section)
+            continue
+
+        new_body = body
+        for key, sid, stitle, paras in s3_cards:
+            plain_paras = [_plain_for_match(p) for p in paras]
+            hits = sum(
+                1
+                for p in plain_paras
+                if p and (p[:120] in new_body or p in new_body)
+            )
+            label = stitle.split("—", 1)[-1].strip() if "—" in stitle else stitle
+            pointer = (
+                f"See **{stitle}** in Our Work for the full case narrative "
+                f"(Challenge, approach, and results)."
+            )
+            pattern = re.compile(
+                rf"(^|\n)(#{{1,3}}\s+[^\n]*(?:{re.escape(label[:24])}|{re.escape(key)})[^\n]*\n)"
+                rf"([\s\S]*?)(?=\n#{{1,3}}\s|\Z)",
+                re.I,
+            )
+            if pattern.search(new_body):
+                new_body = pattern.sub(rf"\1\2{pointer}\n\n", new_body, count=1)
+                compressed += 1
+                continue
+            if hits < 1 and not any(p[:60] in new_body for p in plain_paras if p):
+                continue
+            for p in plain_paras:
+                if p and p in new_body:
+                    new_body = new_body.replace(p, pointer, 1)
+                    compressed += 1
+                    break
+
+        if new_body != body:
+            out.append(section.model_copy(update={"content": new_body.strip()}))
+        else:
+            out.append(section)
+
+    return out, compressed

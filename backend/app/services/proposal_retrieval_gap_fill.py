@@ -87,8 +87,8 @@ _GAP_TOPICS: list[tuple[re.Pattern[str], list[str]]] = [
     (
         re.compile(r"\b(hourly\s+rate|lump\s*sum|budget|fee|pricing)\b", re.I),
         [
-            "00_Guide_Pricing tier Low Average High personnel loading lump sum",
-            "zö agency 07_FIN burdened hourly rates fee schedule",
+            "00_Guide_Pricing tier Low Average High labor category rate card lump sum",
+            "00_Guide_Pricing project management account management fee percentage",
         ],
     ),
     (

@@ -49,6 +49,8 @@ _EVAL_ROW_RE = re.compile(
     r"Familiarity\s+with.{0,40}Brand|"
     r"Cost\s+Points?\s+Conversion|"
     r"Price\s+Reasonableness|"
+    r"Price|"
+    r"Portfolio|"
     r"Technical\s+(?:Approach|Proposal|Capability)|"
     r"Cost(?:\s*/\s*Price)?|"
     r"Experience|"
@@ -200,13 +202,14 @@ def extract_rfp_hard_facts(text: str) -> dict[str, Any]:
         for match in _EVAL_ROW_RE.finditer(window):
             label = re.sub(r"\s+", " ", match.group("label")).strip()
             pts = int(match.group("pts"))
-            if pts <= 0 or pts > 100:
+            # Allow 1000-point RFP scales (e.g. Price 350 of 1000) — not only ≤100.
+            if pts <= 0 or pts > 2000:
                 continue
             collected.append((label, pts))
         for row_m in _EVAL_POINTS_LINE_RE.finditer(window):
             label = re.sub(r"\s+", " ", row_m.group("label")).strip(" .-:")
             pts = int(row_m.group("pts"))
-            if pts <= 0 or pts > 100:
+            if pts <= 0 or pts > 2000:
                 continue
             if len(label) < 4 or label.casefold() in {"section", "page", "item", "group"}:
                 continue

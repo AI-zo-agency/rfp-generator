@@ -48,7 +48,7 @@ export function ProposalPipelineProgressStrip({
     inProgress === "phase-3-6-self-edit";
 
   const phaseTitle = isFulfill
-    ? "Scan RFP"
+    ? "Scan RFP — VERIFY scrub"
     : phaseKey && phaseKey in PIPELINE_PHASE_LABELS
       ? PIPELINE_PHASE_LABELS[phaseKey as PipelinePhase]
       : phaseKey

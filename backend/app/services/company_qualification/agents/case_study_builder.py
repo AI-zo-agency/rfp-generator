@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from app.services import llm
 from app.services.company_qualification.schemas import ProposalContext
@@ -19,6 +20,7 @@ async def run_case_study_builder_agent(
     rfp_client: str,
     brand_voice_block: str,
     kb_sources: list[str],
+    prior_sections_digest: str = "",
 ) -> tuple[dict[str, str | list[str]], str]:
     try:
         raw, provider = await llm.chat_json(
@@ -31,6 +33,12 @@ async def run_case_study_builder_agent(
                         "CRITICAL RULES:\n"
                         f"- Do NOT write about '{rfp_client}' — that is the CURRENT client.\n"
                         "- ONLY use verified facts from the retrieved case study document below.\n"
+                        "- Keep the REAL project name and what the engagement actually was "
+                        "(festival, ticket sales, VIP, launch window, etc.). "
+                        "NEVER genericize into a vague 'municipal communications / community "
+                        "outreach' story the source does not support — that is fabrication.\n"
+                        "- Why Relevant may connect to THIS RFP; Challenge / Solution / Results "
+                        "must stay faithful to the source document.\n"
                         "- If facts are missing, use [VERIFY] — do NOT invent.\n"
                         "- Do NOT include Source:, filename, .pdf, .docx, or knowledge-base citations "
                         "in the client-facing prose. Sources stay in metadata only.\n"
@@ -38,6 +46,8 @@ async def run_case_study_builder_agent(
                         "'Case Study Master', 'pull additional metrics before submission', "
                         "'Creative Examples:', or any word-count labels — those are internal only.\n"
                         "- End after Why Relevant. Do not append catalogs of creative examples.\n"
+                        "- This case study appears ONCE in the proposal (Section 3 only). "
+                        "Do not repeat company overview, team roster, or other case studies.\n"
                         "- Return ONE complete JSON object — no markdown fences.\n\n"
                         "Template:\n"
                         "- Client overview\n"
@@ -53,7 +63,12 @@ async def run_case_study_builder_agent(
                     "role": "user",
                     "content": (
                         f"Voice:\n{brand_voice_block}\n\n"
-                        f"proposalType: {proposal_context.proposal_type}\n"
+                        + (
+                            f"{prior_sections_digest}\n\n"
+                            if prior_sections_digest.strip()
+                            else ""
+                        )
+                        + f"proposalType: {proposal_context.proposal_type}\n"
                         f"industry: {proposal_context.industry}\n\n"
                         f"Retrieved case study document:\n{case_study_text[:60000]}\n\n"
                         f"Known sources: {kb_sources}"
@@ -86,6 +101,26 @@ async def run_case_study_builder_agent(
             f"### {study_title}\n\n"
             f"[VERIFY: case study content missing after parse — complete from KB]"
         )
+    else:
+        from app.services.proposal_integrity_guards import case_study_fidelity_ok
+
+        ok, reason = case_study_fidelity_ok(case_study_text, content)
+        if not ok:
+            logger.warning(
+                "Case study fidelity failed for %s: %s — forcing source-faithful stub",
+                study_title,
+                reason,
+            )
+            # Prefer a short faithful extract over a genericized rewrite.
+            snippet = re.sub(r"\s+", " ", (case_study_text or "")[:1800]).strip()
+            content = (
+                f"### {study_title}\n\n"
+                f"{snippet}\n\n"
+                f"Why Relevant: Supports {proposal_context.proposal_type or 'this RFP'} "
+                f"scope with documented outcomes from the verified engagement above.\n\n"
+                f"[VERIFY: polish Why Relevant only — do not rewrite Challenge/Solution/Results "
+                f"away from the source file]"
+            )
     refs = raw.get("kbRefs") or raw.get("kb_refs") or kb_sources
     if not isinstance(refs, list):
         refs = kb_sources

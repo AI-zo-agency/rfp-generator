@@ -574,6 +574,7 @@ async def _plan_kb_queries(
                 role=AgentRole.QUERY_PLANNER,
                 rfp_client=rfp.client,
                 rfp_sector=rfp.sector,
+                rfp_title=rfp.title,
                 section_title=section.title or "",
                 requirements=requirements,
                 retrieval_focus=retrieval_focus,
@@ -1259,6 +1260,15 @@ async def run_kb_fact_check_pass(
     report.duplicates_removed = dupes
     if dupes:
         report.logs.append(f"Removed {dupes} duplicate Section 3 case study card(s)")
+
+    from app.services.proposal_section_dedup import compress_duplicate_case_study_sections
+
+    updated_sections, cross_dupes = compress_duplicate_case_study_sections(updated_sections)
+    if cross_dupes:
+        report.duplicates_removed += cross_dupes
+        report.logs.append(
+            f"Compressed {cross_dupes} full case-study rewrite(s) outside Section 3"
+        )
 
     draft = draft.model_copy(update={"sections": updated_sections})
 

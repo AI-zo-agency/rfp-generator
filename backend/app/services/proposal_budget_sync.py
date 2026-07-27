@@ -5,7 +5,12 @@ from __future__ import annotations
 import logging
 import re
 
-from app.models.proposal import ProposalBudget, ProposalDraft, ProposalSection
+from app.models.proposal import (
+    BudgetNarrativeMismatch,
+    ProposalBudget,
+    ProposalDraft,
+    ProposalSection,
+)
 from app.services import llm
 from app.services.go_no_go_service import _assess_rfp_content, _build_rfp_context
 from app.services.llm import LlmError
@@ -24,24 +29,45 @@ _FEE_CONTENT_RE = re.compile(
     re.I,
 )
 
-FEE_SYNC_PROMPT = """You align proposal narrative sections with the CANONICAL budget (single source of truth).
+FEE_SLOT_PLAN_PROMPT = """You perform constrained fee narrative sync.
 
-Rules:
-1. Use ONLY dollar values from the canonical budget block — do not invent amounts.
-2. agencyRevenueEstimate / agencyFeeSubtotal = zö's actual fee income ONLY — never pass-through client media.
-3. clientMediaPassthrough and totalClientInvoicing are separate — use when narrative discusses media spend vs agency commission.
-4. Opening paragraphs, Option Terms, Investment Framing, and Section 1 commission statements must cite agencyRevenueEstimate (fee), NOT totalClientInvoicing.
-5. Multi-year math (e.g. "3 × $X") must use agencyRevenueEstimate as the annual agency fee base — never multiply pass-through media into "agency revenue."
-6. qualifyingLanguage must use the SAME pricingTier as the budget.
-7. Preserve all non-pricing content (statutory citations, team, approach, compliance, MWBE, living wage).
-8. Never add [VERIFY] tags or "verify before submission" reconciliation notes.
-9. Change only pricing-related sentences — preserve strong existing prose elsewhere.
-10. NEVER write $0 for agency revenue, annual commission, or "zö fee income" when canonical agencyRevenueEstimate is a positive number — replace every $0 fee line with the canonical amount.
-11. NEVER contradict canonical budget: if narrative says $37,500/year commission, Budget Summary and Investment Framing must all match agencyRevenueEstimate exactly.
-12. Do not defer reference contacts, workforce %, PSA acknowledgments, or hours tables — those are separate compliance rules; only fix fee/pricing sentences here.
+Input: proposal sections + canonical budget totals.
+Task: detect dollar-claim sentences and map each to a known canonical field.
+Do NOT rewrite full sections.
 
-Return ONLY JSON:
-{"sections":[{"sectionId":"...","content":"full updated section prose"}]}"""
+Return JSON only:
+{
+  "claims":[
+    {
+      "sectionId":"...",
+      "sentence":"exact sentence from section",
+      "claimType":"agency_fee|media_passthrough|direct_expenses|total_invoicing",
+      "confidence":"high|medium|low",
+      "note":""
+    }
+  ],
+  "unmapped":[{"sectionId":"...","sentence":"...","reason":"..."}]
+}
+"""
+
+FEE_GROUNDING_CHECK_PROMPT = """You are a grounding checker, not a writer.
+Compare manuscript pricing claims against canonical budget values.
+
+Return JSON only:
+{
+  "mismatches":[
+    {
+      "sectionId":"...",
+      "sectionTitle":"...",
+      "sentence":"...",
+      "claimedField":"agency_fee|media_passthrough|direct_expenses|total_invoicing",
+      "canonicalValue":1234.56,
+      "matches":false,
+      "note":"why this sentence contradicts canonical value"
+    }
+  ]
+}
+"""
 
 
 def _canonical_budget_facts(budget: ProposalBudget) -> str:
@@ -94,13 +120,133 @@ def _needs_fee_sync(section: ProposalSection, budget_idx: int | None, index: int
     return bool(_FEE_CONTENT_RE.search(section.content))
 
 
+def _usd(value: float | None) -> str:
+    if value is None:
+        return "$0.00"
+    if abs(value - round(value)) < 0.01:
+        return f"${value:,.0f}"
+    return f"${value:,.2f}"
+
+
+def _canonical_slot_values(budget: ProposalBudget) -> dict[str, float]:
+    from app.services.proposal_budget_content import canonical_budget_summary_figures
+
+    figs = canonical_budget_summary_figures(budget)
+    agency = figs["agency_fee"] if figs["agency_fee"] > 0 else figs["agency_revenue"]
+    return {
+        "agency_fee": round(float(agency or 0), 2),
+        "media_passthrough": round(float(figs["passthrough"] or 0), 2),
+        "direct_expenses": round(float(figs["direct"] or 0), 2),
+        "total_invoicing": round(float(figs["total"] or 0), 2),
+    }
+
+
+_LABELLED_FEE_CLAIM_RES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"(?i)(?:Total\s+Year\s*1\s+agency\s+fee|Total\s+agency\s+(?:fee|revenue)|"
+            r"Agency\s+(?:fee|revenue)(?:\s+estimate)?|Base-year\s+proposed\s+fees)"
+            r"\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+        ),
+        "agency_fee",
+    ),
+    (
+        re.compile(
+            r"(?i)Client\s+media\s+pass-?through(?:\s*\([^)]*\))?"
+            r"(?:\s+billed\s+at\s+net)?\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+        ),
+        "media_passthrough",
+    ),
+    (
+        re.compile(
+            r"(?i)(?:Direct\s+travel\s*/\s*reimbursables|Direct\s+travel|"
+            r"Estimated\s+reimbursable\s+travel)\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+        ),
+        "direct_expenses",
+    ),
+    (
+        re.compile(
+            r"(?i)(?:Total\s+Year\s*1\s+client\s+invoicing|Total\s+client\s+invoicing|"
+            r"Total\s+Year\s*1\s+investment|Total\s+proposed\s+investment)"
+            r"\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+        ),
+        "total_invoicing",
+    ),
+]
+
+
+def _parse_usd_token(text: str) -> float | None:
+    cleaned = text.replace("$", "").replace(",", "").strip()
+    try:
+        return round(float(cleaned), 2)
+    except ValueError:
+        return None
+
+
+def collect_deterministic_budget_mismatches(
+    draft: ProposalDraft,
+    budget: ProposalBudget,
+) -> list[BudgetNarrativeMismatch]:
+    """Label-aware dollar check — no LLM. Catches agency/passthrough/total swaps."""
+    slots = _canonical_slot_values(budget)
+    if not any(v > 0 for v in slots.values()):
+        return []
+
+    out: list[BudgetNarrativeMismatch] = []
+    seen: set[tuple[str, str, float]] = set()
+    for section in draft.sections:
+        body = section.content or ""
+        if not body.strip():
+            continue
+        for pattern, field in _LABELLED_FEE_CLAIM_RES:
+            for match in pattern.finditer(body):
+                claimed = _parse_usd_token(match.group(1))
+                if claimed is None or claimed <= 0:
+                    continue
+                canonical = float(slots.get(field) or 0)
+                if canonical <= 0:
+                    continue
+                tol = max(1.0, canonical * 0.02)
+                if abs(claimed - canonical) <= tol:
+                    continue
+                key = (section.id, field, claimed)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(
+                    BudgetNarrativeMismatch(
+                        sectionId=section.id,
+                        sectionTitle=section.title or "",
+                        sentence=match.group(0)[:240],
+                        claimedField=field,
+                        canonicalValue=canonical,
+                        matches=False,
+                        note=(
+                            f"Labeled {field} claim {match.group(1)} does not match "
+                            f"canonical {_usd(canonical)}"
+                        ),
+                    )
+                )
+    return out
+
+
+def _template_for_claim(claim_type: str, value: float) -> str | None:
+    templates = {
+        "agency_fee": f"Total Year 1 agency fee: {_usd(value)}.",
+        "media_passthrough": f"Client media spend is billed at net cost ({_usd(value)}), separate from agency fees.",
+        "direct_expenses": f"Direct travel/reimbursables: {_usd(value)}.",
+        "total_invoicing": f"Total Year 1 client invoicing: {_usd(value)}.",
+    }
+    return templates.get(claim_type)
+
+
 async def align_fee_narrative_with_budget(
     *,
     rfp_id: str,
     draft: ProposalDraft,
     budget: ProposalBudget,
 ) -> ProposalDraft:
-    """Rewrite ALL non-budget sections that mention fees/tiers/dollars to match canonical budget."""
+    """Constrained slot-fill sync: replace dollar-claim sentences with approved templates."""
     sections = list(draft.sections)
     budget_idx = find_budget_section_index(sections)
     targets: list[tuple[int, ProposalSection]] = []
@@ -118,7 +264,7 @@ async def align_fee_narrative_with_budget(
     content = _assess_rfp_content(rfp)
     rfp_context = _build_rfp_context(rfp, content)
     canonical = _canonical_budget_facts(budget)
-
+    slot_values = _canonical_slot_values(budget)
     updated_sections = list(sections)
     batch_size = 6
     for batch_start in range(0, len(targets), batch_size):
@@ -127,55 +273,131 @@ async def align_fee_narrative_with_budget(
             {
                 "sectionId": section.id,
                 "title": section.title,
-                "content": section.content[:6000],
+                "content": section.content[:7000],
             }
             for _, section in batch
         ]
         try:
             raw, _provider = await llm.chat_json(
                 [
-                    {"role": "system", "content": FEE_SYNC_PROMPT},
+                    {"role": "system", "content": FEE_SLOT_PLAN_PROMPT},
                     {
                         "role": "user",
                         "content": (
                             f"RFP: {rfp.title}\nClient: {rfp.client}\n\n"
-                            f"=== CANONICAL BUDGET (only source for tiers and totals) ===\n"
-                            f"{canonical}\n\n"
-                            f"=== SECTIONS TO ALIGN ({len(payload)} sections) ===\n"
-                            f"{payload}\n\n"
+                            f"=== CANONICAL BUDGET ===\n{canonical}\n\n"
+                            f"=== SECTIONS ===\n{payload}\n\n"
                             f"RFP fee excerpt:\n{rfp_context[:4000]}"
                         ),
                     },
                 ],
-                max_tokens=8192,
-                temperature=0.2,
+                max_tokens=4096,
+                temperature=0.0,
+                node_name="fee_slot_fill_plan",
             )
         except LlmError as exc:
-            logger.warning(
-                "Fee narrative sync batch %d skipped for %s: %s",
-                batch_start // batch_size + 1,
-                rfp_id,
-                exc,
-            )
+            logger.warning("Fee slot sync batch failed for %s: %s", rfp_id, exc)
             continue
 
-        updates = raw.get("sections") or []
-        if not isinstance(updates, list):
-            continue
-
-        by_id = {
-            str(item.get("sectionId") or item.get("id") or ""): item
-            for item in updates
-            if isinstance(item, dict)
-        }
+        claims = [c for c in (raw.get("claims") or []) if isinstance(c, dict)]
+        by_section: dict[str, list[dict]] = {}
+        for claim in claims:
+            sid = str(claim.get("sectionId") or "").strip()
+            if not sid:
+                continue
+            by_section.setdefault(sid, []).append(claim)
 
         for index, section in batch:
-            item = by_id.get(section.id)
-            if not item:
+            section_claims = by_section.get(section.id) or []
+            if not section_claims:
                 continue
-            new_content = str(item.get("content") or "").strip()
-            if new_content:
-                updated_sections[index] = section.model_copy(update={"content": new_content})
-                logger.info("Fee sync updated section %s (%s)", section.id, section.title)
+            body = section.content or ""
+            for claim in section_claims:
+                sentence = str(claim.get("sentence") or "").strip()
+                claim_type = str(claim.get("claimType") or "").strip()
+                if not sentence or claim_type not in slot_values:
+                    continue
+                template = _template_for_claim(claim_type, slot_values[claim_type])
+                if not template:
+                    continue
+                if sentence in body:
+                    body = body.replace(sentence, template, 1)
+            if body != (section.content or ""):
+                updated_sections[index] = section.model_copy(update={"content": body})
+                logger.info("Fee slot sync updated section %s (%s)", section.id, section.title)
 
     return draft.model_copy(update={"sections": updated_sections})
+
+
+async def run_budget_grounding_check(
+    *,
+    rfp_id: str,
+    draft: ProposalDraft,
+    budget: ProposalBudget,
+) -> list[BudgetNarrativeMismatch]:
+    """Phase 3.5d: detect claims-vs-canonical budget mismatches across manuscript."""
+    deterministic = collect_deterministic_budget_mismatches(draft, budget)
+
+    sections = [
+        {
+            "sectionId": s.id,
+            "sectionTitle": s.title,
+            "content": (s.content or "")[:9000],
+        }
+        for s in draft.sections
+        if s.content and _FEE_CONTENT_RE.search(s.content)
+    ]
+    if not sections:
+        return deterministic
+
+    canonical = _canonical_budget_facts(budget)
+    try:
+        raw, _provider = await llm.chat_json(
+            [
+                {"role": "system", "content": FEE_GROUNDING_CHECK_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"RFP ID: {rfp_id}\n\n"
+                        f"=== CANONICAL BUDGET ===\n{canonical}\n\n"
+                        f"=== MANUSCRIPT SECTIONS ===\n{sections}"
+                    ),
+                },
+            ],
+            max_tokens=4096,
+            temperature=0.0,
+            node_name="budget_claim_grounding_check",
+        )
+    except LlmError as exc:
+        logger.warning(
+            "Budget grounding LLM failed for %s — using deterministic mismatches only: %s",
+            rfp_id,
+            exc,
+        )
+        return deterministic
+
+    out: list[BudgetNarrativeMismatch] = list(deterministic)
+    seen = {
+        (m.section_id, m.claimed_field, round(float(m.canonical_value or 0), 2), m.sentence[:80])
+        for m in out
+    }
+    for row in (raw.get("mismatches") or []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            item = BudgetNarrativeMismatch(**row)
+        except Exception:
+            continue
+        if item.matches:
+            continue
+        key = (
+            item.section_id,
+            item.claimed_field,
+            round(float(item.canonical_value or 0), 2),
+            (item.sentence or "")[:80],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out

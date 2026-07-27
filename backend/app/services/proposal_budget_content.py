@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from app.models.proposal import ProposalBudget, ProposalDraft, ProposalSection
+from app.models.proposal import BudgetLineItem, ProposalBudget, ProposalDraft, ProposalSection
 from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
 from app.services.proposal_rfp_excerpt import rfp_forbids_quotation_form_changes
 
@@ -174,6 +174,22 @@ def render_pricing_proposal_form_markdown(
 
 def budget_section_score(title: str) -> int:
     t = title.lower()
+    # Sections that merely list "budgets" among SOW/compliance topics are NOT
+    # the Cost Proposal tab (e.g. "… Timelines, Budgets, Reporting …").
+    if re.search(
+        r"\b("
+        r"compliance|general\s+requirements|records?\s+retention|"
+        r"acknowledgements?|cover\s+letter|case\s+stud|references?"
+        r")\b",
+        t,
+    ) and not re.search(
+        r"\b("
+        r"cost\s+of(?:\s+the)?\s+base|cost\s+proposal|fee\s+schedule|"
+        r"price\s+proposal|pricing\s+proposal|compensation\s+schedule"
+        r")\b",
+        t,
+    ):
+        return 0
     score = 0
     if "budget" in t:
         score += 4
@@ -201,11 +217,510 @@ def find_budget_section_index(sections: list[ProposalSection]) -> int | None:
     return best_idx if best_score > 0 else None
 
 
+
+_TRAVEL_RE = re.compile(
+    r"\b(travel|airfare|lodging|per\s*diem|mileage|ground\s+transport|hotel)\b",
+    re.I,
+)
+_DOLLAR_RE = re.compile(r"\$[\d,]+(?:\.\d{1,2})?")
+_INTERNAL_OPT_RE = re.compile(
+    r"(?i)\bagency\s+revenue\s+estimate\b|\bmargin\b|\bsonja\b|\b00_guide_pricing\b"
+)
+
+
+def _line_looks_like_travel(item: BudgetLineItem) -> bool:
+    blob = f"{item.category or ''} {item.description or ''} {item.notes or ''}"
+    return bool(_TRAVEL_RE.search(blob))
+
+
+def dedupe_travel_vs_direct_expenses(budget: ProposalBudget) -> ProposalBudget:
+    """If travel is already a line item, do not also add the same amount as direct expenses."""
+    direct = round(float(budget.direct_expenses_total or 0), 2)
+    if direct <= 0:
+        return budget
+    travel_ext = [
+        round(float(i.extended or 0), 2)
+        for i in budget.line_items
+        if _line_looks_like_travel(i) and i.extended is not None
+    ]
+    if not travel_ext:
+        return budget
+    travel_sum = round(sum(travel_ext), 2)
+    if abs(travel_sum - direct) <= 1.0 or any(abs(x - direct) <= 1.0 for x in travel_ext):
+        flags = list(budget.pricing_flags or [])
+        note = (
+            "[PRICING FLAG: Cleared duplicate directExpensesTotal — travel already in line items]"
+        )
+        if note not in flags:
+            flags.append(note)
+        return budget.model_copy(
+            update={"direct_expenses_total": 0.0, "pricing_flags": flags}
+        )
+    return budget
+
+
+def _canonical_client_total(budget: ProposalBudget) -> float | None:
+    line_sum = round(
+        sum(float(i.extended or 0) for i in budget.line_items if i.extended is not None),
+        2,
+    )
+    direct = round(float(budget.direct_expenses_total or 0), 2)
+    computed = round(line_sum + direct, 2)
+    if computed > 0:
+        return computed
+    if budget.lump_sum_total is not None:
+        return round(float(budget.lump_sum_total), 2)
+    if budget.agency_revenue_estimate is not None:
+        return round(float(budget.agency_revenue_estimate), 2)
+    return None
+
+
+def _fmt_money(amount: float) -> str:
+    """Format money as digits only (no leading '$').
+
+    The table often already includes a literal '$' right before the [VERIFY: ...]
+    token, so we add '$' only if it isn't present in the source text.
+    """
+    if abs(amount - round(amount)) < 0.005:
+        return f"{int(round(amount)):,}"
+    return f"{amount:,.2f}"
+
+
+def fill_section_budget_verify_from_canonical(
+    content: str,
+    budget: ProposalBudget,
+) -> tuple[str, int]:
+    """Replace [VERIFY: budget/investment/…] tags using the canonical Stage 3.5 budget.
+
+    Used when the user asks to fill the budget part of the *open* section (e.g. a
+    case study fee table) — does not rebuild Cost of Base Proposal.
+    """
+    from app.services.proposal_manual_flags import VERIFY_TAG_RE
+
+    if not content or not VERIFY_TAG_RE.search(content):
+        return content, 0
+    budget = prepare_budget_for_client_display(budget)
+    total = _canonical_client_total(budget)
+    if total is None or total <= 0:
+        return content, 0
+
+    # Phase label → sum of extended fees for matching line items.
+    phase_sums: dict[str, float] = {}
+    for item in budget.line_items:
+        if item.extended is None:
+            continue
+        label = _phase_label_for_line(item)
+        phase_sums[label] = phase_sums.get(label, 0.0) + float(item.extended)
+
+    fills = 0
+
+    def _is_budget_field(field: str) -> bool:
+        f = field.casefold()
+        return any(
+            k in f
+            for k in (
+                "budget",
+                "investment",
+                "fee",
+                "pricing",
+                "cost",
+                "total",
+                "phase",
+                "dollar",
+                "amount",
+                "figure",
+            )
+        )
+
+    def _is_total_field(field: str) -> bool:
+        f = field.casefold()
+        return "total" in f or "grand" in f or "overall" in f
+
+    def repl(match: re.Match[str]) -> str:
+        nonlocal fills
+        field = match.group(1) or ""
+        if not _is_budget_field(field):
+            return match.group(0)
+        if _is_total_field(field):
+            fills += 1
+            has_dollar_prefix = (
+                match.start() > 0 and content[match.start() - 1] == "$"
+            )  # noqa: S608
+            return ("" if has_dollar_prefix else "$") + _fmt_money(total)
+        # Prefer phase match from surrounding line text (handled in line pass below).
+        return match.group(0)
+
+    # First pass: totals only (safe global replace).
+    updated = VERIFY_TAG_RE.sub(repl, content)
+
+    # Second pass: line-by-line for remaining budget VERIFY tags.
+    out_lines: list[str] = []
+    for line in updated.splitlines(keepends=True):
+        if not VERIFY_TAG_RE.search(line):
+            out_lines.append(line)
+            continue
+
+        def line_repl(match: re.Match[str]) -> str:
+            nonlocal fills
+            field = match.group(1) or ""
+            if not _is_budget_field(field) or _is_total_field(field):
+                return match.group(0)
+            line_cf = line.casefold()
+            has_dollar_prefix = (
+                match.start() > 0 and line[match.start() - 1] == "$"
+            )  # noqa: S608
+            # Match phase / deliverable wording on this row to canonical phase buckets.
+            for label, amount in phase_sums.items():
+                tokens = [
+                    t
+                    for t in re.split(r"[^a-z0-9]+", label.casefold())
+                    if len(t) >= 4 and t not in {"phase", "fees"}
+                ]
+                if tokens and all(t in line_cf for t in tokens[:2]):
+                    fills += 1
+                    return ("" if has_dollar_prefix else "$") + _fmt_money(amount)
+            # Discovery / strategy / etc. keyword fallbacks from the row label.
+            for needle, keys in (
+                ("discovery", ("discovery", "audit")),
+                ("strategy", ("strategy", "positioning")),
+                ("tactical", ("tactical", "execution")),
+                ("roadmap", ("roadmap", "handoff")),
+                ("project management", ("project", "management")),
+                ("travel", ("travel", "reimburs")),
+            ):
+                if any(k in line_cf for k in keys):
+                    for label, amount in phase_sums.items():
+                        if any(k in label.casefold() for k in keys):
+                            fills += 1
+                            return ("" if has_dollar_prefix else "$") + _fmt_money(amount)
+            return match.group(0)
+
+        out_lines.append(VERIFY_TAG_RE.sub(line_repl, line))
+
+    return "".join(out_lines), fills
+
+
+def _professional_fees_and_direct(budget: ProposalBudget) -> tuple[float, float]:
+    """Split agency professional fees from travel/reimbursables (line or direct bucket).
+
+    Client media pass-through lines are excluded from professional fees.
+    """
+    from app.services.proposal_budget_validation import infer_line_item_type
+
+    fee_sum = 0.0
+    travel_in_lines = 0.0
+    for item in budget.line_items:
+        if item.extended is None:
+            continue
+        if infer_line_item_type(item) == "client_passthrough":
+            continue
+        ext = float(item.extended)
+        if _line_looks_like_travel(item):
+            travel_in_lines += ext
+        else:
+            fee_sum += ext
+    direct = round(float(budget.direct_expenses_total or 0), 2)
+    # Travel lives in lines XOR directExpensesTotal after dedupe.
+    reimbursables = round(travel_in_lines + direct, 2)
+    return round(fee_sum, 2), reimbursables
+
+
+def _sync_narrative_total(
+    text: str,
+    canonical: float,
+    *,
+    protect: list[float] | None = None,
+) -> str:
+    """Replace stale investment totals — never rewrite protected reimbursable amounts."""
+    if not text or canonical <= 0:
+        return text
+    amounts = _DOLLAR_RE.findall(text)
+    if not amounts:
+        return text
+    protected = {round(float(p), 2) for p in (protect or []) if p and float(p) > 0}
+    canon_s = _usd(canonical)
+    out = text
+    for amt in amounts:
+        raw = amt.replace("$", "").replace(",", "")
+        try:
+            val = float(raw)
+        except ValueError:
+            continue
+        if any(abs(val - p) <= 1.0 for p in protected):
+            continue
+        if abs(val - canonical) > 1.0:
+            out = out.replace(amt, canon_s, 1)
+    return out
+
+
+def _rewrite_investment_sentence(
+    scope: str,
+    fees: float,
+    direct: float,
+    total: float,
+    *,
+    passthrough: float = 0.0,
+) -> str:
+    """Ensure scope states fees + travel correctly (not 'total including $total travel')."""
+    text = (scope or "").strip()
+    # Drop prior investment / fee total sentences — they drift and get truncated.
+    text = re.sub(
+        r"(?i)\b(?:total\s+proposed\s+investment|total\s+estimated\s+investment|"
+        r"total\s+professional\s+fees|estimated\s+reimbursable\s+travel|"
+        r"professional\s+fees)\s*:[^.]*\.",
+        "",
+        text,
+    )
+    text = re.sub(r"(?i)\bestimated\s+reimbursable\s+travel[^.]*\.", "", text)
+    # Strip trailing garbage from botched dollar rewrites (e.g. "43 ($116,368.")
+    text = re.sub(r"\s+\d{1,3}\s*\(\$[\d,]+(?:\.\d+)?\.?\s*$", "", text)
+    text = re.sub(r"\s{2,}", " ", text).strip(" .\n")
+    parts: list[str] = []
+    if fees > 0:
+        parts.append(f"{_usd(fees)} in professional fees")
+    if direct > 0:
+        parts.append(f"{_usd(direct)} in direct travel expenses")
+    if passthrough > 0:
+        parts.append(f"{_usd(passthrough)} in client media pass-through at net")
+    if parts and total > 0:
+        if len(parts) == 1:
+            clause = f"Total proposed investment: {_usd(total)} ({parts[0]})."
+        elif len(parts) == 2:
+            clause = (
+                f"Total proposed investment: {_usd(total)} "
+                f"({parts[0]} plus {parts[1]})."
+            )
+        else:
+            clause = (
+                f"Total proposed investment: {_usd(total)} "
+                f"({', '.join(parts[:-1])}, and {parts[-1]})."
+            )
+    elif total > 0:
+        clause = f"Total proposed investment: {_usd(total)}."
+    else:
+        return text
+    if text:
+        return f"{text}. {clause}" if not text.endswith(".") else f"{text} {clause}"
+    return clause
+
+
+def _sync_qualifying_fee_language(
+    qualifying: str,
+    *,
+    fees: float,
+    direct: float,
+    total: float,
+) -> str:
+    """Keep Investment Framing dollars aligned with the fee table."""
+    text = (qualifying or "").strip()
+    if not text or fees <= 0:
+        return text
+    # Replace common stale framing like "$73,500 in professional fees, plus … $7,500"
+    text = re.sub(
+        r"(?i)(?:proposed\s+investment\s+of\s+)?\$[\d,]+(?:\.\d{2})?\s+in\s+professional\s+fees"
+        r"(?:\s*,?\s*plus(?:\s+an\s+estimated)?\s+\$[\d,]+(?:\.\d{2})?\s+in\s+reimbursable\s+travel)?",
+        (
+            f"proposed investment of {_usd(fees)} in professional fees"
+            + (f", plus {_usd(direct)} in reimbursable travel" if direct > 0 else "")
+        ),
+        text,
+        count=1,
+    )
+    return text
+
+
+def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
+    """Dedupe travel, sync totals, scrub internal jargon before manuscript render.
+
+    Preserves agency vs pass-through split: agency_revenue / lump_sum = agency fees
+    (+ direct); total_client_invoicing = client grand total including pass-through.
+    """
+    from app.services.proposal_budget_validation import split_line_item_totals
+
+    cleaned = dedupe_travel_vs_direct_expenses(budget)
+    fees, reimbursables = _professional_fees_and_direct(cleaned)
+    direct_bucket = round(float(cleaned.direct_expenses_total or 0), 2)
+    line_sum, agency_fee, passthrough = split_line_item_totals(cleaned.line_items or [])
+    if agency_fee <= 0:
+        agency_fee = fees
+    if passthrough <= 0 and cleaned.client_media_passthrough:
+        passthrough = round(float(cleaned.client_media_passthrough), 2)
+    # Professional fees + travel (whether travel lives in lines or direct bucket).
+    agency_revenue = round(fees + reimbursables, 2)
+    if agency_revenue <= 0 and agency_fee > 0:
+        agency_revenue = round(agency_fee + direct_bucket, 2)
+    # Client total = all line items + residual direct bucket (never add travel twice).
+    client_total = (
+        round(line_sum + direct_bucket, 2)
+        if line_sum > 0
+        else round(agency_revenue + passthrough, 2)
+    )
+    # Narrative "proposed investment" uses client total when media is billed through.
+    display_total = client_total if client_total > 0 else agency_revenue
+    updates: dict = {}
+    if display_total is not None and display_total > 0:
+        updates["line_item_sum"] = round(float(line_sum or 0), 2)
+        updates["agency_fee_subtotal"] = round(float(agency_fee or fees), 2)
+        updates["agency_revenue_estimate"] = agency_revenue
+        # Lump sum tracks agency proposed fees (pass-through invoiced separately).
+        updates["lump_sum_total"] = agency_revenue if agency_revenue > 0 else display_total
+        if passthrough > 0:
+            updates["client_media_passthrough"] = passthrough
+            updates["total_client_invoicing"] = client_total
+        protect = [
+            v
+            for v in (reimbursables, fees, passthrough, agency_revenue)
+            if v and v > 0
+        ]
+        scope = _sync_narrative_total(
+            cleaned.scope_summary or "",
+            display_total,
+            protect=protect,
+        )
+        scope = _rewrite_investment_sentence(
+            scope,
+            fees,
+            reimbursables,
+            display_total,
+            passthrough=passthrough,
+        )
+        if scope != (cleaned.scope_summary or ""):
+            updates["scope_summary"] = scope
+        ql = _sync_qualifying_fee_language(
+            cleaned.qualifying_language or "",
+            fees=fees,
+            direct=reimbursables,
+            total=agency_revenue if agency_revenue > 0 else display_total,
+        )
+        ql = _scrub_unverified_benchmark_clients(ql)
+        scope = _scrub_unverified_benchmark_clients(scope)
+        if scope != (cleaned.scope_summary or ""):
+            updates["scope_summary"] = scope
+        if ql != (cleaned.qualifying_language or ""):
+            updates["qualifying_language"] = ql
+    opt = (cleaned.option_term_notes or "").strip()
+    if opt:
+        opt2 = re.sub(
+            r"(?i)base-year\s+agency\s+revenue\s+estimate\s*:",
+            "Base-year proposed fees:",
+            opt,
+        )
+        opt2 = _INTERNAL_OPT_RE.sub("proposed fees", opt2)
+        if agency_revenue > 0:
+            opt2 = _sync_narrative_total(
+                opt2,
+                agency_revenue,
+                protect=[reimbursables, passthrough]
+                if reimbursables > 0 or passthrough > 0
+                else None,
+            )
+        opt2 = _scrub_unverified_benchmark_clients(opt2)
+        if opt2 != opt:
+            updates["option_term_notes"] = opt2
+    if not updates:
+        return cleaned
+    return cleaned.model_copy(update=updates)
+
+
+def _client_line_label(item: BudgetLineItem) -> tuple[str, str]:
+    """Return (delivery phase, deliverable label) for the client fee table.
+
+    Prefer Phase 1–4 labels from the description so the table matches the
+    narrative / Alignment Matrix — not raw guide category names like
+    "Implementation & Launch" or "Brand Identity & Creative".
+    """
+    desc = (item.description or "").strip()
+    desc = re.sub(r"\s*\*\(?Source:[^*]+\)?\*", "", desc, flags=re.I).strip()
+    cat = (item.category or "").strip() or "Fees"
+
+    phase = _phase_label_for_line(item)
+    generic = not desc or desc.casefold() in {
+        "budget line item",
+        "labor",
+        "fees",
+        "fee",
+    }
+    if generic and item.named_person:
+        role = (item.role_title or "Team").strip()
+        desc = f"{role} — {item.named_person}"
+    if not desc:
+        desc = cat
+    return phase, desc
+
+
+_PHASE_NUM_RE = re.compile(r"\bphase\s*([1-4])\b", re.I)
+
+
+def _phase_label_for_line(item: BudgetLineItem) -> str:
+    """Map a line item to KVCC-style Phase 1–4 (or PM / Travel) for the fee table."""
+    blob = f"{item.description or ''} {item.category or ''} {item.notes or ''}"
+    if re.search(r"\b(travel|airfare|lodging|reimbursable|per\s*diem)\b", blob, re.I):
+        return "Travel / Reimbursables"
+    if re.search(r"\bproject\s+management\b|\baccount\s+management\b", blob, re.I):
+        return "Project Management"
+
+    m = _PHASE_NUM_RE.search(blob)
+    if m:
+        return {
+            "1": "Phase 1 — Discovery",
+            "2": "Phase 2 — Strategy",
+            "3": "Phase 3 — Tactical Plan",
+            "4": "Phase 4 — Roadmap & Handoff",
+        }.get(m.group(1), f"Phase {m.group(1)}")
+
+    if re.search(r"\b(roadmap|handoff|strategic\s+plan\s+document)\b", blob, re.I):
+        return "Phase 4 — Roadmap & Handoff"
+    if re.search(
+        r"\b(tactical|digital\s+campaign|social\s+media|content\s+strategy|"
+        r"earned\s+media|brand\s+messaging\s+toolkit|pr\s*&?\s*earned)\b",
+        blob,
+        re.I,
+    ):
+        return "Phase 3 — Tactical Plan"
+    if re.search(
+        r"\b(messaging\s+framework|competitive\s+positioning|kpi\s+development|"
+        r"brand\s+narrative)\b",
+        blob,
+        re.I,
+    ):
+        return "Phase 2 — Strategy"
+    if re.search(
+        r"\b(discovery|stakeholder|listening\s+session|brand\s+audit|"
+        r"market\s+research|audience\s+segmentation|persona)\b",
+        blob,
+        re.I,
+    ):
+        return "Phase 1 — Discovery"
+    return (item.category or "").strip() or "Fees"
+
+
+def _scrub_unverified_benchmark_clients(text: str) -> str:
+    """Drop unverified client name-drops from pricing framing (e.g. Lake Oswego)."""
+    if not text:
+        return text
+    out = re.sub(r"(?i)\s*(?:and|,)\s*Lake\s+Oswego\b", "", text)
+    out = re.sub(r"(?i)\bLake\s+Oswego\s+and\s+", "", out)
+    out = re.sub(r"(?i)\bLake\s+Oswego\b", "verified public-sector engagements", out)
+    out = re.sub(
+        r"(?i)\bcomparable\s+Carbondale\s+and\s+verified public-sector engagements\s+projects\b",
+        "comparable Carbondale public-sector marketing plan work",
+        out,
+    )
+    out = re.sub(
+        r"(?i)comparable\s+Carbondale\s+and\s+verified public-sector engagements\b",
+        "comparable Carbondale public-sector marketing plan work",
+        out,
+    )
+    return out
+
+
 def render_budget_markdown(
     budget: ProposalBudget,
     *,
     rfp_text: str = "",
 ) -> str:
+    """Client-facing budget: one total, phase/deliverable fee table, short terms."""
+    budget = prepare_budget_for_client_display(budget)
     lines: list[str] = []
     fmt = (budget.budget_format or "").casefold()
     wants_form = fmt == "blended_rate_form" or rfp_wants_blended_pricing_form(rfp_text)
@@ -217,190 +732,407 @@ def render_budget_markdown(
         )
         lines.append("")
 
-    if budget.qualifying_language.strip() and not strict_form:
-        lines.append(budget.qualifying_language.strip())
+    total = _canonical_client_total(budget)
+    fees, direct = _professional_fees_and_direct(budget)
+    passthrough = round(float(budget.client_media_passthrough or 0), 2)
+    if total is not None:
+        lines.append("## Proposed Investment")
         lines.append("")
-    elif budget.qualifying_language.strip() and strict_form:
-        lines.append(
-            "> **Supporting narrative only** — keep qualifying language off the official "
-            "Pricing/Quotation form per RFP disqualification language."
-        )
+        if fees > 0:
+            lines.append(f"**Professional fees: {_usd(fees)}**")
+        if direct > 0:
+            lines.append(f"**Direct travel / reimbursables: {_usd(direct)}**")
+        if passthrough > 0:
+            lines.append(
+                f"**Client media pass-through (net): {_usd(passthrough)}**"
+            )
+        lines.append(f"**Total proposed investment: {_usd(total)}**")
+        if budget.pricing_tier:
+            lines.append(
+                f"Rates follow zö's Industry {budget.pricing_tier} pricing guide "
+                f"for comparable municipal / education marketing engagements."
+            )
+        if passthrough > 0:
+            lines.append(
+                "Media placements billed as client pass-through at net — "
+                "separate from professional fees."
+            )
         lines.append("")
 
-    supporting_title = (
-        "## Supporting Budget Rationale (separate from the official Pricing Proposal Form)"
-        if strict_form
-        else ("## Supporting Budget Build" if wants_form else "## Budget Summary")
-    )
-    if not wants_form:
-        lines.append(supporting_title)
-    elif strict_form:
-        lines.append(supporting_title)
-        if budget.qualifying_language.strip():
-            lines.append(budget.qualifying_language.strip())
+    scope = (budget.scope_summary or "").strip()
+    if scope:
+        if total is not None:
+            scope = _sync_narrative_total(
+                scope,
+                total,
+                protect=[v for v in (direct, fees, passthrough) if v > 0],
+            )
+            scope = _rewrite_investment_sentence(
+                scope,
+                fees,
+                direct,
+                total,
+                passthrough=passthrough,
+            )
+        if len(scope) > 700:
+            cut = scope[:700]
+            scope = cut.rsplit(".", 1)[0].strip() + "."
+        lines.append(scope)
+        lines.append("")
+
+    ql = (budget.qualifying_language or "").strip()
+    if ql:
+        if len(ql) > 1600:
+            ql = ql[:1600].rsplit(".", 1)[0].strip() + "."
+        if strict_form:
+            lines.append(
+                "> Supporting terms only — not part of the official Pricing/Quotation form."
+            )
             lines.append("")
-    elif wants_form:
-        pass  # summary block uses Supporting Budget Build below
-
-    if wants_form and not strict_form:
-        summary_heading = "## Supporting Budget Build"
-    elif not wants_form:
-        summary_heading = "## Budget Summary"
-    else:
-        summary_heading = None
-
-    if summary_heading:
-        lines.append(summary_heading)
-    summary_rows: list[str] = []
-    if budget.rfp_budget_cap is not None:
-        summary_rows.append(f"- **RFP budget cap:** {_usd(budget.rfp_budget_cap)}")
-    if budget.agency_revenue_estimate is not None:
-        summary_rows.append(
-            f"- **Agency revenue estimate (zö fee income only):** "
-            f"{_usd(budget.agency_revenue_estimate)}"
-        )
-    if budget.agency_fee_subtotal is not None and budget.client_media_passthrough:
-        summary_rows.append(
-            f"- **Agency fee subtotal (excl. pass-through):** {_usd(budget.agency_fee_subtotal)}"
-        )
-    if budget.client_media_passthrough is not None and budget.client_media_passthrough > 0:
-        summary_rows.append(
-            f"- **Client media pass-through (at net, not agency revenue):** "
-            f"{_usd(budget.client_media_passthrough)}"
-        )
-    if budget.commission_rate is not None and budget.commission_rate > 0:
-        pct = budget.commission_rate * 100 if budget.commission_rate <= 1 else budget.commission_rate
-        summary_rows.append(f"- **Commission rate:** {pct:g}%")
-    if budget.total_client_invoicing is not None and budget.client_media_passthrough:
-        summary_rows.append(
-            f"- **Total estimated client invoicing (media + agency fees):** "
-            f"{_usd(budget.total_client_invoicing)}"
-        )
-    if budget.line_item_sum is not None:
-        summary_rows.append(f"- **Line item table total:** {_usd(budget.line_item_sum)}")
-    if budget.lump_sum_total is not None:
-        summary_rows.append(f"- **Lump sum (base term):** {_usd(budget.lump_sum_total)}")
-    if budget.direct_expenses_total is not None:
-        summary_rows.append(
-            f"- **Direct expenses:** {_usd(budget.direct_expenses_total)}"
-        )
-    if budget.pricing_tier:
-        summary_rows.append(f"- **Pricing tier:** {budget.pricing_tier}")
-    if budget.fee_structure:
-        summary_rows.append(f"- **Fee structure:** {budget.fee_structure}")
-    if budget.budget_format:
-        summary_rows.append(
-            f"- **Budget format:** {budget.budget_format.replace('_', ' ')}"
-        )
-    if budget.commission_model:
-        summary_rows.append(f"- **Commission model:** {budget.commission_model}")
-    lines.extend(summary_rows or ["- *(See line items below.)*"])
-    lines.append("")
-
-    if budget.rfp_budget_notes.strip():
-        lines.append(budget.rfp_budget_notes.strip())
+        lines.append("## Terms")
         lines.append("")
-
-    if budget.scope_summary.strip():
-        lines.append("## Scope Summary")
-        lines.append(budget.scope_summary.strip())
+        lines.append(ql)
         lines.append("")
-
-    if budget.tiers:
-        lines.append("## Pricing Tiers")
-        for tier in budget.tiers:
-            marker = " *(recommended)*" if tier.id == budget.recommended_tier_id else ""
-            total = _usd(tier.total) if tier.total is not None else "—"
-            lines.append(f"### {tier.name}{marker} — {total}")
-            if tier.rationale.strip():
-                lines.append(tier.rationale.strip())
-            lines.append("")
 
     if budget.line_items:
         heading = (
-            "## Supporting Line Items (not a substitute for the Pricing Proposal Form)"
-            if wants_form
-            else "## Budget Line Items"
+            "## Fee Detail by Phase" if not wants_form else "## Supporting Fee Detail"
         )
         lines.append(heading)
         lines.append("")
-        lines.append("| Category | Description | Qty | Unit | Rate | Extended |")
-        lines.append("| --- | --- | ---: | --- | ---: | ---: |")
+        lines.append("| Phase | Deliverable | Amount |")
+        lines.append("| --- | --- | ---: |")
         subtotal = 0.0
         for item in budget.line_items:
-            desc = item.description
-            if item.named_person:
-                role = item.role_title or item.description
-                desc = f"{role} — {item.named_person}"
-            if item.rate_source:
-                desc = f"{desc} *(Source: {item.rate_source})*"
-            qty = f"{item.quantity:g}" if item.quantity is not None else "—"
-            rate = _usd(item.rate) if item.rate is not None else "—"
+            phase, desc = _client_line_label(item)
             extended = _usd(item.extended) if item.extended is not None else "—"
             if isinstance(item.extended, (int, float)):
                 subtotal += float(item.extended)
-            lines.append(
-                f"| {item.category} | {desc} | {qty} | {item.unit} | {rate} | {extended} |"
-            )
-        direct = float(budget.direct_expenses_total or 0)
-        lines.append(f"| **Subtotal** | *Sum of line items* | | | | **{_usd(subtotal)}** |")
+            lines.append(f"| {phase} | {desc} | {extended} |")
+        direct = round(float(budget.direct_expenses_total or 0), 2)
         if direct > 0:
-            lines.append(f"| **Direct expenses** | | | | | **{_usd(direct)}** |")
-        if budget.client_media_passthrough and budget.client_media_passthrough > 0:
-            agency_only = float(
-                budget.agency_fee_subtotal or (subtotal - budget.client_media_passthrough)
-            )
             lines.append(
-                f"| **Agency fee subtotal** | *Excludes client pass-through* | | | | **{_usd(agency_only)}** |"
+                f"| Direct expenses | Travel / reimbursables | {_usd(direct)} |"
             )
-            lines.append(
-                f"| **Total agency revenue** | *Agency fees + direct expenses* | | | | "
-                f"**{_usd(budget.agency_revenue_estimate or agency_only + direct)}** |"
+        grand = round(subtotal + direct, 2)
+        lines.append(f"| **Total** | | **{_usd(grand)}** |")
+        lines.append("")
+
+    opt = (budget.option_term_notes or "").strip()
+    if opt:
+        opt2 = re.sub(
+            r"(?i)base-year\s+agency\s+revenue\s+estimate\s*:",
+            "Base-year proposed fees:",
+            opt,
+        )
+        opt2 = _INTERNAL_OPT_RE.sub("proposed fees", opt2)
+        if total is not None:
+            opt2 = _sync_narrative_total(
+                opt2,
+                total,
+                protect=[direct] if direct > 0 else None,
             )
-        else:
-            lines.append(
-                f"| **Total (agency revenue)** | *Line items + direct expenses* | | | | "
-                f"**{_usd(subtotal + direct)}** |"
-            )
-        lines.append("")
-
-    if budget.verified_rates:
-        lines.append("## Verified Rates")
-        lines.append("")
-        lines.append("| Person | Role | Rate/hr | Source |")
-        lines.append("| --- | --- | ---: | --- |")
-        for row in budget.verified_rates:
-            rate = _usd(row.hourly_rate) if row.hourly_rate is not None else "—"
-            lines.append(f"| {row.person_name} | {row.role} | {rate} | {row.source} |")
-        lines.append("")
-
-    if budget.media_spend_notes.strip():
-        lines.append("## Media Spend Notes")
-        lines.append(budget.media_spend_notes.strip())
-        lines.append("")
-
-    if budget.option_term_notes.strip():
-        lines.append("## Option Terms")
-        lines.append(budget.option_term_notes.strip())
-        lines.append("")
-
-    if budget.scope_adjustments:
-        lines.append("## Scope Adjustments")
-        for note in budget.scope_adjustments:
-            lines.append(f"- {note}")
-        lines.append("")
-
-    if budget.pricing_flags:
-        lines.append("## Pricing Flags")
-        for flag in budget.pricing_flags:
-            lines.append(f"- {flag}")
-        lines.append("")
-
-    if budget.design_brief.strip():
-        lines.append(f"[DESIGNER NOTE: {budget.design_brief.strip()}]")
-        lines.append("")
+        opt2 = opt2.strip()
+        if opt2 and len(opt2) > 500:
+            opt2 = opt2[:500].rsplit(".", 1)[0].strip() + "."
+        if opt2:
+            lines.append("## Option Terms")
+            lines.append(opt2)
+            lines.append("")
 
     return "\n".join(lines).strip() + "\n"
+
+
+def render_embedded_budget_table_markdown(budget: ProposalBudget) -> str:
+    """Clean fee table for embedding in Compliance / narrative sections.
+
+    Bold labels + one accurate table from the canonical budget. No [PRICING FLAG],
+    no evidence markers, no internal Sonja notes.
+    """
+    budget = prepare_budget_for_client_display(budget)
+    total = _canonical_client_total(budget)
+    fees, direct = _professional_fees_and_direct(budget)
+    passthrough = round(float(budget.client_media_passthrough or 0), 2)
+    lines: list[str] = [
+        "### Proposed Investment",
+        "",
+    ]
+    if fees > 0:
+        lines.append(f"**Professional fees:** {_usd(fees)}")
+    if direct > 0:
+        lines.append(f"**Direct travel / reimbursables:** {_usd(direct)}")
+    if passthrough > 0:
+        lines.append(f"**Client media pass-through (net):** {_usd(passthrough)}")
+    if total is not None:
+        lines.append(f"**Total proposed investment:** {_usd(total)}")
+    if budget.pricing_tier:
+        lines.append(
+            f"Rates follow zö's Industry **{budget.pricing_tier}** pricing guide "
+            "for comparable municipal marketing engagements."
+        )
+    lines.append("")
+    if budget.line_items:
+        lines.append("### Fee Detail by Phase")
+        lines.append("")
+        lines.append("| **Phase** | **Deliverable** | **Amount** |")
+        lines.append("| --- | --- | ---: |")
+        subtotal = 0.0
+        for item in budget.line_items:
+            phase, desc = _client_line_label(item)
+            extended = _usd(item.extended) if item.extended is not None else "—"
+            if isinstance(item.extended, (int, float)):
+                subtotal += float(item.extended)
+            lines.append(f"| {phase} | {desc} | {extended} |")
+        if direct > 0:
+            lines.append(
+                f"| Direct expenses | Travel / reimbursables | {_usd(direct)} |"
+            )
+        grand = round(subtotal + direct, 2)
+        lines.append(f"| **Total** | | **{_usd(grand)}** |")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+_EXISTING_BUDGET_BLOCK_RE = re.compile(
+    r"(?is)(?:^|\n)("
+    r"#{1,3}\s*(?:Proposed\s+Investment(?:\s*/\s*Fee\s+Table)?|"
+    r"Fee\s+Detail(?:\s+by\s+Phase)?|Supporting\s+Fee\s+Detail)\b"
+    r".*?"
+    r")(?=(?:\n#{1,3}\s+)|\Z)"
+)
+
+
+def _strip_existing_investment_blocks(body: str) -> str:
+    """Remove prior Proposed Investment / fee-detail / pricing-flag dumps."""
+    text = re.sub(r"(?is)(?:\s*\[PRICING FLAG:[^\]]*\]\s*)+", "\n\n", body or "")
+    text = _EXISTING_BUDGET_BLOCK_RE.sub("\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
+def insert_budget_table_into_section(content: str, budget_markdown: str) -> tuple[str, str]:
+    """Insert or replace ONLY the budget/fee table block — preserve all other prose.
+
+    Also scrubs evidence markers and [PRICING FLAG] dumps from the section body.
+    Returns (updated_content, action) where action is 'inserted' or 'replaced'.
+    """
+    from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
+
+    original = content or ""
+    body = scrub_client_facing_section_artifacts(original)
+    had_prior = bool(_EXISTING_BUDGET_BLOCK_RE.search(body)) or bool(
+        re.search(r"\[PRICING FLAG:", original, re.I)
+    )
+    body = _strip_existing_investment_blocks(body)
+    body = scrub_client_facing_section_artifacts(body)
+
+    table_md = scrub_client_facing_section_artifacts(budget_markdown or "").strip()
+    if not table_md:
+        return body, "replaced" if had_prior else "inserted"
+
+    fee_only = table_md
+    fee_match = re.search(
+        r"(?is)(#{1,3}\s*(?:Fee\s+Detail(?:\s+by\s+Phase)?|Supporting\s+Fee\s+Detail|"
+        r"Proposed\s+Investment)\b.*)",
+        table_md,
+    )
+    if fee_match:
+        fee_only = fee_match.group(1).strip()
+
+    block = "\n\n" + fee_only.strip() + "\n"
+    action = "replaced" if had_prior else "inserted"
+
+    budgets_heading = re.search(
+        r"(?im)^(#{1,3}\s*BUDGETS?\b[^\n]*\n)",
+        body,
+    )
+    if budgets_heading:
+        start = budgets_heading.end(1)
+        rest = body[start:]
+        para_end = re.search(r"\n\n", rest)
+        if para_end:
+            insert_at = start + para_end.end()
+            updated = body[:insert_at].rstrip() + block + body[insert_at:]
+        else:
+            updated = body[:start].rstrip() + block + rest
+        updated = scrub_client_facing_section_artifacts(updated)
+        return updated.strip() + ("\n" if original.endswith("\n") else ""), action
+
+    updated = body.rstrip() + block
+    updated = scrub_client_facing_section_artifacts(updated)
+    return updated.strip() + ("\n" if original.endswith("\n") else ""), action
+
+
+def canonical_budget_summary_figures(budget: ProposalBudget) -> dict[str, float]:
+    """Distinct agency / pass-through / direct / total figures from the fee table."""
+    from app.services.proposal_budget_validation import split_line_item_totals
+
+    line_sum, agency_fee, passthrough = split_line_item_totals(budget.line_items or [])
+    direct = round(float(budget.direct_expenses_total or 0), 2)
+    if agency_fee <= 0 and budget.agency_fee_subtotal is not None:
+        agency_fee = round(float(budget.agency_fee_subtotal), 2)
+    if passthrough <= 0 and budget.client_media_passthrough is not None:
+        passthrough = round(float(budget.client_media_passthrough), 2)
+    agency_fee = round(float(agency_fee or 0), 2)
+    passthrough = round(float(passthrough or 0), 2)
+    agency_revenue = budget.agency_revenue_estimate
+    if agency_revenue is None or float(agency_revenue) <= 0:
+        agency_revenue = round(agency_fee + direct, 2)
+    else:
+        agency_revenue = round(float(agency_revenue), 2)
+    total = budget.total_client_invoicing
+    if total is None or float(total) <= 0:
+        if line_sum > 0:
+            total = round(float(line_sum) + direct, 2)
+        else:
+            total = round(agency_fee + passthrough + direct, 2)
+    else:
+        total = round(float(total), 2)
+    return {
+        "agency_fee": agency_fee,
+        "agency_revenue": agency_revenue,
+        "passthrough": passthrough,
+        "direct": direct,
+        "total": total,
+        "line_sum": round(float(line_sum or 0), 2),
+    }
+
+
+_YEAR1_INVESTMENT_BLOCK_RE = re.compile(
+    r"(?is)"
+    r"Total\s+Year\s*1\s+agency\s+fee\s*:[^\n]*?"
+    r"(?:Total\s+Year\s*1\s+client\s+invoicing\s*:[^\n.]*)"
+    r"(?:\.\s*)?"
+    r"(?:\s*\d{1,3}\s*\(\$[\d,]+(?:\.\d+)?\.?\s*)?"
+)
+
+_GARBLED_DOLLAR_TAIL_RE = re.compile(
+    r"\s+\d{1,3}\s*\(\$[\d,]+(?:\.\d+)?\.?\s*$",
+    re.M,
+)
+
+
+def reconcile_budget_summary_prose(
+    content: str,
+    budget: ProposalBudget,
+) -> tuple[str, int]:
+    """Rewrite duplicated/garbled investment summary sentences from canonical figures.
+
+    Does not touch fee-table rows — only narrative labels (Year 1 summary, Option
+    Terms, pass-through statements).
+    """
+    text = content or ""
+    if not text.strip():
+        return text, 0
+    figs = canonical_budget_summary_figures(budget)
+    agency = figs["agency_fee"] if figs["agency_fee"] > 0 else figs["agency_revenue"]
+    passthrough = figs["passthrough"]
+    direct = figs["direct"]
+    total = figs["total"]
+    if agency <= 0 and total <= 0:
+        return text, 0
+
+    changes = 0
+    year1_block = (
+        f"Total Year 1 agency fee: {_usd(agency)}. "
+        f"Client media pass-through billed at net: {_usd(passthrough)}. "
+        f"Direct travel/reimbursables: {_usd(direct)}. "
+        f"Total Year 1 client invoicing: {_usd(total)}."
+    )
+
+    def _year1_sub(match: re.Match[str]) -> str:
+        nonlocal changes
+        prior = match.group(0)
+        if prior.strip() == year1_block:
+            return prior
+        changes += 1
+        return year1_block
+
+    out = _YEAR1_INVESTMENT_BLOCK_RE.sub(_year1_sub, text)
+
+    # Label-by-label fixes when the Year 1 block regex did not fire.
+    label_specs: list[tuple[str, float]] = [
+        (
+            r"(Total\s+Year\s*1\s+agency\s+fee|Total\s+agency\s+(?:fee|revenue)|"
+            r"Agency\s+(?:fee|revenue)(?:\s+estimate)?)\s*:\s*\$[\d,]+(?:\.\d{2})?",
+            agency,
+        ),
+        (
+            r"(Client\s+media\s+pass-?through(?:\s*\([^)]*\))?)\s*:\s*\$[\d,]+(?:\.\d{2})?",
+            passthrough,
+        ),
+        (
+            r"(Direct\s+travel\s*/\s*reimbursables|Direct\s+travel|"
+            r"Estimated\s+reimbursable\s+travel)\s*:\s*\$[\d,]+(?:\.\d{2})?",
+            direct,
+        ),
+        (
+            r"(Total\s+Year\s*1\s+client\s+invoicing|Total\s+client\s+invoicing|"
+            r"Total\s+Year\s*1\s+investment)\s*:\s*\$[\d,]+(?:\.\d{2})?",
+            total,
+        ),
+        (
+            r"(Base-year\s+proposed\s+fees)\s*:\s*\$[\d,]+(?:\.\d{2})?",
+            agency,
+        ),
+    ]
+    for pattern, amount in label_specs:
+        def _repl(match: re.Match[str], amt: float = amount) -> str:
+            nonlocal changes
+            label = match.group(1)
+            new = f"{label}: {_usd(amt)}"
+            if match.group(0) != new:
+                changes += 1
+            return new
+
+        out2 = re.sub(pattern, _repl, out, flags=re.I)
+        out = out2
+
+    # Strip trailing generation garbage like "66 ($325,242."
+    cleaned = _GARBLED_DOLLAR_TAIL_RE.sub("", out)
+    if cleaned != out:
+        changes += 1
+        out = cleaned
+
+    return out, changes
+
+
+def reconcile_draft_budget_summaries(
+    draft: ProposalDraft,
+    budget: ProposalBudget,
+) -> tuple[ProposalDraft, int]:
+    """Apply summary-prose reconcile across every section that mentions investment totals."""
+    sections: list[ProposalSection] = []
+    total_changes = 0
+    for section in draft.sections:
+        body = section.content or ""
+        # Touch budget tabs always; other tabs only when Year-1 / pass-through labels exist.
+        looks_relevant = section_is_budgetish(section) or bool(
+            re.search(
+                r"(?i)Year\s*1\s+agency\s+fee|client\s+media\s+pass-?through|"
+                r"total\s+client\s+invoicing|Base-year\s+proposed\s+fees",
+                body,
+            )
+        )
+        if not looks_relevant:
+            sections.append(section)
+            continue
+        new_body, n = reconcile_budget_summary_prose(body, budget)
+        if n > 0 and new_body != body:
+            total_changes += n
+            sections.append(
+                section.model_copy(update={"content": new_body, "status": "generated"})
+            )
+        else:
+            sections.append(section)
+    if total_changes <= 0:
+        return draft, 0
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), total_changes
+
+
+def section_is_budgetish(section: ProposalSection) -> bool:
+    return budget_section_score(section.title or "") > 0
 
 
 def reshape_budget_for_rfp_form(

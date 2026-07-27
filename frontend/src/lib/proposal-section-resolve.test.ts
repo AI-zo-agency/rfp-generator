@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  messageLooksOutlineStructure,
   messageLooksStructural,
   messageNeedsCaseStudyClarify,
   pinnedSectionConflictsWithMessage,
@@ -41,15 +42,15 @@ describe("resolveSectionFromMention", () => {
     expect(hit?.id).toBe("section-2-bio-brian");
   });
 
-  it("prefers bios over insurance for bio/resume asks", () => {
-    const hit = resolveSectionFromMention(
-      sections,
-      "add another team bio per RFP",
-      "section-1-insurance"
-    );
-    expect(hit?.id.startsWith("section-2-bio-")).toBe(true);
+  it("add another team bio is outline structure (not open-tab rewrite)", () => {
+    const result = resolveChatTarget(sections, "add another team bio per RFP", {
+      viewingSectionId: "section-1-insurance",
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.reason).toBe("outline-structure");
+    }
   });
-
   it("still routes when a case study is named", () => {
     const hit = resolveSectionFromMention(
       sections,
@@ -59,13 +60,56 @@ describe("resolveSectionFromMention", () => {
     expect(hit?.id).toBe("section-3-work-oregon");
   });
 
-  it("still falls back to viewing section for generic improve", () => {
+  it("does not bind random open tab without Improve-full-section pin", () => {
     const hit = resolveSectionFromMention(
       sections,
       "make this tighter",
       "section-1-insurance"
     );
-    expect(hit?.id).toBe("section-1-insurance");
+    // No pin + no "this section" → clarify path returns a candidate, not silent insurance bind
+    // resolveSectionFromMention collapses clarify to first candidate — prefer explicit resolveChatTarget
+    const result = resolveChatTarget(sections, "make this tighter", {
+      viewingSectionId: "section-1-insurance",
+    });
+    expect(result?.kind).toBe("clarify");
+    void hit;
+  });
+
+  it("uses open tab only when user says this section", () => {
+    const result = resolveChatTarget(sections, "make this section tighter", {
+      viewingSectionId: "section-1-insurance",
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("section-1-insurance");
+      expect(result.reason).toBe("viewing-explicit");
+    }
+  });
+
+  it("resolves section N as manuscript ordinal", () => {
+    const long = [
+      ...sections,
+      sec("rfp-a", "Technical ability"),
+      sec("rfp-b", "Past performance"),
+      sec("rfp-c", "Cost of base proposal"),
+      sec("rfp-d", "Tourism experience"),
+      sec("rfp-e", "References"),
+      sec("rfp-f", "Agency team"),
+      sec("rfp-g", "Geography"),
+      sec("rfp-h", "Extra one"),
+      sec("rfp-i", "Extra two"),
+    ];
+    // manuscript order ≈ outline order for these simple stubs
+    const result = resolveChatTarget(
+      long,
+      "can you just replace section 15 with some other new section?",
+      { viewingSectionId: "section-1-who-we-are" }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.reason).toBe("ordinal");
+      expect(result.section.id).toBe(long[14]?.id);
+    }
   });
 
   it("parses person name from title", () => {
@@ -103,6 +147,45 @@ describe("resolveChatTarget", () => {
     sec("section-3-work-san-leandro", "3.2 — Municipality Summ"),
     sec("section-3-work-umatilla", "3.3 — City of Umatilla Digital Campaign 2006"),
   ];
+
+  it("named Past Performance beats pin on another section", () => {
+    const withPast = [
+      ...sections,
+      sec("rfp-sec-2", "Past Performance and References"),
+      sec("rfp-sec-3", "Technical Ability"),
+    ];
+    const pin = withPast.find((s) => s.id === "rfp-sec-3")!;
+    const result = resolveChatTarget(
+      withPast,
+      "Clean the Past Performance and References section so all references are relevant",
+      {
+        viewingSectionId: "rfp-sec-3",
+        pinnedSection: pin,
+      }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("rfp-sec-2");
+      expect(result.reason).toBe("title");
+    }
+  });
+
+  it("fuzzy title tokens beat open tab", () => {
+    const withPast = [
+      ...sections,
+      sec("rfp-sec-2", "2 — Past Performance & References"),
+      sec("rfp-sec-3", "3 — Technical Ability"),
+    ];
+    const result = resolveChatTarget(
+      withPast,
+      "clean past performance references — drop irrelevant ones",
+      { viewingSectionId: "rfp-sec-3" }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("rfp-sec-2");
+    }
+  });
 
   it("uses explicit pin with high confidence", () => {
     const pin = sections[0];
@@ -144,7 +227,7 @@ describe("resolveChatTarget", () => {
 
   it("asks which Our Work piece — does NOT silently use open Who We Are", () => {
     const msg =
-      "you only add best case studies that suit this rfp requirements from knowledge base and replace this 3 existing case studies";
+      "improve these existing case studies so they suit the rfp requirements";
     expect(messageNeedsCaseStudyClarify(msg)).toBe(true);
 
     const result = resolveChatTarget(sections, msg, {
@@ -156,11 +239,36 @@ describe("resolveChatTarget", () => {
         true
       );
       expect(result.question.toLowerCase()).toContain("won't guess");
-      // Open tab may be listed as an option, but we must not auto-resolve to it
       expect(result.candidates[0].id).not.toBe("section-1-who-we-are");
     }
   });
 
+  it("add new section bypasses open tab and case-study clarify", () => {
+    const msg = "add a new section titled Project Staff Planning";
+    expect(messageLooksOutlineStructure(msg)).toBe(true);
+    expect(messageNeedsCaseStudyClarify(msg)).toBe(false);
+
+    const result = resolveChatTarget(sections, msg, {
+      viewingSectionId: "section-1-who-we-are",
+      pinnedSection: sections[0],
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.reason).toBe("outline-structure");
+    }
+  });
+
+  it("add new case study is outline structure not clarify", () => {
+    const msg = "add a new case study from the knowledge base for tourism";
+    expect(messageLooksOutlineStructure(msg)).toBe(true);
+    const result = resolveChatTarget(sections, msg, {
+      viewingSectionId: "section-1-who-we-are",
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.reason).toBe("outline-structure");
+    }
+  });
   it("pin still allows editing Who We Are about case-study mentions", () => {
     const result = resolveChatTarget(
       sections,
@@ -174,6 +282,203 @@ describe("resolveChatTarget", () => {
     if (result?.kind === "resolved") {
       expect(result.section.id).toBe("section-1-who-we-are");
       expect(result.reason).toBe("pinned");
+    }
+  });
+
+  it("proposal-wide review does not bind as open-tab-only", () => {
+    const result = resolveChatTarget(
+      sections,
+      "what's missing from the proposal — trade secrets and terms?",
+      { viewingSectionId: "section-1-who-we-are" }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.reason).toBe("proposal-wide");
+    }
+  });
+
+  it("cross-section budget contradiction is treated as proposal-wide", () => {
+    const result = resolveChatTarget(
+      sections,
+      "In section 14 pass-through says $325,242.66 but section 18 says $0.00; this contradiction in the budget needs one clean answer.",
+      { viewingSectionId: "section-1-who-we-are" }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.reason).toBe("proposal-wide");
+    }
+  });
+
+  it("resolves §21 References by mark number even with a long title", () => {
+    const withRefs = [
+      ...sections,
+      sec("rfp-ref-21", "21. References — Current Clients"),
+    ];
+    const result = resolveChatTarget(
+      withRefs,
+      "Fix §21 References only. Do not touch any other section.",
+      { viewingSectionId: "section-1-who-we-are" }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("rfp-ref-21");
+    }
+  });
+
+  it("remembers References from prior chat on short follow-up", () => {
+    const withRefs = [
+      ...sections,
+      sec("rfp-ref-21", "21. References — Current Clients"),
+    ];
+    const result = resolveChatTarget(withRefs, "apply these fixes", {
+      viewingSectionId: "section-1-who-we-are",
+      conversationHistory: [
+        {
+          role: "user",
+          content:
+            "Fix §21 References only. Replace upon request with KB contacts.",
+        },
+        { role: "assistant", content: "Ready to apply." },
+      ],
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("rfp-ref-21");
+      expect(result.reason).toBe("chat-history");
+    }
+  });
+
+  it("does not route Umatilla ask to References via incidental mention", () => {
+    const withRefs = [
+      ...sections,
+      sec("rfp-ref-21", "21. References — Current Clients"),
+    ];
+    const ask =
+      "1. Section 11 (Umatilla case study) still misrepresents what the engagement " +
+      "actually was. I flagged this before the References fix, and it hasn't been " +
+      "addressed. Needs a Rock the Locks rewrite.";
+    const result = resolveChatTarget(withRefs, ask, {
+      viewingSectionId: "rfp-ref-21",
+      pinnedSection: withRefs.find((s) => s.id === "rfp-ref-21") ?? null,
+      conversationHistory: [
+        {
+          role: "user",
+          content: "Fix §21 References only. Replace upon request.",
+        },
+      ],
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("section-3-work-umatilla");
+      expect(result.reason).toBe("client-name");
+    }
+  });
+
+  it("Improve this section pin beats chat-history References", () => {
+    const withRefs = [
+      ...sections,
+      sec("rfp-ref-21", "21. References — Current Clients"),
+    ];
+    const umatilla = withRefs.find((s) => s.id === "section-3-work-umatilla")!;
+    const result = resolveChatTarget(
+      withRefs,
+      "Improve this section for the RFP.",
+      {
+        viewingSectionId: umatilla.id,
+        pinnedSection: umatilla,
+        conversationHistory: [
+          {
+            role: "user",
+            content: "Fix §21 References only. Replace upon request.",
+          },
+        ],
+      }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("section-3-work-umatilla");
+      expect(result.reason).toBe("pinned");
+    }
+  });
+
+  it("implement budget table here does not steal to Cost Proposal", () => {
+    const withCost = [
+      ...sections,
+      sec("rfp-cost", "Cost of Base Proposal / Fee Schedule"),
+      sec(
+        "compliance",
+        "General Requirements Compliance Statement — SOW, Timelines, Budgets"
+      ),
+    ];
+    const compliance = withCost.find((s) => s.id === "compliance")!;
+    const result = resolveChatTarget(withCost, "implement budget table here", {
+      viewingSectionId: compliance.id,
+      pinnedSection: compliance,
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("compliance");
+      expect(result.reason).not.toBe("unique-topic");
+    }
+  });
+
+  it("clarify reply does not follow stale Cover Letter Improve pin", () => {
+    const withCompliance = [
+      sec("cover", "Cover Letter & Executive Summary"),
+      ...sections,
+      sec(
+        "compliance",
+        "General Requirements Compliance Statement — SOW, Timelines, Budgets, Reporting, Records Retention (Section II)"
+      ),
+    ];
+    const cover = withCompliance.find((s) => s.id === "cover")!;
+    const compliance = withCompliance.find((s) => s.id === "compliance")!;
+    const result = resolveChatTarget(
+      withCompliance,
+      "Section 13 General Requirements Compliance Statement (currently open in the UI)",
+      {
+        viewingSectionId: compliance.id,
+        pinnedSection: cover,
+        conversationHistory: [
+          {
+            role: "user",
+            content: "Improve this section for the RFP. Its not correct budget",
+          },
+          {
+            role: "assistant",
+            content:
+              "Which section should I improve?\n\n" +
+              "1. **Section 1.3 Business Information**\n" +
+              "2. **Section 8 Proposal Pricing — Hourly Rates**\n" +
+              "3. **Section 13 General Requirements Compliance Statement (currently open in the UI)**\n" +
+              "4. **Case study budget table**\n",
+          },
+        ],
+      }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("compliance");
+      expect(result.reason).not.toBe("pinned");
+    }
+  });
+
+  it("matches long compliance title from clarify head phrase", () => {
+    const withCompliance = [
+      sec("cover", "Cover Letter & Executive Summary"),
+      sec(
+        "compliance",
+        "General Requirements Compliance Statement — SOW, Timelines, Budgets, Reporting, Records Retention (Section II)"
+      ),
+    ];
+    const result = resolveChatTarget(
+      withCompliance,
+      "General Requirements Compliance Statement",
+      { viewingSectionId: "cover", pinnedSection: withCompliance[0] }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("compliance");
     }
   });
 });

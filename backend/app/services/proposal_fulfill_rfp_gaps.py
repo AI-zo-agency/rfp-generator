@@ -174,8 +174,10 @@ async def _draft_closing_section(
                         "official field labels — no Section A/B/C/D rewrites or extra clauses on the form.\n"
                         "Acknowledgement of Addenda / required forms: treat as pass/fail — follow RFP "
                         "wording tightly so evaluators can check the box.\n"
-                        "Closing/commitment sections: end with a clear offer to perform, fit to buyer "
-                        "goals, and readiness to start — still no invented proof.\n"
+                        "Closing/commitment sections: this is the COMPULSORY end of the proposal — "
+                        "clear offer to perform, fit to buyer goals, capacity/timeline, validity "
+                        "period if stated, invite next steps. Do not repeat full case studies. "
+                        "Still no invented proof.\n"
                         "Return JSON: {\"content\": \"markdown with ## headings\"}"
                     ),
                 },
@@ -207,10 +209,10 @@ async def ensure_closing_sections(
     rfp: RfpRecord,
     rfp_text: str,
 ) -> tuple[ProposalDraft, list[ClosingComponent], list[str]]:
-    """Add missing closing sections demanded by THIS RFP text."""
-    components = detect_closing_components(rfp_text)
+    """Add missing closing sections demanded by THIS RFP — always includes a proper close."""
+    components = detect_closing_components(rfp_text, always_include_commitment=True)
     if not components:
-        return draft, [], ["No closing-package patterns matched in RFP text."]
+        return draft, [], ["No closing package items available."]
 
     ids = {s.id for s in draft.sections}
     titles = [s.title for s in draft.sections]
@@ -286,8 +288,12 @@ async def run_fulfill_rfp_gaps(
     rfp_id: str,
     *,
     use_llm: bool = True,
+    mode: str = "verify_scrub_only",
 ) -> tuple[PreSubmitReview, ProposalResearchCache, ProposalDraft, dict[str, Any]]:
-    """Re-walk THIS RFP → add missing closing tabs → patch gaps → refresh ending report."""
+    """UI 'Scan RFP & add missing pieces' → VERIFY scrub only (default).
+
+    mode='full' keeps the legacy multi-step fulfill (closing/structure/budget/KPI).
+    """
     from app.services.proposal_generation_cancel import (
         ProposalGenerationCancelled,
         bind_active_rfp,
@@ -297,9 +303,17 @@ async def run_fulfill_rfp_gaps(
         clear_fulfill_scan_activity,
         record_generation_stopped,
     )
+    from app.services.proposal_verify_optional_scrub import run_verify_scrub_only_scan
 
     token = bind_active_rfp(rfp_id)
     try:
+        if (mode or "verify_scrub_only").strip().lower() in {
+            "verify_scrub_only",
+            "verify-scrub",
+            "verify_scrub",
+            "scrub",
+        }:
+            return await run_verify_scrub_only_scan(rfp_id)
         return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
     except ProposalGenerationCancelled:
         await record_generation_stopped(rfp_id, "fulfill-scan")
@@ -358,6 +372,7 @@ async def _run_fulfill_rfp_gaps_body(
         "Consistency repairs",
         "Contractor KPIs (Section 2.3)",
         "KB fact-check (Supermemory)",
+        "Remove optional [VERIFY] tags",
         "Pre-submit refresh",
     )
 
@@ -699,7 +714,8 @@ async def _run_fulfill_rfp_gaps_body(
 
     report["logs"].append(
         "Scan RFP walks full PDF text, submission checklist, RFP-scored section structure "
-        "(Exhibit A / criteria), budget reconcile/sync, and contractor KPI alignment — "
+        "(Exhibit A / criteria), budget reconcile/sync, contractor KPI alignment, and "
+        "removes [VERIFY] tags unless critically required by the RFP — never invents; "
         "team bios and case studies are not rewritten."
     )
 
@@ -759,8 +775,62 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("KB fact-check during Scan RFP skipped: %s", exc)
         report["logs"].append(f"KB fact-check skipped: {exc}")
 
+    # Dedicated pass: every section with [VERIFY] → RFP scan → remove unless critical.
     await _scan_progress(
         7,
+        "Scan RFP: remove optional [VERIFY]",
+        "Read each VERIFY section vs full RFP — drop tags unless critically required; never invent.",
+    )
+    await _ensure_not_stopped()
+    try:
+        from app.services.proposal_verify_optional_scrub import (
+            count_verify_tags,
+            scrub_draft_optional_verify_tags,
+        )
+
+        verify_sections = [
+            s.id for s in draft.sections if count_verify_tags(s.content or "") > 0
+        ]
+        if verify_sections:
+            scrubbed, scrub_logs = await scrub_draft_optional_verify_tags(
+                list(draft.sections),
+                rfp_text=rfp_text,
+                section_filter_ids=set(verify_sections),
+            )
+            before_map = {s.id: (s.content or "") for s in draft.sections}
+            changed = any(
+                before_map.get(s.id, "") != (s.content or "") for s in scrubbed
+            )
+            if scrub_logs:
+                report["verifyScrub"] = {
+                    "sectionsScanned": len(verify_sections),
+                    "logs": scrub_logs,
+                }
+                for line in scrub_logs[:25]:
+                    report["logs"].append(f"VERIFY scrub: {line}")
+            if changed:
+                draft = draft.model_copy(
+                    update={
+                        "sections": scrubbed,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                await asave_proposal_draft(draft)
+            else:
+                report["logs"].append(
+                    f"VERIFY scrub: scanned {len(verify_sections)} section(s); "
+                    "no optional tags removed (kept only if RFP-critical)."
+                )
+        else:
+            report["logs"].append("VERIFY scrub: no [VERIFY] tags found.")
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Optional VERIFY scrub during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"VERIFY scrub skipped: {exc}")
+
+    await _scan_progress(
+        8,
         "Scan RFP: pre-submit refresh",
         "Checklist, manual flags, and ending report.",
     )
@@ -809,6 +879,7 @@ async def _run_fulfill_rfp_gaps_body(
                 "Truncation repair",
                 "KB fact-check",
                 "Smart fact-check",
+                "VERIFY scrub",
             )
         )
     )
