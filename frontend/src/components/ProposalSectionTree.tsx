@@ -210,7 +210,10 @@ function SectionGroup({
         >
           ▾
         </span>
-        <span className="proposal-section-tree-group-label min-w-0 flex-1 text-left">
+        <span
+          className="proposal-section-tree-group-label min-w-0 flex-1 text-left"
+          title={group.label}
+        >
           {group.label}
         </span>
         <span className="shrink-0 text-[10px] font-semibold tabular-nums text-zo-text-muted">
