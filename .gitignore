@@ -42,3 +42,7 @@ npm-debug.log*
 
 # Vercel
 .vercel/
+
+# Local architecture / planning docs (keep local only)
+docs/architecture/
+docs/superpowers/
