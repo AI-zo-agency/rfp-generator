@@ -19,6 +19,12 @@ _DRAFT_ERROR_RE = re.compile(
 )
 
 
+def _settings_flag(name: str, default: bool = False) -> bool:
+    """Read a bool settings flag; ignore non-bool MagicMock stubs in tests."""
+    val = getattr(settings, name, default)
+    return val if isinstance(val, bool) else default
+
+
 def count_verify_tags(draft: ProposalDraft) -> int:
     return sum(len(_VERIFY_RE.findall(s.content or "")) for s in draft.sections)
 
@@ -134,13 +140,22 @@ def collect_manuscript_blockers(
         blockers.append("Phase 2: no proof points matched to RFP requirements.")
 
     # Optional flagged gates — never weaken the existing blocker list above.
-    if settings.t1_gates_block:
+    if _settings_flag("t1_gates_block"):
         blockers.extend(_t1_gate_blockers(draft))
 
-    if settings.overlap_gates_block:
+    if _settings_flag("overlap_gates_block"):
         blockers.extend(_overlap_gate_blockers(draft))
 
-    if settings.consistency_criticals_block and rfp is not None:
+    if _settings_flag("money_slots_block", default=True):
+        from app.services.proposal_budget_slots import find_unresolved_budget_slots
+
+        for section in draft.sections:
+            for key in find_unresolved_budget_slots(section.content or ""):
+                blockers.append(
+                    f"Unresolved money slot {{{{budget.{key}}}}} in {section.title or section.id}"
+                )
+
+    if _settings_flag("consistency_criticals_block") and rfp is not None:
         blockers.extend(
             _consistency_critical_blockers(draft=draft, research=research, rfp=rfp)
         )

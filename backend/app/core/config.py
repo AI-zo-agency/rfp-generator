@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     jit_retrieval_on_miss: bool = True
     # OVERLAP_GATES_BLOCK — promote high Jaccard overlap findings to readiness blockers.
     overlap_gates_block: bool = False
+    # BUDGET_BEFORE_DRAFTING — Phase 3.5 before Phase 3 (T5.6); default off.
+    budget_before_drafting: bool = False
+    # MONEY_SLOTS_BLOCK — unresolved {{budget.*}} tokens block readiness.
+    money_slots_block: bool = True
 
     supabase_url: str = ""
     supabase_service_role_key: str = ""

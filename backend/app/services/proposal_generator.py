@@ -1808,8 +1808,13 @@ async def run_phase3_5_budget(
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
+    from app.core.config import settings as app_settings
+
     draft_existing = await aget_proposal_draft(rfp_id)
-    if not draft_existing or not any(s.content.strip() for s in draft_existing.sections):
+    has_manuscript = bool(
+        draft_existing and any(s.content.strip() for s in draft_existing.sections)
+    )
+    if not has_manuscript and not app_settings.budget_before_drafting:
         raise ProposalError(
             "Phase 3 manuscript required before budget. Run full proposal or Phase 3 drafting first.",
             status_code=400,
@@ -1853,6 +1858,18 @@ async def run_phase3_5_budget(
 
     draft = await incorporate_budget_into_draft(rfp_id, budget, rfp_text=rfp_context)
     if not draft:
+        if app_settings.budget_before_drafting and not has_manuscript:
+            logger.info(
+                "Phase 3.5 budget-before-drafting: no manuscript yet for %s — skipping incorporate",
+                rfp_id,
+            )
+            now = datetime.now(timezone.utc).isoformat()
+            draft = ProposalDraft(rfpId=rfp_id, sections=[], updatedAt=now, generatedAt=now)
+            await asave_proposal_draft(draft)
+            if research:
+                research = research.model_copy(update={"budget": budget})
+                await asave_research_cache(research)
+            return draft, research, budget
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
     draft, _ = reconcile_draft_budget_summaries(draft, budget)
@@ -1861,6 +1878,17 @@ async def run_phase3_5_budget(
         draft=draft,
         budget=budget,
     )
+
+    from app.services.proposal_budget_slots import render_draft_budget_slots
+
+    draft, unresolved_slots = render_draft_budget_slots(draft, budget)
+    if unresolved_slots:
+        logger.warning(
+            "Phase 3.5 unresolved money slots for %s: %s",
+            rfp_id,
+            unresolved_slots[:12],
+        )
+
     # Phase 3.5d — block pipeline if manuscript pricing claims contradict canonical budget.
     mismatches = await run_budget_grounding_check(
         rfp_id=rfp_id,
@@ -2092,10 +2120,28 @@ async def generate_full_proposal(
     )
 
     with llm_call_context(rfp_id=rfp_id, run_id=run_id):
+        from app.core.config import settings as app_settings
+
         _draft, brand_voice, _research = await generate_sections_1_3(rfp_id)
         await run_phase2_retrieval(rfp_id)
-        draft, research = await run_phase3_drafting(rfp_id)
-        draft, research, _budget = await run_phase3_5_budget(rfp_id)
+
+        if app_settings.budget_before_drafting:
+            logger.info(
+                "Full proposal budget-before-drafting enabled for %s",
+                rfp_id,
+            )
+            draft, research, _budget = await run_phase3_5_budget(rfp_id)
+            draft, research = await run_phase3_drafting(rfp_id)
+            # Re-render money slots after drafting against canonical budget.
+            if research and research.budget:
+                from app.services.proposal_budget_slots import render_draft_budget_slots
+                from app.services.proposal_repository import asave_proposal_draft
+
+                draft, _unresolved = render_draft_budget_slots(draft, research.budget)
+                await asave_proposal_draft(draft)
+        else:
+            draft, research = await run_phase3_drafting(rfp_id)
+            draft, research, _budget = await run_phase3_5_budget(rfp_id)
 
         # Compulsory closing + RFP-demanded forms/attachments (before senior editor).
         rfp = get_rfp(rfp_id)

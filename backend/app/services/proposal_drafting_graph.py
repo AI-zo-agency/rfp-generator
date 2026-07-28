@@ -735,6 +735,9 @@ async def _draft_batch_once(
     )
 
     user_content += f"{format_anti_duplication_rules()}\n\n"
+    from app.services.proposal_budget_slots import money_slots_prompt_hint
+
+    user_content += f"{money_slots_prompt_hint()}\n\n"
     prior = state.get("drafted_sections") or []
     batch_ids = {
         str(s.get("id") or "") for s in batch if s.get("id")

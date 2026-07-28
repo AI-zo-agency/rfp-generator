@@ -168,6 +168,7 @@ Category 10 — Strategic Deliverables
 
 Use Low / High tier ranges from 00_Guide_Pricing KB excerpts when tier is not Average.
 Anything not in this menu → pricingFlags: [PRICING FLAG: (description) — outside approved parameters, Sonja review required]
+When uncertain of a rate or guide match: set isManualFill=true on the lineItem, leave sourceRateId null, and add a pricing flag — NEVER invent a dollar amount to look confident.
 
 PHASE 4 — Stress-test before finalizing:
 - Total sustains 50% wages / 30% G&A / 20% profit
@@ -696,6 +697,13 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     stage_two, stage_two_ready = _structural_map_text(prior_research)
     guide_text, kb_sources = await _fetch_guide_context(rfp, stage_two)
 
+    from app.services.pricing_rate_card_builder import build_pricing_rate_card_from_guide_text
+    from app.services.pricing_rate_binding import bind_budget_line_items_to_rate_card
+
+    rate_card = build_pricing_rate_card_from_guide_text(guide_text)
+    for warn in rate_card.warnings:
+        logger.info("pricing_rate_card_warning rfp_id=%s warn=%s", rfp_id, warn)
+
     manuscript_digest = ""
     try:
         from app.services.proposal_repository import aget_proposal_draft
@@ -920,26 +928,44 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     if fee_memo:
         budget = budget.model_copy(update={"fee_justification_memo": fee_memo})
 
+    # T5.1/T5.2 — bind lines to KB rate card; unbound → is_manual_fill + flags (no invention).
+    budget = bind_budget_line_items_to_rate_card(budget, rate_card)
+    for warn in rate_card.warnings:
+        flag = f"[PRICING FLAG: rate card] {warn}"
+        if flag not in (budget.pricing_flags or []):
+            budget = budget.model_copy(
+                update={"pricing_flags": [*(budget.pricing_flags or []), flag]}
+            )
+
+    rate_card_payload = rate_card.model_dump(by_alias=True)
+
     if prior_research:
         research = prior_research.model_copy(
-            update={"budget": budget, "updated_at": now, "provider": provider}
+            update={
+                "budget": budget,
+                "pricing_rate_card": rate_card_payload,
+                "updated_at": now,
+                "provider": provider,
+            }
         )
     else:
         research = ProposalResearchCache(
             rfpId=rfp_id,
             budget=budget,
+            pricingRateCard=rate_card_payload,
             updatedAt=now,
             provider=provider,
         )
     await asave_research_cache(research)
 
     logger.info(
-        "Stage 3 budget for %s: %d line items, tier=%s, format=%s, confidence=%d",
+        "Stage 3 budget for %s: %d line items, tier=%s, format=%s, confidence=%d, rate_card=%d",
         rfp_id,
-        len(line_items),
+        len(budget.line_items),
         budget.pricing_tier,
         budget.budget_format,
         budget.confidence,
+        len(rate_card.rates),
     )
     return budget, research
 

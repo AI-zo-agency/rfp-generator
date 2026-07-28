@@ -254,11 +254,11 @@ def scan_manuscript_consistency(
                 ):
                     issues.append(
                         PreSubmitIssue(
-                            severity="warning",
+                            severity="critical",
                             category="consistency",
                             message=(
-                                f"Dollar amount {match.group(0)} does not match canonical budget "
-                                f"(verified total ${_usd_display(budget)})"
+                                f"[T5:free_currency] Dollar amount {match.group(0)} does not "
+                                f"match canonical budget (verified total ${_usd_display(budget)})"
                             ),
                             sectionId=section.id,
                             sectionTitle=section.title,
@@ -510,6 +510,23 @@ def scan_manuscript_consistency(
                 ),
             )
         )
+
+    # T5.4 — unresolved money slots in manuscript.
+    from app.services.proposal_budget_slots import find_unresolved_budget_slots
+
+    for section in draft.sections:
+        unresolved = find_unresolved_budget_slots(section.content or "")
+        for key in unresolved:
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="budget",
+                    message=f"[T5:money_slot] Unresolved budget slot {{{{budget.{key}}}}}",
+                    sectionId=section.id,
+                    sectionTitle=section.title,
+                    excerpt=f"{{{{budget.{key}}}}}",
+                )
+            )
 
     return issues
 

@@ -81,6 +81,16 @@ class BudgetLineItem(BaseModel):
     extended: float | None = None
     notes: str | None = None
     line_item_type: BudgetLineItemType | None = Field(default=None, alias="lineItemType")
+    source_rate_id: str | None = Field(
+        default=None,
+        alias="sourceRateId",
+        description="Bound PricingRate.rate_id from KB rate card (XOR with is_manual_fill).",
+    )
+    is_manual_fill: bool = Field(
+        default=False,
+        alias="isManualFill",
+        description="True when rate is unverified / not confidently bound to KB card.",
+    )
 
 
 class BudgetLineGrounding(BaseModel):
@@ -421,6 +431,11 @@ class ProposalResearchCache(BaseModel):
         default=None,
         alias="evidenceAllocation",
         description="EvidenceAllocationLedger payload (W6) — exclusive ownership of reusable assets.",
+    )
+    pricing_rate_card: dict[str, Any] | None = Field(
+        default=None,
+        alias="pricingRateCard",
+        description="KB-extracted PricingRateCard (T5.1) persisted for binding + agents.",
     )
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None

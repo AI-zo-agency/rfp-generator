@@ -1138,6 +1138,10 @@ def validate_budget_canonical(budget: ProposalBudget) -> list[str]:
     if _VERIFY_BEFORE_SUBMIT_RE.search(rendered):
         errors.append("rendered budget markdown still contains verify-before-submission language")
 
+    from app.services.pricing_rate_binding import collect_unbound_line_item_violations
+
+    errors.extend(collect_unbound_line_item_violations(budget))
+
     return errors
 
 

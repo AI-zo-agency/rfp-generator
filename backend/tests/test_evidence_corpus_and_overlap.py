@@ -120,6 +120,7 @@ class OverlapDetectorTests(unittest.TestCase):
             settings.t1_gates_block = False
             settings.consistency_criticals_block = False
             settings.overlap_gates_block = False
+            settings.money_slots_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft,
                 research=None,
@@ -141,6 +142,7 @@ class OverlapDetectorTests(unittest.TestCase):
             settings.t1_gates_block = False
             settings.consistency_criticals_block = False
             settings.overlap_gates_block = True
+            settings.money_slots_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft,
                 research=None,

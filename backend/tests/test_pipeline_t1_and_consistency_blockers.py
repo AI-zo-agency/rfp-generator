@@ -119,6 +119,8 @@ class ExistingBlockersUnchangedTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = False
             settings.consistency_criticals_block = False
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=_rfp()
             )
@@ -142,6 +144,8 @@ class T1GateBlockerTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = False
             settings.consistency_criticals_block = False
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=_rfp()
             )
@@ -155,6 +159,8 @@ class T1GateBlockerTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = True
             settings.consistency_criticals_block = False
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             with self.assertRaises(ProposalError) as ctx:
                 assert_manuscript_ready(
                     draft=draft, research=research, rfp=_rfp(), require_budget=True
@@ -171,6 +177,8 @@ class T1GateBlockerTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = True
             settings.consistency_criticals_block = False
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=_rfp()
             )
@@ -182,6 +190,8 @@ class T1GateBlockerTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = True
             settings.consistency_criticals_block = False
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=_rfp()
             )
@@ -195,6 +205,8 @@ class T1GateBlockerTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = True
             settings.consistency_criticals_block = False
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=_rfp()
             )
@@ -212,6 +224,8 @@ class T1GateBlockerTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = True
             settings.consistency_criticals_block = False
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=_rfp()
             )
@@ -249,6 +263,8 @@ class ConsistencyCriticalBlockerTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = False
             settings.consistency_criticals_block = True
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=_rfp()
             )
@@ -259,6 +275,8 @@ class ConsistencyCriticalBlockerTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = False
             settings.consistency_criticals_block = False
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers_off = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=_rfp()
             )
@@ -304,6 +322,8 @@ class ConsistencyCriticalBlockerTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = False
             settings.consistency_criticals_block = True
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=_rfp()
             )
@@ -346,6 +366,8 @@ class FixtureIntegrationTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = True
             settings.consistency_criticals_block = False
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=rfp
             )
@@ -379,6 +401,8 @@ class FixtureIntegrationTests(unittest.TestCase):
         with mock.patch("app.services.proposal_pipeline_status.settings") as settings:
             settings.t1_gates_block = True
             settings.consistency_criticals_block = False
+            settings.money_slots_block = False
+            settings.overlap_gates_block = False
             blockers = collect_manuscript_blockers(
                 draft=draft, research=research, rfp=rfp
             )
