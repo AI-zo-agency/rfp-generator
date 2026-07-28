@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     # T1_GATES_BLOCK — promote note-leak / truncation T1 findings to blockers.
     t1_gates_block: bool = False
 
+    # W6 — shared Phase 2 evidence corpus + duplication enforcement.
+    # PERSIST_PHASE2_EVIDENCE_CORPUS — store retrieved writing assets at end of Phase 2.
+    persist_phase2_evidence_corpus: bool = True
+    # JIT_RETRIEVAL_ON_MISS — if section has no shared-corpus hits, fall back to JIT.
+    jit_retrieval_on_miss: bool = True
+    # OVERLAP_GATES_BLOCK — promote high Jaccard overlap findings to readiness blockers.
+    overlap_gates_block: bool = False
+
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     supabase_rfp_bucket: str = "rfp-pdfs"

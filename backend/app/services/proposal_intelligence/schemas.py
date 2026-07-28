@@ -480,7 +480,7 @@ class ProposalExecutionPlan(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    evidence_corpus_rule: ClassVar[str] = "phase3_only"
+    evidence_corpus_rule: ClassVar[str] = "phase2_shared_with_jit_fallback"
 
     metadata: PlanMetadata = Field(default_factory=PlanMetadata)
     opportunity: OpportunityIntelligence = Field(default_factory=OpportunityIntelligence)

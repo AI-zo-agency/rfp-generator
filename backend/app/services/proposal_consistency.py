@@ -461,6 +461,56 @@ def scan_manuscript_consistency(
             )
         )
 
+    # T2 Fact Ledger consistency — detection always; blocking via consistency_criticals_block.
+    from app.services.fact_ledger_store import ledger_from_research
+    from app.services.proposal_t2_validators import scan_all_t2
+
+    ledger = ledger_from_research(research)
+    for finding in scan_all_t2(draft, ledger):
+        issues.append(
+            PreSubmitIssue(
+                severity="critical" if finding["severity"] == "critical" else "warning",
+                category=str(finding["category"]),
+                message=f"[T2:{finding['code']}] {finding['message']}",
+                sectionId=finding.get("section_id"),
+                sectionTitle=finding.get("section_title"),
+                excerpt=finding.get("excerpt"),
+            )
+        )
+
+    # T5.3 — orphan commission narrative (derived fee without media base in manuscript).
+    from app.services.proposal_budget_validation import find_orphan_commission_in_manuscript
+
+    manuscript_blob = "\n".join(s.content or "" for s in draft.sections)
+    for msg in find_orphan_commission_in_manuscript(manuscript_blob):
+        issues.append(
+            PreSubmitIssue(
+                severity="critical",
+                category="budget",
+                message=msg,
+            )
+        )
+
+    # T6.3 — cross-section n-gram overlap on full bodies (not truncated digests).
+    from app.services.proposal_overlap_detector import detect_section_overlaps
+
+    overlap_findings = detect_section_overlaps(
+        (s.id, s.content or "") for s in draft.sections
+    )
+    for finding in overlap_findings:
+        issues.append(
+            PreSubmitIssue(
+                severity="critical" if finding.severity == "critical" else "warning",
+                category="duplication",
+                message=f"[T6:overlap] {finding.message}",
+                sectionId=finding.section_a_id,
+                excerpt=(
+                    f"vs {finding.section_b_id}; jaccard={finding.jaccard}; "
+                    f"shared={finding.shared_ngrams}"
+                ),
+            )
+        )
+
     return issues
 
 

@@ -424,6 +424,87 @@ def collect_one_time_recurring_violations(budget: ProposalBudget) -> list[str]:
     return violations
 
 
+_COMMISSION_LINE_RE = re.compile(r"\bcommission\b", re.I)
+_COMMISSION_PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+_MONEY_RE = re.compile(r"\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)")
+
+
+def collect_orphan_commission_violations(budget: ProposalBudget) -> list[str]:
+    """Derived commission fee cannot exist without a media/pass-through base (T5.3)."""
+    violations: list[str] = []
+    _, _, passthrough = split_line_item_totals(budget.line_items)
+    stored_pt = float(budget.client_media_passthrough or 0)
+    base = max(passthrough, stored_pt)
+    for item in budget.line_items:
+        desc = item.description or ""
+        if not _COMMISSION_LINE_RE.search(desc):
+            continue
+        if infer_line_item_type(item) == "client_passthrough":
+            continue
+        ext = float(item.extended or 0)
+        if ext <= 0:
+            continue
+        if base <= 0.01:
+            violations.append(
+                f"{item.id}: orphan commission ${ext:,.2f} with no client media "
+                f"pass-through / media base line — add the buy base or drop the derived fee"
+            )
+    return violations
+
+
+def find_orphan_commission_in_manuscript(text: str) -> list[str]:
+    """Narrative commission $ with % but missing implied base amount in the manuscript."""
+    blob = text or ""
+    if not _COMMISSION_LINE_RE.search(blob):
+        return []
+    findings: list[str] = []
+    # Sentence-ish windows containing "commission" and a dollar amount + optional %.
+    for match in re.finditer(
+        r"(?i)[^.!\n]{0,120}commission[^.!\n]{0,160}",
+        blob,
+    ):
+        window = match.group(0)
+        money = _MONEY_RE.findall(window)
+        if not money:
+            continue
+        pct_m = _COMMISSION_PCT_RE.search(window)
+        if not pct_m:
+            continue
+        pct = float(pct_m.group(1))
+        if pct <= 0 or pct > 100:
+            continue
+        # Prefer the commission dollar (usually smaller than a media base).
+        amounts = [float(m.replace(",", "")) for m in money]
+        commission = min(amounts)
+        rate = pct / 100.0
+        expected_base = round(commission / rate, 2)
+        # Accept formatting variants of the base in the full manuscript.
+        base_needles = {
+            f"{expected_base:,.2f}",
+            f"{expected_base:.2f}",
+            f"{expected_base:,.0f}",
+            f"{expected_base:.0f}",
+        }
+        if any(n in blob.replace(" ", "") or n in blob for n in base_needles):
+            # Also require a $-prefixed or plain occurrence
+            if any(
+                f"${n}" in blob or n in blob
+                for n in base_needles
+            ):
+                continue
+        # Stronger check: normalized digits only
+        digits_blob = re.sub(r"[^\d]", "", blob)
+        digits_base = re.sub(r"[^\d]", "", f"{expected_base:.2f}")
+        digits_base_int = re.sub(r"[^\d]", "", f"{expected_base:.0f}")
+        if digits_base in digits_blob or digits_base_int in digits_blob:
+            continue
+        findings.append(
+            f"Orphan commission ${commission:,.2f} at {pct:g}% implies media base "
+            f"${expected_base:,.2f}, which does not appear in the manuscript"
+        )
+    return findings
+
+
 def is_commission_style_budget(budget: ProposalBudget) -> bool:
     if budget.commission_model and _COMMISSION_MODEL_RE.search(budget.commission_model):
         return True
@@ -1016,6 +1097,7 @@ def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
     violations.extend(collect_pm_ratio_violations(budget))
     violations.extend(collect_line_item_math_violations(budget))
     violations.extend(collect_one_time_recurring_violations(budget))
+    violations.extend(collect_orphan_commission_violations(budget))
     violations.extend(collect_pm_floor_violations(budget))
 
     return violations

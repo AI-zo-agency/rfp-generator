@@ -16,7 +16,7 @@ class ProposalIntelligenceSchemaTests(unittest.TestCase):
         self.assertEqual(again.metadata.rfp_id, "rfp-1")
         self.assertEqual(again.proposal_memory.facts, {})
         self.assertIsNone(again.writing.reviewer_personas)
-        self.assertEqual(again.evidence_corpus_rule, "phase3_only")
+        self.assertEqual(again.evidence_corpus_rule, "phase2_shared_with_jit_fallback")
 
     def test_research_cache_accepts_execution_plan(self) -> None:
         plan = ProposalExecutionPlan(rfpId="rfp-1")

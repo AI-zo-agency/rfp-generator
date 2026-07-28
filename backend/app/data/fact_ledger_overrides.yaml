@@ -1,0 +1,16 @@
+# Fact Ledger overrides — human-approved single values for proposal generation.
+# KB may keep conflicting numbers; generation uses these when present.
+#
+# Keys: subject_id + claim_class + field_name
+# Edit with Sonja/Ella sign-off; do not invent values here.
+
+overrides:
+  - subjectId: person:ron-comer
+    subjectType: person
+    claimClass: years_experience
+    fieldName: years_experience
+    valueNumber: 35
+    valueText: "35+ years"
+    unit: years
+    reason: "Primary bio sheet is authoritative for proposal drafts"
+    approvedBy: Sonja

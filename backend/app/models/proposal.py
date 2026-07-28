@@ -412,6 +412,16 @@ class ProposalResearchCache(BaseModel):
     proposal_execution_plan: Any | None = Field(
         default=None, alias="proposalExecutionPlan"
     )
+    fact_ledger: dict[str, Any] | None = Field(
+        default=None,
+        alias="factLedger",
+        description="Canonical FactLedger payload (W4) for typed cross-section claims.",
+    )
+    evidence_allocation: dict[str, Any] | None = Field(
+        default=None,
+        alias="evidenceAllocation",
+        description="EvidenceAllocationLedger payload (W6) — exclusive ownership of reusable assets.",
+    )
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None
 

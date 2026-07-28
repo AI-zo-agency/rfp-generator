@@ -291,6 +291,7 @@ async def _redraft_section_via_phase3_isolated(
                 if research and research.proposal_execution_plan
                 else None
             ),
+            evidence_allocation=research.evidence_allocation if research else None,
             rewrite_brief=rewrite_brief,
         )
     except Exception as exc:  # noqa: BLE001

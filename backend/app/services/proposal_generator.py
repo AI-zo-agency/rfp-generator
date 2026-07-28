@@ -937,7 +937,7 @@ def _load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]
 
 
 async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
-    """Phase 2: Proposal Intelligence Layer → ProposalExecutionPlan (no writing evidence)."""
+    """Phase 2: Proposal Intelligence Layer → plan + optional shared evidence corpus."""
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
@@ -994,13 +994,42 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         roster_excerpt=roster_excerpt or "",
     )
 
+    from app.core.config import settings as app_settings
+    from app.services.evidence_allocator import build_evidence_allocation_ledger
+    from app.services.evidence_corpus_builder import build_shared_evidence_corpus
+
+    evidence_corpus: list = []
+    evidence_allocation = None
+    if app_settings.persist_phase2_evidence_corpus:
+        evidence_corpus = await build_shared_evidence_corpus(
+            plan=plan,
+            rfp_client=rfp.client,
+            proof_points=proof_points,
+        )
+        evidence_allocation = build_evidence_allocation_ledger(
+            proof_points=proof_points,
+            evidence_corpus=evidence_corpus,
+            rfp_sections=rfp_sections,
+        )
+        logger.info(
+            "Phase 2 shared corpus persisted for %s: items=%d allocation_entries=%d",
+            rfp_id,
+            len(evidence_corpus),
+            len(evidence_allocation.entries),
+        )
+    else:
+        logger.info(
+            "Phase 2 corpus persistence disabled (persist_phase2_evidence_corpus=false) for %s",
+            rfp_id,
+        )
+
     now = datetime.now(timezone.utc).isoformat()
     research = ProposalResearchCache(
         rfpId=rfp.id,
         rfpSections=rfp_sections,
         questions=prior_research.questions if prior_research else [],
         brandVoice=prior_research.brand_voice if prior_research else None,
-        evidenceCorpus=[],  # HARD RULE: writing evidence only in Phase 3
+        evidenceCorpus=evidence_corpus,
         sectionQueries=section_queries,
         retrievalRounds=0,
         coverageThreshold=85,
@@ -1012,17 +1041,22 @@ async def run_phase2_retrieval(rfp_id: str) -> ProposalResearchCache:
         budget=prior_research.budget if prior_research else None,
         presubmitReview=prior_research.presubmit_review if prior_research else None,
         pipelineCheckpoint=prior_research.pipeline_checkpoint if prior_research else None,
+        factLedger=prior_research.fact_ledger if prior_research else None,
+        evidenceAllocation=(
+            evidence_allocation.model_dump(by_alias=True) if evidence_allocation else None
+        ),
         updatedAt=now,
         provider=plan.metadata.provider,
     )
     await asave_research_cache(research)
 
     logger.info(
-        "Phase 2 complete for %s: plan=%s sections=%d decisions=%d evidence=0",
+        "Phase 2 complete for %s: plan=%s sections=%d decisions=%d evidence=%d",
         rfp_id,
         plan.validation.readiness_status,
         len(rfp_sections),
         len(plan.decision_log),
+        len(evidence_corpus),
     )
     for index, section in enumerate(rfp_sections, 1):
         logger.info(
@@ -1627,6 +1661,8 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
             if hasattr(research.proposal_execution_plan, "model_dump")
             else research.proposal_execution_plan
         ),
+        fact_ledger=research.fact_ledger,
+        evidence_allocation=research.evidence_allocation,
         on_sections_drafted=_on_phase3_batch,
     )
 

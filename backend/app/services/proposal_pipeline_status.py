@@ -64,6 +64,24 @@ def _t1_gate_blockers(draft: ProposalDraft) -> list[str]:
     return t1_findings_as_blocker_messages(findings)
 
 
+def _overlap_gate_blockers(draft: ProposalDraft) -> list[str]:
+    from app.services.proposal_overlap_detector import detect_section_overlaps
+
+    blockers: list[str] = []
+    for finding in detect_section_overlaps(
+        (s.id, s.content or "") for s in draft.sections
+    ):
+        if finding.severity != "critical":
+            continue
+        blockers.append(
+            f"Overlap critical between {finding.section_a_id} and "
+            f"{finding.section_b_id}: Jaccard={finding.jaccard}"
+        )
+    if blockers:
+        logger.info("overlap_gate_blockers count=%s", len(blockers))
+    return blockers
+
+
 def collect_manuscript_blockers(
     *,
     draft: ProposalDraft,
@@ -118,6 +136,9 @@ def collect_manuscript_blockers(
     # Optional flagged gates — never weaken the existing blocker list above.
     if settings.t1_gates_block:
         blockers.extend(_t1_gate_blockers(draft))
+
+    if settings.overlap_gates_block:
+        blockers.extend(_overlap_gate_blockers(draft))
 
     if settings.consistency_criticals_block and rfp is not None:
         blockers.extend(

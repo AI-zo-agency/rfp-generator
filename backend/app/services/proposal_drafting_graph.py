@@ -157,6 +157,8 @@ class DraftingGraphState(TypedDict, total=False):
     loss_lessons: list[dict[str, Any]]
     proof_points: list[dict[str, Any]]
     manuscript_locks: dict[str, Any] | None
+    fact_ledger: dict[str, Any] | None
+    evidence_allocation: dict[str, Any] | None
     drafted_sections: list[dict[str, Any]]
     provider: str
     error: str | None
@@ -511,7 +513,9 @@ async def _ensure_jit_evidence(
     state: DraftingGraphState,
     section_id: str,
 ) -> list[dict[str, Any]]:
-    """JIT-retrieve for a section using retrievalPlan; merge into state corpus."""
+    """Prefer shared Phase 2 corpus; JIT only on miss when flagged (W6 / T6.1)."""
+    from app.core.config import settings as app_settings
+
     corpus = list(state.get("evidence_corpus") or [])
     tagged = _evidence_for_section(section_id, corpus)
 
@@ -561,7 +565,20 @@ async def _ensure_jit_evidence(
             return tagged
 
     if tagged:
+        logger.debug(
+            "phase3_using_shared_corpus section=%s hits=%d",
+            section_id,
+            len(tagged),
+        )
         return tagged
+
+    if not app_settings.jit_retrieval_on_miss:
+        logger.info(
+            "phase3_jit_skipped_no_section_hits section=%s corpus_size=%d",
+            section_id,
+            len(corpus),
+        )
+        return corpus[:12]
 
     if not entry_raw:
         return corpus[:12]
@@ -574,6 +591,10 @@ async def _ensure_jit_evidence(
     except Exception:
         return corpus[:12]
 
+    logger.info(
+        "phase3_jit_fallback section=%s reason=no_shared_corpus_hits",
+        section_id,
+    )
     start = len(corpus) + 1
     items = await retrieve_for_section(
         entry,
@@ -766,6 +787,29 @@ async def _draft_batch_once(
             if block:
                 user_content += f"{block}\n\n"
                 break
+
+    from app.models.evidence_allocation import EvidenceAllocationLedger
+    from app.services.evidence_allocator import drafting_exclusion_contract
+
+    alloc_raw = state.get("evidence_allocation")
+    alloc_ledger = None
+    if isinstance(alloc_raw, EvidenceAllocationLedger):
+        alloc_ledger = alloc_raw
+    elif isinstance(alloc_raw, dict):
+        try:
+            alloc_ledger = EvidenceAllocationLedger.model_validate(alloc_raw)
+        except Exception:
+            alloc_ledger = None
+    if alloc_ledger:
+        for payload in batch_payload:
+            contract = drafting_exclusion_contract(
+                alloc_ledger,
+                section_id=str(payload.get("sectionId") or ""),
+            )
+            if contract:
+                user_content += (
+                    f"For section {payload.get('sectionId')}:\n{contract}\n\n"
+                )
 
     if any(is_modular_approach_section(str(p.get("title") or "")) for p in batch_payload):
         user_content += f"{MODULAR_APPROACH_BLOCK}\n\n"
@@ -1134,6 +1178,8 @@ async def run_drafting_graph(
     proof_points: list | None = None,
     manuscript_locks: dict[str, Any] | None = None,
     execution_plan: dict[str, Any] | None = None,
+    fact_ledger: dict[str, Any] | None = None,
+    evidence_allocation: dict[str, Any] | None = None,
     on_sections_drafted: SectionDraftedCallback | None = None,
 ) -> tuple[list[ProposalSection], str, list[EvidenceItem]]:
     if not llm.is_configured():
@@ -1149,6 +1195,14 @@ async def run_drafting_graph(
     locks_dict = manuscript_locks
     if locks_dict is not None and hasattr(locks_dict, "model_dump"):
         locks_dict = locks_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
+
+    ledger_dict = fact_ledger
+    if ledger_dict is not None and hasattr(ledger_dict, "model_dump"):
+        ledger_dict = ledger_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
+
+    alloc_dict = evidence_allocation
+    if alloc_dict is not None and hasattr(alloc_dict, "model_dump"):
+        alloc_dict = alloc_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
 
     initial: DraftingGraphState = {
         "rfp_id": rfp_id,
@@ -1171,6 +1225,8 @@ async def run_drafting_graph(
             for p in (proof_points or [])
         ],
         "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
+        "fact_ledger": ledger_dict if isinstance(ledger_dict, dict) else None,
+        "evidence_allocation": alloc_dict if isinstance(alloc_dict, dict) else None,
         "drafted_sections": [],
         "llm_semaphore": asyncio.Semaphore(LLM_CONCURRENCY),
     }
@@ -1221,6 +1277,7 @@ async def draft_single_rfp_section_phase3(
     proof_points: list | None = None,
     manuscript_locks: dict[str, Any] | None = None,
     execution_plan: dict[str, Any] | None = None,
+    evidence_allocation: dict[str, Any] | None = None,
     rewrite_brief: str = "",
 ) -> tuple[ProposalSection, str, list[EvidenceItem]]:
     """Phase 3 drafting path for exactly one RFP-mapped section (Senior Editor tickets)."""
@@ -1237,6 +1294,10 @@ async def draft_single_rfp_section_phase3(
     locks_dict = manuscript_locks
     if locks_dict is not None and hasattr(locks_dict, "model_dump"):
         locks_dict = locks_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
+
+    alloc_dict = evidence_allocation
+    if alloc_dict is not None and hasattr(alloc_dict, "model_dump"):
+        alloc_dict = alloc_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
 
     section_dump = section.model_dump(by_alias=True)
     if rewrite_brief.strip():
@@ -1266,6 +1327,8 @@ async def draft_single_rfp_section_phase3(
             for p in (proof_points or [])
         ],
         "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
+        "fact_ledger": None,
+        "evidence_allocation": alloc_dict if isinstance(alloc_dict, dict) else None,
         "drafted_sections": [],
         "llm_semaphore": asyncio.Semaphore(LLM_CONCURRENCY),
     }
