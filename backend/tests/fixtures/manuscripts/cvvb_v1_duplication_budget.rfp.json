@@ -1,0 +1,13 @@
+{
+  "id": "fixture-cvvb-v1-rfp",
+  "title": "Visitor Bureau Marketing Services RFP (Sanitised)",
+  "client": "Central Valley Visitor Bureau",
+  "dueDate": "2026-08-30",
+  "receivedDate": "2026-05-15",
+  "lastActivity": "2026-07-10T15:00:00Z",
+  "lastActivityNote": "synthetic fixture — not a live RFP",
+  "sector": "Tourism",
+  "location": "California",
+  "status": "in_progress",
+  "stage": "pricing"
+}

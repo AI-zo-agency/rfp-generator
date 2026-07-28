@@ -446,6 +446,21 @@ def scan_manuscript_consistency(
                 )
             )
 
+    # T1 deterministic gates — always reported; blocking is gated in pipeline_status.
+    from app.services.proposal_t1_validators import scan_all_t1
+
+    for finding in scan_all_t1(draft):
+        issues.append(
+            PreSubmitIssue(
+                severity="critical" if finding["severity"] == "critical" else "warning",
+                category=str(finding["category"]),
+                message=f"[T1:{finding['code']}] {finding['message']}",
+                sectionId=finding.get("section_id"),
+                sectionTitle=finding.get("section_title"),
+                excerpt=finding.get("excerpt"),
+            )
+        )
+
     return issues
 
 

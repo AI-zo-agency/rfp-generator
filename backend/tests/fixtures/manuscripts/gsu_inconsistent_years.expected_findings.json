@@ -1,0 +1,4 @@
+{
+  "critical": ["years_inconsistency", "invented_staffing_hours"],
+  "warning": []
+}

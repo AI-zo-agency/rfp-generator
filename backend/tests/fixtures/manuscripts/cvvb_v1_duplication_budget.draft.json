@@ -1,0 +1,40 @@
+{
+  "rfpId": "fixture-cvvb-v1-rfp",
+  "updatedAt": "2026-07-10T15:00:00Z",
+  "generatedAt": "2026-07-10T15:00:00Z",
+  "provider": "fixture",
+  "sections": [
+    {
+      "id": "s10",
+      "title": "Understanding of Need",
+      "content": "The Central Valley Visitor Bureau seeks a marketing partner who can grow overnight stays while protecting destination brand equity. We propose an integrated program spanning brand, media, and content.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s13",
+      "title": "Investment and Commercial Terms",
+      "content": "## Investment Framing\nOur investment approach balances accountability with flexibility. We structure fees around deliverable milestones so the client can see progress at every stage. Transparent reporting keeps stakeholders aligned without administrative burden.\n\n## Scope Protection\nScope is protected through a change-order protocol agreed at kickoff. Out-of-scope requests are logged, estimated, and approved before work begins. This protects both the schedule and the budget envelope.\n\n## Reimbursable Expenses\nReimbursable expenses cover media placements, travel, and third-party production as approved. Pass-through costs are invoiced at cost with documentation. No markup is applied to client-approved media buys.\n\nYear 1 agency revenue is $325,242.66. Client media pass-through is $325,242.66. Grand total client invoicing is $325,242.66.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s14",
+      "title": "Budget Narrative",
+      "content": "The commercial summary below restates our Year 1 envelope for ease of evaluation.\n\n## Investment Framing\nOur investment approach balances accountability with flexibility. We structure fees around deliverable milestones so the client can see progress at every stage. Transparent reporting keeps stakeholders aligned without administrative burden.\n\n## Scope Protection\nScope is protected through a change-order protocol agreed at kickoff. Out-of-scope requests are logged, estimated, and approved before work begins. This protects both the schedule and the budget envelope.\n\n## Reimbursable Expenses\nReimbursable expenses cover media placements, travel, and third-party production as approved. Pass-through costs are invoiced at cost with documentation. No markup is applied to client-approved media buys.\n\nAgency revenue: $325,242.66. Media pass-through: $325,242.66. Grand total: $325,242.66.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s18",
+      "title": "Contract Exceptions and Fees",
+      "content": "Fee language for the MSA addendum mirrors the commercial narrative.\n\n## Investment Framing\nOur investment approach balances accountability with flexibility. We structure fees around deliverable milestones so the client can see progress at every stage. Transparent reporting keeps stakeholders aligned without administrative burden.\n\n## Scope Protection\nScope is protected through a change-order protocol agreed at kickoff. Out-of-scope requests are logged, estimated, and approved before work begins. This protects both the schedule and the budget envelope.\n\n## Reimbursable Expenses\nReimbursable expenses cover media placements, travel, and third-party production as approved. Pass-through costs are invoiced at cost with documentation. No markup is applied to client-approved media buys.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    }
+  ]
+}

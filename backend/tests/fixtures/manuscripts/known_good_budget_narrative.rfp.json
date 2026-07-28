@@ -1,0 +1,13 @@
+{
+  "id": "fixture-known-good-budget-rfp",
+  "title": "Tourism Marketing Partnership RFP (Sanitised)",
+  "client": "Santa Clara County Tourism",
+  "dueDate": "2026-11-01",
+  "receivedDate": "2026-07-01",
+  "lastActivity": "2026-07-20T14:00:00Z",
+  "lastActivityNote": "synthetic known-good budget fixture",
+  "sector": "Tourism",
+  "location": "California",
+  "status": "in_progress",
+  "stage": "pricing"
+}

@@ -1,0 +1,29 @@
+{
+  "rfpId": "fixture-cvvb-v1-rfp",
+  "updatedAt": "2026-07-10T15:00:00Z",
+  "budget": {
+    "rfpId": "fixture-cvvb-v1-rfp",
+    "pricingTier": "Average",
+    "updatedAt": "2026-07-10T15:00:00Z",
+    "lineItems": [
+      {
+        "id": "fee-1",
+        "category": "Fees",
+        "description": "Agency fee — Year 1",
+        "extended": 156742.66,
+        "lineItemType": "agency_fee"
+      },
+      {
+        "id": "media-1",
+        "category": "Media",
+        "description": "Client media pass-through",
+        "extended": 168500.0,
+        "lineItemType": "client_passthrough"
+      }
+    ],
+    "agencyRevenueEstimate": 156742.66,
+    "agencyFeeSubtotal": 156742.66,
+    "clientMediaPassthrough": 168500.0,
+    "totalClientInvoicing": 325242.66
+  }
+}

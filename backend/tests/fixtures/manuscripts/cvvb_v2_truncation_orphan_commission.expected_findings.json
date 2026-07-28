@@ -1,0 +1,10 @@
+{
+  "critical": [
+    "truncation_numeric_tail",
+    "mid_sentence_cutoff",
+    "internal_note_leak",
+    "orphan_commission",
+    "passthrough_mismatch"
+  ],
+  "warning": []
+}

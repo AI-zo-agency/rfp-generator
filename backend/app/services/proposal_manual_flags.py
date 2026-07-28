@@ -13,8 +13,10 @@ from app.services.proposal_rfp_compliance import ComplianceGap, scan_rfp_complia
 
 logger = logging.getLogger(__name__)
 
-# Colon-form, bare [MANUAL FILL], and [MANUAL FILL or N/A] (budget/questionnaire stubs).
-MANUAL_FILL_TAG_RE = re.compile(r"\[MANUAL\s+FILL[^\]]*\]", re.I)
+# Broader than plan's FILL(?::[^\]]*)? — also covers [MANUAL FILL or N/A] budget stubs.
+# Word boundary after FILL so [MANUAL FILLING:…] is not matched.
+# See docs/architecture/t2_5_manual_fill_reachability.md (T2.5).
+MANUAL_FILL_TAG_RE = re.compile(r"\[MANUAL\s+FILL\b[^\]]*\]", re.I)
 VERIFY_TAG_RE = re.compile(r"\[VERIFY:\s*([^\]]+)\]", re.I)
 PLACEHOLDER_TAG_RE = re.compile(r"\[(?:PLACEHOLDER|INSERT|TBD)[^\]]+\]", re.I)
 GENERIC_VERIFY_RE = re.compile(r"\[VERIFY\]", re.I)

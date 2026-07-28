@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # Phase 1: decision-first Company Qualification Layer for Section 1.
     use_company_qualification_s1: bool = False
 
+    # State-canonicalization gates (detection always available; blocking is flagged).
+    # CONSISTENCY_CRITICALS_BLOCK — promote scan_manuscript_consistency criticals
+    # into assert_manuscript_ready blockers (default off until FP review).
+    consistency_criticals_block: bool = False
+    # T1_GATES_BLOCK — promote note-leak / truncation T1 findings to blockers.
+    t1_gates_block: bool = False
+
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     supabase_rfp_bucket: str = "rfp-pdfs"

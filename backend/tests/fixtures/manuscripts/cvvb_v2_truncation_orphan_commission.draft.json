@@ -1,0 +1,40 @@
+{
+  "rfpId": "fixture-cvvb-v2-rfp",
+  "updatedAt": "2026-07-12T09:00:00Z",
+  "generatedAt": "2026-07-12T09:00:00Z",
+  "provider": "fixture",
+  "sections": [
+    {
+      "id": "s12",
+      "title": "Team Credentials",
+      "content": "Named staff biographies are available upon request. Full resumes and bio summaries for each named",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s14",
+      "title": "Budget Summary",
+      "content": "Year 1 commercial totals are as follows. Client media pass-through totals $325,242.66 for planned placements. Agency fee work is billed separately under the MSA. Total Year 1 client invoicing: $325,242.66. 66 ($325,242.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s17",
+      "title": "References",
+      "content": "Our reference set includes recent destination and civic clients. [FLAG FOR SONJA: Add Recovery Network of Oregon to references] Contact details will be provided after shortlist notification.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s18",
+      "title": "Pass-Through and Commission",
+      "content": "Client media pass-through for Year 1 is $0.00 under the current table. Commission on media placements is $16,875.00 (15% of planned buys). The commission line is presented without a corresponding $112,500 media base line item in the budget table.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    }
+  ]
+}

@@ -13,6 +13,7 @@ from app.services.llm_call_context import (
     get_llm_rfp_id,
     get_llm_run_id,
 )
+from app.services.llm_routing import resolve_fireworks_eligibility
 from app.services.llm_pricing import estimate_cost_usd, estimate_tokens_from_chars
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,45 @@ _LlmPostResult = tuple[str, dict[str, Any]]
 
 # Process-local: once Fireworks returns 412, never call it again this process.
 _FIREWORKS_SUSPENDED = False
+
+
+def _provider_routing(
+    *,
+    max_tokens: int | None,
+    node_name: str | None,
+) -> tuple[str, bool, bool, bool]:
+    """Return (resolved_node, skip_gemini_for_prefer, skip_openrouter_for_prefer, allow_fireworks).
+
+    Raises LlmError when the request exceeds Fireworks' cap and no alternative exists.
+    """
+    resolved_node = node_name if node_name is not None else get_llm_node_name()
+    openrouter_available = bool(_openrouter_key())
+    gemini_key = settings.gemini_api_key.strip()
+    gemini_available = bool(gemini_key and not _is_placeholder_key(gemini_key))
+    decision = resolve_fireworks_eligibility(
+        requested_max_tokens=max_tokens,
+        prefer_fireworks=settings.llm_prefer_fireworks,
+        node_name=resolved_node,
+        openrouter_available=openrouter_available,
+        gemini_available=gemini_available,
+    )
+    if decision.must_raise:
+        raise LlmError(
+            decision.block_reason
+            or (
+                "Requested max_tokens exceeds Fireworks output cap and no "
+                "alternative provider is configured"
+            ),
+            status_code=503,
+        )
+    if decision.block_reason:
+        logger.info("LLM routing: %s (node=%s)", decision.block_reason, resolved_node or "unknown")
+
+    # Prefer-Fireworks only when eligibility does not force skip (quality-critical / over-cap).
+    prefer_fw = settings.llm_prefer_fireworks and not decision.skip_prefer_fireworks
+    skip_gemini = settings.llm_prefer_openrouter or prefer_fw
+    skip_openrouter = prefer_fw
+    return resolved_node, skip_gemini, skip_openrouter, decision.allow_fireworks
 
 
 def resolve_llm_model(tier: LlmTier = "heavy") -> str:
@@ -380,9 +420,15 @@ async def chat_json(
     skip_fireworks_fallback = False
     started = time.perf_counter()
 
+    _resolved_node, skip_gemini, skip_openrouter, allow_fireworks = _provider_routing(
+        max_tokens=max_tokens,
+        node_name=node_name,
+    )
+    if node_name is None:
+        node_name = _resolved_node or None
+
     # Try Gemini first if API key is configured and not skipped by preferences
     gemini_key = settings.gemini_api_key.strip()
-    skip_gemini = settings.llm_prefer_openrouter or settings.llm_prefer_fireworks
     if gemini_key and not _is_placeholder_key(gemini_key) and not skip_gemini:
         try:
             raw, usage = await _post_gemini_chat(
@@ -409,7 +455,6 @@ async def chat_json(
             started = time.perf_counter()
 
     openrouter_key = _openrouter_key()
-    skip_openrouter = settings.llm_prefer_fireworks
     if openrouter_key and not skip_openrouter:
         try:
             raw, usage = await _post_chat(
@@ -450,9 +495,14 @@ async def chat_json(
 
     fireworks_key = _fireworks_key()
     fireworks_failed = False
-    if fireworks_key and not _FIREWORKS_SUSPENDED and not skip_fireworks_fallback:
+    if (
+        fireworks_key
+        and not _FIREWORKS_SUSPENDED
+        and not skip_fireworks_fallback
+        and allow_fireworks
+    ):
         try:
-            # Scale with caller request — hard cap 8192 (pricing budgets need room).
+            # Only reached when requested ≤ Fireworks cap (T3.1 — no silent under-serve).
             requested = max_tokens or 4096
             fireworks_tokens = min(requested, 8192)
             raw, usage = await _post_chat(
@@ -600,8 +650,14 @@ async def chat_text(
     openrouter_model = resolve_llm_model(tier)
     started = time.perf_counter()
 
+    _resolved_node, skip_gemini, skip_openrouter, allow_fireworks = _provider_routing(
+        max_tokens=max_tokens,
+        node_name=node_name,
+    )
+    if node_name is None:
+        node_name = _resolved_node or None
+
     gemini_key = settings.gemini_api_key.strip()
-    skip_gemini = settings.llm_prefer_openrouter or settings.llm_prefer_fireworks
     if gemini_key and not _is_placeholder_key(gemini_key) and not skip_gemini:
         try:
             raw, usage = await _post_gemini_chat(
@@ -628,7 +684,6 @@ async def chat_text(
             started = time.perf_counter()
 
     openrouter_key = _openrouter_key()
-    skip_openrouter = settings.llm_prefer_fireworks
     if openrouter_key and not skip_openrouter:
         try:
             raw, usage = await _post_chat(
@@ -662,7 +717,7 @@ async def chat_text(
 
     fireworks_key = _fireworks_key()
     fireworks_failed = False
-    if fireworks_key and not _FIREWORKS_SUSPENDED:
+    if fireworks_key and not _FIREWORKS_SUSPENDED and allow_fireworks:
         try:
             requested = max_tokens or 4096
             fireworks_tokens = min(requested, 8192)

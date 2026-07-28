@@ -1,0 +1,31 @@
+{
+  "rfpId": "fixture-cvvb-v2-rfp",
+  "updatedAt": "2026-07-12T09:00:00Z",
+  "budget": {
+    "rfpId": "fixture-cvvb-v2-rfp",
+    "pricingTier": "Average",
+    "updatedAt": "2026-07-12T09:00:00Z",
+    "lineItems": [
+      {
+        "id": "fee-1",
+        "category": "Fees",
+        "description": "Agency fee — Year 1",
+        "extended": 156742.66,
+        "lineItemType": "agency_fee"
+      },
+      {
+        "id": "commission-orphan",
+        "category": "Media Commission",
+        "description": "Media commission (orphan — no $112,500 base buy line)",
+        "extended": 16875.0,
+        "lineItemType": "agency_fee",
+        "notes": "15% commission without corresponding media base line item"
+      }
+    ],
+    "agencyRevenueEstimate": 173617.66,
+    "agencyFeeSubtotal": 173617.66,
+    "clientMediaPassthrough": 0.0,
+    "totalClientInvoicing": 173617.66,
+    "commissionRate": 0.15
+  }
+}

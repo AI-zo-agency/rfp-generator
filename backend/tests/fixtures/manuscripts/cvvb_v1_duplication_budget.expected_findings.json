@@ -1,0 +1,4 @@
+{
+  "critical": ["boilerplate_duplication", "identical_budget_figures"],
+  "warning": []
+}

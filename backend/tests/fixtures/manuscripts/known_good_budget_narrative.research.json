@@ -1,0 +1,29 @@
+{
+  "rfpId": "fixture-known-good-budget-rfp",
+  "updatedAt": "2026-07-20T14:00:00Z",
+  "budget": {
+    "rfpId": "fixture-known-good-budget-rfp",
+    "pricingTier": "Average",
+    "updatedAt": "2026-07-20T14:00:00Z",
+    "lineItems": [
+      {
+        "id": "fee-1",
+        "category": "Fees",
+        "description": "Agency fee — Year 1",
+        "extended": 95000.0,
+        "lineItemType": "agency_fee"
+      },
+      {
+        "id": "media-1",
+        "category": "Media",
+        "description": "Client media pass-through",
+        "extended": 180000.0,
+        "lineItemType": "client_passthrough"
+      }
+    ],
+    "agencyRevenueEstimate": 95000.0,
+    "agencyFeeSubtotal": 95000.0,
+    "clientMediaPassthrough": 180000.0,
+    "totalClientInvoicing": 275000.0
+  }
+}

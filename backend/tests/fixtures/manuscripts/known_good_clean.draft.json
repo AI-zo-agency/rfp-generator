@@ -1,0 +1,40 @@
+{
+  "rfpId": "fixture-known-good-clean-rfp",
+  "updatedAt": "2026-07-15T10:00:00Z",
+  "generatedAt": "2026-07-15T10:00:00Z",
+  "provider": "fixture",
+  "sections": [
+    {
+      "id": "s1",
+      "title": "Cover Letter",
+      "content": "We are honored to propose a partnership with the City of Carbondale. Our team will deliver a clear brand platform, practical creative assets, and a measured rollout plan that respects municipal procurement requirements.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s4",
+      "title": "Approach",
+      "content": "Discovery workshops establish audience priorities and civic constraints. Creative development then translates those insights into a coherent visual and verbal system. Implementation includes templates, training, and a 90-day adoption calendar so staff can apply the brand consistently.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s7",
+      "title": "Key Personnel",
+      "content": "Maya Chen serves as Account Director with 12 years of municipal brand experience. Jordan Hale leads design with 9 years across civic and destination work. Their roles remain consistent throughout this manuscript: Maya owns client communications; Jordan owns design quality.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s9",
+      "title": "References",
+      "content": "References include three completed municipal brand engagements with permission to contact. Staff biographies and curricula vitae are enclosed in Appendix B.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    }
+  ]
+}

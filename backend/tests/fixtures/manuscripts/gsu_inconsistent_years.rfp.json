@@ -1,0 +1,13 @@
+{
+  "id": "fixture-gsu-rfp",
+  "title": "Marketing Communications Services RFP (Sanitised)",
+  "client": "Georgia State University",
+  "dueDate": "2026-09-15",
+  "receivedDate": "2026-06-01",
+  "lastActivity": "2026-07-01T12:00:00Z",
+  "lastActivityNote": "synthetic fixture — not a live RFP",
+  "sector": "Higher Education",
+  "location": "Atlanta, GA",
+  "status": "in_progress",
+  "stage": "sections_4_5"
+}

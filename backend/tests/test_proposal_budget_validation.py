@@ -8,9 +8,11 @@ from app.models.proposal import BudgetLineItem, ProposalBudget
 from app.services.proposal_budget_validation import (
     adjust_pm_line_items_to_guide,
     assert_budget_canonical,
+    collect_line_item_math_violations,
     collect_one_time_recurring_violations,
     collect_pm_ratio_violations,
     reconcile_proposal_budget,
+    scale_line_items_to_hard_cap,
 )
 
 
@@ -20,14 +22,108 @@ def _line(
     description: str,
     extended: float,
     category: str = "Digital Marketing",
+    rate: float | None = None,
+    quantity: float | None = None,
+    unit: str = "",
 ) -> BudgetLineItem:
     return BudgetLineItem(
         id=item_id,
         category=category,
         description=description,
         extended=extended,
+        rate=rate,
+        quantity=quantity,
+        unit=unit,
         lineItemType="agency_fee",
     )
+
+
+class RoundTripRateExtendedTests(unittest.TestCase):
+    """After scale, rate×qty must equal extended (cent-level round-trip)."""
+
+    def test_hard_cap_scale_keeps_rate_times_qty_equal_extended(self) -> None:
+        """Reproduce: rate=round(ext/qty,2) then round(rate*qty,2) ≠ ext."""
+        items = [
+            _line(
+                item_id="L1",
+                description="Phase 1 Discovery — stakeholder interviews",
+                extended=25_600.00,
+                rate=426.67,
+                quantity=60.0,
+                unit="hours",
+            ),
+            _line(
+                item_id="L2",
+                description="Phase 4 Implementation — monthly social package",
+                extended=42_000.00,
+                rate=700.00,
+                quantity=60.0,
+                unit="hours",
+            ),
+        ]
+        scaled, notes = scale_line_items_to_hard_cap(
+            items, hard_cap=50_000.0, direct_expenses=0.0
+        )
+        self.assertTrue(notes)
+        for item in scaled:
+            rate, qty, ext = item.rate, item.quantity, item.extended
+            self.assertIsNotNone(rate)
+            self.assertIsNotNone(qty)
+            self.assertIsNotNone(ext)
+            expected = round(float(rate) * float(qty), 2)
+            self.assertAlmostEqual(
+                float(ext),
+                expected,
+                places=2,
+                msg=f"{item.id}: extended {ext} != rate×qty {expected}",
+            )
+        self.assertEqual(collect_line_item_math_violations(
+            ProposalBudget(
+                rfpId="r1",
+                updatedAt="t",
+                lineItems=scaled,
+                agencyRevenueEstimate=sum(float(i.extended or 0) for i in scaled),
+            )
+        ), [])
+
+    def test_reconcile_after_hard_cap_passes_canonical(self) -> None:
+        budget = ProposalBudget(
+            rfpId="r1",
+            updatedAt="2026-07-28T00:00:00Z",
+            lineItems=[
+                _line(
+                    item_id="L1",
+                    description="Phase 1 Discovery — stakeholder interviews",
+                    extended=25_600.00,
+                    rate=426.67,
+                    quantity=60.0,
+                    unit="hours",
+                ),
+                _line(
+                    item_id="L6",
+                    description="Monthly social media content package",
+                    extended=42_000.00,
+                    rate=700.00,
+                    quantity=60.0,
+                    unit="hours",
+                ),
+            ],
+            agencyFeeSubtotal=67_600.00,
+            agencyRevenueEstimate=67_600.00,
+            lineItemSum=67_600.00,
+            rfpBudgetCap=50_000.00,
+        )
+        reconciled = reconcile_proposal_budget(budget)
+        self.assertEqual(collect_line_item_math_violations(reconciled), [])
+        assert_budget_canonical(reconciled)
+
+    def test_pair_snap_matches_user_failure_numbers(self) -> None:
+        """User case: extended 22364.96 with qty 60 must snap to a consistent pair."""
+        from app.services.proposal_budget_validation import sync_rate_extended_pair
+
+        ext, rate = sync_rate_extended_pair(target_extended=22364.96, quantity=60.0)
+        self.assertEqual(round(rate * 60.0, 2), ext)
+        self.assertLessEqual(abs(ext - 22364.96), 0.05)
 
 
 class ProposalBudgetValidationTests(unittest.TestCase):

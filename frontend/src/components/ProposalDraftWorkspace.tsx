@@ -55,6 +55,10 @@ import { ProposalPipelineProgressStrip } from "./ProposalPipelineProgressStrip";
 import { ProposalVersionCompare } from "./ProposalVersionCompare";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
 import {
+  ConfirmDialogProvider,
+  useConfirmDialog,
+} from "./ConfirmDialog";
+import {
   scanSubmissionFlags,
   mergeSubmissionFlags,
   resolveFlagHighlight,
@@ -200,11 +204,20 @@ interface ProposalDraftWorkspaceProps {
   onOpenGoRfpPicker?: () => void;
 }
 
-export function ProposalDraftWorkspace({
+export function ProposalDraftWorkspace(props: ProposalDraftWorkspaceProps) {
+  return (
+    <ConfirmDialogProvider>
+      <ProposalDraftWorkspaceInner {...props} />
+    </ConfirmDialogProvider>
+  );
+}
+
+function ProposalDraftWorkspaceInner({
   rfp,
   goRfpCount,
   onOpenGoRfpPicker,
 }: ProposalDraftWorkspaceProps) {
+  const confirm = useConfirmDialog();
   const [outline, setOutline] = useState<ProposalOutline>(() =>
     buildDefaultOutline(rfp)
   );
@@ -948,14 +961,16 @@ export function ProposalDraftWorkspace({
       const label =
         outline.snapshots?.find((s) => s.savedAt === savedAt)?.label ??
         "saved version";
-      if (
-        !confirm(
-          `Load checkpoint “${label}”?\n\n` +
-            "This replaces the FULL live proposal with that saved copy.\n" +
-            "Your current live draft is kept as “Live draft (before restore)” in Saved versions.\n" +
-            "Example: an earlier Form 2 checkpoint will clear Form 3/References if they were added later."
-        )
-      ) {
+      const restoreOk = await confirm({
+        title: `Load checkpoint “${label}”?`,
+        description:
+          "This replaces the FULL live proposal with that saved copy.\n\n" +
+          "Your current live draft is kept as “Live draft (before restore)” in Saved versions.\n\n" +
+          "Example: an earlier Form 2 checkpoint will clear Form 3/References if they were added later.",
+        confirmLabel: "Load checkpoint",
+        tone: "default",
+      });
+      if (!restoreOk) {
         return false;
       }
       setIsRestoringSnapshot(true);
@@ -1000,7 +1015,7 @@ export function ProposalDraftWorkspace({
         setIsRestoringSnapshot(false);
       }
     },
-    [restoreSnapshotAt, outline.snapshots, outline.sections, rfp.id, applyOutlineFromServer]
+    [confirm, restoreSnapshotAt, outline.snapshots, outline.sections, rfp.id, applyOutlineFromServer]
   );
 
   const handleSnapshotDropdownChange = useCallback(
@@ -1226,11 +1241,16 @@ export function ProposalDraftWorkspace({
   }, [rfp.id, applyOutlineFromServer]);
 
   const handleFulfillRfpGaps = useCallback(async () => {
-    if (
-      !confirm(
-        "Scan RFP — remove optional [VERIFY] tags only?\n\nReads every section with [VERIFY], checks the RFP, and removes tags that are not critically required.\n\nDoes NOT invent facts. Does NOT add sections, budget, or KPIs.\n\nA saved version is stored first."
-      )
-    ) {
+    const scanOk = await confirm({
+      title: "Scan RFP & scrub VERIFY tags?",
+      description:
+        "Reads every section with [VERIFY], checks the RFP, and removes tags that are not critically required.\n\n" +
+        "Does NOT invent facts. Does NOT add sections, budget, or KPIs.\n\n" +
+        "A saved version is stored first.",
+      confirmLabel: "Scan RFP",
+      tone: "default",
+    });
+    if (!scanOk) {
       return;
     }
     setIsFulfillingRfpGaps(true);
@@ -1291,7 +1311,7 @@ export function ProposalDraftWorkspace({
       stopScanPoll();
       setIsFulfillingRfpGaps(false);
     }
-  }, [rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll]);
+  }, [confirm, rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll]);
 
   const handleGenerateFullProposal = useCallback(async (options?: { startAfterSections1to3?: boolean }) => {
     // Continue = resume from checkpoint (e.g. budget failure).
@@ -1307,28 +1327,38 @@ export function ProposalDraftWorkspace({
       Boolean(pipelineStatus);
 
     if (startAfterSections1to3) {
-      if (
-        !confirm(
-          "Start from Intelligence?\n\nThis DELETES existing Intelligence, RFP tabs, Budget, and Review — then rebuilds them.\nSections 1–3 are kept."
-        )
-      ) {
+      const intelligenceOk = await confirm({
+        title: "Start from Intelligence?",
+        description:
+          "This DELETES existing Intelligence, RFP tabs, Budget, and Review — then rebuilds them.\n\n" +
+          "Sections 1–3 are kept.",
+        confirmLabel: "Start from Intelligence",
+        tone: "danger",
+      });
+      if (!intelligenceOk) {
         return;
       }
     } else if (shouldResume) {
-      if (
-        !confirm(
-          `${pipelineResumeMessage(pipelineStatus!)}\n\nContinue from where it left off? (Skips finished phases.)`
-        )
-      ) {
+      const resumeOk = await confirm({
+        title: "Continue proposal?",
+        description: `${pipelineResumeMessage(pipelineStatus!)}\n\nContinue from where it left off? (Skips finished phases.)`,
+        confirmLabel: "Continue",
+        tone: "default",
+      });
+      if (!resumeOk) {
         return;
       }
-    } else if (
-      fullProposalDone &&
-      !confirm(
-        "Start full proposal from the beginning?\n\nThis regenerates Sections 1–3, intelligence, drafting, budget, and review (uses LLM tokens)."
-      )
-    ) {
-      return;
+    } else if (fullProposalDone) {
+      const restartOk = await confirm({
+        title: "Start full proposal from the beginning?",
+        description:
+          "This regenerates Sections 1–3, intelligence, drafting, budget, and review (uses LLM tokens).",
+        confirmLabel: "Start from beginning",
+        tone: "danger",
+      });
+      if (!restartOk) {
+        return;
+      }
     }
 
     fullProposalAbortRef.current?.abort();
@@ -1506,7 +1536,7 @@ export function ProposalDraftWorkspace({
         setFullProposalProgress(null);
       }
     }
-  }, [rfp, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, handleResearchPoll, applyOutlineFromServer]);
+  }, [confirm, rfp, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, handleResearchPoll, applyOutlineFromServer]);
 
   const handleResetOutline = async () => {
     setIsResettingDraft(true);
@@ -1738,11 +1768,16 @@ export function ProposalDraftWorkspace({
     });
   };
 
-  const removeSection = (id: string) => {
+  const removeSection = async (id: string) => {
     const target = outline.sections.find((s) => s.id === id);
     if (!target) return;
     if (outline.sections.length <= 1) return;
-    const ok = window.confirm(`Delete “${target.title}”? This can’t be undone from here.`);
+    const ok = await confirm({
+      title: `Delete “${target.title}”?`,
+      description: "This can’t be undone from here.",
+      confirmLabel: "Delete section",
+      tone: "danger",
+    });
     if (!ok) return;
 
     setOutline((prev) => {
@@ -2143,7 +2178,7 @@ export function ProposalDraftWorkspace({
                   selectSection(sectionId);
                   setRevisionDrawerSectionId(sectionId);
                 }}
-                onDeleteSection={removeSection}
+                onDeleteSection={(id) => void removeSection(id)}
               />
             </ul>
 
@@ -2191,7 +2226,7 @@ export function ProposalDraftWorkspace({
                     />
                     <div className="ml-auto flex shrink-0 flex-wrap items-center gap-1">
                       <IconButton
-                        onClick={() => removeSection(selectedSection.id)}
+                        onClick={() => void removeSection(selectedSection.id)}
                         label="Remove section"
                         variant="danger"
                       >

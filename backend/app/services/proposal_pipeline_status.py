@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
+from app.core.config import settings
 from app.models.proposal import ProposalBudget, ProposalDraft, ProposalResearchCache
 from app.models.rfp import RfpRecord
 from app.services.proposal_common import ProposalError
+
+logger = logging.getLogger(__name__)
 
 _VERIFY_RE = re.compile(r"\[VERIFY:", re.I)
 _DRAFT_ERROR_RE = re.compile(
@@ -17,6 +21,47 @@ _DRAFT_ERROR_RE = re.compile(
 
 def count_verify_tags(draft: ProposalDraft) -> int:
     return sum(len(_VERIFY_RE.findall(s.content or "")) for s in draft.sections)
+
+
+def _consistency_critical_blockers(
+    *,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    rfp: RfpRecord,
+) -> list[str]:
+    """Re-scan manuscript consistency and promote critical issues to blockers.
+
+    Readiness does not consume persisted presubmit_review issue content — only
+    attachment presence — so blocking requires a fresh scan (OQ-4).
+    """
+    from app.services.proposal_consistency import scan_manuscript_consistency
+
+    issues = scan_manuscript_consistency(draft=draft, research=research, rfp=rfp)
+    blockers: list[str] = []
+    for issue in issues:
+        if issue.severity != "critical":
+            continue
+        loc = issue.section_title or issue.section_id or "manuscript"
+        blockers.append(
+            f"Consistency critical ({issue.category}) in {loc}: {issue.message}"
+        )
+    if blockers:
+        logger.info(
+            "consistency_critical_blockers count=%s rfp_id=%s",
+            len(blockers),
+            rfp.id,
+        )
+    return blockers
+
+
+def _t1_gate_blockers(draft: ProposalDraft) -> list[str]:
+    from app.services.proposal_t1_validators import (
+        scan_all_t1,
+        t1_findings_as_blocker_messages,
+    )
+
+    findings = scan_all_t1(draft)
+    return t1_findings_as_blocker_messages(findings)
 
 
 def collect_manuscript_blockers(
@@ -69,6 +114,15 @@ def collect_manuscript_blockers(
 
     if research and mapped and not research.proof_points:
         blockers.append("Phase 2: no proof points matched to RFP requirements.")
+
+    # Optional flagged gates — never weaken the existing blocker list above.
+    if settings.t1_gates_block:
+        blockers.extend(_t1_gate_blockers(draft))
+
+    if settings.consistency_criticals_block and rfp is not None:
+        blockers.extend(
+            _consistency_critical_blockers(draft=draft, research=research, rfp=rfp)
+        )
 
     return blockers
 

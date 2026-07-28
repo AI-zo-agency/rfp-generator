@@ -3544,6 +3544,163 @@ def _usd_fmt(value: float | None) -> str:
     return f"${value:,.2f}"
 
 
+async def _try_manual_fill_resolution(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    rfp_context: str,
+    persist: bool,
+    selection_mode: bool = False,
+    selection_start: int | None = None,
+    selection_end: int | None = None,
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+] | None:
+    """Resolve explicit MANUAL FILL asks from user text then KB — never invent.
+
+    Returns None when this path does not apply. Must run before LLM intent
+    classification so fill requests never hit rewrite/classify paths (T2.4).
+    """
+    latest_user_ask = (user_message or "").strip()
+    if not is_manual_fill_request(latest_user_ask):
+        return None
+
+    target_text = section.content or ""
+    sel_start = selection_start
+    sel_end = selection_end
+    if (
+        selection_mode
+        and sel_start is not None
+        and sel_end is not None
+        and sel_end > sel_start
+    ):
+        target_text = (section.content or "")[sel_start:sel_end]
+
+    if not extract_manual_fill_tags(target_text):
+        return None
+
+    logger.info(
+        "manual_fill_resolution start rfp_id=%s section_id=%s selection=%s",
+        rfp_id,
+        section_id,
+        selection_mode,
+    )
+
+    evidence_blob = ""
+    if research and research.evidence_corpus:
+        evidence_blob = _section_corpus_blob(research.evidence_corpus, section_id)
+    supplemental = _draft_supplemental_blob(draft)
+    kb_blob = "\n\n".join(
+        part for part in (evidence_blob, supplemental, rfp_context[:8000]) if part.strip()
+    )
+    filled, fill_log, remaining = fill_manual_fill_tags(
+        target_text,
+        user_message=latest_user_ask,
+        kb_blob=kb_blob,
+    )
+    if fill_log:
+        if selection_mode and sel_start is not None and sel_end is not None:
+            new_content = _splice_selection(
+                section.content or "",
+                start=sel_start,
+                end=sel_end,
+                replacement=filled,
+            )
+        else:
+            new_content = filled
+        # Factual substitution only — never brand-voice / tone the resolved value
+        # or regenerate surrounding prose as part of MANUAL FILL resolution.
+        updated_section = section.model_copy(
+            update={"content": new_content, "status": "generated"}
+        )
+        provider = "manual-fill"
+        if research is None:
+            research = ProposalResearchCache(
+                rfpId=rfp_id,
+                updatedAt=datetime.now(timezone.utc).isoformat(),
+                provider=provider,
+            )
+        else:
+            research = research.model_copy(update={"provider": provider})
+        merged_sections = [
+            updated_section if s.id == section_id else s for s in draft.sections
+        ]
+        now = datetime.now(timezone.utc).isoformat()
+        updated_draft = draft.model_copy(
+            update={
+                "sections": merged_sections,
+                "updated_at": now,
+                "provider": provider,
+            }
+        )
+        if persist:
+            updated_draft = await _persist_section_improve_draft(
+                updated_draft,
+                research,
+                section_title=section.title,
+            )
+        sources = ", ".join(f"`{e['tag']}` ← {e['source']}" for e in fill_log[:6])
+        assistant_message = (
+            f"Resolved **{len(fill_log)}** MANUAL FILL tag(s) from "
+            f"explicit sources ({sources})."
+        )
+        if remaining:
+            assistant_message += (
+                " Still open (no user value or KB match): "
+                + ", ".join(f"`{t}`" for t in remaining[:6])
+                + "."
+            )
+        logger.info(
+            "manual_fill_resolution filled count=%s remaining=%s rfp_id=%s",
+            len(fill_log),
+            len(remaining),
+            rfp_id,
+        )
+        return (
+            updated_section,
+            updated_draft,
+            research,
+            provider,
+            assistant_message,
+            True,
+        )
+
+    # Nothing filled — explain gap, do not invent, do not fall through to
+    # a general rewrite that could silently resolve the tags.
+    provider = _provider_name()
+    if research is None:
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+    gap_list = ", ".join(
+        f"`{t.text}`" for t in extract_manual_fill_tags(target_text)[:6]
+    )
+    reply = (
+        "I found MANUAL FILL tag(s) but could not resolve them from your message "
+        "or the knowledge base: "
+        f"{gap_list}. "
+        "Provide the value in chat (e.g. “fill [MANUAL FILL: Title] with Director”) "
+        "or add the fact to Supermemory — I will not invent it."
+    )
+    logger.info(
+        "manual_fill_resolution unresolved tags=%s rfp_id=%s",
+        len(extract_manual_fill_tags(target_text)),
+        rfp_id,
+    )
+    return section, draft, research, provider, reply, False
+
+
 async def _try_section_budget_verify_fill(
     *,
     rfp_id: str,
@@ -3720,6 +3877,27 @@ async def improve_proposal_section(
             focus = _find_draft_section(draft, section_id) or focus
 
         return focus, draft, research, provider, ops_report.reply, changed
+
+    # Explicit MANUAL FILL before LLM intent classify — never invent; skip rewrite.
+    mfill_section = _find_draft_section(draft, section_id) or (
+        draft.sections[0] if draft.sections else None
+    )
+    if mfill_section is not None:
+        mfill_result = await _try_manual_fill_resolution(
+            rfp_id=rfp_id,
+            section=mfill_section,
+            section_id=mfill_section.id,
+            draft=draft,
+            research=research,
+            user_message=user_message,
+            rfp_context=rfp_context,
+            persist=persist,
+            selection_mode=selection_mode,
+            selection_start=selection_start,
+            selection_end=selection_end,
+        )
+        if mfill_result is not None:
+            return mfill_result
 
     # LLM understands the ask: multi-section apply/fix vs advisory vs single edit.
     # No RFP-specific or keyword regex — classification is model-driven.
@@ -4217,116 +4395,22 @@ async def improve_proposal_section(
             )
 
     # Explicit MANUAL FILL resolution — never invent; user text then KB only.
-    if is_manual_fill_request(latest_user_ask):
-        target_text = section.content or ""
-        sel_start = selection_start
-        sel_end = selection_end
-        if (
-            selection_mode
-            and sel_start is not None
-            and sel_end is not None
-            and sel_end > sel_start
-        ):
-            target_text = (section.content or "")[sel_start:sel_end]
-
-        if extract_manual_fill_tags(target_text):
-            evidence_blob = ""
-            if research and research.evidence_corpus:
-                evidence_blob = _section_corpus_blob(
-                    research.evidence_corpus, section_id
-                )
-            supplemental = _draft_supplemental_blob(draft)
-            kb_blob = "\n\n".join(
-                part for part in (evidence_blob, supplemental, rfp_context[:8000]) if part.strip()
-            )
-            filled, fill_log, remaining = fill_manual_fill_tags(
-                target_text,
-                user_message=latest_user_ask,
-                kb_blob=kb_blob,
-            )
-            if fill_log:
-                if selection_mode and sel_start is not None and sel_end is not None:
-                    new_content = _splice_selection(
-                        section.content or "",
-                        start=sel_start,
-                        end=sel_end,
-                        replacement=filled,
-                    )
-                else:
-                    new_content = filled
-                # Factual substitution only — never brand-voice / tone the resolved value
-                # or regenerate surrounding prose as part of MANUAL FILL resolution.
-                updated_section = section.model_copy(
-                    update={"content": new_content, "status": "generated"}
-                )
-                provider = "manual-fill"
-                if research is None:
-                    research = ProposalResearchCache(
-                        rfpId=rfp_id,
-                        updatedAt=datetime.now(timezone.utc).isoformat(),
-                        provider=provider,
-                    )
-                else:
-                    research = research.model_copy(update={"provider": provider})
-                merged_sections = [
-                    updated_section if s.id == section_id else s for s in draft.sections
-                ]
-                now = datetime.now(timezone.utc).isoformat()
-                updated_draft = draft.model_copy(
-                    update={
-                        "sections": merged_sections,
-                        "updated_at": now,
-                        "provider": provider,
-                    }
-                )
-                if persist:
-                    updated_draft = await _persist_section_improve_draft(
-                        updated_draft,
-                        research,
-                        section_title=section.title,
-                    )
-                sources = ", ".join(
-                    f"`{e['tag']}` ← {e['source']}" for e in fill_log[:6]
-                )
-                assistant_message = (
-                    f"Resolved **{len(fill_log)}** MANUAL FILL tag(s) from "
-                    f"explicit sources ({sources})."
-                )
-                if remaining:
-                    assistant_message += (
-                        " Still open (no user value or KB match): "
-                        + ", ".join(f"`{t}`" for t in remaining[:6])
-                        + "."
-                    )
-                return (
-                    updated_section,
-                    updated_draft,
-                    research,
-                    provider,
-                    assistant_message,
-                    True,
-                )
-
-            # Nothing filled — explain gap, do not invent, do not fall through to
-            # a general rewrite that could silently resolve the tags.
-            provider = _provider_name()
-            if research is None:
-                research = ProposalResearchCache(
-                    rfpId=rfp_id,
-                    updatedAt=datetime.now(timezone.utc).isoformat(),
-                    provider=provider,
-                )
-            gap_list = ", ".join(
-                f"`{t.text}`" for t in extract_manual_fill_tags(target_text)[:6]
-            )
-            reply = (
-                "I found MANUAL FILL tag(s) but could not resolve them from your message "
-                "or the knowledge base: "
-                f"{gap_list}. "
-                "Provide the value in chat (e.g. “fill [MANUAL FILL: Title] with Director”) "
-                "or add the fact to Supermemory — I will not invent it."
-            )
-            return section, draft, research, provider, reply, False
+    # Prefer early path above; this is a safety net after section remapping.
+    mfill_late = await _try_manual_fill_resolution(
+        rfp_id=rfp_id,
+        section=section,
+        section_id=section_id,
+        draft=draft,
+        research=research,
+        user_message=latest_user_ask,
+        rfp_context=rfp_context,
+        persist=persist,
+        selection_mode=selection_mode,
+        selection_start=selection_start,
+        selection_end=selection_end,
+    )
+    if mfill_late is not None:
+        return mfill_late
 
     query_focus = _query_focus_message(
         latest_user_ask,

@@ -1,0 +1,13 @@
+{
+  "id": "fixture-known-good-clean-rfp",
+  "title": "Community Branding Services RFP (Sanitised)",
+  "client": "City of Carbondale",
+  "dueDate": "2026-10-01",
+  "receivedDate": "2026-06-20",
+  "lastActivity": "2026-07-15T10:00:00Z",
+  "lastActivityNote": "synthetic known-good fixture",
+  "sector": "Municipal",
+  "location": "Illinois",
+  "status": "in_progress",
+  "stage": "review"
+}

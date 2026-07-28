@@ -1,0 +1,40 @@
+{
+  "rfpId": "fixture-gsu-rfp",
+  "updatedAt": "2026-07-01T12:00:00Z",
+  "generatedAt": "2026-07-01T12:00:00Z",
+  "provider": "fixture",
+  "sections": [
+    {
+      "id": "s1",
+      "title": "Cover Letter",
+      "content": "We are pleased to submit this proposal to Georgia State University for marketing communications services. Our team is prepared to partner with University Communications on brand stewardship and campaign delivery.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s23",
+      "title": "Key Personnel — Creative Leadership",
+      "content": "Ron Comer leads creative strategy for complex public-sector and higher-education engagements. With 35+ years of experience across branding, campaign development, and institutional storytelling, he brings seasoned judgment to every creative review. He will personally oversee concept development for the GSU brand platform refresh.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s28",
+      "title": "Staffing Plan and Hours",
+      "content": "Our Year 1 staffing allocation anticipates intensive launch support followed by steady-state delivery. Proposed hours by role: Account Director 400 hours, Creative Director 320 hours, Senior Strategist 280 hours, Designer 200 hours, and Project Manager 160 hours. Media planning absorbs approximately 25% of the account hours in Q1, rising to 60% of creative hours during the fall enrollment campaign window. These figures are planning estimates invented for this synthetic fixture and are not grounded in a rate card.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s30",
+      "title": "Team Bios — Extended",
+      "content": "Ron Comer has spent 38 years building creative programs for universities and civic clients. His portfolio includes multi-year brand systems and enrollment campaigns. He partners closely with account leadership to keep creative decisions accountable to strategy.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    }
+  ]
+}

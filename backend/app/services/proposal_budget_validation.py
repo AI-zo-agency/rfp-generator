@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from app.models.proposal import BudgetLineItem, BudgetLineItemType, ProposalBudget, RfpSectionMap
+
+logger = logging.getLogger(__name__)
 
 _LUMP_SUM_RE = re.compile(
     r"\b(lump\s*sum|total\s*(?:contract|project)\s*(?:price|cost|amount)|not[\s-]*to[\s-]*exceed|nte)\b",
@@ -217,7 +220,12 @@ def scale_line_items_to_hard_cap(
         new_ext = round(ext * factor, 2)
         updates: dict[str, Any] = {"extended": new_ext}
         if item.rate is not None and item.quantity is not None and float(item.quantity) > 0:
-            updates["rate"] = round(new_ext / float(item.quantity), 2)
+            synced_ext, synced_rate = sync_rate_extended_pair(
+                target_extended=new_ext,
+                quantity=float(item.quantity),
+            )
+            updates["extended"] = synced_ext
+            updates["rate"] = synced_rate
         elif item.rate is not None and item.quantity is None:
             updates["rate"] = round(float(item.rate) * factor, 2)
         scaled.append(item.model_copy(update=updates))
@@ -232,8 +240,65 @@ def _usd(value: float) -> str:
     return f"${value:,.0f}"
 
 
+def sync_rate_extended_pair(
+    *,
+    target_extended: float,
+    quantity: float | None,
+    rate: float | None = None,
+) -> tuple[float, float | None]:
+    """Return (extended, rate) that satisfy extended == round(rate × qty, 2).
+
+    Prefer *target_extended* as the intended line dollars, derive a 2-decimal rate,
+    then snap extended to rate×qty. Drift is at most a few cents — required so
+    hard-cap / PM scaling cannot leave invalid round-trips.
+    """
+    target = round(float(target_extended), 2)
+    if quantity is not None and float(quantity) > 0:
+        qty = float(quantity)
+        synced_rate = round(target / qty, 2)
+        synced_ext = round(synced_rate * qty, 2)
+        if abs(synced_ext - target) > 0.001:
+            logger.debug(
+                "sync_rate_extended_pair snapped extended %.2f → %.2f (rate=%.2f qty=%s)",
+                target,
+                synced_ext,
+                synced_rate,
+                qty,
+            )
+        return synced_ext, synced_rate
+    if rate is not None:
+        return target, round(float(rate), 2)
+    return target, None
+
+
+def resync_line_items_rate_extended(
+    line_items: list[BudgetLineItem],
+) -> list[BudgetLineItem]:
+    """Snap every rate/qty/extended triple so math invariants hold."""
+    synced: list[BudgetLineItem] = []
+    for item in line_items:
+        if (
+            item.extended is not None
+            and item.quantity is not None
+            and float(item.quantity) > 0
+        ):
+            ext, rate = sync_rate_extended_pair(
+                target_extended=float(item.extended),
+                quantity=float(item.quantity),
+                rate=item.rate,
+            )
+            synced.append(item.model_copy(update={"extended": ext, "rate": rate}))
+        else:
+            synced.append(item)
+    return synced
+
+
 def fix_line_item_extended_values(line_items: list[BudgetLineItem]) -> list[BudgetLineItem]:
-    """Recompute extended = rate × quantity when both are present."""
+    """Recompute extended = rate × quantity when both are present.
+
+    Prefer rate×qty when rate already exists (LLM / prior pass). When only a target
+    extended is authoritative after scaling, use resync_line_items_rate_extended.
+    """
     fixed: list[BudgetLineItem] = []
     for item in line_items:
         rate, qty, ext = item.rate, item.quantity, item.extended
@@ -580,19 +645,21 @@ def _raise_pm_items_to_floor(
             new_ext = _PM_GUIDE_FLOOR
             rate, qty = item.rate, item.quantity
             if rate is not None and qty is not None and float(qty) > 0:
+                synced_ext, synced_rate = sync_rate_extended_pair(
+                    target_extended=new_ext,
+                    quantity=float(qty),
+                )
                 adjusted.append(
                     item.model_copy(
-                        update={
-                            "extended": new_ext,
-                            "rate": round(new_ext / float(qty), 2),
-                        }
+                        update={"extended": synced_ext, "rate": synced_rate}
                     )
                 )
+                new_pm += synced_ext
             else:
                 adjusted.append(
                     item.model_copy(update={"extended": new_ext, "rate": new_ext})
                 )
-            new_pm += new_ext
+                new_pm += new_ext
         else:
             adjusted.append(item)
             new_pm += ext
@@ -689,9 +756,13 @@ def adjust_pm_line_items_to_guide(
         new_ext = round(float(item.extended or 0) * scale, 2)
         rate, qty = item.rate, item.quantity
         if rate is not None and qty is not None and float(qty) > 0:
+            synced_ext, synced_rate = sync_rate_extended_pair(
+                target_extended=new_ext,
+                quantity=float(qty),
+            )
             adjusted.append(
                 item.model_copy(
-                    update={"extended": new_ext, "rate": round(new_ext / float(qty), 2)}
+                    update={"extended": synced_ext, "rate": synced_rate}
                 )
             )
         elif rate is not None:
@@ -795,6 +866,9 @@ def reconcile_proposal_budget(
             ]
         elif inferred_cap_from_envelope:
             pass  # keep inferred cap when scale succeeded or wasn't needed
+
+    # Final snap: scaling can leave rate×qty ≠ extended by a few cents.
+    line_items = resync_line_items_rate_extended(line_items)
 
     line_sum, agency_fee, passthrough = split_line_item_totals(line_items)
     direct = round(float(budget.direct_expenses_total or 0), 2)

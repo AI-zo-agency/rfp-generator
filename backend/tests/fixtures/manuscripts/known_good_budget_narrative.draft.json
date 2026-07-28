@@ -1,0 +1,32 @@
+{
+  "rfpId": "fixture-known-good-budget-rfp",
+  "updatedAt": "2026-07-20T14:00:00Z",
+  "generatedAt": "2026-07-20T14:00:00Z",
+  "provider": "fixture",
+  "sections": [
+    {
+      "id": "s1",
+      "title": "Executive Summary",
+      "content": "Santa Clara County Tourism asked for an accountable Year 1 partner. We propose a program that separates agency creative fees from client media pass-through so evaluators can see where dollars land.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s11",
+      "title": "Budget Narrative",
+      "content": "Year 1 agency revenue (fees) is $95,000.00. Client media pass-through is $180,000.00. Total Year 1 client invoicing is $275,000.00. These figures match the attached budget table and do not invent commission lines without a media base.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    },
+    {
+      "id": "s15",
+      "title": "Commercial Terms",
+      "content": "Fees are billed monthly against the $95,000.00 agency fee subtotal. Media placements of $180,000.00 are invoiced at cost with documentation. The grand total of $275,000.00 is the sum of those components.",
+      "status": "generated",
+      "source": "generated",
+      "mode": "write"
+    }
+  ]
+}

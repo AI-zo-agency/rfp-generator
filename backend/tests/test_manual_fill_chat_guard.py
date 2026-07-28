@@ -162,6 +162,15 @@ def _common_improve_patches(*, draft, research, section_id: str, chat_json):
             new=AsyncMock(return_value=_structure_edit(section_id)),
         ),
         patch(
+            "app.services.proposal_chat_manuscript_fix.classify_chat_edit_intent",
+            new=AsyncMock(
+                return_value={
+                    "intent": "single_edit",
+                    "primarySectionId": section_id,
+                }
+            ),
+        ),
+        patch(
             "app.services.proposal_section_editor.should_apply_budget_playbook",
             return_value=False,
         ),
