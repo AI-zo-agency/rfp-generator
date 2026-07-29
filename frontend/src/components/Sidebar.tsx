@@ -6,6 +6,7 @@ import { ZoLogo } from "./ZoLogo";
 import {
   IconAnalytics,
   IconDashboard,
+  IconFinancial,
   IconKnowledge,
   IconProposal,
   IconRfp,
@@ -15,6 +16,7 @@ const workspaceNav = [
   { href: "/", label: "Dashboard", Icon: IconDashboard },
   { href: "/rfps", label: "RFPs", Icon: IconRfp, prefetch: false },
   { href: "/proposals", label: "Proposals", Icon: IconProposal, prefetch: false },
+  { href: "/financial-insights", label: "Financial Insights", Icon: IconFinancial },
   { href: "/knowledge-base", label: "Knowledge Base", Icon: IconKnowledge },
   { href: "/analytics", label: "Analytics", Icon: IconAnalytics },
 ];

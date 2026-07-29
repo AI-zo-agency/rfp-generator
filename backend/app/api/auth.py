@@ -35,6 +35,12 @@ def _validate_domain(email: str) -> None:
         )
 
 
+@router.options("/login")
+@router.options("/signup")
+async def auth_options():
+    return {}
+
+
 @router.post("/signup")
 async def signup(req: AuthRequest, supabase: Client = Depends(get_supabase_client)):
     _validate_domain(req.email)
@@ -79,3 +85,4 @@ async def login(req: AuthRequest, supabase: Client = Depends(get_supabase_client
         }
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid email or password")
+

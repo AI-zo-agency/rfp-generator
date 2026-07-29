@@ -72,10 +72,10 @@ export function OutlineTabs({
       : "relative inline-flex gap-2 rounded-xl border border-zo-border bg-white p-1.5 shadow-sm";
 
   const tabClass = isUnderline
-    ? "outline-tab-underline relative flex flex-1 items-center justify-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors -mb-px sm:flex-none sm:justify-start sm:px-4"
+    ? "outline-tab-underline relative flex flex-1 items-center justify-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors -mb-px sm:flex-none sm:justify-start sm:px-4 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none"
     : compact
-      ? "relative z-10 rounded-md px-3 py-1.5 text-xs font-semibold tracking-normal normal-case"
-      : "relative z-10 flex items-center gap-2.5 rounded-lg px-6 py-3 text-xs font-cabin font-semibold uppercase tracking-[0.08em]";
+      ? "relative z-10 rounded-md px-3 py-1.5 text-xs font-semibold tracking-normal normal-case outline-none focus:outline-none focus:ring-0 focus-visible:outline-none"
+      : "relative z-10 flex items-center gap-2.5 rounded-lg px-6 py-3 text-xs font-cabin font-semibold uppercase tracking-[0.08em] outline-none focus:outline-none focus:ring-0 focus-visible:outline-none";
 
   const indicatorInset = compact ? "top-0.5 bottom-0.5" : "top-1 bottom-1";
 
@@ -111,7 +111,7 @@ export function OutlineTabs({
             role="tab"
             aria-selected={isActive}
             onClick={() => onChange(tab.id)}
-            className={`${tabClass} flex items-center gap-1.5 transition-smooth ${
+            className={`${tabClass} flex items-center gap-1.5 transition-smooth outline-none focus:outline-none focus:ring-0 focus-visible:outline-none ${
               isUnderline
                 ? isActive
                   ? underlineActive

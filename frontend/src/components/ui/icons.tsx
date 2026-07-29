@@ -69,3 +69,12 @@ export function IconTrash({ className = "w-4 h-4" }: { className?: string }) {
     </svg>
   );
 }
+
+export function IconFinancial({ className = "w-5 h-5" }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-6h6M2.25 12a9.75 9.75 0 1119.5 0 9.75 9.75 0 01-19.5 0z" />
+    </svg>
+  );
+}
+
