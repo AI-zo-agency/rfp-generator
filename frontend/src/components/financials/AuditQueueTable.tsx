@@ -96,15 +96,19 @@ export function AuditQueueTable({
 
   const pendingItems = items.filter((i) => !i.status.startsWith("Resolved"));
   const resolvedItems = items.filter((i) => i.status.startsWith("Resolved"));
-  const totalAtRisk = pendingItems.reduce((acc, i) => acc + i.amount, 0);
-  const highCount = pendingItems.filter((i) => i.severity === "HIGH").length;
+  // HIGH = actual unbilled scope creep (matches iWorker tab "AI Flagged Scope Risk")
+  const highItems = pendingItems.filter((i) => i.severity === "HIGH");
+  const medLowItems = pendingItems.filter((i) => i.severity !== "HIGH");
+  const scopeRiskAmount = highItems.reduce((acc, i) => acc + i.amount, 0);
+  const reviewAmount = medLowItems.reduce((acc, i) => acc + i.amount, 0);
+  const highCount = highItems.length;
 
   return (
     <div className="rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
 
       {/* ── Header ────────────────────────────────────────────────────────── */}
       <div className="px-8 py-6 border-b border-zinc-100">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
           <div className="space-y-1.5">
             <div className="flex items-center gap-3 flex-wrap">
               <h3 className="font-heading text-xl font-bold text-zinc-900">Audit Queue</h3>
@@ -126,19 +130,6 @@ export function AuditQueueTable({
               Derived live from iWorker Google Sheets data.
             </p>
           </div>
-
-          {/* Summary stat */}
-          {totalAtRisk > 0 && (
-            <div className="shrink-0 text-right">
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400 mb-0.5">
-                Total at Risk
-              </p>
-              <p className="font-heading text-2xl font-bold text-[#ef5018] leading-none">
-                ${totalAtRisk.toFixed(2)}
-              </p>
-              <p className="text-[11px] text-zinc-400 mt-1">across {pendingItems.length} pending flags</p>
-            </div>
-          )}
         </div>
       </div>
 
