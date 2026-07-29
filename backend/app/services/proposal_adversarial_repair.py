@@ -7,6 +7,7 @@ import re
 import time
 from collections import Counter
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from app.core.config import settings
 from app.models.proposal import (
@@ -18,11 +19,14 @@ from app.models.proposal import (
     ProposalDraft,
     ProposalResearchCache,
     ProposalSection,
+    RepairPlan,
 )
 from app.models.rfp import RfpRecord
 from app.services.evidence_trust.legal_attestation_gate import (
     gate_section_legal_attestations,
 )
+from app.services.proposal_adversarial_repair_planner import build_repair_plan
+from app.services.proposal_adversarial_repair_verifier import verify_repair_attempt
 from app.services.proposal_budget_content import find_budget_section_index
 from app.services.proposal_manual_flags import (
     VERIFY_TAG_RE,
@@ -34,6 +38,8 @@ from app.services.proposal_manuscript_auditor import (
     persist_manuscript_audit,
     run_manuscript_auditor,
 )
+from app.services.proposal_repository import asave_proposal_draft, asave_research_cache
+from app.services.proposal_section_editor import improve_proposal_section
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +120,40 @@ def _protected_finding(section: ProposalSection | None, message: str) -> bool:
 def _deterministic_repair(section: ProposalSection) -> ProposalSection:
     repaired, _report = gate_section_legal_attestations(section, force=True)
     return repaired
+
+
+def _apply_deterministic_patch(
+    working_draft: ProposalDraft, section: ProposalSection | None
+) -> tuple[ProposalDraft, bool]:
+    """Apply the legal-attestation gate to `section` if it changes content safely.
+
+    Returns the (possibly updated) draft and whether a patch was applied. A patch is
+    only accepted when it preserves any existing MANUAL FILL / VERIFY handoffs —
+    the gate must never silently drop an unresolved factual gap.
+    """
+    if not section:
+        return working_draft, False
+    candidate = _deterministic_repair(section)
+    if (
+        not candidate
+        or candidate.content == section.content
+        or not manual_fill_tags_preserved(section.content or "", candidate.content or "")
+        or not all(
+            tag in (candidate.content or "")
+            for tag in _VERIFY_TEXT_RE.findall(section.content or "")
+        )
+    ):
+        return working_draft, False
+    updated_draft = working_draft.model_copy(
+        update={
+            "sections": [
+                candidate if existing.id == candidate.id else existing
+                for existing in working_draft.sections
+            ],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return updated_draft, True
 
 
 def _deterministic_fixable_findings(
@@ -314,6 +354,78 @@ def _escalate_remaining_findings(
     return working, escalations
 
 
+def _build_repair_message_for_finding(
+    *,
+    finding: AdversarialAuditFinding,
+    repair_plan: RepairPlan,
+    failure_reason: str | None,
+    prior_attempt_summary: str,
+    use_strong_model: bool,
+) -> str:
+    """Compose a failure-aware improve prompt for one adversarial finding."""
+    parts = [
+        finding.message.strip(),
+        f"Previous attempt failed because: {failure_reason or 'none'}",
+        f"Previous outcome: {prior_attempt_summary or 'none'}",
+        f"Repair mode: {repair_plan.repair_mode}",
+        (
+            "Rules: reduce broad VERIFY blocks where safely possible; never invent "
+            "fact-bound claims; keep unresolved factual gaps narrow and explicit."
+        ),
+    ]
+    if repair_plan.safe_plan_driven_draft:
+        parts.append(
+            "Methodology and process content may be drafted from the RFP requirements "
+            "and execution plan without inventing company-specific facts."
+        )
+    if use_strong_model or repair_plan.needs_strong_model:
+        parts.append(
+            "This is a strong-model escalation pass — prioritize accurate, evidence-grounded "
+            "repairs over cosmetic rewrites."
+        )
+    return "\n\n".join(part for part in parts if part)
+
+
+async def repair_section_for_finding(
+    *,
+    rfp_id: str,
+    section_id: str,
+    finding: AdversarialAuditFinding,
+    repair_plan: RepairPlan,
+    failure_reason: str | None,
+    prior_attempt_summary: str,
+    use_strong_model: bool = False,
+) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache | None, str]:
+    """Run a targeted section improve pass for one adversarial audit finding."""
+    if not (section_id or "").strip():
+        raise ValueError("section_id is required for targeted section repair")
+
+    repair_message = _build_repair_message_for_finding(
+        finding=finding,
+        repair_plan=repair_plan,
+        failure_reason=failure_reason,
+        prior_attempt_summary=prior_attempt_summary,
+        use_strong_model=use_strong_model,
+    )
+    logger.info(
+        "adversarial_repair section repair rfp_id=%s section_id=%s finding_code=%s "
+        "repair_mode=%s failure_reason=%s use_strong_model=%s",
+        rfp_id,
+        section_id,
+        finding.code,
+        repair_plan.repair_mode,
+        failure_reason or "none",
+        use_strong_model or repair_plan.needs_strong_model,
+    )
+    section, draft, research, provider, _detail, _changed = await improve_proposal_section(
+        rfp_id,
+        section_id,
+        repair_message,
+        persist=True,
+    )
+    return section, draft, research, provider
+
+
 def _attempt_entry(
     *,
     finding_code: str,
@@ -337,14 +449,21 @@ async def run_adversarial_repair_loop(
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
     use_llm_audit: bool = True,
-    use_llm_repair: bool = False,
+    use_llm_repair: bool = True,
     max_rounds: int | None = None,
     max_attempts_per_finding: int | None = None,
     time_budget_sec: int | None = None,
 ) -> tuple[ProposalDraft, ProposalResearchCache, ProposalAdversarialAudit, AdversarialRepairReport]:
-    """Repair only fixable audit findings; escalate stubborn defects to MANUAL FILL."""
-    del use_llm_repair  # LLM section repair is intentionally deferred until FP review.
+    """Repair fixable audit findings; escalate stubborn defects to MANUAL FILL.
 
+    When `use_llm_repair` is False, only the deterministic legal-attestation gate
+    runs and unresolved findings escalate straight to MANUAL FILL (legacy behavior
+    relied on by existing regression tests). When True, each finding/attempt is
+    routed through a `RepairPlan` from `build_repair_plan` — deterministic patch,
+    targeted section rewrite, or budget handoff — and section rewrites are checked
+    with `verify_repair_attempt` so failure reasons carry forward into the next
+    attempt's plan.
+    """
     rounds_cap = max_rounds or settings.adversarial_repair_max_rounds
     attempts_cap = (
         max_attempts_per_finding or settings.adversarial_repair_max_attempts_per_finding
@@ -357,6 +476,7 @@ async def run_adversarial_repair_loop(
         updatedAt=datetime.now(timezone.utc).isoformat(),
     )
     attempts_by_finding: Counter[str] = Counter()
+    prior_by_key: dict[str, SimpleNamespace] = {}
     report_attempts: list[AdversarialRepairAttempt] = []
     escalations: list[str] = []
     stopped_reason = "max_rounds"
@@ -364,11 +484,13 @@ async def run_adversarial_repair_loop(
     exhausted_any = False
 
     logger.info(
-        "adversarial_repair start rfp_id=%s max_rounds=%s attempts_cap=%s time_budget_sec=%s",
+        "adversarial_repair start rfp_id=%s max_rounds=%s attempts_cap=%s time_budget_sec=%s "
+        "use_llm_repair=%s",
         rfp.id,
         rounds_cap,
         attempts_cap,
         time_cap,
+        use_llm_repair,
     )
     from app.core.step_debug_logger import step_trace, summarize_sections
 
@@ -379,6 +501,7 @@ async def run_adversarial_repair_loop(
         attempts_cap=attempts_cap,
         time_budget_sec=time_cap,
         use_llm_audit=use_llm_audit,
+        use_llm_repair=use_llm_repair,
         **summarize_sections(working_draft.sections),
     )
 
@@ -401,11 +524,16 @@ async def run_adversarial_repair_loop(
             stopped_reason = "resolved"
             break
 
-        before = _section_map(working_draft)
         changed = False
+        pending_section_repairs: list[dict] = []
+
         for finding in actionable:
             key = _finding_key(finding)
-            section = before.get(finding.section_id or "")
+            # Re-read from working_draft on every iteration (not a round-start snapshot)
+            # so a mutation from an earlier finding in this round — e.g. a deterministic
+            # patch or section rewrite touching the same section_id — is visible before
+            # we capture before_section / apply the next patch for this finding.
+            section = _section_map(working_draft).get(finding.section_id or "")
             issue_text = _report_issue_text(finding.message)
 
             if _protected_finding(section, finding.message):
@@ -423,79 +551,273 @@ async def run_adversarial_repair_loop(
                     if tag:
                         escalations.append(tag)
                         changed = True
+                outcome = "manual_fill_escalated" if tag else "protected_blocked"
                 report_attempts.append(
                     _attempt_entry(
                         finding_code=finding.code,
                         section_id=finding.section_id,
                         strategy="protected_skip",
-                        outcome="manual_fill_escalated" if tag else "protected_blocked",
+                        outcome=outcome,
                         attempts=attempts_by_finding[key],
                     )
+                )
+                step_trace(
+                    "adversarial_repair_attempt",
+                    rfp_id=rfp.id,
+                    finding_code=finding.code,
+                    section_id=finding.section_id,
+                    attempt_number=attempts_by_finding[key],
+                    repair_mode="protected_skip",
+                    failure_reason="protected_section",
+                    outcome=outcome,
+                    resolved=False,
+                    improved=False,
                 )
                 continue
 
             attempts_by_finding[key] += 1
-            candidate = _deterministic_repair(section) if section else section
-            if (
-                section
-                and candidate
-                and candidate.content != section.content
-                and manual_fill_tags_preserved(section.content or "", candidate.content or "")
-                and all(
-                    tag in (candidate.content or "")
-                    for tag in _VERIFY_TEXT_RE.findall(section.content or "")
+            attempt_number = attempts_by_finding[key]
+
+            if not use_llm_repair:
+                candidate = _deterministic_repair(section) if section else section
+                if (
+                    section
+                    and candidate
+                    and candidate.content != section.content
+                    and manual_fill_tags_preserved(section.content or "", candidate.content or "")
+                    and all(
+                        tag in (candidate.content or "")
+                        for tag in _VERIFY_TEXT_RE.findall(section.content or "")
+                    )
+                ):
+                    working_draft = working_draft.model_copy(
+                        update={
+                            "sections": [
+                                candidate if existing.id == candidate.id else existing
+                                for existing in working_draft.sections
+                            ],
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                    changed = True
+                    report_attempts.append(
+                        _attempt_entry(
+                            finding_code=finding.code,
+                            section_id=finding.section_id,
+                            strategy="deterministic_gate",
+                            outcome="patched",
+                            attempts=attempt_number,
+                        )
+                    )
+                    continue
+
+                if attempt_number >= attempts_cap:
+                    exhausted_any = True
+                    working_draft, tag = _append_manual_fill(
+                        working_draft,
+                        section_id=finding.section_id,
+                        issue=issue_text,
+                    )
+                    if tag:
+                        escalations.append(tag)
+                        changed = True
+                    report_attempts.append(
+                        _attempt_entry(
+                            finding_code=finding.code,
+                            section_id=finding.section_id,
+                            strategy="deterministic_gate",
+                            outcome="manual_fill_escalated" if tag else "attempts_exhausted",
+                            attempts=attempt_number,
+                        )
+                    )
+                    continue
+
+                report_attempts.append(
+                    _attempt_entry(
+                        finding_code=finding.code,
+                        section_id=finding.section_id,
+                        strategy="deterministic_gate",
+                        outcome="no_change",
+                        attempts=attempt_number,
+                    )
                 )
-            ):
-                working_draft = working_draft.model_copy(
-                    update={
-                        "sections": [
-                            candidate if existing.id == candidate.id else existing
-                            for existing in working_draft.sections
-                        ],
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                continue
+
+            # ---- planner-driven intelligent repair ----
+            prior = prior_by_key.get(key)
+            plan = build_repair_plan(
+                finding=finding,
+                attempt_number=attempt_number,
+                previous_outcome=(prior.outcome if prior else ""),
+                failure_reason=(prior.failure_reason if prior else None),
+            )
+
+            if plan.repair_mode == "budget_canonical_repair":
+                # Never freeform-rewrite budget/pricing content — deterministic
+                # cleanup only, otherwise hand off for human/pricing reconciliation.
+                working_draft, patched = _apply_deterministic_patch(working_draft, section)
+                if patched:
+                    changed = True
+                    outcome = "patched"
+                    prior_by_key.pop(key, None)
+                else:
+                    working_draft, tag = _append_manual_fill(
+                        working_draft, section_id=finding.section_id, issue=issue_text
+                    )
+                    if tag:
+                        escalations.append(tag)
+                        changed = True
+                    outcome = "manual_fill_escalated" if tag else "budget_handoff_pending"
+                    prior_by_key[key] = SimpleNamespace(
+                        outcome=outcome, failure_reason="budget_conflict"
+                    )
+                report_attempts.append(
+                    _attempt_entry(
+                        finding_code=finding.code,
+                        section_id=finding.section_id,
+                        strategy=plan.repair_mode,
+                        outcome=outcome,
+                        attempts=attempt_number,
+                    )
+                )
+                step_trace(
+                    "adversarial_repair_attempt",
+                    rfp_id=rfp.id,
+                    finding_code=finding.code,
+                    section_id=finding.section_id,
+                    attempt_number=attempt_number,
+                    repair_mode=plan.repair_mode,
+                    failure_reason=plan.failure_reason,
+                    outcome=outcome,
+                    resolved=False,
+                    improved=patched,
+                )
+                continue
+
+            is_deterministic_family = (
+                _finding_family(finding) in {"staffing_hours", "percent_time"}
+                or (finding.code or "").startswith("deterministic.integrity.")
+            )
+            if is_deterministic_family:
+                working_draft, patched = _apply_deterministic_patch(working_draft, section)
+                if patched:
+                    changed = True
+                    outcome = "patched"
+                    prior_by_key.pop(key, None)
+                elif attempt_number >= attempts_cap:
+                    exhausted_any = True
+                    working_draft, tag = _append_manual_fill(
+                        working_draft, section_id=finding.section_id, issue=issue_text
+                    )
+                    if tag:
+                        escalations.append(tag)
+                        changed = True
+                    outcome = "manual_fill_escalated" if tag else "attempts_exhausted"
+                    prior_by_key[key] = SimpleNamespace(outcome=outcome, failure_reason="no_change")
+                else:
+                    outcome = "no_change"
+                    prior_by_key[key] = SimpleNamespace(outcome=outcome, failure_reason="no_change")
+                report_attempts.append(
+                    _attempt_entry(
+                        finding_code=finding.code,
+                        section_id=finding.section_id,
+                        strategy=plan.repair_mode,
+                        outcome=outcome,
+                        attempts=attempt_number,
+                    )
+                )
+                step_trace(
+                    "adversarial_repair_attempt",
+                    rfp_id=rfp.id,
+                    finding_code=finding.code,
+                    section_id=finding.section_id,
+                    attempt_number=attempt_number,
+                    repair_mode=plan.repair_mode,
+                    failure_reason=plan.failure_reason,
+                    outcome=outcome,
+                    resolved=False,
+                    improved=patched,
+                )
+                continue
+
+            if finding.section_id:
+                before_section = section
+                try:
+                    await asave_proposal_draft(working_draft)
+                    await asave_research_cache(working_research)
+                    new_section, new_draft, new_research, _provider = (
+                        await repair_section_for_finding(
+                            rfp_id=rfp.id,
+                            section_id=finding.section_id,
+                            finding=finding,
+                            repair_plan=plan,
+                            failure_reason=plan.failure_reason,
+                            prior_attempt_summary=plan.previous_outcome or "none",
+                            use_strong_model=plan.needs_strong_model,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - keep the repair loop resilient
+                    logger.warning(
+                        "adversarial_repair section repair raised rfp_id=%s section_id=%s "
+                        "finding_code=%s attempt=%s error=%s",
+                        rfp.id,
+                        finding.section_id,
+                        finding.code,
+                        attempt_number,
+                        exc,
+                    )
+                else:
+                    working_draft = new_draft
+                    if new_research is not None:
+                        working_research = new_research
+                    after_section = _section_map(working_draft).get(finding.section_id)
+                    if (
+                        after_section
+                        and before_section
+                        and after_section.content != before_section.content
+                    ):
+                        changed = True
+
+                pending_section_repairs.append(
+                    {
+                        "finding": finding,
+                        "key": key,
+                        "attempt_number": attempt_number,
+                        "plan": plan,
+                        "before_section": before_section,
                     }
                 )
+                continue
+
+            # No section to target — hand off directly, mirroring legacy behavior.
+            working_draft, tag = _append_manual_fill(
+                working_draft, section_id=None, issue=issue_text
+            )
+            if tag:
+                escalations.append(tag)
                 changed = True
-                report_attempts.append(
-                    _attempt_entry(
-                        finding_code=finding.code,
-                        section_id=finding.section_id,
-                        strategy="deterministic_gate",
-                        outcome="patched",
-                        attempts=attempts_by_finding[key],
-                    )
-                )
-                continue
-
-            if attempts_by_finding[key] >= attempts_cap:
-                exhausted_any = True
-                working_draft, tag = _append_manual_fill(
-                    working_draft,
-                    section_id=finding.section_id,
-                    issue=issue_text,
-                )
-                if tag:
-                    escalations.append(tag)
-                    changed = True
-                report_attempts.append(
-                    _attempt_entry(
-                        finding_code=finding.code,
-                        section_id=finding.section_id,
-                        strategy="deterministic_gate",
-                        outcome="manual_fill_escalated" if tag else "attempts_exhausted",
-                        attempts=attempts_by_finding[key],
-                    )
-                )
-                continue
-
+            outcome = "manual_fill_escalated" if tag else "no_section"
+            prior_by_key[key] = SimpleNamespace(outcome=outcome, failure_reason=None)
             report_attempts.append(
                 _attempt_entry(
                     finding_code=finding.code,
                     section_id=finding.section_id,
-                    strategy="deterministic_gate",
-                    outcome="no_change",
-                    attempts=attempts_by_finding[key],
+                    strategy=plan.repair_mode,
+                    outcome=outcome,
+                    attempts=attempt_number,
                 )
+            )
+            step_trace(
+                "adversarial_repair_attempt",
+                rfp_id=rfp.id,
+                finding_code=finding.code,
+                section_id=finding.section_id,
+                attempt_number=attempt_number,
+                repair_mode=plan.repair_mode,
+                failure_reason=plan.failure_reason,
+                outcome=outcome,
+                resolved=False,
+                improved=False,
             )
 
         final_audit = await run_manuscript_auditor(
@@ -505,6 +827,83 @@ async def run_adversarial_repair_loop(
             use_llm=use_llm_audit,
         )
         working_research = persist_manuscript_audit(working_research, final_audit)
+
+        if pending_section_repairs:
+            # Verify targeted section rewrites against the fresh round audit rather
+            # than re-auditing per finding — cheaper, and matches the once-per-round
+            # cadence the deterministic path already uses.
+            remaining_for_verification = _collect_actionable_findings(final_audit, working_draft)
+            current_sections = _section_map(working_draft)
+            for item in pending_section_repairs:
+                pfinding: AdversarialAuditFinding = item["finding"]
+                pkey: str = item["key"]
+                pattempt: int = item["attempt_number"]
+                pplan: RepairPlan = item["plan"]
+                pbefore_section: ProposalSection | None = item["before_section"]
+                pafter_section = current_sections.get(pfinding.section_id or "")
+                new_findings_for_section = [
+                    f
+                    for f in remaining_for_verification
+                    if (f.section_id or "") == (pfinding.section_id or "")
+                ]
+                verification = verify_repair_attempt(
+                    finding=pfinding,
+                    before=pbefore_section,
+                    after=pafter_section,
+                    new_findings=new_findings_for_section,
+                )
+
+                if verification.outcome == "resolved":
+                    prior_by_key.pop(pkey, None)
+                else:
+                    if verification.introduced_critical:
+                        p_failure_reason = "introduced_new_finding"
+                    elif verification.outcome == "improved_but_unresolved":
+                        p_failure_reason = (
+                            "evidence_missing"
+                            if pplan.requires_targeted_retrieval
+                            else "still_unverified"
+                        )
+                    else:
+                        p_failure_reason = "no_change"
+                    prior_by_key[pkey] = SimpleNamespace(
+                        outcome=verification.outcome, failure_reason=p_failure_reason
+                    )
+
+                outcome_label = verification.outcome
+                if pattempt >= attempts_cap and not verification.resolved:
+                    exhausted_any = True
+                    working_draft, tag = _append_manual_fill(
+                        working_draft,
+                        section_id=pfinding.section_id,
+                        issue=_report_issue_text(pfinding.message),
+                    )
+                    if tag:
+                        escalations.append(tag)
+                        changed = True
+                        outcome_label = "manual_fill_escalated"
+
+                report_attempts.append(
+                    _attempt_entry(
+                        finding_code=pfinding.code,
+                        section_id=pfinding.section_id,
+                        strategy=pplan.repair_mode,
+                        outcome=outcome_label,
+                        attempts=pattempt,
+                    )
+                )
+                step_trace(
+                    "adversarial_repair_attempt",
+                    rfp_id=rfp.id,
+                    finding_code=pfinding.code,
+                    section_id=pfinding.section_id,
+                    attempt_number=pattempt,
+                    repair_mode=pplan.repair_mode,
+                    failure_reason=pplan.failure_reason,
+                    outcome=outcome_label,
+                    resolved=verification.resolved,
+                    improved=verification.improved,
+                )
 
         if escalations:
             stopped_reason = "manual_fill_required"

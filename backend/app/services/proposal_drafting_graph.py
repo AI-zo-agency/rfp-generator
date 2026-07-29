@@ -879,17 +879,9 @@ async def _draft_batch_once(
 
     user_content += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
 
-    draft_max_tokens = 12_288 if any(
-        _is_plan_driven_narrative(
-            title=str(s.get("title") or ""),
-            register=classify_section_register(
-                section_id=str(s.get("id") or ""),
-                title=str(s.get("title") or ""),
-                zo_mode=str(s.get("zoMode") or s.get("zo_mode") or "write"),
-            ),
-        )
-        for s in batch
-    ) else 8192
+    # Keep ≤ Fireworks 8192 output cap so prefer/fallback Fireworks can serve
+    # when Gemini/OpenRouter are unavailable (expired models / credit exhaustion).
+    draft_max_tokens = 8192
 
     async with state["llm_semaphore"]:
         from app.services.llm_call_context import llm_call_context

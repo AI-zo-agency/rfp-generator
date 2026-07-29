@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     # ADVERSARIAL_REPAIR_LOOP — bounded validate→repair→re-validate loop after Phase 4 autofix.
     adversarial_repair_loop: bool = True
     adversarial_repair_max_rounds: int = 3
-    adversarial_repair_max_attempts_per_finding: int = 2
+    adversarial_repair_max_attempts_per_finding: int = 3
     adversarial_repair_time_budget_sec: int = 540
     # BUDGET_BEFORE_DRAFTING — Phase 3.5 before Phase 3 (T5.6); default off.
     budget_before_drafting: bool = False

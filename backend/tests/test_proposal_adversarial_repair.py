@@ -459,5 +459,258 @@ class AdversarialRepairLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repair.await_args.kwargs["rfp"], rfp)
 
 
+class RepairSectionForFindingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repair_section_for_finding_includes_failure_reason(self) -> None:
+        from app.models.proposal import RepairPlan
+        from app.services.proposal_adversarial_repair import repair_section_for_finding
+
+        finding = AdversarialAuditFinding(
+            severity="critical",
+            category="fabrication",
+            code="llm.fabrication.staffing_hours",
+            message="Staffing hours appear invented.",
+            sectionId="s1",
+            sectionTitle="Staffing Plan",
+        )
+        plan = RepairPlan(
+            findingCode=finding.code,
+            findingCategory=finding.category,
+            sectionId="s1",
+            attemptNumber=2,
+            previousOutcome="no_change",
+            failureReason="evidence_missing",
+            repairMode="targeted_retrieval_then_rewrite",
+            requiresTargetedRetrieval=True,
+        )
+        fake_section = ProposalSection(
+            id="s1",
+            title="T",
+            content="fixed",
+            status="generated",
+            source="generated",
+            mode="write",
+        )
+        fake_draft = ProposalDraft(
+            rfpId="r1",
+            sections=[fake_section],
+            updatedAt="t",
+            generatedAt="t",
+        )
+
+        with mock.patch(
+            "app.services.proposal_adversarial_repair.improve_proposal_section",
+            new_callable=mock.AsyncMock,
+            return_value=(fake_section, fake_draft, None, "test", "ok", True),
+        ) as improve:
+            section, draft, research, provider = await repair_section_for_finding(
+                rfp_id="r1",
+                section_id="s1",
+                finding=finding,
+                repair_plan=plan,
+                failure_reason="evidence_missing",
+                prior_attempt_summary="no_change",
+                use_strong_model=False,
+            )
+
+        self.assertEqual(section.id, "s1")
+        self.assertEqual(draft.rfp_id, "r1")
+        self.assertIsNone(research)
+        self.assertEqual(provider, "test")
+        improve.assert_awaited_once()
+        msg = improve.await_args.args[2]
+        self.assertIn("Staffing hours appear invented.", msg)
+        self.assertIn("Previous attempt failed because: evidence_missing", msg)
+        self.assertIn("Previous outcome: no_change", msg)
+        self.assertIn("Repair mode: targeted_retrieval_then_rewrite", msg)
+
+    async def test_repair_section_for_finding_rejects_missing_section_id(self) -> None:
+        from app.models.proposal import RepairPlan
+        from app.services.proposal_adversarial_repair import repair_section_for_finding
+
+        finding = AdversarialAuditFinding(
+            severity="critical",
+            category="fabrication",
+            code="llm.fabrication.staffing_hours",
+            message="Staffing hours appear invented.",
+        )
+        plan = RepairPlan(
+            findingCode=finding.code,
+            findingCategory=finding.category,
+            sectionId=None,
+            attemptNumber=1,
+            repairMode="targeted_retrieval_then_rewrite",
+        )
+
+        with mock.patch(
+            "app.services.proposal_adversarial_repair.improve_proposal_section",
+            new_callable=mock.AsyncMock,
+        ) as improve:
+            with self.assertRaises(ValueError):
+                await repair_section_for_finding(
+                    rfp_id="r1",
+                    section_id="",
+                    finding=finding,
+                    repair_plan=plan,
+                    failure_reason=None,
+                    prior_attempt_summary="",
+                )
+        improve.assert_not_called()
+
+
+class IntelligentRepairLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_intelligent_repair_calls_section_repair_with_plan(self) -> None:
+        """use_llm_repair=True routes a non-protected empty methodology finding to
+        repair_section_for_finding with a failure-aware RepairPlan, and the loop
+        converges + records the attempt in the report."""
+        draft, research, rfp = _sibling_defect_draft()
+        section_id = "s-approach"
+        empty_section = ProposalSection(
+            id=section_id,
+            title="Technical Approach & Methodology",
+            content="",
+            status="generated",
+            source="generated",
+            mode="write",
+        )
+        draft = draft.model_copy(update={"sections": [empty_section]})
+        research = research.model_copy(
+            update={
+                "rfp_sections": [
+                    RfpSectionMap(id=section_id, title=empty_section.title, requirements=["x"])
+                ]
+            }
+        )
+
+        finding = AdversarialAuditFinding(
+            severity="critical",
+            category="other",
+            code="deterministic.coverage.empty_technical_approach",
+            message="Required methodology section is empty.",
+            sectionId=section_id,
+            sectionTitle=empty_section.title,
+            source="deterministic",
+        )
+        improved_section = empty_section.model_copy(
+            update={"content": "We will execute a four-phase methodology with weekly checkpoints."}
+        )
+
+        async def fake_audit(*, draft, research, rfp, use_llm):
+            target = next((s for s in draft.sections if s.id == section_id), None)
+            findings = [] if (target and (target.content or "").strip()) else [finding]
+            return ProposalAdversarialAudit(
+                rfpId=rfp.id,
+                scannedAt="2026-01-01T00:00:00Z",
+                findings=findings,
+                provider="deterministic",
+            )
+
+        async def fake_repair_section(
+            *,
+            rfp_id,
+            section_id: str,
+            finding,
+            repair_plan,
+            failure_reason,
+            prior_attempt_summary,
+            use_strong_model,
+        ):
+            updated_draft = draft.model_copy(update={"sections": [improved_section]})
+            return improved_section, updated_draft, research, "test-provider"
+
+        with (
+            mock.patch(
+                "app.services.proposal_adversarial_repair.run_manuscript_auditor",
+                side_effect=fake_audit,
+            ),
+            mock.patch(
+                "app.services.proposal_adversarial_repair.asave_proposal_draft",
+                new=mock.AsyncMock(),
+            ),
+            mock.patch(
+                "app.services.proposal_adversarial_repair.asave_research_cache",
+                new=mock.AsyncMock(),
+            ),
+            mock.patch(
+                "app.services.proposal_adversarial_repair.repair_section_for_finding",
+                side_effect=fake_repair_section,
+            ) as repair_mock,
+        ):
+            updated_draft, _updated_research, _audit, report = await run_adversarial_repair_loop(
+                rfp=rfp,
+                draft=draft,
+                research=research,
+                use_llm_audit=False,
+                use_llm_repair=True,
+            )
+
+        repair_mock.assert_called_once()
+        _args, kwargs = repair_mock.call_args
+        self.assertEqual(kwargs["section_id"], section_id)
+        self.assertEqual(kwargs["finding"].code, finding.code)
+        plan = kwargs["repair_plan"]
+        self.assertIn(
+            plan.repair_mode,
+            {"plan_driven_rewrite", "targeted_retrieval_then_rewrite", "strong_model_rewrite"},
+        )
+        self.assertEqual(plan.attempt_number, 1)
+
+        approach = next(s for s in updated_draft.sections if s.id == section_id)
+        self.assertTrue((approach.content or "").strip())
+        self.assertTrue(report.resolved)
+
+        matching_attempts = [a for a in report.attempts if a.finding_code == finding.code]
+        self.assertTrue(matching_attempts, msg="expected attempt history for the finding")
+        self.assertEqual(matching_attempts[0].outcome, "resolved")
+        self.assertEqual(matching_attempts[0].strategy, plan.repair_mode)
+
+    async def test_budget_finding_escalates_without_freeform_rewrite(self) -> None:
+        """budget_canonical_repair findings must never trigger repair_section_for_finding —
+        deterministic cleanup or MANUAL FILL handoff only."""
+        draft, research, rfp = _sibling_defect_draft()
+        section_id = "s-commission"
+        finding = AdversarialAuditFinding(
+            severity="critical",
+            category="budget_money",
+            code="deterministic.budget.mismatch",
+            message="Commission total contradicts canonical budget.",
+            sectionId=section_id,
+            sectionTitle="Pass-Through and Commission",
+            source="deterministic",
+        )
+
+        async def fake_audit(*, draft, research, rfp, use_llm):
+            return ProposalAdversarialAudit(
+                rfpId=rfp.id,
+                scannedAt="2026-01-01T00:00:00Z",
+                findings=[finding],
+                provider="deterministic",
+            )
+
+        with (
+            mock.patch(
+                "app.services.proposal_adversarial_repair.run_manuscript_auditor",
+                side_effect=fake_audit,
+            ),
+            mock.patch(
+                "app.services.proposal_adversarial_repair.repair_section_for_finding"
+            ) as repair_mock,
+        ):
+            updated_draft, _updated_research, _audit, report = await run_adversarial_repair_loop(
+                rfp=rfp,
+                draft=draft,
+                research=research,
+                use_llm_audit=False,
+                use_llm_repair=True,
+                max_rounds=1,
+            )
+
+        repair_mock.assert_not_called()
+        budget_attempts = [a for a in report.attempts if a.strategy == "budget_canonical_repair"]
+        self.assertTrue(budget_attempts, msg="expected a budget_canonical_repair attempt entry")
+        self.assertTrue(any(a.outcome == "manual_fill_escalated" for a in budget_attempts))
+        self.assertTrue(_manuscript_manual_fills(updated_draft))
+        self.assertFalse(report.resolved)
+
+
 if __name__ == "__main__":
     unittest.main()
