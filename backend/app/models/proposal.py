@@ -239,6 +239,49 @@ class PreSubmitReview(BaseModel):
     provider: str | None = None
 
 
+class AdversarialAuditFinding(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    severity: Literal["critical", "warning", "info"]
+    category: str
+    code: str
+    message: str
+    section_id: str | None = Field(default=None, alias="sectionId")
+    section_title: str | None = Field(default=None, alias="sectionTitle")
+    excerpt: str | None = None
+    source: Literal["deterministic", "llm"] = "deterministic"
+
+
+class ProposalAdversarialAudit(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    rfp_id: str = Field(alias="rfpId")
+    findings: list[AdversarialAuditFinding] = Field(default_factory=list)
+    summary: str = ""
+    scanned_at: str = Field(alias="scannedAt")
+    provider: str | None = None
+
+
+class AdversarialRepairAttempt(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    finding_code: str = Field(alias="findingCode")
+    section_id: str | None = Field(default=None, alias="sectionId")
+    strategy: str
+    outcome: str
+    attempts: int = 0
+
+
+class AdversarialRepairReport(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    rounds_run: int = Field(default=0, alias="roundsRun")
+    stopped_reason: str = Field(default="", alias="stoppedReason")
+    resolved: bool = False
+    attempts: list[AdversarialRepairAttempt] = Field(default_factory=list)
+    escalations: list[str] = Field(default_factory=list)
+
+
 class SectionAutoFixLog(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -408,6 +451,16 @@ class ProposalResearchCache(BaseModel):
         description="Locked primary contact + RFQ-named KPIs for cross-section consistency.",
     )
     presubmit_review: PreSubmitReview | None = Field(default=None, alias="presubmitReview")
+    adversarial_audit: ProposalAdversarialAudit | None = Field(
+        default=None,
+        alias="adversarialAudit",
+        description="Whole-manuscript adversarial audit findings (deterministic + residual LLM).",
+    )
+    adversarial_repair_report: AdversarialRepairReport | None = Field(
+        default=None,
+        alias="adversarialRepairReport",
+        description="Short report from the bounded adversarial repair loop.",
+    )
     ending_report: dict[str, Any] | None = Field(
         default=None,
         alias="endingReport",

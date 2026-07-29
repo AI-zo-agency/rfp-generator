@@ -46,8 +46,19 @@ from app.services.proposal_fee_justification import generate_fee_justification_m
 from app.services.proposal_loss_lessons import build_loss_lessons_for_rfp
 from app.services.proposal_pipeline_status import assert_manuscript_ready
 from app.services.proposal_pricing_service import generate_proposal_budget
-from app.services.proposal_presubmit_review import run_presubmit_review
+from app.services.proposal_presubmit_review import (
+    run_presubmit_review,
+    run_presubmit_review_with_manual_flags,
+)
 from app.services.proposal_presubmit_autofix import run_presubmit_autofix_loop
+from app.services.proposal_manuscript_auditor import (
+    persist_manuscript_audit,
+    run_manuscript_auditor,
+)
+from app.services.proposal_adversarial_repair import (
+    adversarial_repair_blocking_issues,
+    run_adversarial_repair_loop,
+)
 from app.services.proposal_intelligence.graph import run_intelligence_graph
 from app.services.proposal_intelligence.plan_ops import IntelligenceError
 from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
@@ -56,6 +67,31 @@ from app.services.proposal_sections_graph import run_sections_1_3_graph
 from app.services.rfp_repository import get_rfp
 
 logger = logging.getLogger(__name__)
+
+
+async def _attach_phase4_manuscript_audit(
+    *,
+    rfp: RfpRecord,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    use_llm: bool = True,
+) -> ProposalResearchCache:
+    """Persist whole-manuscript audit findings without mutating draft content."""
+    audit = await run_manuscript_auditor(
+        draft=draft,
+        research=research,
+        rfp=rfp,
+        use_llm=use_llm,
+    )
+    updated = persist_manuscript_audit(research, audit)
+    logger.info(
+        "Phase 4 adversarial audit for %s: findings=%d critical=%d provider=%s",
+        rfp.id,
+        len(audit.findings),
+        sum(1 for finding in audit.findings if finding.severity == "critical"),
+        audit.provider,
+    )
+    return updated
 
 ZO_SECTIONS: list[dict[str, object]] = [
     # Section 1 — Company Overview subsections
@@ -1949,7 +1985,12 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
 
     now = datetime.now(timezone.utc).isoformat()
     # Attach review before ending report so next-actions / readyToSubmit match.
-    research_for_ending = (research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)).model_copy(
+    research_with_audit = await _attach_phase4_manuscript_audit(
+        rfp=rfp,
+        draft=draft,
+        research=research,
+    )
+    research_for_ending = research_with_audit.model_copy(
         update={
             "presubmit_review": review,
             "updated_at": now,
@@ -2014,7 +2055,34 @@ async def run_phase4_presubmit_autofix(
 
     now = datetime.now(timezone.utc).isoformat()
     base_research = updated_research_cache or research
-    updated_research = (base_research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)).model_copy(
+    from app.core.config import settings as app_settings
+
+    if app_settings.adversarial_repair_loop:
+        updated_draft, base_research, _audit, repair_report = (
+            await run_adversarial_repair_loop(
+                rfp=rfp,
+                draft=updated_draft,
+                research=base_research,
+                use_llm_audit=use_llm,
+                use_llm_repair=use_llm,
+            )
+        )
+        review = run_presubmit_review_with_manual_flags(
+            rfp=rfp,
+            draft=updated_draft,
+            research=base_research,
+            extra_issues=adversarial_repair_blocking_issues(repair_report),
+            kb_searched=True,
+            finalized=True,
+        )
+        await asave_proposal_draft(updated_draft)
+    updated_research = await _attach_phase4_manuscript_audit(
+        rfp=rfp,
+        draft=updated_draft,
+        research=base_research,
+        use_llm=use_llm,
+    )
+    updated_research = updated_research.model_copy(
         update={"presubmit_review": review, "updated_at": now}
     )
     await asave_research_cache(updated_research)
@@ -2082,9 +2150,14 @@ async def run_phase4_finalize_gaps(
     )
 
     now = datetime.now(timezone.utc).isoformat()
-    saved_research = (
-        updated_research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)
-    ).model_copy(update={"presubmit_review": review, "updated_at": now})
+    saved_research = await _attach_phase4_manuscript_audit(
+        rfp=rfp,
+        draft=updated_draft,
+        research=updated_research,
+    )
+    saved_research = saved_research.model_copy(
+        update={"presubmit_review": review, "updated_at": now}
+    )
     await asave_research_cache(saved_research)
     await asave_proposal_draft(updated_draft)
 
@@ -2135,7 +2208,6 @@ async def generate_full_proposal(
             # Re-render money slots after drafting against canonical budget.
             if research and research.budget:
                 from app.services.proposal_budget_slots import render_draft_budget_slots
-                from app.services.proposal_repository import asave_proposal_draft
 
                 draft, _unresolved = render_draft_budget_slots(draft, research.budget)
                 await asave_proposal_draft(draft)
@@ -2206,6 +2278,28 @@ async def generate_full_proposal(
         rfp = get_rfp(rfp_id)
         if rfp:
             extra_issues = self_edit_exhausted_issues(edit_report.section_logs, draft)
+            from app.core.config import settings as app_settings
+
+            if app_settings.adversarial_repair_loop:
+                draft, research, _audit, repair_report = await run_adversarial_repair_loop(
+                    rfp=rfp,
+                    draft=draft,
+                    research=research,
+                )
+                await asave_proposal_draft(draft)
+                await asave_research_cache(research)
+                extra_issues = [
+                    *extra_issues,
+                    *adversarial_repair_blocking_issues(repair_report),
+                ]
+                logger.info(
+                    "Full proposal adversarial repair for %s: resolved=%s stopped=%s rounds=%s",
+                    rfp_id,
+                    repair_report.resolved,
+                    repair_report.stopped_reason,
+                    repair_report.rounds_run,
+                )
+
             review = run_presubmit_review(
                 rfp=rfp,
                 draft=draft,
@@ -2218,7 +2312,12 @@ async def generate_full_proposal(
             )
 
             now = datetime.now(timezone.utc).isoformat()
-            research_for_ending = research.model_copy(
+            research_with_audit = await _attach_phase4_manuscript_audit(
+                rfp=rfp,
+                draft=draft,
+                research=research,
+            )
+            research_for_ending = research_with_audit.model_copy(
                 update={
                     "presubmit_review": review,
                     "updated_at": now,

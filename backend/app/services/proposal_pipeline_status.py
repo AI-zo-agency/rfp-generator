@@ -88,6 +88,41 @@ def _overlap_gate_blockers(draft: ProposalDraft) -> list[str]:
     return blockers
 
 
+def _adversarial_audit_blockers(
+    *,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    rfp: RfpRecord | None,
+) -> list[str]:
+    """Promote adversarial criticals to blockers via a fresh scan when possible.
+
+    Does not trust persisted deterministic findings alone — a draft may have
+    changed after ``research.adversarial_audit`` was written.
+    """
+    from app.services.proposal_manuscript_auditor import (
+        collect_adversarial_critical_findings_for_blockers,
+    )
+
+    findings = collect_adversarial_critical_findings_for_blockers(
+        draft=draft,
+        research=research,
+        rfp=rfp,
+    )
+    blockers: list[str] = []
+    for finding in findings:
+        loc = finding.section_title or finding.section_id or "manuscript"
+        blockers.append(
+            f"Adversarial audit critical ({finding.code}) in {loc}: {finding.message}"
+        )
+    if blockers:
+        logger.info(
+            "adversarial_audit_blockers count=%s rfp_id=%s",
+            len(blockers),
+            getattr(rfp, "id", None),
+        )
+    return blockers
+
+
 def collect_manuscript_blockers(
     *,
     draft: ProposalDraft,
@@ -145,6 +180,11 @@ def collect_manuscript_blockers(
 
     if _settings_flag("overlap_gates_block"):
         blockers.extend(_overlap_gate_blockers(draft))
+
+    if _settings_flag("adversarial_audit_block"):
+        blockers.extend(
+            _adversarial_audit_blockers(draft=draft, research=research, rfp=rfp)
+        )
 
     if _settings_flag("money_slots_block", default=True):
         from app.services.proposal_budget_slots import find_unresolved_budget_slots

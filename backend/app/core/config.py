@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     jit_retrieval_on_miss: bool = True
     # OVERLAP_GATES_BLOCK — promote high Jaccard overlap findings to readiness blockers.
     overlap_gates_block: bool = False
+    # ADVERSARIAL_AUDIT_BLOCK — promote persisted whole-manuscript audit criticals.
+    adversarial_audit_block: bool = False
+    # ADVERSARIAL_REPAIR_LOOP — bounded validate→repair→re-validate loop after Phase 4 autofix.
+    adversarial_repair_loop: bool = False
+    adversarial_repair_max_rounds: int = 3
+    adversarial_repair_max_attempts_per_finding: int = 2
+    adversarial_repair_time_budget_sec: int = 540
     # BUDGET_BEFORE_DRAFTING — Phase 3.5 before Phase 3 (T5.6); default off.
     budget_before_drafting: bool = False
     # MONEY_SLOTS_BLOCK — unresolved {{budget.*}} tokens block readiness.
