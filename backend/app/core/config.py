@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     # ADVERSARIAL_AUDIT_BLOCK — promote persisted whole-manuscript audit criticals.
     adversarial_audit_block: bool = False
     # ADVERSARIAL_REPAIR_LOOP — bounded validate→repair→re-validate loop after Phase 4 autofix.
-    adversarial_repair_loop: bool = False
+    adversarial_repair_loop: bool = True
     adversarial_repair_max_rounds: int = 3
     adversarial_repair_max_attempts_per_finding: int = 2
     adversarial_repair_time_budget_sec: int = 540
@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     budget_before_drafting: bool = False
     # MONEY_SLOTS_BLOCK — unresolved {{budget.*}} tokens block readiness.
     money_slots_block: bool = True
+
+    # LangSmith — process env is synced at startup (see langsmith_tracing.py).
+    langsmith_tracing: bool = False
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_api_key: str = ""
+    langsmith_project: str = "proposal generation"
 
     supabase_url: str = ""
     supabase_service_role_key: str = ""

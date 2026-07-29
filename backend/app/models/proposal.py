@@ -282,6 +282,48 @@ class AdversarialRepairReport(BaseModel):
     escalations: list[str] = Field(default_factory=list)
 
 
+RepairFailureReason = Literal[
+    "no_change",
+    "still_unverified",
+    "evidence_missing",
+    "retrieval_too_weak",
+    "introduced_new_finding",
+    "violated_isolation",
+    "budget_conflict",
+    "protected_section",
+]
+
+
+class RepairPlan(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    finding_code: str = Field(alias="findingCode")
+    finding_category: str = Field(alias="findingCategory")
+    section_id: str | None = Field(default=None, alias="sectionId")
+    attempt_number: int = Field(default=1, alias="attemptNumber")
+    previous_outcome: str = Field(default="", alias="previousOutcome")
+    failure_reason: RepairFailureReason | None = Field(default=None, alias="failureReason")
+    repair_mode: str = Field(alias="repairMode")
+    requires_targeted_retrieval: bool = Field(default=False, alias="requiresTargetedRetrieval")
+    safe_plan_driven_draft: bool = Field(default=False, alias="safePlanDrivenDraft")
+    needs_strong_model: bool = Field(default=False, alias="needsStrongModel")
+    must_preserve_tags: bool = Field(default=True, alias="mustPreserveTags")
+    allowed_evidence_ids: list[str] = Field(default_factory=list, alias="allowedEvidenceIds")
+    success_checks: list[str] = Field(default_factory=list, alias="successChecks")
+
+
+class RepairVerificationResult(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    finding_code: str = Field(alias="findingCode")
+    section_id: str | None = Field(default=None, alias="sectionId")
+    resolved: bool = False
+    improved: bool = False
+    verify_count_delta: int = Field(default=0, alias="verifyCountDelta")
+    introduced_critical: bool = Field(default=False, alias="introducedCritical")
+    outcome: str = ""
+
+
 class SectionAutoFixLog(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -489,6 +531,11 @@ class ProposalResearchCache(BaseModel):
         default=None,
         alias="pricingRateCard",
         description="KB-extracted PricingRateCard (T5.1) persisted for binding + agents.",
+    )
+    pricing_contract: dict[str, Any] | None = Field(
+        default=None,
+        alias="pricingContract",
+        description="Deterministic pre-Stage-3 PricingContract (fee model + evidenced media spend).",
     )
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None

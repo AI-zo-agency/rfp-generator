@@ -1100,6 +1100,35 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
                 state.get("rfp_id"),
                 len(batch_results),
             )
+            try:
+                from app.core.step_debug_logger import (
+                    classify_section_outcome,
+                    step_trace,
+                    summarize_sections,
+                )
+
+                section_outcomes = [
+                    {
+                        "id": str(item.get("id") or ""),
+                        "title": str(item.get("title") or "")[:80],
+                        "outcome": classify_section_outcome(
+                            str(item.get("content") or "")
+                        ),
+                        "chars": len(str(item.get("content") or "")),
+                        "evidence_refs": len(item.get("kbRefs") or []),
+                    }
+                    for item in batch_results
+                ]
+                step_trace(
+                    "phase3_section_batch_outcomes",
+                    rfp_id=str(state.get("rfp_id") or "") or None,
+                    batch_index=index,
+                    batch_total=len(batches),
+                    outcomes=section_outcomes,
+                    **summarize_sections(batch_results),
+                )
+            except Exception:  # noqa: BLE001
+                pass
             callback = _SECTION_DRAFT_CALLBACKS.get(str(state.get("rfp_id") or ""))
             if callback:
                 drafted_sections = [
@@ -1113,6 +1142,19 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
                 state.get("rfp_id"),
                 exc,
             )
+            try:
+                from app.core.step_debug_logger import step_trace
+
+                step_trace(
+                    "phase3_section_batch_failed",
+                    rfp_id=str(state.get("rfp_id") or "") or None,
+                    batch_index=index,
+                    error_type=exc.__class__.__name__,
+                    error_message=str(exc)[:300],
+                    section_ids=[str(s.get("id") or "") for s in batch],
+                )
+            except Exception:  # noqa: BLE001
+                pass
             for section in batch:
                 sid = str(section.get("id") or "")
                 all_drafted.append(

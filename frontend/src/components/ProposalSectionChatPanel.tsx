@@ -12,6 +12,7 @@ import {
 } from "@/lib/proposal-section-resolve";
 import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import type { SectionRevisionRecord } from "./DraftSectionEditor";
+import { MarkdownReportBody } from "./MarkdownReportBody";
 
 export interface SectionChatMessage {
   id: string;
@@ -341,7 +342,11 @@ export function ProposalSectionChatPanel({
               key={msg.id}
               className={`proposal-section-chat-bubble proposal-section-chat-bubble--${msg.role}`}
             >
-              {msg.content}
+              {msg.role === "assistant" ? (
+                <MarkdownReportBody body={msg.content} variant="chat" />
+              ) : (
+                msg.content
+              )}
             </div>
           ))
         )}

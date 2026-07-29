@@ -5,7 +5,10 @@ from __future__ import annotations
 import unittest
 
 from app.models.proposal import BudgetLineItem, ProposalBudget
-from app.services.proposal_budget_content import fill_section_budget_verify_from_canonical
+from app.services.proposal_budget_content import (
+    fill_section_budget_verify_from_canonical,
+    render_offer_form_of2_from_canonical,
+)
 from app.services.proposal_budget_playbook import (
     refuse_noncompliant_budget_edit,
     section_has_budget_verify_tags,
@@ -236,6 +239,70 @@ class SectionBudgetVerifyFillTests(unittest.TestCase):
         self.assertIn("$30,000", filled)
         self.assertNotIn("[VERIFY: total budget figure]", filled)
         self.assertNotIn("$$", filled)
+
+    def test_render_offer_form_of2_from_canonical_replaces_corrupted_table(self) -> None:
+        content = (
+            "## Offer Form OF-2\n\n"
+            "| Line Item | Description | Cost (USD) |\n"
+            "|---|---|---|\n"
+            "| 1 | Discovery | 541.350.2778 |\n"
+            "| 2 | Strategy | 541.350.2778 |\n"
+            "| **Subtotal (pre-GET)** | | **[VERIFY: subtotal — pricing to be confirmed]** |\n"
+            "| **Hawaiʻi GET (Oʻahu, 4.5%)** | Baked into the total per RFP §3.4.1 | **[VERIFY: GET amount — pricing to be confirmed]** |\n"
+            "| **TOTAL ALL-INCLUSIVE CONTRACT COST** | Fixed | **[VERIFY: total — pricing to be confirmed]** |\n"
+        )
+        budget = ProposalBudget(
+            rfpId="rfp-1",
+            updatedAt="2026-07-22T00:00:00+00:00",
+            pricingTier="Average",
+            lineItems=[
+                BudgetLineItem(
+                    id="1",
+                    description="Phase 1 discovery stakeholder sessions",
+                    category="Discovery",
+                    quantity=1,
+                    unit="project",
+                    rate=10000,
+                    extended=10000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="2",
+                    description="Phase 2 messaging framework strategy",
+                    category="Strategy",
+                    quantity=1,
+                    unit="project",
+                    rate=20000,
+                    extended=20000,
+                    lineItemType="agency_fee",
+                ),
+            ],
+            agencyRevenueEstimate=30000,
+            lumpSumTotal=30000,
+        )
+        rendered, changed = render_offer_form_of2_from_canonical(content, budget)
+        self.assertTrue(changed)
+        self.assertIn("$10,000", rendered)
+        self.assertIn("$20,000", rendered)
+        self.assertIn("$28,708.13", rendered)
+        self.assertIn("$1,291.87", rendered)
+        self.assertIn("$30,000", rendered)
+        self.assertNotIn("541.350.2778", rendered)
+        self.assertNotIn("[VERIFY: total", rendered)
+
+    def test_render_offer_form_of2_noop_without_marker(self) -> None:
+        budget = ProposalBudget(
+            rfpId="rfp-1",
+            updatedAt="2026-07-22T00:00:00+00:00",
+            agencyRevenueEstimate=30000,
+            lineItems=[],
+        )
+        rendered, changed = render_offer_form_of2_from_canonical(
+            "General narrative only",
+            budget,
+        )
+        self.assertFalse(changed)
+        self.assertEqual(rendered, "General narrative only")
 
 
 class InsertBudgetTablePreserveProseTests(unittest.TestCase):

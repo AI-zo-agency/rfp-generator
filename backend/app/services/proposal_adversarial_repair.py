@@ -370,6 +370,17 @@ async def run_adversarial_repair_loop(
         attempts_cap,
         time_cap,
     )
+    from app.core.step_debug_logger import step_trace, summarize_sections
+
+    step_trace(
+        "adversarial_repair_start",
+        rfp_id=rfp.id,
+        max_rounds=rounds_cap,
+        attempts_cap=attempts_cap,
+        time_budget_sec=time_cap,
+        use_llm_audit=use_llm_audit,
+        **summarize_sections(working_draft.sections),
+    )
 
     final_audit = await run_manuscript_auditor(
         draft=working_draft,
@@ -550,6 +561,18 @@ async def run_adversarial_repair_loop(
         stopped_reason,
         len(escalations),
         sum(1 for finding in final_audit.findings if finding.severity == "critical"),
+    )
+    step_trace(
+        "adversarial_repair_finished",
+        rfp_id=rfp.id,
+        rounds_run=rounds_run,
+        stopped_reason=stopped_reason,
+        escalation_count=len(escalations),
+        critical_remaining=sum(
+            1 for finding in final_audit.findings if finding.severity == "critical"
+        ),
+        findings=len(final_audit.findings),
+        **summarize_sections(working_draft.sections),
     )
     return (
         working_draft,

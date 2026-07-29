@@ -137,8 +137,12 @@ Rules:
 6. You may disagree or push back when their request would weaken compliance or accuracy.
 7. Do NOT rewrite the section in this turn — explain what you would change and why,
    or answer the question.
-8. Be concise but thorough (use bullets when auditing). Use **bold** for key RFP
-   requirements.
+8. Format the chat reply as clean markdown the UI will render (not plain text):
+   - Use **bold** for section titles, Status labels, and key RFP requirements
+   - Use "- " bullet lists (one item per line) for audits / gaps / checklists
+   - Short paragraphs; blank line between title, status, and list blocks
+   - Do NOT wrap the entire reply in one **…**; do NOT escape asterisks as \\*
+   - Prefer scannable structure over a dense wall of text
 9. If they need an edit, tell them to ask explicitly (e.g. "apply these fixes" or
    "replace 3.3 with a tourism case study from KB").
 10. Budget/pricing/fees: follow the pricing playbook when provided — refuse invented
@@ -148,13 +152,13 @@ Rules:
     **check duplicates**, **remove duplicates**, or **remove fabricated content** so
     the system can run the full content→RFP→KB pipeline.
 
-Return ONLY JSON: {"reply": "markdown message for the chat"}"""
+Return ONLY JSON: {"reply": "<markdown chat message with **bold** and bullets as needed>"}"""
 
 # Explicit mutate verbs — required before we rewrite a section.
 _EDIT_INTENT_RE = re.compile(
     r"\b("
     r"change|fix|update|rewrite|revise|edit|improve|shorten|lengthen|"
-    r"remove|replace|fill|patch|insert|delete|correct|align|"
+    r"remove|replace|fill|patch|insert|delete|correct|align|apply|resolve|"
     r"make\s+it|make\s+this|swap|redraft|regenerate|"
     r"create\b.{0,50}\b(?:section|tab|h2|bio|case\s*stud)|"
     r"add\b.{0,50}\b(?:section|tab|h2|paragraph|sentence|case\s*stud(?:y|ies)?|"
@@ -403,7 +407,14 @@ def _remove_markdown_table_column(content: str, *, header_pat: str) -> tuple[str
     return text, touched
 
 
-def _wants_section_edit(user_message: str) -> bool:
+_SHORT_CONFIRM_RE = re.compile(
+    r"^(?:yes|ok|okay|please|go\s+ahead|do\s+it|yep|yup|sure|confirmed?|"
+    r"yes\s+(?:apply|do\s+it|please|go))\s*[.!]?$",
+    re.I,
+)
+
+
+def _wants_section_edit(user_message: str, *, conversation_history: list[dict[str, str]] | None = None) -> bool:
     """True only when the user clearly asks to mutate draft text.
 
     Default is advisory. Phrases like "check all case studies… list which don't"
@@ -416,14 +427,30 @@ def _wants_section_edit(user_message: str) -> bool:
     if not text:
         return False
 
+    # Short confirmations ("yes", "ok", "do it") after the assistant proposed an
+    # edit are edit intent — not advisory.  Without this the system re-queries KB
+    # from scratch instead of applying the already-proposed change.
+    if _SHORT_CONFIRM_RE.match(text) and conversation_history:
+        for turn in reversed(conversation_history[-6:]):
+            if turn.get("role") == "assistant":
+                assistant_text = (turn.get("content") or "").casefold()
+                if any(
+                    signal in assistant_text
+                    for signal in (
+                        "apply", "shall i", "want me to", "i can update",
+                        "i'll update", "ready to apply", "go ahead",
+                        "would you like me to", "i found",
+                    )
+                ):
+                    return True
+                break
+
     advisory = bool(_ADVISORY_INTENT_RE.search(text))
     mutate = bool(_EDIT_INTENT_RE.search(text))
 
     if advisory and not mutate:
         return False
     if advisory and mutate and not _FOLLOW_WITH_MUTATE_RE.search(text):
-        # "check and review" / "evaluate fit then tell me" → still advisory
-        # Require an explicit "then fix/replace/…" OR LLM multi_patch classification.
         return False
     if mutate:
         return True
@@ -3731,6 +3758,8 @@ async def _try_section_budget_verify_fill(
     if not section_has_budget_verify_tags(section.content or ""):
         return None
 
+    from app.core.step_debug_logger import step_trace
+
     provider = _provider_name()
     if research is None:
         research = ProposalResearchCache(
@@ -3740,6 +3769,16 @@ async def _try_section_budget_verify_fill(
         )
     canonical = research.budget if research else None
     if canonical is None or not (canonical.line_items or []):
+        step_trace(
+            "section_budget_verify_fill_no_canonical",
+            rfp_id=rfp_id,
+            section_id=section.id,
+            section_title=section.title,
+            has_canonical=bool(canonical is not None),
+            canonical_line_items=len(getattr(canonical, "line_items", []) or [])
+            if canonical is not None
+            else 0,
+        )
         return (
             section,
             draft,
@@ -3756,6 +3795,14 @@ async def _try_section_budget_verify_fill(
     filled, n_fills = fill_section_budget_verify_from_canonical(
         section.content or "",
         canonical,
+    )
+    step_trace(
+        "section_budget_verify_fill_result",
+        rfp_id=rfp_id,
+        section_id=section.id,
+        section_title=section.title,
+        n_fills=n_fills,
+        canonical_line_items=len(getattr(canonical, "line_items", []) or []),
     )
     if n_fills <= 0:
         return (
@@ -3801,6 +3848,88 @@ async def _try_section_budget_verify_fill(
             + ", ".join(f"`{g}`" for g in remaining_budget[:6])
             + "."
         )
+    return working, updated_draft, research, provider, reply, True
+
+
+async def _try_offer_form_of2_fill(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    persist: bool,
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+] | None:
+    """Deterministically fill OF-2 from the canonical budget.
+
+    Root-cause fix: OF-2 is budget-related, so it bypasses the generic
+    section-budget VERIFY path. Without a deterministic renderer it falls through
+    to freeform LLM rewrite, which can leak nearby phone numbers into cost cells.
+    """
+    ask = (user_message or "").strip()
+    if not user_asks_section_budget_fill(ask):
+        return None
+    if "offer form of-2" not in (section.title or "").casefold():
+        return None
+
+    from app.core.step_debug_logger import step_trace
+    from app.services.proposal_budget_content import render_offer_form_of2_from_canonical
+
+    provider = _provider_name()
+    if research is None:
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+    canonical = research.budget if research else None
+    if canonical is None or not (canonical.line_items or []):
+        step_trace(
+            "offer_form_of2_fill_no_canonical",
+            rfp_id=rfp_id,
+            section_id=section.id,
+            section_title=section.title,
+        )
+        return None
+
+    filled, changed = render_offer_form_of2_from_canonical(section.content or "", canonical)
+    step_trace(
+        "offer_form_of2_fill_result",
+        rfp_id=rfp_id,
+        section_id=section.id,
+        section_title=section.title,
+        changed=changed,
+        canonical_line_items=len(getattr(canonical, "line_items", []) or []),
+        total=getattr(canonical, "lump_sum_total", None)
+        or getattr(canonical, "agency_revenue_estimate", None),
+    )
+    if not changed:
+        return None
+
+    working = section.model_copy(update={"content": filled, "status": "generated"})
+    merged = [working if s.id == section_id else s for s in draft.sections]
+    now = datetime.now(timezone.utc).isoformat()
+    updated_draft = draft.model_copy(
+        update={"sections": merged, "updated_at": now, "provider": provider}
+    )
+    if persist:
+        updated_draft = await _persist_section_improve_draft(
+            updated_draft,
+            research,
+            section_title=section.title,
+        )
+    reply = (
+        f"Filled **{section.title}** deterministically from the canonical Stage 3.5 "
+        "budget, including subtotal / GET / total fields."
+    )
     return working, updated_draft, research, provider, reply, True
 
 
@@ -4047,6 +4176,17 @@ async def improve_proposal_section(
                 )
                 if budget_fill is not None:
                     return budget_fill
+                offer_form_fill = await _try_offer_form_of2_fill(
+                    rfp_id=rfp_id,
+                    section=early_section,
+                    section_id=section_id,
+                    draft=draft,
+                    research=research,
+                    user_message=user_message,
+                    persist=persist,
+                )
+                if offer_form_fill is not None:
+                    return offer_form_fill
 
         if chat_intent == "multi_patch":
             updated, research, fix_reply, fixed = await run_manuscript_wide_fixes(
@@ -4128,7 +4268,7 @@ async def improve_proposal_section(
     force_edit = chat_intent in {"single_edit", "multi_patch"}
     if (
         not selection_mode
-        and (force_advisory or (not force_edit and not _wants_section_edit(user_message)))
+        and (force_advisory or (not force_edit and not _wants_section_edit(user_message, conversation_history=conversation_history)))
         and not _is_outline_structure_ask(user_message)
     ):
         section = _find_draft_section(draft, section_id) or (
@@ -4281,7 +4421,7 @@ async def improve_proposal_section(
                 f"{rfp_context}\n\n=== 00_Guide_Pricing (Supermemory) ===\n{guide_text[:20_000]}"
             )
 
-    if not force_edit and not _wants_section_edit(user_message):
+    if not force_edit and not _wants_section_edit(user_message, conversation_history=conversation_history):
         reply = await _section_chat_advisory_reply(
             section=section,
             rfp=rfp,
@@ -4332,6 +4472,17 @@ async def improve_proposal_section(
         )
         if budget_fill is not None:
             return budget_fill
+        offer_form_fill = await _try_offer_form_of2_fill(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=latest_user_ask,
+            persist=persist,
+        )
+        if offer_form_fill is not None:
+            return offer_form_fill
 
     # Budget/fee edits on the Cost Proposal tab: Stage 3.5 agent.
     # Never steal a case-study "fill budget part" / "implement table here" ask.

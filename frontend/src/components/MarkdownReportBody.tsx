@@ -297,7 +297,7 @@ export function MarkdownReportBody({
   highlightTexts = [],
 }: {
   body: string;
-  variant?: "report" | "document";
+  variant?: "report" | "document" | "chat";
   highlightTexts?: string[];
 }) {
   const blocks = parseBlocks(
@@ -393,12 +393,18 @@ export function MarkdownReportBody({
     );
   }
 
+  const compact = variant === "chat";
+  const stackClass = compact
+    ? "proposal-section-chat-md space-y-2 text-[14px] leading-relaxed text-inherit"
+    : "space-y-4 text-sm leading-relaxed text-zo-text-secondary";
+
   return (
-    <div className="space-y-4 text-sm leading-relaxed text-zo-text-secondary">
+    <div className={stackClass}>
       {blocks.map((block, index) => {
         if (block.type === "heading") {
-          const className =
-            block.level <= 3
+          const className = compact
+            ? "text-[14px] font-semibold text-zo-text"
+            : block.level <= 3
               ? "font-heading text-sm font-bold uppercase tracking-wide text-foreground"
               : "text-sm font-bold text-foreground";
           return (
@@ -448,9 +454,9 @@ export function MarkdownReportBody({
           return (
             <ListTag
               key={index}
-              className={`space-y-1.5 pl-5 ${
+              className={`pl-5 ${
                 block.ordered ? "list-decimal" : "list-disc"
-              }`}
+              } ${compact ? "space-y-1" : "space-y-1.5"}`}
             >
               {block.items.map((item, itemIndex) => (
                 <li key={`${index}-li-${itemIndex}`}>
@@ -480,7 +486,7 @@ export function MarkdownReportBody({
           return (
             <hr
               key={index}
-              className="my-4 border-zo-border"
+              className={compact ? "my-2 border-zo-border" : "my-4 border-zo-border"}
               aria-hidden
             />
           );

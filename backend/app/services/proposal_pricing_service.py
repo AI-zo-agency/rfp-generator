@@ -124,11 +124,17 @@ PHASE 3b — Commission / pass-through model (when RFP uses media commission or 
 - Populate commissionRate AND clientMediaPassthrough whenever commission applies — reconcile math depends on them
 
 ZERO-DOLLAR PROHIBITION (submission disqualifier):
-- NEVER return agencyRevenueEstimate = 0 or null when commission or agency fees apply.
-- NEVER show "$0" for "Agency revenue estimate" or "Line item table total" when the RFP is commission-based —
+- NEVER invent agencyRevenueEstimate / commission dollars when media spend is unknown.
+- When LOCKED PricingContract.mediaSpendAnnual is null and feeModel is commission/hybrid:
+  retain commission shape with MANUAL FILL placeholders; agencyRevenueEstimate MAY be null —
+  do NOT invent media base or commission fee amounts.
+- When mediaSpendAnnual is set (or non-commission agency fees apply): NEVER return
+  agencyRevenueEstimate = 0 when fee income applies — use rate × pass-through or agency_fee rows.
+- NEVER show "$0" for "Agency revenue estimate" when evidenced commission math applies —
   the commission dollar amount IS the agency revenue (rate × pass-through or sum of agency_fee rows).
 - lineItemSum may be large (mostly pass-through media); agencyRevenueEstimate is still the fee income only.
-- lumpSumTotal and optionTermNotes MUST cite the same positive annual agency fee as agencyRevenueEstimate.
+- lumpSumTotal and optionTermNotes MUST cite the same positive annual agency fee as agencyRevenueEstimate
+  when that fee is evidenced — otherwise leave MANUAL FILL / pricing flags.
 - If estimated annual media spend is in RFP/Stage 1, use it for clientMediaPassthrough and compute commission.
 
 STAFF HOURS (when RFP Section D requires hours and billing rates):
@@ -690,19 +696,54 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
 
+    from app.core.step_debug_logger import pipeline_step, step_trace, summarize_budget
+
     rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
     prior_research = await aget_research_cache(rfp_id)
 
     stage_one, stage_one_ready = _stage_one_text(rfp)
     stage_two, stage_two_ready = _structural_map_text(prior_research)
-    guide_text, kb_sources = await _fetch_guide_context(rfp, stage_two)
+    with pipeline_step("fetch_pricing_guide"):
+        guide_text, kb_sources = await _fetch_guide_context(rfp, stage_two)
 
     from app.services.pricing_rate_card_builder import build_pricing_rate_card_from_guide_text
     from app.services.pricing_rate_binding import bind_budget_line_items_to_rate_card
+    from app.services.pricing_contract_builder import (
+        build_pricing_contract,
+        format_pricing_contract_for_prompt,
+    )
+    from app.services.commission_budget_sanitizer import sanitize_commission_budget
 
     rate_card = build_pricing_rate_card_from_guide_text(guide_text)
     for warn in rate_card.warnings:
         logger.info("pricing_rate_card_warning rfp_id=%s warn=%s", rfp_id, warn)
+
+    pricing_contract = build_pricing_contract(
+        stage_one_text="\n".join(
+            part
+            for part in (
+                stage_one,
+                (prior_research.budget.media_spend_notes if prior_research and prior_research.budget else "") or "",
+                (prior_research.budget.rfp_budget_notes if prior_research and prior_research.budget else "") or "",
+            )
+            if part
+        ),
+        rfp_text=rfp_context,
+    )
+    contract_prompt = format_pricing_contract_for_prompt(pricing_contract)
+    step_trace(
+        "pricing_inputs_ready",
+        rfp_id=rfp_id,
+        stage_one_ready=stage_one_ready,
+        stage_two_ready=stage_two_ready,
+        guide_chars=len(guide_text or ""),
+        guide_missing=bool((guide_text or "").startswith("(No 00_Guide_Pricing")),
+        rate_card_rates=len(rate_card.rates or []),
+        rate_card_warnings=len(rate_card.warnings or []),
+        contract_fee_model=str(getattr(pricing_contract, "fee_model", "") or ""),
+        contract_confidence=getattr(pricing_contract, "confidence", None),
+        kb_source_count=len(kb_sources or []),
+    )
 
     manuscript_digest = ""
     try:
@@ -721,6 +762,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             f"\n=== Stage 1 Go/No-Go ===\n{stage_one[:12_000]}",
             f"\n=== Stage 2 Structural map (deliverables) ===\n{stage_two[:10_000]}",
             f"\n=== 00_Guide_Pricing (KB) ===\n{guide_text}",
+            f"\n{contract_prompt}",
             (
                 f"\n=== Manuscript approach + current budget (PRICE MUST FUND THESE PHASES) ===\n"
                 f"{manuscript_digest[:14_000]}"
@@ -743,30 +785,40 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         {"role": "user", "content": user_content},
     ]
     try:
-        raw, provider = await llm.chat_json(
-            messages,
-            max_tokens=8192,
-            temperature=0.2,
-        )
+        with pipeline_step("budget_llm_json"):
+            raw, provider = await llm.chat_json(
+                messages,
+                max_tokens=8192,
+                temperature=0.2,
+            )
     except LlmError as exc:
         logger.warning(
             "Stage 3 budget first pass failed (%s), retrying with compact output",
             exc,
         )
+        step_trace(
+            "pricing_llm_first_pass_failed",
+            rfp_id=rfp_id,
+            error_type=exc.__class__.__name__,
+            error_message=str(exc)[:300],
+        )
         compact_user = (
             user_content
             + "\n\nIMPORTANT: Return COMPACT JSON only. Maximum 20 lineItems. "
             "Keep rfpBudgetNotes under 500 characters. No markdown or commentary. "
-            "agencyRevenueEstimate MUST be > 0 for commission RFPs (rate × pass-through). Never return $0 agency revenue."
+            "agencyRevenueEstimate MUST be > 0 when mediaSpendAnnual is evidenced or "
+            "non-commission agency fees apply. When mediaSpendAnnual is null, do NOT invent "
+            "commission dollars — use MANUAL FILL placeholders instead."
         )
-        raw, provider = await llm.chat_json(
-            [
-                {"role": "system", "content": STAGE3_BUDGET_PROMPT},
-                {"role": "user", "content": compact_user},
-            ],
-            max_tokens=6144,
-            temperature=0.2,
-        )
+        with pipeline_step("budget_llm_json_compact_retry"):
+            raw, provider = await llm.chat_json(
+                [
+                    {"role": "system", "content": STAGE3_BUDGET_PROMPT},
+                    {"role": "user", "content": compact_user},
+                ],
+                max_tokens=6144,
+                temperature=0.2,
+            )
 
     now = datetime.now(timezone.utc).isoformat()
     flags = [
@@ -873,6 +925,23 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     except Exception:
         logger.exception("Pricing tier cost-weight guard failed for %s", rfp_id)
 
+    budget = sanitize_commission_budget(budget, pricing_contract)
+    # Bind before editor so MANUAL FILL commission placeholders do not trip unbound
+    # XOR checks against still-unbound labor lines inside assert_budget_canonical.
+    budget = bind_budget_line_items_to_rate_card(budget, rate_card)
+    step_trace(
+        "pricing_bound_to_rate_card",
+        rfp_id=rfp_id,
+        rate_card_rates=len(rate_card.rates or []),
+        **summarize_budget(budget),
+    )
+    for warn in rate_card.warnings:
+        flag = f"[PRICING FLAG: rate card] {warn}"
+        if flag not in (budget.pricing_flags or []):
+            budget = budget.model_copy(
+                update={"pricing_flags": [*(budget.pricing_flags or []), flag]}
+            )
+
     budget = run_budget_editor_pass(
         budget,
         rfp_sections=prior_research.rfp_sections if prior_research else [],
@@ -901,6 +970,13 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         budget = budget.model_copy(
             update={"pricing_flags": existing_flags, "pricing_audit_flags": audit_flags}
         )
+    step_trace(
+        "pricing_grounding_audit",
+        rfp_id=rfp_id,
+        grounding_rows=len(grounding_rows or []),
+        audit_flags=len(audit_flags or []),
+        **summarize_budget(budget),
+    )
 
     from app.services.proposal_budget_content import prepare_budget_for_client_display
 
@@ -928,22 +1004,15 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     if fee_memo:
         budget = budget.model_copy(update={"fee_justification_memo": fee_memo})
 
-    # T5.1/T5.2 — bind lines to KB rate card; unbound → is_manual_fill + flags (no invention).
-    budget = bind_budget_line_items_to_rate_card(budget, rate_card)
-    for warn in rate_card.warnings:
-        flag = f"[PRICING FLAG: rate card] {warn}"
-        if flag not in (budget.pricing_flags or []):
-            budget = budget.model_copy(
-                update={"pricing_flags": [*(budget.pricing_flags or []), flag]}
-            )
-
     rate_card_payload = rate_card.model_dump(by_alias=True)
+    contract_payload = pricing_contract.model_dump(by_alias=True)
 
     if prior_research:
         research = prior_research.model_copy(
             update={
                 "budget": budget,
                 "pricing_rate_card": rate_card_payload,
+                "pricing_contract": contract_payload,
                 "updated_at": now,
                 "provider": provider,
             }
@@ -953,6 +1022,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             rfpId=rfp_id,
             budget=budget,
             pricingRateCard=rate_card_payload,
+            pricingContract=contract_payload,
             updatedAt=now,
             provider=provider,
         )
@@ -967,12 +1037,19 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         budget.confidence,
         len(rate_card.rates),
     )
+    step_trace(
+        "pricing_budget_persisted",
+        rfp_id=rfp_id,
+        provider=str(provider or ""),
+        rate_card_rates=len(rate_card.rates or []),
+        **summarize_budget(budget),
+    )
     return budget, research
 
 
 async def reconcile_cached_budget(rfp_id: str) -> tuple[ProposalBudget, ProposalResearchCache]:
     """Re-run deterministic budget editor on cached budget (no LLM regen)."""
-    _rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
+    rfp, _content, rfp_context = load_rfp_for_proposal(rfp_id)
     research = await aget_research_cache(rfp_id)
     if not research or not research.budget:
         raise ProposalError(
@@ -980,13 +1057,67 @@ async def reconcile_cached_budget(rfp_id: str) -> tuple[ProposalBudget, Proposal
             status_code=400,
         )
 
+    from app.models.pricing_contract import PricingContract
+    from app.services.commission_budget_sanitizer import sanitize_commission_budget
+    from app.services.pricing_contract_builder import build_pricing_contract
+    from app.services.pricing_rate_binding import bind_budget_line_items_to_rate_card
+    from app.services.pricing_rate_card_builder import build_pricing_rate_card_from_guide_text
+
+    stage_one, _ = _stage_one_text(rfp)
+    prior_notes = ""
+    if research.budget:
+        prior_notes = "\n".join(
+            part
+            for part in (
+                research.budget.media_spend_notes or "",
+                research.budget.rfp_budget_notes or "",
+                research.budget.fee_structure or "",
+            )
+            if part
+        )
+    if research.pricing_contract:
+        try:
+            contract = PricingContract.model_validate(research.pricing_contract)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "pricing_contract invalid on cache for %s — rebuilding", rfp_id
+            )
+            contract = build_pricing_contract(
+                stage_one_text=f"{stage_one}\n{prior_notes}",
+                rfp_text=rfp_context,
+            )
+    else:
+        contract = build_pricing_contract(
+            stage_one_text=f"{stage_one}\n{prior_notes}",
+            rfp_text=rfp_context,
+        )
+
+    budget = sanitize_commission_budget(research.budget, contract)
+    rate_card = None
+    if research.pricing_rate_card:
+        try:
+            from app.models.pricing_rate_card import PricingRateCard
+
+            rate_card = PricingRateCard.model_validate(research.pricing_rate_card)
+        except Exception:  # noqa: BLE001
+            rate_card = None
+    if rate_card is None:
+        guide_text, _kb = await _fetch_guide_context(rfp, _structural_map_text(research)[0])
+        rate_card = build_pricing_rate_card_from_guide_text(guide_text)
+    budget = bind_budget_line_items_to_rate_card(budget, rate_card)
     budget = run_budget_editor_pass(
-        research.budget,
+        budget,
         rfp_sections=research.rfp_sections,
         rfp_context=rfp_context,
     )
     now = datetime.now(timezone.utc).isoformat()
-    research = research.model_copy(update={"budget": budget, "updated_at": now})
+    research = research.model_copy(
+        update={
+            "budget": budget,
+            "pricing_contract": contract.model_dump(by_alias=True),
+            "updated_at": now,
+        }
+    )
     await asave_research_cache(research)
     logger.info(
         "Budget reconciled for %s: revenue=%s, lump=%s, %d line items",

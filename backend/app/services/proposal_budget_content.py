@@ -226,6 +226,11 @@ _DOLLAR_RE = re.compile(r"\$[\d,]+(?:\.\d{1,2})?")
 _INTERNAL_OPT_RE = re.compile(
     r"(?i)\bagency\s+revenue\s+estimate\b|\bmargin\b|\bsonja\b|\b00_guide_pricing\b"
 )
+_OF2_MARKER_RE = re.compile(r"(?i)\boffer\s+form\s+of-?2\b|all-?inclusive\s+contract\s+cost")
+_OF2_TABLE_RE = re.compile(
+    r"(?is)\|[ \t]*Line Item[ \t]*\|[ \t]*Description[ \t]*\|[ \t]*Cost \(USD\)[ \t]*\|.*?"
+    r"(?=(?:\n#{1,6}\s)|\Z)"
+)
 
 
 def _line_looks_like_travel(item: BudgetLineItem) -> bool:
@@ -296,12 +301,28 @@ def fill_section_budget_verify_from_canonical(
     case study fee table) — does not rebuild Cost of Base Proposal.
     """
     from app.services.proposal_manual_flags import VERIFY_TAG_RE
+    from app.core.step_debug_logger import step_trace
 
     if not content or not VERIFY_TAG_RE.search(content):
         return content, 0
     budget = prepare_budget_for_client_display(budget)
     total = _canonical_client_total(budget)
     if total is None or total <= 0:
+        step_trace(
+            "budget_verify_fill_total_missing",
+            rfp_id=getattr(budget, "rfp_id", None),
+            total=total,
+            agency_revenue_estimate=budget.agency_revenue_estimate,
+            lump_sum_total=budget.lump_sum_total,
+            direct_expenses_total=budget.direct_expenses_total,
+            client_media_passthrough=budget.client_media_passthrough,
+            line_items=len(budget.line_items or []),
+            priced_line_items=sum(
+                1
+                for i in (budget.line_items or [])
+                if (i.extended is not None and float(i.extended) > 0)
+            ),
+        )
         return content, 0
 
     # Phase label → sum of extended fees for matching line items.
@@ -398,6 +419,80 @@ def fill_section_budget_verify_from_canonical(
         out_lines.append(VERIFY_TAG_RE.sub(line_repl, line))
 
     return "".join(out_lines), fills
+
+
+def _of2_get_rate(content: str) -> float:
+    """Best-effort GET rate for OF-2.
+
+    Prefer an explicit percentage in the section content; otherwise default to the
+    conservative Oʻahu 4.5% used in the current attachment language.
+    """
+    match = re.search(r"(\d+(?:\.\d+)?)\s*%", content or "")
+    if match:
+        try:
+            pct = float(match.group(1))
+            if 0 < pct < 100:
+                return pct / 100.0
+        except ValueError:
+            pass
+    return 0.045
+
+
+def render_offer_form_of2_from_canonical(
+    content: str,
+    budget: ProposalBudget,
+) -> tuple[str, bool]:
+    """Render Attachment 2 / OF-2 pricing table from the canonical budget.
+
+    This is deterministic by design: budget sections must not be freeform-rewritten
+    by the chat model, otherwise nearby manuscript text can leak into money cells.
+    """
+    if not content or not _OF2_MARKER_RE.search(content):
+        return content, False
+
+    budget = prepare_budget_for_client_display(budget)
+    total = _canonical_client_total(budget)
+    if total is None or total <= 0:
+        return content, False
+
+    fee_items = [
+        item
+        for item in (budget.line_items or [])
+        if item.extended is not None and float(item.extended) > 0
+    ]
+    if not fee_items:
+        return content, False
+
+    get_rate = _of2_get_rate(content)
+    subtotal_pre_get = round(total / (1.0 + get_rate), 2)
+    get_amount = round(total - subtotal_pre_get, 2)
+    rate_label = f"{get_rate * 100:.1f}%"
+    if abs(get_rate * 100 - round(get_rate * 100)) < 0.001:
+        rate_label = f"{int(round(get_rate * 100))}%"
+
+    lines = [
+        "| Line Item | Description | Cost (USD) |",
+        "| --- | --- | ---: |",
+    ]
+    for idx, item in enumerate(fee_items, start=1):
+        _phase, desc = _client_line_label(item)
+        lines.append(f"| {idx} | {desc} | {_usd(float(item.extended or 0))} |")
+    lines.extend(
+        [
+            f"| **Subtotal (pre-GET)** | | **{_usd(subtotal_pre_get)}** |",
+            f"| **Hawaiʻi GET (Oʻahu, {rate_label})** | Baked into the total per RFP §3.4.1 | **{_usd(get_amount)}** |",
+            f"| **TOTAL ALL-INCLUSIVE CONTRACT COST** | Fixed, not-to-exceed, inclusive of all costs | **{_usd(total)}** |",
+        ]
+    )
+    rendered_table = "\n".join(lines)
+
+    if _OF2_TABLE_RE.search(content):
+        return _OF2_TABLE_RE.sub(rendered_table, content, count=1), True
+
+    # Fallback: append under the heading if the table is malformed/missing.
+    if _OF2_MARKER_RE.search(content):
+        return content.rstrip() + "\n\n" + rendered_table + "\n", True
+    return content, False
 
 
 def _professional_fees_and_direct(budget: ProposalBudget) -> tuple[float, float]:

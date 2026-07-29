@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import random
 import re
 import time
+from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
 import httpx
@@ -16,6 +18,16 @@ from app.services.llm_call_context import (
 from app.services.llm_routing import resolve_fireworks_eligibility
 from app.services.llm_pricing import estimate_cost_usd, estimate_tokens_from_chars
 
+try:
+    from langsmith import traceable as _langsmith_traceable
+except ImportError:  # pragma: no cover
+
+    def _langsmith_traceable(*_args: Any, **_kwargs: Any):  # type: ignore[misc]
+        def _decorator(fn: Any) -> Any:
+            return fn
+
+        return _decorator
+
 logger = logging.getLogger(__name__)
 
 LlmTier = Literal["heavy", "light"]
@@ -25,6 +37,21 @@ _LlmPostResult = tuple[str, dict[str, Any]]
 
 # Process-local: once Fireworks returns 412, never call it again this process.
 _FIREWORKS_SUSPENDED = False
+
+
+def _redact_langsmith_llm_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Never send API keys / bearer tokens to LangSmith."""
+    redacted = dict(inputs)
+    if "api_key" in redacted and redacted["api_key"]:
+        redacted["api_key"] = "***"
+    headers = redacted.get("extra_headers")
+    if isinstance(headers, dict):
+        safe = dict(headers)
+        for key in list(safe):
+            if "auth" in key.lower() or "key" in key.lower():
+                safe[key] = "***"
+        redacted["extra_headers"] = safe
+    return redacted
 
 
 def _provider_routing(
@@ -212,6 +239,78 @@ async def _post_gemini_chat(
     }
 
 
+# 429 retry: honor Retry-After when present; else exponential backoff + jitter.
+_RATE_LIMIT_MAX_WAIT_S = 60.0
+_RATE_LIMIT_JITTER_FRAC = 0.3
+
+
+def _parse_retry_after_seconds(response: httpx.Response) -> float | None:
+    """Extract wait seconds from Retry-After header or JSON body, if present.
+
+    Fireworks does not document Retry-After as guaranteed; honor it when sent.
+    Accepts delay-seconds or HTTP-date header values, plus common JSON fields.
+    """
+    header = (response.headers.get("Retry-After") or "").strip()
+    if header:
+        try:
+            return max(0.0, float(header))
+        except ValueError:
+            try:
+                dt = parsedate_to_datetime(header)
+                if dt is not None:
+                    return max(0.0, dt.timestamp() - time.time())
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
+
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    candidates: list[Any] = [
+        payload.get("retry_after"),
+        payload.get("retryAfter"),
+    ]
+    err = payload.get("error")
+    if isinstance(err, dict):
+        candidates.extend([err.get("retry_after"), err.get("retryAfter")])
+
+    for raw in candidates:
+        if raw is None:
+            continue
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _rate_limit_wait_seconds(attempt: int, response: httpx.Response) -> tuple[float, str]:
+    """Return (wait_seconds, source) for a 429 retry.
+
+    attempt is 0-based within the retry loop (0 = first retry after initial fail).
+    Base schedule without Retry-After: 2s, 4s, 8s + up to 30% jitter, capped at 60s.
+    """
+    retry_after = _parse_retry_after_seconds(response)
+    if retry_after is not None:
+        # Tiny jitter so parallel callers don't align even when the server
+        # returns the same Retry-After.
+        wait = min(_RATE_LIMIT_MAX_WAIT_S, retry_after + random.uniform(0.0, 0.5))
+        return wait, "retry_after"
+
+    base = float(2 ** (attempt + 1))
+    jitter = random.uniform(0.0, base * _RATE_LIMIT_JITTER_FRAC)
+    wait = min(_RATE_LIMIT_MAX_WAIT_S, base + jitter)
+    return wait, "exponential_backoff"
+
+
+@_langsmith_traceable(
+    name="llm.post_chat",
+    run_type="llm",
+    process_inputs=_redact_langsmith_llm_inputs,
+)
 async def _post_chat(
     *,
     base_url: str,
@@ -265,12 +364,13 @@ async def _post_chat(
         response = await run_with_generation_cancel(_post)
 
         if response.status_code == 429 and attempt < 3:
-            wait_s = 2 ** (attempt + 1)
+            wait_s, wait_source = _rate_limit_wait_seconds(attempt, response)
             logger.warning(
-                "LLM rate limited (%s), retrying in %ds (attempt %d/3)",
+                "LLM rate limited (%s), retrying in %.1fs (attempt %d/3, source=%s)",
                 provider,
                 wait_s,
                 attempt + 1,
+                wait_source,
             )
             await asyncio.sleep(wait_s)
             continue
@@ -404,6 +504,7 @@ def _record_successful_call(
         logger.warning("LLM cost record failed (non-fatal): %s", str(exc)[:200])
 
 
+@_langsmith_traceable(name="llm.chat_json", run_type="chain")
 async def chat_json(
     messages: list[dict[str, str]],
     *,
@@ -634,6 +735,7 @@ async def chat_json_soft(
         return {}, "failed"
 
 
+@_langsmith_traceable(name="llm.chat_text", run_type="chain")
 async def chat_text(
     messages: list[dict[str, str]],
     *,

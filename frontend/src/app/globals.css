@@ -1793,13 +1793,13 @@ h4 {
   padding: 0.55rem 0.75rem;
   font-size: 14px;
   line-height: 1.55;
-  white-space: pre-wrap;
 }
 
 .proposal-section-chat-bubble--user {
   margin-left: 1.25rem;
   background: rgba(239, 80, 24, 0.1);
   color: var(--zo-text);
+  white-space: pre-wrap;
 }
 
 .proposal-section-chat-bubble--assistant {
@@ -1807,6 +1807,21 @@ h4 {
   background: #fff;
   border: 1px solid rgba(17, 24, 39, 0.08);
   color: var(--zo-text-secondary);
+  white-space: normal;
+}
+
+.proposal-section-chat-md strong {
+  font-weight: 650;
+  color: var(--zo-text);
+}
+
+.proposal-section-chat-md p {
+  margin: 0;
+}
+
+.proposal-section-chat-md ul,
+.proposal-section-chat-md ol {
+  margin: 0;
 }
 
 .proposal-section-chat-composer {

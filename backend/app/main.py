@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.api.auth import router as auth_router
 from app.core.config import settings
+from app.core.langsmith_tracing import configure_langsmith_tracing
 from app.services.proposal_repository import init_proposal_db
 
 logging.basicConfig(
@@ -14,9 +15,13 @@ logging.basicConfig(
     format="%(levelname)s %(name)s: %(message)s",
 )
 
+# Sync LANGSMITH_* into os.environ before any LangChain / LangGraph import work.
+configure_langsmith_tracing()
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    configure_langsmith_tracing()
     init_proposal_db()
     yield
 
@@ -26,6 +31,15 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+try:
+    from langsmith.middleware import TracingMiddleware
+
+    app.add_middleware(TracingMiddleware)
+except Exception:  # noqa: BLE001 — optional if older langsmith
+    logging.getLogger(__name__).debug(
+        "LangSmith TracingMiddleware unavailable", exc_info=True
+    )
 
 app.add_middleware(
     CORSMiddleware,
