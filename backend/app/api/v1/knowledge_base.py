@@ -227,3 +227,15 @@ async def sync_google_drive() -> dict[str, str]:
             detail=str(exc),
         ) from exc
     return {"ok": "true", "message": "Google Drive sync started"}
+
+
+@router.get("/key-personas")
+async def get_key_personas() -> dict[str, object]:
+    from app.services import team_personas_service
+
+    personas = await team_personas_service.get_all_key_personas()
+    return {
+        "total": len(personas),
+        "personas": personas,
+    }
+

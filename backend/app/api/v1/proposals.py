@@ -1,5 +1,6 @@
 from collections.abc import Awaitable, Callable
 from typing import Any
+from pydantic import BaseModel, ConfigDict, Field
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
@@ -279,6 +280,9 @@ def upsert_proposal(rfp_id: str, draft: ProposalDraft) -> dict[str, object]:
                         "Reload the draft — newer sections are already saved."
                     ),
                 )
+
+    if existing and existing.selected_key_personas and not draft.selected_key_personas:
+        draft.selected_key_personas = existing.selected_key_personas
 
     draft = merge_snapshots_for_save(draft, existing)
     from app.services.proposal_draft_snapshots import prune_clutter_snapshots
@@ -920,3 +924,95 @@ async def export_proposal_google_doc(rfp_id: str) -> ProposalGoogleDocExportResp
         title=result["title"],
         section_count=result["sectionCount"],
     )
+
+
+class ProposalKeyPersonasRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    selected_persona_ids: list[str] = Field(..., alias="selectedPersonaIds")
+
+
+@router.get("/{rfp_id}/proposal/key-personas")
+@router.get("/{rfp_id}/key-personas")
+async def get_proposal_key_personas(rfp_id: str) -> dict[str, object]:
+    from app.services import team_personas_service
+    from app.services.proposal_repository import aget_proposal_draft
+
+    all_personas = await team_personas_service.get_all_key_personas()
+    selected_ids: list[str] = []
+    try:
+        draft = await aget_proposal_draft(rfp_id)
+        if draft and draft.selected_key_personas:
+            selected_ids = draft.selected_key_personas
+    except Exception:
+        pass
+
+    return {
+        "total": len(all_personas),
+        "personas": all_personas,
+        "selectedPersonaIds": selected_ids,
+    }
+
+
+@router.post("/{rfp_id}/proposal/key-personas")
+@router.post("/{rfp_id}/key-personas")
+async def save_proposal_key_personas(
+    rfp_id: str, payload: ProposalKeyPersonasRequest
+) -> dict[str, object]:
+    from datetime import datetime, timezone
+    from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
+    from app.models.proposal import ProposalDraft
+
+    draft = await aget_proposal_draft(rfp_id)
+    now = datetime.now(timezone.utc).isoformat()
+    if not draft:
+        draft = ProposalDraft(
+            rfp_id=rfp_id,
+            sections=[],
+            updated_at=now,
+            selected_key_personas=payload.selected_persona_ids,
+        )
+    else:
+        draft.selected_key_personas = payload.selected_persona_ids
+        draft.updated_at = now
+
+    async def _bg_save():
+        try:
+            await asave_proposal_draft(draft)
+            from app.services import supabase_db
+            if supabase_db.use_supabase_db():
+                note = f"Key Personas selected ({len(payload.selected_persona_ids)}): {', '.join(payload.selected_persona_ids)}"
+                supabase_db._get_client().table("rfps").update({
+                    "last_activity": now,
+                    "last_activity_note": note[:250],
+                }).or_(f"id.eq.{rfp_id},external_id.eq.{rfp_id}").execute()
+        except Exception as exc:
+            logger.warning("Background persona save error: %s", exc)
+
+    import asyncio
+    asyncio.create_task(_bg_save())
+
+    return {
+        "ok": True,
+        "rfpId": rfp_id,
+        "selectedPersonaIds": draft.selected_key_personas,
+    }
+
+
+proposals_direct_router = APIRouter(prefix="/proposals", tags=["proposals"])
+
+
+@proposals_direct_router.get("/{rfp_id}/key-personas")
+@proposals_direct_router.get("/{rfp_id}/proposal/key-personas")
+async def get_proposal_key_personas_direct(rfp_id: str) -> dict[str, object]:
+    return await get_proposal_key_personas(rfp_id)
+
+
+@proposals_direct_router.post("/{rfp_id}/key-personas")
+@proposals_direct_router.post("/{rfp_id}/proposal/key-personas")
+async def save_proposal_key_personas_direct(
+    rfp_id: str, payload: ProposalKeyPersonasRequest
+) -> dict[str, object]:
+    return await save_proposal_key_personas(rfp_id, payload)
+
+

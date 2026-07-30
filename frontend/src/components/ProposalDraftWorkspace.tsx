@@ -1,5 +1,7 @@
 "use client";
 
+// Proposal Draft Workspace - Key Personas Enabled
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -53,6 +55,7 @@ import { SectionRevisionCompare } from "./SectionRevisionCompare";
 import { ProposalManualFlagsPanel } from "./ProposalManualFlagsPanel";
 import { ProposalPipelineProgressStrip } from "./ProposalPipelineProgressStrip";
 import { ProposalVersionCompare } from "./ProposalVersionCompare";
+import { KeyPersonasBox } from "./KeyPersonasBox";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
 import {
   ConfirmDialogProvider,
@@ -283,7 +286,15 @@ function ProposalDraftWorkspaceInner({
   );
   const [sectionChatBusy, setSectionChatBusy] = useState(false);
   const [sectionChatMessages, setSectionChatMessages] = useState<SectionChatMessage[]>([]);
+  const [showKeyPersonas, setShowKeyPersonas] = useState(true);
   const assistantPaneRef = useRef<HTMLDivElement>(null);
+
+  const handleKeyPersonasChange = useCallback((selectedPersonaIds: string[]) => {
+    setOutline((prev) => ({
+      ...prev,
+      selectedKeyPersonas: selectedPersonaIds,
+    }));
+  }, []);
 
   const openSectionChat = useCallback((request?: SectionChatReference | null) => {
     if (request) {
@@ -2138,6 +2149,11 @@ function ProposalDraftWorkspaceInner({
             >
               Start from Intelligence
             </button>
+            <KeyPersonasBox
+              rfpId={rfp.id}
+              initialSelectedIds={outline.selectedKeyPersonas || []}
+              onSelectionChange={handleKeyPersonasChange}
+            />
             <button
               type="button"
               onClick={() => void handlePrimaryPipeline()}
@@ -2155,6 +2171,7 @@ function ProposalDraftWorkspaceInner({
             </button>
             </div>
           </div>
+
           <div
             className="proposal-outline-layout grid min-h-0 min-w-0 flex-1 overflow-hidden"
           >

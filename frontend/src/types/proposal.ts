@@ -32,6 +32,15 @@ export interface ProposalDraftSnapshot {
   scanSummary?: Record<string, unknown>;
 }
 
+export interface KeyPersona {
+  id: string;
+  name: string;
+  title: string;
+  hasResume: boolean;
+  sourceFile: string;
+  bioSnippet?: string;
+}
+
 export interface ProposalOutline {
   sections: OutlineSection[];
   updatedAt: string;
@@ -40,6 +49,7 @@ export interface ProposalOutline {
   googleDocExportedAt?: string | null;
   snapshots?: ProposalDraftSnapshot[];
   lastFulfillReport?: Record<string, unknown>;
+  selectedKeyPersonas?: string[];
 }
 
 export interface ProposalDraftMeta {

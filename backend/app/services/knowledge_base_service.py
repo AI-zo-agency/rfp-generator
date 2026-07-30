@@ -56,7 +56,7 @@ async def list_documents() -> list[dict[str, object]]:
     documents = [memory_to_document(memory) for memory in kb_memories]
     return [doc for doc in documents if doc["id"]]
 
-
+#you generated worst ui for key persona keep it simple keep button for persona if user click open modal box and use branding same color as in RFP used
 async def upload_document(
     *,
     title: str,

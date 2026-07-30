@@ -8,6 +8,7 @@ api_router.include_router(health.router)
 api_router.include_router(rfps.router)
 api_router.include_router(sync_jobs.router)
 api_router.include_router(proposals.router)
+api_router.include_router(proposals.proposals_direct_router)
 api_router.include_router(knowledge_base.router)
 api_router.include_router(financials_router)
 

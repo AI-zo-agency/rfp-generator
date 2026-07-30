@@ -33,6 +33,7 @@ export interface ApiProposalDraft {
   googleDocExportedAt?: string | null;
   snapshots?: ProposalOutline["snapshots"];
   lastFulfillReport?: Record<string, unknown>;
+  selectedKeyPersonas?: string[];
 }
 
 export function apiDraftToOutline(draft: ApiProposalDraft): ProposalOutline {
@@ -47,6 +48,7 @@ export function apiDraftToOutline(draft: ApiProposalDraft): ProposalOutline {
       sections: s.sections ?? [],
     })),
     lastFulfillReport: draft.lastFulfillReport ?? undefined,
+    selectedKeyPersonas: draft.selectedKeyPersonas ?? [],
   };
 }
 
@@ -1810,3 +1812,73 @@ export async function exportProposalToGoogleDoc(rfpId: string): Promise<{
     sectionCount: data.sectionCount ?? data.section_count ?? 0,
   };
 }
+
+export interface KeyPersonaItem {
+  id: string;
+  name: string;
+  title: string;
+  hasResume: boolean;
+  sourceFile: string;
+  bioSnippet?: string;
+}
+
+export interface KeyPersonasResponse {
+  total: number;
+  personas: KeyPersonaItem[];
+  selectedPersonaIds?: string[];
+}
+
+export async function fetchKeyPersonas(
+  rfpId?: string,
+  signal?: AbortSignal
+): Promise<KeyPersonasResponse> {
+  const primaryUrl = rfpId
+    ? `/api/rfps/${encodeURIComponent(rfpId)}/proposal/key-personas`
+    : `/api/knowledge-base/key-personas`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const res = await fetch(primaryUrl, {
+      cache: "no-store",
+      signal: signal || controller.signal,
+    });
+    if (res.ok) {
+      return (await res.json()) as KeyPersonasResponse;
+    }
+  } catch {
+    // fallback below
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // Fallback query
+  try {
+    const fallbackRes = await fetch("/api/knowledge-base/key-personas", {
+      cache: "no-store",
+    });
+    if (fallbackRes.ok) {
+      return (await fallbackRes.json()) as KeyPersonasResponse;
+    }
+  } catch {
+    // ignore
+  }
+
+  return { total: 0, personas: [] };
+}
+
+export async function saveProposalKeyPersonas(
+  rfpId: string,
+  selectedPersonaIds: string[]
+): Promise<boolean> {
+  const res = await fetch(
+    `/api/rfps/${encodeURIComponent(rfpId)}/proposal/key-personas`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ selectedPersonaIds }),
+    }
+  );
+  return res.ok;
+}
+

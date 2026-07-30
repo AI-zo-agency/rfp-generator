@@ -578,6 +578,17 @@ class ProposalDraftSnapshot(BaseModel):
     scan_summary: dict[str, Any] | None = Field(default=None, alias="scanSummary")
 
 
+class KeyPersona(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    name: str
+    title: str = ""
+    has_resume: bool = Field(default=True, alias="hasResume")
+    source_file: str = Field(default="", alias="sourceFile")
+    bio_snippet: str = Field(default="", alias="bioSnippet")
+
+
 class ProposalDraft(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -594,6 +605,9 @@ class ProposalDraft(BaseModel):
     snapshots: list[ProposalDraftSnapshot] = Field(default_factory=list)
     last_fulfill_report: dict[str, Any] | None = Field(
         default=None, alias="lastFulfillReport"
+    )
+    selected_key_personas: list[str] = Field(
+        default_factory=list, alias="selectedKeyPersonas"
     )
 
 
