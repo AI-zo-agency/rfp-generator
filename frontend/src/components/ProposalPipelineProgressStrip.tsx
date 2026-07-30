@@ -5,8 +5,6 @@ import {
   FULFILL_SCAN_STEP_LABELS,
   FULL_PROPOSAL_STEP_LABELS,
   PIPELINE_PHASE_LABELS,
-  SENIOR_EDITOR_SUBSTEPS,
-  seniorEditorSubstepIndex,
   type PipelinePhase,
   type ProposalPipelineCheckpoint,
 } from "@/lib/proposal-pipeline-checkpoint";
@@ -59,9 +57,6 @@ export function ProposalPipelineProgressStrip({
   const detail = cp?.activityDetail?.trim();
   const stepIndex = cp?.stepIndex ?? null;
   const stepTotal = cp?.stepTotal ?? null;
-  const seniorStep = isSeniorEditor
-    ? seniorEditorSubstepIndex(activity, stepIndex)
-    : null;
 
   const stepLabels = isFulfill ? FULFILL_SCAN_STEP_LABELS : null;
 
@@ -116,49 +111,14 @@ export function ProposalPipelineProgressStrip({
             </p>
           ) : isSeniorEditor ? (
             <p className="mt-0.5 text-[12px] leading-relaxed text-zo-text-muted">
-              Checking facts, filling gaps, fixing weak sections, then a final
-              polish.
+              Scanning RFP coverage, compliance, and [VERIFY] tags together,
+              then applying fixes.
             </p>
           ) : null}
         </div>
       </div>
 
-      {isSeniorEditor ? (
-        <ol className="mt-3 grid gap-1.5 sm:grid-cols-2 lg:grid-cols-5">
-          {SENIOR_EDITOR_SUBSTEPS.map((step, i) => {
-            const active = seniorStep === i;
-            const done = seniorStep != null && seniorStep > i;
-            return (
-              <li
-                key={step.id}
-                className={`rounded-lg border px-2.5 py-2 ${
-                  active
-                    ? "border-zo-orange/40 bg-zo-orange/10"
-                    : done
-                      ? "border-emerald-200/80 bg-emerald-50/80"
-                      : "border-zo-border/70 bg-white/70"
-                }`}
-              >
-                <p
-                  className={`text-[11px] font-bold ${
-                    active
-                      ? "text-zo-orange"
-                      : done
-                        ? "text-emerald-800"
-                        : "text-zo-text-muted"
-                  }`}
-                >
-                  {done ? "✓ " : active ? "● " : ""}
-                  {step.label}
-                </p>
-                <p className="mt-0.5 text-[10px] leading-snug text-zo-text-muted">
-                  {step.hint}
-                </p>
-              </li>
-            );
-          })}
-        </ol>
-      ) : !isFulfill ? (
+      {!isSeniorEditor && !isFulfill ? (
         <ol className="mt-2 flex flex-wrap gap-1.5">
           {FULL_PROPOSAL_STEP_LABELS.map(({ phase, label }) => {
             const active = phaseKey === phase;

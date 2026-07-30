@@ -46,66 +46,23 @@ export interface ProposalPipelineCheckpoint {
 
 export const FULFILL_SCAN_PHASE = "fulfill-scan";
 
-/** Live substeps shown while Senior editor polish runs (maps to backend activity labels). */
+/** Live substep shown while Senior editor polish runs (maps to backend activity labels).
+ * Dedupe, coverage/compliance ticketing, VERIFY-vs-RFP scrubbing, and legal gates now
+ * run as one consolidated backend pass (ticket emission + VERIFY scrub happen
+ * concurrently), so there is a single card rather than a 3-step sequence. */
 export const SENIOR_EDITOR_SUBSTEPS = [
   {
-    id: "dedupe",
-    label: "Remove duplicates",
-    hint: "Cut repeated case studies and rehashed content",
-  },
-  {
-    id: "coverage",
-    label: "Coverage & compliance",
-    hint: "RFP gaps and required gov/buyer policies",
-  },
-  {
-    id: "legal",
-    label: "Legal gates",
-    hint: "Keep attestation VERIFYs honest",
+    id: "coverage-compliance-verify",
+    label: "Coverage, compliance & VERIFY scrub",
+    hint: "RFP gaps, required gov/buyer policies, and unneeded [VERIFY] tags — scanned together",
   },
 ] as const;
 
 export function seniorEditorSubstepIndex(
-  activityLabel: string | null | undefined,
-  stepIndex?: number | null
+  _activityLabel: string | null | undefined,
+  _stepIndex?: number | null
 ): number {
-  // Prefer backend stepIndex (1-based) — avoids misreading phase titles like
-  // "Senior editor polish" as the Final polish substep.
-  if (typeof stepIndex === "number" && stepIndex >= 1) {
-    return Math.min(
-      Math.max(stepIndex - 1, 0),
-      SENIOR_EDITOR_SUBSTEPS.length - 1
-    );
-  }
-
-  const a = (activityLabel || "").toLowerCase().trim();
-  if (!a) return 0;
-  // Phase-level title only — run just started, still on first card.
-  if (a === "senior editor polish" || a === "senior editor") return 0;
-
-  if (
-    a.includes("duplicate") ||
-    a.includes("removing duplicates") ||
-    a.includes("dedupe")
-  ) {
-    return 0;
-  }
-  if (
-    a.includes("coverage") ||
-    a.includes("compliance") ||
-    a.includes("ticket") ||
-    a.includes("finding gaps") ||
-    a.includes("find gaps")
-  ) {
-    return 1;
-  }
-  if (
-    a.includes("legal") ||
-    a.includes("attestation") ||
-    a.includes("final polish")
-  ) {
-    return 2;
-  }
+  // Only one substep exists now — always the active card while the phase runs.
   return 0;
 }
 

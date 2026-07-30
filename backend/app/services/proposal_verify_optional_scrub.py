@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from app.services import llm
 from app.services.proposal_manual_flags import VERIFY_TAG_RE
@@ -344,32 +346,48 @@ async def scrub_draft_optional_verify_tags(
     rfp_text: str,
     section_filter_ids: set[str] | None = None,
 ) -> tuple[list, list[str]]:
-    """Scrub optional VERIFYs on draft sections that still have tags. Returns (sections, logs)."""
-    logs: list[str] = []
-    out = []
-    for section in draft_sections:
+    """Scrub optional VERIFYs on draft sections that still have tags. Returns (sections, logs).
+
+    Each section's scrub is an independent, side-effect-free LLM call (no DB writes
+    inside the loop), so sections-with-tags are scrubbed concurrently — this is the
+    "scan RFP" half of the Senior Editor pass and the main latency cost when a
+    manuscript has several flagged sections.
+    """
+    targets: list[tuple[int, Any, str]] = []
+    out: list[Any] = list(draft_sections)
+    for idx, section in enumerate(draft_sections):
         sid = getattr(section, "id", "") or ""
         title = getattr(section, "title", "") or sid
         content = getattr(section, "content", "") or ""
         if section_filter_ids is not None and sid not in section_filter_ids:
-            out.append(section)
             continue
         if count_verify_tags(content) <= 0:
-            out.append(section)
             continue
-        result = await scrub_optional_verify_tags(
-            content,
-            section_title=title,
-            rfp_text=rfp_text,
+        targets.append((idx, section, title))
+
+    if not targets:
+        return out, []
+
+    results = await asyncio.gather(
+        *(
+            scrub_optional_verify_tags(
+                getattr(section, "content", "") or "",
+                section_title=title,
+                rfp_text=rfp_text,
+            )
+            for _idx, section, title in targets
         )
+    )
+
+    logs: list[str] = []
+    for (idx, section, _title), result in zip(targets, results):
+        sid = getattr(section, "id", "") or ""
         if result.changed:
-            out.append(section.model_copy(update={"content": result.content}))
+            out[idx] = section.model_copy(update={"content": result.content})
             logs.append(
                 f"verify-scrub:{sid}: removed {result.removed}, "
                 f"kept {result.tags_after} — {result.note[:120]}"
             )
-        else:
-            out.append(section)
-            if result.note:
-                logs.append(f"verify-scrub:{sid}: {result.note[:120]}")
+        elif result.note:
+            logs.append(f"verify-scrub:{sid}: {result.note[:120]}")
     return out, logs

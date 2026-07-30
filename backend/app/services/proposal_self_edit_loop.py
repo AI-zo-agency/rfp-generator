@@ -344,8 +344,9 @@ async def _redraft_section_via_phase3_isolated(
     return next_draft, research, improved, "phase3_ticket_redraft"
 
 
-async def _run_senior_editor_ticket_pass(
+async def _apply_senior_editor_tickets(
     *,
+    tickets: dict[str, Any],
     rfp_id: str,
     rfp: RfpRecord,
     draft: ProposalDraft,
@@ -353,15 +354,7 @@ async def _run_senior_editor_ticket_pass(
     report: SelfEditReport,
     max_tickets: int = 8,
 ) -> tuple[ProposalDraft, ProposalResearchCache | None]:
-    """Emit Senior Editor tickets and dispatch Phase 3 single-section redrafts."""
-    from app.services.proposal_langchain_agents import senior_editor_emit_tickets
-
-    tickets = await senior_editor_emit_tickets(
-        rfp_client=rfp.client,
-        rfp_title=rfp.title,
-        manuscript_digest=_manuscript_digest_for_senior_editor(draft),
-        requirements_by_section=_requirements_by_section_id(research),
-    )
+    """Dispatch Phase 3 single-section redrafts for already-emitted Senior Editor tickets."""
     # Dedupe first (remove bloat), then coverage, then gov compliance.
     coverage = list(tickets.get("coverageTickets") or [])
     dedupe = list(tickets.get("dedupeTickets") or [])
@@ -778,15 +771,8 @@ async def run_self_edit_loop(
 
     report = SelfEditReport(iterations_run=1)
 
-    # Step 1 — deterministic cross-section case-study compression
-    await record_pipeline_activity(
-        rfp_id,
-        label="Senior editor: Removing duplicates",
-        detail="Scanning sections for repeated case studies and cutting unnecessary copies",
-        step_index=1,
-        step_total=3,
-        in_progress_phase="phase-3-6-self-edit",
-    )
+    # Deterministic cross-section case-study compression — fast, no LLM call, so it
+    # runs before the concurrent scans below and they see already-deduped content.
     sections, cross_dupes = compress_duplicate_case_study_sections(list(draft.sections))
     if cross_dupes:
         draft = draft.model_copy(
@@ -803,16 +789,56 @@ async def run_self_edit_loop(
             }
         )
 
-    # Step 2 — one Senior Editor ticket pass (dedupe / coverage / gov compliance)
+    # One consolidated Senior Editor pass. The two scans below are independent reads
+    # against the same manuscript/RFP — emitting coverage/compliance tickets and
+    # deciding which [VERIFY] tags the RFP actually requires — so they run
+    # concurrently instead of as separate sequential phases (this folds the old
+    # standalone "Scan RFP" VERIFY-scrub into generation itself, at no extra token
+    # cost since it no longer needs a second manual pass afterward).
     await record_pipeline_activity(
         rfp_id,
-        label="Senior editor: Coverage & compliance",
-        detail="Checking RFP coverage, duplicates, and required gov/buyer policies",
-        step_index=2,
-        step_total=3,
+        label="Senior editor: coverage, compliance & VERIFY scrub",
+        detail="Scanning manuscript vs. RFP requirements and removing [VERIFY] tags the RFP doesn't require",
+        step_index=1,
+        step_total=1,
         in_progress_phase="phase-3-6-self-edit",
     )
-    draft, research = await _run_senior_editor_ticket_pass(
+
+    from app.services.proposal_langchain_agents import senior_editor_emit_tickets
+    from app.services.proposal_verify_optional_scrub import (
+        count_verify_tags,
+        scrub_draft_optional_verify_tags,
+    )
+
+    verify_ids = {s.id for s in draft.sections if count_verify_tags(s.content or "") > 0}
+
+    tickets, (scrubbed_sections, scrub_logs) = await asyncio.gather(
+        senior_editor_emit_tickets(
+            rfp_client=rfp.client,
+            rfp_title=rfp.title,
+            manuscript_digest=_manuscript_digest_for_senior_editor(draft),
+            requirements_by_section=_requirements_by_section_id(research),
+        ),
+        scrub_draft_optional_verify_tags(
+            list(draft.sections),
+            rfp_text=rfp_context,
+            section_filter_ids=verify_ids,
+        ),
+    )
+
+    if scrub_logs:
+        draft = draft.model_copy(
+            update={
+                "sections": scrubbed_sections,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        await asave_proposal_draft(draft)
+        for line in scrub_logs:
+            report.section_logs.append({"section": "verify-scrub", "detail": line})
+
+    draft, research = await _apply_senior_editor_tickets(
+        tickets=tickets,
         rfp_id=rfp_id,
         rfp=rfp,
         draft=draft,
@@ -823,15 +849,8 @@ async def run_self_edit_loop(
     draft = await aget_proposal_draft(rfp_id) or draft
     research = await aget_research_cache(rfp_id) or research
 
-    # Step 3 — legal attestation gate only (no VERIFY hunt / polish / budget reconcile)
-    await record_pipeline_activity(
-        rfp_id,
-        label="Senior editor: Legal gates",
-        detail="Ensuring E-Verify / conflict / attestation VERIFYs stay honest",
-        step_index=3,
-        step_total=3,
-        in_progress_phase="phase-3-6-self-edit",
-    )
+    # Legal attestation gate — deterministic; keeps E-Verify / conflict / attestation
+    # VERIFYs honest (never lets the LLM assert them as fact).
     from app.services.evidence_trust.legal_attestation_gate import (
         apply_legal_attestation_gates,
     )

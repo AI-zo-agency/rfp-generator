@@ -1568,9 +1568,16 @@ async def _build_case_study_section(
                             "Use ONLY the knowledge-base evidence. Do not invent metrics, "
                             "clients, or contacts.\n"
                             f"{ANTI_HALLUCINATION_RULES}\n"
-                            "Structure: Client overview, Challenge, Approach, Results, "
-                            "Why relevant to this RFP.\n"
-                            "Keep concise (about 450–700 words). First person we/our.\n"
+                            "Structure — exactly these three sections, nothing else: "
+                            "Challenge, Solution / Our Approach, Client Voice.\n"
+                            "Client Voice: a short client quote copied VERBATIM from the "
+                            "knowledge base, in quotation marks, with the speaker's name/title "
+                            "if given. Never paraphrase, embellish, or invent a quote. If the "
+                            "knowledge base contains no client quote, write exactly: "
+                            "[VERIFY: no client quote found in source material]\n"
+                            "Do NOT include a client overview, a Results or KPI/metrics list, "
+                            "or a 'Why Relevant' section.\n"
+                            "Keep concise (about 300–500 words). First person we/our.\n"
                             'Return JSON: {"content": "markdown", "kbRefs": ["..."]}'
                         ),
                     },
@@ -1635,11 +1642,9 @@ def _build_stub_section(
         body = (
             f"### {title}\n\n"
             f"{hint + chr(10) + chr(10) if hint else ''}"
-            "Client overview\n\n[VERIFY: Client overview]\n\n"
             "Challenge:\n\n[VERIFY: Challenge]\n\n"
             "Solution / Our Approach:\n\n[VERIFY: Approach]\n\n"
-            "Results:\n\n- [VERIFY: Results]\n\n"
-            "Why Relevant:\n\n[VERIFY: Why relevant to this RFP]\n"
+            "Client Voice:\n\n[VERIFY: no client quote found in source material]\n"
         )
         mode = "select"
         source = "template"

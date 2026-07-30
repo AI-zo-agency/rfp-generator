@@ -163,8 +163,16 @@ def closing_package_excerpt(rfp_text: str, *, max_chars: int = 32_000) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def submission_documents_excerpt(rfp_text: str, *, max_chars: int = 38_000) -> str:
-    """Documents to be submitted, forms to return, vendor qualifications."""
+def submission_documents_excerpt(rfp_text: str, *, max_chars: int = 46_000) -> str:
+    """Documents to be submitted, forms to return, vendor qualifications.
+
+    Pattern list is kept in sync with `list_submission_checklist_from_rfp`'s
+    catalog (proposal_rfp_submission_requirements.py) — a form or attachment
+    the RFP names as "Exhibit H" or "W-9" with no nearby "documents to be
+    submitted" phrase must still pull a text window here, or the LLM
+    inventory pass that actually creates the manuscript checklist tab never
+    sees it at all.
+    """
     body = (rfp_text or "").strip()
     if not body:
         return ""
@@ -180,6 +188,23 @@ def submission_documents_excerpt(rfp_text: str, *, max_chars: int = 38_000) -> s
         r"awards?\s*(?:and|&)\s*recognition",
         r"acknowledgement\s+of\s+addenda",
         r"section\s+iv",
+        # Named exhibits/forms/attachments are how most gov/buyer RFPs actually
+        # label required submissions — often with no "documents to be
+        # submitted" heading anywhere nearby (e.g. a trailing appendix list).
+        r"\bexhibit\s+[A-Z0-9]+\b",
+        r"\bappendix\s+[A-Z0-9]+\b",
+        r"\battachment\s+[A-Z0-9]+\b",
+        r"non[- ]?collusion",
+        r"affirmative action",
+        r"statement of ownership|ownership disclosure",
+        r"vendor questionnaire|contractor questionnaire",
+        r"certificate(?:s)?\s+of\s+insurance|\bCOI\b",
+        r"\bW[- ]?9\b",
+        r"pricing\s+proposal\s+form|cost\s+proposal\s+form|quotation\s*/?\s*pricing",
+        r"authorized\s+(?:representative|signatory|signature)|signature\s+(?:block|page)",
+        r"contractor vendor certification|\bCVC\b",
+        r"required\s+attachments?|documents?\s+to\s+(?:be\s+)?(?:submitted|included|attached)|submission\s+checklist",
+        r"assurance of compliance",
     )
     windows: list[tuple[int, int]] = []
     span = 5500

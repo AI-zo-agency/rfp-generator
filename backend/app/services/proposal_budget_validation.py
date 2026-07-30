@@ -339,13 +339,20 @@ def infer_line_item_type(item: BudgetLineItem) -> BudgetLineItemType:
 def split_line_item_totals(
     line_items: list[BudgetLineItem],
 ) -> tuple[float, float, float]:
-    """Return (line_item_sum, agency_fee_subtotal, client_passthrough_subtotal)."""
+    """Return (line_item_sum, agency_fee_subtotal, client_passthrough_subtotal).
+
+    Negative-extended lines (discounts, credits, waived-fee adjustments) are
+    legitimate and must be included — dropping them here silently disagreed
+    with sum_line_items_extended/_canonical_client_total/the rendered fee
+    table's own subtotal (none of which filter by sign), which desynced
+    agencyRevenueEstimate/lineItemSum from the client-facing total and could
+    make collect_budget_invariant_violations fail against its own reconciled
+    value. Zero-valued/unset lines still contribute nothing either way.
+    """
     agency = 0.0
     passthrough = 0.0
     for item in line_items:
         ext = float(item.extended or 0)
-        if ext <= 0:
-            continue
         if infer_line_item_type(item) == "client_passthrough":
             passthrough += ext
         else:
@@ -448,6 +455,53 @@ def collect_orphan_commission_violations(budget: ProposalBudget) -> list[str]:
             violations.append(
                 f"{item.id}: orphan commission ${ext:,.2f} with no client media "
                 f"pass-through / media base line — add the buy base or drop the derived fee"
+            )
+    return violations
+
+
+def collect_commission_fee_math_violations(budget: ProposalBudget) -> list[str]:
+    """A drafted commission-fee line's dollar amount must equal rate x media base.
+
+    reconcile_proposal_budget trusts the line item's own `extended` as ground
+    truth and only falls back to rate x pass-through when the line is missing
+    or zero (derive_commission_agency_revenue) — so a populated commission
+    line with the wrong arithmetic (wrong base, stale rate, plain error) is
+    never caught. This checks only lines whose own description says
+    "commission" (matching collect_orphan_commission_violations's
+    identification), never the whole agency_fee_subtotal, so a mixed fee
+    structure (flat retainer + commission line) does not false-positive.
+    """
+    violations: list[str] = []
+    rate = budget.commission_rate
+    if rate is None:
+        return violations
+    r = float(rate)
+    if r > 1:
+        r = r / 100.0
+    if r <= 0:
+        return violations
+
+    _, _, passthrough = split_line_item_totals(budget.line_items)
+    stored_pt = float(budget.client_media_passthrough or 0)
+    base = max(passthrough, stored_pt)
+    if base <= 0.01:
+        return violations
+
+    expected = round(base * r, 2)
+    tolerance = max(5.0, expected * 0.03)
+    for item in budget.line_items:
+        desc = item.description or ""
+        if not _COMMISSION_LINE_RE.search(desc):
+            continue
+        if infer_line_item_type(item) == "client_passthrough":
+            continue
+        ext = float(item.extended or 0)
+        if ext <= 0:
+            continue
+        if abs(ext - expected) > tolerance:
+            violations.append(
+                f"{item.id}: commission fee ${ext:,.2f} != commissionRate ({rate}) x "
+                f"media base (${base:,.2f}) = ${expected:,.2f} — check rate/base, not invented"
             )
     return violations
 
@@ -1098,6 +1152,7 @@ def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
     violations.extend(collect_line_item_math_violations(budget))
     violations.extend(collect_one_time_recurring_violations(budget))
     violations.extend(collect_orphan_commission_violations(budget))
+    violations.extend(collect_commission_fee_math_violations(budget))
     violations.extend(collect_pm_floor_violations(budget))
 
     return violations

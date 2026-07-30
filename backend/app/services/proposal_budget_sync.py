@@ -141,34 +141,53 @@ def _canonical_slot_values(budget: ProposalBudget) -> dict[str, float]:
     }
 
 
+# Connects a budget label to its dollar figure — a colon ("Agency fee: $X") or
+# natural sentence phrasing ("Agency fee is $X" / "...equals $X" / "...totals $X").
+# Colon-only used to miss real client-facing prose like "Year 1 agency revenue
+# is $325,242.66" (confirmed against tests/fixtures/manuscripts/
+# cvvb_v1_duplication_budget), letting a mislabeled-but-canonical figure (the
+# grand total, repeated under the agency-fee and pass-through labels too)
+# through every deterministic check.
+_LABEL_VALUE_CONNECTOR = (
+    r"(?:\s*:\s*|\s+(?:is|are|was|equals?|totals?|comes?\s+to|amounts?\s+to)\s+)"
+)
+_USD_TOKEN = r"(\$[\d,]+(?:\.\d{2})?)"
+
 _LABELLED_FEE_CLAIM_RES: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
             r"(?i)(?:Total\s+Year\s*1\s+agency\s+fee|Total\s+agency\s+(?:fee|revenue)|"
             r"Agency\s+(?:fee|revenue)(?:\s+estimate)?|Base-year\s+proposed\s+fees)"
-            r"\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+            + _LABEL_VALUE_CONNECTOR
+            + _USD_TOKEN
         ),
         "agency_fee",
     ),
     (
         re.compile(
             r"(?i)Client\s+media\s+pass-?through(?:\s*\([^)]*\))?"
-            r"(?:\s+billed\s+at\s+net)?\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+            r"(?:\s+billed\s+at\s+net)?"
+            + _LABEL_VALUE_CONNECTOR
+            + _USD_TOKEN
         ),
         "media_passthrough",
     ),
     (
         re.compile(
             r"(?i)(?:Direct\s+travel\s*/\s*reimbursables|Direct\s+travel|"
-            r"Estimated\s+reimbursable\s+travel)\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+            r"Estimated\s+reimbursable\s+travel)"
+            + _LABEL_VALUE_CONNECTOR
+            + _USD_TOKEN
         ),
         "direct_expenses",
     ),
     (
         re.compile(
             r"(?i)(?:Total\s+Year\s*1\s+client\s+invoicing|Total\s+client\s+invoicing|"
-            r"Total\s+Year\s*1\s+investment|Total\s+proposed\s+investment)"
-            r"\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+            r"Total\s+Year\s*1\s+investment|Total\s+proposed\s+investment|"
+            r"Grand\s+total\s+client\s+invoicing)"
+            + _LABEL_VALUE_CONNECTOR
+            + _USD_TOKEN
         ),
         "total_invoicing",
     ),

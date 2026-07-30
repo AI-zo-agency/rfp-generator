@@ -1,0 +1,95 @@
+{
+  "timestamp": "2026-07-30T12:02:19.943856+00:00",
+  "rfp_id": "rfp_0001",
+  "entities_processed": 20,
+  "entity_types": [
+    "EMAIL",
+    "LOC",
+    "ORG",
+    "PER",
+    "PHONE",
+    "ZIP_CODE"
+  ],
+  "mapping": {
+    "ZIP_CODE:17050": {
+      "token": "[ZIP_CODE_1]",
+      "type": "ZIP_CODE"
+    },
+    "EMAIL:rafael@visitcumberlandvalley.com": {
+      "token": "[EMAIL_1]",
+      "type": "EMAIL"
+    },
+    "LOC:Atlantic": {
+      "token": "[LOC_1]",
+      "type": "LOC"
+    },
+    "LOC:Cumberland Valley": {
+      "token": "[LOC_2]",
+      "type": "LOC"
+    },
+    "ORG:IT": {
+      "token": "[ORG_1]",
+      "type": "ORG"
+    },
+    "ORG:CAEDC": {
+      "token": "[ORG_2]",
+      "type": "ORG"
+    },
+    "LOC:Pennsylvania": {
+      "token": "[LOC_3]",
+      "type": "LOC"
+    },
+    "ORG:CVVB": {
+      "token": "[ORG_3]",
+      "type": "ORG"
+    },
+    "ORG:VB": {
+      "token": "[ORG_4]",
+      "type": "ORG"
+    },
+    "ORG:Cumberland Valley Visitors Bureau": {
+      "token": "[ORG_5]",
+      "type": "ORG"
+    },
+    "ORG:Cumberland County Board of Commissioners": {
+      "token": "[ORG_6]",
+      "type": "ORG"
+    },
+    "ORG:Cumberland Area Economic Development Corporation": {
+      "token": "[ORG_7]",
+      "type": "ORG"
+    },
+    "ORG:Creative Campaign Production & Media": {
+      "token": "[ORG_8]",
+      "type": "ORG"
+    },
+    "PHONE:(717) 240.7194": {
+      "token": "[PHONE_1]",
+      "type": "PHONE"
+    },
+    "PER:Rafael Hernandez": {
+      "token": "[PER_1]",
+      "type": "PER"
+    },
+    "ORG:Selected": {
+      "token": "[ORG_9]",
+      "type": "ORG"
+    },
+    "ORG:Creative Campaign Development & Media": {
+      "token": "[ORG_10]",
+      "type": "ORG"
+    },
+    "LOC:PA": {
+      "token": "[LOC_4]",
+      "type": "LOC"
+    },
+    "LOC:Ste 100 Mechanicsburg": {
+      "token": "[LOC_5]",
+      "type": "LOC"
+    },
+    "LOC:Sporting Hill Rd": {
+      "token": "[LOC_6]",
+      "type": "LOC"
+    }
+  }
+}

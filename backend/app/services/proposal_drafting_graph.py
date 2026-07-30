@@ -126,7 +126,7 @@ Rules (strict):
 38. HOURLY RATES: Never invent individual ZO member $/hr. If a staff-hours table is required, use labor-category / work rates from 00_Guide_Pricing evidence, or [VERIFY: hourly rate — {role}]. namedPerson is a staffing note only.
 38. PERCENT-TIME / FTE: Never invent percent-time columns or reuse static % grids from other proposals. If the RFP does not require percent-time/FTE, omit that column entirely (Role | Name | experience only). If the RFP requires it, every cell is [VERIFY: percent time] — never invent 10%/35%/25%/25-30%.
 39. LENGTH: Hit the scored RFP asks, then stop. Do not pad to wordTarget with filler when the requirement is already met. Evaluators skim — dense and short beats long and repetitive.
-40. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Why Relevant may connect to THIS RFP; facts must stay faithful to evidence [E#].
+40. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Cover Challenge and Solution only, facts staying faithful to evidence [E#]. If the evidence contains a client quote, include it verbatim as Client Voice (quotation marks, speaker name/title if given) — never paraphrase or invent one. Do not add a Results/KPI/metrics list or a separate "Why Relevant" section.
 
 Return ONLY JSON:
 {

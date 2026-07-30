@@ -8,6 +8,15 @@ from app.services import supermemory
 
 logger = logging.getLogger(__name__)
 
+# Baseline set of zö team members always expected to have an approved
+# 04_Bio_*.pdf on file — used as a sanity floor, not an allowlist.
+VERIFIED_TEAM_PERSONAS: tuple[str, ...] = (
+    "Sonja Anderson",
+    "Rachael Rice",
+    "Ella Lindau",
+    "Sarah Eichhorn",
+)
+
 
 def _name_to_id(name: str) -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")

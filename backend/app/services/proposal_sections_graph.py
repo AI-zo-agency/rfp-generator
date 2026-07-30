@@ -21,7 +21,8 @@ from langgraph.graph import END, START, StateGraph
 
 from app.core.config import settings
 from app.models.proposal import ProposalBrandVoice, ProposalSection, Section1EditorialReview, Section1EditorialRecommendation
-from app.services import llm, proposal_knowledge_base_tools, supermemory
+from app.services import llm, proposal_knowledge_base_tools, supermemory, team_personas_service
+from app.services.proposal_repository import aget_proposal_draft
 from app.services.agency_facts import (
     agency_tenure_block,
     agency_years_in_operation,
@@ -53,6 +54,7 @@ from app.services.company_qualification.schemas import (
     ProposalContext,
     Section1CompositionResult,
     Section1PlanResult,
+    TeamMemberSelection,
     TeamSelectionResult,
 )
 from app.services.llm import LlmError
@@ -1915,6 +1917,41 @@ async def _build_section_1_cq(state: SectionsGraphState) -> dict[str, Any]:
     return {"sections": new_sections, "provider": provider}
 
 
+async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, Any]]:
+    """User-selected Key Personas for this RFP, if any were chosen in the UI."""
+    if not rfp_id:
+        return []
+    try:
+        draft = await aget_proposal_draft(rfp_id)
+    except Exception:
+        logger.warning("Could not load proposal draft %s to check selected Key Personas", rfp_id)
+        return []
+    selected_ids = set(getattr(draft, "selected_key_personas", None) or [])
+    if not selected_ids:
+        return []
+    try:
+        all_personas = await team_personas_service.get_all_key_personas()
+    except Exception:
+        logger.warning("Could not load Key Personas roster for rfp %s", rfp_id)
+        return []
+    by_id = {p["id"]: p for p in all_personas}
+    return [by_id[pid] for pid in selected_ids if pid in by_id]
+
+
+def _team_selection_from_personas(personas: list[dict[str, Any]]) -> TeamSelectionResult:
+    """Build a TeamSelectionResult straight from the user's Key Persona picks —
+    no RFP-needs matching, no roster re-scoring, no owner auto-insert."""
+    members = [
+        TeamMemberSelection(
+            name=str(p["name"]),
+            role=str(p.get("title") or ""),
+            rationale="Selected by the user as a Key Persona for this proposal.",
+        )
+        for p in personas
+    ]
+    return TeamSelectionResult(members=members)
+
+
 async def _select_team(state: SectionsGraphState) -> dict[str, Any]:
     """Team Selection Agent — roster query + skill-based pick, no bios."""
     if state.get("skip_section_2"):
@@ -1925,6 +1962,22 @@ async def _select_team(state: SectionsGraphState) -> dict[str, Any]:
         rfp_sector=state["rfp_sector"],
         rfp_context=state["rfp_context"],
     )
+
+    # A user-selected Key Personas list takes over completely: fetch bios for
+    # exactly those people, never the RFP-needs-driven roster match below.
+    selected_personas = await _selected_key_personas_for_rfp(state.get("rfp_id"))
+    if selected_personas:
+        selection = _team_selection_from_personas(selected_personas)
+        logger.info(
+            "Team Selection: using %d user-selected Key Personas for rfp %s (skipping RFP-needs matching)",
+            len(selected_personas),
+            state.get("rfp_id"),
+        )
+        return {
+            "team_selection": selection.model_dump(by_alias=True),
+            "kb_master_roster": roster_text,
+            "kb_master_roster_sources": roster_sources,
+        }
 
     context_raw = state.get("proposal_context")
     if not context_raw:
@@ -2672,9 +2725,15 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                             "- Return ONE complete JSON object — no markdown fences.\n\n"
                             "Format and Content:\n"
                             "- Write from zö's perspective (we/our/us).\n"
-                            "- Use bold text for key outcomes and impact metrics.\n"
-                            "- Structure as: Client overview → Challenge → Our Approach → Key Tactics → Measurable Outcomes\n"
-                            "- Use bullet points for tactics and outcomes — no long boring paragraphs.\n"
+                            "- Structure as exactly these three sections, nothing else: "
+                            "Challenge → Solution / Our Approach → Client Voice.\n"
+                            "- Client Voice: a short client quote copied VERBATIM from the case "
+                            "study KB, in quotation marks, with the speaker's name/title if given. "
+                            "Never paraphrase, embellish, or invent a quote. If the KB contains no "
+                            "client quote for this study, write exactly: [VERIFY: no client quote "
+                            "found in source material]\n"
+                            "- Do NOT include a company/client overview, a Results or KPI/metrics "
+                            "list, 'Key Tactics', or 'Measurable Outcomes' section.\n"
                             "- Use ASCII characters only in all text — no special Unicode or non-English characters.\n"
                             'Return JSON: {"content": "full case study content", "kbRefs": ["..."]}'
                         ),

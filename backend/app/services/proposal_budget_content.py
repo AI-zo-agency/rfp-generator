@@ -1145,29 +1145,43 @@ def reconcile_budget_summary_prose(
 
     out = _YEAR1_INVESTMENT_BLOCK_RE.sub(_year1_sub, text)
 
-    # Label-by-label fixes when the Year 1 block regex did not fire.
+    # Label-by-label fixes when the Year 1 block regex did not fire. Connector
+    # accepts a colon OR natural sentence phrasing ("Agency fee is $X") — colon-only
+    # let sentences like "Year 1 agency revenue is $325,242.66" (a mislabeled
+    # figure copying the grand total) through untouched; see proposal_budget_sync
+    # for the matching fix in the detector this auto-fixer complements.
+    _connector = r"(?:\s*:\s*|\s+(?:is|are|was|equals?|totals?|comes?\s+to|amounts?\s+to)\s+)"
     label_specs: list[tuple[str, float]] = [
         (
             r"(Total\s+Year\s*1\s+agency\s+fee|Total\s+agency\s+(?:fee|revenue)|"
-            r"Agency\s+(?:fee|revenue)(?:\s+estimate)?)\s*:\s*\$[\d,]+(?:\.\d{2})?",
+            r"Agency\s+(?:fee|revenue)(?:\s+estimate)?)"
+            + _connector
+            + r"\$[\d,]+(?:\.\d{2})?",
             agency,
         ),
         (
-            r"(Client\s+media\s+pass-?through(?:\s*\([^)]*\))?)\s*:\s*\$[\d,]+(?:\.\d{2})?",
+            r"(Client\s+media\s+pass-?through(?:\s*\([^)]*\))?)"
+            + _connector
+            + r"\$[\d,]+(?:\.\d{2})?",
             passthrough,
         ),
         (
             r"(Direct\s+travel\s*/\s*reimbursables|Direct\s+travel|"
-            r"Estimated\s+reimbursable\s+travel)\s*:\s*\$[\d,]+(?:\.\d{2})?",
+            r"Estimated\s+reimbursable\s+travel)"
+            + _connector
+            + r"\$[\d,]+(?:\.\d{2})?",
             direct,
         ),
         (
             r"(Total\s+Year\s*1\s+client\s+invoicing|Total\s+client\s+invoicing|"
-            r"Total\s+Year\s*1\s+investment)\s*:\s*\$[\d,]+(?:\.\d{2})?",
+            r"Total\s+Year\s*1\s+investment|Total\s+proposed\s+investment|"
+            r"Grand\s+total\s+client\s+invoicing)"
+            + _connector
+            + r"\$[\d,]+(?:\.\d{2})?",
             total,
         ),
         (
-            r"(Base-year\s+proposed\s+fees)\s*:\s*\$[\d,]+(?:\.\d{2})?",
+            r"(Base-year\s+proposed\s+fees)" + _connector + r"\$[\d,]+(?:\.\d{2})?",
             agency,
         ),
     ]

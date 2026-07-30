@@ -259,7 +259,7 @@ async def inventory_rfp_submission_requirements(
                 },
                 {
                     "role": "user",
-                    "content": f"RFP: {rfp_title}\n\nSubmission excerpt:\n{excerpt[:42000]}",
+                    "content": f"RFP: {rfp_title}\n\nSubmission excerpt:\n{excerpt[:46000]}",
                 },
             ],
             max_tokens=4096,
