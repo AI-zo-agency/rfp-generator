@@ -2258,6 +2258,49 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
             reason="adversarial_repair_loop=false",
         )
 
+    # Scan any surviving [VERIFY] tags against the RFP before building the review
+    # the user sees: keep a tag only if the RFP explicitly requires that fact,
+    # drop it otherwise (never invent). Without this the preview panel showed the
+    # raw, un-scrubbed count even when Senior Editor's earlier pass had already
+    # run — e.g. tags reintroduced by the adversarial-repair step above.
+    from app.services.go_no_go_service import _assess_rfp_content, combine_rfp_text
+    from app.services.proposal_budget_content import find_budget_section_index
+    from app.services.proposal_verify_optional_scrub import (
+        count_verify_tags,
+        scrub_draft_optional_verify_tags,
+    )
+
+    budget_idx = find_budget_section_index(draft.sections)
+    budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
+    verify_ids = {
+        s.id
+        for s in draft.sections
+        if s.id != budget_section_id and count_verify_tags(s.content or "") > 0
+    }
+    if verify_ids:
+        content_info = _assess_rfp_content(rfp)
+        rfp_text = combine_rfp_text(content_info.description or "", content_info.pdf_text or "")
+        scrubbed_sections, scrub_logs = await scrub_draft_optional_verify_tags(
+            list(draft.sections),
+            rfp_text=rfp_text or "",
+            section_filter_ids=verify_ids,
+        )
+        by_old = {s.id: (s.content or "") for s in draft.sections}
+        if any(by_old.get(s.id, "") != (s.content or "") for s in scrubbed_sections):
+            draft = draft.model_copy(
+                update={
+                    "sections": scrubbed_sections,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            await asave_proposal_draft(draft)
+            if scrub_logs:
+                logger.info(
+                    "Phase 4 review VERIFY scrub for %s: %s",
+                    rfp_id,
+                    "; ".join(scrub_logs[:5]),
+                )
+
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp,
         draft=draft,

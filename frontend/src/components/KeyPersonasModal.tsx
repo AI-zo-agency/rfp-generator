@@ -159,7 +159,7 @@ export function KeyPersonasModal({
               id="key-personas-modal-title"
               className="mt-1 text-2xl font-bold text-[#111827]"
             >
-              Key Personas
+              Key Persons
             </h2>
             <p className="mt-1 text-xs text-[#4b5563]">
               Select team members whose Knowledge Base resumes will be included in this RFP proposal.

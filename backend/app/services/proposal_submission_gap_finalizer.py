@@ -174,13 +174,24 @@ async def _scrub_optional_verify_after_fills(
     draft: ProposalDraft,
     logs: list[str],
 ) -> tuple[ProposalDraft, list[str]]:
-    """Drop remaining [VERIFY] tags the RFP does not require (never invent)."""
+    """Drop remaining [VERIFY] tags the RFP does not require (never invent).
+
+    Excludes the Budget/Pricing section explicitly — it is deterministically
+    rendered from the canonical ProposalBudget object (render_budget_markdown)
+    and must never go through a generic content-rewriting LLM pass, which has
+    no awareness it must preserve an exact reconciled table. Today this call
+    only avoided it by luck (the budget's own placeholders are "[MANUAL FILL:
+    ...]"/"[PRICING FLAG: ...]", not literal "[VERIFY]"); make the exclusion
+    explicit so a future guide/placeholder change can't silently reopen it.
+    """
     try:
         from app.services.go_no_go_service import (
             _assess_rfp_content,
             combine_rfp_text,
         )
+        from app.services.proposal_budget_content import find_budget_section_index
         from app.services.proposal_verify_optional_scrub import (
+            count_verify_tags,
             scrub_draft_optional_verify_tags,
         )
 
@@ -189,9 +200,17 @@ async def _scrub_optional_verify_after_fills(
             content_info.description or "",
             content_info.pdf_text or "",
         )
+        budget_idx = find_budget_section_index(draft.sections)
+        budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
+        verify_ids = {
+            s.id
+            for s in draft.sections
+            if s.id != budget_section_id and count_verify_tags(s.content or "") > 0
+        }
         scrubbed_sections, scrub_logs = await scrub_draft_optional_verify_tags(
             list(draft.sections),
             rfp_text=rfp_text or "",
+            section_filter_ids=verify_ids,
         )
         if scrub_logs:
             logs.extend(scrub_logs)

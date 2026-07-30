@@ -1085,6 +1085,18 @@ def reconcile_proposal_budget(
                 )
 
     merged = budget.model_copy(update=updates)
+
+    # PM-vs-agency-fee ratio is a policy guide, not an arithmetic fact: the
+    # absolute-dollar PM guide (00_Guide_Pricing 9.1/9.2, ~$7.5k-12k) and this
+    # 5-8%-of-fee ceiling structurally conflict on any engagement under
+    # roughly $150k in agency fee — adjust_pm_line_items_to_guide/
+    # _raise_pm_items_to_floor above already tried to reconcile them and can
+    # legitimately fail to (the floor and the ceiling can't both hold on a
+    # small-fee RFP). Surface it as a review flag rather than hard-blocking
+    # the whole pipeline on a policy tension no retry can resolve.
+    for msg in collect_pm_ratio_violations(merged):
+        flags.append(f"[PRICING FLAG: {msg}]")
+
     merged = merged.model_copy(
         update={
             "option_term_notes": rebuild_option_term_notes(
@@ -1148,7 +1160,11 @@ def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
             if re.search(r"reconcil|must equal|!=\s*sum", flag, re.I):
                 violations.append(f"unresolved budget flag: {flag[:120]}")
 
-    violations.extend(collect_pm_ratio_violations(budget))
+    # PM ratio vs. guide is intentionally NOT a hard invariant — see the
+    # advisory [PRICING FLAG: ...] this same check appends inside
+    # reconcile_proposal_budget. It is a policy/guide tension (absolute-dollar
+    # PM floor vs. percentage-of-fee ceiling), not an arithmetic fact, and can
+    # be legitimately unresolvable on a small-fee RFP no retry fixes.
     violations.extend(collect_line_item_math_violations(budget))
     violations.extend(collect_one_time_recurring_violations(budget))
     violations.extend(collect_orphan_commission_violations(budget))

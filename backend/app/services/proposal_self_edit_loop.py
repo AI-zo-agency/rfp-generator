@@ -355,6 +355,15 @@ async def _apply_senior_editor_tickets(
     max_tickets: int = 8,
 ) -> tuple[ProposalDraft, ProposalResearchCache | None]:
     """Dispatch Phase 3 single-section redrafts for already-emitted Senior Editor tickets."""
+    from app.services.proposal_budget_content import find_budget_section_index
+
+    # The Budget/Pricing section is deterministically rendered (render_budget_markdown)
+    # and must never go through a generic Phase 3 section redraft, which would freely
+    # rewrite the reconciled table as ordinary prose. Never apply a ticket to it —
+    # budget corrections belong in the budget editor, not the senior editor ticket pass.
+    budget_idx = find_budget_section_index(draft.sections)
+    budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
+
     # Dedupe first (remove bloat), then coverage, then gov compliance.
     coverage = list(tickets.get("coverageTickets") or [])
     dedupe = list(tickets.get("dedupeTickets") or [])
@@ -366,6 +375,8 @@ async def _apply_senior_editor_tickets(
             continue
         sid = str(raw.get("sectionId") or "").strip()
         if not sid or sid in seen:
+            continue
+        if sid == budget_section_id:
             continue
         if not any(s.id == sid for s in draft.sections):
             continue
@@ -804,13 +815,27 @@ async def run_self_edit_loop(
         in_progress_phase="phase-3-6-self-edit",
     )
 
+    from app.services.proposal_budget_content import find_budget_section_index
     from app.services.proposal_langchain_agents import senior_editor_emit_tickets
     from app.services.proposal_verify_optional_scrub import (
         count_verify_tags,
         scrub_draft_optional_verify_tags,
     )
 
-    verify_ids = {s.id for s in draft.sections if count_verify_tags(s.content or "") > 0}
+    # The Budget/Pricing section is deterministically rendered from the canonical
+    # ProposalBudget object (render_budget_markdown) — it is never freely drafted,
+    # so it must never go through a generic content-rewriting LLM pass. A stray
+    # [VERIFY]/[MANUAL FILL] placeholder for an unbound rate-card line would
+    # otherwise pull the whole reconciled table into the scrub prompt, which has
+    # no awareness it must preserve an exact table and can corrupt or blank it.
+    budget_idx = find_budget_section_index(draft.sections)
+    budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
+
+    verify_ids = {
+        s.id
+        for s in draft.sections
+        if s.id != budget_section_id and count_verify_tags(s.content or "") > 0
+    }
 
     tickets, (scrubbed_sections, scrub_logs) = await asyncio.gather(
         senior_editor_emit_tickets(
