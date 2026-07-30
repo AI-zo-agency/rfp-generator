@@ -367,9 +367,14 @@ def _build_audit_items_from_timesheets() -> list[dict]:
             round_label = f"Round {detected_round}" if detected_round else "R4+"
             reasoning = entries[0].get("ai_classification", {}).get("ai_reasoning", "Exceeds retainer revision cap.")
 
-            item_id = f"aud-oscope-{topic[:20].replace(' ', '-').lower()}"
-            if item_id in seen_ids:
-                item_id += f"-{len(entries)}"
+            # Build a unique ID using topic slug + global index
+            topic_slug = re.sub(r"[^a-z0-9]+", "-", topic[:30].lower()).strip("-")
+            base_id = f"aud-oscope-{topic_slug}"
+            item_id = base_id
+            counter = 1
+            while item_id in seen_ids:
+                counter += 1
+                item_id = f"{base_id}-{counter}"
             seen_ids.add(item_id)
 
             items.append({
@@ -420,9 +425,13 @@ def _build_audit_items_from_timesheets() -> list[dict]:
             continue  # Not a significant volume flag
         dates = info["dates"]
         date_range = f"{dates[0]} – {dates[-1]}" if len(dates) > 1 else (dates[0] if dates else "")
-        item_id = f"aud-vol-{key[:20].replace(' ', '-').lower()}"
-        if item_id in seen_ids:
-            continue
+        key_slug = re.sub(r"[^a-z0-9]+", "-", key[:30].lower()).strip("-")
+        base_id = f"aud-vol-{key_slug}"
+        item_id = base_id
+        counter = 1
+        while item_id in seen_ids:
+            counter += 1
+            item_id = f"{base_id}-{counter}"
         seen_ids.add(item_id)
 
         items.append({
@@ -450,9 +459,13 @@ def _build_audit_items_from_timesheets() -> list[dict]:
         total_amt = round(info["amount"], 2)
         if total_hrs < 1:
             continue
-        item_id = f"aud-unmap-{key[:20].replace(' ', '-').lower()}"
-        if item_id in seen_ids:
-            continue
+        key_slug = re.sub(r"[^a-z0-9]+", "-", key[:30].lower()).strip("-")
+        base_id = f"aud-unmap-{key_slug}"
+        item_id = base_id
+        counter = 1
+        while item_id in seen_ids:
+            counter += 1
+            item_id = f"{base_id}-{counter}"
         seen_ids.add(item_id)
 
         items.append({
@@ -486,50 +499,63 @@ class AuditResolveRequest(BaseModel):
     action: str
 
 @router.get("/iworker-timesheets")
-def get_iworker_timesheets(sheet_url: Optional[str] = Query(None)):
-    """Returns iWorker timesheets with AI classification.
-    
-    Results are cached for 5 minutes per sheet URL to avoid re-running
-    the AI classifier on every page load or tab switch.
-    """
-    cache_key = sheet_url or "default"
+def get_iworker_timesheets(
+    sheet_url: Optional[str] = Query(None),
+    contractor: Optional[str] = Query(None),
+):
+    """Returns iWorker timesheets across all contractor tabs with rate extraction and AI classification."""
+    cache_key = f"{sheet_url or 'default'}:{contractor or 'all'}"
     now = time.monotonic()
 
-    # ── Cache hit: serve immediately, no re-classification ───────────────────
+    # ── Cache hit: serve immediately ───────────────────
     if cache_key in _TIMESHEET_CACHE:
         cached_at, cached_response = _TIMESHEET_CACHE[cache_key]
         age_seconds = now - cached_at
         if age_seconds < _TIMESHEET_CACHE_TTL_SECONDS:
-            remaining = int(_TIMESHEET_CACHE_TTL_SECONDS - age_seconds)
-            logger.info(
-                f"[CACHE HIT] Serving timesheets from cache (key={cache_key!r}, "
-                f"age={int(age_seconds)}s, expires_in={remaining}s)"
-            )
             return cached_response
         else:
-            logger.info(f"[CACHE EXPIRED] Re-fetching and re-classifying timesheets (key={cache_key!r})")
             del _TIMESHEET_CACHE[cache_key]
-    else:
-        logger.info(f"[CACHE MISS] First fetch for key={cache_key!r}, running classification...")
 
     is_live = False
     fetched_entries = None
+    tabs_meta: List[Dict[str, Any]] = []
 
     try:
-        # Attempt to fetch live rows from Google Sheets API
         sp_id = google_sheets.extract_spreadsheet_id(sheet_url) if sheet_url else None
-        live_rows = google_sheets.fetch_live_sheet_rows(sp_id, "A1:I5000")
-        if live_rows and len(live_rows) > 0:
-            parsed = google_sheets.parse_sheet_rows_to_timesheets(live_rows)
-            if parsed and len(parsed) > 0:
-                fetched_entries = parsed
-                is_live = True
+        res_data = google_sheets.fetch_all_tabs_and_timesheets(sp_id)
+        if res_data and res_data.get("timesheets"):
+            fetched_entries = res_data["timesheets"]
+            tabs_meta = res_data.get("tabs", [])
+            is_live = True
     except Exception as e:
-        logger.info(f"Using parsed Google Sheet dataset: {e}")
+        logger.info(f"Using fallback dataset for Google Sheet tabs: {e}")
 
-    active_timesheets = fetched_entries if (fetched_entries and is_live) else IWORKER_TIMESHEETS
+    # Fallback multi-tab dataset if offline
+    if not is_live or not fetched_entries:
+        tabs_meta = [
+            {"name": "Murilo Mendes", "rate": 12.50, "total_hours": 1243.77, "total_spend": 12830.25, "active_entries": 690},
+            {"name": "Marcelle Benevides", "rate": 13.99, "total_hours": 627.48, "total_spend": 8241.21, "active_entries": 456},
+            {"name": "Kelvin Kiruthu", "rate": 11.99, "total_hours": 183.13, "total_spend": 2195.84, "active_entries": 140},
+            {"name": "Erick Parra", "rate": 9.99, "total_hours": 2214.65, "total_spend": 17664.03, "active_entries": 501},
+        ]
+        # Tag fallback entries with Murilo Mendes
+        fetched_entries = []
+        for item in IWORKER_TIMESHEETS:
+            c_item = dict(item)
+            c_item["contractor"] = "Murilo Mendes"
+            c_item["rate"] = 12.50
+            fetched_entries.append(c_item)
 
-    # ── AI Classification (skip off/weekend entries — no value in classifying them) ──
+    active_timesheets = fetched_entries
+
+    # Filter by contractor tab if requested
+    if contractor and contractor.lower() != "all":
+        active_timesheets = [
+            t for t in active_timesheets
+            if t.get("contractor", "").lower() == contractor.lower()
+        ]
+
+    # ── AI Classification (skip off/zero-hour entries) ──
     classified_count = 0
     skipped_count = 0
     enriched_timesheets = []
@@ -538,7 +564,6 @@ def get_iworker_timesheets(sheet_url: Optional[str] = Query(None)):
         task_text = (t_copy.get("task") or "").strip()
         task_lower = task_text.lower()
 
-        # Skip classification for off days, weekends, and zero-hour entries
         should_skip = (
             task_lower in ("off / no hours logged", "weekend", "") or
             t_copy.get("hours", 0) == 0
@@ -562,11 +587,6 @@ def get_iworker_timesheets(sheet_url: Optional[str] = Query(None)):
 
         enriched_timesheets.append(t_copy)
 
-    logger.info(
-        f"[CLASSIFICATION] Done: {classified_count} entries classified, "
-        f"{skipped_count} zero-hour entries skipped (tokens saved)"
-    )
-
     total_hours = sum(t["hours"] for t in enriched_timesheets)
     total_spend = sum(t["amount"] for t in enriched_timesheets)
     active_tasks = len(set(t["task"] for t in enriched_timesheets if t["task"] not in ["Off / No hours logged", "Weekend"]))
@@ -581,26 +601,28 @@ def get_iworker_timesheets(sheet_url: Optional[str] = Query(None)):
         if t["hours"] > 0:
             weeks[we]["entries_count"] += 1
 
+    selected_contractor = contractor if contractor and contractor.lower() != "all" else "All Contractors"
+    active_tab_obj = next((tb for tb in tabs_meta if tb["name"].lower() == selected_contractor.lower()), None)
+    active_rate = active_tab_obj["rate"] if active_tab_obj else 12.50
+
     response = {
-        "contractor": "iWorker Contractor",
+        "contractor": selected_contractor,
         "source": "Google Sheets (iWorker Time Tracker)",
         "status": "Connected & Ingested Live" if is_live else "Connected (Synced Dataset)",
         "is_live_oauth_sync": is_live,
+        "tabs": tabs_meta,
         "summary": {
             "total_logged_hours": round(total_hours, 2),
             "total_spend_usd": round(total_spend, 2),
             "active_tasks_count": active_tasks,
-            "hourly_rate_usd": 12.50,
+            "hourly_rate_usd": active_rate,
             "unbilled_risk_amount": 99.00
         },
         "weekly_totals": list(weeks.values()),
         "timesheets": enriched_timesheets
     }
 
-    # ── Store in cache ────────────────────────────────────────────────────────
     _TIMESHEET_CACHE[cache_key] = (time.monotonic(), response)
-    logger.info(f"[CACHE STORED] Timesheets cached for {_TIMESHEET_CACHE_TTL_SECONDS}s (key={cache_key!r})")
-
     return response
 
 @router.get("/checklist")

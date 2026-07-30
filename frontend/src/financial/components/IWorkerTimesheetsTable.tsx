@@ -23,6 +23,7 @@ import {
   AlertCircle,
   Bot,
   Minus,
+  FileSpreadsheet,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { expoOutEase } from "@/lib/motion";
@@ -30,12 +31,14 @@ import { AnimatedNumber } from "./AnimatedNumber";
 
 export interface TimesheetEntry {
   id: string;
+  contractor?: string;
   day: string;
   date: string;
   start_time: string;
   end_time: string;
   duration: string;
   hours: number;
+  rate?: number;
   amount: number;
   task: string;
   week_ending: string;
@@ -51,9 +54,20 @@ export interface TimesheetEntry {
   };
 }
 
+export interface ContractorTabInfo {
+  name: string;
+  rate: number;
+  total_hours: number;
+  total_spend: number;
+  active_entries: number;
+}
+
 interface IWorkerTimesheetsTableProps {
   contractor: string;
   source: string;
+  tabs?: ContractorTabInfo[];
+  selectedContractor?: string;
+  onSelectContractor?: (contractorName: string) => void;
   summary: {
     total_logged_hours: number;
     total_spend_usd: number;
@@ -99,6 +113,9 @@ function detectRevisionRound(taskDescription: string): number | null {
 export function IWorkerTimesheetsTable({
   contractor,
   source,
+  tabs,
+  selectedContractor,
+  onSelectContractor,
   summary,
   weeklyTotals,
   timesheets,
@@ -326,7 +343,7 @@ export function IWorkerTimesheetsTable({
               <p className="text-xs text-zo-text-muted leading-relaxed">
                 Source: <span className="font-semibold text-foreground">iWorker Time Tracker Sheet</span>
                 <span className="mx-2 text-zinc-300">·</span>
-                Rate: <span className="font-semibold text-foreground">$12.50 / hr</span>
+                Rate: <span className="font-semibold text-foreground">${summary.hourly_rate_usd.toFixed(2)} / hr</span>
                 <span className="mx-2 text-zinc-300">·</span>
                 <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
                   <Bot className="h-3 w-3" />
@@ -335,6 +352,52 @@ export function IWorkerTimesheetsTable({
               </p>
             </div>
           </div>
+
+          {/* Contractor Tabs — shown only when connected and tabs available */}
+          {isConnected && tabs && tabs.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted">
+                Contractor Sheets ({tabs.length})
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {/* All contractors pill */}
+                <button
+                  onClick={() => onSelectContractor?.("all")}
+                  className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold border transition-all ${
+                    (!selectedContractor || selectedContractor === "all")
+                      ? "bg-[#3C5A56] text-white border-[#3C5A56] shadow-sm"
+                      : "bg-zinc-50 text-zinc-600 border-zinc-200 hover:border-[#3C5A56]/40 hover:text-[#3C5A56]"
+                  }`}
+                >
+                  <FileSpreadsheet className="h-3 w-3" />
+                  All
+                </button>
+                {tabs.map((tab) => {
+                  const isActive = selectedContractor === tab.name;
+                  return (
+                    <button
+                      key={tab.name}
+                      onClick={() => onSelectContractor?.(tab.name)}
+                      title={`${tab.total_hours} hrs · $${tab.rate}/hr · ${tab.active_entries} entries`}
+                      className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold border transition-all ${
+                        isActive
+                          ? "bg-[#3C5A56] text-white border-[#3C5A56] shadow-sm"
+                          : "bg-zinc-50 text-zinc-600 border-zinc-200 hover:border-[#3C5A56]/40 hover:text-[#3C5A56]"
+                      }`}
+                    >
+                      <FileSpreadsheet className="h-3 w-3" />
+                      {tab.name}
+                      <span className={`ml-0.5 rounded px-1 py-0.5 text-[10px] font-bold ${
+                        isActive ? "bg-white/20 text-white" : "bg-zinc-200 text-zinc-500"
+                      }`}>
+                        ${tab.rate}/hr
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Toolbar — visually separated from identity, grouped by purpose */}
           <div className="flex flex-col gap-4 border-t border-zinc-100 pt-6 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">

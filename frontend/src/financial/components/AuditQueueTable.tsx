@@ -149,7 +149,7 @@ export function AuditQueueTable({
           </div>
         )}
 
-        {items.map((item) => {
+        {items.map((item, idx) => {
           const isResolved = item.status.startsWith("Resolved");
           const isExpanded = expandedId === item.id;
           const cfg = getSeverityConfig(item.severity);
@@ -157,7 +157,7 @@ export function AuditQueueTable({
 
           return (
             <div
-              key={item.id}
+              key={`${item.id}-${idx}`}
               className={`rounded-xl border transition-all duration-200 overflow-hidden ${
                 isResolved
                   ? "border-zinc-200 bg-zinc-50 opacity-60"

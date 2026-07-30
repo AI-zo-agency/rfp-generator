@@ -20,11 +20,19 @@ const FINANCIAL_TABS = [
 export function FinancialInsightsClient() {
   const [activeTab, setActiveTab] = useState<string>("iworker");
   const [loading, setLoading] = useState<boolean>(true);
+  const [selectedContractor, setSelectedContractor] = useState<string>("all");
 
   // Data states
   const [iworkerData, setIworkerData] = useState<{
     contractor: string;
     source: string;
+    tabs?: Array<{
+      name: string;
+      rate: number;
+      total_hours: number;
+      total_spend: number;
+      active_entries: number;
+    }>;
     summary: {
       total_logged_hours: number;
       total_spend_usd: number;
@@ -43,9 +51,24 @@ export function FinancialInsightsClient() {
 
   const [sourcesData, setSourcesData] = useState<DataSource[]>([]);
   const [auditItems, setAuditItems] = useState<AuditItem[]>([]);
-
-  // AI insights state lifted here so it persists across tab switches
   const [aiInsights, setAiInsights] = useState<AiInsightsData | null>(null);
+
+  const fetchIworkerData = async (contractorName: string = "all") => {
+    try {
+      const savedUrl = localStorage.getItem("zo_iworker_sheet_url") || "";
+      const queryParams = new URLSearchParams();
+      if (savedUrl) queryParams.set("sheet_url", savedUrl);
+      if (contractorName && contractorName !== "all") queryParams.set("contractor", contractorName);
+
+      const res = await fetch(`${API_BASE}/api/v1/financials/iworker-timesheets?${queryParams.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        setIworkerData(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch iWorker data:", err);
+    }
+  };
 
   useEffect(() => {
     async function loadAllData() {
@@ -77,6 +100,11 @@ export function FinancialInsightsClient() {
 
     loadAllData();
   }, []);
+
+  const handleSelectContractor = (contractorName: string) => {
+    setSelectedContractor(contractorName);
+    void fetchIworkerData(contractorName);
+  };
 
   const handleFetchAiInsights = async (): Promise<AiInsightsData> => {
     const res = await fetch(`${API_BASE}/api/v1/financials/ai-insights`, {
@@ -137,6 +165,9 @@ export function FinancialInsightsClient() {
           <IWorkerTimesheetsTable
             contractor={iworkerData.contractor}
             source={iworkerData.source}
+            tabs={iworkerData.tabs}
+            selectedContractor={selectedContractor}
+            onSelectContractor={handleSelectContractor}
             summary={iworkerData.summary}
             weeklyTotals={iworkerData.weekly_totals}
             timesheets={iworkerData.timesheets}
