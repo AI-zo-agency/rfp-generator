@@ -515,6 +515,10 @@ async def _ensure_jit_evidence(
 ) -> list[dict[str, Any]]:
     """Prefer shared Phase 2 corpus; JIT only on miss when flagged (W6 / T6.1)."""
     from app.core.config import settings as app_settings
+    from app.services.proposal_evidence_gate import (
+        EvidenceDecision,
+        decide_evidence_action,
+    )
 
     corpus = list(state.get("evidence_corpus") or [])
     tagged = _evidence_for_section(section_id, corpus)
@@ -525,8 +529,31 @@ async def _ensure_jit_evidence(
         if str(section.get("id") or "") == section_id:
             section_title = str(section.get("title") or "")
             break
-    is_budget_section = any(
-        k in section_title.lower() for k in ("budget", "pricing", "fees", "cost")
+    gate = decide_evidence_action(section_id=section_id, section_title=section_title)
+    logger.info(
+        "drafting_evidence_gate section_id=%s decision=%s reason=%s",
+        section_id,
+        gate.action.value,
+        gate.reason,
+    )
+
+    # Plan-driven / manual / cleanup: do not pull random KB facts into the writer.
+    if gate.action in {
+        EvidenceDecision.WRITE_FROM_PLAN,
+        EvidenceDecision.MANUAL_FILL,
+        EvidenceDecision.DETERMINISTIC_CLEANUP,
+        EvidenceDecision.VERIFY_FIELD,
+    }:
+        logger.info(
+            "phase3_jit_skipped_by_gate section=%s decision=%s",
+            section_id,
+            gate.action.value,
+        )
+        return []
+
+    is_budget_section = (
+        gate.action == EvidenceDecision.WRITE_FROM_CANONICAL_BUDGET
+        or any(k in section_title.lower() for k in ("budget", "pricing", "fees", "cost"))
     )
 
     # Budget narrative must ground in 00_Guide_Pricing — always supplement.
@@ -682,6 +709,9 @@ async def _draft_batch_once(
             if brief and brief.get("wordBudget")
             else _word_target(section)
         )
+        from app.services.proposal_evidence_gate import decide_evidence_action
+
+        gate = decide_evidence_action(section_id=sid, section_title=title)
         batch_payload.append(
             {
                 "sectionId": sid,
@@ -695,6 +725,8 @@ async def _draft_batch_once(
                 or [],
                 "evidence": _format_evidence_block(evidence),
                 "planContext": _format_plan_context(state, sid),
+                "evidencePolicy": gate.action.value,
+                "evidencePolicyReason": gate.reason,
             }
         )
 
@@ -823,10 +855,30 @@ async def _draft_batch_once(
             user_content += (
                 f"Execution plan context for {payload.get('sectionId')}:\n{plan_ctx}\n\n"
             )
+        from app.services.proposal_evidence_gate import (
+            EvidenceDecision,
+            EvidenceGateResult,
+            evidence_policy_prompt_stanza,
+        )
+
+        policy = str(payload.get("evidencePolicy") or "")
+        if policy:
+            decision = EvidenceGateResult(
+                action=EvidenceDecision(policy),
+                reason=str(payload.get("evidencePolicyReason") or ""),
+                requires_retrieval=policy == EvidenceDecision.RETRIEVE_THEN_WRITE.value,
+                safe_plan_driven=policy == EvidenceDecision.WRITE_FROM_PLAN.value,
+            )
+            user_content += (
+                evidence_policy_prompt_stanza(
+                    decision, section_id=str(payload.get("sectionId") or "")
+                )
+                + "\n\n"
+            )
         if _is_plan_driven_narrative(
             title=str(payload.get("title") or ""),
             register=str(payload.get("register") or ""),
-        ):
+        ) or policy == EvidenceDecision.WRITE_FROM_PLAN.value:
             evidence_text = str(payload.get("evidence") or "")
             thin_evidence = (
                 not evidence_text.strip()

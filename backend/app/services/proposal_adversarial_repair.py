@@ -27,6 +27,7 @@ from app.services.evidence_trust.legal_attestation_gate import (
 )
 from app.services.proposal_adversarial_repair_planner import build_repair_plan
 from app.services.proposal_adversarial_repair_verifier import verify_repair_attempt
+from app.services.proposal_evidence_gate import decide_evidence_action
 from app.services.proposal_budget_content import find_budget_section_index
 from app.services.proposal_manual_flags import (
     VERIFY_TAG_RE,
@@ -199,6 +200,35 @@ def _collect_actionable_findings(
             *_deterministic_fixable_findings(draft),
         ]
     )
+
+
+def _finding_priority(finding: AdversarialAuditFinding) -> int:
+    """Lower = repair sooner (cheaper/higher leverage families first)."""
+    blob = f"{finding.code or ''} {finding.category or ''} {finding.message or ''}".casefold()
+    if "budget" in blob or "money" in blob or "free_currency" in blob:
+        return 0
+    if "placeholder" in blob or "verify" in blob:
+        return 1
+    if "truncation" in blob or "note_leak" in blob:
+        return 2
+    if "compliance" in blob:
+        return 3
+    if "fabrication" in blob:
+        return 4
+    if "inconsistency" in blob or blob.startswith("llm."):
+        return 8
+    return 5
+
+
+def _triage_actionable_findings(
+    findings: list[AdversarialAuditFinding],
+    *,
+    max_findings: int,
+) -> list[AdversarialAuditFinding]:
+    ordered = sorted(findings, key=_finding_priority)
+    if max_findings <= 0 or len(ordered) <= max_findings:
+        return ordered
+    return ordered[:max_findings]
 
 
 def _ensure_open_pricing_section(draft: ProposalDraft) -> tuple[ProposalDraft, str]:
@@ -469,6 +499,8 @@ async def run_adversarial_repair_loop(
         max_attempts_per_finding or settings.adversarial_repair_max_attempts_per_finding
     )
     time_cap = time_budget_sec or settings.adversarial_repair_time_budget_sec
+    findings_cap = max(1, int(settings.adversarial_repair_max_findings_per_round or 12))
+    llm_each_round = bool(settings.adversarial_repair_llm_audit_each_round)
     started = time.monotonic()
     working_draft = draft
     working_research = research or ProposalResearchCache(
@@ -485,12 +517,14 @@ async def run_adversarial_repair_loop(
 
     logger.info(
         "adversarial_repair start rfp_id=%s max_rounds=%s attempts_cap=%s time_budget_sec=%s "
-        "use_llm_repair=%s",
+        "findings_cap=%s use_llm_repair=%s llm_audit_each_round=%s",
         rfp.id,
         rounds_cap,
         attempts_cap,
         time_cap,
+        findings_cap,
         use_llm_repair,
+        llm_each_round,
     )
     from app.core.step_debug_logger import step_trace, summarize_sections
 
@@ -500,6 +534,7 @@ async def run_adversarial_repair_loop(
         max_rounds=rounds_cap,
         attempts_cap=attempts_cap,
         time_budget_sec=time_cap,
+        findings_cap=findings_cap,
         use_llm_audit=use_llm_audit,
         use_llm_repair=use_llm_repair,
         **summarize_sections(working_draft.sections),
@@ -519,13 +554,25 @@ async def run_adversarial_repair_loop(
             stopped_reason = "time_budget_exceeded"
             break
 
-        actionable = _collect_actionable_findings(final_audit, working_draft)
+        actionable = _triage_actionable_findings(
+            _collect_actionable_findings(final_audit, working_draft),
+            max_findings=findings_cap,
+        )
         if not actionable:
             stopped_reason = "resolved"
             break
 
+        step_trace(
+            "adversarial_repair_round_triage",
+            rfp_id=rfp.id,
+            round_index=round_index,
+            actionable=len(actionable),
+            findings_cap=findings_cap,
+        )
+
         changed = False
         pending_section_repairs: list[dict] = []
+        rewritten_sections: set[str] = set()
 
         for finding in actionable:
             key = _finding_key(finding)
@@ -694,6 +741,93 @@ async def run_adversarial_repair_loop(
                 )
                 continue
 
+            if plan.repair_mode in {"protected_skip", "manual_fill"}:
+                working_draft, tag = _append_manual_fill(
+                    working_draft,
+                    section_id=finding.section_id,
+                    issue=issue_text,
+                )
+                if tag:
+                    escalations.append(tag)
+                    changed = True
+                outcome = "manual_fill_escalated" if tag else "protected_blocked"
+                prior_by_key[key] = SimpleNamespace(
+                    outcome=outcome, failure_reason="protected_section"
+                )
+                report_attempts.append(
+                    _attempt_entry(
+                        finding_code=finding.code,
+                        section_id=finding.section_id,
+                        strategy=plan.repair_mode,
+                        outcome=outcome,
+                        attempts=attempt_number,
+                    )
+                )
+                step_trace(
+                    "adversarial_repair_attempt",
+                    rfp_id=rfp.id,
+                    finding_code=finding.code,
+                    section_id=finding.section_id,
+                    attempt_number=attempt_number,
+                    repair_mode=plan.repair_mode,
+                    failure_reason="protected_section",
+                    outcome=outcome,
+                    resolved=False,
+                    improved=False,
+                    **decide_evidence_action(
+                        section_id=finding.section_id,
+                        section_title=finding.section_title,
+                        finding=finding,
+                    ).as_log_dict(),
+                )
+                continue
+
+            if plan.repair_mode == "deterministic_cleanup":
+                working_draft, patched = _apply_deterministic_patch(working_draft, section)
+                if patched:
+                    changed = True
+                    outcome = "patched"
+                    prior_by_key.pop(key, None)
+                elif attempt_number >= attempts_cap:
+                    exhausted_any = True
+                    working_draft, tag = _append_manual_fill(
+                        working_draft, section_id=finding.section_id, issue=issue_text
+                    )
+                    if tag:
+                        escalations.append(tag)
+                        changed = True
+                    outcome = "manual_fill_escalated" if tag else "attempts_exhausted"
+                    prior_by_key[key] = SimpleNamespace(
+                        outcome=outcome, failure_reason="no_change"
+                    )
+                else:
+                    outcome = "no_change"
+                    prior_by_key[key] = SimpleNamespace(
+                        outcome=outcome, failure_reason="no_change"
+                    )
+                report_attempts.append(
+                    _attempt_entry(
+                        finding_code=finding.code,
+                        section_id=finding.section_id,
+                        strategy=plan.repair_mode,
+                        outcome=outcome,
+                        attempts=attempt_number,
+                    )
+                )
+                step_trace(
+                    "adversarial_repair_attempt",
+                    rfp_id=rfp.id,
+                    finding_code=finding.code,
+                    section_id=finding.section_id,
+                    attempt_number=attempt_number,
+                    repair_mode=plan.repair_mode,
+                    failure_reason=plan.failure_reason,
+                    outcome=outcome,
+                    resolved=False,
+                    improved=patched,
+                )
+                continue
+
             is_deterministic_family = (
                 _finding_family(finding) in {"staffing_hours", "percent_time"}
                 or (finding.code or "").startswith("deterministic.integrity.")
@@ -741,6 +875,34 @@ async def run_adversarial_repair_loop(
                 continue
 
             if finding.section_id:
+                sid = finding.section_id
+                # One LLM rewrite per section per round — later findings on the same
+                # section wait for the next round / re-audit.
+                if sid in rewritten_sections:
+                    report_attempts.append(
+                        _attempt_entry(
+                            finding_code=finding.code,
+                            section_id=sid,
+                            strategy="section_batched_skip",
+                            outcome="deferred_same_section",
+                            attempts=attempt_number,
+                        )
+                    )
+                    step_trace(
+                        "adversarial_repair_attempt",
+                        rfp_id=rfp.id,
+                        finding_code=finding.code,
+                        section_id=sid,
+                        attempt_number=attempt_number,
+                        repair_mode="section_batched_skip",
+                        outcome="deferred_same_section",
+                        resolved=False,
+                        improved=False,
+                    )
+                    # Don't burn an attempt for deferred siblings
+                    attempts_by_finding[key] = max(0, attempts_by_finding[key] - 1)
+                    continue
+
                 before_section = section
                 try:
                     await asave_proposal_draft(working_draft)
@@ -756,6 +918,7 @@ async def run_adversarial_repair_loop(
                             use_strong_model=plan.needs_strong_model,
                         )
                     )
+                    rewritten_sections.add(sid)
                 except Exception as exc:  # noqa: BLE001 - keep the repair loop resilient
                     logger.warning(
                         "adversarial_repair section repair raised rfp_id=%s section_id=%s "
@@ -820,11 +983,16 @@ async def run_adversarial_repair_loop(
                 improved=False,
             )
 
+        # Middle rounds: deterministic-only re-audit unless configured otherwise.
+        round_use_llm = bool(
+            use_llm_audit
+            and (llm_each_round or round_index >= rounds_cap or round_index == 1)
+        )
         final_audit = await run_manuscript_auditor(
             draft=working_draft,
             research=working_research,
             rfp=rfp,
-            use_llm=use_llm_audit,
+            use_llm=round_use_llm,
         )
         working_research = persist_manuscript_audit(working_research, final_audit)
 

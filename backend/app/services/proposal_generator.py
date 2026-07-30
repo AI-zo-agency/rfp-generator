@@ -2209,7 +2209,7 @@ async def _run_phase3_5_budget_inner(
 
 
 async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, ProposalResearchCache]:
-    """Stage 4: pre-submit copy-paste scan + compliance checklist."""
+    """Stage 4: audit → optional adversarial repair → pre-submit + ending report."""
     rfp = get_rfp(rfp_id)
     if not rfp:
         raise ProposalError("RFP not found", status_code=404)
@@ -2222,10 +2222,48 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         )
 
     research = await aget_research_cache(rfp_id)
+    from app.core.config import settings as app_settings
     from app.services.proposal_presubmit_review import run_presubmit_review_with_manual_flags
 
+    extra_issues: list = []
+    if app_settings.adversarial_repair_loop:
+        with pipeline_phase("adversarial-repair", rfp_id=rfp_id):
+            draft, research, _audit, repair_report = await run_adversarial_repair_loop(
+                rfp=rfp,
+                draft=draft,
+                research=research,
+            )
+            await asave_proposal_draft(draft)
+            await asave_research_cache(research)
+            extra_issues = list(adversarial_repair_blocking_issues(repair_report))
+            logger.info(
+                "Phase 4 review adversarial repair for %s: resolved=%s stopped=%s rounds=%s",
+                rfp_id,
+                repair_report.resolved,
+                repair_report.stopped_reason,
+                repair_report.rounds_run,
+            )
+            step_trace(
+                "adversarial_repair_complete",
+                rfp_id=rfp_id,
+                resolved=bool(repair_report.resolved),
+                stopped_reason=str(repair_report.stopped_reason or ""),
+                rounds_run=repair_report.rounds_run,
+                escalation_count=len(getattr(repair_report, "escalations", []) or []),
+            )
+    else:
+        step_trace(
+            "adversarial_repair_skipped",
+            rfp_id=rfp_id,
+            reason="adversarial_repair_loop=false",
+        )
+
     review = run_presubmit_review_with_manual_flags(
-        rfp=rfp, draft=draft, research=research, finalized=False
+        rfp=rfp,
+        draft=draft,
+        research=research,
+        extra_issues=extra_issues or None,
+        finalized=False,
     )
 
     from app.services.proposal_ending_report import (
@@ -2240,6 +2278,15 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         draft=draft,
         research=research,
     )
+    # Preserve repair report if the audit attach path returned a copy without it.
+    if (
+        research
+        and research.adversarial_repair_report is not None
+        and research_with_audit.adversarial_repair_report is None
+    ):
+        research_with_audit = research_with_audit.model_copy(
+            update={"adversarial_repair_report": research.adversarial_repair_report}
+        )
     research_for_ending = research_with_audit.model_copy(
         update={
             "presubmit_review": review,

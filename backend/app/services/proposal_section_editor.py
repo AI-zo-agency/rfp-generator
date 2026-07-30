@@ -3967,6 +3967,36 @@ async def improve_proposal_section(
 
     research = await aget_research_cache(rfp_id)
 
+    # Shared Evidence Gate: decide KB vs write (same policy as drafting / repair).
+    from app.services.proposal_evidence_gate import (
+        EvidenceDecision,
+        decide_evidence_action,
+        evidence_policy_prompt_stanza,
+    )
+
+    gate = None
+    try:
+        target = next((s for s in draft.sections if s.id == section_id), None)
+        gate = decide_evidence_action(
+            section_id=section_id,
+            section_title=target.title if target else "",
+            user_ask=user_message,
+        )
+        logger.info(
+            "section_chat_evidence_gate rfp_id=%s section_id=%s decision=%s reason=%s",
+            rfp_id,
+            section_id,
+            gate.action.value,
+            gate.reason,
+        )
+        user_message = (
+            evidence_policy_prompt_stanza(gate, section_id=section_id)
+            + "\n\n"
+            + user_message
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("section_chat_evidence_gate failed rfp_id=%s: %s", rfp_id, exc)
+
     # Powerful chat ops: duplicate audit / fabrication purge (content → RFP → KB)
     from app.services.proposal_chat_ops import classify_chat_op, run_chat_ops
 
@@ -5415,7 +5445,28 @@ async def improve_proposal_section(
             prior_queries=prior_queries,
         )
         user_message = editor_instruction
-        if not queries:
+        skip_kb = bool(
+            gate is not None
+            and (
+                not gate.requires_retrieval
+                or gate.action
+                in {
+                    EvidenceDecision.WRITE_FROM_PLAN,
+                    EvidenceDecision.MANUAL_FILL,
+                    EvidenceDecision.DETERMINISTIC_CLEANUP,
+                    EvidenceDecision.VERIFY_FIELD,
+                }
+            )
+        )
+        if skip_kb:
+            queries = []
+            logger.info(
+                "section_improve_kb_skipped_by_gate rfp_id=%s section_id=%s decision=%s",
+                rfp_id,
+                section_id,
+                gate.action.value if gate else "",
+            )
+        elif not queries:
             title = section.title
             queries = [
                 f"zö agency firm history organizational chart employee count {rfp.sector} {title}"[:240],

@@ -124,6 +124,11 @@ def get_research_cache(rfp_id: str) -> ProposalResearchCache | None:
 
 
 def save_research_cache(cache: ProposalResearchCache) -> None:
+    from app.services.proposal_research_merge import merge_research_preserve_audit_fields
+
+    existing = get_research_cache(cache.rfp_id)
+    cache = merge_research_preserve_audit_fields(cache, existing)
+
     if _use_supabase():
         _with_supabase_retry(
             "save_research_cache",

@@ -32,6 +32,46 @@ from app.services.proposal_repository import aget_research_cache, asave_research
 logger = logging.getLogger(__name__)
 
 GUIDE_SEARCH_CHAR_LIMIT = 24_000
+# Full pinned guide is ~34k; do not truncate below that or PM lines (9.x) are lost.
+PINNED_GUIDE_CHAR_LIMIT = 80_000
+# Canonical pricing guide — always pin by filename for rate-card builds.
+PRICING_GUIDE_FILE_NAMES: tuple[str, ...] = (
+    "00_Guide_Pricing.docx",
+    "00_Guide_Pricing.pdf",
+    "00_Guide_Pricing.md",
+)
+# When the guide is present but extraction yields essentially nothing usable,
+# fail closed instead of shipping an all-manual budget from a junk rate card.
+_MIN_USABLE_RATE_CARD_RATES = 2
+
+
+def assert_rate_card_usable(
+    *,
+    rate_card: Any,
+    guide_text: str,
+    guide_missing: bool | None = None,
+) -> None:
+    """Raise when pricing guide text exists but the rate card is not bindable."""
+    missing = (
+        guide_missing
+        if guide_missing is not None
+        else bool((guide_text or "").startswith("(No 00_Guide_Pricing"))
+    )
+    if missing:
+        return
+    rates = list(getattr(rate_card, "rates", None) or [])
+    if len(rates) < _MIN_USABLE_RATE_CARD_RATES:
+        logger.error(
+            "pricing_rate_card_unusable rates=%s guide_chars=%s",
+            len(rates),
+            len(guide_text or ""),
+        )
+        raise ProposalError(
+            "Pricing guide rate card unusable: extracted too few bindable rates "
+            f"({len(rates)}). Re-fetch 00_Guide_Pricing before building budget.",
+            status_code=422,
+        )
+
 
 STAGE3_BUDGET_PROMPT = """You are zö agency's Stage 3 Budget assistant. Build a complete, defensible budget using ONLY:
 - The Pricing Guide menu below (tier ranges)
@@ -369,16 +409,74 @@ async def fetch_pricing_guide_context(
     return await _fetch_guide_context(rfp, stage_two, focus_hint=focus_hint)
 
 
+async def _fetch_pinned_pricing_guide() -> tuple[str, list[str]] | None:
+    """Load the canonical pricing guide by exact filename (full indexed text).
+
+    Prefer this over fuzzy search: hybrid hits are summaries, documents hits are
+    mid-table chunks, and query thresholds can return 0 hits even when the doc exists.
+    """
+    if not supermemory.is_configured():
+        return None
+    last_error: Exception | None = None
+    for file_name in PRICING_GUIDE_FILE_NAMES:
+        try:
+            document = await supermemory.find_document_by_file_name(file_name)
+            if not document:
+                continue
+            custom_id = supermemory.document_fetch_key(document)
+            if not custom_id:
+                logger.warning(
+                    "pricing_guide_pin_missing_fetch_key file_name=%s",
+                    file_name,
+                )
+                continue
+            content = await supermemory.get_document_content(custom_id=custom_id)
+            if not (content or "").strip():
+                logger.warning(
+                    "pricing_guide_pin_empty_content file_name=%s custom_id=%s",
+                    file_name,
+                    custom_id,
+                )
+                continue
+            text = content.strip()
+            if len(text) > PINNED_GUIDE_CHAR_LIMIT:
+                text = text[:PINNED_GUIDE_CHAR_LIMIT]
+            logger.info(
+                "pricing_guide_pinned file_name=%s chars=%s",
+                file_name,
+                len(text),
+            )
+            return text, [file_name]
+        except supermemory.SupermemoryError as exc:
+            last_error = exc
+            logger.warning(
+                "pricing_guide_pin_failed file_name=%s error=%s",
+                file_name,
+                exc,
+            )
+    if last_error:
+        logger.warning("pricing_guide_pin_exhausted last_error=%s", last_error)
+    return None
+
+
 async def _fetch_guide_context(
     rfp: RfpRecord,
     stage_two: str,
     *,
     focus_hint: str = "",
 ) -> tuple[str, list[str]]:
-    """Retrieve 00_Guide_Pricing from Supermemory (pricing + reference categories)."""
+    """Retrieve 00_Guide_Pricing: pin by filename first, search only as fallback."""
     if not supermemory.is_configured():
         return "(Supermemory not configured.)", []
 
+    pinned = await _fetch_pinned_pricing_guide()
+    if pinned is not None:
+        return pinned
+
+    logger.warning(
+        "pricing_guide_pin_miss — falling back to search rfp_id=%s",
+        rfp.id,
+    )
     scope_hint = stage_two[:200] if stage_two else (rfp.sector or "")
     hint = (focus_hint or "")[:300]
     from app.services.proposal_knowledge_base_tools import sanitize_pricing_guide_query
@@ -406,7 +504,8 @@ async def _fetch_guide_context(
     sources: list[str] = []
     seen_chunk_keys: set[str] = set()
     for query in queries:
-        for category in ("reference", "pricing"):
+        # Prefer pricing category; reference only as secondary fallback.
+        for category in ("pricing", "reference"):
             text, srcs = await search_knowledge_base(
                 query,
                 limit=8,
@@ -717,6 +816,49 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     rate_card = build_pricing_rate_card_from_guide_text(guide_text)
     for warn in rate_card.warnings:
         logger.info("pricing_rate_card_warning rfp_id=%s warn=%s", rfp_id, warn)
+
+    guide_missing = bool((guide_text or "").startswith("(No 00_Guide_Pricing"))
+    pinned_ok = any(
+        (src or "").casefold().startswith("00_guide_pricing") for src in (kb_sources or [])
+    )
+    try:
+        assert_rate_card_usable(
+            rate_card=rate_card,
+            guide_text=guide_text or "",
+            guide_missing=guide_missing,
+        )
+    except ProposalError:
+        if guide_missing or pinned_ok:
+            # Pinned full doc already loaded — re-search won't change parse failures.
+            raise
+        # One guided re-fetch with menu-dense focus, then fail closed if still junk.
+        logger.warning(
+            "pricing_rate_card_unusable_retry rfp_id=%s rates=%s — re-fetching guide",
+            rfp_id,
+            len(rate_card.rates or []),
+        )
+        with pipeline_step("fetch_pricing_guide_retry"):
+            guide_text, kb_sources = await _fetch_guide_context(
+                rfp,
+                stage_two,
+                focus_hint=(
+                    "menu 1.1 2.1 3.1 4.4 5.3 5.4 9.1 9.2 "
+                    "Low Average High tier ranges (Avg: $)"
+                ),
+            )
+        rate_card = build_pricing_rate_card_from_guide_text(guide_text)
+        guide_missing = bool((guide_text or "").startswith("(No 00_Guide_Pricing"))
+        assert_rate_card_usable(
+            rate_card=rate_card,
+            guide_text=guide_text or "",
+            guide_missing=guide_missing,
+        )
+        step_trace(
+            "pricing_rate_card_refetch_ok",
+            rfp_id=rfp_id,
+            rate_card_rates=len(rate_card.rates or []),
+            guide_chars=len(guide_text or ""),
+        )
 
     pricing_contract = build_pricing_contract(
         stage_one_text="\n".join(

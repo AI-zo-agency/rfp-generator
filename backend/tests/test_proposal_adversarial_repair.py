@@ -284,6 +284,77 @@ class AdversarialRepairLoopTests(unittest.IsolatedAsyncioTestCase):
         attach.assert_awaited_once()
         self.assertFalse(attach.await_args.kwargs["use_llm"])
 
+    async def test_phase4_presubmit_review_runs_adversarial_repair_when_enabled(self) -> None:
+        from app.core.config import settings
+        from app.services import proposal_generator as generator
+
+        draft, research, rfp = _sibling_defect_draft()
+        review_stub = research.presubmit_review
+        assert review_stub is not None
+        repaired_research = research.model_copy(
+            update={
+                "adversarial_audit": ProposalAdversarialAudit(
+                    rfpId=rfp.id,
+                    scannedAt="2026-01-01T00:00:00Z",
+                    findings=[],
+                    provider="deterministic",
+                ),
+                "adversarial_repair_report": AdversarialRepairReport(
+                    roundsRun=1,
+                    stoppedReason="resolved",
+                    resolved=True,
+                ),
+            }
+        )
+
+        with (
+            mock.patch.object(settings, "adversarial_repair_loop", True),
+            mock.patch(
+                "app.services.proposal_generator.get_rfp",
+                return_value=rfp,
+            ),
+            mock.patch(
+                "app.services.proposal_generator.aget_proposal_draft",
+                new=mock.AsyncMock(return_value=draft),
+            ),
+            mock.patch(
+                "app.services.proposal_generator.aget_research_cache",
+                new=mock.AsyncMock(return_value=research),
+            ),
+            mock.patch(
+                "app.services.proposal_generator.asave_proposal_draft",
+                new=mock.AsyncMock(),
+            ),
+            mock.patch(
+                "app.services.proposal_generator.asave_research_cache",
+                new=mock.AsyncMock(),
+            ) as save_research,
+            mock.patch(
+                "app.services.proposal_generator.run_adversarial_repair_loop",
+                new=mock.AsyncMock(
+                    return_value=(
+                        draft,
+                        repaired_research,
+                        repaired_research.adversarial_audit,
+                        repaired_research.adversarial_repair_report,
+                    )
+                ),
+            ) as repair,
+            mock.patch(
+                "app.services.proposal_generator._attach_phase4_manuscript_audit",
+                new=mock.AsyncMock(return_value=repaired_research),
+            ),
+            mock.patch(
+                "app.services.proposal_generator.run_presubmit_review_with_manual_flags",
+                return_value=review_stub,
+            ),
+        ):
+            _review, updated = await generator.run_phase4_presubmit_review(rfp.id)
+
+        repair.assert_awaited_once()
+        self.assertIsNotNone(updated.adversarial_repair_report)
+        self.assertTrue(save_research.await_count >= 1)
+
     def test_sibling_manual_fill_not_suppressed_by_existing_tag(self) -> None:
         """A MANUAL FILL for issue A must not skip escalation of distinct issue B."""
         draft, _research, _rfp = _sibling_defect_draft()

@@ -168,6 +168,90 @@ class ConsistencyTests(unittest.TestCase):
             )
         )
 
+    def test_policy_limit_amounts_are_not_unauthorized_bid_currency(self) -> None:
+        b = _budget(
+            agencyRevenueEstimate=116_471,
+            totalClientInvoicing=116_471,
+            clientMediaPassthrough=None,
+            lineItems=[
+                BudgetLineItem(
+                    id="a",
+                    category="Fees",
+                    description="Agency fee",
+                    extended=116_471,
+                    lineItemType="agency_fee",
+                ),
+            ],
+        )
+        self.assertFalse(
+            introduces_unauthorized_dollars(
+                "Commercial General Liability: $1,000,000 per occurrence / $2,000,000 aggregate.",
+                b,
+            )
+        )
+        issues = scan_manuscript_consistency(
+            draft=ProposalDraft(
+                rfpId="r1",
+                updatedAt="2026-01-01T00:00:00Z",
+                sections=[
+                    ProposalSection(
+                        id="ins",
+                        title="Insurance",
+                        content=(
+                            "CGL coverage limit $1,000,000 per occurrence and "
+                            "$2,000,000 aggregate."
+                        ),
+                        status="generated",
+                    )
+                ],
+            ),
+            research=ProposalResearchCache(
+                rfpId="r1",
+                updatedAt="2026-01-01T00:00:00Z",
+                budget=b,
+            ),
+            rfp=_rfp(),
+        )
+        free = [i for i in issues if "free_currency" in (i.message or "")]
+        self.assertEqual(free, [])
+
+    def test_stray_fee_amount_still_flags_free_currency(self) -> None:
+        b = _budget(
+            agencyRevenueEstimate=116_471,
+            totalClientInvoicing=116_471,
+            clientMediaPassthrough=None,
+            lineItems=[
+                BudgetLineItem(
+                    id="a",
+                    category="Fees",
+                    description="Agency fee",
+                    extended=116_471,
+                    lineItemType="agency_fee",
+                ),
+            ],
+        )
+        issues = scan_manuscript_consistency(
+            draft=ProposalDraft(
+                rfpId="r1",
+                updatedAt="2026-01-01T00:00:00Z",
+                sections=[
+                    ProposalSection(
+                        id="pm",
+                        title="Project Management",
+                        content="Optional travel day rate of $150 for island work.",
+                        status="generated",
+                    )
+                ],
+            ),
+            research=ProposalResearchCache(
+                rfpId="r1",
+                updatedAt="2026-01-01T00:00:00Z",
+                budget=b,
+            ),
+            rfp=_rfp(),
+        )
+        self.assertTrue(any("free_currency" in (i.message or "") for i in issues))
+
 
 if __name__ == "__main__":
     unittest.main()

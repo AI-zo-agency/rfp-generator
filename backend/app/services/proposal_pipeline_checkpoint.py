@@ -492,7 +492,24 @@ def phase_is_complete(
         return False
 
     if phase == "phase-3-5-budget":
-        return research.budget is not None
+        if research.budget is None:
+            return False
+        # Hard failure (e.g. grounding contradictions) must not count as complete
+        # merely because a partial budget artifact was persisted before the error.
+        cp = research.pipeline_checkpoint
+        if cp and cp.last_failed_phase == "phase-3-5-budget":
+            err = (cp.last_error or "").casefold()
+            if any(
+                marker in err
+                for marker in (
+                    "grounding",
+                    "pricing contradiction",
+                    "unresolved pricing",
+                    "rate card unusable",
+                )
+            ):
+                return False
+        return True
 
     if phase == "phase-4-review":
         return research.presubmit_review is not None

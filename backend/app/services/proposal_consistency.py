@@ -45,6 +45,26 @@ _TEAM_SIZE_RE = re.compile(
     re.I,
 )
 
+# Context that indicates a dollar amount is a policy limit / bond / statutory
+# threshold — not a bid fee that must match the canonical budget ledger.
+_NON_BID_CURRENCY_CONTEXT_RE = re.compile(
+    r"("
+    r"per\s+occurrence|each\s+occurrence|aggregate|"
+    r"general\s+liabilit|cgl|umbrella|"
+    r"workers['’]?\s*compensation|professional\s+liabilit|"
+    r"coverage\s+limit|policy\s+limit|liability\s+limit|"
+    r"insurance\s+limit|bonded?\b|surety|deductible|"
+    r"statutory|threshold|not\s+to\s+exceed\s+\$?"
+    r")",
+    re.I,
+)
+
+
+def _is_non_bid_currency_context(content: str, match_start: int, match_end: int) -> bool:
+    """True when amount sits in insurance/bond/statutory language, not bid totals."""
+    window = content[max(0, match_start - 80) : min(len(content), match_end + 80)]
+    return bool(_NON_BID_CURRENCY_CONTEXT_RE.search(window))
+
 
 def _parse_usd_amount(text: str) -> float | None:
     cleaned = text.replace("$", "").replace(",", "").strip()
@@ -131,6 +151,8 @@ def introduces_unauthorized_dollars(
     for match in _USD_IN_TEXT_RE.finditer(content):
         amount = _parse_usd_amount(match.group(0))
         if amount is None or amount <= 0:
+            continue
+        if _is_non_bid_currency_context(content, match.start(), match.end()):
             continue
         if not any(abs(amount - allowed_amt) <= max(1.0, allowed_amt * 0.02) for allowed_amt in allowed):
             return True
@@ -247,6 +269,10 @@ def scan_manuscript_consistency(
             for match in _USD_IN_TEXT_RE.finditer(section.content):
                 amount = _parse_usd_amount(match.group(0))
                 if amount is None or amount <= 0:
+                    continue
+                if _is_non_bid_currency_context(
+                    section.content, match.start(), match.end()
+                ):
                     continue
                 if not any(
                     abs(amount - allowed_amt) <= max(1.0, allowed_amt * 0.02)

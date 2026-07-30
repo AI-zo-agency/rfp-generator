@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 from app.models.proposal import AdversarialAuditFinding, RepairPlan
-
-_METHODOLOGY_TITLE_TOKENS = (
-    "technical approach",
-    "methodology",
-    "training",
-    "timeline",
-    "knowledge transfer",
-    "transmittal",
+from app.services.proposal_evidence_gate import (
+    EvidenceDecision,
+    decide_evidence_action,
+    gate_to_repair_mode,
 )
 
 _EMPTY_SECTION_CODE_MARKERS = ("coverage.empty", "empty_section")
@@ -30,23 +26,6 @@ def build_repair_plan(
     previous_outcome: str,
     failure_reason: str | None,
 ) -> RepairPlan:
-    code = (finding.code or "").casefold()
-    category = (finding.category or "other").casefold()
-    title = (finding.section_title or "").casefold()
-    message = (finding.message or "").casefold()
-
-    if "budget" in category or "money" in category or "commission" in code:
-        return RepairPlan(
-            findingCode=finding.code,
-            findingCategory=finding.category,
-            sectionId=finding.section_id,
-            attemptNumber=attempt_number,
-            previousOutcome=previous_outcome,
-            failureReason=failure_reason,
-            repairMode="budget_canonical_repair",
-            successChecks=["finding_removed", "budget_still_grounded"],
-        )
-
     # Escalate stubborn failures to the strong-model prompt path before attempt 3
     # (attempts_cap defaults to 3, so waiting for attempt>=3 made this unreachable
     # in practice) — a second attempt that is still unverified, missing evidence,
@@ -67,46 +46,6 @@ def build_repair_plan(
             successChecks=["finding_removed"],
         )
 
-    if category == "fabrication":
-        return RepairPlan(
-            findingCode=finding.code,
-            findingCategory=finding.category,
-            sectionId=finding.section_id,
-            attemptNumber=attempt_number,
-            previousOutcome=previous_outcome,
-            failureReason=failure_reason,
-            repairMode="targeted_retrieval_then_rewrite",
-            requiresTargetedRetrieval=True,
-            safePlanDrivenDraft=False,
-            successChecks=["finding_removed", "no_new_critical_findings"],
-        )
-
-    if any(token in title for token in _METHODOLOGY_TITLE_TOKENS):
-        return RepairPlan(
-            findingCode=finding.code,
-            findingCategory=finding.category,
-            sectionId=finding.section_id,
-            attemptNumber=attempt_number,
-            previousOutcome=previous_outcome,
-            failureReason=failure_reason,
-            repairMode="plan_driven_rewrite",
-            safePlanDrivenDraft=True,
-            successChecks=["section_non_empty", "no_unsupported_fact_claims"],
-        )
-
-    if any(marker in code or marker in message for marker in _EMPTY_SECTION_CODE_MARKERS):
-        return RepairPlan(
-            findingCode=finding.code,
-            findingCategory=finding.category,
-            sectionId=finding.section_id,
-            attemptNumber=attempt_number,
-            previousOutcome=previous_outcome,
-            failureReason=failure_reason,
-            repairMode="plan_driven_rewrite",
-            safePlanDrivenDraft=True,
-            successChecks=["section_non_empty", "no_unsupported_fact_claims"],
-        )
-
     if attempt_number >= 3:
         return RepairPlan(
             findingCode=finding.code,
@@ -120,6 +59,66 @@ def build_repair_plan(
             successChecks=["finding_removed"],
         )
 
+    decision = decide_evidence_action(
+        section_id=finding.section_id,
+        section_title=finding.section_title,
+        finding=finding,
+    )
+    mode = gate_to_repair_mode(decision)
+
+    if decision.action == EvidenceDecision.WRITE_FROM_CANONICAL_BUDGET:
+        return RepairPlan(
+            findingCode=finding.code,
+            findingCategory=finding.category,
+            sectionId=finding.section_id,
+            attemptNumber=attempt_number,
+            previousOutcome=previous_outcome,
+            failureReason=failure_reason,
+            repairMode="budget_canonical_repair",
+            successChecks=["finding_removed", "budget_still_grounded"],
+        )
+
+    if decision.action == EvidenceDecision.MANUAL_FILL:
+        return RepairPlan(
+            findingCode=finding.code,
+            findingCategory=finding.category,
+            sectionId=finding.section_id,
+            attemptNumber=attempt_number,
+            previousOutcome=previous_outcome,
+            failureReason=failure_reason,
+            repairMode="protected_skip",
+            successChecks=["finding_removed"],
+        )
+
+    if decision.action == EvidenceDecision.DETERMINISTIC_CLEANUP:
+        return RepairPlan(
+            findingCode=finding.code,
+            findingCategory=finding.category,
+            sectionId=finding.section_id,
+            attemptNumber=attempt_number,
+            previousOutcome=previous_outcome,
+            failureReason=failure_reason,
+            repairMode="deterministic_cleanup",
+            successChecks=["finding_removed"],
+        )
+
+    if decision.action == EvidenceDecision.WRITE_FROM_PLAN or any(
+        marker in (finding.code or "").casefold()
+        or marker in (finding.message or "").casefold()
+        for marker in _EMPTY_SECTION_CODE_MARKERS
+    ):
+        return RepairPlan(
+            findingCode=finding.code,
+            findingCategory=finding.category,
+            sectionId=finding.section_id,
+            attemptNumber=attempt_number,
+            previousOutcome=previous_outcome,
+            failureReason=failure_reason,
+            repairMode="plan_driven_rewrite",
+            safePlanDrivenDraft=True,
+            successChecks=["section_non_empty", "no_unsupported_fact_claims"],
+        )
+
     return RepairPlan(
         findingCode=finding.code,
         findingCategory=finding.category,
@@ -127,7 +126,11 @@ def build_repair_plan(
         attemptNumber=attempt_number,
         previousOutcome=previous_outcome,
         failureReason=failure_reason,
-        repairMode="targeted_retrieval_then_rewrite",
-        requiresTargetedRetrieval=True,
-        successChecks=["finding_removed"],
+        repairMode=mode if mode != "protected_skip" else "targeted_retrieval_then_rewrite",
+        requiresTargetedRetrieval=decision.requires_retrieval
+        or decision.action == EvidenceDecision.RETRIEVE_THEN_WRITE,
+        safePlanDrivenDraft=decision.safe_plan_driven,
+        successChecks=["finding_removed", "no_new_critical_findings"]
+        if decision.action == EvidenceDecision.RETRIEVE_THEN_WRITE
+        else ["finding_removed"],
     )

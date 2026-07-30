@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     adversarial_repair_max_rounds: int = 3
     adversarial_repair_max_attempts_per_finding: int = 3
     adversarial_repair_time_budget_sec: int = 540
+    # Cap LLM/KB work per round (criticals already preferred by collector).
+    adversarial_repair_max_findings_per_round: int = 12
+    # Full LLM residual audit only on first + final round; middle rounds deterministic.
+    adversarial_repair_llm_audit_each_round: bool = False
     # BUDGET_BEFORE_DRAFTING — Phase 3.5 before Phase 3 (T5.6); default off.
     budget_before_drafting: bool = False
     # MONEY_SLOTS_BLOCK — unresolved {{budget.*}} tokens block readiness.
