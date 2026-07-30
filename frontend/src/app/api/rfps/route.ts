@@ -111,7 +111,7 @@ export async function POST(request: Request) {
     }
 
     // Bust RSC cache so Active RFPs / dashboard counts include the new row.
-    revalidatePath("/");
+    revalidatePath("/rfp-dashboard");
     revalidatePath("/rfps");
     revalidatePath("/proposals");
 

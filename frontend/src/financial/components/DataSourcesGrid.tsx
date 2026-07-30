@@ -1,5 +1,7 @@
 "use client";
 
+import { CheckCircle2, Clock } from "lucide-react";
+
 export interface DataSource {
   name: string;
   type: string;
@@ -23,14 +25,14 @@ export function DataSourcesGrid({ sources }: DataSourcesGridProps) {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
         {sources.map((source) => {
           const isConnected = source.active_data;
 
           return (
             <div
               key={source.name}
-              className={`rounded-2xl border p-5 transition-all shadow-sm ${
+              className={`rounded-2xl border p-6 transition-all shadow-sm ${
                 isConnected
                   ? "border-emerald-300 bg-white ring-2 ring-emerald-500/10 shadow-md"
                   : "border-zinc-200 bg-white/80"
@@ -52,20 +54,26 @@ export function DataSourcesGrid({ sources }: DataSourcesGridProps) {
                 )}
               </div>
 
-              <h4 className="text-lg font-black text-zinc-900 mt-3">{source.name}</h4>
-              <p className="text-xs text-zinc-600 font-medium mt-1 leading-relaxed">{source.details}</p>
+              <h4 className="text-lg font-black text-zinc-900 mt-4">{source.name}</h4>
+              <p className="text-xs text-zinc-600 font-medium mt-1.5 leading-relaxed">{source.details}</p>
 
-              <div className="mt-4 pt-3 border-t border-zinc-100 flex items-center justify-between text-xs">
+              <div className="mt-5 pt-4 border-t border-zinc-100 flex items-center justify-between text-xs">
                 <span className="text-zinc-500 font-medium">Status:</span>
                 {isConnected ? (
-                  <span className="font-bold text-emerald-700">🟢 Ingestion Active</span>
+                  <span className="inline-flex items-center gap-1.5 font-bold text-emerald-700">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    Ingestion Active
+                  </span>
                 ) : (
-                  <span className="font-bold text-amber-700">🟡 Integration Scheduled</span>
+                  <span className="inline-flex items-center gap-1.5 font-bold text-amber-700">
+                    <Clock className="h-3.5 w-3.5" />
+                    Integration Scheduled
+                  </span>
                 )}
               </div>
 
               {!isConnected && (
-                <div className="mt-3 rounded-xl bg-zinc-50 p-2.5 text-[11px] text-zinc-500 border border-zinc-200 text-center font-mono font-medium">
+                <div className="mt-4 rounded-xl bg-zinc-50 p-2.5 text-[11px] text-zinc-500 border border-zinc-200 text-center font-mono font-medium">
                   No dummy data loaded (Enforced)
                 </div>
               )}

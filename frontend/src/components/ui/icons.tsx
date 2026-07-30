@@ -78,3 +78,19 @@ export function IconFinancial({ className = "w-5 h-5" }: { className?: string })
   );
 }
 
+export function IconSwitch({ className = "w-5 h-5" }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 7.5h11.25m0 0l-4-4m4 4l-4 4M16.5 16.5H5.25m0 0l4 4m-4-4l4-4" />
+    </svg>
+  );
+}
+
+export function IconArrowRight({ className = "w-5 h-5" }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14M13 5l7 7-7 7" />
+    </svg>
+  );
+}
+

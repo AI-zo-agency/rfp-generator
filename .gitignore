@@ -46,3 +46,8 @@ npm-debug.log*
 # Local architecture / planning docs (keep local only)
 docs/architecture/
 docs/superpowers/
+
+# Impeccable design skill (local context, keep local only)
+PRODUCT.md
+DESIGN.md
+.impeccable/

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 import logging
-from app.services import google_sheets, ai_classifier
+from app.financial import google_sheets, ai_classifier
 from app.services.llm import chat_json
 from app.core.config import settings
 

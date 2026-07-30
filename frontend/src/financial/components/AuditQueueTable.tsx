@@ -2,16 +2,13 @@
 
 import { useState } from "react";
 import {
-  AlertTriangle,
   AlertCircle,
   Info,
   CheckCircle2,
-  RefreshCw,
   DollarSign,
   Clock,
   FileText,
   ChevronDown,
-  ChevronUp,
   Lightbulb,
   ShieldAlert,
   Check,
@@ -19,6 +16,8 @@ import {
   ReceiptText,
   Tag,
 } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
+import { expoOutEase } from "@/lib/motion";
 
 export interface AuditItem {
   id: string;
@@ -107,7 +106,7 @@ export function AuditQueueTable({
     <div className="rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
 
       {/* ── Header ────────────────────────────────────────────────────────── */}
-      <div className="px-8 py-6 border-b border-zinc-100">
+      <div className="px-8 py-7 border-b border-zinc-100">
         <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
           <div className="space-y-1.5">
             <div className="flex items-center gap-3 flex-wrap">
@@ -134,7 +133,7 @@ export function AuditQueueTable({
       </div>
 
       {/* ── Items ─────────────────────────────────────────────────────────── */}
-      <div className="px-8 py-6 space-y-4">
+      <div className="px-8 py-7 space-y-4">
 
         {items.length === 0 && (
           <div className="rounded-xl border border-dashed border-zinc-300 bg-zinc-50 px-8 py-12 text-center space-y-2">
@@ -220,18 +219,25 @@ export function AuditQueueTable({
                     <div className={`flex h-7 w-7 items-center justify-center rounded-lg border transition-colors ${
                       isExpanded ? "bg-zinc-900 border-zinc-900 text-white" : "bg-zinc-100 border-zinc-200 text-zinc-500"
                     }`}>
-                      {isExpanded ? (
-                        <ChevronUp className="h-4 w-4" />
-                      ) : (
-                        <ChevronDown className="h-4 w-4" />
-                      )}
+                      <ChevronDown
+                        className="h-4 w-4 transition-transform duration-300"
+                        style={{ transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)" }}
+                      />
                     </div>
                   </div>
                 </div>
               </div>
 
               {/* Expanded Detail + Actions */}
-              {isExpanded && (
+              <AnimatePresence initial={false}>
+                {isExpanded && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.3, ease: expoOutEase }}
+                    className="overflow-hidden"
+                  >
                 <div className="border-t border-zinc-100 bg-white px-6 py-5 space-y-5">
 
                   {/* Flag Reason */}
@@ -250,13 +256,13 @@ export function AuditQueueTable({
                   {/* AI Recommendation */}
                   <div className="flex gap-3">
                     <div className="shrink-0 mt-0.5">
-                      <Lightbulb className="h-4 w-4 text-[#ef5018]" />
+                      <Lightbulb className="h-4 w-4 text-[#3C5A56]" />
                     </div>
                     <div className="space-y-1">
                       <p className="text-[11px] font-bold uppercase tracking-widest text-zinc-400">
                         AI Recommendation
                       </p>
-                      <p className="text-sm font-semibold text-[#ef5018] leading-relaxed">
+                      <p className="text-sm font-semibold text-[#3C5A56] leading-relaxed">
                         {item.recommended_action}
                       </p>
                     </div>
@@ -271,7 +277,7 @@ export function AuditQueueTable({
                       <button
                         disabled={resolvingId === item.id}
                         onClick={() => handleAction(item.id, "ACCEPT")}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 text-white px-4 py-2 text-xs font-bold hover:bg-zinc-700 transition-colors disabled:opacity-50"
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-zinc-900 text-white px-4 py-2 text-xs font-bold hover:bg-zinc-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Check className="h-3.5 w-3.5" />
                         Accept
@@ -279,7 +285,7 @@ export function AuditQueueTable({
                       <button
                         disabled={resolvingId === item.id}
                         onClick={() => handleAction(item.id, "RECLASSIFY")}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-100 border border-zinc-200 text-zinc-700 px-4 py-2 text-xs font-bold hover:bg-zinc-200 transition-colors disabled:opacity-50"
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-zinc-100 border border-zinc-200 text-zinc-700 px-4 py-2 text-xs font-bold hover:bg-zinc-200 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Tag className="h-3.5 w-3.5" />
                         Reclassify
@@ -287,7 +293,7 @@ export function AuditQueueTable({
                       <button
                         disabled={resolvingId === item.id}
                         onClick={() => handleAction(item.id, "BILL")}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-[#ef5018] text-white px-4 py-2 text-xs font-bold hover:bg-orange-600 transition-colors disabled:opacity-50"
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-[#3C5A56] text-white px-4 py-2 text-xs font-bold hover:bg-[#2e4744] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <ReceiptText className="h-3.5 w-3.5" />
                         Bill Client
@@ -295,7 +301,7 @@ export function AuditQueueTable({
                       <button
                         disabled={resolvingId === item.id}
                         onClick={() => handleAction(item.id, "DISMISS")}
-                        className="inline-flex items-center gap-1.5 rounded-lg text-zinc-400 px-4 py-2 text-xs font-semibold hover:text-zinc-600 transition-colors disabled:opacity-50 ml-auto"
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg text-zinc-400 px-4 py-2 text-xs font-semibold hover:text-zinc-600 transition-colors disabled:cursor-not-allowed disabled:opacity-50 ml-auto"
                       >
                         <X className="h-3.5 w-3.5" />
                         Dismiss
@@ -303,7 +309,9 @@ export function AuditQueueTable({
                     </div>
                   )}
                 </div>
-              )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           );
         })}

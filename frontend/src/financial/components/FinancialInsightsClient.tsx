@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { DashboardHeader } from "@/components/DashboardHeader";
+import { FinancialHeader } from "./FinancialHeader";
+import { TabFade } from "./TabFade";
 import { OutlineTabs } from "@/components/ui/OutlineTabs";
 import { IWorkerTimesheetsTable, TimesheetEntry } from "./IWorkerTimesheetsTable";
 import { AiInsightsPanel, AiInsightsData } from "./AiInsightsPanel";
@@ -106,7 +107,7 @@ export function FinancialInsightsClient() {
     return (
       <div className="flex h-96 w-full items-center justify-center">
         <div className="flex flex-col items-center gap-3">
-          <div className="h-10 w-10 animate-spin rounded-full border-4 border-[#ef5018] border-t-transparent"></div>
+          <div className="h-10 w-10 animate-spin rounded-full border-4 border-[#3C5A56] border-t-transparent"></div>
           <p className="text-xs text-zo-text-muted font-medium animate-pulse">Loading Financial Insights...</p>
         </div>
       </div>
@@ -115,11 +116,9 @@ export function FinancialInsightsClient() {
 
   return (
     <div className="space-y-8 sm:space-y-10">
-      {/* RFP Header Component */}
-      <DashboardHeader
+      <FinancialHeader
         title="Financial & Margin Auditor"
         subtitle="Reconciliation, margin tracking, and human-reviewed audit queue. Integrated with live iWorker Google Sheets timesheets."
-        showSync={false}
       />
 
       {/* Navigation Tabs — always left-aligned */}
@@ -128,11 +127,12 @@ export function FinancialInsightsClient() {
           tabs={FINANCIAL_TABS}
           activeTab={activeTab}
           onChange={(id) => setActiveTab(id)}
+          accentColor="#3C5A56"
         />
       </div>
 
       {/* Tab 1: iWorker Ingestion — always mounted, hidden when not active */}
-      <div className={activeTab === "iworker" ? "block" : "hidden"}>
+      <TabFade active={activeTab === "iworker"}>
         {iworkerData && (
           <IWorkerTimesheetsTable
             contractor={iworkerData.contractor}
@@ -142,10 +142,10 @@ export function FinancialInsightsClient() {
             timesheets={iworkerData.timesheets}
           />
         )}
-      </div>
+      </TabFade>
 
       {/* Tab 2: AI Audit Queue & Insights — always mounted, hidden when not active */}
-      <div className={activeTab === "ai" ? "block" : "hidden"}>
+      <TabFade active={activeTab === "ai"}>
         <div className="space-y-8">
           <AiInsightsPanel
             onFetchAiInsights={handleFetchAiInsights}
@@ -157,12 +157,12 @@ export function FinancialInsightsClient() {
             onResolveItem={handleResolveAuditItem}
           />
         </div>
-      </div>
+      </TabFade>
 
       {/* Tab 3: Connected Data Sources — always mounted, hidden when not active */}
-      <div className={activeTab === "sources" ? "block" : "hidden"}>
+      <TabFade active={activeTab === "sources"}>
         <DataSourcesGrid sources={sourcesData} />
-      </div>
+      </TabFade>
     </div>
   );
 }

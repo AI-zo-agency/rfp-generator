@@ -121,12 +121,12 @@ export function FeatureChecklist({
                 }
                 className={`cursor-pointer rounded-2xl border p-4 transition-all shadow-sm ${
                   selectedPhaseTab === p.phase
-                    ? "border-[#ef5018] bg-white ring-2 ring-[#ef5018]/20 shadow-md"
+                    ? "border-[#3C5A56] bg-white ring-2 ring-[#3C5A56]/20 shadow-md"
                     : "border-zo-border bg-white hover:border-zinc-300 hover:shadow-md"
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] uppercase font-cabin font-extrabold tracking-wider text-[#ef5018]">
+                  <span className="text-[10px] uppercase font-cabin font-extrabold tracking-wider text-[#3C5A56]">
                     Phase {p.phase}
                   </span>
                   <span className="text-[10px] font-semibold text-zo-text-muted">{p.duration}</span>
@@ -150,7 +150,7 @@ export function FeatureChecklist({
           <div>
             <div className="flex items-center gap-3">
               <h3 className="font-heading text-xl font-bold text-foreground">Feature Checklist (All Phases Combined)</h3>
-              <span className="rounded-full bg-[#ef5018]/10 px-3 py-1 text-xs font-bold text-[#ef5018] border border-[#ef5018]/20 font-cabin">
+              <span className="rounded-full bg-[#3C5A56]/10 px-3 py-1 text-xs font-bold text-[#3C5A56] border border-[#3C5A56]/20 font-cabin">
                 {progressPercent}% Complete
               </span>
             </div>
@@ -167,7 +167,7 @@ export function FeatureChecklist({
             </div>
             <div className="h-2.5 w-full rounded-full bg-zinc-100 overflow-hidden border border-zo-border">
               <div
-                className="h-full bg-gradient-to-r from-[#ef5018] to-emerald-500 transition-all duration-500"
+                className="h-full bg-gradient-to-r from-[#3C5A56] to-emerald-500 transition-all duration-500"
                 style={{ width: `${progressPercent}%` }}
               ></div>
             </div>
@@ -180,7 +180,7 @@ export function FeatureChecklist({
             onClick={() => setSelectedPhaseTab("ALL")}
             className={`rounded-xl px-3.5 py-1.5 text-xs font-bold transition-all ${
               selectedPhaseTab === "ALL"
-                ? "bg-[#ef5018] text-white shadow-md shadow-[#ef5018]/20"
+                ? "bg-[#3C5A56] text-white shadow-md shadow-[#3C5A56]/20"
                 : "bg-zinc-100 text-zo-text-secondary hover:text-foreground hover:bg-zinc-200 border border-zo-border"
             }`}
           >
@@ -192,7 +192,7 @@ export function FeatureChecklist({
               onClick={() => setSelectedPhaseTab(ph)}
               className={`rounded-xl px-3.5 py-1.5 text-xs font-bold transition-all ${
                 selectedPhaseTab === ph
-                  ? "bg-[#ef5018] text-white shadow-md shadow-[#ef5018]/20"
+                  ? "bg-[#3C5A56] text-white shadow-md shadow-[#3C5A56]/20"
                   : "bg-zinc-100 text-zo-text-secondary hover:text-foreground hover:bg-zinc-200 border border-zo-border"
               }`}
             >

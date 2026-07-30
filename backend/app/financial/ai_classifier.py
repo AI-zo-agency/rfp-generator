@@ -3,7 +3,7 @@ import re
 from typing import Dict, Any, Optional
 
 # Dedicated Logger for AI Timesheet Classification Generation Traces
-logger = logging.getLogger("app.services.ai_classifier")
+logger = logging.getLogger("app.financial.ai_classifier")
 logger.setLevel(logging.INFO)
 
 if not logger.handlers:

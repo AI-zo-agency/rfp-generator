@@ -6,17 +6,15 @@ import { ZoLogo } from "./ZoLogo";
 import {
   IconAnalytics,
   IconDashboard,
-  IconFinancial,
   IconKnowledge,
   IconProposal,
   IconRfp,
 } from "./ui/icons";
 
 const workspaceNav = [
-  { href: "/", label: "Dashboard", Icon: IconDashboard },
+  { href: "/rfp-dashboard", label: "Dashboard", Icon: IconDashboard },
   { href: "/rfps", label: "RFPs", Icon: IconRfp, prefetch: false },
   { href: "/proposals", label: "Proposals", Icon: IconProposal, prefetch: false },
-  { href: "/financial-insights", label: "Financial Insights", Icon: IconFinancial },
   { href: "/knowledge-base", label: "Knowledge Base", Icon: IconKnowledge },
   { href: "/analytics", label: "Analytics", Icon: IconAnalytics },
 ];
@@ -36,7 +34,7 @@ export function Sidebar({ collapsed }: SidebarProps) {
       }`}
     >
       <div className="border-b border-[var(--shell-border)] px-5 py-6">
-        <Link href="/" className="flex items-center gap-3">
+        <Link href="/rfp-dashboard" className="flex items-center gap-3">
           <ZoLogo collapsed={collapsed} />
         </Link>
       </div>

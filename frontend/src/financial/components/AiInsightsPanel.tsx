@@ -10,9 +10,8 @@ import {
   RotateCcw,
   Bot,
   Clock,
-  ChevronDown,
-  ChevronUp,
 } from "lucide-react";
+import { FadeInItem, FadeInStagger } from "@/components/ui/FadeIn";
 
 export interface AiInsightsData {
   status: string;
@@ -89,14 +88,14 @@ export function AiInsightsPanel({
     <div className="rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <div className="px-8 py-6 border-b border-zinc-100">
+      <div className="px-8 py-7 border-b border-zinc-100">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
 
           {/* Left: Title */}
           <div className="space-y-1.5">
             <div className="flex items-center gap-2">
-              <span className="flex h-1.5 w-1.5 rounded-full bg-[#ef5018] animate-ping" />
-              <span className="text-xs font-bold uppercase tracking-widest text-[#ef5018]">
+              <span className="flex h-1.5 w-1.5 rounded-full bg-[#3C5A56] animate-ping" />
+              <span className="text-xs font-bold uppercase tracking-widest text-[#3C5A56]">
                 AI Financial Auditor
               </span>
             </div>
@@ -117,7 +116,7 @@ export function AiInsightsPanel({
               className={`inline-flex items-center gap-2.5 rounded-xl px-6 py-3 text-sm font-semibold text-white shadow-sm transition-all ${
                 loading
                   ? "bg-zinc-300 cursor-not-allowed"
-                  : "bg-gradient-to-r from-[#ef5018] to-orange-500 hover:from-orange-500 hover:to-[#ef5018] hover:shadow-md hover:shadow-orange-200 active:scale-95"
+                  : "cursor-pointer bg-gradient-to-r from-[#3C5A56] to-[#547d75] hover:from-[#456b64] hover:to-[#3C5A56] hover:shadow-md hover:shadow-[#3C5A56]/20 active:scale-95"
               }`}
             >
               {loading ? (
@@ -142,16 +141,16 @@ export function AiInsightsPanel({
       </div>
 
       {/* ── Body ───────────────────────────────────────────────────────────── */}
-      <div className="px-8 py-6 space-y-6">
+      <div className="px-8 py-7 space-y-6">
 
         {/* Loading State */}
         {loading && (
-          <div className="rounded-xl border border-orange-200 bg-orange-50/50 px-6 py-8 text-center space-y-5">
+          <div className="rounded-xl border border-[#3C5A56]/20 bg-[#3C5A56]/5 px-6 py-8 text-center space-y-5">
             <div className="flex justify-center">
               <div className="relative">
-                <div className="h-14 w-14 rounded-full border-4 border-orange-200 border-t-[#ef5018] animate-spin" />
+                <div className="h-14 w-14 rounded-full border-4 border-[#3C5A56]/20 border-t-[#3C5A56] animate-spin" />
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <Bot className="h-5 w-5 text-[#ef5018]" />
+                  <Bot className="h-5 w-5 text-[#3C5A56]" />
                 </div>
               </div>
             </div>
@@ -167,7 +166,7 @@ export function AiInsightsPanel({
                 <div
                   key={idx}
                   className={`h-1.5 rounded-full transition-all duration-300 ${
-                    idx <= loadingStep ? "w-4 bg-[#ef5018]" : "w-1.5 bg-zinc-300"
+                    idx <= loadingStep ? "w-4 bg-[#3C5A56]" : "w-1.5 bg-zinc-300"
                   }`}
                 />
               ))}
@@ -204,10 +203,10 @@ export function AiInsightsPanel({
 
         {/* Generated Insights */}
         {insights && !loading && (
-          <div className="space-y-6">
+          <FadeInStagger className="space-y-6">
 
             {/* Generated At + stats badge row */}
-            <div className="flex flex-wrap items-center gap-3">
+            <FadeInItem className="flex flex-wrap items-center gap-3">
               <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-100 border border-zinc-200 px-3 py-1 text-xs text-zinc-500">
                 <Clock className="h-3 w-3" />
                 {insights.generated_at}
@@ -218,30 +217,30 @@ export function AiInsightsPanel({
                     {insights.stats.active_entries} sessions · {insights.stats.total_hours} hrs · ${insights.stats.total_spend.toFixed(2)}
                   </span>
                   {insights.stats.over_scope_spend > 0 && (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-50 border border-orange-200 px-3 py-1 text-xs font-semibold text-[#ef5018]">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-50 border border-orange-200 px-3 py-1 text-xs font-semibold text-orange-600">
                       <AlertTriangle className="h-3 w-3" />
                       ${insights.stats.over_scope_spend.toFixed(2)} over-scope risk
                     </span>
                   )}
                 </>
               )}
-            </div>
+            </FadeInItem>
 
             {/* Executive Brief */}
-            <div className="rounded-xl border border-[#ef5018]/20 bg-orange-50/60 px-6 py-5 space-y-2">
+            <FadeInItem className="rounded-xl border border-[#3C5A56]/20 bg-[#3C5A56]/[0.06] px-6 py-5 space-y-2">
               <div className="flex items-center gap-2">
-                <Bot className="h-4 w-4 text-[#ef5018]" />
-                <span className="text-xs font-bold uppercase tracking-widest text-[#ef5018]">
+                <Bot className="h-4 w-4 text-[#3C5A56]" />
+                <span className="text-xs font-bold uppercase tracking-widest text-[#3C5A56]">
                   Executive Brief
                 </span>
               </div>
               <p className="text-sm text-zinc-800 leading-relaxed font-medium">
                 {insights.summary.leadership_brief_text}
               </p>
-            </div>
+            </FadeInItem>
 
             {/* Risks + Wins Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            <FadeInItem className="grid grid-cols-1 md:grid-cols-2 gap-5">
 
               {/* Top Risks */}
               <div className="rounded-xl border border-red-200 bg-red-50/40 p-5 space-y-4">
@@ -292,10 +291,10 @@ export function AiInsightsPanel({
                   ))}
                 </ol>
               </div>
-            </div>
+            </FadeInItem>
 
             {/* Margin Recommendations */}
-            <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-5 space-y-4">
+            <FadeInItem className="rounded-xl border border-amber-200 bg-amber-50/40 p-5 space-y-4">
               <div className="flex items-center gap-2">
                 <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-100 text-amber-600">
                   <Lightbulb className="h-4 w-4" />
@@ -310,14 +309,14 @@ export function AiInsightsPanel({
                     key={idx}
                     className="flex items-start gap-3 bg-white rounded-lg px-4 py-3.5 border border-amber-100 shadow-xs"
                   >
-                    <span className="shrink-0 text-[#ef5018] font-bold text-sm mt-0.5">→</span>
+                    <span className="shrink-0 text-[#3C5A56] font-bold text-sm mt-0.5">→</span>
                     <span className="text-xs text-zinc-700 leading-relaxed">{rec}</span>
                   </div>
                 ))}
               </div>
-            </div>
+            </FadeInItem>
 
-          </div>
+          </FadeInStagger>
         )}
       </div>
     </div>

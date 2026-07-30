@@ -12,7 +12,6 @@ import {
   Package,
   List,
   ChevronDown,
-  ChevronRight,
   RotateCcw,
   Info,
   Wifi,
@@ -25,6 +24,9 @@ import {
   Bot,
   Minus,
 } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
+import { expoOutEase } from "@/lib/motion";
+import { AnimatedNumber } from "./AnimatedNumber";
 
 export interface TimesheetEntry {
   id: string;
@@ -291,61 +293,59 @@ export function IWorkerTimesheetsTable({
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-8">
 
-      {/* ─── HEADER CARD ─────────────────────────────────────────────────────── */}
+      {/* ─── IDENTITY CARD ───────────────────────────────────────────────────── */}
       <div className="rounded-2xl border border-zo-border bg-white shadow-sm overflow-hidden">
-        {/* Orange left accent stripe */}
-        <div className="h-1 w-full bg-gradient-to-r from-[#ef5018] via-orange-400 to-amber-400" />
+        {/* Teal accent stripe */}
+        <div className="h-1 w-full bg-gradient-to-r from-[#3C5A56] via-[#598079] to-[#8fb0a9]" />
 
-        <div className="p-6 sm:p-8">
-          {/* Top Row: Identity + Controls */}
-          <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-6">
-
-            {/* Left: Identity */}
-            <div className="flex items-center gap-5">
-              <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[#ef5018]/10 border border-[#ef5018]/20 font-black text-lg text-[#ef5018] tracking-tight select-none">
-                iW
-              </div>
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-3 flex-wrap">
-                  <h3 className="font-heading text-xl font-bold text-foreground leading-tight">
-                    iWorker Contractor Timesheets
-                  </h3>
-                  {isConnected ? (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 border border-emerald-200">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                      Live & AI Active
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-100 px-3 py-1 text-xs font-semibold text-zinc-500 border border-zinc-200">
-                      <WifiOff className="h-3 w-3" />
-                      Disconnected
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-zo-text-muted leading-relaxed">
-                  Source: <span className="font-semibold text-foreground">iWorker Time Tracker Sheet</span>
-                  <span className="mx-2 text-zinc-300">·</span>
-                  Rate: <span className="font-semibold text-foreground">$12.50 / hr</span>
-                  <span className="mx-2 text-zinc-300">·</span>
-                  <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
-                    <Bot className="h-3 w-3" />
-                    FastAPI AI Classifier Active
-                  </span>
-                </p>
-              </div>
+        <div className="p-6 sm:p-8 space-y-6">
+          {/* Identity */}
+          <div className="flex items-center gap-5">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[#3C5A56]/10 border border-[#3C5A56]/20 font-black text-lg text-[#3C5A56] tracking-tight select-none">
+              iW
             </div>
+            <div className="space-y-1.5 min-w-0">
+              <div className="flex items-center gap-3 flex-wrap">
+                <h3 className="font-heading text-xl font-bold text-foreground leading-tight">
+                  iWorker Contractor Timesheets
+                </h3>
+                {isConnected ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 border border-emerald-200">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    Live & AI Active
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-100 px-3 py-1 text-xs font-semibold text-zinc-500 border border-zinc-200">
+                    <WifiOff className="h-3 w-3" />
+                    Disconnected
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-zo-text-muted leading-relaxed">
+                Source: <span className="font-semibold text-foreground">iWorker Time Tracker Sheet</span>
+                <span className="mx-2 text-zinc-300">·</span>
+                Rate: <span className="font-semibold text-foreground">$12.50 / hr</span>
+                <span className="mx-2 text-zinc-300">·</span>
+                <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
+                  <Bot className="h-3 w-3" />
+                  FastAPI AI Classifier Active
+                </span>
+              </p>
+            </div>
+          </div>
 
-            {/* Right: Action Buttons */}
-            <div className="flex flex-wrap items-center gap-2.5 lg:shrink-0">
+          {/* Toolbar — visually separated from identity, grouped by purpose */}
+          <div className="flex flex-col gap-4 border-t border-zinc-100 pt-6 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-2.5">
               {/* View Mode Toggle */}
               <div className="inline-flex items-center rounded-xl bg-zinc-100 p-1 border border-zinc-200 gap-0.5">
                 <button
                   onClick={() => setViewMode("GROUPED")}
-                  className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg transition-all ${
+                  className={`inline-flex cursor-pointer items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg transition-all ${
                     viewMode === "GROUPED"
-                      ? "bg-[#ef5018] text-white shadow-sm"
+                      ? "bg-[#3C5A56] text-white shadow-sm"
                       : "text-zinc-500 hover:text-zinc-800"
                   }`}
                 >
@@ -354,9 +354,9 @@ export function IWorkerTimesheetsTable({
                 </button>
                 <button
                   onClick={() => setViewMode("DAILY")}
-                  className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg transition-all ${
+                  className={`inline-flex cursor-pointer items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg transition-all ${
                     viewMode === "DAILY"
-                      ? "bg-[#ef5018] text-white shadow-sm"
+                      ? "bg-[#3C5A56] text-white shadow-sm"
                       : "text-zinc-500 hover:text-zinc-800"
                   }`}
                 >
@@ -381,107 +381,104 @@ export function IWorkerTimesheetsTable({
                   <option value="disconnected">Disconnected</option>
                 </select>
               </div>
+            </div>
 
-              {isConnected && (
-                <>
-                  <a
-                    href={googleSheetUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 transition-colors"
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                    Open Sheet
-                  </a>
-                  <button
-                    onClick={() => setShowPreview(!showPreview)}
-                    className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold transition-colors ${
-                      showPreview
-                        ? "bg-zinc-800 text-white"
-                        : "bg-zinc-900 text-white hover:bg-zinc-800"
-                    }`}
-                  >
-                    <Grid3X3 className="h-3.5 w-3.5" />
-                    {showPreview ? "Hide Grid" : "Sheet Grid"}
-                  </button>
-                </>
-              )}
+            {isConnected && (
+              <div className="grid grid-cols-2 gap-2.5 sm:flex sm:shrink-0">
+                <a
+                  href={googleSheetUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 transition-colors"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Open Sheet
+                </a>
+                <button
+                  onClick={() => setShowPreview(!showPreview)}
+                  className={`inline-flex cursor-pointer items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold transition-colors ${
+                    showPreview
+                      ? "bg-zinc-800 text-white"
+                      : "bg-zinc-900 text-white hover:bg-zinc-800"
+                  }`}
+                >
+                  <Grid3X3 className="h-3.5 w-3.5" />
+                  {showPreview ? "Hide Grid" : "Sheet Grid"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ─── OVERVIEW STATS — own section, room to breathe ──────────────────── */}
+      {isConnected ? (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+          {/* Total Hours */}
+          <div className="flex items-center gap-4 rounded-2xl bg-white border border-zinc-200 shadow-sm px-6 py-6">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
+              <Clock className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
+                Total Logged Hours
+              </p>
+              <p className="font-heading text-3xl font-bold text-foreground leading-none">
+                <AnimatedNumber value={summary.total_logged_hours} decimals={2} />
+                <span className="text-sm font-semibold text-zo-text-muted ml-1.5">hrs</span>
+              </p>
+              <p className="text-[11px] text-zo-text-muted mt-1.5">Across active weekly cycles</p>
             </div>
           </div>
 
-          {/* ── Connected: Metric Cards ── */}
-          {isConnected && (
-            <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-4">
-              {/* Total Hours */}
-              <div className="flex items-center gap-4 rounded-xl bg-zinc-50 border border-zinc-200 px-5 py-4">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
-                  <Clock className="h-5 w-5" />
-                </div>
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-0.5">
-                    Total Logged Hours
-                  </p>
-                  <p className="font-heading text-2xl font-bold text-foreground leading-none">
-                    {summary.total_logged_hours}
-                    <span className="text-sm font-semibold text-zo-text-muted ml-1.5">hrs</span>
-                  </p>
-                  <p className="text-[11px] text-zo-text-muted mt-1">Across active weekly cycles</p>
-                </div>
-              </div>
-
-              {/* Total Spend */}
-              <div className="flex items-center gap-4 rounded-xl bg-zinc-50 border border-zinc-200 px-5 py-4">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
-                  <DollarSign className="h-5 w-5" />
-                </div>
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-0.5">
-                    Contractor Spend
-                  </p>
-                  <p className="font-heading text-2xl font-bold text-emerald-600 leading-none">
-                    ${summary.total_spend_usd.toFixed(2)}
-                  </p>
-                  <p className="text-[11px] text-zo-text-muted mt-1">
-                    $12.50 / hr · Sheet cell H4
-                  </p>
-                </div>
-              </div>
-
-              {/* AI Flagged Risk */}
-              <div className="flex items-center gap-4 rounded-xl bg-orange-50 border border-orange-200 px-5 py-4">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-orange-100 text-[#ef5018]">
-                  <AlertTriangle className="h-5 w-5" />
-                </div>
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-0.5">
-                    AI Flagged Scope Risk
-                  </p>
-                  <p className="font-heading text-2xl font-bold text-[#ef5018] leading-none">
-                    ${liveOverScopeSpend.toFixed(2)}
-                  </p>
-                  <p className="text-[11px] text-zo-text-muted mt-1">Unbilled revision overages (R4+)</p>
-                </div>
-              </div>
+          {/* Total Spend */}
+          <div className="flex items-center gap-4 rounded-2xl bg-white border border-zinc-200 shadow-sm px-6 py-6">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
+              <DollarSign className="h-5 w-5" />
             </div>
-          )}
-
-          {/* Disconnected State */}
-          {!isConnected && (
-            <div className="mt-8 rounded-xl border border-dashed border-zinc-300 bg-zinc-50 px-8 py-12 text-center space-y-3">
-              <div className="flex justify-center">
-                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-zinc-100 text-zinc-400">
-                  <WifiOff className="h-7 w-7" />
-                </div>
-              </div>
-              <h4 className="font-heading text-base font-bold text-foreground">Sheet Disconnected</h4>
-              <p className="text-sm text-zo-text-muted max-w-sm mx-auto leading-relaxed">
-                Switch status above to <strong className="text-foreground">iWorker Sheet Connected</strong> to
-                view live timesheet data.
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
+                Contractor Spend
+              </p>
+              <p className="font-heading text-3xl font-bold text-emerald-600 leading-none">
+                <AnimatedNumber value={summary.total_spend_usd} decimals={2} prefix="$" />
+              </p>
+              <p className="text-[11px] text-zo-text-muted mt-1.5">
+                $12.50 / hr · Sheet cell H4
               </p>
             </div>
-          )}
+          </div>
+
+          {/* AI Flagged Risk */}
+          <div className="flex items-center gap-4 rounded-2xl bg-orange-50 border border-orange-200 shadow-sm px-6 py-6">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-orange-100 text-orange-600">
+              <AlertTriangle className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
+                AI Flagged Scope Risk
+              </p>
+              <p className="font-heading text-3xl font-bold text-orange-600 leading-none">
+                <AnimatedNumber value={liveOverScopeSpend} decimals={2} prefix="$" />
+              </p>
+              <p className="text-[11px] text-zo-text-muted mt-1.5">Unbilled revision overages (R4+)</p>
+            </div>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-8 py-12 text-center space-y-3">
+          <div className="flex justify-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-zinc-100 text-zinc-400">
+              <WifiOff className="h-7 w-7" />
+            </div>
+          </div>
+          <h4 className="font-heading text-base font-bold text-foreground">Sheet Disconnected</h4>
+          <p className="text-sm text-zo-text-muted max-w-sm mx-auto leading-relaxed">
+            Switch status above to <strong className="text-foreground">iWorker Sheet Connected</strong> to
+            view live timesheet data.
+          </p>
+        </div>
+      )}
 
       {/* ─── SHEET GRID PREVIEW ──────────────────────────────────────────────── */}
       {isConnected && showPreview && (
@@ -501,14 +498,14 @@ export function IWorkerTimesheetsTable({
                 href={googleSheetUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#ef5018] hover:underline"
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#3C5A56] hover:underline"
               >
                 Open in Sheets
                 <ExternalLink className="h-3 w-3" />
               </a>
               <button
                 onClick={() => setShowPreview(false)}
-                className="flex h-7 w-7 items-center justify-center rounded-lg hover:bg-zinc-200 text-zinc-400 hover:text-zinc-700 transition-colors"
+                className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg hover:bg-zinc-200 text-zinc-400 hover:text-zinc-700 transition-colors"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -552,7 +549,7 @@ export function IWorkerTimesheetsTable({
       {/* ─── SEARCH + FILTER BAR ─────────────────────────────────────────────── */}
       {isConnected && (
         <div className="rounded-2xl border border-zo-border bg-white shadow-sm overflow-hidden">
-          <div className="px-6 py-4 flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="px-6 py-5 flex flex-col sm:flex-row sm:items-center gap-3.5">
 
             {/* Search Input */}
             <div className="relative flex-1 max-w-md">
@@ -562,12 +559,12 @@ export function IWorkerTimesheetsTable({
                 placeholder="Search tasks, dates, days…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full rounded-xl bg-zinc-50 pl-10 pr-4 py-2.5 text-sm text-foreground placeholder-zinc-400 border border-zinc-200 focus:border-[#ef5018] focus:bg-white focus:outline-none transition-all"
+                className="w-full rounded-xl bg-zinc-50 pl-10 pr-4 py-2.5 text-sm text-foreground placeholder-zinc-400 border border-zinc-200 focus:border-[#3C5A56] focus:bg-white focus:outline-none transition-all"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery("")}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 cursor-pointer text-zinc-400 hover:text-zinc-600"
                 >
                   <X className="h-4 w-4" />
                 </button>
@@ -579,14 +576,14 @@ export function IWorkerTimesheetsTable({
               onClick={() => setShowFilters(!showFilters)}
               className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold border transition-all cursor-pointer ${
                 showFilters || activeFiltersCount > 0
-                  ? "bg-[#ef5018] text-white border-[#ef5018]"
+                  ? "bg-[#3C5A56] text-white border-[#3C5A56]"
                   : "bg-zinc-50 text-zinc-700 border-zinc-200 hover:bg-zinc-100"
               }`}
             >
               <SlidersHorizontal className="h-4 w-4" />
               Filters
               {activeFiltersCount > 0 && (
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-white text-[#ef5018] text-[10px] font-bold">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-white text-[#3C5A56] text-[10px] font-bold">
                   {activeFiltersCount}
                 </span>
               )}
@@ -637,7 +634,7 @@ export function IWorkerTimesheetsTable({
                   <select
                     value={selectedYear}
                     onChange={(e) => setSelectedYear(e.target.value)}
-                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-foreground focus:outline-none focus:border-[#ef5018] cursor-pointer min-w-[110px]"
+                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-foreground focus:outline-none focus:border-[#3C5A56] cursor-pointer min-w-[110px]"
                   >
                     <option value="ALL">All Years</option>
                     {availableYears.map((year) => (
@@ -655,7 +652,7 @@ export function IWorkerTimesheetsTable({
                   <select
                     value={selectedMonth}
                     onChange={(e) => setSelectedMonth(e.target.value)}
-                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-foreground focus:outline-none focus:border-[#ef5018] cursor-pointer min-w-[130px]"
+                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-foreground focus:outline-none focus:border-[#3C5A56] cursor-pointer min-w-[130px]"
                   >
                     <option value="ALL">All Months</option>
                     {["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"].map((m) => (
@@ -673,7 +670,7 @@ export function IWorkerTimesheetsTable({
                   <select
                     value={selectedStatusFilter}
                     onChange={(e) => setSelectedStatusFilter(e.target.value as "ALL" | "BILLABLE" | "OVER_SCOPE")}
-                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-foreground focus:outline-none focus:border-[#ef5018] cursor-pointer min-w-[190px]"
+                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-foreground focus:outline-none focus:border-[#3C5A56] cursor-pointer min-w-[190px]"
                   >
                     <option value="ALL">All Status Tags</option>
                     <option value="BILLABLE">✓ Billable Time (In-Scope)</option>
@@ -690,7 +687,7 @@ export function IWorkerTimesheetsTable({
                   <select
                     value={sortOrder}
                     onChange={(e) => setSortOrder(e.target.value as "DESC" | "ASC")}
-                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-foreground focus:outline-none focus:border-[#ef5018] cursor-pointer min-w-[160px]"
+                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-foreground focus:outline-none focus:border-[#3C5A56] cursor-pointer min-w-[160px]"
                   >
                     <option value="DESC">Newest First ↓</option>
                     <option value="ASC">Oldest First ↑</option>
@@ -708,7 +705,7 @@ export function IWorkerTimesheetsTable({
                         type="checkbox"
                         checked={hideOffDays}
                         onChange={(e) => setHideOffDays(e.target.checked)}
-                        className="rounded border-zinc-300 text-[#ef5018] focus:ring-[#ef5018] cursor-pointer"
+                        className="rounded border-zinc-300 text-[#3C5A56] focus:ring-[#3C5A56] cursor-pointer"
                       />
                       Hide zero-hour days
                     </label>
@@ -719,7 +716,7 @@ export function IWorkerTimesheetsTable({
                 {activeFiltersCount > 0 && (
                   <button
                     onClick={resetFilters}
-                    className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-500 hover:text-[#ef5018] transition-colors ml-auto self-end pb-2"
+                    className="inline-flex cursor-pointer items-center gap-1.5 text-xs font-semibold text-zinc-500 hover:text-[#3C5A56] transition-colors ml-auto self-end pb-2"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
                     Reset filters
@@ -754,9 +751,9 @@ export function IWorkerTimesheetsTable({
                   </div>
                 </div>
                 <div className="flex gap-3 bg-white rounded-xl p-4 border border-orange-200">
-                  <AlertCircle className="h-5 w-5 text-[#ef5018] shrink-0 mt-0.5" />
+                  <AlertCircle className="h-5 w-5 text-orange-600 shrink-0 mt-0.5" />
                   <div>
-                    <p className="text-sm font-semibold text-[#ef5018] mb-1">Over Scope (R4+ Revisions)</p>
+                    <p className="text-sm font-semibold text-orange-600 mb-1">Over Scope (R4+ Revisions)</p>
                     <p className="text-xs text-zinc-500 leading-relaxed">
                       Round 4 or later on any deliverable topic triggers an unbilled overage flag requiring a
                       client change order.
@@ -771,7 +768,7 @@ export function IWorkerTimesheetsTable({
 
       {/* ─── GROUPED DELIVERABLES VIEW ───────────────────────────────────────── */}
       {isConnected && viewMode === "GROUPED" && (
-        <div className="space-y-3">
+        <div className="space-y-4">
           {deliverableGroups.length === 0 ? (
             <div className="rounded-2xl border border-zo-border bg-white p-16 text-center text-sm text-zinc-400">
               No deliverables match your current filters.
@@ -791,18 +788,17 @@ export function IWorkerTimesheetsTable({
                   {/* Group Header */}
                   <button
                     onClick={() => toggleExpand(group.taskName)}
-                    className="w-full text-left px-6 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-zinc-50/60 transition-colors"
+                    className="w-full cursor-pointer text-left px-6 py-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-zinc-50/60 transition-colors"
                   >
                     <div className="flex items-start gap-4 flex-1 min-w-0">
                       {/* Expand icon */}
                       <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border transition-colors ${
                         isExpanded ? "bg-zinc-900 border-zinc-900 text-white" : "bg-zinc-100 border-zinc-200 text-zinc-500"
                       }`}>
-                        {isExpanded ? (
-                          <ChevronDown className="h-4 w-4" />
-                        ) : (
-                          <ChevronRight className="h-4 w-4" />
-                        )}
+                        <ChevronDown
+                          className="h-4 w-4 transition-transform duration-300"
+                          style={{ transform: isExpanded ? "rotate(0deg)" : "rotate(-90deg)" }}
+                        />
                       </div>
 
                       <div className="min-w-0">
@@ -811,7 +807,7 @@ export function IWorkerTimesheetsTable({
                             {group.taskName}
                           </span>
                           {group.isOverScope ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2.5 py-0.5 text-[11px] font-bold text-[#ef5018] border border-orange-200 shrink-0">
+                            <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2.5 py-0.5 text-[11px] font-bold text-orange-600 border border-orange-200 shrink-0">
                               <AlertTriangle className="h-3 w-3" />
                               Over Scope
                             </span>
@@ -851,8 +847,15 @@ export function IWorkerTimesheetsTable({
                   </button>
 
                   {/* Expanded Session Table */}
-                  {isExpanded && (
-                    <div className="border-t border-zinc-100">
+                  <AnimatePresence initial={false}>
+                    {isExpanded && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.3, ease: expoOutEase }}
+                        className="overflow-hidden border-t border-zinc-100"
+                      >
                       <table className="w-full text-left text-xs">
                         <thead className="bg-zinc-50 border-b border-zinc-100">
                           <tr className="text-zinc-400 font-semibold uppercase tracking-wider">
@@ -885,7 +888,7 @@ export function IWorkerTimesheetsTable({
                               <td className="px-6 py-3.5 text-zinc-400">{session.week_ending}</td>
                               <td className="px-6 py-3.5 text-center">
                                 {session.isOverScope ? (
-                                  <span className="inline-flex items-center gap-1 text-[11px] font-bold text-[#ef5018]">
+                                  <span className="inline-flex items-center gap-1 text-[11px] font-bold text-orange-600">
                                     <AlertTriangle className="h-3 w-3" />
                                     Over Scope
                                   </span>
@@ -900,8 +903,9 @@ export function IWorkerTimesheetsTable({
                           ))}
                         </tbody>
                       </table>
-                    </div>
-                  )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               );
             })
@@ -944,7 +948,7 @@ export function IWorkerTimesheetsTable({
                         <td colSpan={6} className="px-6 py-3">
                           <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2.5">
-                              <div className="flex h-5 w-5 items-center justify-center rounded bg-[#ef5018] text-white">
+                              <div className="flex h-5 w-5 items-center justify-center rounded bg-[#3C5A56] text-white">
                                 <CalendarDays className="h-3 w-3" />
                               </div>
                               <span className="font-bold text-xs uppercase tracking-widest text-foreground">
@@ -1012,7 +1016,7 @@ export function IWorkerTimesheetsTable({
                           <td className="px-6 py-5 whitespace-nowrap text-center">
                             {row.isOverScope ? (
                               <div className="space-y-1">
-                                <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-[#ef5018] border border-orange-200">
+                                <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-600 border border-orange-200">
                                   <AlertTriangle className="h-3 w-3" />
                                   Over Scope
                                 </span>

@@ -21,6 +21,8 @@ interface OutlineTabsProps {
   variant?: "pill" | "underline";
   /** Stretch tabs across the row */
   fullWidth?: boolean;
+  /** Active-indicator color — defaults to the RFP brand orange; override per workspace (e.g. Financial's teal) */
+  accentColor?: string;
 }
 
 export function OutlineTabs({
@@ -31,6 +33,7 @@ export function OutlineTabs({
   compact = false,
   variant = "pill",
   fullWidth = false,
+  accentColor = "#ef5018",
 }: OutlineTabsProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
@@ -72,10 +75,10 @@ export function OutlineTabs({
       : "relative inline-flex gap-2 rounded-xl border border-zo-border bg-white p-1.5 shadow-sm";
 
   const tabClass = isUnderline
-    ? "outline-tab-underline relative flex flex-1 items-center justify-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors -mb-px sm:flex-none sm:justify-start sm:px-4 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none"
+    ? "outline-tab-underline relative flex flex-1 cursor-pointer items-center justify-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors -mb-px sm:flex-none sm:justify-start sm:px-4 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none"
     : compact
-      ? "relative z-10 rounded-md px-3 py-1.5 text-xs font-semibold tracking-normal normal-case outline-none focus:outline-none focus:ring-0 focus-visible:outline-none"
-      : "relative z-10 flex items-center gap-2.5 rounded-lg px-6 py-3 text-xs font-cabin font-semibold uppercase tracking-[0.08em] outline-none focus:outline-none focus:ring-0 focus-visible:outline-none";
+      ? "relative z-10 cursor-pointer rounded-md px-3 py-1.5 text-xs font-semibold tracking-normal normal-case outline-none focus:outline-none focus:ring-0 focus-visible:outline-none"
+      : "relative z-10 flex cursor-pointer items-center gap-2.5 rounded-lg px-6 py-3 text-xs font-cabin font-semibold uppercase tracking-[0.08em] outline-none focus:outline-none focus:ring-0 focus-visible:outline-none";
 
   const indicatorInset = compact ? "top-0.5 bottom-0.5" : "top-1 bottom-1";
 
@@ -83,21 +86,19 @@ export function OutlineTabs({
     <div ref={containerRef} className={`${shellClass} ${className}`} role="tablist">
       {!isUnderline && ready && (
         <motion.div
-          className={`pointer-events-none absolute rounded-lg bg-[#ef5018] ${indicatorInset}`}
+          className={`pointer-events-none absolute rounded-lg ${indicatorInset}`}
           initial={false}
           animate={{
             left: indicator.left,
             width: indicator.width,
           }}
           transition={smoothTransition}
-          style={{ position: "absolute" }}
+          style={{ position: "absolute", backgroundColor: accentColor }}
         />
       )}
 
       {tabs.map((tab) => {
         const isActive = tab.id === activeTab;
-        const underlineActive =
-          "border-[#ef5018] text-[#ef5018]";
         const underlineIdle =
           "border-transparent text-zo-text-secondary hover:border-zo-border hover:text-foreground";
 
@@ -114,12 +115,13 @@ export function OutlineTabs({
             className={`${tabClass} flex items-center gap-1.5 transition-smooth outline-none focus:outline-none focus:ring-0 focus-visible:outline-none ${
               isUnderline
                 ? isActive
-                  ? underlineActive
+                  ? "border-current"
                   : underlineIdle
                 : isActive
                   ? "text-white"
                   : "text-zo-text-secondary hover:text-foreground"
             }`}
+            style={isUnderline && isActive ? { color: accentColor, borderColor: accentColor } : undefined}
           >
             {tab.label}
             {tab.count !== undefined && tab.count > 0 && (
@@ -127,9 +129,7 @@ export function OutlineTabs({
                 className={
                   isUnderline
                     ? `min-w-[1.125rem] rounded-full px-1.5 py-0.5 text-center text-[10px] font-bold tabular-nums ${
-                        isActive
-                          ? "bg-[#ef5018]/15 text-[#c2410c]"
-                          : "bg-amber-100 text-amber-900"
+                        isActive ? "" : "bg-amber-100 text-amber-900"
                       }`
                     : `min-w-[1.25rem] px-2 py-0.5 text-center text-[10px] font-bold transition-smooth rounded-full ${
                         isActive
@@ -137,6 +137,7 @@ export function OutlineTabs({
                           : "bg-red-100 text-red-800"
                       }`
                 }
+                style={isUnderline && isActive ? { backgroundColor: `${accentColor}26`, color: accentColor } : undefined}
               >
                 {tab.count}
               </span>

@@ -1,6 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { IconSwitch } from "./ui/icons";
 
 interface TopBarProps {
   collapsed: boolean;
@@ -35,6 +37,14 @@ export function TopBar({ collapsed, onToggleSidebar }: TopBarProps) {
       </div>
 
       <div className="flex items-center gap-2 md:gap-3">
+        <Link
+          href="/choose"
+          className="zo-btn secondary !py-3"
+          aria-label="Switch workspace"
+        >
+          <IconSwitch className="h-4 w-4" />
+          <span className="hidden sm:inline">Switch Workspace</span>
+        </Link>
         <button type="button" onClick={handleLogout} className="zo-btn secondary !py-3">
           Logout
         </button>

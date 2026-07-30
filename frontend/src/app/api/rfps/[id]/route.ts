@@ -60,7 +60,7 @@ export async function DELETE(
     });
     const data = await response.json();
     if (response.ok) {
-      revalidatePath("/");
+      revalidatePath("/rfp-dashboard");
       revalidatePath("/rfps");
       revalidatePath("/proposals");
     }
