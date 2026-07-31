@@ -245,7 +245,14 @@ def scan_truncation_artifacts(draft: ProposalDraft) -> list[T1Finding]:
             )
 
         # 3) Mid-sentence cutoff on final non-empty line
-        last = _final_nonempty_line(content)
+        # Ignore trailing handoff tags ([MANUAL FILL]/[DESIGNER NOTE]/[VERIFY]) so
+        # process markers do not look like truncated prose.
+        from app.services.proposal_rfp_optional_claim_scrub import (
+            strip_handoff_tags_for_scan,
+        )
+
+        scan_body = strip_handoff_tags_for_scan(content)
+        last = _final_nonempty_line(scan_body if scan_body else content)
         if last is not None and not _is_structural_line(last):
             if not _TERMINAL_PUNCT_RE.search(last.rstrip()):
                 findings.append(

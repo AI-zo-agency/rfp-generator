@@ -54,15 +54,26 @@ _NON_BID_CURRENCY_CONTEXT_RE = re.compile(
     r"workers['’]?\s*compensation|professional\s+liabilit|"
     r"coverage\s+limit|policy\s+limit|liability\s+limit|"
     r"insurance\s+limit|bonded?\b|surety|deductible|"
-    r"statutory|threshold|not\s+to\s+exceed\s+\$?"
+    r"statutory|threshold|not\s+to\s+exceed\s+\$?|"
+    r"allocation|ceiling|budget\s+cap|program[-\s]?specific|"
+    r"tuition|per\s+year|/year|in[-\s]?state"
     r")",
     re.I,
 )
 
+# Compact tuition / marketing figures like $12K — not bid ledger amounts.
+_COMPACT_CURRENCY_SUFFIX_RE = re.compile(r"\$[\d,]+(?:\.\d+)?\s*[KMB]\b", re.I)
+
 
 def _is_non_bid_currency_context(content: str, match_start: int, match_end: int) -> bool:
-    """True when amount sits in insurance/bond/statutory language, not bid totals."""
+    """True when amount sits in insurance/bond/statutory/tuition language, not bid totals."""
+    # $12K / $1.2M style — matcher often captures only $12 from $12K
+    tail = content[match_end : match_end + 2]
+    if tail[:1].upper() in {"K", "M", "B"}:
+        return True
     window = content[max(0, match_start - 80) : min(len(content), match_end + 80)]
+    if _COMPACT_CURRENCY_SUFFIX_RE.search(window):
+        return True
     return bool(_NON_BID_CURRENCY_CONTEXT_RE.search(window))
 
 

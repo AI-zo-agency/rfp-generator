@@ -124,10 +124,9 @@ export function outlineToApiDraft(
 
 import {
   buildPipelineStatus,
-  inferResumePhaseFromBlocker,
   normalizeCheckpointForDisplay,
+  phaseCompleteOnServer,
   phaseIsComplete,
-  resolveResumePhase,
   shouldRunPhase,
   type PipelinePhase,
   type PipelineInProgressPhase,
@@ -535,6 +534,19 @@ async function fetchProposalJobStatus(
   }
 }
 
+function isPhaseFinishedOnSnapshot(
+  snapshot: {
+    draft: ProposalOutline | null;
+    research: ProposalResearch | null;
+    pipelineStatus: ProposalPipelineStatus | null;
+  },
+  phase: PipelinePhase
+): boolean {
+  const fromServer = phaseCompleteOnServer(snapshot.pipelineStatus, phase);
+  if (fromServer !== null) return fromServer;
+  return phaseIsComplete(snapshot.draft, snapshot.research, phase);
+}
+
 /**
  * After a 202 start, poll draft/checkpoint (and optional in-memory job status)
  * until the phase finishes. Never holds a long POST open through the proxy.
@@ -587,7 +599,7 @@ async function waitForProposalPhase(
       }
       if (
         cp?.lastCompletedPhase === phase ||
-        phaseIsComplete(snapshot.draft, snapshot.research, phase)
+        isPhaseFinishedOnSnapshot(snapshot, phase)
       ) {
         return { draft: snapshot.draft, research: snapshot.research };
       }
@@ -601,14 +613,14 @@ async function waitForProposalPhase(
       !observedRunning &&
       job?.jobType === phase &&
       job.status === "completed" &&
-      phaseIsComplete(snapshot.draft, snapshot.research, phase)
+      isPhaseFinishedOnSnapshot(snapshot, phase)
     ) {
       return { draft: snapshot.draft, research: snapshot.research };
     }
 
     // Started but checkpoint not visible yet — don't treat as failure.
     if (!observedRunning && Date.now() - startedWall > 90_000) {
-      if (phaseIsComplete(snapshot.draft, snapshot.research, phase)) {
+      if (isPhaseFinishedOnSnapshot(snapshot, phase)) {
         return { draft: snapshot.draft, research: snapshot.research };
       }
       throw new Error(
@@ -787,31 +799,29 @@ export async function generateFullProposalStaged(
   const snapshot = await fetchProposalDraft(rfpId);
   let draft = snapshot.draft;
   let research = snapshot.research;
+  let pipelineStatus = snapshot.pipelineStatus;
 
-  // Always start from Sections 1–3 when forceRestart is set.
-  let resumeFrom: PipelinePhase = options?.forceRestart
-    ? "sections-1-3"
-    : (options?.startFrom ??
-      snapshot.pipelineStatus?.resumeFromPhase ??
-      resolveResumePhase(draft, research));
+  // Resume ownership is backend: trust server pipelineStatus.resumeFromPhase.
+  // Client may only force a known restart entrypoint (Sections 1–3 / Phase 2).
+  let resumeFrom: PipelinePhase;
+  if (options?.forceRestart) {
+    resumeFrom = "sections-1-3";
+  } else if (options?.forceRerunFromStart && options.startFrom) {
+    resumeFrom = options.startFrom;
+  } else if (options?.startFrom && options.startFrom === "phase-2") {
+    resumeFrom = "phase-2";
+  } else {
+    resumeFrom =
+      pipelineStatus?.resumeFromPhase ??
+      research?.pipelineCheckpoint?.resumeFromPhase ??
+      "sections-1-3";
+  }
 
   // Keep incomplete 1–3 from blocking an explicit Intelligence+ start.
   const skipStaticGate =
-    options?.startFrom === "phase-2" || options?.forceRerunFromStart === true;
+    resumeFrom === "phase-2" || options?.forceRerunFromStart === true;
   if (draft && !staticSections1to3Complete(draft) && !skipStaticGate) {
     resumeFrom = "sections-1-3";
-  }
-
-  // forceRestart / explicit startFrom must not be redirected to a later phase by
-  // validate blockers (e.g. "budget missing" → jump to phase-3-5).
-  if (!options?.forceRestart && !options?.startFrom && draft && research) {
-    const blocker = validateStagedProposalComplete(draft, research);
-    if (!blocker && resumeFrom === "complete") {
-      return { draft, research };
-    }
-    if (blocker) {
-      resumeFrom = inferResumePhaseFromBlocker(blocker);
-    }
   }
 
   const run = (phase: PipelinePhase) =>
@@ -829,10 +839,14 @@ export async function generateFullProposalStaged(
       return false;
     }
     await waitForInFlightPhase(rfpId, phase, onProgress);
-    const snap = await refreshProposalSnapshot(rfpId);
+    const snap = await fetchProposalDraft(rfpId);
     draft = snap.draft ?? draft;
     research = snap.research ?? research;
-    return phaseIsComplete(draft, research, phase);
+    pipelineStatus = snap.pipelineStatus ?? pipelineStatus;
+    const fromServer = phaseCompleteOnServer(pipelineStatus, phase);
+    // Prefer server completedPhases. If status is missing, do not invent a skip.
+    if (fromServer !== null) return fromServer;
+    return false;
   }
 
   if (run("sections-1-3")) {
@@ -845,7 +859,7 @@ export async function generateFullProposalStaged(
         () => generateProposalSections1to3(rfpId, signal),
         options?.onResearchUpdate
       );
-      ({ draft, research } = await refreshProposalSnapshot(rfpId));
+      ({ draft, research, pipelineStatus } = await refreshProposalSnapshot(rfpId));
     }
   }
 
@@ -854,7 +868,7 @@ export async function generateFullProposalStaged(
       throwIfAborted(signal);
       onProgress?.("phase-2");
       research = await runPhase2Retrieval(rfpId, signal);
-      ({ draft, research } = await refreshProposalSnapshot(rfpId));
+      ({ draft, research, pipelineStatus } = await refreshProposalSnapshot(rfpId));
       // Seed RFP tabs from fresh Intelligence so the sidebar updates before Phase 3.
       if (draft && research?.rfpSections?.length) {
         const isStatic = (id: string) =>
@@ -943,24 +957,35 @@ export async function generateFullProposalStaged(
 
   throwIfAborted(signal);
 
-  ({ draft, research } = await refreshProposalSnapshot(rfpId));
+  ({ draft, research, pipelineStatus } = await refreshProposalSnapshot(rfpId));
   if (!draft || !research) {
     throw new Error("Proposal draft missing after pipeline run.");
+  }
+
+  // Prefer server completeness over local blocker heuristics for soft exit.
+  if (pipelineStatus?.isComplete || pipelineStatus?.resumeFromPhase === "complete") {
+    return { draft, research };
   }
 
   const blocker = validateStagedProposalComplete(draft, research);
   if (blocker) {
     const lower = blocker.toLowerCase();
-    if (lower.includes("verify") && research.budget && research.presubmitReview) {
-      return { draft, research };
-    }
+    // VERIFY tags are a manual handoff after senior editor — do not soft-succeed
+    // just because stale budget/review artifacts exist; only exit cleanly when the
+    // server already considers the pipeline complete (handled above).
     if (lower.includes("verify") && !options?.forceRestart) {
       throwIfAborted(signal);
       onProgress?.("phase-3-6-self-edit");
       const retry = await runPhase3_6SelfEditWithRecovery(rfpId, signal);
       draft = retry.draft;
       research = retry.research;
-      ({ draft, research } = await refreshProposalSnapshot(rfpId));
+      ({ draft, research, pipelineStatus } = await refreshProposalSnapshot(rfpId));
+      if (
+        pipelineStatus?.isComplete ||
+        pipelineStatus?.resumeFromPhase === "complete"
+      ) {
+        return { draft: draft!, research: research! };
+      }
       const retryBlocker =
         draft && research ? validateStagedProposalComplete(draft, research) : blocker;
       if (!retryBlocker || retryBlocker.toLowerCase().includes("verify")) {
@@ -986,9 +1011,14 @@ export async function generateFullProposalStaged(
 async function refreshProposalSnapshot(rfpId: string): Promise<{
   draft: ProposalOutline | null;
   research: ProposalResearch | null;
+  pipelineStatus: ProposalPipelineStatus | null;
 }> {
   const snapshot = await fetchProposalDraft(rfpId);
-  return { draft: snapshot.draft, research: snapshot.research };
+  return {
+    draft: snapshot.draft,
+    research: snapshot.research,
+    pipelineStatus: snapshot.pipelineStatus,
+  };
 }
 
 /** If backend is still finishing a phase after a proxy timeout, wait before re-firing it. */

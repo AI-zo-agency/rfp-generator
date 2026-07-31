@@ -808,8 +808,11 @@ async def run_self_edit_loop(
     # cost since it no longer needs a second manual pass afterward).
     await record_pipeline_activity(
         rfp_id,
-        label="Senior editor: coverage, compliance & VERIFY scrub",
-        detail="Scanning manuscript vs. RFP requirements and removing [VERIFY] tags the RFP doesn't require",
+        label="Senior editor: coverage, compliance & optional-claim scrub",
+        detail=(
+            "Scanning manuscript vs. RFP requirements; removing DESIGNER NOTE / "
+            "auditor-echo MANUAL FILL and [VERIFY] tags the RFP doesn't require"
+        ),
         step_index=1,
         step_total=1,
         in_progress_phase="phase-3-6-self-edit",
@@ -817,6 +820,9 @@ async def run_self_edit_loop(
 
     from app.services.proposal_budget_content import find_budget_section_index
     from app.services.proposal_langchain_agents import senior_editor_emit_tickets
+    from app.services.proposal_rfp_optional_claim_scrub import (
+        apply_optional_claim_scrub_to_draft,
+    )
     from app.services.proposal_verify_optional_scrub import (
         count_verify_tags,
         scrub_draft_optional_verify_tags,
@@ -830,6 +836,17 @@ async def run_self_edit_loop(
     # no awareness it must preserve an exact table and can corrupt or blank it.
     budget_idx = find_budget_section_index(draft.sections)
     budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
+    skip_budget = {budget_section_id} if budget_section_id else set()
+
+    draft, claim_logs = apply_optional_claim_scrub_to_draft(
+        draft,
+        rfp_text=rfp_context,
+        skip_section_ids=skip_budget,
+    )
+    if claim_logs:
+        await asave_proposal_draft(draft)
+        for line in claim_logs:
+            report.section_logs.append({"section": "optional-claim-scrub", "detail": line})
 
     verify_ids = {
         s.id

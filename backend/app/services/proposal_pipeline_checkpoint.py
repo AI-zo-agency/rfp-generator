@@ -432,6 +432,27 @@ async def pipeline_phase(rfp_id: str, phase: str):
         unbind_active_rfp(token)
 
 
+def _checkpoint_reached_phase(
+    research: ProposalResearchCache | None,
+    phase: str,
+) -> bool:
+    """True when checkpoint lastCompletedPhase is at or past ``phase``.
+
+    Artifact presence alone is not enough — otherwise a stale budget/review from
+    an earlier run marks later phases complete and Continue never re-runs them.
+    """
+    if research is None or research.pipeline_checkpoint is None:
+        return False
+    last = research.pipeline_checkpoint.last_completed_phase
+    if not last:
+        return False
+    if last == "complete":
+        return True
+    if last not in PIPELINE_PHASES or phase not in PIPELINE_PHASES:
+        return False
+    return _phase_index(last) >= _phase_index(phase)
+
+
 def phase_is_complete(
     *,
     draft: ProposalDraft | None,
@@ -509,10 +530,15 @@ def phase_is_complete(
                 )
             ):
                 return False
-        return True
+        # Stale budget artifacts must not skip Phase 3.5 after a newer draft run.
+        return _checkpoint_reached_phase(research, "phase-3-5-budget")
 
     if phase == "phase-4-review":
-        return research.presubmit_review is not None
+        if research.presubmit_review is None:
+            return False
+        # Stale pre-submit reviews (e.g. from a prior day) must not mark the
+        # pipeline complete while checkpoint still points at phase-4.
+        return _checkpoint_reached_phase(research, "phase-4-review")
 
     return False
 
@@ -569,10 +595,9 @@ async def resolve_resume_phase(
             return cp.last_failed_phase
         if cp.in_progress_phase and cp.in_progress_phase in PIPELINE_PHASES:
             return cp.in_progress_phase
-        if cp.resume_from_phase and cp.resume_from_phase in PIPELINE_PHASES:
-            if not phase_is_complete(draft=draft, research=research, phase=cp.resume_from_phase):
-                return cp.resume_from_phase
 
+    # Always resume at the first incomplete phase. Do not trust resumeFromPhase alone —
+    # it can point at phase-4 while a stale budget/review artifact left earlier work skipped.
     for phase in PIPELINE_PHASES:
         if not phase_is_complete(draft=draft, research=research, phase=phase):
             return phase

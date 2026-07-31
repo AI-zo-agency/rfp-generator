@@ -71,7 +71,6 @@ import {
   type ManualFillFlag,
 } from "@/lib/proposal-manual-flags";
 import {
-  phaseIsComplete,
   FULFILL_SCAN_PHASE,
   pipelineServerStillWorkingMessage,
   inProgressPhaseLabel,
@@ -838,31 +837,42 @@ function ProposalDraftWorkspaceInner({
     "";
 
   const sections1to3Done = useMemo(
-    () => staticSections1to3Complete(outline),
-    [outline]
+    () =>
+      pipelineStatus?.completedPhases?.includes("sections-1-3") ??
+      staticSections1to3Complete(outline),
+    [outline, pipelineStatus]
   );
 
-  const phase2Done =
-    research?.proposalExecutionPlan?.validation?.readinessStatus === "ready" ||
-    (research?.evidenceCorpus?.length ?? 0) > 0;
+  const phase2Done = useMemo(
+    () =>
+      pipelineStatus?.completedPhases?.includes("phase-2") ??
+      (research?.proposalExecutionPlan?.validation?.readinessStatus === "ready" ||
+        (research?.evidenceCorpus?.length ?? 0) > 0),
+    [pipelineStatus, research]
+  );
 
   const phase3Done = useMemo(
     () =>
-      sections1to3Done &&
-      phase2Done &&
-      outline.sections.some(
-        (section) =>
-          section.source === "rfp" && section.content.trim().length > 0
-      ),
-    [outline.sections, phase2Done, sections1to3Done]
+      pipelineStatus?.completedPhases?.includes("phase-3") ??
+      (sections1to3Done &&
+        phase2Done &&
+        outline.sections.some(
+          (section) =>
+            section.source === "rfp" && section.content.trim().length > 0
+        )),
+    [outline.sections, phase2Done, pipelineStatus, sections1to3Done]
   );
 
   const selfEditDone = useMemo(
-    () => phaseIsComplete(outline, research, "phase-3-6-self-edit"),
-    [outline, research]
+    () =>
+      Boolean(
+        pipelineStatus?.completedPhases?.includes("phase-3-6-self-edit")
+      ),
+    [pipelineStatus]
   );
 
-  const fullProposalDone = phase3Done && selfEditDone;
+  const fullProposalDone =
+    pipelineStatus?.isComplete ?? (phase3Done && selfEditDone);
 
   const plainStatus = useMemo(
     () =>
@@ -1140,7 +1150,22 @@ function ProposalDraftWorkspaceInner({
   const handleResearchPoll = useCallback((updated: ProposalResearch | null) => {
     if (!updated) return;
     setResearch(updated);
-    setPipelineStatus(buildPipelineStatus(outlineRef.current, updated));
+    // Polling updates live checkpoint activity only — do not recompute resume/skip locally.
+    setPipelineStatus((prev) => {
+      const cp = updated.pipelineCheckpoint;
+      if (prev && cp) {
+        return {
+          ...prev,
+          checkpoint: cp,
+          inProgressPhase: cp.inProgressPhase ?? null,
+          lastFailedPhase: cp.lastFailedPhase ?? prev.lastFailedPhase ?? null,
+          lastError: cp.lastError ?? prev.lastError ?? null,
+          lastCompletedPhase:
+            cp.lastCompletedPhase ?? prev.lastCompletedPhase ?? null,
+        };
+      }
+      return buildPipelineStatus(outlineRef.current, updated, prev);
+    });
   }, []);
 
   const handleLiveDraftUpdateRef = useRef(handleLiveDraftUpdate);
@@ -1445,11 +1470,8 @@ function ProposalDraftWorkspaceInner({
       const { draft, research: updatedResearch } =
         await generateFullProposalStaged(rfp.id, setFullProposalProgress, {
           forceRestart,
-          startFrom: startAfterSections1to3
-            ? "phase-2"
-            : shouldResume
-            ? pipelineStatus!.resumeFromPhase
-            : undefined,
+          // Continue trusts backend resumeFromPhase — do not pass a client override.
+          startFrom: startAfterSections1to3 ? "phase-2" : undefined,
           forceRerunFromStart: startAfterSections1to3,
           signal: abort.signal,
           onDraftUpdate: handleLiveDraftUpdate,
@@ -1459,7 +1481,11 @@ function ProposalDraftWorkspaceInner({
       applyOutlineFromServer(draft);
       if (updatedResearch) {
         setResearch(updatedResearch);
-        setPipelineStatus(buildPipelineStatus(draft, updatedResearch));
+        const snap = await fetchProposalDraft(rfp.id);
+        setPipelineStatus(
+          snap.pipelineStatus ??
+            buildPipelineStatus(draft, updatedResearch, snap.pipelineStatus)
+        );
         if (updatedResearch.budget) {
           setBudget(updatedResearch.budget);
         }
@@ -1490,7 +1516,14 @@ function ProposalDraftWorkspaceInner({
         applyOutlineFromServer(recovered.draft);
         if (recovered.research) {
           setResearch(recovered.research);
-          const status = buildPipelineStatus(recovered.draft, recovered.research);
+          const snap = await fetchProposalDraft(rfp.id);
+          const status =
+            snap.pipelineStatus ??
+            buildPipelineStatus(
+              recovered.draft,
+              recovered.research,
+              snap.pipelineStatus
+            );
           setPipelineStatus(status);
           if (recovered.research.budget) {
             setBudget(recovered.research.budget);
@@ -1498,25 +1531,29 @@ function ProposalDraftWorkspaceInner({
           if (recovered.research.presubmitReview) {
             setPresubmitReview(recovered.research.presubmitReview);
           }
+          setActiveTab("content");
+          setSelectedSectionId(
+            recovered.draft.sections.find((s) => s.content)?.id ??
+              recovered.draft.sections[0]?.id ??
+              null
+          );
+          const inFlight = recovered.research?.pipelineCheckpoint?.inProgressPhase;
+          const serverNote = inFlight
+            ? ` ${pipelineServerStillWorkingMessage(inFlight)}`
+            : "";
+          setGenerateNotice(
+            `Step failed, but progress is saved. ${pipelineResumeMessage(status, { blocker: errMsg })}${serverNote}`
+          );
+          setGenerateError(null);
+        } else {
+          setActiveTab("content");
+          setSelectedSectionId(
+            recovered.draft.sections.find((s) => s.content)?.id ??
+              recovered.draft.sections[0]?.id ??
+              null
+          );
+          setGenerateError(errMsg);
         }
-        setActiveTab("content");
-        setSelectedSectionId(
-          recovered.draft.sections.find((s) => s.content)?.id ??
-            recovered.draft.sections[0]?.id ??
-            null
-        );
-        const status = buildPipelineStatus(
-          recovered.draft,
-          recovered.research
-        );
-        const inFlight = recovered.research?.pipelineCheckpoint?.inProgressPhase;
-        const serverNote = inFlight
-          ? ` ${pipelineServerStillWorkingMessage(inFlight)}`
-          : "";
-        setGenerateNotice(
-          `Step failed, but progress is saved. ${pipelineResumeMessage(status, { blocker: errMsg })}${serverNote}`
-        );
-        setGenerateError(null);
       } else {
         setGenerateError(errMsg);
       }
@@ -1533,7 +1570,12 @@ function ProposalDraftWorkspaceInner({
           if (snap.research) {
             setResearch(snap.research);
             setPipelineStatus(
-              buildPipelineStatus(outline, snap.research, snap.pipelineStatus)
+              snap.pipelineStatus ??
+                buildPipelineStatus(
+                  snap.draft ?? outline,
+                  snap.research,
+                  snap.pipelineStatus
+                )
             );
             keepClientProgress = Boolean(
               snap.research.pipelineCheckpoint?.inProgressPhase

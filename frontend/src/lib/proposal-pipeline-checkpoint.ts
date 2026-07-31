@@ -73,6 +73,41 @@ const SECTION_DRAFT_FAILURE_MARKER =
 export function isDuplicateStaticRfpSection(title: string): boolean {
   const t = title.trim();
   if (!t) return false;
+
+  const coveredTitle = [
+    /\bwho\s+we\s+are\b/i,
+    /\bour\s+promise\b/i,
+    /\bcompany\s+history\b/i,
+    /\bfirm\s+history\b/i,
+    /\bfirm\s+(?:overview|profile|background)\b/i,
+    /\babout\s+(?:the\s+)?(?:firm|agency|company|proposer|vendor)\b/i,
+    /\bclient\s+roster\b/i,
+    /\bcore\s+services\b/i,
+    /\borganizational?\s+structure\b/i,
+    /\bbusiness\s+information\b/i,
+    /\bcertifications?\b/i,
+    /\binsurance\s+information\b/i,
+    /\bcompany\s+overview\b/i,
+    /\bteam\s+overview\b(?:\s*[—\-–:].*)?\b(bios?|resumes?|personnel|contract\s+manager|point\s+of\s+contact|primary\s+contact|staff(?:ing)?)\b/i,
+    /^\s*team\s+overview\s*$/i,
+    /\bpersonnel\s+bios?(?:\s*\/\s*resumes?)?\b/i,
+    /\b(?:staff|team)\s+(?:member\s+)?(?:bios?|resumes?)\b/i,
+  ].some((p) => p.test(t));
+
+  if (coveredTitle) {
+    if (/\b(sample\s+work|portfolio|minimum\s+two|recent\s+campaign)\b/i.test(t)) {
+      return false;
+    }
+    if (
+      /\b(agency\s+requirements?|capability\s+matrix|service\s+capability|scope\s+of\s+work|statement\s+of\s+work)\b/i.test(
+        t
+      )
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   const patterns = [
     /section\s*1\b/i,
     /company\s+overview/i,
@@ -223,12 +258,47 @@ export function phaseIsComplete(
     return false;
   }
   if (phase === "phase-3-5-budget") {
-    return Boolean(research.budget);
+    if (!research.budget) return false;
+    // Mirror backend: a failed budget with grounding/rate-card markers is not complete.
+    const cp = research.pipelineCheckpoint;
+    if (cp?.lastFailedPhase === "phase-3-5-budget") {
+      const err = (cp.lastError ?? "").toLowerCase();
+      if (
+        err.includes("grounding") ||
+        err.includes("pricing contradiction") ||
+        err.includes("unresolved pricing") ||
+        err.includes("rate card unusable")
+      ) {
+        return false;
+      }
+    }
+    // Artifact alone is not enough — checkpoint must have reached budget.
+    const last = cp?.lastCompletedPhase;
+    if (!last) return false;
+    const order = PIPELINE_PHASE_ORDER;
+    const lastIdx = order.indexOf(last as PipelinePhase);
+    const budgetIdx = order.indexOf("phase-3-5-budget");
+    return lastIdx >= 0 && budgetIdx >= 0 && lastIdx >= budgetIdx;
   }
   if (phase === "phase-4-review") {
-    return Boolean(research.presubmitReview);
+    if (!research.presubmitReview) return false;
+    const last = research.pipelineCheckpoint?.lastCompletedPhase;
+    if (!last) return false;
+    const order = PIPELINE_PHASE_ORDER;
+    const lastIdx = order.indexOf(last as PipelinePhase);
+    const reviewIdx = order.indexOf("phase-4-review");
+    return lastIdx >= 0 && reviewIdx >= 0 && lastIdx >= reviewIdx;
   }
   return false;
+}
+
+/** Prefer server completedPhases; local phaseIsComplete is display/fallback only. */
+export function phaseCompleteOnServer(
+  status: ProposalPipelineStatus | null | undefined,
+  phase: PipelinePhase
+): boolean | null {
+  if (!status) return null;
+  return status.completedPhases.includes(phase);
 }
 
 export function resolveResumePhase(
@@ -315,11 +385,23 @@ export function buildPipelineStatus(
       canResume: hasProgress && serverStatus.canResume && !serverStatus.isComplete,
     };
   }
-  const resumeFromPhase = resolveResumePhase(draft, research);
+  // Offline / direct-Supabase fallback only. Orchestration must use server status.
+  const cp = research?.pipelineCheckpoint;
+  const resumeFromPhase =
+    (cp?.resumeFromPhase && PIPELINE_PHASE_ORDER.includes(cp.resumeFromPhase)
+      ? cp.resumeFromPhase
+      : null) ??
+    (cp?.lastFailedPhase && PIPELINE_PHASE_ORDER.includes(cp.lastFailedPhase)
+      ? cp.lastFailedPhase
+      : null) ??
+    (cp?.inProgressPhase &&
+    PIPELINE_PHASE_ORDER.includes(cp.inProgressPhase as PipelinePhase)
+      ? (cp.inProgressPhase as PipelinePhase)
+      : null) ??
+    resolveResumePhase(draft, research);
   const completedPhases = PIPELINE_PHASE_ORDER.filter((phase) =>
     phaseIsComplete(draft, research, phase)
   );
-  const cp = research?.pipelineCheckpoint;
   return {
     resumeFromPhase,
     completedPhases,

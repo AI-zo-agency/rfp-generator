@@ -215,6 +215,47 @@ class ConsistencyTests(unittest.TestCase):
         free = [i for i in issues if "free_currency" in (i.message or "")]
         self.assertEqual(free, [])
 
+    def test_tuition_compact_and_allocation_not_free_currency(self) -> None:
+        b = _budget(
+            agencyRevenueEstimate=85_529,
+            totalClientInvoicing=85_529,
+            clientMediaPassthrough=None,
+            lineItems=[
+                BudgetLineItem(
+                    id="a",
+                    category="Fees",
+                    description="Agency fee",
+                    extended=85_529,
+                    lineItemType="agency_fee",
+                )
+            ],
+        )
+        issues = scan_manuscript_consistency(
+            draft=ProposalDraft(
+                rfpId="r1",
+                updatedAt="t",
+                sections=[
+                    ProposalSection(
+                        id="s1",
+                        title="Creative",
+                        content=(
+                            "Proof point: tuition under $12K/year for in-state students. "
+                            "Must remain within the $120,000 allocation MSU Denver has set."
+                        ),
+                        status="generated",
+                    )
+                ],
+            ),
+            research=ProposalResearchCache(
+                rfpId="r1",
+                updatedAt="2026-01-01T00:00:00Z",
+                budget=b,
+            ),
+            rfp=_rfp(),
+        )
+        free = [i for i in issues if "free_currency" in (i.message or "")]
+        self.assertEqual(free, [])
+
     def test_stray_fee_amount_still_flags_free_currency(self) -> None:
         b = _budget(
             agencyRevenueEstimate=116_471,

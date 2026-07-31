@@ -183,6 +183,21 @@ class TruncationArtifactTests(unittest.TestCase):
         findings = scan_truncation_artifacts(draft)
         self.assertEqual(findings, [])
 
+    def test_does_not_flag_manual_fill_tail_after_complete_sentence(self) -> None:
+        draft = _draft(
+            _section(
+                "We serve public universities with clarity.\n\n"
+                "[MANUAL FILL: Sonja — Section ends mid-sentence without terminal punctuation]",
+                section_id="s-mf",
+                title="Who We Are",
+            )
+        )
+        findings = scan_truncation_artifacts(draft)
+        self.assertFalse(
+            any(f["code"] == "t1.truncation.mid_sentence_cutoff" for f in findings),
+            msg=f"handoff-tag tail must not count as truncation, got {findings}",
+        )
+
     def test_does_not_flag_table_ending_without_period(self) -> None:
         draft = _draft(
             _section(

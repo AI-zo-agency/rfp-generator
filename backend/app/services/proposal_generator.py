@@ -2270,9 +2270,6 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         scrub_draft_optional_verify_tags,
     )
 
-    content_info = _assess_rfp_content(rfp)
-    rfp_text = combine_rfp_text(content_info.description or "", content_info.pdf_text or "")
-
     budget_idx = find_budget_section_index(draft.sections)
     budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
     verify_ids = {
@@ -2281,6 +2278,8 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         if s.id != budget_section_id and count_verify_tags(s.content or "") > 0
     }
     if verify_ids:
+        content_info = _assess_rfp_content(rfp)
+        rfp_text = combine_rfp_text(content_info.description or "", content_info.pdf_text or "")
         scrubbed_sections, scrub_logs = await scrub_draft_optional_verify_tags(
             list(draft.sections),
             rfp_text=rfp_text or "",
@@ -2309,64 +2308,6 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         extra_issues=extra_issues or None,
         finalized=False,
     )
-
-    # Flag required attachments/signed forms/signature pages the RFP demands but a
-    # generated manuscript can never itself satisfy (a drafted PDF can't attach a
-    # signed COI, W-9, or notarized affidavit) — these must surface as an explicit
-    # manual action in the preview, not pass silently because no [VERIFY]/[MANUAL
-    # FILL] tag was ever written for something that was never drafted at all.
-    try:
-        from app.models.proposal import ManualFillFlag
-        from app.services.proposal_rfp_submission_requirements import (
-            detect_missing_submission_deliverables,
-            inventory_rfp_submission_requirements,
-        )
-
-        inventory = await inventory_rfp_submission_requirements(
-            rfp_text[:50_000], rfp_title=rfp.title
-        )
-        missing_attachments = [
-            item
-            for item in detect_missing_submission_deliverables(
-                draft, inventory, research=research
-            )
-            if item.kind in ("signed_form", "attachment", "signature_block")
-        ]
-        if missing_attachments:
-            existing_tags = {f.tag for f in review.manual_fill_flags}
-            new_flags = []
-            for item in missing_attachments:
-                tag = (
-                    f"[MANUAL FILL: {item.title} — must be attached/signed per RFP; "
-                    "cannot be generated in the manuscript]"
-                )
-                if tag in existing_tags:
-                    continue
-                new_flags.append(
-                    ManualFillFlag(
-                        sectionId=item.section_id,
-                        sectionTitle=item.title,
-                        kind="manual_fill",
-                        tag=tag,
-                        finalized=False,
-                        kbSearched=False,
-                    )
-                )
-            if new_flags:
-                review = review.model_copy(
-                    update={
-                        "manual_fill_flags": [*review.manual_fill_flags, *new_flags]
-                    }
-                )
-                logger.info(
-                    "Phase 4 review for %s: flagged %d required attachment(s)/form(s)",
-                    rfp_id,
-                    len(new_flags),
-                )
-    except Exception:
-        logger.warning(
-            "Attachment/signed-form scan failed for %s", rfp_id, exc_info=True
-        )
 
     from app.services.proposal_ending_report import (
         build_proposal_ending_report,

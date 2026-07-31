@@ -161,7 +161,17 @@ def detect_hallucinations(content: str, section_title: str = "") -> list[dict[st
             })
     
     # Check hallucination patterns
+    title_cf = (section_title or "").casefold()
+    is_certifications_section = (
+        "certification" in title_cf
+        or title_cf.strip().startswith("1.4")
+        or "1.4 —" in title_cf
+        or "1.4 -" in title_cf
+    )
     for pattern, description in HALLUCINATION_PATTERNS:
+        # "Certs only in 1.4" must not fire on section 1.4 itself.
+        if is_certifications_section and "should ONLY appear in section 1.4" in description:
+            continue
         matches = re.finditer(pattern, content, re.IGNORECASE)
         for match in matches:
             issues.append({
@@ -174,8 +184,15 @@ def detect_hallucinations(content: str, section_title: str = "") -> list[dict[st
             })
     
     # Check for unverified certifications (anything not in VERIFIED_CERTIFICATIONS)
+    # Skip auditor-echo / MANUAL FILL tails — they are process text, not cert claims.
+    scan_content = re.sub(
+        r"\[(?:MANUAL\s+FILL|DESIGNER\s+NOTE|VERIFY)[^\]]*\]",
+        "",
+        content or "",
+        flags=re.IGNORECASE,
+    )
     cert_pattern = r"certif(?:ied|ication)s?:?\s+([A-Z][A-Za-z\s&,]+?)(?:\.|,|;|\n|$)"
-    cert_matches = re.finditer(cert_pattern, content, re.IGNORECASE)
+    cert_matches = re.finditer(cert_pattern, scan_content, re.IGNORECASE)
     for match in cert_matches:
         cert_text = match.group(1).strip()
         # Check if this cert is in our verified list
@@ -185,6 +202,9 @@ def detect_hallucinations(content: str, section_title: str = "") -> list[dict[st
                 pattern_text in cert_text.lower() 
                 for pattern_text in ["google ads", "meta", "spotify", "iso", "teaching"]
             )
+            # Ignore prose fragments that are not certification names
+            if len(cert_text) > 80 or cert_text.casefold().startswith("matter "):
+                continue
             if is_flagged_platform or cert_text:
                 issues.append({
                     "type": "unverified_certification",

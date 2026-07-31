@@ -174,7 +174,7 @@ async def _scrub_optional_verify_after_fills(
     draft: ProposalDraft,
     logs: list[str],
 ) -> tuple[ProposalDraft, list[str]]:
-    """Drop remaining [VERIFY] tags the RFP does not require (never invent).
+    """Drop remaining optional handoff tags / [VERIFY] the RFP does not require.
 
     Excludes the Budget/Pricing section explicitly — it is deterministically
     rendered from the canonical ProposalBudget object (render_budget_markdown)
@@ -190,6 +190,9 @@ async def _scrub_optional_verify_after_fills(
             combine_rfp_text,
         )
         from app.services.proposal_budget_content import find_budget_section_index
+        from app.services.proposal_rfp_optional_claim_scrub import (
+            apply_optional_claim_scrub_to_draft,
+        )
         from app.services.proposal_verify_optional_scrub import (
             count_verify_tags,
             scrub_draft_optional_verify_tags,
@@ -202,6 +205,17 @@ async def _scrub_optional_verify_after_fills(
         )
         budget_idx = find_budget_section_index(draft.sections)
         budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
+        skip_budget = {budget_section_id} if budget_section_id else set()
+
+        draft, claim_logs = apply_optional_claim_scrub_to_draft(
+            draft,
+            rfp_text=rfp_text or "",
+            skip_section_ids=skip_budget,
+        )
+        if claim_logs:
+            logs.extend(claim_logs)
+            await asave_proposal_draft(draft)
+
         verify_ids = {
             s.id
             for s in draft.sections
