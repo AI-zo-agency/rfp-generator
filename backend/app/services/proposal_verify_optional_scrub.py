@@ -127,32 +127,60 @@ async def scrub_optional_verify_tags(
         )
 
     rfp_excerpt = build_priority_rfp_excerpt(rfp_text or "", max_chars=18_000)
+
+    # Before giving up on a tag, check whether the KB actually has the real answer —
+    # a genuine KB-sourced fact beats both a bracket placeholder AND a vague generic
+    # rewrite. Bounded to a short, single retrieval per section (asks are batched into
+    # one question) to keep this cheap: this only fires on sections that already have
+    # [VERIFY] tags, and only once per section, not per tag.
+    kb_context = ""
+    asks = [a.strip() for a in VERIFY_TAG_RE.findall(body) if a.strip()]
+    if asks:
+        try:
+            from app.services.kb_rag_retrieve import retrieve_for_question
+
+            question = f"{section_title}: " + "; ".join(asks[:6])
+            kb_context, _labels, _queries = await retrieve_for_question(
+                question, limit=4, max_chars=4_000
+            )
+        except Exception:
+            logger.warning("KB lookup for VERIFY scrub failed on %s", section_title, exc_info=True)
+            kb_context = ""
+
     system = (
-        "You scrub proposal manuscript [VERIFY: …] placeholders using the RFP.\n"
-        "BIAS: Prefer REMOVING tags. Clean client-ready prose beats bracket placeholders.\n"
+        "You scrub proposal manuscript [VERIFY: …] placeholders using the RFP and the KB.\n"
+        "BIAS: Prefer REMOVING tags, but a REAL fact beats a removal — never settle for vague "
+        "prose when the KB evidence below already answers the tag.\n"
         "RULES:\n"
-        "1. DEFAULT — REMOVE each [VERIFY] tag and rewrite the sentence/row/cell so the "
-        "section still reads cleanly. Drop optional name/contact/backup columns; say work "
+        "1. FIRST — check the KB EVIDENCE below. If it contains the exact fact a [VERIFY] tag "
+        "asks for (a name, number, cert, contact, partner, etc.), REPLACE the tag with that real "
+        "fact, verbatim from the evidence. This is the preferred outcome: it lowers the VERIFY "
+        "count with a correct answer instead of a placeholder or a vague generic line.\n"
+        "2. IF KB evidence does NOT answer it — REMOVE the tag and rewrite the sentence/row/cell "
+        "so the section still reads cleanly. Drop optional name/contact/backup columns; say work "
         "is in-house or with vetted partners when names are unknown — WITHOUT inventing.\n"
-        "2. KEEP a short [VERIFY: brief field] ONLY when the RFP EXPLICITLY mandates that "
+        "3. KEEP a short [VERIFY: brief field] ONLY when the RFP EXPLICITLY mandates that "
         "exact fact for compliance or scoring (e.g. required named references + phone, "
-        "FEIN, insurance dollar limits, required legal attestation) AND inventing would "
-        "be dishonest. If unsure whether it is required → REMOVE.\n"
-        "3. NEVER invent facts — no names, phones, emails, rates, certs, clients, or wins.\n"
-        "4. Never leave empty brackets like [] or bare [VERIFY].\n"
-        "5. Preserve useful tables/structure; only change what VERIFY tags force.\n"
-        "6. Return JSON only."
+        "FEIN, insurance dollar limits, required legal attestation) AND neither the KB "
+        "evidence nor the RFP already supplies it. If unsure whether it is required → REMOVE.\n"
+        "4. NEVER invent facts — no names, phones, emails, rates, certs, clients, or wins. "
+        "Only use a fact if it is verbatim in the KB evidence or RFP excerpts below.\n"
+        "5. Never leave empty brackets like [] or bare [VERIFY].\n"
+        "6. Preserve useful tables/structure; only change what VERIFY tags force.\n"
+        "7. Return JSON only."
     )
     user = (
         f"Section title: {section_title}\n\n"
         f"RFP excerpts (source of truth for what is required):\n"
         f"{rfp_excerpt or '(no RFP text provided — treat unknown-named optional details as removable)'}\n\n"
+        f"KB evidence (use ONLY if it genuinely answers a [VERIFY] tag below; ignore otherwise):\n"
+        f"{kb_context or '(no relevant KB evidence found)'}\n\n"
         f"Current section body:\n{body}\n\n"
         "Return JSON:\n"
         "{\n"
         '  "content": "full updated section markdown",\n'
         '  "keptRequiredCount": <int how many [VERIFY] tags you intentionally kept>,\n'
-        '  "note": "one short sentence: what you removed vs kept"\n'
+        '  "note": "one short sentence: what you filled from KB vs removed vs kept"\n'
         "}"
     )
     try:
