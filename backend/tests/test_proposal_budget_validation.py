@@ -8,8 +8,10 @@ from app.models.proposal import BudgetLineItem, ProposalBudget
 from app.services.proposal_budget_validation import (
     adjust_pm_line_items_to_guide,
     assert_budget_canonical,
+    collect_budget_invariant_violations,
     collect_line_item_math_violations,
     collect_one_time_recurring_violations,
+    collect_pm_floor_violations,
     collect_pm_ratio_violations,
     reconcile_proposal_budget,
     scale_line_items_to_hard_cap,
@@ -445,6 +447,62 @@ class ProposalBudgetValidationTests(unittest.TestCase):
         violations = collect_one_time_recurring_violations(budget)
         self.assertTrue(violations)
         self.assertIn("email-setup", violations[0])
+
+    def test_one_time_and_pm_floor_do_not_hard_fail_canonical(self) -> None:
+        """Guide-policy tensions surface as pricing flags — Phase 3.5 must continue."""
+        budget = ProposalBudget(
+            rfpId="advisory-guide",
+            updatedAt="2026-08-01T00:00:00Z",
+            lineItems=[
+                BudgetLineItem(
+                    id="L8",
+                    category="Content Creation",
+                    description="One-time website setup and development",
+                    quantity=36,
+                    rate=500,
+                    extended=18_000,
+                    lineItemType="agency_fee",
+                    unit="months",
+                ),
+                BudgetLineItem(
+                    id="L12",
+                    category="Account & Project Management",
+                    description="Project management — engagement",
+                    extended=7_461,
+                    lineItemType="agency_fee",
+                ),
+                _line(
+                    item_id="fees",
+                    description="Strategy and creative delivery",
+                    extended=80_000,
+                ),
+            ],
+            agencyRevenueEstimate=105_461,
+            lineItemSum=105_461,
+        )
+        # Collectors still detect the guide issues pre-reconcile.
+        self.assertTrue(collect_one_time_recurring_violations(budget))
+        self.assertTrue(collect_pm_floor_violations(budget))
+        # But they must not be hard invariants (pipeline halt).
+        hard = collect_budget_invariant_violations(budget)
+        self.assertFalse(
+            any("one-time" in v.lower() or "multiplied" in v.lower() for v in hard),
+            msg=hard,
+        )
+        self.assertFalse(
+            any("engagement floor" in v.lower() for v in hard),
+            msg=hard,
+        )
+        # Reconcile surfaces advisory flags; PM may auto-raise; one-time stays flagged.
+        reconciled = reconcile_proposal_budget(budget)
+        assert_budget_canonical(reconciled)
+        flag_blob = " ".join(reconciled.pricing_flags).lower()
+        self.assertTrue(
+            "one-time" in flag_blob or "multiplied" in flag_blob,
+            msg=f"expected one-time advisory flag, got {reconciled.pricing_flags}",
+        )
+        pm = next(i for i in reconciled.line_items if i.id == "L12")
+        self.assertGreaterEqual(float(pm.extended or 0), 7_500 - 0.01)
 
 
 if __name__ == "__main__":

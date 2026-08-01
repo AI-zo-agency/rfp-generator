@@ -378,6 +378,10 @@ async def _apply_senior_editor_tickets(
             continue
         if sid == budget_section_id:
             continue
+        # Bio stubs + PDF designer notes are complete for Section 2 — do not
+        # redraft into full invented Key Accounts / career narratives.
+        if sid.startswith("section-2-bio-") and sid != "section-2-bio-placeholder":
+            continue
         if not any(s.id == sid for s in draft.sections):
             continue
         seen.add(sid)
@@ -818,6 +822,7 @@ async def run_self_edit_loop(
         in_progress_phase="phase-3-6-self-edit",
     )
 
+    from app.core.step_debug_logger import step_trace, summarize_sections
     from app.services.proposal_budget_content import find_budget_section_index
     from app.services.proposal_langchain_agents import senior_editor_emit_tickets
     from app.services.proposal_rfp_optional_claim_scrub import (
@@ -837,6 +842,13 @@ async def run_self_edit_loop(
     budget_idx = find_budget_section_index(draft.sections)
     budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
     skip_budget = {budget_section_id} if budget_section_id else set()
+    verify_before = sum(count_verify_tags(s.content or "") for s in draft.sections)
+    step_trace(
+        "senior_editor_start",
+        rfp_id=rfp_id,
+        verify_tag_count=verify_before,
+        **summarize_sections(draft.sections),
+    )
 
     draft, claim_logs = apply_optional_claim_scrub_to_draft(
         draft,
@@ -847,12 +859,48 @@ async def run_self_edit_loop(
         await asave_proposal_draft(draft)
         for line in claim_logs:
             report.section_logs.append({"section": "optional-claim-scrub", "detail": line})
+        step_trace(
+            "senior_editor_optional_claim_scrub",
+            rfp_id=rfp_id,
+            removed_count=len(claim_logs),
+            samples=claim_logs[:12],
+        )
+        logger.info(
+            "Senior editor optional-claim scrub rfp_id=%s removed=%s samples=%s",
+            rfp_id,
+            len(claim_logs),
+            claim_logs[:6],
+        )
+
+    from app.services.proposal_cert_claim_scrub import apply_cert_claim_scrub_to_draft
+
+    draft, cert_logs = apply_cert_claim_scrub_to_draft(
+        draft,
+        skip_section_ids=skip_budget,
+    )
+    if cert_logs:
+        await asave_proposal_draft(draft)
+        for line in cert_logs:
+            report.section_logs.append({"section": "cert-claim-scrub", "detail": line})
+        step_trace(
+            "senior_editor_cert_claim_scrub",
+            rfp_id=rfp_id,
+            removed_count=len(cert_logs),
+            samples=cert_logs[:12],
+        )
+        logger.info(
+            "Senior editor cert scrub rfp_id=%s changes=%s samples=%s",
+            rfp_id,
+            len(cert_logs),
+            cert_logs[:6],
+        )
 
     verify_ids = {
         s.id
         for s in draft.sections
         if s.id != budget_section_id and count_verify_tags(s.content or "") > 0
     }
+    verify_mid = sum(count_verify_tags(s.content or "") for s in draft.sections)
 
     tickets, (scrubbed_sections, scrub_logs) = await asyncio.gather(
         senior_editor_emit_tickets(
@@ -878,6 +926,49 @@ async def run_self_edit_loop(
         await asave_proposal_draft(draft)
         for line in scrub_logs:
             report.section_logs.append({"section": "verify-scrub", "detail": line})
+        verify_after_scrub = sum(
+            count_verify_tags(s.content or "") for s in draft.sections
+        )
+        step_trace(
+            "senior_editor_verify_scrub",
+            rfp_id=rfp_id,
+            verify_before=verify_mid,
+            verify_after=verify_after_scrub,
+            removed=max(0, verify_mid - verify_after_scrub),
+            samples=scrub_logs[:16],
+        )
+        logger.info(
+            "Senior editor VERIFY scrub rfp_id=%s before=%s after=%s logs=%s",
+            rfp_id,
+            verify_mid,
+            verify_after_scrub,
+            scrub_logs[:8],
+        )
+
+    dedupe_n = len(tickets.get("dedupeTickets") or [])
+    coverage_n = len(tickets.get("coverageTickets") or [])
+    compliance_n = len(tickets.get("complianceTickets") or [])
+    step_trace(
+        "senior_editor_tickets_emitted",
+        rfp_id=rfp_id,
+        dedupe=dedupe_n,
+        coverage=coverage_n,
+        compliance=compliance_n,
+        ticket_samples=[
+            {
+                "sectionId": str(t.get("sectionId") or ""),
+                "kind": kind,
+                "brief": str(t.get("rewriteBrief") or "")[:160],
+            }
+            for kind, bucket in (
+                ("dedupe", tickets.get("dedupeTickets") or []),
+                ("coverage", tickets.get("coverageTickets") or []),
+                ("compliance", tickets.get("complianceTickets") or []),
+            )
+            for t in bucket[:4]
+            if isinstance(t, dict)
+        ][:12],
+    )
 
     draft, research = await _apply_senior_editor_tickets(
         tickets=tickets,
@@ -890,6 +981,32 @@ async def run_self_edit_loop(
     )
     draft = await aget_proposal_draft(rfp_id) or draft
     research = await aget_research_cache(rfp_id) or research
+
+    ticket_results = [
+        {
+            "sectionId": str(row.get("sectionId") or ""),
+            "ticket": str(row.get("ticket") or ""),
+            "detail": str(row.get("detail") or "")[:200],
+        }
+        for row in report.section_logs
+        if isinstance(row, dict) and row.get("ticket")
+    ]
+    if ticket_results:
+        step_trace(
+            "senior_editor_tickets_applied",
+            rfp_id=rfp_id,
+            applied=len(ticket_results),
+            improved=report.sections_improved,
+            unchanged=report.sections_unchanged,
+            results=ticket_results[:12],
+        )
+        logger.info(
+            "Senior editor tickets applied rfp_id=%s applied=%s improved=%s results=%s",
+            rfp_id,
+            len(ticket_results),
+            report.sections_improved,
+            ticket_results[:6],
+        )
 
     # Legal attestation gate — deterministic; keeps E-Verify / conflict / attestation
     # VERIFYs honest (never lets the LLM assert them as fact).
@@ -912,6 +1029,12 @@ async def run_self_edit_loop(
                     "detail": line,
                 }
             )
+        step_trace(
+            "senior_editor_legal_gate",
+            rfp_id=rfp_id,
+            log_count=len(legal_report.logs),
+            samples=list(legal_report.logs)[:8],
+        )
 
     from app.services.proposal_manuscript_locks import scan_manuscript_lock_issues
 
@@ -932,16 +1055,50 @@ async def run_self_edit_loop(
             summary,
         )
 
+    verify_after = sum(count_verify_tags(s.content or "") for s in draft.sections)
     if research:
+        # Persist a short log trail so later traces are not count-only.
+        log_rows = [
+            {
+                "section": str(row.get("section") or row.get("sectionId") or ""),
+                "detail": str(row.get("detail") or "")[:400],
+                "ticket": str(row.get("ticket") or ""),
+            }
+            for row in (report.section_logs or [])[:40]
+            if isinstance(row, dict)
+        ]
         research = research.model_copy(
-            update={"updated_at": datetime.now(timezone.utc).isoformat()}
+            update={
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "self_edit_logs": log_rows,
+            }
         )
         await asave_research_cache(research)
 
     report.stopped_reason = "focused_pass_complete"
+    step_trace(
+        "senior_editor_complete",
+        rfp_id=rfp_id,
+        verify_before=verify_before,
+        verify_after=verify_after,
+        verify_removed=max(0, verify_before - verify_after),
+        optional_claim_scrubs=len(claim_logs or []),
+        cert_scrubs=len(cert_logs or []),
+        verify_scrub_logs=len(scrub_logs or []),
+        tickets_applied=len(ticket_results),
+        sections_improved=report.sections_improved,
+        log_count=len(report.section_logs),
+        **summarize_sections(draft.sections),
+    )
     logger.info(
-        "Self-edit for %s: focused pass, %d improved, stopped=%s",
+        "Self-edit for %s: verify %s→%s, claim_scrubs=%s cert_scrubs=%s "
+        "tickets_applied=%s improved=%s stopped=%s",
         rfp_id,
+        verify_before,
+        verify_after,
+        len(claim_logs or []),
+        len(cert_logs or []),
+        len(ticket_results),
         report.sections_improved,
         report.stopped_reason,
     )

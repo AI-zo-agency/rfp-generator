@@ -51,7 +51,16 @@ Return JSON only:
 """
 
 FEE_GROUNDING_CHECK_PROMPT = """You are a grounding checker, not a writer.
-Compare manuscript pricing claims against canonical budget values.
+Compare manuscript pricing claims against canonical budget values AND RFP money constraints.
+
+Flag mismatches when:
+1) A labeled fee / media / total claim does not match the canonical field.
+2) The ledger exceeds an RFP hard fee NTE or program/media envelope listed below.
+3) The manuscript calls the bid's own total the "RFP ceiling/allocation/cap" when that
+   dollar is NOT an extracted RFP constraint (invented ceiling).
+
+Do NOT flag tuition, sample reallocation examples, or RFP-stated envelopes that match
+extracted constraints when used as RFP context (not as bid totals).
 
 Return JSON only:
 {
@@ -60,10 +69,10 @@ Return JSON only:
       "sectionId":"...",
       "sectionTitle":"...",
       "sentence":"...",
-      "claimedField":"agency_fee|media_passthrough|direct_expenses|total_invoicing",
+      "claimedField":"agency_fee|media_passthrough|direct_expenses|total_invoicing|rfp_ceiling_claim|rfp_authority",
       "canonicalValue":1234.56,
       "matches":false,
-      "note":"why this sentence contradicts canonical value"
+      "note":"why this sentence contradicts canonical value or RFP authority"
     }
   ]
 }
@@ -96,7 +105,13 @@ def _canonical_budget_facts(budget: ProposalBudget) -> str:
         f"feeStructure: {budget.fee_structure}",
         f"budgetFormat: {budget.budget_format}",
         f"commissionModel: {budget.commission_model or '(none)'}",
+        f"rfpBudgetCap (hard fee NTE only): {budget.rfp_budget_cap}",
+        f"rfpMediaOrProgramEnvelope: {budget.rfp_media_or_program_envelope}",
     ]
+    if (budget.rfp_money_constraint_notes or "").strip():
+        lines.append(
+            "rfpMoneyConstraintNotes:\n" + budget.rfp_money_constraint_notes[:1200]
+        )
     if budget.option_term_notes.strip():
         lines.append(f"optionTermNotes (canonical):\n{budget.option_term_notes[:1200]}")
     if budget.qualifying_language.strip():
@@ -109,6 +124,10 @@ def _canonical_budget_facts(budget: ProposalBudget) -> str:
             "CRITICAL: agencyRevenueEstimate is ZERO — do NOT write $0 in narrative; "
             "run budget reconcile or set commissionRate × clientMediaPassthrough first."
         )
+    lines.append(
+        "NEVER treat the proposal's own bid total as the RFP ceiling unless it equals "
+        "rfpBudgetCap or rfpMediaOrProgramEnvelope above."
+    )
     return "\n".join(lines)
 
 
@@ -207,16 +226,54 @@ def collect_deterministic_budget_mismatches(
     budget: ProposalBudget,
 ) -> list[BudgetNarrativeMismatch]:
     """Label-aware dollar check — no LLM. Catches agency/passthrough/total swaps."""
-    slots = _canonical_slot_values(budget)
-    if not any(v > 0 for v in slots.values()):
-        return []
+    from app.services.evidence_trust.rfp_money_constraints import (
+        collect_invented_ceiling_mismatches,
+        collect_over_authority_flags,
+    )
 
+    slots = _canonical_slot_values(budget)
     out: list[BudgetNarrativeMismatch] = []
     seen: set[tuple[str, str, float]] = set()
+
+    # Ledger vs RFP authority (even with no labeled fee claims).
+    for flag in collect_over_authority_flags(budget):
+        out.append(
+            BudgetNarrativeMismatch(
+                sectionId="budget",
+                sectionTitle="Budget / RFP authority",
+                sentence=flag[:500],
+                claimedField="rfp_authority",
+                canonicalValue=float(
+                    budget.rfp_media_or_program_envelope
+                    or budget.rfp_budget_cap
+                    or 0
+                ),
+                matches=False,
+                note=flag,
+            )
+        )
+
+    if not any(v > 0 for v in slots.values()):
+        return out
+
     for section in draft.sections:
         body = section.content or ""
         if not body.strip():
             continue
+        for invented in collect_invented_ceiling_mismatches(
+            body,
+            budget=budget,
+            section_id=section.id,
+            section_title=section.title or "",
+        ):
+            key = (section.id, "rfp_ceiling_claim", float(invented.canonical_value or 0))
+            # Deduplicate by sentence prefix
+            sent_key = (section.id, "rfp_ceiling_claim", hash((invented.sentence or "")[:80]))
+            if sent_key in seen:
+                continue
+            seen.add(sent_key)
+            out.append(invented)
+
         for pattern, field in _LABELLED_FEE_CLAIM_RES:
             for match in pattern.finditer(body):
                 claimed = _parse_usd_token(match.group(1))

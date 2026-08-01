@@ -256,7 +256,10 @@ class ConsistencyTests(unittest.TestCase):
         free = [i for i in issues if "free_currency" in (i.message or "")]
         self.assertEqual(free, [])
 
-    def test_stray_fee_amount_still_flags_free_currency(self) -> None:
+    def test_stray_fee_amount_is_pass_a_candidate_not_sync_free_currency(self) -> None:
+        """Sync scan no longer emits regex free_currency; Pass A candidates still see it."""
+        from app.services.proposal_money_intelligence import collect_currency_candidates
+
         b = _budget(
             agencyRevenueEstimate=116_471,
             totalClientInvoicing=116_471,
@@ -271,19 +274,20 @@ class ConsistencyTests(unittest.TestCase):
                 ),
             ],
         )
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="2026-01-01T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="pm",
+                    title="Project Management",
+                    content="Optional travel day rate of $150 for island work.",
+                    status="generated",
+                )
+            ],
+        )
         issues = scan_manuscript_consistency(
-            draft=ProposalDraft(
-                rfpId="r1",
-                updatedAt="2026-01-01T00:00:00Z",
-                sections=[
-                    ProposalSection(
-                        id="pm",
-                        title="Project Management",
-                        content="Optional travel day rate of $150 for island work.",
-                        status="generated",
-                    )
-                ],
-            ),
+            draft=draft,
             research=ProposalResearchCache(
                 rfpId="r1",
                 updatedAt="2026-01-01T00:00:00Z",
@@ -291,7 +295,12 @@ class ConsistencyTests(unittest.TestCase):
             ),
             rfp=_rfp(),
         )
-        self.assertTrue(any("free_currency" in (i.message or "") for i in issues))
+        self.assertFalse(any("free_currency" in (i.message or "") for i in issues))
+        candidates = collect_currency_candidates(draft, b)
+        self.assertTrue(
+            any(abs(float(c["amountValue"]) - 150) < 0.01 for c in candidates),
+            candidates,
+        )
 
 
 if __name__ == "__main__":

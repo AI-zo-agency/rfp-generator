@@ -72,17 +72,25 @@ def strip_handoff_tags_for_scan(content: str) -> str:
 
 
 def strip_designer_notes(content: str) -> tuple[str, int]:
-    """Always remove [DESIGNER NOTE: …] — never an RFP client deliverable."""
+    """Remove [DESIGNER NOTE: …] except bio-PDF insert handoffs (Option B stubs)."""
     body = content or ""
-    found = _DESIGNER_NOTE_RE.findall(body)
-    if not found:
-        return body, 0
-    out = _DESIGNER_NOTE_RE.sub("", body)
-    out = re.sub(r"\n{3,}", "\n\n", out).strip()
-    # Preserve trailing newline style lightly
-    if body.endswith("\n") and out:
-        out += "\n"
-    return out, len(found)
+    removed = 0
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal removed
+        tag = match.group(0)
+        # Keep intentional bio PDF insert notes — scrub must not undo Section 2 stubs.
+        if re.search(r"Insert approved bio PDF|04_Bio_", tag, re.IGNORECASE):
+            return tag
+        removed += 1
+        return ""
+
+    out = _DESIGNER_NOTE_RE.sub(_repl, body)
+    if removed:
+        out = re.sub(r"\n{3,}", "\n\n", out).strip()
+        if body.endswith("\n") and out:
+            out += "\n"
+    return out, removed
 
 
 def strip_auditor_echo_manual_fills(content: str) -> tuple[str, int]:

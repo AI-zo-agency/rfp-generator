@@ -28,6 +28,8 @@ def merge_research_preserve_audit_fields(
         and existing.adversarial_repair_report is not None
     ):
         updates["adversarial_repair_report"] = existing.adversarial_repair_report
+    if incoming.pricing_sync_report is None and existing.pricing_sync_report is not None:
+        updates["pricing_sync_report"] = existing.pricing_sync_report
 
     if not updates:
         return incoming

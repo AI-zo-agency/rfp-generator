@@ -120,13 +120,16 @@ def _protected_finding(section: ProposalSection | None, message: str) -> bool:
 
 def _deterministic_repair(section: ProposalSection) -> ProposalSection:
     repaired, _report = gate_section_legal_attestations(section, force=True)
+    from app.services.proposal_cert_claim_scrub import scrub_section_cert_claims
+
+    repaired, _cert_logs = scrub_section_cert_claims(repaired)
     return repaired
 
 
 def _apply_deterministic_patch(
     working_draft: ProposalDraft, section: ProposalSection | None
 ) -> tuple[ProposalDraft, bool]:
-    """Apply the legal-attestation gate to `section` if it changes content safely.
+    """Apply legal-attestation + cert scrub to `section` if content changes safely.
 
     Returns the (possibly updated) draft and whether a patch was applied. A patch is
     only accepted when it preserves any existing MANUAL FILL / VERIFY handoffs —
@@ -283,18 +286,34 @@ def _append_manual_fill(
     *,
     section_id: str | None,
     issue: str,
+    finding_code: str | None = None,
 ) -> tuple[ProposalDraft, str | None]:
+    """Append a Sonja handoff tag. Prefer stable finding codes over truncated prose."""
     draft, target_id = _resolve_escalation_section_id(draft, section_id=section_id)
     sections = []
     appended: str | None = None
     owner = _owner_for_field(issue)
-    tag = f"[MANUAL FILL: {owner} — {issue[:100].strip()}]"
+    code = (finding_code or "").strip()
+    short_title = _report_issue_text(issue)
+    if len(short_title) > 80:
+        short_title = short_title[:77].rstrip() + "…"
+    if code:
+        tag = f"[MANUAL FILL: {owner} — {code}" + (
+            f" | {short_title}]" if short_title and short_title.casefold() not in code.casefold() else "]"
+        )
+    else:
+        # Fallback: full cleaned issue (no mid-word [:100] cut).
+        tag = f"[MANUAL FILL: {owner} — {short_title}]"
     for section in draft.sections:
         if section.id != target_id:
             sections.append(section)
             continue
-        if tag.casefold() not in (section.content or "").casefold():
-            body = (section.content or "").rstrip()
+        existing = section.content or ""
+        already = tag.casefold() in existing.casefold()
+        if code and f"— {code}".casefold() in existing.casefold():
+            already = True
+        if not already:
+            body = existing.rstrip()
             content = f"{body}\n\n{tag}" if body else tag
             section = section.model_copy(update={"content": content})
             appended = tag
@@ -304,7 +323,7 @@ def _append_manual_fill(
     logger.info(
         "adversarial_repair escalated MANUAL FILL section_id=%s tag=%r",
         target_id,
-        tag[:120],
+        tag[:160],
     )
     return draft.model_copy(
         update={
@@ -314,19 +333,51 @@ def _append_manual_fill(
     ), appended
 
 
+def ensure_open_pricing_handoffs_section(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, str]:
+    """Public alias for pricing-sync / other callers."""
+    return _ensure_open_pricing_section(draft)
+
+
+def append_manual_fill_tag(
+    draft: ProposalDraft,
+    *,
+    section_id: str | None,
+    issue: str,
+    finding_code: str | None = None,
+) -> tuple[ProposalDraft, str | None]:
+    """Public alias for appending a Sonja MANUAL FILL handoff tag."""
+    return _append_manual_fill(
+        draft,
+        section_id=section_id,
+        issue=issue,
+        finding_code=finding_code,
+    )
+
+
 def _report_issue_text(message: str) -> str:
     cleaned = VERIFY_TAG_RE.sub("", message or "").strip()
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:")
     return cleaned or "confirm before submission"
 
 
-def _manuscript_has_manual_fill_for_issue(draft: ProposalDraft, issue: str) -> bool:
-    needle = issue[:80].strip().casefold()
-    if not needle:
+def _manuscript_has_manual_fill_for_issue(
+    draft: ProposalDraft,
+    issue: str,
+    *,
+    finding_code: str | None = None,
+) -> bool:
+    code = (finding_code or "").strip().casefold()
+    needle = _report_issue_text(issue)[:80].strip().casefold()
+    if not needle and not code:
         return False
     for section in draft.sections:
         for tag in extract_manual_fill_tags(section.content or ""):
-            if needle in tag.description.casefold() or needle in tag.text.casefold():
+            blob = f"{tag.description} {tag.text}".casefold()
+            if code and code in blob:
+                return True
+            if needle and (needle in tag.description.casefold() or needle in tag.text.casefold()):
                 return True
     return False
 
@@ -353,7 +404,9 @@ def _finding_already_handed_off(
     issue_text: str,
 ) -> bool:
     """Only skip escalation when THIS finding already has a handoff — not any sibling tag."""
-    if _manuscript_has_manual_fill_for_issue(draft, issue_text):
+    if _manuscript_has_manual_fill_for_issue(
+        draft, issue_text, finding_code=finding.code
+    ):
         return True
     section = _section_map(draft).get(finding.section_id or "")
     return _verify_covers_finding(section, finding)
@@ -368,16 +421,21 @@ def _escalate_remaining_findings(
 
     Sibling defects in the same section must each get their own MANUAL FILL — an
     existing MANUAL FILL / VERIFY for a *different* issue must not suppress escalation.
+    Full finding messages are kept in the repair report; tags use stable codes.
     """
     working = draft
     for finding in findings:
         issue_text = _report_issue_text(finding.message)
         if _finding_already_handed_off(working, finding, issue_text=issue_text):
             continue
+        # Persist full message in report list even when tag uses code.
+        if issue_text and issue_text not in escalations:
+            escalations.append(issue_text)
         working, tag = _append_manual_fill(
             working,
             section_id=finding.section_id,
             issue=issue_text,
+            finding_code=finding.code,
         )
         if tag and tag not in escalations:
             escalations.append(tag)
@@ -583,6 +641,27 @@ async def run_adversarial_repair_loop(
             section = _section_map(working_draft).get(finding.section_id or "")
             issue_text = _report_issue_text(finding.message)
 
+            # Bio stub + PDF designer-note sections are complete for Option B —
+            # do not rewrite or append Key Accounts MANUAL FILL tags.
+            try:
+                from app.services.proposal_bio_stub import is_bio_stub_section
+
+                if section is not None and is_bio_stub_section(
+                    section.id, section.content or ""
+                ):
+                    report_attempts.append(
+                        _attempt_entry(
+                            finding_code=finding.code,
+                            section_id=finding.section_id,
+                            strategy="bio_stub_skip",
+                            outcome="bio_stub_protected",
+                            attempts=attempts_by_finding[key],
+                        )
+                    )
+                    continue
+            except Exception:
+                pass
+
             if _protected_finding(section, finding.message):
                 # Section may already have VERIFY/MANUAL FILL for a sibling defect —
                 # still escalate THIS finding unless it already has its own handoff.
@@ -594,6 +673,7 @@ async def run_adversarial_repair_loop(
                         working_draft,
                         section_id=finding.section_id,
                         issue=issue_text,
+                        finding_code=finding.code,
                     )
                     if tag:
                         escalations.append(tag)
@@ -664,6 +744,7 @@ async def run_adversarial_repair_loop(
                         working_draft,
                         section_id=finding.section_id,
                         issue=issue_text,
+                        finding_code=finding.code,
                     )
                     if tag:
                         escalations.append(tag)
@@ -709,7 +790,10 @@ async def run_adversarial_repair_loop(
                     prior_by_key.pop(key, None)
                 else:
                     working_draft, tag = _append_manual_fill(
-                        working_draft, section_id=finding.section_id, issue=issue_text
+                        working_draft,
+                        section_id=finding.section_id,
+                        issue=issue_text,
+                        finding_code=finding.code,
                     )
                     if tag:
                         escalations.append(tag)
@@ -743,9 +827,8 @@ async def run_adversarial_repair_loop(
 
             if plan.repair_mode in {"protected_skip", "manual_fill"}:
                 working_draft, tag = _append_manual_fill(
-                    working_draft,
-                    section_id=finding.section_id,
-                    issue=issue_text,
+                    working_draft, section_id=finding.section_id, issue=issue_text,
+                    finding_code=finding.code,
                 )
                 if tag:
                     escalations.append(tag)
@@ -791,7 +874,10 @@ async def run_adversarial_repair_loop(
                 elif attempt_number >= attempts_cap:
                     exhausted_any = True
                     working_draft, tag = _append_manual_fill(
-                        working_draft, section_id=finding.section_id, issue=issue_text
+                        working_draft,
+                        section_id=finding.section_id,
+                        issue=issue_text,
+                        finding_code=finding.code,
                     )
                     if tag:
                         escalations.append(tag)
@@ -841,7 +927,10 @@ async def run_adversarial_repair_loop(
                 elif attempt_number >= attempts_cap:
                     exhausted_any = True
                     working_draft, tag = _append_manual_fill(
-                        working_draft, section_id=finding.section_id, issue=issue_text
+                        working_draft,
+                        section_id=finding.section_id,
+                        issue=issue_text,
+                        finding_code=finding.code,
                     )
                     if tag:
                         escalations.append(tag)
@@ -954,7 +1043,10 @@ async def run_adversarial_repair_loop(
 
             # No section to target — hand off directly, mirroring legacy behavior.
             working_draft, tag = _append_manual_fill(
-                working_draft, section_id=None, issue=issue_text
+                working_draft,
+                section_id=None,
+                issue=issue_text,
+                finding_code=finding.code,
             )
             if tag:
                 escalations.append(tag)
@@ -1045,6 +1137,7 @@ async def run_adversarial_repair_loop(
                         working_draft,
                         section_id=pfinding.section_id,
                         issue=_report_issue_text(pfinding.message),
+                        finding_code=pfinding.code,
                     )
                     if tag:
                         escalations.append(tag)
@@ -1109,6 +1202,40 @@ async def run_adversarial_repair_loop(
                 len(escalations),
             )
 
+    by_outcome: Counter[str] = Counter()
+    fixed_codes: list[str] = []
+    escalated_codes: list[str] = []
+    skipped_codes: list[str] = []
+    for attempt in report_attempts:
+        outcome = str(getattr(attempt, "outcome", "") or "")
+        code = str(getattr(attempt, "finding_code", "") or "")
+        by_outcome[outcome or "unknown"] += 1
+        if outcome in {"resolved", "patched"}:
+            if code and code not in fixed_codes:
+                fixed_codes.append(code)
+        elif outcome in {
+            "manual_fill_escalated",
+            "protected_blocked",
+            "bio_stub_protected",
+            "budget_handoff_pending",
+        }:
+            if code and code not in escalated_codes:
+                escalated_codes.append(code)
+        elif outcome and code:
+            # Keep a short sample of other non-success outcomes for debug.
+            sample = f"{code}:{outcome}"
+            if sample not in skipped_codes and len(skipped_codes) < 24:
+                skipped_codes.append(sample)
+
+    outcome_summary = {
+        "byOutcome": dict(by_outcome),
+        "fixedCodes": fixed_codes[:40],
+        "escalatedCodes": escalated_codes[:40],
+        "otherOutcomes": skipped_codes[:24],
+        "attemptCount": len(report_attempts),
+        "escalationTagCount": len(escalations),
+        "escalationSamples": [str(tag)[:180] for tag in escalations[:8]],
+    }
     working_research = working_research.model_copy(
         update={
             "adversarial_repair_report": AdversarialRepairReport(
@@ -1117,17 +1244,22 @@ async def run_adversarial_repair_loop(
                 resolved=stopped_reason == "resolved" and not escalations,
                 attempts=report_attempts,
                 escalations=escalations,
+                outcomeSummary=outcome_summary,
             ),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
     )
     logger.info(
-        "adversarial_repair finished rfp_id=%s rounds=%s stopped_reason=%s escalations=%s critical_remaining=%s",
+        "adversarial_repair finished rfp_id=%s rounds=%s stopped_reason=%s "
+        "escalations=%s critical_remaining=%s by_outcome=%s fixed=%s escalated_codes=%s",
         rfp.id,
         rounds_run,
         stopped_reason,
         len(escalations),
         sum(1 for finding in final_audit.findings if finding.severity == "critical"),
+        dict(by_outcome),
+        fixed_codes[:12],
+        escalated_codes[:12],
     )
     step_trace(
         "adversarial_repair_finished",
@@ -1139,6 +1271,7 @@ async def run_adversarial_repair_loop(
             1 for finding in final_audit.findings if finding.severity == "critical"
         ),
         findings=len(final_audit.findings),
+        outcome_summary=outcome_summary,
         **summarize_sections(working_draft.sections),
     )
     return (

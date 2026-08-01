@@ -1972,17 +1972,32 @@ async def run_phase3_5_budget_reconcile(
         budget=budget,
     )
     if mismatches:
-        budget = budget.model_copy(update={"narrative_mismatches": mismatches})
-        research = research.model_copy(update={"budget": budget})
-        await asave_research_cache(research)
-        raise ProposalError(
-            "Budget grounding check found unresolved pricing contradictions. "
-            "Resolve pricing mismatches before continuing.",
-            status_code=422,
+        from app.services.proposal_pricing_sync_repair import (
+            run_pricing_sync_repair_or_handoff,
         )
-    budget = budget.model_copy(update={"narrative_mismatches": []})
-    research = research.model_copy(update={"budget": budget})
-    await asave_research_cache(research)
+
+        step_trace(
+            "phase3_5_grounding_mismatches",
+            rfp_id=rfp_id,
+            mismatch_count=len(mismatches),
+            mismatch_sample=[
+                (m.note or m.sentence or str(m))[:120] for m in mismatches[:8]
+            ],
+        )
+        draft, research, budget, _sync_report = await run_pricing_sync_repair_or_handoff(
+            rfp_id=rfp_id,
+            draft=draft,
+            budget=budget,
+            research=research,
+            initial_mismatches=mismatches,
+            rfp_text=rfp_context,
+        )
+    else:
+        budget = budget.model_copy(update={"narrative_mismatches": []})
+        if research:
+            research = research.model_copy(update={"budget": budget})
+    if research:
+        await asave_research_cache(research)
     await asave_proposal_draft(draft)
 
     logger.info(
@@ -2162,31 +2177,38 @@ async def _run_phase3_5_budget_inner(
             unresolved_sample=list(unresolved_slots)[:12],
         )
 
-    # Phase 3.5d — block pipeline if manuscript pricing claims contradict canonical budget.
+    # Phase 3.5d — repair or hand off if manuscript pricing claims contradict canonical budget.
     mismatches = await run_budget_grounding_check(
         rfp_id=rfp_id,
         draft=draft,
         budget=budget,
     )
     if mismatches:
-        budget = budget.model_copy(update={"narrative_mismatches": mismatches})
-        if research:
-            research = research.model_copy(update={"budget": budget})
-            await asave_research_cache(research)
+        from app.services.proposal_pricing_sync_repair import (
+            run_pricing_sync_repair_or_handoff,
+        )
+
         step_trace(
-            "phase3_5_grounding_failed",
+            "phase3_5_grounding_mismatches",
             rfp_id=rfp_id,
             mismatch_count=len(mismatches),
-            mismatch_sample=[str(m)[:120] for m in mismatches[:8]],
+            mismatch_sample=[
+                (m.note or m.sentence or str(m))[:120] for m in mismatches[:8]
+            ],
         )
-        raise ProposalError(
-            "Budget grounding check found unresolved pricing contradictions. "
-            "Resolve pricing mismatches before senior editor / Phase 4.",
-            status_code=422,
+        draft, research, budget, _sync_report = await run_pricing_sync_repair_or_handoff(
+            rfp_id=rfp_id,
+            draft=draft,
+            budget=budget,
+            research=research,
+            initial_mismatches=mismatches,
+            rfp_text=rfp_context,
         )
-    budget = budget.model_copy(update={"narrative_mismatches": []})
+    else:
+        budget = budget.model_copy(update={"narrative_mismatches": []})
+        if research:
+            research = research.model_copy(update={"budget": budget})
     if research:
-        research = research.model_copy(update={"budget": budget})
         await asave_research_cache(research)
     await _assert_proposal_not_reset(rfp_id)
     await asave_proposal_draft(draft)
@@ -2300,6 +2322,25 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
                     rfp_id,
                     "; ".join(scrub_logs[:5]),
                 )
+
+    # Money intelligence Pass A/B (ledger↔RFP already enforced in 3.5; this triages
+    # residual `$` noise and pricing narrative integrity).
+    if research and research.budget:
+        try:
+            from app.services.proposal_money_intelligence import run_money_intelligence
+
+            money_issues = await run_money_intelligence(
+                draft=draft, budget=research.budget
+            )
+            if money_issues:
+                extra_issues = list(extra_issues or []) + list(money_issues)
+                logger.info(
+                    "Phase 4 money intelligence for %s: %d issue(s)",
+                    rfp_id,
+                    len(money_issues),
+                )
+        except Exception:
+            logger.exception("Phase 4 money intelligence failed for %s", rfp_id)
 
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp,

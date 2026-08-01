@@ -97,6 +97,13 @@ _CLEANUP_MARKERS = (
     "note leak",
     "mid_sentence",
     "flag_for",
+    "spotify",
+    "fabricated_fact",
+    "unverified_cert",
+    "individual certs, not agency",
+    "certification not in verified",
+    "google ads certification",
+    "meta certification",
 )
 
 _EMPTY_MARKERS = ("coverage.empty", "empty_section", "section is empty")
@@ -128,10 +135,12 @@ def decide_evidence_action(
     if any(m in text for m in _CLEANUP_MARKERS) or category.casefold() in {
         "truncation",
         "note_leak",
+        "fabricated_fact",
+        "unverified_claim",
     }:
         result = EvidenceGateResult(
             action=EvidenceDecision.DETERMINISTIC_CLEANUP,
-            reason="truncation_or_note_leak",
+            reason="truncation_note_leak_or_cert_fabrication",
         )
         _log(section_id, result)
         return result

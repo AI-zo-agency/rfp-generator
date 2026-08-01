@@ -291,17 +291,74 @@ def _candidate_names_for_scan(locks: ManuscriptLocks) -> list[str]:
     return out
 
 
+_SECONDARY_CONTACT_CONTEXT_RE = re.compile(
+    r"\b("
+    r"secondary\s+contact|backup\s+(?:contact|support|liaison)|"
+    r"alternate\s+contact|supporting\s+(?:contact|role)|"
+    r"escalation\s+contact|cc\b|copied\s+on|"
+    r"day[- ]to[- ]day\s+support\s+for|assists?\s+"
+    r")\b",
+    re.I,
+)
+
+_PRIMARY_NEAR_NAME_RE = re.compile(
+    r"\b("
+    r"primary\s+contact|primary\s+liaison|dedicated\s+(?:account\s+)?(?:rep|representative|manager)|"
+    r"day[- ]to[- ]day\s+(?:point\s+of\s+contact|poc|contact)|"
+    r"single\s+point\s+of\s+contact|account\s+lead"
+    r")\b",
+    re.I,
+)
+
+
+def _name_is_secondary_only(content: str, name: str) -> bool:
+    """True when every nearby mention of `name` is secondary/backup, not primary."""
+    lower = content
+    name_l = name.casefold()
+    primary_near = False
+    secondary_near = False
+    for m in re.finditer(re.escape(name), content, flags=re.I):
+        window = content[max(0, m.start() - 100) : min(len(content), m.end() + 100)]
+        if _SECONDARY_CONTACT_CONTEXT_RE.search(window):
+            secondary_near = True
+            continue
+        if _PRIMARY_NEAR_NAME_RE.search(window):
+            primary_near = True
+    if secondary_near and not primary_near:
+        return True
+    # Explicit "X (secondary contact)" / "secondary contact: X"
+    if re.search(
+        rf"{re.escape(name_l)}.{{0,40}}secondary\s+contact|"
+        rf"secondary\s+contact.{{0,40}}{re.escape(name_l)}|"
+        rf"{re.escape(name_l)}.{{0,40}}backup|"
+        rf"backup.{{0,40}}{re.escape(name_l)}",
+        lower.casefold(),
+        re.I,
+    ) and not re.search(
+        rf"(?:primary\s+contact|dedicated\s+account).{{0,40}}{re.escape(name_l)}|"
+        rf"{re.escape(name_l)}.{{0,40}}(?:primary\s+contact|dedicated\s+account)",
+        lower.casefold(),
+        re.I,
+    ):
+        return True
+    return False
+
+
 def _people_claimed_as_primary(content: str, candidates: list[str]) -> list[str]:
-    """Section-level co-occurrence: primary role phrase + person name (plain substrings)."""
+    """Names co-occurring with primary-role language, excluding secondary/backup labels."""
     if not content.strip() or not _section_has_primary_role_claim(content):
         return []
     lower = content.casefold()
     found: list[str] = []
     seen: set[str] = set()
     for name in candidates:
-        if name.casefold() in lower and name.casefold() not in seen:
-            seen.add(name.casefold())
-            found.append(_norm_person(name))
+        key = name.casefold()
+        if key not in lower or key in seen:
+            continue
+        if _name_is_secondary_only(content, name):
+            continue
+        seen.add(key)
+        found.append(_norm_person(name))
     return found
 
 

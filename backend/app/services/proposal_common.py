@@ -37,9 +37,9 @@ def load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]:
         )
         from app.services.go_no_go_service import combine_rfp_text
 
-        hard = extract_rfp_hard_facts(
-            combine_rfp_text(content.description, content.pdf_text)
-        )
+        full_rfp = combine_rfp_text(content.description, content.pdf_text)
+        hard = extract_rfp_hard_facts(full_rfp)
+        hard["_source_text"] = full_rfp
         block = format_hard_facts_block(hard)
         if block:
             rfp_context = f"{rfp_context}\n\n{block}"

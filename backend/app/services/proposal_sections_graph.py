@@ -1999,7 +1999,12 @@ async def _select_team(state: SectionsGraphState) -> dict[str, Any]:
 
 
 async def _build_bios(state: SectionsGraphState) -> dict[str, Any]:
-    """Bio Builder — one 04_Bio query per selected person."""
+    """Bio Builder — select members, emit stub + designer note (no full rewrite).
+
+    Option B (2026-07-31): do not re-format Key Accounts / full career history into
+    the manuscript. Designer inserts approved 04_Bio_*.pdf. Optional short verified
+    bullets only when the RFP requires inline bio/resume text.
+    """
     if state.get("skip_section_2"):
         return {}
 
@@ -2007,11 +2012,24 @@ async def _build_bios(state: SectionsGraphState) -> dict[str, Any]:
     if not selection_raw:
         return {}
 
+    from app.services.proposal_bio_stub import (
+        resolve_bio_pdf_filename,
+        rfp_requires_inline_bios,
+        stub_from_extraction,
+    )
+
     team = TeamSelectionResult.model_validate(selection_raw)
     members = normalize_selected_members([m.name for m in team.members])
     if not members:
         return {}
 
+    role_by_name: dict[str, str] = {}
+    for m in team.members:
+        norm = normalize_selected_members([m.name])
+        if norm:
+            role_by_name[norm[0]] = (m.role or "").strip()
+
+    inline_required = rfp_requires_inline_bios(state.get("rfp_context") or "")
     existing = state.get("sections") or []
     new_sections: list[dict[str, Any]] = []
 
@@ -2021,27 +2039,59 @@ async def _build_bios(state: SectionsGraphState) -> dict[str, Any]:
         sec_title = f"2.{i} — {member}"
         _log_section_generate_next(state, section_id=sec_id, title=sec_title)
 
-        logger.info("Fetching 04_Bio file for: %s", member)
+        logger.info(
+            "Building bio stub for %s (inline_required=%s)",
+            member,
+            inline_required,
+        )
         kb_text_for_extraction, bio_sources = await _fetch_member_bio_kb(member)
+        kb_available = bool(
+            kb_text_for_extraction.strip() and len(kb_text_for_extraction) >= 200
+        )
+        if not kb_available:
+            logger.warning(
+                "No 04_Bio content for %s — stub with Ella MANUAL FILL",
+                member,
+            )
 
-        if not kb_text_for_extraction.strip() or len(kb_text_for_extraction) < 200:
-            logger.warning("No 04_Bio content for %s — sections will use [VERIFY] placeholders", member)
+        pdf_name = resolve_bio_pdf_filename(member, bio_sources)
+        extracted: dict[str, Any] = {}
+        if inline_required and kb_available:
+            # Title / bullets only — stub_from_extraction ignores key_accounts.
+            extracted = await _extract_member_bio_facts(member, kb_text_for_extraction)
 
-        extracted = await _extract_member_bio_facts(member, kb_text_for_extraction)
+        content = stub_from_extraction(
+            member=member,
+            role=role_by_name.get(member, "")
+            or next(
+                (m.role for m in team.members if m.name.strip().casefold() == member.casefold()),
+                "",
+            ),
+            pdf_filename=pdf_name,
+            kb_text=kb_text_for_extraction if inline_required else "",
+            kb_available=kb_available,
+            inline_required=inline_required,
+            extracted=extracted,
+        )
         content = _apply_verified_corrections(
-            _sanitize_content(_format_member_bio_content(member, extracted)),
+            _sanitize_content(content),
             rfp_client=state.get("rfp_client", ""),
         )
-        raw = {"content": content, "kbRefs": bio_sources or [f"04_Bio_{_bio_file_slug(member)}.pdf"]}
+        raw = {
+            "content": content,
+            "kbRefs": bio_sources or [pdf_name],
+        }
 
         section = _section_payload(
             section_id=sec_id,
             title=sec_title,
             mode="select",
-            word_target=500,
+            word_target=120 if not inline_required else 220,
             page_limit=state.get("page_limit"),
-            page_ratio=0.05,
-            designer_note_default=f"Bio for {member}. From 04_Bio file only — no rewrites.",
+            page_ratio=0.02,
+            designer_note_default=(
+                f"Insert approved bio PDF — {pdf_name}. Do not rewrite Key Accounts."
+            ),
             raw=raw,
             kb_sources=bio_sources,
             extra_refs=[member],

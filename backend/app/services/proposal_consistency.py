@@ -12,7 +12,6 @@ from app.models.proposal import (
     ProposalSection,
 )
 from app.models.rfp import RfpRecord
-from app.services.proposal_budget_content import find_budget_section_index
 from app.services.proposal_budget_validation import (
     _STALE_RECONCILIATION_FLAG_RE,
     _USD_IN_TEXT_RE,
@@ -56,7 +55,10 @@ _NON_BID_CURRENCY_CONTEXT_RE = re.compile(
     r"insurance\s+limit|bonded?\b|surety|deductible|"
     r"statutory|threshold|not\s+to\s+exceed\s+\$?|"
     r"allocation|ceiling|budget\s+cap|program[-\s]?specific|"
-    r"tuition|per\s+year|/year|in[-\s]?state"
+    r"tuition|per\s+year|/year|in[-\s]?state|"
+    r"reallocat|optimization\s+recommendation|sample\s+(?:shift|move)|"
+    r"for\s+example|e\.g\.|illustrative|"
+    r"from\s+\w+\s+to\s+\w+"  # "from LinkedIn to Google Search"
     r")",
     re.I,
 )
@@ -102,6 +104,8 @@ def allowed_budget_amounts(budget: ProposalBudget) -> set[float]:
         budget.agency_revenue_estimate,
         budget.lump_sum_total,
         budget.total_client_invoicing,
+        budget.rfp_budget_cap,
+        budget.rfp_media_or_program_envelope,
     ):
         if isinstance(value, (int, float)) and float(value) > 0:
             amounts.add(round(float(value), 2))
@@ -263,7 +267,6 @@ def scan_manuscript_consistency(
 ) -> list[PreSubmitIssue]:
     issues: list[PreSubmitIssue] = []
     budget = research.budget if research else None
-    budget_idx = find_budget_section_index(draft.sections)
     client_lower = rfp.client.strip().casefold()
 
     from app.services.proposal_manuscript_locks import scan_manuscript_lock_issues
@@ -271,38 +274,9 @@ def scan_manuscript_consistency(
     issues.extend(scan_manuscript_lock_issues(draft=draft, research=research))
 
     if budget and budget.agency_revenue_estimate:
-        allowed = allowed_budget_amounts(budget)
-        for index, section in enumerate(draft.sections):
-            if budget_idx is not None and index == budget_idx:
-                continue
-            if not section.content.strip():
-                continue
-            for match in _USD_IN_TEXT_RE.finditer(section.content):
-                amount = _parse_usd_amount(match.group(0))
-                if amount is None or amount <= 0:
-                    continue
-                if _is_non_bid_currency_context(
-                    section.content, match.start(), match.end()
-                ):
-                    continue
-                if not any(
-                    abs(amount - allowed_amt) <= max(1.0, allowed_amt * 0.02)
-                    for allowed_amt in allowed
-                ):
-                    issues.append(
-                        PreSubmitIssue(
-                            severity="critical",
-                            category="consistency",
-                            message=(
-                                f"[T5:free_currency] Dollar amount {match.group(0)} does not "
-                                f"match canonical budget (verified total ${_usd_display(budget)})"
-                            ),
-                            sectionId=section.id,
-                            sectionTitle=section.title,
-                            excerpt=match.group(0),
-                        )
-                    )
-
+        # Regex free_currency criticals removed — Pass A (proposal_money_intelligence)
+        # owns bid-claim triage. Deterministic labeled mismatches + RFP-authority
+        # checks below still run synchronously.
         from app.services.proposal_budget_sync import collect_deterministic_budget_mismatches
 
         for mismatch in collect_deterministic_budget_mismatches(draft, budget):

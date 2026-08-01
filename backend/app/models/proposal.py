@@ -280,6 +280,22 @@ class AdversarialRepairReport(BaseModel):
     resolved: bool = False
     attempts: list[AdversarialRepairAttempt] = Field(default_factory=list)
     escalations: list[str] = Field(default_factory=list)
+    outcome_summary: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="outcomeSummary",
+        description="Debug rollup: byOutcome counts, fixed codes, escalated codes.",
+    )
+
+
+class PricingSyncReport(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    rounds_run: int = Field(default=0, alias="roundsRun")
+    resolved: bool = False
+    handoff: bool = False
+    mismatch_count: int = Field(default=0, alias="mismatchCount")
+    codes: list[str] = Field(default_factory=list)
+    samples: list[str] = Field(default_factory=list)
 
 
 RepairFailureReason = Literal[
@@ -360,7 +376,21 @@ class ProposalBudget(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     rfp_id: str = Field(alias="rfpId")
-    rfp_budget_cap: float | None = Field(default=None, alias="rfpBudgetCap")
+    rfp_budget_cap: float | None = Field(
+        default=None,
+        alias="rfpBudgetCap",
+        description="Hard fee / compensation NTE from the RFP (not program media envelope).",
+    )
+    rfp_media_or_program_envelope: float | None = Field(
+        default=None,
+        alias="rfpMediaOrProgramEnvelope",
+        description="Program/media 'allocating up to' envelope — compare to total client invoicing.",
+    )
+    rfp_money_constraint_notes: str = Field(
+        default="",
+        alias="rfpMoneyConstraintNotes",
+        description="Excerpts for extracted RFP money constraints (Sonja / grounding).",
+    )
     rfp_budget_notes: str = Field(default="", alias="rfpBudgetNotes")
     fee_structure: str = Field(default="", alias="feeStructure")
     pricing_tier: str | None = Field(default=None, alias="pricingTier")
@@ -502,6 +532,16 @@ class ProposalResearchCache(BaseModel):
         default=None,
         alias="adversarialRepairReport",
         description="Short report from the bounded adversarial repair loop.",
+    )
+    self_edit_logs: list[dict[str, str]] = Field(
+        default_factory=list,
+        alias="selfEditLogs",
+        description="Phase 3.6 senior-editor section_logs summary (scrub/tickets).",
+    )
+    pricing_sync_report: PricingSyncReport | None = Field(
+        default=None,
+        alias="pricingSyncReport",
+        description="Phase 3.5d pricing sync retry / grounding handoff summary.",
     )
     ending_report: dict[str, Any] | None = Field(
         default=None,

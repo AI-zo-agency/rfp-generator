@@ -232,7 +232,7 @@ class FreeCurrencyBackstopTests(unittest.TestCase):
                 ProposalSection(
                     id="approach",
                     title="Approach",
-                    content="Our fee for this work is $54,321.00 which is special.",
+                    content="Agency fee is $54,321.00 which is special.",
                 ),
                 ProposalSection(
                     id="budget",
@@ -248,13 +248,19 @@ class FreeCurrencyBackstopTests(unittest.TestCase):
             evidenceCorpus=[],
         )
         issues = scan_manuscript_consistency(draft=draft, research=research, rfp=_rfp())
-        free = [
+        # Sync free_currency regex retired — labeled fee mismatch still critical.
+        labeled = [
             i
             for i in issues
-            if i.severity == "critical" and "free_currency" in i.message
+            if i.severity == "critical"
+            and (
+                "agency_fee" in (i.message or "").casefold()
+                or "54,321" in (i.message or "")
+                or "54321" in (i.message or "").replace(",", "")
+            )
         ]
-        self.assertTrue(free)
-        self.assertEqual(free[0].section_id, "approach")
+        self.assertTrue(labeled, msg=[i.message for i in issues])
+        self.assertEqual(labeled[0].section_id, "approach")
 
 
 if __name__ == "__main__":

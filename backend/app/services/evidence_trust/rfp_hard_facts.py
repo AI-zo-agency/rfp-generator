@@ -247,6 +247,21 @@ def format_hard_facts_block(facts: dict[str, Any]) -> str:
     else:
         lines.append("### Contract value / ceiling")
         lines.append("- Not found as a contract ceiling/budget in the RFP body.")
+
+    # Structured money authority (hard NTE vs program/media envelope) — RFP-agnostic.
+    try:
+        from app.services.evidence_trust.rfp_money_constraints import (
+            extract_rfp_money_constraints,
+            format_money_constraints_block,
+        )
+
+        # Caller may pass full RFP via facts["_source_text"]; else skip structured block.
+        source = facts.get("_source_text") or ""
+        if source.strip():
+            money = extract_rfp_money_constraints(source)
+            lines.append(format_money_constraints_block(money))
+    except Exception:
+        pass
     evals = facts.get("evaluation_lines") or []
     if evals:
         lines.append("### Evaluation criteria (points)")

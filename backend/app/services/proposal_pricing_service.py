@@ -253,6 +253,9 @@ PHASE 4b — PHASE / LINE CONSISTENCY (submission quality — do NOT skip):
 7. HARD CAP HYGIENE: rfpBudgetCap is ONLY an RFP maximum compensation / NTE / published ceiling.
    NEVER set it from travel estimates, PM rows, roadmap rows, or notes that say "budget envelope"
    colloquially. Yearly Annual Allocation rows are envelopes — not fee lines.
+   NEVER set rfpBudgetCap equal to your own proposed total to make the bid "fit" a ceiling.
+   Program/media "allocating up to $X for advertising" is NOT rfpBudgetCap — that is a separate
+   program/media envelope enforced deterministically after this JSON.
 8. Traceability: each phase fee notes which RFP section/items it covers — without reusing the
    same extended dollars across phases.
 
@@ -995,6 +998,12 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         confidence = min(confidence, 40)
 
     extras = parse_budget_extras(raw)
+    from app.services.evidence_trust.rfp_money_constraints import (
+        apply_constraints_to_budget_fields,
+        extract_rfp_money_constraints,
+    )
+
+    money_constraints = extract_rfp_money_constraints(rfp_context)
     budget = ProposalBudget(
         rfpId=rfp_id,
         rfpBudgetCap=_parse_budget_cap(raw.get("rfpBudgetCap")),
@@ -1050,6 +1059,8 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         updatedAt=now,
         provider=provider,
     )
+    # Deterministic RFP money authority wins over LLM-invented caps matching own total.
+    budget = apply_constraints_to_budget_fields(budget, money_constraints)
 
     # Decision Guide: cost ≥25% → Low tier (never leave Average on a 35% price RFP).
     try:

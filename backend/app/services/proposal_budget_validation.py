@@ -650,10 +650,20 @@ def rebuild_option_term_notes(
     *,
     rfp_context: str = "",
 ) -> str:
-    """Rebuild option-year prose from verified agency fee base (never pass-through totals)."""
+    """Rebuild option-year prose from verified agency fee base (never pass-through totals).
+
+    Pass-through, agency fee, and total invoicing are always distinct canonical fields —
+    never copy one dollar into all three labels.
+    """
     base = budget.agency_revenue_estimate
     if base is None or base <= 0:
         return budget.option_term_notes
+
+    agency_fee = float(budget.agency_fee_subtotal or base)
+    passthrough = float(budget.client_media_passthrough or 0)
+    total_inv = budget.total_client_invoicing
+    if total_inv is None and passthrough > 0:
+        total_inv = round(agency_fee + passthrough + float(budget.direct_expenses_total or 0), 2)
 
     context_blob = "\n".join(
         part for part in (rfp_context[:20_000], budget.option_term_notes, budget.rfp_budget_notes) if part
@@ -663,16 +673,24 @@ def rebuild_option_term_notes(
     option_years = _count_option_years(context_blob)
 
     lines: list[str] = []
-    if is_commission_style_budget(budget) and budget.client_media_passthrough:
-        lines.append(
-            f"Annual agency commission revenue (base year): {_usd(base)}. "
-            f"Client media pass-through (at net, not agency revenue): "
-            f"{_usd(budget.client_media_passthrough)}."
+    if passthrough > 0:
+        fee_label = (
+            "Annual agency commission revenue (base year)"
+            if is_commission_style_budget(budget)
+            else "Professional service fees (base year)"
         )
-        if budget.total_client_invoicing:
+        lines.append(
+            f"{fee_label}: {_usd(agency_fee)}. "
+            f"Client media pass-through (at net, not agency revenue): "
+            f"{_usd(passthrough)}."
+        )
+        if total_inv is not None and float(total_inv) > 0:
+            # Guard: never emit a sentence where fee and total are the same while media > 0.
+            if abs(float(total_inv) - agency_fee) < 0.01 and passthrough > 0.01:
+                total_inv = round(agency_fee + passthrough, 2)
             lines.append(
                 f"Total estimated annual client invoicing (media pass-through + agency fees): "
-                f"{_usd(budget.total_client_invoicing)}."
+                f"{_usd(float(total_inv))}."
             )
 
     if base_years > 1:
@@ -690,11 +708,13 @@ def rebuild_option_term_notes(
             amount = round(prior * (1 + escalation), 2)
             if year == 1:
                 lines.append(
-                    f"Option Year {year}: {_usd(amount)} ({pct:g}% escalation on base year)."
+                    f"Option Year {year}: {_usd(amount)} ({pct:g}% escalation on base year "
+                    f"— agency fee only, not pass-through)."
                 )
             else:
                 lines.append(
-                    f"Option Year {year}: {_usd(amount)} ({pct:g}% escalation on Option Year {year - 1})."
+                    f"Option Year {year}: {_usd(amount)} ({pct:g}% escalation on Option Year {year - 1} "
+                    f"— agency fee only)."
                 )
             prior = amount
     elif budget.option_term_notes.strip() and not _USD_IN_TEXT_RE.findall(budget.option_term_notes):
@@ -1037,6 +1057,40 @@ def reconcile_proposal_budget(
             f"exceeds RFP hard cap {_usd(float(hard_cap))} after reconcile — rebuild before submit]"
         )
 
+    # Re-apply deterministic RFP money constraints from context (program/media envelopes).
+    from app.services.evidence_trust.rfp_money_constraints import (
+        apply_constraints_to_budget_fields,
+        collect_over_authority_flags,
+        extract_rfp_money_constraints,
+    )
+
+    # Use post-reconcile hard_cap (may be None after refusing absurd compression).
+    # Do not re-inject a prior bogus rfpBudgetCap from the incoming budget object.
+    constraint_seed = budget.model_copy(
+        update={
+            "agency_revenue_estimate": agency_revenue,
+            "agency_fee_subtotal": agency_fee,
+            "client_media_passthrough": passthrough if passthrough > 0 else budget.client_media_passthrough,
+            "total_client_invoicing": (
+                total_invoicing
+                if total_invoicing
+                else round(
+                    agency_revenue + float(passthrough or budget.client_media_passthrough or 0),
+                    2,
+                )
+            ),
+            "rfp_budget_cap": hard_cap,
+        }
+    )
+    if rfp_context.strip():
+        constraint_seed = apply_constraints_to_budget_fields(
+            constraint_seed,
+            extract_rfp_money_constraints(rfp_context),
+        )
+    for flag in collect_over_authority_flags(constraint_seed):
+        if flag not in flags:
+            flags.append(flag)
+
     updates: dict[str, Any] = {
         "line_items": line_items,
         "line_item_sum": line_sum,
@@ -1044,12 +1098,24 @@ def reconcile_proposal_budget(
         "client_media_passthrough": passthrough if passthrough > 0 else None,
         "total_client_invoicing": total_invoicing if commission_style and passthrough > 0 else None,
         "agency_revenue_estimate": agency_revenue,
+        "rfp_media_or_program_envelope": constraint_seed.rfp_media_or_program_envelope,
+        "rfp_money_constraint_notes": constraint_seed.rfp_money_constraint_notes or "",
+        # Prefer live hard_cap; else deterministic extract; else clear refused/bogus caps.
+        "rfp_budget_cap": (
+            float(hard_cap)
+            if hard_cap is not None
+            else (
+                float(constraint_seed.rfp_budget_cap)
+                if constraint_seed.rfp_budget_cap is not None
+                else None
+            )
+        ),
     }
-    if hard_cap is not None:
-        updates["rfp_budget_cap"] = float(hard_cap)
-    elif budget.rfp_budget_cap is not None:
-        # Explicitly clear a refused/bogus cap so it does not persist on the research budget.
-        updates["rfp_budget_cap"] = None
+    # Ensure totalClientInvoicing is set when we have media + fees (envelope compare needs it).
+    if updates.get("total_client_invoicing") is None:
+        media = float(updates.get("client_media_passthrough") or 0)
+        if media > 0:
+            updates["total_client_invoicing"] = round(agency_revenue + media + direct, 2)
 
     computed = agency_revenue
     requires_lump_hourly = rfp_requires_lump_sum_and_hourly(rfp_sections, rfp_context)
@@ -1096,6 +1162,17 @@ def reconcile_proposal_budget(
     # the whole pipeline on a policy tension no retry can resolve.
     for msg in collect_pm_ratio_violations(merged):
         flags.append(f"[PRICING FLAG: {msg}]")
+
+    # One-time setup × months and residual PM-floor dollars: advisory for Sonja.
+    # Do not halt Phase 3.5 — same class as PM ratio policy tension.
+    for msg in collect_one_time_recurring_violations(merged):
+        flag = f"[PRICING FLAG: {msg}]"
+        if flag not in flags:
+            flags.append(flag)
+    for msg in collect_pm_floor_violations(merged):
+        flag = f"[PRICING FLAG: {msg}]"
+        if flag not in flags:
+            flags.append(flag)
 
     merged = merged.model_copy(
         update={
@@ -1165,11 +1242,12 @@ def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
     # reconcile_proposal_budget. It is a policy/guide tension (absolute-dollar
     # PM floor vs. percentage-of-fee ceiling), not an arithmetic fact, and can
     # be legitimately unresolvable on a small-fee RFP no retry fixes.
+    #
+    # Same for one-time×months and residual PM-floor dollars: surface as
+    # pricing flags for Sonja, do not halt Phase 3.5.
     violations.extend(collect_line_item_math_violations(budget))
-    violations.extend(collect_one_time_recurring_violations(budget))
     violations.extend(collect_orphan_commission_violations(budget))
     violations.extend(collect_commission_fee_math_violations(budget))
-    violations.extend(collect_pm_floor_violations(budget))
 
     return violations
 
