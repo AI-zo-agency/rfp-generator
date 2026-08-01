@@ -2210,7 +2210,7 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
             section_id=sec_id,
             title=sec_title,
             mode="select",
-            word_target=600,
+            word_target=350,
             page_limit=merged_state.get("page_limit"),
             page_ratio=0.03,
             designer_note_default=f"Our Work example: {study}.",
@@ -2810,11 +2810,14 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                 "kbRefs": kb_sources,
             }
         content = _sanitize_content(raw.get("content", "").strip())
+        from app.services.proposal_integrity_guards import scrub_case_study_overbuild
+
+        content, _cs_logs = scrub_case_study_overbuild(content)
         section = _section_payload(
             section_id=sec_id,
             title=sec_title,
             mode="select",
-            word_target=600,
+            word_target=350,
             page_limit=state.get("page_limit"),
             page_ratio=0.03,
             designer_note_default=f"Our Work example: {study}.",

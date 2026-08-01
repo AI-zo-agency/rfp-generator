@@ -113,6 +113,31 @@ def apply_manuscript_integrity_guards(draft: ProposalDraft) -> tuple[ProposalDra
             new, bio_logs = fix_known_bio_typos(new)
             section_logs.extend(bio_logs)
 
+        if (
+            sid.startswith("section-3-work")
+            or "our work" in title_cf
+            or "case study" in title_cf
+            or re.search(r"\b3\.\d+\b", title_cf)
+        ):
+            new, cs_logs = scrub_case_study_overbuild(new)
+            section_logs.extend(cs_logs)
+            is_dump, dump_reason = case_study_looks_like_source_dump(new)
+            if is_dump:
+                title_hint = (section.title or sid or "case study").strip()
+                new = (
+                    f"### {title_hint}\n\n"
+                    f"**Challenge**\n\n"
+                    f"[VERIFY: rewrite Challenge from source case study — "
+                    f"rejected source dump ({dump_reason})]\n\n"
+                    f"**Solution / Our Approach**\n\n"
+                    f"[VERIFY: rewrite Solution from source case study — "
+                    f"rejected source dump ({dump_reason})]\n\n"
+                    f"Client Voice: [VERIFY: no client quote found in source material]"
+                )
+                section_logs.append(
+                    f"Replaced case-study source dump with VERIFY stub ({dump_reason})"
+                )
+
         if new != content:
             changed = True
             sections.append(section.model_copy(update={"content": new}))
@@ -260,6 +285,202 @@ def enforce_pricing_tier_for_cost_weight(
         f"{cost_weight_pct:.0f}% ≥25%"
     )
     return budget, logs
+
+
+_FORBIDDEN_CASE_STUDY_HEADINGS = frozenset(
+    {
+        "strategy",
+        "goal",
+        "goals",
+        "kpi",
+        "kpis",
+        "creative deliverables",
+        "deliverables",
+        "why relevant",
+        "results",
+        "measurable outcomes",
+        "key tactics",
+        "company overview",
+        "client overview",
+        "objectives",
+        "objective",
+    }
+)
+
+_ALLOWED_CASE_STUDY_HEADINGS = frozenset(
+    {
+        "challenge",
+        "solution",
+        "solution / our approach",
+        "our approach",
+        "client voice",
+    }
+)
+
+
+def _case_study_heading_key(line: str) -> str:
+    key = re.sub(r"^#+\s*", "", (line or "").strip()).strip().rstrip(":").casefold()
+    key = re.sub(r"\s+", " ", key)
+    return key
+
+
+def _looks_like_case_study_heading(line: str) -> bool:
+    s = (line or "").strip()
+    if not s:
+        return False
+    if s.startswith("#"):
+        return True
+    if s.endswith(".") or s.endswith("?") or s.endswith("!"):
+        return False
+    if len(s) > 56:
+        return False
+    if not re.match(r"^[A-Za-z][\w\s/&'’\-]+$", s):
+        return False
+    words = s.split()
+    return 1 <= len(words) <= 8
+
+
+def prefer_case_study_kb_text(case_study_text: str) -> tuple[str, list[str]]:
+    """
+    Prefer 03_CS_* document blocks over 06_WON / full-proposal OCR.
+
+    Retrieved packs often interleave the case-study PDF with a won-proposal PDF;
+    feeding only 03_CS sharply reduces Challenge/Solution regurgitation failures.
+    """
+    text = (case_study_text or "").strip()
+    if not text:
+        return text, []
+
+    blocks = re.split(r"(?m)(?=^###\s+)", text)
+    blocks = [b.strip() for b in blocks if b.strip()]
+    if not blocks:
+        return text, []
+
+    cs_blocks: list[str] = []
+    cs_labels: list[str] = []
+    other_blocks: list[str] = []
+    for block in blocks:
+        first = block.splitlines()[0] if block.splitlines() else ""
+        label = re.sub(r"^###\s*", "", first).strip()
+        label_cf = label.casefold()
+        if "03_cs" in label_cf or re.search(r"(?i)\bcase\s*study\b", label):
+            cs_blocks.append(block)
+            if label:
+                cs_labels.append(label)
+        elif re.search(r"(?i)\b06_won_|\b07_fin_", label_cf):
+            continue
+        else:
+            other_blocks.append(block)
+
+    if cs_blocks:
+        return "\n\n".join(cs_blocks).strip(), cs_labels
+    if other_blocks:
+        return "\n\n".join(other_blocks).strip(), []
+    return text, []
+
+
+def case_study_has_required_structure(content: str) -> bool:
+    """True when Challenge + Solution/Our Approach headings are present."""
+    body = content or ""
+    has_challenge = bool(
+        re.search(r"(?im)^(?:#{1,6}\s*)?\**\s*challenge\b", body)
+    )
+    has_solution = bool(
+        re.search(
+            r"(?im)^(?:#{1,6}\s*)?\**\s*(?:solution(?:\s*/\s*our\s+approach)?|our\s+approach)\b",
+            body,
+        )
+    )
+    return has_challenge and has_solution
+
+
+def case_study_looks_like_source_dump(content: str) -> tuple[bool, str]:
+    """
+    Detect LLM regurgitation of proposal/OCR blobs instead of a case-study rewrite.
+
+    Used after Case Study Builder so Umatilla-style TOC/cover-letter dumps are rejected.
+    """
+    body = content or ""
+    if not body.strip():
+        return False, ""
+
+    signals: list[str] = []
+    if re.search(r"(?i)\b06_WON_", body):
+        signals.append("06_WON filename in body")
+    if re.search(r"(?i)\b03_CS_[^\n]{0,120}\.pdf\b", body):
+        signals.append("03_CS filename in body")
+    if re.search(r"(?i)\[photo\]", body):
+        signals.append("photo OCR placeholder")
+    if re.search(
+        r"(?i)\bSECTION\s+[1-7]\b.{0,80}(?:Firm Overview|Relevant Experience|Key Personnel)",
+        body,
+    ):
+        signals.append("proposal TOC")
+    if re.search(r"(?im)^Dear\s+.+(?:Selection Committee|Committee)\b", body):
+        signals.append("cover letter salutation")
+    if re.search(r"(?i)\bSubmitted by:\s*zo\s*agency\b", body):
+        signals.append("proposal submitter line")
+    if re.search(r"(?i)\bTable of Contents\b|\bPage\s+\d+\b.*\bPage\s+\d+\b", body):
+        signals.append("TOC/page index")
+
+    strong = {"proposal TOC", "cover letter salutation", "photo OCR placeholder"}
+    if any(s in strong for s in signals) or len(signals) >= 2:
+        return True, ", ".join(signals[:5])
+    return False, ""
+
+
+def scrub_case_study_overbuild(content: str) -> tuple[str, list[str]]:
+    """
+    Enforce Challenge → Solution → Client Voice shape.
+
+    Strips KB-template dump sections (Strategy/Goals/KPIs/Creative Deliverables)
+    and invented RFP bridges ("Why this matters for …") that prompts forbid but
+    models still emit when copying master case-study docs.
+    """
+    text = content or ""
+    if not text.strip():
+        return text, []
+
+    logs: list[str] = []
+    removed: list[str] = []
+    out_lines: list[str] = []
+    skipping = False
+
+    for line in text.splitlines():
+        if _looks_like_case_study_heading(line):
+            key = _case_study_heading_key(line)
+            is_forbidden = (
+                key in _FORBIDDEN_CASE_STUDY_HEADINGS
+                or key.startswith("why this matters")
+                or key.startswith("why matters")
+            )
+            if is_forbidden:
+                skipping = True
+                if key not in removed:
+                    removed.append(key)
+                continue
+            # Resume on any other heading (allowed template or title).
+            skipping = False
+            out_lines.append(line)
+            continue
+        if skipping:
+            continue
+        # Orphan bridge lines without a clean heading break.
+        if re.match(r"(?i)^why\s+(?:this\s+)?matters\b", line.strip()):
+            skipping = True
+            if "why this matters" not in removed:
+                removed.append("why this matters")
+            continue
+        out_lines.append(line)
+
+    cleaned = "\n".join(out_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    if removed:
+        logs.append(
+            "Stripped case-study overbuild sections: " + ", ".join(removed[:8])
+        )
+        logger.info("case_study_overbuild_scrub removed=%s", removed[:8])
+    return cleaned, logs
 
 
 def case_study_fidelity_ok(source_text: str, written: str) -> tuple[bool, str]:

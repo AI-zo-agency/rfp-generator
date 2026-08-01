@@ -1614,11 +1614,15 @@ async def _build_case_study_section(
             f"[VERIFY: Draft case study for {name} from 03_CS — KB returned "
             f"{'partial' if kb_text.strip() else 'no'} evidence; complete from case study file]\n"
         )
+    else:
+        from app.services.proposal_integrity_guards import scrub_case_study_overbuild
+
+        content, _ = scrub_case_study_overbuild(content)
 
     return ProposalSection(
         id=sec_id,
         title=title,
-        wordTarget=700,
+        wordTarget=350,
         required=True,
         custom=False,
         source="template",
