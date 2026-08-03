@@ -169,7 +169,13 @@ class OutlineDedupTests(unittest.TestCase):
         self.assertTrue(any("merged into Agency Requirements" in d for d in dropped))
         self.assertTrue(any("Sample Work" in t for t in titles))
 
-    def test_merge_closing_adds_commitment_and_references(self) -> None:
+    def test_merge_closing_adds_only_what_the_rfp_requires(self) -> None:
+        """Deliberate change: no unrequested commitment/closing section.
+
+        This RFP asks for references and addenda acknowledgement. It never asks
+        for a closing statement, so the outline must not gain one — under a page
+        limit that section displaces content the RFP does require.
+        """
         sections = [
             {"id": "rfp-sec-1", "title": "Technical Approach & Scope of Work", "required": True},
         ]
@@ -185,7 +191,7 @@ class OutlineDedupTests(unittest.TestCase):
             (s.title if hasattr(s, "title") else s.get("title")) for s in merged
         ]
         self.assertTrue(any("Reference" in (t or "") for t in titles), msg=titles)
-        self.assertTrue(
+        self.assertFalse(
             any("Closing" in (t or "") or "Commitment" in (t or "") for t in titles),
             msg=titles,
         )

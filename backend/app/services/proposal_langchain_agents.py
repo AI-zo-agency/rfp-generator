@@ -41,6 +41,9 @@ class AgentProfile:
     max_tool_rounds: int
     system_prompt: str
     tier: LlmTier = "heavy"
+    # Stage-map key — see _QUALITY_EXACT / _MECHANICAL_EXACT in llm_routing.py.
+    # Without it this layer falls through to the cheapest provider.
+    node_name: str = ""
 
 
 SENIOR_EDITOR_SYSTEM = """You are zö agency's Senior Proposal Editor (manuscript director).
@@ -165,6 +168,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         max_tool_rounds=0,
         system_prompt=SENIOR_EDITOR_SYSTEM,
         tier="heavy",
+        node_name="senior_editor",
     ),
     AgentRole.SECTION_REPAIR: AgentProfile(
         role=AgentRole.SECTION_REPAIR,
@@ -174,6 +178,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         max_tool_rounds=2,
         system_prompt=SECTION_REPAIR_SYSTEM,
         tier="heavy",
+        node_name="section_repair",
     ),
     AgentRole.USER_REVISE: AgentProfile(
         role=AgentRole.USER_REVISE,
@@ -183,6 +188,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         max_tool_rounds=2,
         system_prompt=USER_REVISE_SYSTEM,
         tier="heavy",
+        node_name="user_revise",
     ),
     AgentRole.SURGICAL_FIX: AgentProfile(
         role=AgentRole.SURGICAL_FIX,
@@ -192,6 +198,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         max_tool_rounds=3,
         system_prompt=SURGICAL_FIX_SYSTEM,
         tier="heavy",
+        node_name="surgical_fix",
     ),
     AgentRole.QUERY_PLANNER: AgentProfile(
         role=AgentRole.QUERY_PLANNER,
@@ -201,6 +208,7 @@ AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
         max_tool_rounds=0,
         system_prompt=QUERY_PLANNER_SYSTEM,
         tier="light",
+        node_name="query_planner",
     ),
 }
 
@@ -306,7 +314,10 @@ async def run_json_agent(
 ) -> tuple[dict[str, Any], str]:
     """Single-turn LangChain agent (no tools) — senior editor, query planner."""
     profile = get_profile(role)
-    force_fireworks = _use_fireworks_primary()
+    # Let the stage map decide rather than forcing Fireworks for every role:
+    # quality roles (senior editor) must not be served by the economy model
+    # when a better provider is configured. The retry below still falls back.
+    force_fireworks = False
 
     async def _invoke(*, fireworks: bool) -> dict[str, Any]:
         llm = get_chat_model(
@@ -314,6 +325,7 @@ async def run_json_agent(
             max_tokens=profile.max_tokens,
             force_fireworks=fireworks,
             tier=profile.tier,
+            node_name=profile.node_name,
         )
         response = await llm.ainvoke(
             [
@@ -363,6 +375,7 @@ async def run_tool_json_agent(
         agent_label=profile.label,
         rfp_id=rfp_id,
         tier=profile.tier,
+        node_name=profile.node_name,
     )
     parsed = await _parse_json_from_agent_text(final_text)
     if not str(parsed.get("content") or "").strip():

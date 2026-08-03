@@ -165,7 +165,7 @@ _CLOSING_CATALOG: list[tuple[str, str, str, str, tuple[str, ...], str]] = [
     ),
     (
         "insurance_attachments",
-        "Insurance Certificates & Required Attachments",
+        "Required Submission Attachments — Document Checklist",
         "rfp-closing-attachments",
         "attachment",
         (
@@ -185,10 +185,13 @@ _CLOSING_CATALOG: list[tuple[str, str, str, str, tuple[str, ...], str]] = [
             r"\bcomplete\s+and\s+return\b",
         ),
         (
-            "Checklist of insurance certificates and attachments THIS RFP requires "
-            "(limits, additional insured, COI timing, exhibits, appendices, W-9). "
+            "A CHECKLIST OF DOCUMENTS TO RETURN — not a narrative. Section 1.5 "
+            "Insurance Information already states zö's coverage; do NOT restate "
+            "limits, carriers or coverage types here. Cross-reference it in one "
+            "line if the RFP asks, then list ONLY the items to be submitted "
+            "(certificate of insurance, additional-insured endorsement, W-9, "
+            "named exhibits/appendices, signed forms) with their status. "
             "Use RFP-stated minimums when present. "
-            "List every named attachment/exhibit from the submission instructions. "
             "Mark physical file attachments as [MANUAL FILL: attach PDF]."
         ),
     ),
@@ -281,19 +284,116 @@ def _build_closing_component(
     )
 
 
+# A topic being *mentioned* is not a requirement to write a section about it.
+# "The County may issue addenda prior to the proposal due date" is procedural
+# prose; it does not ask the vendor for an Acknowledgement of Addenda section.
+# Requiring an obligation phrase near the topic match is what separates the two.
+_OBLIGATION_VERB = (
+    r"(?:return(?:ed)?|submit(?:ted)?|includ(?:e|ed)|complet(?:e|ed)|"
+    r"sign(?:ed)?|acknowledg(?:e|ed)|provid(?:e|ed)|attach(?:ed)?|"
+    r"furnish(?:ed)?|enclos(?:e|ed))"
+)
+
+_SUBMISSION_OBLIGATION_RE = re.compile(
+    rf"""(?ix)
+    (?:
+        # "must be returned", "shall acknowledge", "will be submitted"
+        \b (?:must|shall|will|is|are) \s+ (?:be \s+)? (?:\w+ \s+){{0,2}}?
+          {_OBLIGATION_VERB} \b
+        # "is required to submit", "are required"
+      | \b (?:is|are) \s+ required \b
+        # "Required submission documents:", "required forms", "required exhibit"
+      | \b required \s+ (?:\w+ \s+){{0,2}} (?:form|document|attachment|
+          submittal|exhibit|item|material)s? \b
+        # section headers listing what to send
+      | \b submission \s+ (?:document|requirement|material|item)s? \b
+        # bare imperative: "Submit three references", "Return the signed form"
+      | \b (?:submit|return|enclose|attach|furnish) \b
+        # "proposal shall contain", "quote must include"
+      | \b (?:proposal|quote|submittal|response|bid) \s+ (?:shall|must|should)
+          \s+ (?:contain|includ(?:e)|consist) \b
+      | \b failure \s+ to \s+ (?:return|submit|include|provide|acknowledge) \b
+        # "...with your proposal", "as part of the submittal"
+      | \b (?:with|as \s+ part \s+ of) \s+ (?:the \s+|your \s+)?
+          (?:proposal|quote|submittal|response|bid) \b
+    )
+    """
+)
+
+# Characters either side of a topic match to scan for the obligation phrase.
+# Wide enough to span a sentence or short clause, narrow enough that an
+# unrelated obligation elsewhere in the document does not bleed in.
+_OBLIGATION_WINDOW = 320
+
+
+def rfp_requires_topic(rfp_text: str, topic_terms: list[str]) -> bool:
+    """True when the RFP asks the vendor to SUBMIT something about ``topic_terms``.
+
+    Shared with outline filtering: a topic being mentioned is not a request for
+    a section about it. "PERA retiree notification" and "sex offender
+    registration" appear in the solicitation as standing obligations, not as
+    proposal contents — keeping a section for each inflated the manuscript past
+    its page limit with content the buyer never asked for.
+    """
+    body = rfp_text or ""
+    if not body or not topic_terms:
+        return False
+    for term in topic_terms:
+        term = (term or "").strip()
+        if len(term) < 4:
+            continue
+        for match in re.finditer(re.escape(term), body, re.IGNORECASE):
+            # Sentence-scoped, not a fixed character window. A procedural
+            # clause often sits directly beside a real submission requirement
+            # ("...notify the County after award. SECTION IV. Each quote shall
+            # contain..."), and a wide window reads the neighbour's obligation
+            # as this topic's.
+            # Boundaries are sentence stops and PARAGRAPH breaks only. Text
+            # extracted from a PDF is hard-wrapped, so treating every newline
+            # as a boundary splits "Each quote shall contain a company
+            # overview, past\nperformance examples, ... methodology" and hides
+            # the verb from half its own sentence.
+            start = max(
+                body.rfind(".", 0, match.start()),
+                body.rfind("\n\n", 0, match.start()),
+            )
+            end_dot = body.find(".", match.end())
+            end_para = body.find("\n\n", match.end())
+            candidates = [e for e in (end_dot, end_para) if e != -1]
+            end = min(candidates) if candidates else len(body)
+            sentence = body[start + 1 : end]
+            if _SUBMISSION_OBLIGATION_RE.search(sentence):
+                return True
+    return False
+
+
+def _is_submission_obligation(text: str, match: re.Match[str]) -> bool:
+    """True when the matched topic sits near language obliging the vendor to submit it."""
+    start = max(0, match.start() - _OBLIGATION_WINDOW)
+    end = min(len(text), match.end() + _OBLIGATION_WINDOW)
+    return bool(_SUBMISSION_OBLIGATION_RE.search(text[start:end]))
+
+
 def detect_closing_components(
     rfp_text: str,
     *,
-    always_include_commitment: bool = True,
+    always_include_commitment: bool = False,
 ) -> list[ClosingComponent]:
-    """Return closing components whose patterns appear in this RFP's text.
+    """Return closing components THIS RFP obliges the vendor to submit.
 
-    Always includes Offeror Commitment & Closing Statement unless disabled —
-    every proposal must close properly even when the RFP never says \"closing\".
+    A component is emitted only when its topic pattern matches *and* submission
+    obligation language sits nearby. Matching on topic alone added sections for
+    procedural clauses the RFP never asked vendors to write, inflating the
+    manuscript past its page limit.
+
+    ``always_include_commitment`` defaults to False: an unconditional closing
+    statement is not an RFP requirement, and under a page cap it displaces
+    content that is.
     """
     text = (rfp_text or "").strip()
     if not text:
-        # Still return compulsory closing so empty/thin extracts do not skip it.
+        # No text means nothing is evidenced as required — emit nothing unless
+        # the caller explicitly opts into the compulsory close.
         if always_include_commitment:
             for row in _CLOSING_CATALOG:
                 if row[0] == "offeror_commitment":
@@ -312,14 +412,21 @@ def detect_closing_components(
 
     found: list[ClosingComponent] = []
     found_ids: set[str] = set()
+    skipped: list[str] = []
     for comp_id, title, section_id, kind, patterns, base_instructions in _CLOSING_CATALOG:
         matched = None
+        mention_only = None
         for pat in patterns:
             m = re.search(pat, text, flags=re.IGNORECASE)
-            if m:
+            if not m:
+                continue
+            if _is_submission_obligation(text, m):
                 matched = m.group(0)
                 break
+            mention_only = mention_only or m.group(0)
         if not matched:
+            if mention_only:
+                skipped.append(f"{comp_id} (mention only: {mention_only[:60]!r})")
             continue
         found.append(
             _build_closing_component(
@@ -354,6 +461,12 @@ def detect_closing_components(
         "Closing package for this RFP: %s",
         ", ".join(c.id for c in found) or "(none matched)",
     )
+    if skipped:
+        # Visible so a genuinely-required item filtered as a mention can be spotted.
+        logger.info(
+            "Closing package skipped (topic mentioned, no submission obligation): %s",
+            ", ".join(skipped),
+        )
     return found
 
 

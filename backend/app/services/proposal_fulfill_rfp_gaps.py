@@ -209,8 +209,13 @@ async def ensure_closing_sections(
     rfp: RfpRecord,
     rfp_text: str,
 ) -> tuple[ProposalDraft, list[ClosingComponent], list[str]]:
-    """Add missing closing sections demanded by THIS RFP — always includes a proper close."""
-    components = detect_closing_components(rfp_text, always_include_commitment=True)
+    """Add missing closing sections demanded by THIS RFP.
+
+    Only components this RFP obliges the vendor to submit. A closing statement
+    is no longer forced in: under a page limit an unrequested section displaces
+    content the RFP actually asks for.
+    """
+    components = detect_closing_components(rfp_text)
     if not components:
         return draft, [], ["No closing package items available."]
 

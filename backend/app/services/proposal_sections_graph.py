@@ -1004,7 +1004,15 @@ def _sanitize_bio_extraction(extracted: dict[str, Any], kb_text: str) -> dict[st
         area = str(exp.get("area") or "").strip()
         years = str(exp.get("years") or "").strip()
         if area and _item_appears_in_kb(area, kb_text):
-            expertise.append({"area": area, "years": years or "[VERIFY]"})
+            # Colon form is required: VERIFY_TAG_RE is r"\[VERIFY:\s*([^\]]+)\]",
+            # and every resolver (proposal_verify_optional_scrub, the section
+            # editor's KB fill-in, budget content) matches on it. A bare
+            # "[VERIFY]" is invisible to all of them, so it could never be
+            # filled from the KB nor dropped when the RFP does not ask for it —
+            # it survived to the final document by construction.
+            expertise.append(
+                {"area": area, "years": years or "[VERIFY: years of experience]"}
+            )
     clean["expertise"] = expertise
 
     work_history: list[dict[str, str]] = []
@@ -1703,6 +1711,14 @@ def _section_system_preamble(state: SectionsGraphState) -> str:
     return _narrative_section_preamble(state)
 
 
+# Per-subsection KB slices. The bucket budgets in proposal_knowledge_base_tools
+# already bound these; the point here is the *relative* narrowing — "who we are"
+# deliberately sees less company detail than the default so it stays narrative.
+_KB_SLICE_VOICE = 12_000
+_KB_SLICE_COMPANY_MINIMAL = 12_000
+_KB_SLICE_COMPANY_REGISTRATION = 20_000
+
+
 def _section_kb_user_content(state: SectionsGraphState, sec_id: str) -> str:
     """Pick KB context per subsection — org structure uses master roster only."""
     if sec_id == "section-1-org-structure":
@@ -1710,21 +1726,21 @@ def _section_kb_user_content(state: SectionsGraphState, sec_id: str) -> str:
             "Master Team Roster "
             f"(SOURCE: {proposal_knowledge_base_tools.MASTER_TEAM_ROSTER_DOC} — "
             "use ONLY names and titles from this document):\n"
-            f"{state.get('kb_master_roster', '')[:500000]}"
+            f"{state.get('kb_master_roster', '')}"
         )
     if sec_id == "section-1-who-we-are":
         return (
-            f"Brand Voice KB:\n{state.get('kb_zo_voice', '')[:80000]}\n\n"
+            f"Brand Voice KB:\n{state.get('kb_zo_voice', '')[:_KB_SLICE_VOICE]}\n\n"
             f"Company facts (minimal — no client lists or certifications):\n"
-            f"{state.get('kb_company', '')[:50000]}"
+            f"{state.get('kb_company', '')[:_KB_SLICE_COMPANY_MINIMAL]}"
         )
     if sec_id == "section-1-business-info":
         return (
             "Company facts (REGISTRATION, LEGAL IDENTITY, AND CONTACT ONLY — "
             "ignore narrative marketing copy, certifications, awards, and team bios):\n"
-            f"{state.get('kb_company', '')[:120000]}"
+            f"{state.get('kb_company', '')[:_KB_SLICE_COMPANY_REGISTRATION]}"
         )
-    return f"Company Knowledge Base:\n{state.get('kb_company', '')[:500000]}"
+    return f"Company Knowledge Base:\n{state.get('kb_company', '')}"
 
 
 _SECTION1_PAGE_RATIOS: dict[str, tuple[float, int]] = {
@@ -2601,7 +2617,7 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
                         f"Proposal context:\n{context_block}\n\n"
                         f"RFP context:\n{state['rfp_context'][:15000]}\n\n"
                         f"Master Team Roster ({proposal_knowledge_base_tools.MASTER_TEAM_ROSTER_DOC}):\n"
-                        f"{roster_text[:500000]}"
+                        f"{roster_text}"
                     )
                 }
             ],
@@ -2731,7 +2747,7 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                     "content": (
                         f"Proposal context:\n{context_block}\n\n"
                         f"RFP requirements summary:\n{state['rfp_context'][:15000]}\n\n"
-                        f"Case study corpus (ONLY use titles listed here):\n{case_corpus[:500000]}"
+                        f"Case study corpus (ONLY use titles listed here):\n{case_corpus}"
                     )
                 }
             ],
@@ -2792,7 +2808,7 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                         "role": "user",
                         "content": (
                             f"Voice:\n{voice}\n\n"
-                            f"Case studies knowledge base:\n{case_corpus[:500000]}"
+                            f"Case studies knowledge base:\n{case_corpus}"
                         ),
                     },
                 ],

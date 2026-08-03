@@ -61,6 +61,33 @@ _STATIC_COVERED_TITLE_RES = (
     # "Qualifications and Experience of the Firm and Key Personnel".
     re.compile(r"^\s*(?:key\s+personnel|team\s+bios?)\s*$", re.IGNORECASE),
     re.compile(r"^\s*staff(?:ing)?\s+(?:bios|resumes|qualifications)\s*$", re.IGNORECASE),
+    # RFP tables of contents often restate a requirement as a whole SENTENCE
+    # rather than a label: "A brief description of the firm, including the year
+    # the firm was established, type of firm (partnership, corporation, etc.)".
+    # Label-only patterns miss those, so the tab was drafted alongside Sections
+    # 1.1/1.3 and repeated the firm history, founding date and entity type.
+    re.compile(
+        r"\b(?:brief\s+)?description\s+of\s+(?:the\s+)?(?:firm|agency|company|"
+        r"organi[sz]ation|proposer|vendor)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\byear\s+(?:the\s+)?(?:firm|agency|company|business)\s+was\s+"
+        r"(?:established|founded|formed|incorporated)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bdate\s+(?:the\s+)?(?:firm|agency|company|business)\s+was\s+"
+        r"(?:established|founded|formed|incorporated)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\btype\s+of\s+(?:firm|entity|organi[sz]ation)\b", re.IGNORECASE),
+    re.compile(r"\bform\s+of\s+(?:business|organi[sz]ation)\b", re.IGNORECASE),
+    re.compile(r"\blegal\s+(?:structure|entity|form|status)\b", re.IGNORECASE),
+    re.compile(
+        r"\byears?\s+in\s+business\b|\bhow\s+long\b.{0,40}\bin\s+business\b",
+        re.IGNORECASE,
+    ),
 )
 
 

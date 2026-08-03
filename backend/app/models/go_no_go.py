@@ -21,6 +21,38 @@ class GoNoGoDecisionMatrixRow(BaseModel):
     notes: str = ""
 
 
+CapabilityStatus = Literal["verified", "partial", "gap", "unverified"]
+
+
+class GoNoGoCapabilityRow(BaseModel):
+    """One RFP requirement matched (or not) to KB evidence.
+
+    Previously these rows existed only as free-form Markdown inside
+    stageOneReport, so nothing could check a "Verified" claim against the KB.
+    Structured here so validation is deterministic: a row may keep
+    status="verified" only when kb_source names a document that was actually
+    retrieved for this RFP and that document's text supports the claim.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    requirement: str
+    status: CapabilityStatus = "unverified"
+    # KB document/file name backing a verified claim. Required for "verified".
+    kb_source: str = Field(default="", alias="kbSource")
+    evidence: str = ""
+    # True when the RFP treats this requirement as mandatory or scored.
+    is_core: bool = Field(default=False, alias="isCore")
+    # Set by the validator when a claim fails its citation check.
+    downgrade_reason: str = Field(default="", alias="downgradeReason")
+    # Why a gap is a gap. "absent" = nothing in the KB addresses it.
+    # "contradicted" = the KB explicitly disclaims it (a bio reading
+    # "Web Design/Development (Not Programming)"). "adjacent" = the KB has
+    # related but materially different work. These are different findings:
+    # absent may be fixable by re-ingesting; contradicted never is.
+    evidence_state: str = Field(default="", alias="evidenceState")
+
+
 class GoNoGoFlag(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -79,6 +111,9 @@ class GoNoGoAnalysis(BaseModel):
         default_factory=list, alias="clarifyingQuestions"
     )
     stage_one_report: str = Field(default="", alias="stageOneReport")
+    capability_matrix: list[GoNoGoCapabilityRow] = Field(
+        default_factory=list, alias="capabilityMatrix"
+    )
     decision_matrix: list[GoNoGoDecisionMatrixRow] = Field(
         default_factory=list, alias="decisionMatrix"
     )

@@ -56,6 +56,7 @@ import { ProposalManualFlagsPanel } from "./ProposalManualFlagsPanel";
 import { ProposalPipelineProgressStrip } from "./ProposalPipelineProgressStrip";
 import { ProposalVersionCompare } from "./ProposalVersionCompare";
 import { KeyPersonasBox } from "./KeyPersonasBox";
+import { KeyPersonasModal } from "./KeyPersonasModal";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
 import {
   ConfirmDialogProvider,
@@ -294,6 +295,42 @@ function ProposalDraftWorkspaceInner({
       selectedKeyPersonas: selectedPersonaIds,
     }));
   }, []);
+
+  // Key personas are a precondition for generation: the proposal names and
+  // staffs these people, and a draft built without them has to be regenerated
+  // rather than edited. The gate holds the requested action and runs it once a
+  // selection exists, so the user is not sent back to find the button again.
+  const [personaGateOpen, setPersonaGateOpen] = useState(false);
+  const pendingGenerateRef = useRef<null | (() => void)>(null);
+
+  const selectedPersonaIds = useMemo(
+    () => outline.selectedKeyPersonas || [],
+    [outline.selectedKeyPersonas]
+  );
+  const hasKeyPersonas = selectedPersonaIds.length > 0;
+
+  const requireKeyPersonas = useCallback(
+    (run: () => void) => {
+      if (selectedPersonaIds.length > 0) {
+        run();
+        return;
+      }
+      pendingGenerateRef.current = run;
+      setPersonaGateOpen(true);
+    },
+    [selectedPersonaIds]
+  );
+
+  const closePersonaGate = useCallback(() => {
+    setPersonaGateOpen(false);
+    const pending = pendingGenerateRef.current;
+    pendingGenerateRef.current = null;
+    // Only continue when a selection was actually made — dismissing the modal
+    // must not start a run the gate exists to prevent.
+    if (pending && (outline.selectedKeyPersonas || []).length > 0) {
+      pending();
+    }
+  }, [outline.selectedKeyPersonas]);
 
   const openSectionChat = useCallback((request?: SectionChatReference | null) => {
     if (request) {
@@ -2184,7 +2221,11 @@ function ProposalDraftWorkspaceInner({
             ) : null}
             <button
               type="button"
-              onClick={() => void handleGenerateFullProposal({ startAfterSections1to3: true })}
+              onClick={() =>
+                requireKeyPersonas(() =>
+                  void handleGenerateFullProposal({ startAfterSections1to3: true })
+                )
+              }
               disabled={anyPipelineRunning}
               className="proposal-toolbar-btn disabled:opacity-60"
               title="Deletes existing Intelligence / RFP tabs / Budget / Review, keeps Sections 1–3, then rebuilds from Phase 2"
@@ -2196,9 +2237,19 @@ function ProposalDraftWorkspaceInner({
               initialSelectedIds={outline.selectedKeyPersonas || []}
               onSelectionChange={handleKeyPersonasChange}
             />
+            {/* Gate shown when generation is attempted with no personas chosen.
+                Separate instance from KeyPersonasBox so its open state is
+                driven by the generate action rather than by the toolbar. */}
+            <KeyPersonasModal
+              isOpen={personaGateOpen}
+              onClose={closePersonaGate}
+              rfpId={rfp.id}
+              initialSelectedIds={outline.selectedKeyPersonas || []}
+              onSelectionChange={handleKeyPersonasChange}
+            />
             <button
               type="button"
-              onClick={() => void handlePrimaryPipeline()}
+              onClick={() => requireKeyPersonas(() => void handlePrimaryPipeline())}
               disabled={anyPipelineRunning}
               className="zo-btn proposal-toolbar-btn disabled:opacity-60"
             >
@@ -2590,9 +2641,14 @@ function ProposalDraftWorkspaceInner({
             <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
               <button
                 type="button"
-                onClick={() => void handleGenerateFullProposal()}
+                onClick={() => requireKeyPersonas(() => void handleGenerateFullProposal())}
                 disabled={anyPipelineRunning}
                 className="zo-btn disabled:opacity-60"
+                title={
+                  hasKeyPersonas
+                    ? undefined
+                    : "Select key personas first — they are named and staffed throughout the proposal"
+                }
               >
                 Generate Proposal
               </button>

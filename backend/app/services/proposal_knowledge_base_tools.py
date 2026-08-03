@@ -11,13 +11,26 @@ from app.services.rfp_repository import get_rfp
 
 logger = logging.getLogger(__name__)
 
-SEARCH_CHARACTER_LIMIT = 500_000
+SEARCH_CHARACTER_LIMIT = 60_000
 PROPOSAL_KB_SEARCH_LIMIT = 50
+
+# Per-document ceiling applied before the bucket total. Without it a single large
+# document (a 400k-char master roster, a merged case-study export) consumes the
+# whole budget and starves every other hit, which is what produced empty
+# extractions and the resulting [VERIFY] placeholders — see
+# docs/DEBUG_VERIFY_PLACEHOLDERS.md. Capping per document keeps the corpus
+# *diverse* rather than deep on one file.
+PROPOSAL_KB_DOC_CHAR_LIMIT = 8_000
+
+# Bucket totals sized to what each section actually needs. These are prompt
+# inputs re-sent on every subsection / case-study call, so the cost of an
+# oversized budget is multiplied by the number of calls, and recall past the
+# first few thousand relevant characters is negative (lost-in-the-middle).
 PROPOSAL_BUCKET_CHAR_LIMITS = {
-    "zo_voice": 500_000,
-    "company": 500_000,
-    "bios": 500_000,
-    "case_studies": 500_000,
+    "zo_voice": 20_000,
+    "company": 45_000,
+    "bios": 60_000,
+    "case_studies": 60_000,
 }
 
 
@@ -25,7 +38,8 @@ PROPOSAL_KB_BUCKETS = ("zo_voice", "company", "bios", "case_studies")
 
 # Referenced in prompts — retrieval itself is search-driven, not hardcoded to this file.
 MASTER_TEAM_ROSTER_DOC = "02_MasterTemplate_OrgStructure_AllTeamBios.pdf"
-MASTER_TEAM_ROSTER_CHAR_LIMIT = 500_000
+# Single known document, so no per-doc spread concern — but still bounded.
+MASTER_TEAM_ROSTER_CHAR_LIMIT = 80_000
 
 PROPOSAL_QUERY_PLANNER_PROMPT = """You plan targeted Supermemory knowledge-base searches for zö agency proposal Sections 1–3.
 The KB contains ONLY zö agency materials (company facts, bios, case studies, pricing guide) —
@@ -295,6 +309,7 @@ async def search_and_fetch_full(
     *,
     limit: int = PROPOSAL_KB_SEARCH_LIMIT,
     max_chars: int = SEARCH_CHARACTER_LIMIT,
+    max_chars_per_doc: int | None = PROPOSAL_KB_DOC_CHAR_LIMIT,
     filters: dict[str, Any] | None = None,
 ) -> tuple[str, list[str]]:
     """Run hybrid search, then load each matching document's full indexed text."""
@@ -302,19 +317,74 @@ async def search_and_fetch_full(
         return "(Supermemory not configured.)", []
 
     hits = await _search_hits_all_modes(query, limit=limit, filters=filters)
-    return await fetch_full_documents_for_hits(hits, max_chars=max_chars)
+    return await fetch_full_documents_for_hits(
+        hits, max_chars=max_chars, max_chars_per_doc=max_chars_per_doc
+    )
+
+
+def _collapse_ws(text: str) -> str:
+    return " ".join(text.split())
+
+
+def relevance_window(content: str, anchor: str, max_chars: int) -> tuple[str, bool]:
+    """Return <= max_chars of ``content`` centred on the search-matched passage.
+
+    ``anchor`` is the chunk text the hybrid search actually matched. Front-
+    truncating instead would drop the relevant passage whenever it sits past
+    ``max_chars`` — the exact failure that produced empty extractions and
+    [VERIFY] placeholders. Falls back to a head slice when the anchor cannot be
+    located. Returns (text, was_windowed).
+    """
+    if len(content) <= max_chars:
+        return content, False
+
+    idx = -1
+    probe_raw = (anchor or "").strip()
+    for size in (200, 120, 60):
+        probe = probe_raw[:size]
+        if len(probe) < 20:
+            continue
+        idx = content.find(probe)
+        if idx >= 0:
+            break
+
+    if idx < 0 and len(probe_raw) >= 20:
+        # Whitespace between the indexed chunk and the stored document often
+        # differs; match in collapsed space and map the offset back by ratio.
+        collapsed_content = _collapse_ws(content)
+        collapsed_anchor = _collapse_ws(probe_raw)[:120]
+        if len(collapsed_anchor) >= 20 and collapsed_content:
+            c_idx = collapsed_content.find(collapsed_anchor)
+            if c_idx >= 0:
+                idx = int(len(content) * (c_idx / len(collapsed_content)))
+
+    if idx < 0:
+        return content[:max_chars], True
+
+    half = max_chars // 2
+    start = max(0, idx - half)
+    end = min(len(content), start + max_chars)
+    start = max(0, end - max_chars)
+    return content[start:end], True
 
 
 async def fetch_full_documents_for_hits(
     hits: list[dict[str, Any]],
     *,
     max_chars: int,
+    max_chars_per_doc: int | None = PROPOSAL_KB_DOC_CHAR_LIMIT,
 ) -> tuple[str, list[str]]:
-    """For each unique search hit, load the complete document via v3 GET."""
+    """Load each unique search hit's document text, windowed on the matched passage.
+
+    ``max_chars_per_doc`` bounds each document before the shared ``max_chars``
+    budget is applied, so one oversized file cannot crowd out later hits. Pass
+    ``None`` to disable when a caller genuinely wants one document in full.
+    """
     seen_docs: set[str] = set()
     parts: list[str] = []
     sources: list[str] = []
     total = 0
+    windowed_docs = 0
 
     for hit in hits:
         doc_key = supermemory.document_dedupe_key(hit)
@@ -326,6 +396,13 @@ async def fetch_full_documents_for_hits(
         if not content:
             continue
 
+        if max_chars_per_doc is not None:
+            content, was_windowed = relevance_window(
+                content, supermemory.hit_text(hit), max_chars_per_doc
+            )
+            if was_windowed:
+                windowed_docs += 1
+
         label = supermemory.hit_file_name(hit) or doc_key
         remaining = max_chars - total
         if remaining <= 0:
@@ -336,6 +413,14 @@ async def fetch_full_documents_for_hits(
         parts.append(block)
         sources.append(label)
         total += len(block)
+
+    logger.info(
+        "  [KB fetch] docs=%d chars=%d/%d windowed=%d",
+        len(sources),
+        total,
+        max_chars,
+        windowed_docs,
+    )
 
     text = "\n\n".join(parts).strip()
     return text or "(No matching knowledge-base content.)", sources
@@ -596,7 +681,13 @@ async def fetch_master_team_roster(
     # Fallback only when the exact document cannot be fetched.
     query = f"{MASTER_TEAM_ROSTER_DOC} organizational structure team roster"
     logger.info("  └─ [Team Selection] fallback roster query: %s", query)
-    return await search_and_fetch_full(query, limit=4, max_chars=MASTER_TEAM_ROSTER_CHAR_LIMIT)
+    # One known target document — take it whole rather than spreading the budget.
+    return await search_and_fetch_full(
+        query,
+        limit=4,
+        max_chars=MASTER_TEAM_ROSTER_CHAR_LIMIT,
+        max_chars_per_doc=None,
+    )
 
 
 async def _gather_bucket(

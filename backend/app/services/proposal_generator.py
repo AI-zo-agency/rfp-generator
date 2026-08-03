@@ -34,7 +34,11 @@ from app.services.proposal_repository import (
     asave_research_cache,
 )
 from app.services.proposal_common import aload_rfp_for_proposal
-from app.services.proposal_drafting_graph import run_drafting_graph
+from app.services.proposal_drafting_graph import (
+    MIN_SECTION_WORDS,
+    WORDS_PER_PAGE,
+    run_drafting_graph,
+)
 from app.services.proposal_budget_content import incorporate_budget_into_draft
 from app.services.proposal_budget_editor import run_budget_editor_pass
 from app.services.proposal_budget_sync import (
@@ -263,6 +267,66 @@ def static_sections_1_3_have_content(draft: ProposalDraft | None) -> bool:
 
 
 from app.services.proposal_common import ProposalError, can_start_proposal, load_rfp_for_proposal
+
+
+# Share of the page limit held back for content written outside the drafting
+# graph — budget/cost tables, closing forms, signature blocks. Without a reserve
+# the drafting graph spends the whole allowance and those sections push the
+# manuscript back over the limit.
+_NON_DRAFT_RESERVE = 0.15
+
+
+def _remaining_word_budget(
+    *,
+    rfp: RfpRecord,
+    already_written: list[ProposalSection],
+    drafting_count: int,
+) -> int | None:
+    """Words the drafting graph may spend, given the RFP's page limit.
+
+    Returns None when the RFP states no page limit — sections then keep their
+    natural targets, as before.
+    """
+    if not rfp.page_limit or rfp.page_limit <= 0 or drafting_count <= 0:
+        return None
+
+    total = rfp.page_limit * WORDS_PER_PAGE
+    spent = sum(
+        len((section.content or "").split())
+        for section in already_written
+        if (section.content or "").strip()
+    )
+    reserve = int(total * _NON_DRAFT_RESERVE)
+    remaining = total - spent - reserve
+
+    floor = MIN_SECTION_WORDS * drafting_count
+    if remaining < floor:
+        logger.warning(
+            "page budget exhausted for %s: limit=%dpg total=%dw spent=%dw "
+            "reserve=%dw remaining=%dw < floor=%dw — drafting at the floor; "
+            "outline is too large for the page limit",
+            rfp.id,
+            rfp.page_limit,
+            total,
+            spent,
+            reserve,
+            remaining,
+            floor,
+        )
+        return floor
+
+    logger.info(
+        "page budget for %s: limit=%dpg total=%dw spent=%dw reserve=%dw "
+        "available=%dw across %d sections",
+        rfp.id,
+        rfp.page_limit,
+        total,
+        spent,
+        reserve,
+        remaining,
+        drafting_count,
+    )
+    return remaining
 
 
 def _default_sections(page_limit: int | None) -> list[ProposalSection]:
@@ -1819,6 +1883,12 @@ async def _run_phase3_drafting_inner(
             raise ProposalError("Proposal draft missing after Phase 3 seed.", status_code=500)
         return draft, research
 
+    doc_word_budget = _remaining_word_budget(
+        rfp=rfp,
+        already_written=[*static_sections, *already_filled],
+        drafting_count=len(sections_to_draft),
+    )
+
     with pipeline_step("drafting_graph", section_count=len(sections_to_draft)):
         drafted_rfp_sections, provider, jit_corpus = await run_drafting_graph(
             rfp_id=rfp.id,
@@ -1846,6 +1916,7 @@ async def _run_phase3_drafting_inner(
             ),
             fact_ledger=research.fact_ledger,
             evidence_allocation=research.evidence_allocation,
+            doc_word_budget=doc_word_budget,
             on_sections_drafted=_on_phase3_batch,
         )
 

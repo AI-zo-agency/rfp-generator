@@ -168,7 +168,38 @@ def get_proposal_draft(rfp_id: str) -> ProposalDraft | None:
     return ProposalDraft.model_validate(json.loads(row["payload"]))
 
 
+def _preserve_selected_key_personas(draft: ProposalDraft) -> None:
+    """Carry the user's Key Persona picks across draft rebuilds.
+
+    Generation rebuilds ProposalDraft from scratch at several points
+    (sections 1-3, phase 3 partials, budget merge) and none of those
+    constructors pass selectedKeyPersonas, so it defaulted to [] and the
+    selection was silently wiped on the first save. The visible symptoms were a
+    "Key Personas 0" badge after generating and a Section 2 containing one bio
+    instead of the three chosen — with the picks gone, team selection fell
+    through to the LLM roster-matching agent.
+
+    An explicit selection is only ever cleared through the personas API, which
+    does its own preservation check.
+    """
+    if getattr(draft, "selected_key_personas", None):
+        return
+    try:
+        existing = get_proposal_draft(draft.rfp_id)
+    except Exception:  # pragma: no cover - never block a save on this
+        return
+    previous = getattr(existing, "selected_key_personas", None) if existing else None
+    if previous:
+        draft.selected_key_personas = list(previous)
+        logger.info(
+            "preserved %d selected key persona(s) across draft rebuild for %s",
+            len(previous),
+            draft.rfp_id,
+        )
+
+
 def save_proposal_draft(draft: ProposalDraft) -> None:
+    _preserve_selected_key_personas(draft)
     if _use_supabase():
         _with_supabase_retry(
             "save_proposal_draft",

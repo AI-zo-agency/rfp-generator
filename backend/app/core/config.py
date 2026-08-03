@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     llm_prefer_fireworks: bool = False
     # When true, skip Gemini - use OpenRouter as primary (before Fireworks).
     llm_prefer_openrouter: bool = False
+    # Master switch for OpenRouter usability. A key can be present but unfunded;
+    # set this false to keep quality-critical stages on the economy provider
+    # instead of paying a failed round-trip before every fallback. Flip to true
+    # when credits are topped up and judgment stages move to the heavy model
+    # with no code change.
+    llm_openrouter_enabled: bool = True
 
     # Phase 1: decision-first Company Qualification Layer for Section 1.
     use_company_qualification_s1: bool = False

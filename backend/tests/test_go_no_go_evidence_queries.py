@@ -193,7 +193,7 @@ class GoNoGoEvidenceQueryTests(unittest.TestCase):
         for row in cleaned["decisionMatrix"]:
             self.assertNotIn("62%", str(row.get("notes") or ""))
 
-    def test_scrub_invented_eval_weights_bumps_depressed_scores(self) -> None:
+    def test_scrub_invented_eval_weights_never_raises_scores(self) -> None:
         raw = {
             "summary": "Worth 2/5 due to cost evaluation weighted at 62%. Ella Lindeau flagged.",
             "worthScore": 2,
@@ -249,9 +249,16 @@ class GoNoGoEvidenceQueryTests(unittest.TestCase):
         by_dim = {
             str(row["dimension"]): row for row in cleaned["decisionMatrix"]
         }
-        self.assertGreaterEqual(by_dim["Financial Viability"]["score"], 3)
-        self.assertGreaterEqual(by_dim["Win Probability"]["score"], 3)
-        self.assertEqual(cleaned["worthScore"], 3)
+        # Deliberate reversal. This previously asserted the scrubber RAISED
+        # these scores (Financial Viability >= 3, Win Probability >= 3,
+        # worthScore == 3) when it detected invented evaluation weights.
+        # compute_overall_go_score averages the matrix, so finding fabrication
+        # increased the composite — an opportunity with no verifiable capability
+        # match scored 3.4 / "GO WITH CONDITIONS". Fabrication must reduce
+        # confidence, never inflate a score.
+        self.assertLessEqual(by_dim["Financial Viability"]["score"], 2)
+        self.assertLessEqual(by_dim["Win Probability"]["score"], 2)
+        self.assertLessEqual(cleaned["worthScore"], 2)
         report = cleaned["stageOneReport"]
         self.assertIn("not disclosed", report.casefold())
         self.assertNotIn("62%", report)

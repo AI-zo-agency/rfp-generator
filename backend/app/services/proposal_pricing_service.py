@@ -808,7 +808,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     with pipeline_step("fetch_pricing_guide"):
         guide_text, kb_sources = await _fetch_guide_context(rfp, stage_two)
 
-    from app.services.pricing_rate_card_builder import build_pricing_rate_card_from_guide_text
+    from app.services.pricing_rate_card_store import build_stable_rate_card
     from app.services.pricing_rate_binding import bind_budget_line_items_to_rate_card
     from app.services.pricing_contract_builder import (
         build_pricing_contract,
@@ -816,7 +816,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     )
     from app.services.commission_budget_sanitizer import sanitize_commission_budget
 
-    rate_card = build_pricing_rate_card_from_guide_text(guide_text)
+    rate_card = build_stable_rate_card(guide_text)
     for warn in rate_card.warnings:
         logger.info("pricing_rate_card_warning rfp_id=%s warn=%s", rfp_id, warn)
 
@@ -849,7 +849,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
                     "Low Average High tier ranges (Avg: $)"
                 ),
             )
-        rate_card = build_pricing_rate_card_from_guide_text(guide_text)
+        rate_card = build_stable_rate_card(guide_text)
         guide_missing = bool((guide_text or "").startswith("(No 00_Guide_Pricing"))
         assert_rate_card_usable(
             rate_card=rate_card,
@@ -1214,7 +1214,7 @@ async def reconcile_cached_budget(rfp_id: str) -> tuple[ProposalBudget, Proposal
     from app.services.commission_budget_sanitizer import sanitize_commission_budget
     from app.services.pricing_contract_builder import build_pricing_contract
     from app.services.pricing_rate_binding import bind_budget_line_items_to_rate_card
-    from app.services.pricing_rate_card_builder import build_pricing_rate_card_from_guide_text
+    from app.services.pricing_rate_card_store import build_stable_rate_card
 
     stage_one, _ = _stage_one_text(rfp)
     prior_notes = ""
@@ -1256,7 +1256,7 @@ async def reconcile_cached_budget(rfp_id: str) -> tuple[ProposalBudget, Proposal
             rate_card = None
     if rate_card is None:
         guide_text, _kb = await _fetch_guide_context(rfp, _structural_map_text(research)[0])
-        rate_card = build_pricing_rate_card_from_guide_text(guide_text)
+        rate_card = build_stable_rate_card(guide_text)
     budget = bind_budget_line_items_to_rate_card(budget, rate_card)
     budget = run_budget_editor_pass(
         budget,

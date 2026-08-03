@@ -17,6 +17,30 @@ from app.models.go_no_go import (
 )
 from app.models.rfp import RfpRecord
 from app.services import llm, supermemory
+from app.services.go_no_go_requirements import (
+    REQUIREMENT_PLANNER_PROMPT,
+    RfpRequirement,
+    all_queries,
+    parse_requirements,
+)
+from app.services.go_no_go_role_queries import (
+    required_disciplines,
+    role_evidence_queries,
+)
+from app.models.go_no_go import GoNoGoCapabilityRow
+from app.services.go_no_go_adjudicator import (
+    ADJUDICATOR_PROMPT,
+    build_adjudication_payload,
+    rows_from_assessments,
+)
+from app.services.go_no_go_capability import (
+    build_matrix_from_requirements,
+    coherent_dimension_cap,
+    derive_technical_capability_score,
+    reconcile_narrative,
+    upsert_capability_section,
+    unverified_core_requirements,
+)
 from app.services.rfp_content import combine_rfp_text, load_local_rfp_text, resolve_rfp_pdf_path
 from app.services.pdf_text import IMAGE_ONLY_TEXT_THRESHOLD
 from app.services.rfp_repository import get_rfp_pdf_path
@@ -971,10 +995,11 @@ def _truncate_rfp_text(text: str, *, max_chars: int = RFP_PROMPT_MAX_CHARS) -> s
     return build_priority_rfp_excerpt(text, max_chars=max_chars)
 
 
-async def _plan_knowledge_base_queries(
+async def _plan_rfp_requirements(
     rfp: RfpRecord,
     content: RfpContentInfo,
-) -> list[str]:
+) -> list[RfpRequirement]:
+    """Decompose the RFP into requirements, each carrying its own KB queries."""
     excerpt = _sanitize_text_for_search(
         combine_rfp_text(content.description, content.pdf_text),
         max_chars=8_000,
@@ -985,7 +1010,7 @@ async def _plan_knowledge_base_queries(
             max_chars=8_000,
         )
     messages = [
-        {"role": "system", "content": KB_QUERY_PLANNER_PROMPT},
+        {"role": "system", "content": REQUIREMENT_PLANNER_PROMPT},
         {
             "role": "user",
             "content": (
@@ -998,30 +1023,42 @@ async def _plan_knowledge_base_queries(
         },
     ]
     try:
-        raw, provider = await llm.chat_json(messages, max_tokens=1024, temperature=0.25)
-        queries = raw.get("queries", [])
-        if isinstance(queries, list):
-            planned = [str(query).strip() for query in queries if str(query).strip()]
-            logger.info(
-                "Planned %d KB search queries for %s via %s",
-                len(planned),
-                rfp.id,
-                provider,
-            )
-            return planned[:16]
+        raw, provider = await llm.chat_json(messages, max_tokens=4096, temperature=0.2)
+        requirements = parse_requirements(raw)
+        logger.info(
+            "Planned %d RFP requirements (%d core) for %s via %s",
+            len(requirements),
+            sum(1 for r in requirements if r.is_core),
+            rfp.id,
+            provider,
+        )
+        return requirements
     except llm.LlmError as exc:
-        logger.warning("KB query planning failed for %s: %s", rfp.id, exc)
+        logger.warning("RFP requirement planning failed for %s: %s", rfp.id, exc)
     return []
 
 
 async def _gather_knowledge_context(
     rfp: RfpRecord,
     content: RfpContentInfo,
-) -> str:
-    if not supermemory.is_configured():
-        return "(Knowledge base search unavailable — SUPERMEMORY_API_KEY not configured.)"
+) -> tuple[str, list[dict[str, Any]], list[RfpRequirement], dict[str, list[dict[str, Any]]]]:
+    """Return (KB excerpts, all hits, RFP requirements, hits per requirement).
 
-    planned = await _plan_knowledge_base_queries(rfp, content)
+    The hits are returned as well as the prose so capability claims can be
+    validated against documents that were actually retrieved. Previously only
+    the string escaped this function, which is why nothing downstream could
+    tell a real citation from an invented one.
+    """
+    if not supermemory.is_configured():
+        return (
+            "(Knowledge base search unavailable — SUPERMEMORY_API_KEY not configured.)",
+            [],
+            [],
+            {},
+        )
+
+    requirements = await _plan_rfp_requirements(rfp, content)
+    planned = all_queries(requirements)
     sector_query = f"zö agency {rfp.sector} sector experience case studies similar clients"
     location_query = (
         f"zö agency {rfp.location} state registration vendor compliance"
@@ -1060,6 +1097,10 @@ async def _gather_knowledge_context(
     if re.search(r"housing authority|HUD|public housing", rfp_sample, re.IGNORECASE):
         queries.append("zö agency housing authority HUD public housing case study")
     queries.extend(_deterministic_evidence_queries(rfp, content))
+    # Search for the disciplines the RFP actually names, so a required role is
+    # answered by whoever in the KB does that job — not by whichever bios rank
+    # on topical similarity to the sector.
+    queries.extend(role_evidence_queries(rfp_sample))
     queries.extend(planned)
 
     seen_queries: set[str] = set()
@@ -1083,6 +1124,17 @@ async def _gather_knowledge_context(
             return []
 
     results = await asyncio.gather(*(run_query(query) for query in unique_queries))
+    by_query = dict(zip(unique_queries, results))
+
+    # Attribute hits to the requirement whose query produced them, so the
+    # capability matrix is built from each requirement's OWN evidence rather
+    # than from one undifferentiated pool.
+    hits_by_requirement: dict[str, list[dict[str, Any]]] = {}
+    for requirement in requirements:
+        collected: list[dict[str, Any]] = []
+        for query in requirement.kb_queries:
+            collected.extend(by_query.get(query.strip(), []))
+        hits_by_requirement[requirement.requirement] = collected
 
     merged = _merge_kb_hits_round_robin(list(results))
 
@@ -1098,7 +1150,12 @@ async def _gather_knowledge_context(
         len(merged),
         len(formatted),
     )
-    return formatted or "(No knowledge base excerpts returned for this search.)"
+    return (
+        formatted or "(No knowledge base excerpts returned for this search.)",
+        merged,
+        requirements,
+        hits_by_requirement,
+    )
 
 
 def _build_rfp_context(rfp: RfpRecord, content: RfpContentInfo) -> str:
@@ -1249,6 +1306,15 @@ def _coerce_evaluations(raw: object) -> list[dict[str, str]]:
 
 def _coerce_go_no_go_raw(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalize LLM output before Pydantic validation (minimax often drifts schema)."""
+    # The capability matrix is rebuilt deterministically from the RFP
+    # requirements and their retrieved evidence, so whatever the model wrote is
+    # discarded. Dropping it here also stops a schema drift (e.g. "Verified"
+    # instead of "verified") from failing validation and 502-ing the whole
+    # analysis — the model must never be able to break the run with a field we
+    # do not use.
+    raw.pop("capabilityMatrix", None)
+    raw.pop("capability_matrix", None)
+
     raw["summary"] = str(raw.get("summary") or "Go/No-Go analysis complete.").strip()
     raw["stageOneReport"] = str(raw.get("stageOneReport") or raw.get("stage_one_report") or "").strip()
 
@@ -1498,18 +1564,27 @@ def _scrub_invented_eval_and_people(
                     or "62%" in notes
                     or int(row.get("score") or 0) <= 2
                 ):
-                    score = int(row.get("score") or 0)
-                    if score <= 2:
-                        row["score"] = min(3, score + 1)
+                    # Scores are NEVER raised here. This branch fires because the
+                    # model invented an evaluation table, i.e. the analysis is
+                    # less trustworthy than usual — bumping the score turned a
+                    # fabrication signal into a higher Go score, which is how a
+                    # no-go opportunity scored 3.4. Restate the note only.
                     row["notes"] = (
                         "Point-weighted evaluation table not disclosed in RFP — "
                         "score based on scope fit, competition, and logistics only."
                     )
                 elif _INVENTED_EVAL_WEIGHT_RE.search(notes):
                     row["notes"] = _INVENTED_EVAL_WEIGHT_RE.sub("", notes).strip()
-        worth = raw.get("worthScore")
-        if isinstance(worth, int) and worth <= 2:
-            raw["worthScore"] = 3
+        # worthScore is likewise left as-is. Detecting invented weights cannot
+        # justify raising it; if the fabrication makes the recommendation
+        # unreliable, downgrade the recommendation instead of inflating a score.
+        if raw.get("recommendation") == "go":
+            raw["recommendation"] = "review"
+            if isinstance(gaps, list):
+                gaps.append(
+                    "Evaluation weights in this analysis were not found in the RFP — "
+                    "treat scoring as low-confidence and confirm criteria manually."
+                )
         gaps[:] = [
             g
             for g in gaps
@@ -1736,6 +1811,213 @@ def compute_overall_go_score(analysis: GoNoGoAnalysis) -> float | None:
     return float(fit if fit is not None else worth)
 
 
+async def _adjudicate_capabilities(
+    rfp: RfpRecord,
+    requirements: list[RfpRequirement],
+    hits_by_requirement: dict[str, list[dict[str, Any]]],
+    all_hits: list[dict[str, Any]],
+) -> list[GoNoGoCapabilityRow]:
+    """Judge each requirement against its retrieved KB, verifying every quote.
+
+    Semantic judgment is the model's (WordPress evidences CMS; a keyword matcher
+    cannot see that). Non-fabrication is ours: a claim survives only if its
+    quote actually appears in the document it cites.
+    """
+    if not requirements:
+        return []
+
+    body, sources = build_adjudication_payload(
+        requirements, hits_by_requirement, all_hits
+    )
+    if not body.strip():
+        return build_matrix_from_requirements(requirements, hits_by_requirement)
+
+    try:
+        raw, provider = await llm.chat_json(
+            [
+                {"role": "system", "content": ADJUDICATOR_PROMPT},
+                {"role": "user", "content": body[:60_000]},
+            ],
+            max_tokens=6000,
+            temperature=0.0,
+            node_name="capability_adjudicator",
+            rfp_id=rfp.id,
+        )
+    except llm.LlmError as exc:
+        logger.warning(
+            "capability adjudication failed for %s (%s) — falling back to "
+            "term matching",
+            rfp.id,
+            str(exc)[:160],
+        )
+        return build_matrix_from_requirements(requirements, hits_by_requirement)
+
+    assessments = raw.get("assessments")
+    if not isinstance(assessments, list):
+        logger.warning(
+            "capability adjudication returned no assessments for %s — falling "
+            "back to term matching",
+            rfp.id,
+        )
+        return build_matrix_from_requirements(requirements, hits_by_requirement)
+
+    rows, rejected = rows_from_assessments(requirements, assessments, sources)
+    logger.info(
+        "capability adjudication for %s via %s: %d rows, %d verified, "
+        "%d ungrounded claims rejected",
+        rfp.id,
+        provider,
+        len(rows),
+        sum(1 for r in rows if r.status == "verified"),
+        len(rejected),
+    )
+    return rows
+
+
+def _enforce_capability_evidence(
+    analysis: GoNoGoAnalysis,
+    kb_hits: list[dict[str, Any]],
+) -> GoNoGoAnalysis:
+    """Downgrade unevidenced capability claims and re-derive the technical score.
+
+    Nothing here trusts the model's own "Verified" label. A claim survives only
+    when the cited KB document was retrieved for this RFP and its text supports
+    the requirement; otherwise the row is downgraded, listed as a critical gap,
+    and the recommendation is forced to no_go when a core requirement fails.
+    """
+    if analysis.insufficient_data:
+        # Thin-RFP path already suppresses scores and recommendation.
+        return analysis
+
+    if not analysis.capability_matrix:
+        # Fail CLOSED. An empty matrix means no capability was evidenced at all,
+        # not that everything checks out. Returning the analysis untouched here
+        # would let a model that simply omitted the field bypass every check
+        # below — the same fail-open shape as the original bug.
+        gaps = list(analysis.critical_gaps)
+        note = (
+            "No capability matrix was produced, so no capability claim in this "
+            "analysis has been checked against the knowledge base. Treat the "
+            "capability assessment as unverified."
+        )
+        if note not in gaps:
+            gaps.append(note)
+        updates: dict[str, Any] = {"critical_gaps": gaps}
+        if analysis.recommendation == "go":
+            updates["recommendation"] = "review"
+        logger.warning(
+            "go_no_go capability matrix missing — capability claims unvalidated; "
+            "recommendation held at '%s'",
+            updates.get("recommendation", analysis.recommendation),
+        )
+        return analysis.model_copy(update=updates)
+
+    # Rows reaching here are ALREADY validated — either by the adjudicator
+    # (every quote checked verbatim against the document it cites) or by the
+    # term-matching fallback. Re-running term matching over adjudicated rows
+    # made the old matcher overrule the new one: a live run produced
+    # "12 rows, 2 verified, 0 ungrounded claims rejected" and then immediately
+    # "capability downgrades=7", because a grounded quote from
+    # 02_MasterTemplate_OrgStructure_AllTeamBios.pdf does not share keywords
+    # with "Website redesign and modernization". The model's own matrix can no
+    # longer reach this point (it is dropped in _coerce_go_no_go_raw), so a
+    # second check has nothing left to catch and only destroys good evidence.
+    del kb_hits  # rows arrive validated; nothing left to cross-check them against
+    validated = list(analysis.capability_matrix)
+    downgrades = [
+        f"{row.requirement}: {row.downgrade_reason}"
+        for row in validated
+        if row.downgrade_reason
+    ]
+    updates: dict[str, Any] = {"capability_matrix": validated}
+
+    gaps = list(analysis.critical_gaps)
+    for message in downgrades:
+        gap = f"Unverified capability claim — {message}"
+        if gap not in gaps:
+            gaps.append(gap)
+
+    core_gaps = unverified_core_requirements(validated)
+    derived = derive_technical_capability_score(validated)
+
+    matrix = [row.model_copy() for row in analysis.decision_matrix]
+    if derived is not None:
+        for row in matrix:
+            if row.dimension.casefold() == "technical capability match":
+                if derived < row.score:
+                    row.notes = (
+                        f"{row.notes} | Score reduced to {derived}/5: "
+                        f"{len(core_gaps)} core requirement(s) lack verifiable "
+                        "KB evidence."
+                    ).strip(" |")
+                    row.score = derived
+                continue
+
+            # Dimensions downstream of capability cannot outrun it. A 0/5
+            # technical match beside a 4/5 win probability averaged out to a
+            # "moderate" 3.0 on an opportunity zö cannot deliver.
+            cap = coherent_dimension_cap(row.dimension, derived)
+            if cap is not None and row.score > cap:
+                row.notes = (
+                    f"{row.notes} | Capped at {cap}/5: cannot exceed technical "
+                    f"capability ({derived}/5) — {len(core_gaps)} core "
+                    "requirement(s) lack verifiable KB evidence."
+                ).strip(" |")
+                row.score = cap
+        updates["decision_matrix"] = matrix
+
+    if core_gaps:
+        updates["recommendation"] = "no_go"
+        summary_gap = (
+            "Core RFP requirements with no verifiable KB evidence: "
+            + ", ".join(core_gaps[:6])
+        )
+        if summary_gap not in gaps:
+            gaps.append(summary_gap)
+        logger.info(
+            "go_no_go forced no_go for %s: %d unverified core requirement(s)",
+            analysis.__dict__.get("rfp_id", "?"),
+            len(core_gaps),
+        )
+
+    updates["critical_gaps"] = gaps
+
+    # Bring the narrative in line with the enforced verdict. Readers act on the
+    # Markdown report, so leaving the model's own "GO WITH CONDITIONS" and its
+    # self-stated score in place produced a document contradicting its own
+    # capability table two paragraphs below.
+    reconciled = analysis.model_copy(update=updates)
+    narrative = reconcile_narrative(
+        reconciled.stage_one_report,
+        recommendation=reconciled.recommendation,
+        overall_score=compute_overall_go_score(reconciled),
+    )
+    # Show the validated matrix in the report itself — the frontend renders
+    # stageOneReport, not capabilityMatrix, so this is what the reader sees.
+    updates["stage_one_report"] = upsert_capability_section(narrative, validated)
+    # The summary is surfaced on its own in the UI and activity feed, so it
+    # needs the same treatment — a live run left it reading "strong technical
+    # capability match ... Overall Go Score 3.8/5" beside an enforced No-Go
+    # at 3.0 with 20 unevidenced core requirements.
+    summary = reconcile_narrative(
+        reconciled.summary,
+        recommendation=reconciled.recommendation,
+        overall_score=compute_overall_go_score(reconciled),
+    )
+    if core_gaps:
+        # Substitution cannot fix a claim that is not phrased as a verdict —
+        # the live summary simply asserted "strong technical capability match"
+        # with no verdict word to replace. Lead with the finding instead.
+        verdict = (
+            f"NO-GO — {len(core_gaps)} of {len(validated)} required "
+            "capabilities lack verifiable knowledge-base evidence."
+        )
+        if not summary.startswith("NO-GO"):
+            summary = f"{verdict} {summary}".strip()
+    updates["summary"] = summary
+    return analysis.model_copy(update=updates)
+
+
 async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
     if not llm.is_configured():
         raise GoNoGoError(
@@ -1763,7 +2045,9 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
         )
         return _build_needs_input_analysis(rfp, content)
 
-    kb_context = await _gather_knowledge_context(rfp, content)
+    kb_context, kb_hits, rfp_requirements, hits_by_requirement = (
+        await _gather_knowledge_context(rfp, content)
+    )
     rfp_context = _build_rfp_context(rfp, content)
     deadline_info = _assess_deadline(rfp, content)
     hard_facts = extract_rfp_hard_facts(
@@ -1797,9 +2081,14 @@ No default or template scores. Do not invent pessimistic point tables to justify
 If HARD FACTS list a contract ceiling / year budgets, Financial Viability MUST cite them (do not say undisclosed).
 If HARD FACTS list evaluation point rows, Win Probability and the EVALUATION CRITERIA table MUST use them.
 If HARD FACTS say evaluation points were NOT found, say so — never invent %.
-When KB includes a near-direct case study for the core scope (e.g. Recovery Network of Oregon for
-coalition/health communications), cite it as Verified and score Technical Capability ≥ 4 unless a
-separate structural blocker exists. Fixable registration/team flags → review, not a 2.x Overall.
+Do NOT output a capability matrix. Capability is computed separately by matching
+each RFP requirement against the KB documents actually retrieved for it, and
+that computed result overrides any capability claim in your narrative. So in the
+report, never assert a capability as proven unless the KB excerpts below contain
+a document that evidences it — a related-but-different capability does not count
+(content development ≠ content migration; print/brand design ≠ web or UX design;
+branding for a city ≠ building that city a website). Where evidence is absent,
+say so plainly; unsupported claims are stripped and become critical gaps.
 Use [FLAG FOR ROLE: ...] and [FLAG: ...] for every item needing human confirmation before submission.
 Use tables with pipe characters for capability assessment; evaluation point tables ONLY when HARD FACTS provide them.
 Cite specific RFP requirements and specific knowledge-base evidence. Tag uncertain items [VERIFY].
@@ -1866,6 +2155,19 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 
     if analysis is None:
         raise GoNoGoError("Go/No-Go analysis failed after retries", status_code=502)
+
+    # Build the matrix from RFP requirements and each one's own evidence. The
+    # model no longer authors it, so it cannot omit a requirement it lacks
+    # evidence for nor assert one the KB does not support.
+    if rfp_requirements:
+        analysis = analysis.model_copy(
+            update={
+                "capability_matrix": await _adjudicate_capabilities(
+                    rfp, rfp_requirements, hits_by_requirement, kb_hits
+                )
+            }
+        )
+    analysis = _enforce_capability_evidence(analysis, kb_hits)
 
     logger.info(
         "Go/No-Go analysis complete for rfp_id=%s provider=%s recommendation=%s "

@@ -76,7 +76,16 @@ class QualityCriticalPreferFireworksTests(unittest.TestCase):
     def test_light_planners_not_critical(self) -> None:
         self.assertFalse(is_quality_critical_node("plan_section_1"))
         self.assertFalse(is_quality_critical_node("select_team"))
-        self.assertFalse(is_quality_critical_node(""))
+
+    def test_unnamed_node_now_defaults_to_quality(self) -> None:
+        # Deliberate inversion. This previously returned False, so any call site
+        # that omitted node_name was served by the cheapest provider — which is
+        # how the repair agents, [VERIFY] scrubber and KB fact-checker all ended
+        # up on the economy model while the drafter used a better one. Unknown
+        # nodes now fail toward quality and log a warning naming the node.
+        self.assertTrue(is_quality_critical_node(""))
+        self.assertTrue(is_quality_critical_node(None))
+        self.assertTrue(is_quality_critical_node("node_added_next_week"))
 
     def test_quality_critical_ignores_prefer_fireworks(self) -> None:
         decision = resolve_fireworks_eligibility(

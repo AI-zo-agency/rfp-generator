@@ -202,6 +202,29 @@ def collapse_agency_requirements_siblings(
     return out, dropped
 
 
+# KB filenames sometimes reach the outline as section titles — a live draft
+# produced a tab literally called "3.2 — Copy of 03 CS All Case Studies Last
+# Updated". These are storage artefacts, never headings a buyer should read.
+_KB_ARTEFACT_TITLE_RE = re.compile(
+    r"(?:"
+    r"\bcopy\s+of\b|"
+    # "03_CS_Torrent" — \b fails after CS because "_" is a word character.
+    r"\b0\d[_\s-]*(?:cs|won|fin|bio|guide|companyfacts|clientlist|mastertemplate)"
+    r"(?![a-z])|"
+    r"\.(?:pdf|docx?|xlsx?|pptx?)(?![a-z])|"
+    r"\blast\s+updated\b|"
+    r"\bfinal[_\s-]*v\d|"
+    r"\buntitled\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_kb_artefact_outline_title(title: str) -> bool:
+    """True when a section title is really a knowledge-base filename."""
+    return bool(_KB_ARTEFACT_TITLE_RE.search(title or ""))
+
+
 def is_important_or_closing_outline_title(title: str) -> bool:
     """Submission-critical / scored / closing tabs — never drop for being 'generic'."""
     return bool(_IMPORTANT_OR_CLOSING_TITLE_RE.search(title or ""))
@@ -347,6 +370,9 @@ def filter_lean_outline_sections(
 
     for _, section in ordered:
         original_title = _title(section)
+        if is_kb_artefact_outline_title(original_title):
+            dropped.append(f"{original_title} (knowledge-base filename, not a section)")
+            continue
         title = enrich_outline_title_from_rfp(original_title, rfp_context)
         if should_skip_rfp_section_as_static_duplicate(
             title=title,
@@ -359,12 +385,28 @@ def filter_lean_outline_sections(
                 dropped.append(original_title)
                 continue
         if drop_generic_filler and is_generic_filler_outline_title(title):
+            # A topic being MENTIONED in the RFP is not a request for a section
+            # about it. Procedural clauses (addenda process, PERA retiree
+            # notification, sex-offender registration) are standing obligations,
+            # not proposal contents — keeping a tab for each pushed the
+            # manuscript past its page limit with content nobody asked for.
+            from app.services.proposal_closing_package import rfp_requires_topic
+
             core = normalize_outline_title(title)
-            mentioned = bool(core and core in rfp_blob) or any(
-                tok in rfp_blob for tok in outline_title_tokens(title) if len(tok) >= 4
+            terms = [core] + [
+                tok for tok in outline_title_tokens(title) if len(tok) >= 4
+            ]
+            # With no RFP text we cannot know what was requested — keep the
+            # section rather than silently emptying the outline.
+            requested = (not (rfp_context or "").strip()) or rfp_requires_topic(
+                rfp_context, terms
             )
-            if not mentioned and not is_important_or_closing_outline_title(title):
-                dropped.append(f"{original_title} (generic filler)")
+            if not requested and not is_important_or_closing_outline_title(title):
+                mentioned = bool(core and core in rfp_blob)
+                reason = (
+                    "mentioned but not requested" if mentioned else "generic filler"
+                )
+                dropped.append(f"{original_title} ({reason})")
                 continue
         if any(outline_titles_near_duplicate(title, _title(prev)) for prev in kept):
             # Prefer the longer / more specific title when near-dup.
@@ -413,7 +455,9 @@ def merge_closing_components_into_outline(
     )
     from app.services.proposal_intelligence.schemas import OutlineSection
 
-    components = detect_closing_components(rfp_context, always_include_commitment=True)
+    # Obligation-gated only — an unrequested closing tab consumes page budget
+    # that belongs to sections the RFP actually requires.
+    components = detect_closing_components(rfp_context)
     if not components:
         return sections, []
 

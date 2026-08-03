@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 from app.models.proposal import (
@@ -159,6 +161,43 @@ def _parse_llm_finding(row: object) -> AdversarialAuditFinding | None:
     )
 
 
+# Memoize the whole-manuscript LLM audit on the exact payload sent.
+#
+# The audit costs ~30k input tokens and fires 4-6 times per generation: once
+# before the adversarial repair loop, once inside it, once after escalation,
+# and again from _attach_phase4_manuscript_audit. Several of those run against
+# a manuscript that has not changed since the previous call — the post-loop
+# audit in particular re-audits a byte-identical draft. Keying on the rendered
+# payload makes the skip exact rather than heuristic.
+_AUDIT_CACHE_MAX = 8
+_audit_cache: "OrderedDict[str, tuple[list[AdversarialAuditFinding], str | None]]" = (
+    OrderedDict()
+)
+
+
+def clear_manuscript_audit_cache() -> None:
+    """Drop memoized audits — for tests and for forced re-scan paths."""
+    _audit_cache.clear()
+
+
+def _audit_cache_get(
+    key: str,
+) -> tuple[list[AdversarialAuditFinding], str | None] | None:
+    hit = _audit_cache.get(key)
+    if hit is not None:
+        _audit_cache.move_to_end(key)
+    return hit
+
+
+def _audit_cache_put(
+    key: str, value: tuple[list[AdversarialAuditFinding], str | None]
+) -> None:
+    _audit_cache[key] = value
+    _audit_cache.move_to_end(key)
+    while len(_audit_cache) > _AUDIT_CACHE_MAX:
+        _audit_cache.popitem(last=False)
+
+
 async def _run_llm_residual_audit(
     *,
     draft: ProposalDraft,
@@ -178,22 +217,31 @@ async def _run_llm_residual_audit(
     if not sections:
         return [], None
 
+    user_content = (
+        f"RFP ID: {rfp.id}\n"
+        f"Client: {rfp.client}\n"
+        f"Title: {rfp.title}\n"
+        f"Has budget: {bool(research and research.budget)}\n\n"
+        "=== DETERMINISTIC FINDINGS ALREADY KNOWN ===\n"
+        f"{_deterministic_findings_markdown(deterministic_findings)}\n\n"
+        f"=== MANUSCRIPT SECTIONS ===\n{sections}"
+    )
+    cache_key = hashlib.sha256(user_content.encode("utf-8")).hexdigest()
+    cached = _audit_cache_get(cache_key)
+    if cached is not None:
+        logger.info(
+            "manuscript_auditor cache_hit rfp_id=%s findings=%s — manuscript "
+            "unchanged since last audit, skipping LLM call",
+            rfp.id,
+            len(cached[0]),
+        )
+        return cached
+
     try:
         raw, provider = await llm.chat_json(
             [
                 {"role": "system", "content": _AUDIT_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"RFP ID: {rfp.id}\n"
-                        f"Client: {rfp.client}\n"
-                        f"Title: {rfp.title}\n"
-                        f"Has budget: {bool(research and research.budget)}\n\n"
-                        "=== DETERMINISTIC FINDINGS ALREADY KNOWN ===\n"
-                        f"{_deterministic_findings_markdown(deterministic_findings)}\n\n"
-                        f"=== MANUSCRIPT SECTIONS ===\n{sections}"
-                    ),
-                },
+                {"role": "user", "content": user_content},
             ],
             max_tokens=4096,
             temperature=0.0,
@@ -223,6 +271,7 @@ async def _run_llm_residual_audit(
         rfp.id,
         provider,
     )
+    _audit_cache_put(cache_key, (deduped, provider))
     return deduped, provider
 
 

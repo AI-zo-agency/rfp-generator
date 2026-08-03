@@ -3933,6 +3933,75 @@ async def _try_offer_form_of2_fill(
     return working, updated_draft, research, provider, reply, True
 
 
+
+async def _try_redraft_failed_section(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    rfp: RfpRecord,
+):
+    """Rebuild a section whose Phase 3 draft failed, straight from chat.
+
+    A failed section holds only SECTION_DRAFT_FAILURE_PLACEHOLDER, so the normal
+    chat edit paths have nothing to improve — they would rewrite the placeholder
+    rather than produce the section. Recovering previously meant waiting for the
+    whole pipeline to be idle and pressing Continue Proposal, which is not
+    possible while a later phase (e.g. budget) is still running.
+
+    Detection is on the section's STATE, not on the user's wording: if the
+    content is the failure placeholder, any ask to write/fix/redraft it means
+    "draft this properly". Returns None when this path does not apply.
+    """
+    from app.services.proposal_draft_llm import SECTION_DRAFT_FAILURE_PLACEHOLDER
+
+    content = (section.content or "").strip()
+    if content != SECTION_DRAFT_FAILURE_PLACEHOLDER.strip():
+        return None
+
+    from app.services.proposal_self_edit_loop import (
+        _redraft_section_via_phase3_isolated,
+    )
+
+    logger.info(
+        "chat redrafting failed section %s for %s (placeholder detected)",
+        section.id,
+        rfp_id,
+    )
+    next_draft, next_research, changed, detail = await _redraft_section_via_phase3_isolated(
+        rfp_id=rfp_id,
+        section_id=section.id,
+        rewrite_brief=(user_message or "").strip()[:600],
+        rfp=rfp,
+        draft=draft,
+        research=research,
+    )
+    if not changed:
+        return (
+            section,
+            draft,
+            research,
+            "none",
+            (
+                f"Could not rebuild \u201c{section.title}\u201d yet ({detail}). "
+                "This usually means the model provider is rate-limited or out of "
+                "credit — try again shortly."
+            ),
+            False,
+        )
+
+    rebuilt = next((s for s in next_draft.sections if s.id == section.id), section)
+    return (
+        rebuilt,
+        next_draft,
+        next_research,
+        "phase3",
+        f"Rebuilt \u201c{section.title}\u201d from Phase 3 drafting.",
+        True,
+    )
+
 async def improve_proposal_section(
     rfp_id: str,
     section_id: str,
@@ -4036,6 +4105,24 @@ async def improve_proposal_section(
             focus = _find_draft_section(draft, section_id) or focus
 
         return focus, draft, research, provider, ops_report.reply, changed
+
+    # A section whose Phase 3 draft failed holds only the failure placeholder.
+    # Rebuild it before any edit path, which would otherwise "improve" the
+    # placeholder text instead of writing the section.
+    failed_section = _find_draft_section(draft, section_id) or (
+        draft.sections[0] if draft.sections else None
+    )
+    if failed_section is not None:
+        redraft = await _try_redraft_failed_section(
+            rfp_id=rfp_id,
+            section=failed_section,
+            draft=draft,
+            research=research,
+            user_message=user_message,
+            rfp=rfp,
+        )
+        if redraft is not None:
+            return redraft
 
     # Explicit MANUAL FILL before LLM intent classify — never invent; skip rewrite.
     mfill_section = _find_draft_section(draft, section_id) or (

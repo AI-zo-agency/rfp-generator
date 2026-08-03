@@ -9,6 +9,7 @@ from langchain_openai import ChatOpenAI
 from app.core.config import settings
 from app.services import proposal_knowledge_base_tools
 from app.services.llm import LlmError, LlmTier, _fireworks_key, _openrouter_key, chat_json, resolve_llm_model
+from app.services.llm_routing import is_quality_critical_node
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +20,46 @@ def _use_fireworks_primary() -> bool:
     return bool(settings.llm_prefer_fireworks and _fireworks_key())
 
 
+def _prefer_fireworks_for_node(node_name: str | None) -> bool:
+    """Honour LLM_PREFER_FIREWORKS except for quality-critical judgment nodes.
+
+    This layer (Senior Editor, Section Repair, User Revise, Surgical Fix) does
+    not go through llm.chat_json, so it needs the same stage-map check. When a
+    quality node has no alternative provider configured we still serve it from
+    Fireworks — but we say so, because a silent downgrade here means the agent
+    judging the proposal is weaker than the one that wrote it.
+    """
+    if not _use_fireworks_primary():
+        return False
+    if not is_quality_critical_node(node_name):
+        return True
+    if _openrouter_key() and settings.llm_openrouter_enabled:
+        logger.info(
+            "llm_stage_map quality_node=%s routed off Fireworks to OpenRouter",
+            node_name or "unnamed",
+        )
+        return False
+    logger.warning(
+        "llm_stage_map quality_node=%s served by economy model — OpenRouter "
+        "unavailable (key=%s, enabled=%s). Judgment quality is degraded for "
+        "this stage; set LLM_OPENROUTER_ENABLED=true once credits are funded.",
+        node_name or "unnamed",
+        bool(_openrouter_key()),
+        settings.llm_openrouter_enabled,
+    )
+    return True
+
+
 def get_chat_model(
     *,
     temperature: float = 0.2,
     max_tokens: int = 4096,
     force_fireworks: bool = False,
     tier: LlmTier = "heavy",
+    node_name: str | None = None,
 ) -> ChatOpenAI:
     """LangChain chat model — respects LLM_PREFER_FIREWORKS like chat_json."""
-    if force_fireworks or _use_fireworks_primary():
+    if force_fireworks or _prefer_fireworks_for_node(node_name):
         if not _fireworks_key():
             raise LlmError(
                 "FIREWORKS_API_KEY required when LLM_PREFER_FIREWORKS is set.",
@@ -73,8 +105,10 @@ async def run_tool_agent_loop(
     agent_label: str,
     rfp_id: str = "",
     tier: LlmTier = "heavy",
+    node_name: str | None = None,
 ) -> tuple[str, str, list[str]]:
     """Generic LangChain tool-calling loop. Falls back to Fireworks on OpenRouter failure."""
+    used_fireworks_first = _prefer_fireworks_for_node(node_name)
     try:
         return await _run_tool_agent_loop_once(
             system_prompt=system_prompt,
@@ -85,11 +119,12 @@ async def run_tool_agent_loop(
             max_rounds=max_rounds,
             agent_label=agent_label,
             rfp_id=rfp_id,
-            force_fireworks=_use_fireworks_primary(),
+            force_fireworks=used_fireworks_first,
             tier=tier,
         )
     except Exception as exc:
-        if _fireworks_key() and not _use_fireworks_primary():
+        # Only worth retrying on Fireworks if the first attempt was not already there.
+        if _fireworks_key() and not used_fireworks_first:
             logger.warning(
                 "%s agent primary LLM failed (%s) — retrying via Fireworks",
                 agent_label,

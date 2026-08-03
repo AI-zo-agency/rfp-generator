@@ -15,8 +15,54 @@ logger = logging.getLogger(__name__)
 FIREWORKS_OUTPUT_TOKEN_CAP = 8192
 DEFAULT_REQUESTED_MAX_TOKENS = 4096
 
-# Prefixes / exact names that must not be forced onto Fireworks via prefer flag.
-_QUALITY_CRITICAL_EXACT = frozenset(
+# ---------------------------------------------------------------------------
+# Explicit per-stage model map.
+#
+# Every LLM call in the proposal pipeline is either QUALITY (it writes prose a
+# client will read, or makes a judgment about correctness) or MECHANICAL (it
+# selects, plans, classifies, or reshapes — a cheap model is genuinely fine).
+#
+# An UNKNOWN node name resolves to QUALITY and logs a warning. That direction
+# matters: the previous behaviour defaulted unknown nodes to mechanical, so
+# every repair agent, the [VERIFY] scrubber and the KB fact-checker silently
+# ran on the cheapest model in the stack while the drafter used a better one —
+# judgment was being done by a weaker model than composition.
+# ---------------------------------------------------------------------------
+
+# Mechanical: selection, planning, classification, structural reshaping.
+# These pick, order or route — they do not compose client-facing prose and do
+# not judge whether a factual claim is supported.
+_MECHANICAL_EXACT = frozenset(
+    {
+        # Sections 1-3 graph planners / selectors.
+        "plan_section_1",
+        "prioritize_capabilities",
+        "select_team",
+        "select_evidence",
+        "fetch_proposal_context",
+        "fetch_knowledge_base",
+        # Chat + edit planners.
+        "query_planner",
+        "section_dedup",
+        "team_select",
+        "case_select",
+        "brand_voice",
+        "manuscript_locks",
+        "chat_edit_scope_plan",
+        "chat_structure_plan",
+        "chat_structure_split",
+        "chat_manuscript_intent",
+        "chat_manuscript_fix_plan",
+        "fee_slot_fill_plan",
+        # Phase-2 intelligence planners.
+        "retrieval_planner",
+        "dynamic_section",
+        "section_strategy",
+    }
+)
+
+# Quality: prose a client reads, or a correctness judgment about that prose.
+_QUALITY_EXACT = frozenset(
     {
         "fetch_company_truth",
         "build_case_studies",
@@ -24,13 +70,33 @@ _QUALITY_CRITICAL_EXACT = frozenset(
         "build_section_1",
         "manuscript_auditor",
         "senior_editor",
+        # Judgment stages that previously fell through to the cheapest model.
+        "section_repair",
+        "user_revise",
+        "surgical_fix",
+        "verify_optional_scrub",
+        "kb_fact_check",
+        "rfp_structure_reframe",
+        "bio_extract",
+        "budget_claim_grounding_check",
+        "stage35a_budget_grounding",
+        "money_intelligence_pass_a",
+        "money_intelligence_pass_b",
+        "rfp_understanding",
+        "capability_adjudicator",
     }
 )
-_QUALITY_CRITICAL_PREFIXES = (
+_QUALITY_PREFIXES = (
     "draft_sections",
     "build_case_studies",
     "build_section_1",
+    "chat_full_redraft",
+    "chat_excerpt_edit",
+    "chat_replace_section",
+    "chat_manuscript_surgical_patch",
 )
+
+_warned_unknown_nodes: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -43,14 +109,40 @@ class FireworksEligibility:
     block_reason: str | None = None
 
 
-def is_quality_critical_node(node_name: str | None) -> bool:
-    """True for drafting / company-truth / case-study / auditor-class nodes."""
+def _matches(name: str, prefixes: tuple[str, ...]) -> bool:
+    return any(
+        name == p or name.startswith(f"{p}:") or name.startswith(f"{p}_")
+        for p in prefixes
+    )
+
+
+def classify_node(node_name: str | None) -> str:
+    """Return "quality" or "mechanical" for a pipeline node.
+
+    Unknown / unnamed nodes resolve to "quality" and warn once, so a new call
+    site that forgets its node_name fails toward correctness instead of being
+    silently served by the cheapest provider.
+    """
     name = (node_name or "").strip()
     if not name:
-        return False
-    if name in _QUALITY_CRITICAL_EXACT:
-        return True
-    return any(name == p or name.startswith(f"{p}:") or name.startswith(f"{p}_") for p in _QUALITY_CRITICAL_PREFIXES)
+        return "quality"
+    if name in _MECHANICAL_EXACT:
+        return "mechanical"
+    if name in _QUALITY_EXACT or _matches(name, _QUALITY_PREFIXES):
+        return "quality"
+    if name not in _warned_unknown_nodes:
+        _warned_unknown_nodes.add(name)
+        logger.warning(
+            "llm_stage_map unknown_node=%s — defaulting to quality tier. "
+            "Add it to _QUALITY_EXACT or _MECHANICAL_EXACT in llm_routing.py.",
+            name,
+        )
+    return "quality"
+
+
+def is_quality_critical_node(node_name: str | None) -> bool:
+    """True when this node must not be forced onto the cheapest provider."""
+    return classify_node(node_name) == "quality"
 
 
 def resolve_fireworks_eligibility(

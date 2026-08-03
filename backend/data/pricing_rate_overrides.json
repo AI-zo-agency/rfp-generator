@@ -1,0 +1,22 @@
+{
+  "_readme": [
+    "Human-authored corrections to the pricing rate card.",
+    "",
+    "The card is parsed from 00_Guide_Pricing in the knowledge base. When that",
+    "parse gets a rate wrong or misses one, fix it HERE once — it then applies",
+    "to every future proposal instead of being re-done by hand each time.",
+    "",
+    "Entries are merged by rateId: a matching rateId replaces the parsed rate,",
+    "a new rateId adds one. Everything else comes from the guide.",
+    "",
+    "unit: hour | fixed | percent | monthly | annual | unknown",
+    "tier: Low | Average | High",
+    "Use amountLow/amountHigh for a band, amount for a single figure.",
+    "",
+    "Example:",
+    "  { \"rateId\": \"web-dev-hourly\", \"service\": \"Web development\",",
+    "    \"tier\": \"Average\", \"unit\": \"hour\", \"amount\": 165,",
+    "    \"sourceDoc\": \"00_Guide_Pricing\", \"notes\": \"Confirmed by Sonja 2026-08\" }"
+  ],
+  "rates": []
+}

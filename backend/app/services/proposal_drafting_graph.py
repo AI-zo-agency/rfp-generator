@@ -166,7 +166,73 @@ class DraftingGraphState(TypedDict, total=False):
     llm_semaphore: asyncio.Semaphore
 
 
+# Matches the estimator in proposal_presubmit_review so the budget enforced at
+# generation and the page count checked at review agree.
+WORDS_PER_PAGE = 350
+# Below this a section cannot say anything useful, so the allocator never
+# starves one to feed another; it shrinks everything proportionally instead.
+MIN_SECTION_WORDS = 150
+# Hard floor. If even this cannot be met the outline itself is too large for the
+# page limit — that is a planning problem (too many sections), not something a
+# word budget can solve, so the allocator returns this and lets the caller warn.
+ABSOLUTE_MIN_SECTION_WORDS = 50
+
+
+def allocate_word_budget(
+    natural_targets: list[int],
+    budget: int | None,
+    *,
+    floor: int = MIN_SECTION_WORDS,
+) -> list[int]:
+    """Scale per-section word targets to fit a document-level budget.
+
+    Without this, each section takes its natural target independently and the
+    manuscript overshoots the RFP page limit by a multiple — ~21 sections at the
+    800-word default is ~16,800 words against a 12-page (4,200-word) cap. The
+    overshoot is only detected after every section has been paid for.
+
+    Relative emphasis is preserved: sections keep their share of the headroom
+    above ``floor``, so evaluation-weighted sections stay proportionally longer.
+
+    The sum fits ``budget`` except when the outline is too large for it to be
+    possible — more sections than ``budget // ABSOLUTE_MIN_SECTION_WORDS``. In
+    that case every section gets ``ABSOLUTE_MIN_SECTION_WORDS`` and the total
+    exceeds budget on purpose: the fix is to cut sections, not to emit stubs
+    too short to say anything.
+    """
+    count = len(natural_targets)
+    if count == 0:
+        return []
+    if not budget or budget <= 0:
+        return list(natural_targets)
+
+    total = sum(natural_targets)
+    if total <= budget:
+        return list(natural_targets)
+
+    # Budget too tight to give everyone the floor — split evenly, never below
+    # the hard floor. May exceed budget; see the docstring.
+    if floor * count >= budget:
+        return [max(ABSOLUTE_MIN_SECTION_WORDS, budget // count)] * count
+
+    headroom = budget - floor * count
+    natural_headroom = total - floor * count
+    if natural_headroom <= 0:
+        return [budget // count] * count
+
+    out: list[int] = []
+    for target in natural_targets:
+        above_floor = max(0, target - floor)
+        out.append(floor + int(headroom * (above_floor / natural_headroom)))
+    return out
+
+
 def _word_target(section: dict[str, Any]) -> int:
+    # An allocator-assigned target wins: it already accounts for the document
+    # page limit and the other sections competing for it.
+    assigned = section.get("wordTarget") or section.get("word_target")
+    if isinstance(assigned, int) and assigned > 0:
+        return assigned
     page_limit = section.get("pageLimit") or section.get("page_limit")
     if isinstance(page_limit, int) and page_limit > 0:
         # Cap so page limits do not explode into unreadably long tabs.
@@ -756,10 +822,26 @@ async def _draft_batch_once(
         )
     zo_ctx = (state.get("zo_sections_context") or "").strip()
     if zo_ctx:
+        # Framing matters more than the content here. This block used to be
+        # labelled a reference that barred only word-for-word copying, which
+        # invited restating the same facts in fresh wording — a tab titled
+        # "A brief description of the firm, including the year the firm was
+        # established" duly repeated the founding date and entity type already
+        # covered by 1.1 and 1.3. These sections are ALREADY IN THE DOCUMENT.
         user_content += (
-            "Existing zö template sections 1–3 (reference for pull/select sections; "
-            "do not duplicate verbatim — adapt to RFP section requirements):\n"
-            f"{zo_ctx[:6000]}\n\n"
+            "ALREADY WRITTEN — these sections are in this proposal already. The "
+            "reader will have read them before reaching your section.\n"
+            "Do NOT restate their facts in ANY form, including paraphrase, "
+            "summary, or 'as noted above' recaps: company history, founding "
+            "date, entity type, ownership, certifications, insurance limits, "
+            "office locations, team member bios or credentials, and case-study "
+            "narratives all belong to these sections and must not be repeated.\n"
+            "If your RFP section needs one of these facts, write ONE short "
+            "cross-reference (e.g. 'see Company Overview') and spend your words "
+            "on what THIS section uniquely requires. Only re-state a fact when "
+            "the RFP explicitly demands it inside your section (a required form "
+            "field or a numbered submission item).\n\n"
+            f"{zo_ctx[:8000]}\n\n"
         )
 
     from app.services.proposal_section_dedup import (
@@ -1243,8 +1325,15 @@ _DRAFTING_GRAPH = _build_graph()
 
 
 def _zo_sections_context(sections: list[ProposalSection]) -> str:
+    """Everything already written in Sections 1-3, so Phase 3 does not repeat it.
+
+    ``sections[:3]`` used to truncate here, but "Sections 1-3" is 8 subsections
+    (1.1-1.5 company, 2.1 bios, 3.1-3.2 case studies). The drafter therefore
+    never saw certifications, insurance, team bios or case studies, and
+    re-drafted them in RFP tabs.
+    """
     blocks: list[str] = []
-    for section in sections[:3]:
+    for section in sections:
         if not section.content.strip():
             continue
         blocks.append(f"### {section.title}\n{section.content[:2500]}")
@@ -1270,6 +1359,7 @@ async def run_drafting_graph(
     execution_plan: dict[str, Any] | None = None,
     fact_ledger: dict[str, Any] | None = None,
     evidence_allocation: dict[str, Any] | None = None,
+    doc_word_budget: int | None = None,
     on_sections_drafted: SectionDraftedCallback | None = None,
 ) -> tuple[list[ProposalSection], str, list[EvidenceItem]]:
     if not llm.is_configured():
@@ -1294,6 +1384,20 @@ async def run_drafting_graph(
     if alloc_dict is not None and hasattr(alloc_dict, "model_dump"):
         alloc_dict = alloc_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
 
+    section_dicts = [s.model_dump(by_alias=True) for s in rfp_sections]
+    if doc_word_budget and section_dicts:
+        natural = [_word_target(s) for s in section_dicts]
+        allocated = allocate_word_budget(natural, doc_word_budget)
+        for section, target in zip(section_dicts, allocated):
+            section["wordTarget"] = target
+        logger.info(
+            "drafting page budget: sections=%d natural=%d allocated=%d budget=%d",
+            len(section_dicts),
+            sum(natural),
+            sum(allocated),
+            doc_word_budget,
+        )
+
     initial: DraftingGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
@@ -1301,7 +1405,7 @@ async def run_drafting_graph(
         "rfp_sector": rfp_sector,
         "rfp_location": rfp_location,
         "rfp_context": rfp_context,
-        "rfp_sections": [s.model_dump(by_alias=True) for s in rfp_sections],
+        "rfp_sections": section_dicts,
         "evidence_corpus": [e.model_dump(by_alias=True) for e in evidence_corpus],
         "execution_plan": plan_dict if isinstance(plan_dict, dict) else None,
         "brand_voice": brand_voice.model_dump(by_alias=True) if brand_voice else {},
