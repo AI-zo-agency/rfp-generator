@@ -24,6 +24,7 @@ import {
   Bot,
   Minus,
   FileSpreadsheet,
+  Loader2,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { expoOutEase } from "@/lib/motion";
@@ -68,6 +69,7 @@ interface IWorkerTimesheetsTableProps {
   tabs?: ContractorTabInfo[];
   selectedContractor?: string;
   onSelectContractor?: (contractorName: string) => void;
+  isLoadingContractor?: boolean;
   summary: {
     total_logged_hours: number;
     total_spend_usd: number;
@@ -110,12 +112,44 @@ function detectRevisionRound(taskDescription: string): number | null {
   return null;
 }
 
+function HighlightText({ text, query }: { text: string; query: string }) {
+  if (!query || !query.trim() || !text) return <>{text}</>;
+  const keywords = query
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (keywords.length === 0) return <>{text}</>;
+
+  try {
+    const regex = new RegExp(`(${keywords.join("|")})`, "gi");
+    const parts = text.split(regex);
+
+    return (
+      <>
+        {parts.map((part, i) =>
+          keywords.some((kw) => kw.toLowerCase() === part.toLowerCase()) ? (
+            <mark key={i} className="bg-amber-200 text-amber-950 font-bold rounded px-0.5 py-0.2 select-none">
+              {part}
+            </mark>
+          ) : (
+            part
+          )
+        )}
+      </>
+    );
+  } catch (e) {
+    return <>{text}</>;
+  }
+}
+
 export function IWorkerTimesheetsTable({
   contractor,
   source,
   tabs,
   selectedContractor,
   onSelectContractor,
+  isLoadingContractor = false,
   summary,
   weeklyTotals,
   timesheets,
@@ -197,7 +231,7 @@ export function IWorkerTimesheetsTable({
 
       let isOverScope = ai ? ai.is_over_scope : false;
       if (!ai && isEditTask && item.hours > 0) {
-        if (editNumber >= 4 || taskLower.includes("round 4") || taskLower.includes("r4")) {
+        if (editNumber >= 3 || taskLower.includes("round 3") || taskLower.includes("r3") || taskLower.includes("round 4") || taskLower.includes("r4")) {
           isOverScope = true;
         }
       }
@@ -207,10 +241,10 @@ export function IWorkerTimesheetsTable({
 
       if (!ai) {
         if (isOverScope) {
-          flagReason = `Unbilled Revision Overage (Edit #${editNumber || 4})`;
-          flagSubtext = "Exceeds 3-round retainer cap";
+          flagReason = `Unbilled Revision Overage (Edit #${editNumber || 3})`;
+          flagSubtext = "Exceeds 2-round retainer cap";
         } else if (isEditTask && item.hours > 0) {
-          flagReason = `In-Scope Revision (Edit #${editNumber} of 3)`;
+          flagReason = `In-Scope Revision (Edit #${editNumber} of 2)`;
           flagSubtext = "Covered under retainer edit cap";
         }
       }
@@ -240,14 +274,33 @@ export function IWorkerTimesheetsTable({
       result = result.filter((item) => item.hours > 0 && !item.isOverScope);
     else if (selectedStatusFilter === "OVER_SCOPE")
       result = result.filter((item) => item.isOverScope);
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      result = result.filter(
-        (item) =>
-          item.task.toLowerCase().includes(q) ||
-          item.date.toLowerCase().includes(q) ||
-          item.day.toLowerCase().includes(q)
-      );
+    if (searchQuery && searchQuery.trim()) {
+      const keywords = searchQuery.toLowerCase().trim().split(/\s+/).filter(Boolean);
+      result = result.filter((item) => {
+        const statusTerm = item.isOverScope
+          ? "over scope overage r3+ unbilled risk flag"
+          : "billable in-scope baseline retainer approved";
+
+        const searchableFields = [
+          item.task,
+          item.topic,
+          item.contractor || "",
+          item.date,
+          item.day,
+          item.week_ending ? `week ending ${item.week_ending}` : "",
+          item.duration,
+          item.hours ? `${item.hours} hrs ${item.hours}h` : "",
+          item.amount ? `$${item.amount.toFixed(2)} ${item.amount}` : "",
+          item.flagReason,
+          item.flagSubtext,
+          item.ai_reasoning,
+          statusTerm,
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return keywords.every((kw) => searchableFields.includes(kw));
+      });
     }
     result.sort((a, b) => {
       const dateA = new Date(a.date).getTime();
@@ -356,36 +409,55 @@ export function IWorkerTimesheetsTable({
           {/* Contractor Tabs — shown only when connected and tabs available */}
           {isConnected && tabs && tabs.length > 0 && (
             <div className="space-y-2">
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted">
-                Contractor Sheets ({tabs.length})
-              </p>
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted flex items-center gap-2">
+                  Contractor Sheets ({tabs.length})
+                </p>
+                {isLoadingContractor && (
+                  <span className="inline-flex items-center gap-1.5 text-xs text-[#3C5A56] font-semibold animate-pulse">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Loading contractor sheet data...
+                  </span>
+                )}
+              </div>
               <div className="flex flex-wrap gap-2">
                 {/* All contractors pill */}
                 <button
                   onClick={() => onSelectContractor?.("all")}
+                  disabled={isLoadingContractor}
                   className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold border transition-all ${
                     (!selectedContractor || selectedContractor === "all")
                       ? "bg-[#3C5A56] text-white border-[#3C5A56] shadow-sm"
                       : "bg-zinc-50 text-zinc-600 border-zinc-200 hover:border-[#3C5A56]/40 hover:text-[#3C5A56]"
-                  }`}
+                  } ${isLoadingContractor ? "cursor-wait opacity-90" : "cursor-pointer"}`}
                 >
-                  <FileSpreadsheet className="h-3 w-3" />
+                  {isLoadingContractor && (!selectedContractor || selectedContractor === "all") ? (
+                    <Loader2 className="h-3 w-3 animate-spin text-white" />
+                  ) : (
+                    <FileSpreadsheet className="h-3 w-3" />
+                  )}
                   All
                 </button>
                 {tabs.map((tab) => {
                   const isActive = selectedContractor === tab.name;
+                  const isThisLoading = isLoadingContractor && isActive;
                   return (
                     <button
                       key={tab.name}
                       onClick={() => onSelectContractor?.(tab.name)}
+                      disabled={isLoadingContractor}
                       title={`${tab.total_hours} hrs · $${tab.rate}/hr · ${tab.active_entries} entries`}
                       className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold border transition-all ${
                         isActive
                           ? "bg-[#3C5A56] text-white border-[#3C5A56] shadow-sm"
                           : "bg-zinc-50 text-zinc-600 border-zinc-200 hover:border-[#3C5A56]/40 hover:text-[#3C5A56]"
-                      }`}
+                      } ${isLoadingContractor ? "cursor-wait opacity-90" : "cursor-pointer"}`}
                     >
-                      <FileSpreadsheet className="h-3 w-3" />
+                      {isThisLoading ? (
+                        <Loader2 className="h-3 w-3 animate-spin text-white" />
+                      ) : (
+                        <FileSpreadsheet className="h-3 w-3" />
+                      )}
                       {tab.name}
                       <span className={`ml-0.5 rounded px-1 py-0.5 text-[10px] font-bold ${
                         isActive ? "bg-white/20 text-white" : "bg-zinc-200 text-zinc-500"
@@ -476,55 +548,65 @@ export function IWorkerTimesheetsTable({
 
       {/* ─── OVERVIEW STATS — own section, room to breathe ──────────────────── */}
       {isConnected ? (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
-          {/* Total Hours */}
-          <div className="flex items-center gap-4 rounded-2xl bg-white border border-zinc-200 shadow-sm px-6 py-6">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
-              <Clock className="h-5 w-5" />
+        <div className="relative">
+          {isLoadingContractor && (
+            <div className="absolute inset-0 bg-white/70 backdrop-blur-[1px] z-20 rounded-2xl flex items-center justify-center transition-all duration-300">
+              <div className="inline-flex items-center gap-2.5 rounded-xl bg-white border border-[#3C5A56]/20 px-4 py-2.5 shadow-lg text-xs font-semibold text-[#3C5A56] animate-pulse">
+                <Loader2 className="h-4 w-4 animate-spin text-[#3C5A56]" />
+                <span>Recalculating contractor hours & spend...</span>
+              </div>
             </div>
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
-                Total Logged Hours
-              </p>
-              <p className="font-heading text-3xl font-bold text-foreground leading-none">
-                <AnimatedNumber value={summary.total_logged_hours} decimals={2} />
-                <span className="text-sm font-semibold text-zo-text-muted ml-1.5">hrs</span>
-              </p>
-              <p className="text-[11px] text-zo-text-muted mt-1.5">Across active weekly cycles</p>
+          )}
+          <div className={`grid grid-cols-1 sm:grid-cols-3 gap-5 transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
+            {/* Total Hours */}
+            <div className="flex items-center gap-4 rounded-2xl bg-white border border-zinc-200 shadow-sm px-6 py-6">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
+                <Clock className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
+                  Total Logged Hours
+                </p>
+                <p className="font-heading text-3xl font-bold text-foreground leading-none">
+                  <AnimatedNumber value={summary.total_logged_hours} decimals={2} />
+                  <span className="text-sm font-semibold text-zo-text-muted ml-1.5">hrs</span>
+                </p>
+                <p className="text-[11px] text-zo-text-muted mt-1.5">Across active weekly cycles</p>
+              </div>
             </div>
-          </div>
 
-          {/* Total Spend */}
-          <div className="flex items-center gap-4 rounded-2xl bg-white border border-zinc-200 shadow-sm px-6 py-6">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
-              <DollarSign className="h-5 w-5" />
+            {/* Total Spend */}
+            <div className="flex items-center gap-4 rounded-2xl bg-white border border-zinc-200 shadow-sm px-6 py-6">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
+                <DollarSign className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
+                  Contractor Spend
+                </p>
+                <p className="font-heading text-3xl font-bold text-emerald-600 leading-none">
+                  <AnimatedNumber value={summary.total_spend_usd} decimals={2} prefix="$" />
+                </p>
+                <p className="text-[11px] text-zo-text-muted mt-1.5">
+                  ${summary.hourly_rate_usd.toFixed(2)} / hr · Sheet cell H4
+                </p>
+              </div>
             </div>
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
-                Contractor Spend
-              </p>
-              <p className="font-heading text-3xl font-bold text-emerald-600 leading-none">
-                <AnimatedNumber value={summary.total_spend_usd} decimals={2} prefix="$" />
-              </p>
-              <p className="text-[11px] text-zo-text-muted mt-1.5">
-                $12.50 / hr · Sheet cell H4
-              </p>
-            </div>
-          </div>
 
-          {/* AI Flagged Risk */}
-          <div className="flex items-center gap-4 rounded-2xl bg-orange-50 border border-orange-200 shadow-sm px-6 py-6">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-orange-100 text-orange-600">
-              <AlertTriangle className="h-5 w-5" />
-            </div>
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
-                AI Flagged Scope Risk
-              </p>
-              <p className="font-heading text-3xl font-bold text-orange-600 leading-none">
-                <AnimatedNumber value={liveOverScopeSpend} decimals={2} prefix="$" />
-              </p>
-              <p className="text-[11px] text-zo-text-muted mt-1.5">Unbilled revision overages (R4+)</p>
+            {/* AI Flagged Risk */}
+            <div className="flex items-center gap-4 rounded-2xl bg-orange-50 border border-orange-200 shadow-sm px-6 py-6">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-orange-100 text-orange-600">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
+                  AI Flagged Scope Risk
+                </p>
+                <p className="font-heading text-3xl font-bold text-orange-600 leading-none">
+                  <AnimatedNumber value={liveOverScopeSpend} decimals={2} prefix="$" />
+                </p>
+                <p className="text-[11px] text-zo-text-muted mt-1.5">Unbilled revision overages (R3+)</p>
+              </div>
             </div>
           </div>
         </div>
@@ -619,17 +701,21 @@ export function IWorkerTimesheetsTable({
               <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400 pointer-events-none" />
               <input
                 type="text"
-                placeholder="Search tasks, dates, days…"
+                placeholder="Search tasks, dates, contractors, status…"
                 value={searchQuery}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setSearchQuery("");
+                }}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full rounded-xl bg-zinc-50 pl-10 pr-4 py-2.5 text-sm text-foreground placeholder-zinc-400 border border-zinc-200 focus:border-[#3C5A56] focus:bg-white focus:outline-none transition-all"
+                className="w-full rounded-xl bg-zinc-50 pl-10 pr-10 py-2.5 text-sm text-foreground placeholder-zinc-400 border border-zinc-200 focus:border-[#3C5A56] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#3C5A56]/20 transition-all"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery("")}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 cursor-pointer text-zinc-400 hover:text-zinc-600"
+                  title="Clear search"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 cursor-pointer text-zinc-400 hover:text-zinc-700 p-1 rounded-md hover:bg-zinc-200 transition-colors"
                 >
-                  <X className="h-4 w-4" />
+                  <X className="h-3.5 w-3.5" />
                 </button>
               )}
             </div>
@@ -669,7 +755,12 @@ export function IWorkerTimesheetsTable({
             <div className="hidden sm:block h-6 w-px bg-zinc-200" />
 
             {/* Results Count */}
-            <div className="text-xs text-zinc-500 font-medium whitespace-nowrap ml-auto">
+            <div className="text-xs text-zinc-500 font-medium whitespace-nowrap ml-auto flex items-center gap-2">
+              {searchQuery && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-700 font-semibold px-2.5 py-0.5 border border-emerald-200 text-[11px]">
+                  Filtered by "{searchQuery}"
+                </span>
+              )}
               {viewMode === "GROUPED" ? (
                 <>
                   <span className="font-bold text-foreground">{deliverableGroups.length}</span> deliverables ·{" "}
@@ -737,7 +828,7 @@ export function IWorkerTimesheetsTable({
                   >
                     <option value="ALL">All Status Tags</option>
                     <option value="BILLABLE">✓ Billable Time (In-Scope)</option>
-                    <option value="OVER_SCOPE">⚠️ Over Scope (R4+ Revisions)</option>
+                    <option value="OVER_SCOPE">⚠️ Over Scope (R3+ Revisions)</option>
                   </select>
                 </div>
 
@@ -795,33 +886,54 @@ export function IWorkerTimesheetsTable({
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
                   <Bot className="h-4 w-4 text-blue-600" />
-                  <h4 className="text-sm font-bold text-foreground">FastAPI AI Classification Rules</h4>
+                  <h4 className="text-sm font-bold text-foreground">FastAPI AI Classification Rules (Round 3+ Threshold)</h4>
                 </div>
                 <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-700">
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
                   Trace Logs Active
                 </span>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="flex gap-3 bg-white rounded-xl p-4 border border-emerald-200">
-                  <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-sm font-semibold text-emerald-700 mb-1">Billable Time (In-Scope)</p>
-                    <p className="text-xs text-zinc-500 leading-relaxed">
-                      Initial production and revision rounds 1–3, including spelled-out phrasing like{" "}
-                      <em>"Second round of edits"</em>, are classified as billable.
-                    </p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {/* Round 1 */}
+                <div className="flex flex-col justify-between bg-white rounded-xl p-4 border border-emerald-200 shadow-sm space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-700 uppercase tracking-wider">Round 1</span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
+                      <CheckCircle2 className="h-3 w-3" /> Billable
+                    </span>
                   </div>
+                  <p className="text-xs font-bold text-foreground">Baseline Production</p>
+                  <p className="text-[11px] text-zinc-500 leading-relaxed">
+                    Initial creation, drafting, and asset setup for approved retainer deliverables. 100% in-scope.
+                  </p>
                 </div>
-                <div className="flex gap-3 bg-white rounded-xl p-4 border border-orange-200">
-                  <AlertCircle className="h-5 w-5 text-orange-600 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-sm font-semibold text-orange-600 mb-1">Over Scope (R4+ Revisions)</p>
-                    <p className="text-xs text-zinc-500 leading-relaxed">
-                      Round 4 or later on any deliverable topic triggers an unbilled overage flag requiring a
-                      client change order.
-                    </p>
+
+                {/* Round 2 */}
+                <div className="flex flex-col justify-between bg-white rounded-xl p-4 border border-emerald-200 shadow-sm space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-700 uppercase tracking-wider">Round 2</span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
+                      <CheckCircle2 className="h-3 w-3" /> Billable
+                    </span>
                   </div>
+                  <p className="text-xs font-bold text-foreground">First Revisions (Retainer Cap)</p>
+                  <p className="text-[11px] text-zinc-500 leading-relaxed">
+                    Standard edits, copy updates, and client feedback adjustments covered under retainer cap.
+                  </p>
+                </div>
+
+                {/* Round 3+ */}
+                <div className="flex flex-col justify-between bg-white rounded-xl p-4 border border-orange-200 bg-orange-50/20 shadow-sm space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-orange-600 uppercase tracking-wider">Round 3+</span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-bold text-orange-600">
+                      <AlertCircle className="h-3 w-3" /> Over Scope
+                    </span>
+                  </div>
+                  <p className="text-xs font-bold text-orange-700">Unbilled Scope Risk Flag</p>
+                  <p className="text-[11px] text-zinc-500 leading-relaxed">
+                    3rd round or subsequent revisions trigger an AI scope risk flag requiring a client change order.
+                  </p>
                 </div>
               </div>
             </div>
@@ -831,282 +943,302 @@ export function IWorkerTimesheetsTable({
 
       {/* ─── GROUPED DELIVERABLES VIEW ───────────────────────────────────────── */}
       {isConnected && viewMode === "GROUPED" && (
-        <div className="space-y-4">
-          {deliverableGroups.length === 0 ? (
-            <div className="rounded-2xl border border-zo-border bg-white p-16 text-center text-sm text-zinc-400">
-              No deliverables match your current filters.
+        <div className="relative">
+          {isLoadingContractor && (
+            <div className="absolute inset-0 bg-white/70 backdrop-blur-[1px] z-20 rounded-2xl flex items-center justify-center p-12 transition-all">
+              <div className="inline-flex items-center gap-2.5 rounded-xl bg-white border border-[#3C5A56]/20 px-5 py-3 shadow-lg text-xs font-semibold text-[#3C5A56] animate-pulse">
+                <Loader2 className="h-4 w-4 animate-spin text-[#3C5A56]" />
+                Loading contractor sheet deliverables...
+              </div>
             </div>
-          ) : (
-            deliverableGroups.map((group) => {
-              const isExpanded = !!expandedDeliverables[group.taskName];
-              return (
-                <div
-                  key={group.taskName}
-                  className={`rounded-2xl border overflow-hidden transition-all ${
-                    group.isOverScope
-                      ? "border-orange-200 bg-white"
-                      : "border-zinc-200 bg-white hover:border-zinc-300"
-                  } shadow-sm`}
-                >
-                  {/* Group Header */}
-                  <button
-                    onClick={() => toggleExpand(group.taskName)}
-                    className="w-full cursor-pointer text-left px-6 py-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-zinc-50/60 transition-colors"
-                  >
-                    <div className="flex items-start gap-4 flex-1 min-w-0">
-                      {/* Expand icon */}
-                      <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border transition-colors ${
-                        isExpanded ? "bg-zinc-900 border-zinc-900 text-white" : "bg-zinc-100 border-zinc-200 text-zinc-500"
-                      }`}>
-                        <ChevronDown
-                          className="h-4 w-4 transition-transform duration-300"
-                          style={{ transform: isExpanded ? "rotate(0deg)" : "rotate(-90deg)" }}
-                        />
-                      </div>
-
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-3 flex-wrap">
-                          <span className="font-semibold text-sm text-foreground leading-snug truncate">
-                            {group.taskName}
-                          </span>
-                          {group.isOverScope ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2.5 py-0.5 text-[11px] font-bold text-orange-600 border border-orange-200 shrink-0">
-                              <AlertTriangle className="h-3 w-3" />
-                              Over Scope
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-bold text-emerald-700 border border-emerald-200 shrink-0">
-                              <CheckCircle2 className="h-3 w-3" />
-                              Billable
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-xs text-zinc-400 mt-1.5">
-                          {group.entries.length} sessions logged
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Right: Stats */}
-                    <div className="flex items-center gap-8 shrink-0">
-                      <div className="text-right">
-                        <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400 mb-0.5">
-                          Hours
-                        </p>
-                        <p className="font-heading font-bold text-lg text-foreground leading-none">
-                          {group.totalHours.toFixed(1)}
-                          <span className="text-sm font-medium text-zinc-400 ml-1">hrs</span>
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400 mb-0.5">
-                          Spend
-                        </p>
-                        <p className="font-heading font-bold text-lg text-emerald-600 leading-none">
-                          ${group.totalSpend.toFixed(2)}
-                        </p>
-                      </div>
-                    </div>
-                  </button>
-
-                  {/* Expanded Session Table */}
-                  <AnimatePresence initial={false}>
-                    {isExpanded && (
-                      <motion.div
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: "auto", opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        transition={{ duration: 0.3, ease: expoOutEase }}
-                        className="overflow-hidden border-t border-zinc-100"
-                      >
-                      <table className="w-full text-left text-xs">
-                        <thead className="bg-zinc-50 border-b border-zinc-100">
-                          <tr className="text-zinc-400 font-semibold uppercase tracking-wider">
-                            <th className="px-6 py-3">Day & Date</th>
-                            <th className="px-6 py-3">Time Period</th>
-                            <th className="px-6 py-3 text-center">Duration</th>
-                            <th className="px-6 py-3 text-right">Amount</th>
-                            <th className="px-6 py-3">Week Ending</th>
-                            <th className="px-6 py-3 text-center">AI Status</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-zinc-50 bg-white">
-                          {group.entries.map((session) => (
-                            <tr key={session.id} className="hover:bg-zinc-50/80 transition-colors">
-                              <td className="px-6 py-3.5 font-medium text-foreground">
-                                {session.day},{" "}
-                                <span className="text-zinc-400 font-normal">{session.date}</span>
-                              </td>
-                              <td className="px-6 py-3.5 font-mono text-zinc-400">
-                                {session.start_time
-                                  ? `${session.start_time} – ${session.end_time}`
-                                  : <Minus className="h-3.5 w-3.5 text-zinc-300" />}
-                              </td>
-                              <td className="px-6 py-3.5 text-center font-mono font-semibold text-zinc-600">
-                                {session.duration}
-                              </td>
-                              <td className="px-6 py-3.5 text-right font-mono font-bold text-emerald-600">
-                                ${session.amount.toFixed(2)}
-                              </td>
-                              <td className="px-6 py-3.5 text-zinc-400">{session.week_ending}</td>
-                              <td className="px-6 py-3.5 text-center">
-                                {session.isOverScope ? (
-                                  <span className="inline-flex items-center gap-1 text-[11px] font-bold text-orange-600">
-                                    <AlertTriangle className="h-3 w-3" />
-                                    Over Scope
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-600">
-                                    <CheckCircle2 className="h-3 w-3" />
-                                    Billable
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              );
-            })
           )}
+          <div className={`space-y-4 transition-all duration-200 ${isLoadingContractor ? "opacity-40 pointer-events-none" : ""}`}>
+            {deliverableGroups.length === 0 ? (
+              <div className="rounded-2xl border border-zo-border bg-white p-16 text-center text-sm text-zinc-400">
+                No deliverables match your current filters.
+              </div>
+            ) : (
+              deliverableGroups.map((group) => {
+                const isExpanded = !!expandedDeliverables[group.taskName];
+                return (
+                  <div
+                    key={group.taskName}
+                    className={`rounded-2xl border overflow-hidden transition-all ${
+                      group.isOverScope
+                        ? "border-orange-200 bg-white"
+                        : "border-zinc-200 bg-white hover:border-zinc-300"
+                    } shadow-sm`}
+                  >
+                    {/* Group Header */}
+                    <button
+                      onClick={() => toggleExpand(group.taskName)}
+                      className="w-full cursor-pointer text-left px-6 py-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-zinc-50/60 transition-colors"
+                    >
+                      <div className="flex items-start gap-4 flex-1 min-w-0">
+                        {/* Expand icon */}
+                        <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border transition-colors ${
+                          isExpanded ? "bg-zinc-900 border-zinc-900 text-white" : "bg-zinc-100 border-zinc-200 text-zinc-500"
+                        }`}>
+                          <ChevronDown
+                            className="h-4 w-4 transition-transform duration-300"
+                            style={{ transform: isExpanded ? "rotate(0deg)" : "rotate(-90deg)" }}
+                          />
+                        </div>
+
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-3 flex-wrap">
+                            <span className="font-semibold text-sm text-foreground leading-snug truncate">
+                              {group.taskName}
+                            </span>
+                            {group.isOverScope ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2.5 py-0.5 text-[11px] font-bold text-orange-600 border border-orange-200 shrink-0">
+                                <AlertTriangle className="h-3 w-3" />
+                                Over Scope
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-bold text-emerald-700 border border-emerald-200 shrink-0">
+                                <CheckCircle2 className="h-3 w-3" />
+                                Billable
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-zinc-400 mt-1.5">
+                            {group.entries.length} sessions logged
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Right: Stats */}
+                      <div className="flex items-center gap-8 shrink-0">
+                        <div className="text-right">
+                          <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400 mb-0.5">
+                            Hours
+                          </p>
+                          <p className="font-heading font-bold text-lg text-foreground leading-none">
+                            {group.totalHours.toFixed(1)}
+                            <span className="text-sm font-medium text-zinc-400 ml-1">hrs</span>
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400 mb-0.5">
+                            Spend
+                          </p>
+                          <p className="font-heading font-bold text-lg text-emerald-600 leading-none">
+                            ${group.totalSpend.toFixed(2)}
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+
+                    {/* Expanded Session Table */}
+                    <AnimatePresence initial={false}>
+                      {isExpanded && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: "auto", opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          transition={{ duration: 0.3, ease: expoOutEase }}
+                          className="overflow-hidden border-t border-zinc-100"
+                        >
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-zinc-50 border-b border-zinc-100">
+                            <tr className="text-zinc-400 font-semibold uppercase tracking-wider">
+                              <th className="px-6 py-3">Day & Date</th>
+                              <th className="px-6 py-3">Time Period</th>
+                              <th className="px-6 py-3 text-center">Duration</th>
+                              <th className="px-6 py-3 text-right">Amount</th>
+                              <th className="px-6 py-3">Week Ending</th>
+                              <th className="px-6 py-3 text-center">AI Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-zinc-50 bg-white">
+                            {group.entries.map((session) => (
+                              <tr key={session.id} className="hover:bg-zinc-50/80 transition-colors">
+                                <td className="px-6 py-3.5 font-medium text-foreground">
+                                  {session.day},{" "}
+                                  <span className="text-zinc-400 font-normal">{session.date}</span>
+                                </td>
+                                <td className="px-6 py-3.5 font-mono text-zinc-400">
+                                  {session.start_time
+                                    ? `${session.start_time} – ${session.end_time}`
+                                    : <Minus className="h-3.5 w-3.5 text-zinc-300" />}
+                                </td>
+                                <td className="px-6 py-3.5 text-center font-mono font-semibold text-zinc-600">
+                                  {session.duration}
+                                </td>
+                                <td className="px-6 py-3.5 text-right font-mono font-bold text-emerald-600">
+                                  ${session.amount.toFixed(2)}
+                                </td>
+                                <td className="px-6 py-3.5 text-zinc-400">{session.week_ending}</td>
+                                <td className="px-6 py-3.5 text-center">
+                                  {session.isOverScope ? (
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-orange-600">
+                                      <AlertTriangle className="h-3 w-3" />
+                                      Over Scope
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-600">
+                                      <CheckCircle2 className="h-3 w-3" />
+                                      Billable
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       )}
 
       {/* ─── DAILY LOG VIEW ──────────────────────────────────────────────────── */}
       {isConnected && viewMode === "DAILY" && (
-        <div className="rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="bg-zinc-900 text-white text-xs font-semibold uppercase tracking-widest">
-                  <th className="px-6 py-4">Day & Date</th>
-                  <th className="px-6 py-4">Time Period</th>
-                  <th className="px-6 py-4 text-center">Duration</th>
-                  <th className="px-6 py-4 text-right">Amount</th>
-                  <th className="px-8 py-4">Task / Notes</th>
-                  <th className="px-6 py-4 text-center">AI Status</th>
-                </tr>
-              </thead>
-
-              {Object.keys(monthGroups).length === 0 ? (
-                <tbody>
-                  <tr>
-                    <td colSpan={6} className="px-6 py-16 text-center text-sm text-zinc-400">
-                      No timesheet logs match your filters.
-                    </td>
+        <div className="relative">
+          {isLoadingContractor && (
+            <div className="absolute inset-0 bg-white/70 backdrop-blur-[1px] z-20 rounded-2xl flex items-center justify-center p-12 transition-all">
+              <div className="inline-flex items-center gap-2.5 rounded-xl bg-white border border-[#3C5A56]/20 px-5 py-3 shadow-lg text-xs font-semibold text-[#3C5A56] animate-pulse">
+                <Loader2 className="h-4 w-4 animate-spin text-[#3C5A56]" />
+                Loading daily timesheet logs...
+              </div>
+            </div>
+          )}
+          <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden transition-all duration-200 ${isLoadingContractor ? "opacity-40 pointer-events-none" : ""}`}>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="bg-zinc-900 text-white text-xs font-semibold uppercase tracking-widest">
+                    <th className="px-6 py-4">Day & Date</th>
+                    <th className="px-6 py-4">Time Period</th>
+                    <th className="px-6 py-4 text-center">Duration</th>
+                    <th className="px-6 py-4 text-right">Amount</th>
+                    <th className="px-8 py-4">Task / Notes</th>
+                    <th className="px-6 py-4 text-center">AI Status</th>
                   </tr>
-                </tbody>
-              ) : (
-                Object.entries(monthGroups).map(([monthYear, groupEntries]) => {
-                  const groupHours = groupEntries.reduce((acc, curr) => acc + curr.hours, 0);
-                  const groupSpend = groupEntries.reduce((acc, curr) => acc + curr.amount, 0);
-                  return (
-                    <tbody key={monthYear} className="divide-y divide-zinc-100">
-                      {/* Month header row */}
-                      <tr className="bg-zinc-50 border-y border-zinc-200">
-                        <td colSpan={6} className="px-6 py-3">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2.5">
-                              <div className="flex h-5 w-5 items-center justify-center rounded bg-[#3C5A56] text-white">
-                                <CalendarDays className="h-3 w-3" />
-                              </div>
-                              <span className="font-bold text-xs uppercase tracking-widest text-foreground">
-                                {monthYear}
-                              </span>
-                              <span className="rounded-full bg-zinc-200 px-2 py-0.5 text-[11px] font-semibold text-zinc-500">
-                                {groupEntries.length} entries
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-4 text-xs text-zinc-500 font-medium">
-                              <span>
-                                <span className="font-bold text-foreground">{groupHours.toFixed(1)} hrs</span>
-                              </span>
-                              <span className="text-zinc-300">·</span>
-                              <span className="font-bold text-emerald-600 font-mono">
-                                ${groupSpend.toFixed(2)}
-                              </span>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
+                </thead>
 
-                      {/* Data rows */}
-                      {groupEntries.map((row) => (
-                        <tr
-                          key={row.id}
-                          className={`hover:bg-zinc-50/70 transition-colors ${
-                            row.isOverScope ? "bg-orange-50/30" : "bg-white"
-                          }`}
-                        >
-                          <td className="px-6 py-5 whitespace-nowrap">
-                            <div className="font-semibold text-sm text-foreground">{row.day}</div>
-                            <div className="text-xs text-zinc-400 mt-0.5">{row.date}</div>
-                          </td>
-                          <td className="px-6 py-5 whitespace-nowrap font-mono text-sm text-zinc-400">
-                            {row.start_time ? `${row.start_time} – ${row.end_time}` : "—"}
-                          </td>
-                          <td className="px-6 py-5 whitespace-nowrap text-center">
-                            <span className={`inline-block rounded-lg px-3 py-1.5 text-sm font-mono font-semibold ${
-                              row.hours > 0
-                                ? "bg-zinc-100 text-zinc-700 border border-zinc-200"
-                                : "text-zinc-300"
-                            }`}>
-                              {row.duration}
-                            </span>
-                          </td>
-                          <td className="px-6 py-5 whitespace-nowrap text-right">
-                            <div className="font-mono font-bold text-emerald-600 text-sm">
-                              {row.amount > 0 ? `$${row.amount.toFixed(2)}` : "$0.00"}
-                            </div>
-                            {row.hours > 0 && (
-                              <div className="text-[10px] text-zinc-400 mt-0.5">
-                                {row.hours.toFixed(1)} × $12.50
-                              </div>
-                            )}
-                          </td>
-                          <td className="px-8 py-5">
-                            <div className="text-sm font-medium text-foreground leading-snug max-w-sm">
-                              {row.task}
-                            </div>
-                            <div className="text-xs text-zinc-400 mt-1">
-                              Week ending {row.week_ending}
-                            </div>
-                          </td>
-                          <td className="px-6 py-5 whitespace-nowrap text-center">
-                            {row.isOverScope ? (
-                              <div className="space-y-1">
-                                <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-600 border border-orange-200">
-                                  <AlertTriangle className="h-3 w-3" />
-                                  Over Scope
+                {Object.keys(monthGroups).length === 0 ? (
+                  <tbody>
+                    <tr>
+                      <td colSpan={6} className="px-6 py-16 text-center text-sm text-zinc-400">
+                        No timesheet logs match your filters.
+                      </td>
+                    </tr>
+                  </tbody>
+                ) : (
+                  Object.entries(monthGroups).map(([monthYear, groupEntries]) => {
+                    const groupHours = groupEntries.reduce((acc, curr) => acc + curr.hours, 0);
+                    const groupSpend = groupEntries.reduce((acc, curr) => acc + curr.amount, 0);
+                    return (
+                      <tbody key={monthYear} className="divide-y divide-zinc-100">
+                        {/* Month header row */}
+                        <tr className="bg-zinc-50 border-y border-zinc-200">
+                          <td colSpan={6} className="px-6 py-3">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2.5">
+                                <div className="flex h-5 w-5 items-center justify-center rounded bg-[#3C5A56] text-white">
+                                  <CalendarDays className="h-3 w-3" />
+                                </div>
+                                <span className="font-bold text-xs uppercase tracking-widest text-foreground">
+                                  {monthYear}
                                 </span>
-                                <p className="text-[10px] text-zinc-400">Round 4+ flag</p>
-                              </div>
-                            ) : row.hours > 0 ? (
-                              <div className="space-y-1">
-                                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700 border border-emerald-200">
-                                  <CheckCircle2 className="h-3 w-3" />
-                                  Billable
+                                <span className="rounded-full bg-zinc-200 px-2 py-0.5 text-[11px] font-semibold text-zinc-500">
+                                  {groupEntries.length} entries
                                 </span>
-                                <p className="text-[10px] text-zinc-400">AI: In-Scope</p>
                               </div>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-xs text-zinc-400">
-                                <Minus className="h-3 w-3" />
-                                Off Day
-                              </span>
-                            )}
+                              <div className="flex items-center gap-4 text-xs text-zinc-500 font-medium">
+                                <span>
+                                  <span className="font-bold text-foreground">{groupHours.toFixed(1)} hrs</span>
+                                </span>
+                                <span className="text-zinc-300">·</span>
+                                <span className="font-bold text-emerald-600 font-mono">
+                                  ${groupSpend.toFixed(2)}
+                                </span>
+                              </div>
+                            </div>
                           </td>
                         </tr>
-                      ))}
-                    </tbody>
-                  );
-                })
-              )}
-            </table>
+
+                        {/* Data rows */}
+                        {groupEntries.map((row) => (
+                          <tr
+                            key={row.id}
+                            className={`hover:bg-zinc-50/70 transition-colors ${
+                              row.isOverScope ? "bg-orange-50/30" : "bg-white"
+                            }`}
+                          >
+                            <td className="px-6 py-5 whitespace-nowrap">
+                              <div className="font-semibold text-sm text-foreground">{row.day}</div>
+                              <div className="text-xs text-zinc-400 mt-0.5">{row.date}</div>
+                            </td>
+                            <td className="px-6 py-5 whitespace-nowrap font-mono text-sm text-zinc-400">
+                              {row.start_time ? `${row.start_time} – ${row.end_time}` : "—"}
+                            </td>
+                            <td className="px-6 py-5 whitespace-nowrap text-center">
+                              <span className={`inline-block rounded-lg px-3 py-1.5 text-sm font-mono font-semibold ${
+                                row.hours > 0
+                                  ? "bg-zinc-100 text-zinc-700 border border-zinc-200"
+                                  : "text-zinc-300"
+                              }`}>
+                                {row.duration}
+                              </span>
+                            </td>
+                            <td className="px-6 py-5 whitespace-nowrap text-right">
+                              <div className="font-mono font-bold text-emerald-600 text-sm">
+                                {row.amount > 0 ? `$${row.amount.toFixed(2)}` : "$0.00"}
+                              </div>
+                              {row.hours > 0 && (
+                                <div className="text-[10px] text-zinc-400 mt-0.5">
+                                  {row.hours.toFixed(1)} × ${(row.rate || summary.hourly_rate_usd).toFixed(2)}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-8 py-5">
+                              <div className="text-sm font-medium text-foreground leading-snug max-w-sm">
+                                {row.task}
+                              </div>
+                              <div className="text-xs text-zinc-400 mt-1">
+                                Week ending {row.week_ending}
+                              </div>
+                            </td>
+                            <td className="px-6 py-5 whitespace-nowrap text-center">
+                              {row.isOverScope ? (
+                                <div className="space-y-1">
+                                  <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-600 border border-orange-200">
+                                    <AlertTriangle className="h-3 w-3" />
+                                    Over Scope
+                                  </span>
+                                  <p className="text-[10px] text-zinc-400">Round 3+ flag</p>
+                                </div>
+                              ) : row.hours > 0 ? (
+                                <div className="space-y-1">
+                                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700 border border-emerald-200">
+                                    <CheckCircle2 className="h-3 w-3" />
+                                    Billable
+                                  </span>
+                                  <p className="text-[10px] text-zinc-400">AI: In-Scope</p>
+                                </div>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-xs text-zinc-400">
+                                  <Minus className="h-3 w-3" />
+                                  Off Day
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    );
+                  })
+                )}
+              </table>
+            </div>
           </div>
         </div>
       )}

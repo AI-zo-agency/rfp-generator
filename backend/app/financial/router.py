@@ -347,7 +347,7 @@ def _build_audit_items_from_timesheets() -> list[dict]:
     items: list[dict] = []
     seen_ids: set[str] = set()
 
-    # ── Flag 1: Over-scope revision entries (R4+ tasks) ── HIGH severity
+    # ── Flag 1: Over-scope revision entries (R3+ tasks) ── HIGH severity
     over_scope_entries = [
         t for t in active
         if t.get("ai_classification", {}).get("is_over_scope", False)
@@ -365,7 +365,7 @@ def _build_audit_items_from_timesheets() -> list[dict]:
             dates = [e["date"] for e in entries if e.get("date")]
             date_range = f"{dates[0]} – {dates[-1]}" if len(dates) > 1 else (dates[0] if dates else "")
             detected_round = entries[0].get("ai_classification", {}).get("detected_round")
-            round_label = f"Round {detected_round}" if detected_round else "R4+"
+            round_label = f"Round {detected_round}" if detected_round else "R3+"
             reasoning = entries[0].get("ai_classification", {}).get("ai_reasoning", "Exceeds retainer revision cap.")
 
             # Build a unique ID using topic slug + global index
@@ -781,13 +781,13 @@ CONTEXT:
 - Total Active Hours: {total_hours} hrs
 - Total Spend: ${total_spend:,.2f}
 - Total Work Sessions: {len(active_entries)}
-- Over-Scope Spend (R4+ revisions): ${total_over_scope_spend:,.2f}
+- Over-Scope Spend (R3+ revisions): ${total_over_scope_spend:,.2f}
 - Analysis Date: {datetime.now().strftime('%B %d, %Y')}
 
 TOP 20 DELIVERABLES BY HOURS:
 {tasks_json}
 
-OVER-SCOPE ITEMS (Round 4+ revisions that exceed retainer):
+OVER-SCOPE ITEMS (Round 3+ revisions that exceed retainer):
 {over_scope_json}
 
 Generate a JSON response with EXACTLY this structure:

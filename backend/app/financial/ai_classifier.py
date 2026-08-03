@@ -91,14 +91,14 @@ def classify_timesheet_task(task_description: str) -> Dict[str, Any]:
 
     if is_edit:
         round_num = detected_round if detected_round is not None else 1
-        if round_num >= 4 or "round 4" in task_lower or "r4" in task_lower:
+        if round_num >= 3 or "round 3" in task_lower or "r3" in task_lower or "round 4" in task_lower or "r4" in task_lower:
           is_over_scope = True
           work_category = f"Unbilled Revision Creep (Round {round_num})"
           status_tag = "⚠️ Over Scope"
-          reasoning = f"Exceeds 3-round retainer cap (Round {round_num} requested). Requires add-on change order."
+          reasoning = f"Exceeds 2-round retainer cap (Round {round_num} requested). Requires add-on change order."
         else:
           is_over_scope = False
-          work_category = f"In-Scope Revision (Round {round_num} of 3)"
+          work_category = f"In-Scope Revision (Round {round_num} of 2)"
           status_tag = "✓ Billable Time"
           reasoning = f"Revision Round {round_num} covered under standard client retainer scope."
 

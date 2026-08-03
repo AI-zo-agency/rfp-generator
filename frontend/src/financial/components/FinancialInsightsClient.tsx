@@ -53,7 +53,10 @@ export function FinancialInsightsClient() {
   const [auditItems, setAuditItems] = useState<AuditItem[]>([]);
   const [aiInsights, setAiInsights] = useState<AiInsightsData | null>(null);
 
+  const [isContractorLoading, setIsContractorLoading] = useState<boolean>(false);
+
   const fetchIworkerData = async (contractorName: string = "all") => {
+    setIsContractorLoading(true);
     try {
       const savedUrl = localStorage.getItem("zo_iworker_sheet_url") || "";
       const queryParams = new URLSearchParams();
@@ -67,6 +70,8 @@ export function FinancialInsightsClient() {
       }
     } catch (err) {
       console.error("Failed to fetch iWorker data:", err);
+    } finally {
+      setIsContractorLoading(false);
     }
   };
 
@@ -168,6 +173,7 @@ export function FinancialInsightsClient() {
             tabs={iworkerData.tabs}
             selectedContractor={selectedContractor}
             onSelectContractor={handleSelectContractor}
+            isLoadingContractor={isContractorLoading}
             summary={iworkerData.summary}
             weeklyTotals={iworkerData.weekly_totals}
             timesheets={iworkerData.timesheets}
