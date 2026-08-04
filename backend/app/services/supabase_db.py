@@ -149,6 +149,23 @@ def _rfp_to_row(record: RfpRecord, *, go_no_go_analysis: Any | None = ...) -> di
     return row
 
 
+# Columns owned by Go/No-Go analysis or by the user's workflow rather than by the
+# JustWin feed. `upsert_rfp` keeps whatever is already stored for these so a
+# re-sync cannot silently undo an analysis or a stage change.
+_PRESERVED_ON_RESYNC = (
+    "fit_score",
+    "worth_score",
+    "go_no_go",
+    "go_no_go_analysis",
+    "stage",
+    "status",
+    "assigned_to",
+    "estimated_value",
+    "page_limit",
+    "pdf_path",
+)
+
+
 def _dedupe_by_title(rfps: list[RfpRecord]) -> list[RfpRecord]:
     by_title: dict[str, RfpRecord] = {}
     for rfp in rfps:
@@ -246,26 +263,34 @@ def insert_rfp(record: RfpRecord) -> RfpRecord:
 
 
 def upsert_rfp(record: RfpRecord) -> None:
+    """Upsert a synced solicitation by external_id.
+
+    A sync refreshes what JustWin knows (title, dates, description, document) but
+    must never reset what we decided: Go/No-Go results, workflow stage, and
+    assignment all survive a re-sync.
+    """
     client = _get_client()
     external_id = record.external_id or record.id
-    existing_pdf: str | None = None
+    existing_row: dict[str, Any] = {}
     try:
         existing = (
             client.table("rfps")
-            .select("pdf_path")
+            .select(",".join(_PRESERVED_ON_RESYNC))
             .eq("external_id", external_id)
             .limit(1)
             .execute()
         )
         rows = _handle_response(existing.data, context="upsert_rfp lookup")
-        if rows and rows[0].get("pdf_path"):
-            existing_pdf = str(rows[0]["pdf_path"])
+        if rows:
+            existing_row = rows[0] or {}
     except Exception:
         logger.debug("No existing row for external_id=%s", external_id)
 
     row = _rfp_to_row(record)
-    if existing_pdf and not row.get("pdf_path"):
-        row["pdf_path"] = existing_pdf
+    for column in _PRESERVED_ON_RESYNC:
+        existing_value = existing_row.get(column)
+        if existing_value is not None and existing_value != "":
+            row[column] = existing_value
 
     client.table("rfps").upsert(row, on_conflict="external_id").execute()
 

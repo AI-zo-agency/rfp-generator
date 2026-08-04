@@ -1,7 +1,8 @@
 import "./load-env";
 import { getAuthenticatedContext, getJustWinBaseUrl } from "./browser";
-import { scrapeAllLeads } from "./scrape-leads";
-import { downloadPdfFromSolicitationPackage } from "./solicitation-package";
+import { collectLeads } from "./scrape-leads";
+import { createApiClient } from "./justwin-api";
+import { downloadSolicitationPdf } from "./solicitation-package";
 import { mapLeadToRfp } from "../../src/lib/justwin-mapper";
 import {
   finishSyncJob,
@@ -11,10 +12,9 @@ import {
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8001";
 
 /**
- * JustWin Playwright CLI — disabled while the dashboard uses FastAPI backend.
- * Set to true to run manually (also update package.json sync:justwin script).
+ * JustWin Playwright CLI — enabled for automated browser sync.
  */
-const JUSTWIN_SYNC_CLI_ENABLED = false;
+const JUSTWIN_SYNC_CLI_ENABLED = true;
 
 async function uploadPdfToBackend(rfpId: string, pdfPath: string): Promise<void> {
   const fs = await import("fs");
@@ -27,6 +27,25 @@ async function uploadPdfToBackend(rfpId: string, pdfPath: string): Promise<void>
   if (!response.ok) {
     throw new Error(`PDF upload failed for ${rfpId}: ${response.status}`);
   }
+}
+
+async function extractDueDateFromPdf(pdfPath: string): Promise<string | null> {
+  try {
+    const fs = await import("fs");
+    const content = fs.readFileSync(pdfPath);
+    const response = await fetch(`${BACKEND_URL}/api/v1/rfps/extract-due-date`, {
+      method: "POST",
+      headers: { "Content-Type": "application/pdf" },
+      body: content,
+    });
+    if (response.ok) {
+      const data = (await response.json()) as { dueDate?: string | null };
+      return data.dueDate ?? null;
+    }
+  } catch (err) {
+    console.warn(`[justwin-sync] due date extraction skipped:`, err);
+  }
+  return null;
 }
 
 async function main() {
@@ -42,7 +61,14 @@ async function main() {
   }
 
   const jobId = process.argv[2] ?? "manual";
-  console.log(`[justwin-sync] starting job ${jobId}`);
+  // "-" means the dashboard asked for every date; anything else is an ISO date.
+  const rawDate = process.argv[3] ?? new Date().toISOString().slice(0, 10);
+  const syncDate = rawDate === "-" ? "" : rawDate;
+  const targetTab = process.argv[4] ?? "all";
+
+  console.log(
+    `[justwin-sync] starting job ${jobId} (date: ${syncDate || "any"}, tab: ${targetTab})`
+  );
 
   const { browser, context } = await getAuthenticatedContext();
   const page = await context.newPage();
@@ -58,19 +84,34 @@ async function main() {
       throw new Error("Not authenticated — delete data/justwin-session.json and rerun sync");
     }
 
-    const leads = await scrapeAllLeads(page);
-    console.log(`[justwin-sync] syncing ${leads.length} lead(s) only`);
+    const client = await createApiClient(page);
+    const leads = await collectLeads(client, syncDate, targetTab);
+    console.log(`[justwin-sync] found ${leads.length} matching lead(s)`);
 
     let pdfsDownloaded = 0;
     for (const lead of leads) {
-      const pdfPath = await downloadPdfFromSolicitationPackage(
-        page,
-        context,
-        lead.externalId,
-        lead.detailUrl
-      );
+      let pdfPath: string | undefined;
+      try {
+        pdfPath = await downloadSolicitationPdf(client, lead.externalId);
+      } catch (pdfErr) {
+        console.warn(
+          `[justwin-sync] PDF download warning for ${lead.externalId}:`,
+          pdfErr instanceof Error ? pdfErr.message : pdfErr
+        );
+      }
+
+      // JustWin supplies the due date directly; only fall back to parsing the
+      // PDF when the lead has none.
+      if (pdfPath && !lead.dueDate) {
+        const extractedDueDate = await extractDueDateFromPdf(pdfPath);
+        if (extractedDueDate) {
+          lead.dueDate = extractedDueDate;
+        }
+      }
+
       const record = mapLeadToRfp(lead, pdfPath ? `pending:${lead.externalId}` : undefined);
       await upsertRfpViaBackend(record);
+
       if (pdfPath) {
         await uploadPdfToBackend(record.id, pdfPath);
         pdfsDownloaded++;
@@ -91,6 +132,8 @@ async function main() {
         jobId,
         rfpsFound: leads.length,
         pdfsDownloaded,
+        syncDate,
+        targetTab,
       })
     );
   } catch (error) {

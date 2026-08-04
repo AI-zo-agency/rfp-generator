@@ -7,12 +7,15 @@ import { config } from "dotenv";
  */
 export function loadEnv(): void {
   const root = process.cwd();
-  const files = [".env", ".env.local"];
+  // Highest precedence first. `override` stays false so a real environment
+  // variable passed by the caller (e.g. HEADLESS=true) always wins over a
+  // file, and .env.local wins over .env.
+  const files = [".env.local", ".env"];
 
   for (const file of files) {
     const filePath = path.join(root, file);
     if (fs.existsSync(filePath)) {
-      config({ path: filePath, override: true });
+      config({ path: filePath, override: false });
     }
   }
 }

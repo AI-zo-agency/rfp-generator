@@ -1,12 +1,9 @@
-const DEFAULT_TITLE_FILTER =
-  "Advertising, Marketing, Communications for Tennessee Board of Regents";
-
 export function getTitleFilter(): string | null {
   const raw = process.env.JUSTWIN_RFP_TITLE_FILTER?.trim();
-  if (raw === "false" || raw === "off" || raw === "*") {
+  if (!raw || raw === "false" || raw === "off" || raw === "*") {
     return null;
   }
-  return raw || DEFAULT_TITLE_FILTER;
+  return raw;
 }
 
 export function matchesTitleFilter(title: string, filter: string): boolean {

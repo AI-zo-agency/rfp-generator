@@ -81,7 +81,8 @@ export function formatOverallGoScore(
 ): string {
   const score = computeOverallGoScore(fitScore, worthScore, decisionMatrix);
   if (score === null) return "Pending";
-  return `${score} / 5`;
+  const scaled = score > 5 ? Math.round((score / 20) * 10) / 10 : score;
+  return `${scaled} / 5`;
 }
 
 export function formatGoScore(
@@ -90,7 +91,8 @@ export function formatGoScore(
 ): string {
   const score = computeGoScore(fitScore, worthScore);
   if (score === null) return "Pending";
-  return `${score} / 5`;
+  const scaled = score > 5 ? Math.round((score / 20) * 10) / 10 : score;
+  return `${scaled} / 5`;
 }
 
 /** @deprecated Use formatGoScore — kept for callers migrating off dual display */

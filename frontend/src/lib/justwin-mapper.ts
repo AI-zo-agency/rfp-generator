@@ -45,7 +45,10 @@ export function mapLeadToRfp(lead: JustWinLead, pdfPath?: string): RfpRecord {
     stage: "intake",
     status: "new",
     priority: lead.score >= 4 ? "high" : "medium",
-    fitScore: lead.score * 20,
+    // JustWin's relevance score is not a Go/No-Go result, and fitScore/worthScore
+    // are a 0-5 scale owned by that analysis (see GoNoGoAnalysis). Leave them unset
+    // so the Go Score column reads "—" until Go/No-Go actually runs.
+    fitScore: null,
     worthScore: null,
     goNoGo: null,
     assignedTo: null,
