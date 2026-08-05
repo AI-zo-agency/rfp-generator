@@ -13,9 +13,20 @@ confidently matched to a guide service, and refuses to let the proposed total
 fall materially below that floor.
 
 Direct expenses (travel, reimbursables) and client pass-through media have no
-guide band and are excluded — see ``proposal_budget_validation.infer_line_item_type``.
-Line items that cannot be confidently matched to a guide service contribute
-nothing to the floor (never a false floor for unrecognised/bespoke work).
+guide band and are excluded entirely — see
+``proposal_budget_validation.infer_line_item_type``.
+
+Line items that cannot be confidently matched to a guide service add nothing to
+the floor (never a false floor for unrecognised/bespoke work) but their dollars
+DO still count toward the proposed total. Both halves matter: dropping them from
+the floor prevents inventing a requirement, and keeping them in the total
+prevents a large bespoke line from reading as an underbid of the small matched
+remainder.
+
+This check raises 422 and aborts the whole proposal, so a false positive is as
+damaging as a miss. Every ambiguity here is therefore resolved toward NOT
+firing: unmatched work, an unloadable guide, and a below-threshold fuzzy match
+all yield no violation.
 """
 
 from __future__ import annotations
@@ -51,10 +62,24 @@ def _group_rates_by_service(rates: list[PricingRate]) -> dict[str, list[PricingR
 
 
 def _best_service_label(description: str, groups: dict[str, list[PricingRate]]) -> str | None:
-    """Match a line item description to a guide service by token overlap.
+    """Match a line item description to a guide service by symmetric token overlap.
 
     None when no service clears the match threshold — an unrecognised /
     bespoke deliverable must never manufacture a floor.
+
+    Scoring is Jaccard (``intersection / union``), NOT ``intersection / len(label)``.
+    Normalizing by label length alone meant any short guide label was trivially
+    cleared by any line item that happened to contain its words: the 2-token
+    label "Website Design" scored 1.0 against "Design review of existing website
+    content", inventing a $20,000 floor for a $500 line. Because a violation here
+    raises 422 and aborts the whole proposal, a false match is as damaging as a
+    missed one — unlike pricing_rate_binding._find_rate, whose false match only
+    sets is_manual_fill and emits an advisory flag. Jaccard penalizes both a label
+    that is too short relative to the line item and a line item that describes far
+    more than the label does; a minimum-overlap-count rule would not have caught
+    the "Website Design" case at all (its overlap is already 2). Failing to match
+    is the safe direction: it contributes nothing and can only miss an underbid,
+    never manufacture a halt.
     """
     want = _tokens(description)
     if not want:
@@ -64,7 +89,7 @@ def _best_service_label(description: str, groups: dict[str, list[PricingRate]]) 
         have = _tokens(label)
         if not have:
             continue
-        score = len(want & have) / len(have)
+        score = len(want & have) / len(want | have)
         if score > best_score:
             best_label, best_score = label, score
     return best_label if best_score >= _MATCH_SCORE_MIN else None
@@ -87,10 +112,12 @@ def collect_underbid_violations(
 ) -> list[str]:
     """Empty when priced agency fees are at or near the 00_Guide_Pricing floor.
 
-    Only agency_fee line items are compared — travel/reimbursables and client
+    Only agency_fee line items are considered — travel/reimbursables and client
     media pass-through have no guide band (proposal_budget_validation.
-    infer_line_item_type). If the rate card is empty or unavailable, this
-    never halts the pipeline: an unloadable guide is not a pricing defect.
+    infer_line_item_type). Of those, every priced dollar counts toward the
+    proposed total, while the floor sums each distinct matched guide service
+    exactly once. If the rate card is empty or unavailable, this never halts the
+    pipeline: an unloadable guide is not a pricing defect.
     """
     rates = bindable_rates(rate_card)
     if not rates:
@@ -99,27 +126,35 @@ def collect_underbid_violations(
     if not groups:
         return []
 
-    floor = 0.0
+    # Floor is keyed by distinct guide SERVICE, not by line item. budgetFormat
+    # defaults to "phased" (proposal_pricing_service.py), so splitting a single
+    # guide deliverable across "… — phase 1" / "… — phase 2" rows is the normal
+    # shape of a generated budget. Accumulating per line item counted the same
+    # deliverable's floor twice and halted correctly-priced budgets with a 422.
+    floors_by_service: dict[str, float] = {}
+    # Numerator is ALL priced agency fees, not just the matched ones. Dropping an
+    # unmatched item's dollars while keeping other items' floors made a $31,000
+    # proposal (nearly 3x the matched floor) read as a $1,000 underbid.
     priced = 0.0
-    matched_labels: list[str] = []
     for item in budget.line_items:
         if infer_line_item_type(item) != "agency_fee":
-            continue  # travel and media have no guide band
+            continue  # travel and media are billed at cost — no guide band
+        priced += float(item.extended or 0)
         label = _best_service_label(item.description or "", groups)
         if label is None:
-            continue  # unmatched — contributes nothing, never manufactures a floor
-        floor += _service_floor(groups[label])
-        priced += float(item.extended or 0)
-        matched_labels.append(label)
+            continue  # unmatched — adds no floor, but its dollars still count above
+        floors_by_service.setdefault(label, _service_floor(groups[label]))
 
+    floor = round(sum(floors_by_service.values()), 2)
+    priced = round(priced, 2)
     if floor <= 0:
         return []
     if priced >= floor * tolerance:
         return []
 
     return [
-        f"Proposed fees ${priced:,.0f} are below {int(tolerance * 100)}% of the "
-        f"00_Guide_Pricing floor ${floor:,.0f} for the matched deliverables "
-        f"({', '.join(matched_labels)}). Confirm this is a deliberate discount "
-        "before submitting, or raise the priced fees to match the guide."
+        f"Proposed agency fees ${priced:,.2f} are below {int(tolerance * 100)}% of the "
+        f"00_Guide_Pricing floor ${floor:,.2f} for the matched deliverables "
+        f"({', '.join(sorted(floors_by_service))}). Confirm this is a deliberate "
+        "discount before submitting, or raise the priced fees to match the guide."
     ]

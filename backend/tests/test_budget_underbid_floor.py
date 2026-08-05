@@ -133,12 +133,59 @@ class UnderbidFloorTests(unittest.TestCase):
         self.assertEqual(collect_underbid_violations(_budget(("Discovery", 100)), None), [])
 
     def test_travel_is_excluded_from_the_floor_comparison(self) -> None:
-        """Direct expenses are billed at cost and have no guide band."""
+        """Direct expenses are billed at cost and have no guide band.
+
+        The guide below deliberately CONTAINS a travel service, and the budget is
+        travel-only, so the infer_line_item_type filter is the only thing standing
+        between this budget and a violation. An earlier version of this test used a
+        guide with no travel row and a budget that cleared the floor anyway — it
+        passed even with the filter deleted, i.e. it proved nothing. Deleting the
+        `infer_line_item_type(item) != "agency_fee"` guard must break this test.
+        """
+        card = PricingRateCard(
+            rates=[
+                _rate(
+                    "guide-11.1-average",
+                    "Travel and Reimbursable Expenses",
+                    2000,
+                    5000,
+                )
+            ]
+        )
+        budget = _budget(("Travel and reimbursable expenses", 200))
+        self.assertEqual(collect_underbid_violations(budget, card), [])
+
+    def test_phased_line_items_count_each_guide_service_floor_once(self) -> None:
+        """C1 regression: budgetFormat defaults to "phased", so one guide deliverable
+        split across phase lines is the NORMAL shape of a generated budget. Summing
+        the floor per line item instead of per distinct service double-counted it and
+        halted a correctly-priced budget with a 422."""
         budget = _budget(
-            ("Implementation roadmap", 15000),
-            ("Travel — site visits", 200),
+            ("Implementation roadmap — phase 1 discovery", 6000),
+            ("Implementation roadmap — phase 2 delivery", 8000),
+        )
+        # $14,000 priced against a single $12,000 Implementation Roadmap floor — above it.
+        self.assertEqual(collect_underbid_violations(budget, CARD), [])
+
+    def test_unmatched_dollars_still_count_toward_the_proposed_total(self) -> None:
+        """C2 regression: an unmatched item's money must not vanish from the numerator
+        while other items' floors stay in the denominator. A $31,000 proposal — nearly
+        3x the matched floor — was being rejected as a 10x underbid."""
+        budget = _budget(
+            ("Implementation roadmap", 1000),
+            ("Bespoke integration engineering", 30000),
         )
         self.assertEqual(collect_underbid_violations(budget, CARD), [])
+
+    def test_a_short_guide_label_does_not_match_an_unrelated_line_item(self) -> None:
+        """I3 regression: scoring by label length alone meant any 2-token guide label
+        was trivially cleared by any line item containing both words. Because this
+        check raises 422, a false match aborts the whole proposal."""
+        card = PricingRateCard(
+            rates=[_rate("guide-6.1-average", "Website Design", 20000, 30000)]
+        )
+        budget = _budget(("Design review of existing website content", 500))
+        self.assertEqual(collect_underbid_violations(budget, card), [])
 
     def test_multiple_tiers_for_one_service_use_the_lowest_documented_floor(self) -> None:
         """A service with Low/Average/High rows must floor against the Low tier,
@@ -202,6 +249,71 @@ class BudgetEditorPipelineUnderbidTests(unittest.TestCase):
         finalized = run_budget_editor_pass(budget, rate_card=CARD)
         self.assertGreater(float(finalized.agency_revenue_estimate or 0), 0)
         self.assertEqual(collect_underbid_violations(finalized, CARD), [])
+
+    def test_scan_rfp_path_forwards_the_cached_rate_card(self) -> None:
+        """M5 regression: run_fulfill_budget_scan (the "Scan RFP" button) re-runs the
+        budget editor. It previously let rate_card default to None while
+        research.pricing_rate_card was in scope, so a budget generated before the
+        floor check existed was never floor-checked on re-scan."""
+        import asyncio
+
+        from app.models.proposal import ProposalDraft, ProposalResearchCache
+        from app.models.rfp import RfpRecord
+        from app.services import proposal_fulfill_rfp_budget_kpi as scan_mod
+
+        captured: dict[str, object] = {}
+
+        class _Stop(Exception):
+            pass
+
+        def _capture(budget, **kwargs):
+            captured.update(kwargs)
+            raise _Stop
+
+        original = scan_mod.run_budget_editor_pass
+        scan_mod.run_budget_editor_pass = _capture
+        try:
+            research = ProposalResearchCache(
+                rfpId="rfp-scan",
+                updatedAt="2026-08-05T00:00:00+00:00",
+                budget=_budget(("Implementation roadmap", 1000)),
+                pricingRateCard=CARD.model_dump(by_alias=True),
+            )
+            with self.assertRaises(_Stop):
+                asyncio.run(
+                    scan_mod.run_fulfill_budget_scan(
+                        rfp_id="rfp-scan",
+                        rfp=RfpRecord(
+                            id="rfp-scan",
+                            title="T",
+                            client="C",
+                            dueDate="2026-09-01",
+                            receivedDate="2026-08-01",
+                            lastActivity="2026-08-05",
+                            lastActivityNote="n",
+                        ),
+                        draft=ProposalDraft(
+                            rfpId="rfp-scan",
+                            sections=[],
+                            updatedAt="2026-08-05T00:00:00+00:00",
+                        ),
+                        research=research,
+                        rfp_text="Some RFP text.",
+                        use_llm=False,
+                        skip_section_ids=set(),
+                    )
+                )
+        finally:
+            scan_mod.run_budget_editor_pass = original
+
+        forwarded = captured.get("rate_card")
+        self.assertIsNotNone(
+            forwarded, msg="Scan RFP re-ran the budget editor with no rate card"
+        )
+        self.assertEqual(
+            [r.service for r in forwarded.rates],  # type: ignore[union-attr]
+            [r.service for r in CARD.rates],
+        )
 
     def test_run_budget_editor_pass_never_halts_without_a_rate_card(self) -> None:
         """No rate_card passed (guide unavailable) — the pipeline must not halt

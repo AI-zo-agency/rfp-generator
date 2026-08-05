@@ -115,10 +115,29 @@ async def run_fulfill_budget_scan(
         )
         return draft, research, logs
 
+    # Reuse the rate card already persisted on the research cache so the Scan RFP
+    # path gets the same 00_Guide_Pricing underbid floor check as Phase 3.5.
+    # Without this, a budget generated before the floor check existed and then
+    # re-scanned via the "Scan RFP" button would never be floor-checked.
+    # A missing / invalid card leaves rate_card None, which never halts.
+    rate_card = None
+    if research.pricing_rate_card:
+        try:
+            from app.models.pricing_rate_card import PricingRateCard
+
+            rate_card = PricingRateCard.model_validate(research.pricing_rate_card)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "pricing_rate_card invalid on cache for %s — skipping underbid floor check",
+                rfp_id,
+            )
+            rate_card = None
+
     budget = run_budget_editor_pass(
         research.budget,
         rfp_sections=research.rfp_sections,
         rfp_context=rfp_text[:80_000],
+        rate_card=rate_card,
     )
     research = research.model_copy(update={"budget": budget})
     logs.append("Budget: reconciled line items and canonical totals from RFP/pricing model.")
