@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 
+from app.models.pricing_rate_card import PricingRateCard
 from app.models.proposal import ProposalBudget, RfpSectionMap
+from app.services.proposal_budget_floor import collect_underbid_violations
 from app.services.proposal_budget_validation import (
     assert_budget_invariants,
     reconcile_proposal_budget,
@@ -20,10 +22,18 @@ def run_budget_editor_pass(
     *,
     rfp_sections: list[RfpSectionMap] | None = None,
     rfp_context: str = "",
+    rate_card: PricingRateCard | None = None,
 ) -> ProposalBudget:
     """
     Finalize budget math: line-item sum is ground truth; propagate everywhere;
     never leave unresolved reconciliation flags. Fails loudly on invariant breach.
+
+    ``rate_card`` (when the caller has one already built for this RFP) is used to
+    check the proposed total against zo's own published pricing guide floor — a
+    proposal materially below the guide's own minimum for the deliverables it
+    covers halts here rather than shipping with only an advisory flag. Missing
+    or empty rate card never halts (the guide failing to load is not a pricing
+    defect).
     """
     before_revenue = budget.agency_revenue_estimate
     before_lump = budget.lump_sum_total
@@ -55,6 +65,16 @@ def run_budget_editor_pass(
                 "Re-run Phase 3.5 budget generation or fix line items before proceeding.",
                 status_code=422,
             ) from exc
+
+    underbid_violations = collect_underbid_violations(finalized, rate_card)
+    if underbid_violations:
+        raise ProposalError(
+            "BUDGET EDITOR FAILED — pipeline halted: "
+            + "; ".join(underbid_violations)
+            + " Re-run Phase 3.5 budget generation or raise line-item pricing to match "
+            "the 00_Guide_Pricing floor before proceeding.",
+            status_code=422,
+        )
 
     after_subtotal = sum_line_items_extended(finalized)
     after_revenue = finalized.agency_revenue_estimate

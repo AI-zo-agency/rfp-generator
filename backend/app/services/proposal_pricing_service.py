@@ -1099,6 +1099,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         budget,
         rfp_sections=prior_research.rfp_sections if prior_research else [],
         rfp_context=rfp_context,
+        rate_card=rate_card,
     )
 
     # Phase 3.5a — adversarial grounding audit (RFP requirement + guide SKU per line).
@@ -1262,6 +1263,7 @@ async def reconcile_cached_budget(rfp_id: str) -> tuple[ProposalBudget, Proposal
         budget,
         rfp_sections=research.rfp_sections,
         rfp_context=rfp_context,
+        rate_card=rate_card,
     )
     now = datetime.now(timezone.utc).isoformat()
     research = research.model_copy(
