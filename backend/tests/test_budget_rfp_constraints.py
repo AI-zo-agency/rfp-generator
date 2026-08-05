@@ -107,6 +107,53 @@ class RfpConstraintTests(unittest.TestCase):
     def test_missing_rfp_text_never_halts(self) -> None:
         self.assertEqual(collect_rfp_constraint_violations(_budget(("Travel", 2500)), None), [])  # type: ignore[arg-type]
 
+    # --- Silent-miss hardening (negated on-site language) ------------------
+    # The on-site carve-out detector must not be negation-blind. "On-site
+    # presence shall not be required" is a natural way to phrase the SAME
+    # remote-only constraint as the observed MSU Denver RFP; a requirement
+    # word merely CO-OCCURRING near "on-site" must not suppress the check,
+    # or the $2,500 travel line ships unflagged.
+
+    def test_negated_on_site_requirement_still_flags_travel(self) -> None:
+        text = (
+            "All work under this agreement shall be performed remotely. "
+            "On-site presence shall not be required at any time."
+        )
+        violations = collect_rfp_constraint_violations(_budget(("Travel", 2500)), text)
+        self.assertTrue(violations)
+        self.assertIn("remote", violations[0].lower())
+
+    def test_negated_travel_obligation_still_flags_travel(self) -> None:
+        text = (
+            "All work under this agreement shall be performed remotely. "
+            "Contractors shall not be required to travel on-site."
+        )
+        self.assertTrue(collect_rfp_constraint_violations(_budget(("Travel", 2500)), text))
+
+    def test_facilities_boilerplate_near_on_site_still_flags_travel(self) -> None:
+        """A stray 'required' near 'on-site' elsewhere in the doc must not suppress."""
+        text = (
+            "All work under this agreement shall be performed remotely. "
+            "There is no on-site parking available; badges are not required for remote staff."
+        )
+        self.assertTrue(collect_rfp_constraint_violations(_budget(("Travel", 2500)), text))
+
+    def test_negated_on_site_clause_in_the_same_sentence_still_flags_travel(self) -> None:
+        text = (
+            "All work under this agreement shall be performed remotely, and on-site "
+            "attendance is not required under any circumstance."
+        )
+        self.assertTrue(collect_rfp_constraint_violations(_budget(("Travel", 2500)), text))
+
+    def test_an_affirmative_on_site_clause_elsewhere_still_suppresses(self) -> None:
+        """A negated clause must not override a genuine on-site obligation elsewhere."""
+        text = (
+            "All work under this agreement shall be performed remotely. "
+            "No on-site presence is anticipated for routine delivery. "
+            "The contractor shall attend an on-site kickoff workshop in Denver."
+        )
+        self.assertEqual(collect_rfp_constraint_violations(_budget(("Travel", 2500)), text), [])
+
 
 if __name__ == "__main__":
     unittest.main()

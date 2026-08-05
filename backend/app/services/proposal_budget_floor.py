@@ -178,39 +178,102 @@ def collect_underbid_violations(
 # ship. _REMOTE_ONLY_RE is deliberately narrow (specific "performed remotely"
 # / "no on-site presence" phrasings) so an incidental "remote" mention
 # ("remote desktop support", "remote sensing data", "the remote possibility
-# that...") never trips it. _ONSITE_REQUIRED_RE is deliberately broad — any
-# on-site obligation nearby a requirement verb (required/mandatory/expected/
-# shall/must/necessary), in either word order, within the same sentence —
-# so a hybrid engagement ("primarily remote, with occasional on-site
-# meetings") or a remote clause carved out for on-site kickoff/quarterly
-# visits never fires. Sentence-bounded via ``[^.]`` so a requirement verb in
-# one sentence can't combine with "on-site" in an unrelated later sentence.
+# that...") never trips it.
 _REMOTE_ONLY_RE = re.compile(
     r"(?i)\b(?:all\s+work[^.]{0,60}performed\s+remotely|"
     r"work\s+shall\s+be\s+performed\s+remotely|"
     r"no\s+on-?site\s+presence\s+is\s+anticipated|"
     r"fully\s+remote\s+engagement)\b"
 )
-_ONSITE_REQUIRED_RE = re.compile(
-    r"(?i)\bon[\s-]?site\b[^.]{0,60}\b(?:required|mandatory|expected|shall|must|necessary)\b|"
-    r"\b(?:required|mandatory|expected|shall|must)\b[^.]{0,60}\bon[\s-]?site\b"
+
+# The on-site carve-out detector (``_rfp_requires_onsite_work``) suppresses
+# the whole check, so it is the silent-miss surface: anything it matches lets
+# travel ship unflagged. It is therefore NOT a bare proximity regex.
+#
+# A proximity-only pattern ("on-site" within N chars of a requirement word,
+# either order) is negation-blind, and negation is exactly how a remote-only
+# constraint is naturally phrased: "On-site presence shall not be required at
+# any time" is the SAME constraint as the observed MSU Denver clause, yet
+# reads as an on-site requirement to a proximity match. Facilities boilerplate
+# ("there is no on-site parking available; badges are not required") sank the
+# check the same way. Both let the observed $2,500 travel line through.
+#
+# A negation check over the regex's own matched span does not fix this either,
+# because the modal anchors BEFORE the negation: in "on-site presence shall
+# not be required", the pair (on-site, shall) spans a clean, negation-free
+# window. So the detection is done in code over every (on-site, requirement)
+# pair in a clause, and ANY negated pair disqualifies that clause.
+#
+# Scoping is per clause (split on . ; newline) rather than per document, so a
+# genuine "shall attend an on-site kickoff" obligation elsewhere still
+# suppresses even when another clause negates on-site work — a contradictory
+# RFP resolves toward NOT firing, consistent with the rest of this module.
+_CLAUSE_SPLIT_RE = re.compile(r"[.;\n]+")
+_ONSITE_RE = re.compile(r"(?i)\bon[\s-]?site\b")
+_REQUIREMENT_RE = re.compile(
+    r"(?i)\b(?:require|requires|required|mandatory|expected|shall|must|necessary)\b"
 )
+# "cannot"/"nothing" deliberately absent: \b-anchored, so they never match here.
+_NEGATION_RE = re.compile(r"(?i)\b(?:not|no|never|without|nor|neither)\b|\w+n['’]t\b")
+# Max chars between the two anchors for them to read as one clause-level
+# obligation, and how far back to look for a leading "no" ("no on-site ...").
+_ONSITE_REQUIREMENT_GAP = 60
+_NEGATION_PREFIX_CHARS = 12
+
+
+def _rfp_requires_onsite_work(text: str) -> bool:
+    """True when the RFP states an affirmative, un-negated on-site obligation.
+
+    Suppresses the remote-only check, so it errs toward True only on a real
+    obligation: a requirement word merely co-occurring near "on-site" is not
+    enough if any (on-site, requirement) pair in that clause is negated.
+    """
+    for clause in _CLAUSE_SPLIT_RE.split(text):
+        onsites = _ONSITE_RE.finditer(clause)
+        sites = list(onsites)
+        if not sites:
+            continue
+        requirements = list(_REQUIREMENT_RE.finditer(clause))
+        if not requirements:
+            continue
+
+        found_pair = False
+        negated = False
+        for site in sites:
+            for req in requirements:
+                first, second = sorted((site, req), key=lambda m: m.start())
+                if second.start() - first.end() > _ONSITE_REQUIREMENT_GAP:
+                    continue  # too far apart to read as one obligation
+                found_pair = True
+                window = clause[max(0, first.start() - _NEGATION_PREFIX_CHARS) : second.end()]
+                if _NEGATION_RE.search(window):
+                    negated = True
+                    break
+            if negated:
+                break
+
+        if found_pair and not negated:
+            return True
+    return False
 
 
 def collect_rfp_constraint_violations(budget: ProposalBudget, rfp_text: str) -> list[str]:
     """Reject direct-expense line items (travel, reimbursables) the RFP's own terms forbid.
 
     Empty/missing RFP text, or RFP text that does not clearly state a
-    remote-only engagement, never halts. An RFP that also calls out an
-    on-site obligation (kickoff, quarterly visits, hybrid work) never halts
-    either — only an unqualified remote-only clause with no on-site carve-out
-    does. Agency fee and client pass-through lines are never candidates; only
-    ``direct_expense`` lines (travel/reimbursables) can be flagged.
+    remote-only engagement, never halts. An RFP that also states an
+    affirmative on-site obligation (kickoff, quarterly visits, hybrid work)
+    never halts either — only an unqualified remote-only clause with no
+    on-site carve-out does. A NEGATED on-site clause ("on-site presence shall
+    not be required") is not a carve-out: it restates the remote-only
+    constraint, and still halts. Agency fee and client pass-through lines are
+    never candidates; only ``direct_expense`` lines (travel/reimbursables)
+    can be flagged.
     """
     text = rfp_text or ""
     if not text.strip():
         return []
-    if not _REMOTE_ONLY_RE.search(text) or _ONSITE_REQUIRED_RE.search(text):
+    if not _REMOTE_ONLY_RE.search(text) or _rfp_requires_onsite_work(text):
         return []
 
     offenders = [
