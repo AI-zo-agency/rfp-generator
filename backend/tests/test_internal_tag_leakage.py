@@ -10,6 +10,11 @@ import re
 import unittest
 
 from app.models.proposal import ProposalDraft, ProposalSection
+from app.services.evidence_trust.flags import (
+    flag_claim_mismatch,
+    flag_confirm,
+    flag_provenance,
+)
 from app.services.proposal_docx_export import build_proposal_docx_bytes
 from app.services.proposal_manuscript import (
     build_manuscript_blocks,
@@ -19,15 +24,35 @@ from app.services.proposal_manuscript import (
 from app.services.proposal_presubmit_review import _PLACEHOLDER_RE
 from app.services.proposal_t1_validators import scan_internal_note_leaks
 
+# Bare [FLAG: ...] tags are emitted for real by app/services/evidence_trust/flags.py
+# and reach section.content via claim_validator.validate_and_flag_section (from
+# proposal_fulfill_fabrication_guard.repair_fabricated_qualifications and
+# proposal_chat_ops.py) — the same path this module guards. Built from the real
+# emitters so these tests break if the emitted tag shape ever changes.
+BARE_FLAG_TAGS = [
+    flag_confirm("Acme Corp"),
+    flag_claim_mismatch("Acme Corp", "led the rebrand", "media buying"),
+    flag_provenance("blog.example.com", "unverified source"),
+]
+
 INTERNAL_TAGS = [
     "[PRICING FLAG: PM ratio 12% outside 5-8% guide]",
     "[MANUAL FILL: Sonja — confirm commission rate]",
     "[FLAG FOR SONJA: Recovery Network of Oregon]",
     "[DESIGNER NOTE: insert 04_Bio_SonjaAnderson.pdf]",
     "[VERIFY: years in operation]",
+    *BARE_FLAG_TAGS,
 ]
 
-_MARKERS = ("PRICING FLAG", "MANUAL FILL", "FLAG FOR", "DESIGNER NOTE", "VERIFY:")
+# "FLAG:" covers both bare [FLAG: ...] and [PRICING FLAG: ...].
+_MARKERS = (
+    "PRICING FLAG",
+    "MANUAL FILL",
+    "FLAG FOR",
+    "DESIGNER NOTE",
+    "VERIFY:",
+    "FLAG:",
+)
 
 
 class PlaceholderScannerTests(unittest.TestCase):
@@ -172,6 +197,101 @@ class T1WhitelistTests(unittest.TestCase):
             any(f["code"] == "t1.note_leak.pricing_flag" for f in findings)
         )
         self.assertTrue(any(f["blocker"] for f in findings))
+
+    def test_bare_flag_is_not_a_t1_blocker(self) -> None:
+        """Deliberate: evidence_trust emits bare [FLAG: ...] during authoring, so
+        making it a T1 *blocker* would halt legitimate proposals. It is surfaced
+        by the presubmit placeholder scanner and removed by the export scrub
+        instead — see the decision table in task-5-report.md."""
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="2026-01-01T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="s1",
+                    title="Our Work",
+                    content=f"We served {flag_confirm('Acme Corp')} last year.",
+                    status="generated",
+                )
+            ],
+        )
+        self.assertEqual(scan_internal_note_leaks(draft), [])
+        # ...but the presubmit scanner must still see it.
+        self.assertTrue(_PLACEHOLDER_RE.findall(flag_confirm("Acme Corp")))
+
+
+class BareFlagTagExportTests(unittest.TestCase):
+    """Regression: evidence_trust/flags.py emits bare [FLAG: ...] (no 'FOR'), which
+    the first version of the export scrub missed entirely — it only matched
+    'FLAG FOR'. Verified leaking into both plain text and real DOCX bytes."""
+
+    def _draft(self) -> ProposalDraft:
+        body = "We served three public universities.\n\n" + "\n\n".join(
+            BARE_FLAG_TAGS
+        )
+        return ProposalDraft(
+            rfpId="r1",
+            updatedAt="2026-01-01T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="section-3-our-work",
+                    title="Our Work",
+                    content=body,
+                    status="generated",
+                )
+            ],
+        )
+
+    def test_bare_flag_does_not_survive_plain_text_export(self) -> None:
+        for tag in BARE_FLAG_TAGS:
+            with self.subTest(tag=tag):
+                out = plain_text_for_export(f"We served Acme Corp.\n\n{tag}")
+                self.assertNotIn("FLAG", out)
+                self.assertIn("We served Acme Corp.", out)
+
+    def test_bare_flag_does_not_survive_build_manuscript_structured(self) -> None:
+        structured = build_manuscript_structured(self._draft().sections)
+        combined = "\n".join(
+            part.get("text", "")
+            for sec in structured
+            for part in sec.get("parts", [])
+        )
+        self.assertNotIn("FLAG", combined)
+        self.assertIn("We served three public universities.", combined)
+
+    def test_bare_flag_does_not_survive_real_docx_bytes(self) -> None:
+        import io
+
+        from docx import Document
+
+        raw = build_proposal_docx_bytes(doc_title="Test", draft=self._draft())
+        doc = Document(io.BytesIO(raw))
+        full_text = "\n".join(p.text for p in doc.paragraphs)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    full_text += "\n" + cell.text
+        self.assertNotIn("FLAG", full_text)
+        self.assertIn("We served three public universities.", full_text)
+
+
+class ScrubDoesNotOverReachTests(unittest.TestCase):
+    """The shared tag regex is word-boundary anchored — ordinary prose that merely
+    starts with the same letters must not be eaten by the export scrub."""
+
+    def test_ordinary_bracketed_citations_survive(self) -> None:
+        out = plain_text_for_export("[1] See appendix A [2]")
+        self.assertIn("[1]", out)
+        self.assertIn("[2]", out)
+        self.assertIn("See appendix A", out)
+
+    def test_words_merely_starting_with_a_tag_name_survive(self) -> None:
+        for text in (
+            "Our [FLAGSHIP PROGRAM] served the county.",
+            "See [VERIFICATION SUMMARY] for details.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(plain_text_for_export(text), text)
 
 
 if __name__ == "__main__":

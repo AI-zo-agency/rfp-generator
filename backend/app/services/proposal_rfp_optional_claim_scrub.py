@@ -14,6 +14,15 @@ from typing import Sequence
 
 from app.models.proposal import ProposalDraft, ProposalSection
 
+# Single shared definition of "internal handoff tag" — owned by
+# proposal_manuscript (a dependency-free leaf module) and reused here so the two
+# call sites cannot drift. They already had: the export-side copy matched only
+# `FLAG\s+FOR` and therefore missed the bare `[FLAG: ...]` tags this pattern
+# always caught, leaking them into client-facing DOCX exports.
+from app.services.proposal_manuscript import (
+    INTERNAL_HANDOFF_TAG_RE as _HANDOFF_TAG_STRIP_RE,
+)
+
 logger = logging.getLogger(__name__)
 
 _DESIGNER_NOTE_RE = re.compile(
@@ -57,12 +66,6 @@ _NAMED_SUB_LINE_RE = re.compile(
     r"(?im)^[ \t]*(?:[-*]|\d+[.)])?[ \t]*"
     r"subcontractor\s*:\s*[^\n]+$",
 )
-
-_HANDOFF_TAG_STRIP_RE = re.compile(
-    r"\[(?:MANUAL\s+FILL|DESIGNER\s+NOTE|VERIFY|FLAG|PRICING\s+FLAG)[^\]]*\]",
-    re.IGNORECASE,
-)
-
 
 def strip_handoff_tags_for_scan(content: str) -> str:
     """Remove handoff tags so truncation/punctuation scanners see real prose."""

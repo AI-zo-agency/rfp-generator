@@ -130,22 +130,33 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
     return strip_internal_pricing_flags(strip_evidence_citation_markers(text or ""))
 
 
-# --- Export-only scrub -----------------------------------------------------------
+# --- Internal handoff tags: THE single definition ---------------------------------
 #
-# [MANUAL FILL: ...], [DESIGNER NOTE: ...], [VERIFY: ...], and [FLAG FOR ...] are
-# legitimate while a proposal is being authored (see scrub_client_facing_section_
-# artifacts above), but none of them may ever appear in the file actually
-# submitted/sent to a client or RFP reviewer. Observed defect: DOCX export
-# rendered [DESIGNER NOTE: ...] as a styled "DESIGNER NOTE" block in the
-# generated .docx, and [PRICING FLAG: ...] reached plain-text export verbatim.
-_INTERNAL_HANDOFF_TAG_RE = re.compile(
-    r"\[(?:MANUAL\s+FILL|DESIGNER\s+NOTE|VERIFY|FLAG\s+FOR)\b[^\]]*\]",
-    re.IGNORECASE | re.S,
+# This is the one place that defines "what counts as an internal handoff tag".
+# proposal_rfp_optional_claim_scrub.strip_handoff_tags_for_scan imports it too —
+# do not fork this pattern. (It was forked once: the export copy matched only
+# `FLAG\s+FOR`, so the bare `[FLAG: ...]` tags emitted by
+# app/services/evidence_trust/flags.py — flag_confirm / flag_claim_mismatch /
+# flag_provenance, which reach section.content via
+# claim_validator.validate_and_flag_section — shipped verbatim in client-facing
+# DOCX exports.)
+#
+# These tags are legitimate while a proposal is being authored (see
+# scrub_client_facing_section_artifacts above), but none of them may ever appear
+# in the file actually submitted/sent to a client or RFP reviewer. Observed
+# defects: DOCX export rendered [DESIGNER NOTE: ...] as a styled "DESIGNER NOTE"
+# block, and [PRICING FLAG: ...] / [FLAG: ...] reached export verbatim.
+#
+# `\b` after each alternative keeps ordinary prose safe — "[FLAGSHIP PROGRAM]"
+# and "[VERIFICATION SUMMARY]" are not tags and must survive the scrub.
+INTERNAL_HANDOFF_TAG_RE = re.compile(
+    r"\[(?:MANUAL\s+FILL|DESIGNER\s+NOTE|VERIFY|PRICING\s+FLAG|FLAG)\b[^\]]*\]",
+    re.IGNORECASE,
 )
 
 
 def strip_internal_handoff_tags(text: str) -> str:
-    """Remove [MANUAL FILL]/[DESIGNER NOTE]/[VERIFY]/[FLAG FOR ...] blocks.
+    """Remove [MANUAL FILL]/[DESIGNER NOTE]/[VERIFY]/[FLAG ...]/[PRICING FLAG] blocks.
 
     Export-only: these tags must survive authoring (see
     scrub_client_facing_section_artifacts) but must never reach a document
@@ -153,7 +164,7 @@ def strip_internal_handoff_tags(text: str) -> str:
     """
     if not text:
         return text
-    cleaned = _INTERNAL_HANDOFF_TAG_RE.sub("", text)
+    cleaned = INTERNAL_HANDOFF_TAG_RE.sub("", text)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned
