@@ -1013,12 +1013,87 @@ async def search_evidence_candidate_index(
     return candidates
 
 
+def case_study_id_slug(file_name: str) -> str:
+    """Reproduce the slug proposal_sections_graph bakes into Section 3 ids.
+
+    Kept byte-identical to that construction (`study.lower()[:40]` then space and
+    slash replacement) so a section can be mapped back to the document it was
+    built from. The 40-char truncation is lossy — "…Digital Campaign_2006.pdf"
+    becomes "…digital-campaign_" — which is why matching is done on the slug of
+    each candidate rather than by reconstructing a filename.
+    """
+    return (file_name or "").lower()[:40].replace(" ", "-").replace("/", "-")
+
+
+async def find_case_study_document_for_section(section_id: str) -> dict[str, Any] | None:
+    """Resolve the KB document a Section 3 case-study tab was generated from."""
+    match = re.match(r"^section-3-work-\d+-(.+)$", (section_id or "").strip())
+    if not match:
+        return None
+    slug = match.group(1)
+    try:
+        docs = await supermemory.list_container_memories(limit=1000)
+    except supermemory.SupermemoryError as exc:
+        logger.warning("Case-study document lookup failed for %s: %s", section_id, exc)
+        return None
+    for doc in docs:
+        metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        file_name = str(metadata.get("fileName") or "")
+        if file_name and case_study_id_slug(file_name) == slug:
+            return doc
+    return None
+
+
+#: Below this, the named document is too thin to build a case study from and we
+#: fall back to broad retrieval rather than starve the writer.
+_MIN_NAMED_CASE_STUDY_CHARS = 400
+
+
 async def fetch_single_case_study(
     study_title: str,
     *,
     max_chars: int = 120_000,
 ) -> tuple[str, list[str]]:
-    """JIT full retrieval for one selected case study."""
-    query = f"03_CS_ {study_title}"
+    """JIT full retrieval for one selected case study.
+
+    Fetches the named document directly when it exists. A broad semantic query
+    returns the right document buried among unrelated material: for
+    "03_CS_City of Umatilla_Digital Campaign_2006.pdf" it produced 120,032 chars
+    across 17 documents — four other clients' proposals, a pricing guide and a
+    filing guide — with the actual 4,862-char case study ranked 7th, about 4% of
+    the payload. The builder, under strict "never invent" rules, could not pick it
+    out and emitted "no source material available in knowledge base" for a case
+    study that is present in the knowledge base.
+
+    `study_title` is the KB fileName (that is what selection returns), so an exact
+    metadata.fileName lookup resolves it.
+    """
     logger.info("  └─ [Case Study Builder] fetching: %s", study_title[:80])
+
+    try:
+        doc = await supermemory.find_document_by_file_name(study_title)
+    except supermemory.SupermemoryError as exc:
+        logger.warning("Named case-study lookup failed for %s: %s", study_title[:60], exc)
+        doc = None
+
+    if doc:
+        fetch_key = supermemory.document_fetch_key(doc)
+        if fetch_key:
+            try:
+                body = await supermemory.get_document_content(custom_id=fetch_key)
+            except supermemory.SupermemoryError as exc:
+                logger.warning("Named case-study fetch failed for %s: %s", study_title[:60], exc)
+                body = ""
+            if body and len(body.strip()) >= _MIN_NAMED_CASE_STUDY_CHARS:
+                logger.info(
+                    "  └─ [Case Study Builder] using named document (%d chars, no search noise)",
+                    len(body),
+                )
+                return body[:max_chars], [study_title]
+            logger.info(
+                "  └─ [Case Study Builder] named document too thin (%d chars) — broadening",
+                len(body or ""),
+            )
+
+    query = f"03_CS_ {study_title}"
     return await search_and_fetch_full(query, max_chars=max_chars)

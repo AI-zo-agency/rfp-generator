@@ -15,6 +15,7 @@ import {
   stripLegacyMonolithSections,
 } from "@/lib/proposal-draft";
 import { getManuscriptSections, normalizeOutlineSectionOrder, resolveManuscriptJumpTarget, buildManuscriptIndexMap } from "@/lib/proposal-outline-tree";
+import { isSectionDrafted } from "@/lib/proposal-section-health";
 import {
   buildPipelineStatus,
   fetchProposalDraft,
@@ -553,8 +554,12 @@ function ProposalDraftWorkspaceInner({
 
   const manuscriptProgress = useMemo(() => {
     const total = manuscriptSections.length;
+    // Count only genuinely drafted sections. A failed section holds a short
+    // [VERIFY: ...] stub, so a bare trim() check reported "16/16 drafted" while
+    // three sections held no draft — contradicting the pipeline, which correctly
+    // refuses to mark Phase 3 complete for them.
     const complete = manuscriptSections.filter((s) =>
-      Boolean(s.content?.trim())
+      isSectionDrafted(s.content)
     ).length;
     return { complete, total };
   }, [manuscriptSections]);
@@ -2524,7 +2529,7 @@ function ProposalDraftWorkspaceInner({
                       <span className="proposal-on-page-num">{index + 1}</span>
                       <span className="proposal-on-page-title">
                         {section.title}
-                        {!section.content?.trim() ? " · …" : ""}
+                        {!isSectionDrafted(section.content) ? " · …" : ""}
                       </span>
                     </button>
                   </li>
@@ -2551,7 +2556,7 @@ function ProposalDraftWorkspaceInner({
                 </div>
               ) : null}
               {manuscriptSections.map((section, index) =>
-                  section.content?.trim() ? (
+                  isSectionDrafted(section.content) ? (
                   <article
                     key={section.id}
                     id={section.id}
@@ -2703,7 +2708,7 @@ function ProposalDraftWorkspaceInner({
                             <span className="proposal-on-page-num">{index + 1}</span>
                             <span className="proposal-on-page-title">
                               {section.title}
-                              {!section.content?.trim() ? " · …" : ""}
+                              {!isSectionDrafted(section.content) ? " · …" : ""}
                             </span>
                           </button>
                         </li>
@@ -2715,7 +2720,7 @@ function ProposalDraftWorkspaceInner({
                     className="proposal-content-scroll proposal-content-manuscript-pane proposal-review-manuscript custom-scrollbar min-h-0"
                   >
                     {manuscriptSections.map((section, index) =>
-                      section.content?.trim() ? (
+                      isSectionDrafted(section.content) ? (
                         <article
                           key={section.id}
                           id={section.id}

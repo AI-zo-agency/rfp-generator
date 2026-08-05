@@ -701,6 +701,42 @@ async def _ensure_jit_evidence(
     return _evidence_for_section(section_id, corpus) or corpus[:12]
 
 
+#: Extra attempts for a single section before writing a failure placeholder.
+#: Bounded at one so worst-case Phase 3 latency stays predictable.
+_SINGLE_SECTION_RETRIES = 1
+_SINGLE_SECTION_RETRY_BACKOFF_SECONDS = 3.0
+
+
+async def _draft_single_with_retry(
+    section: dict[str, Any],
+    state: DraftingGraphState,
+) -> tuple[list[dict[str, Any]], str]:
+    """Draft one section, retrying once on LlmError before giving up.
+
+    The common causes here are transient — provider rate limits and brief
+    outages. Without a retry a single blip permanently converts a section into a
+    placeholder that only chat can recover, so one cheap backoff attempt removes
+    most placeholders at the source.
+    """
+    attempt = 0
+    while True:
+        try:
+            return await _draft_batch_once([section], state)
+        except LlmError as exc:
+            if attempt >= _SINGLE_SECTION_RETRIES:
+                raise
+            delay = _SINGLE_SECTION_RETRY_BACKOFF_SECONDS * (2**attempt)
+            attempt += 1
+            logger.warning(
+                "Phase 3 section %s attempt %d failed (%s) — retrying in %.1fs",
+                section.get("id") or "",
+                attempt,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
 async def _draft_batch(
     batch: list[dict[str, Any]],
     state: DraftingGraphState,
@@ -719,7 +755,7 @@ async def _draft_batch(
         provider = state.get("provider") or _provider_name()
         for section in batch:
             try:
-                results, batch_provider = await _draft_batch_once([section], state)
+                results, batch_provider = await _draft_single_with_retry(section, state)
                 merged.extend(results)
                 provider = batch_provider
             except LlmError as single_exc:

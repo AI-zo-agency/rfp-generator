@@ -155,16 +155,26 @@ Rules:
 Return ONLY JSON: {"reply": "<markdown chat message with **bold** and bullets as needed>"}"""
 
 # Explicit mutate verbs — required before we rewrite a section.
+from app.services.proposal_draft_llm import chat_json_with_repair
+from app.services.proposal_chat_verbs import (
+    ADD_VERBS,
+    EDIT_VERBS,
+    QUESTION_OPENERS,
+    verb_alternation,
+)
+
+
+# Built from the shared vocabulary so the three edit-verb lists in this codebase
+# cannot drift apart again. See proposal_chat_verbs.EDIT_VERBS.
 _EDIT_INTENT_RE = re.compile(
     r"\b("
-    r"change|fix|update|rewrite|revise|edit|improve|shorten|lengthen|"
-    r"remove|replace|fill|patch|insert|delete|correct|align|apply|resolve|"
-    r"make\s+it|make\s+this|swap|redraft|regenerate|"
-    r"create\b.{0,50}\b(?:section|tab|h2|bio|case\s*stud)|"
-    r"add\b.{0,50}\b(?:section|tab|h2|paragraph|sentence|case\s*stud(?:y|ies)?|"
-    r"bios?|bullet|row|line)\b|"
-    r"more\s+\d*\s*(?:team\s*)?bios?"
-    r")",
+    + verb_alternation(EDIT_VERBS)
+    + r"|make\s+it|make\s+this|"
+    + r"(?:" + verb_alternation(ADD_VERBS) + r")\b.{0,50}\b"
+    + r"(?:section|tab|h2|paragraph|sentence|case\s*stud(?:y|ies)?|"
+    + r"bios?|bullet|row|line)\b|"
+    + r"more\s+\d*\s*(?:team\s*)?bios?"
+    + r")",
     re.I,
 )
 
@@ -184,8 +194,19 @@ _ADVISORY_INTENT_RE = re.compile(
     re.I,
 )
 
+# Interrogative openers that make a message a question about the draft rather than
+# an instruction to change it. See proposal_chat_verbs.QUESTION_OPENERS.
+_QUESTION_OPENER_RE = re.compile(
+    r"^\s*(?:" + "|".join(o.replace(" ", r"\s+") for o in QUESTION_OPENERS) + r")\b",
+    re.I,
+)
+
+
+# "check X and then fix it" — an advisory opener followed by an instruction is an
+# edit. Uses the shared vocabulary; the old hardcoded seven verbs missed
+# "review this and tighten it up".
 _FOLLOW_WITH_MUTATE_RE = re.compile(
-    r"\b(?:then|and)\s+(?:please\s+)?(?:fix|rewrite|replace|update|remove|improve|edit)\b",
+    r"\b(?:then|and)\s+(?:please\s+)?(?:" + verb_alternation(EDIT_VERBS) + r")\b",
     re.I,
 )
 
@@ -452,6 +473,18 @@ def _wants_section_edit(user_message: str, *, conversation_history: list[dict[st
         return False
     if advisory and mutate and not _FOLLOW_WITH_MUTATE_RE.search(text):
         return False
+
+    # A question *about* the draft is not an instruction to change it, even when
+    # it contains an edit verb: "does the budget cut affect this?", "which
+    # sections need trimming?". Request forms ("can you shorten this?", "please
+    # tighten this") are deliberately not question openers, so they still edit.
+    if (
+        mutate
+        and _QUESTION_OPENER_RE.match(text)
+        and not _FOLLOW_WITH_MUTATE_RE.search(text)
+    ):
+        return False
+
     if mutate:
         return True
     if text.endswith("?"):
@@ -465,6 +498,47 @@ def _wants_section_edit(user_message: str, *, conversation_history: list[dict[st
         return False
     # Safe default: answer in chat; do not rewrite.
     return False
+
+
+@dataclass(frozen=True)
+class ChatRoute:
+    """Whether a chat turn answers in chat or mutates the draft, and why."""
+
+    advisory: bool
+    reason: str
+
+
+def decide_chat_route(
+    *,
+    chat_intent: str,
+    user_message: str,
+    selection_mode: bool,
+    conversation_history: list[dict[str, str]] | None = None,
+) -> ChatRoute:
+    """Decide advisory vs edit for one chat turn.
+
+    Lifted verbatim out of improve_proposal_section so the decision can be tested
+    directly instead of only through a 1,700-line dispatcher. Order matters and is
+    load-bearing:
+
+    * a pinned excerpt edit is always an edit;
+    * a structure ask (add/delete a section) always mutates, overriding even a
+      classifier that said "advisory";
+    * the LLM classifier decides next, because it reads the whole manuscript;
+    * only when the classifier abstains ("none", including when it could not run)
+      does the keyword gate decide, and its default is advisory.
+    """
+    if selection_mode:
+        return ChatRoute(advisory=False, reason="selection_edit")
+    if _is_outline_structure_ask(user_message):
+        return ChatRoute(advisory=False, reason="structure_ask")
+    if chat_intent == "advisory":
+        return ChatRoute(advisory=True, reason="classifier_advisory")
+    if chat_intent in {"single_edit", "multi_patch"}:
+        return ChatRoute(advisory=False, reason=f"classifier_{chat_intent}")
+    if _wants_section_edit(user_message, conversation_history=conversation_history):
+        return ChatRoute(advisory=False, reason="keyword_edit")
+    return ChatRoute(advisory=True, reason="keyword_default_advisory")
 
 
 def _compose_chat_user_message(
@@ -1716,13 +1790,18 @@ async def _section_chat_advisory_reply(
         if full_detail:
             system_prompt = f"{system_prompt}\n\n{BUDGET_EXPLAIN_ADVISORY_RULES}"
     max_tokens = 2000 if user_asks_budget_explanation(user_message) else 1200
-    raw, _ = await llm.chat_json(
+    # Advisory replies are long markdown wrapped in {"reply": "..."} and the model
+    # intermittently emits JSON this strict parser rejects, which surfaced to the
+    # user as a 502 on roughly half of all questions. Repair once before failing —
+    # same helper Phase 3 drafting already uses.
+    raw, _ = await chat_json_with_repair(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
         max_tokens=max_tokens,
         temperature=0.25 if user_asks_budget_explanation(user_message) else 0.35,
+        node_name="section_chat_advisory",
     )
     reply = str(raw.get("reply", "")).strip()
     return reply or (
@@ -2226,6 +2305,35 @@ async def _bio_kb_context_for_section(section: ProposalSection) -> str:
     return bio_text
 
 
+async def _case_study_kb_context_for_section(section: ProposalSection) -> str:
+    """Authoritative 03_CS source document for a Section 3 case-study tab.
+
+    Mirrors _bio_kb_context_for_section. Without it, a chat redraft of a case
+    study relies on a broad semantic query, which returns the right document
+    buried among other clients' proposals — measured at 4% of a 120k-char payload
+    for City of Umatilla — and the writer emitted "no source material available in
+    knowledge base" for a case study that is in the knowledge base.
+    """
+    if not section.id.startswith("section-3-work-"):
+        return ""
+    from app.services.proposal_knowledge_base_tools import (
+        find_case_study_document_for_section,
+    )
+
+    doc = await find_case_study_document_for_section(section.id)
+    if not doc:
+        return ""
+    fetch_key = supermemory.document_fetch_key(doc)
+    if not fetch_key:
+        return ""
+    try:
+        body = await supermemory.get_document_content(custom_id=fetch_key)
+    except supermemory.SupermemoryError as exc:
+        logger.warning("Case-study source fetch failed for %s: %s", section.id, exc)
+        return ""
+    return body or ""
+
+
 async def _merge_bio_kb_into_blobs(
     section: ProposalSection,
     *,
@@ -2233,12 +2341,32 @@ async def _merge_bio_kb_into_blobs(
     fact_blob: str,
 ) -> tuple[str, str]:
     bio_text = await _bio_kb_context_for_section(section)
-    if not bio_text:
-        return kb_block, fact_blob
-    header = f"=== 04_Bio approved file ({section.title}) ===\n{bio_text[:80_000]}"
-    merged_kb = f"{kb_block}\n\n{header}".strip() if kb_block.strip() else header
-    merged_fact = f"{fact_blob}\n\n{bio_text}".strip() if fact_blob.strip() else bio_text
-    return merged_kb, merged_fact
+    if bio_text:
+        header = f"=== 04_Bio approved file ({section.title}) ===\n{bio_text[:80_000]}"
+        merged_kb = f"{kb_block}\n\n{header}".strip() if kb_block.strip() else header
+        merged_fact = (
+            f"{fact_blob}\n\n{bio_text}".strip() if fact_blob.strip() else bio_text
+        )
+        return merged_kb, merged_fact
+
+    case_text = await _case_study_kb_context_for_section(section)
+    if case_text:
+        header = (
+            f"=== 03_CS source case study ({section.title}) — write from THIS ===\n"
+            f"{case_text[:80_000]}"
+        )
+        merged_kb = f"{header}\n\n{kb_block}".strip() if kb_block.strip() else header
+        merged_fact = (
+            f"{case_text}\n\n{fact_blob}".strip() if fact_blob.strip() else case_text
+        )
+        logger.info(
+            "chat redraft using named 03_CS source for %s (%d chars)",
+            section.id,
+            len(case_text),
+        )
+        return merged_kb, merged_fact
+
+    return kb_block, fact_blob
 
 
 def _apply_bio_work_history_kb_fill(
@@ -3943,32 +4071,47 @@ async def _try_redraft_failed_section(
     user_message: str,
     rfp: RfpRecord,
 ):
-    """Rebuild a section whose Phase 3 draft failed, straight from chat.
+    """Rebuild a section that holds no usable draft, straight from chat.
 
-    A failed section holds only SECTION_DRAFT_FAILURE_PLACEHOLDER, so the normal
-    chat edit paths have nothing to improve — they would rewrite the placeholder
-    rather than produce the section. Recovering previously meant waiting for the
-    whole pipeline to be idle and pressing Continue Proposal, which is not
-    possible while a later phase (e.g. budget) is still running.
+    A dead section holds only a short [VERIFY: ...] stub, so the normal chat edit
+    paths have nothing to improve — they would rewrite the stub rather than
+    produce the section. Recovering previously meant waiting for the whole
+    pipeline to be idle and pressing Continue Proposal, which is not possible
+    while a later phase (e.g. budget) is still running.
 
-    Detection is on the section's STATE, not on the user's wording: if the
-    content is the failure placeholder, any ask to write/fix/redraft it means
-    "draft this properly". Returns None when this path does not apply.
+    Detection is on the section's STATE, not on the user's wording: if the section
+    holds no draft, any ask to write/fix/redraft it means "draft this properly".
+    Returns None when this path does not apply.
+
+    State is classified by proposal_section_health rather than compared against
+    SECTION_DRAFT_FAILURE_PLACEHOLDER. Stored drafts contain punctuation variants
+    of that sentinel, and exact equality silently skipped them — the section then
+    fell through to the advisory router and chat answered "I cannot improve this
+    section" instead of rebuilding it.
     """
-    from app.services.proposal_draft_llm import SECTION_DRAFT_FAILURE_PLACEHOLDER
+    from app.services.proposal_section_health import (
+        SectionHealth,
+        classify_section_health,
+        is_failed_draft_stub,
+    )
 
-    content = (section.content or "").strip()
-    if content != SECTION_DRAFT_FAILURE_PLACEHOLDER.strip():
+    # Only a section that drafting ran on and left a stub in. An empty section is
+    # not hijacked here — the normal edit path writes it. is_failed_draft_stub is
+    # the single definition of that set, so adding a stub kind (PLACEHOLDER_ONLY)
+    # does not need a second edit here.
+    if not is_failed_draft_stub(section.content):
         return None
+    health = classify_section_health(section.content)
 
     from app.services.proposal_self_edit_loop import (
         _redraft_section_via_phase3_isolated,
     )
 
     logger.info(
-        "chat redrafting failed section %s for %s (placeholder detected)",
+        "chat redrafting dead section %s for %s (health=%s)",
         section.id,
         rfp_id,
+        health.value,
     )
     next_draft, next_research, changed, detail = await _redraft_section_via_phase3_isolated(
         rfp_id=rfp_id,
@@ -3979,18 +4122,25 @@ async def _try_redraft_failed_section(
         research=research,
     )
     if not changed:
-        return (
-            section,
-            draft,
-            research,
-            "none",
-            (
+        # Distinguish the two failure modes. A provider outage is retryable; a
+        # corpus gap is not, and telling the user to "try again shortly" for a
+        # corpus gap just sends them round the same loop.
+        if health is SectionHealth.NO_EVIDENCE:
+            message = (
+                f"I re-ran drafting for \u201c{section.title}\u201d but the knowledge "
+                f"base still has no evidence to write it from ({detail}).\n\n"
+                "This section needs source material before it can be drafted — "
+                "add the relevant document to the knowledge base, or tell me the "
+                "specifics here and I'll write it from what you give me. "
+                "I won't invent content for it."
+            )
+        else:
+            message = (
                 f"Could not rebuild \u201c{section.title}\u201d yet ({detail}). "
                 "This usually means the model provider is rate-limited or out of "
                 "credit — try again shortly."
-            ),
-            False,
-        )
+            )
+        return (section, draft, research, "none", message, False)
 
     rebuilt = next((s for s in next_draft.sections if s.id == section.id), section)
     return (
@@ -4183,6 +4333,11 @@ async def improve_proposal_section(
             conversation_history=conversation_history,
         )
         chat_intent = str(intent_info.get("intent") or "none")
+        # True when the classifier could not run at all (provider outage), as
+        # opposed to deciding "none". Routing then falls back to the keyword gate,
+        # which defaults to advisory — so tell the user rather than letting an
+        # outage look like the assistant declining to edit.
+        intent_degraded = bool(intent_info.get("degraded"))
 
         # For multi_patch, do NOT remap to one named section — the plan spans many.
         # For single_edit / default, named titles + LLM primary beat the open tab.
@@ -4381,13 +4536,14 @@ async def improve_proposal_section(
 
     # LLM advisory wins. For single_edit/multi_patch, do not short-circuit on
     # keyword advisory regex — the model already decided the user wants edits.
-    force_advisory = chat_intent == "advisory"
-    force_edit = chat_intent in {"single_edit", "multi_patch"}
-    if (
-        not selection_mode
-        and (force_advisory or (not force_edit and not _wants_section_edit(user_message, conversation_history=conversation_history)))
-        and not _is_outline_structure_ask(user_message)
-    ):
+    route = decide_chat_route(
+        chat_intent=chat_intent,
+        user_message=user_message,
+        selection_mode=bool(selection_mode),
+        conversation_history=conversation_history,
+    )
+    logger.info("chat route=%s reason=%s", "advisory" if route.advisory else "edit", route.reason)
+    if route.advisory:
         section = _find_draft_section(draft, section_id) or (
             draft.sections[0] if draft.sections else None
         )
@@ -4408,6 +4564,15 @@ async def improve_proposal_section(
             manuscript_digest=manuscript_digest,
             research=research,
         )
+        if intent_degraded:
+            # The classifier could not run, so this answer may be advisory only
+            # because routing fell back to the keyword gate. Say so — otherwise a
+            # provider outage is indistinguishable from a considered refusal.
+            reply = (
+                "_Note: the intent classifier is unavailable right now "
+                "(model provider error), so I answered instead of editing. "
+                "If you wanted a change made, resend the request in a moment._\n\n"
+            ) + reply
         provider = _provider_name()
         if research is None:
             research = ProposalResearchCache(
@@ -4538,7 +4703,9 @@ async def improve_proposal_section(
                 f"{rfp_context}\n\n=== 00_Guide_Pricing (Supermemory) ===\n{guide_text[:20_000]}"
             )
 
-    if not force_edit and not _wants_section_edit(user_message, conversation_history=conversation_history):
+    if chat_intent not in {"single_edit", "multi_patch"} and not _wants_section_edit(
+        user_message, conversation_history=conversation_history
+    ):
         reply = await _section_chat_advisory_reply(
             section=section,
             rfp=rfp,

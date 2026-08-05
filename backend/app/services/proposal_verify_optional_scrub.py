@@ -11,6 +11,7 @@ from typing import Any
 from app.services import llm
 from app.services.proposal_manual_flags import VERIFY_TAG_RE
 from app.services.proposal_rfp_excerpt import build_priority_rfp_excerpt
+from app.services.proposal_section_health import is_dead_section
 
 logger = logging.getLogger(__name__)
 
@@ -217,8 +218,11 @@ async def scrub_optional_verify_tags(
             note="Scrub returned empty content — left original.",
         )
 
-    # Guard: do not accept a near-empty wipe of a long section.
-    if len(body) > 400 and len(updated) < max(120, int(len(body) * 0.25)):
+    # Guard: do not accept a near-empty wipe. Applies at every length — the old
+    # `len(body) > 400` precondition meant short bodies had no guard at all, so a
+    # ~60-character failure stub could be scrubbed away entirely, leaving an empty
+    # section and destroying the marker chat needs to rebuild it.
+    if len(updated) < max(24, int(len(body) * 0.25)):
         return VerifyOptionalScrubResult(
             content=body,
             tags_before=before,
@@ -390,6 +394,11 @@ async def scrub_draft_optional_verify_tags(
         if section_filter_ids is not None and sid not in section_filter_ids:
             continue
         if count_verify_tags(content) <= 0:
+            continue
+        if is_dead_section(content):
+            # The whole body is a failure stub, not prose with optional tags in
+            # it. There is nothing to scrub, and removing the stub would destroy
+            # the marker chat uses to rebuild the section.
             continue
         targets.append((idx, section, title))
 

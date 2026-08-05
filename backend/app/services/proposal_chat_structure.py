@@ -762,6 +762,9 @@ def _heuristic_bio_replace_plan(
     )
 
 
+from app.services.proposal_chat_verbs import ADD_VERBS, verb_alternation
+
+
 _ADD_CASE_STUDY_INTENT_RE = re.compile(
     r"(?is)"
     r"(?:add|include|put|insert|create)\s+"
@@ -771,7 +774,10 @@ _ADD_CASE_STUDY_INTENT_RE = re.compile(
     r"(?:the\s+)?"
     r"(?:case\s*stud(?:y|ies)|our\s+work|section\s*3)\b"
     r"|"
-    r"(?:add|include)\s+(?:a\s+)?(?:new\s+)?"
+    # Shared ADD_VERBS: this alternation previously listed only add|include while
+    # the one above listed add|include|put|insert|create, so "create a new case
+    # study for Bend" matched neither.
+    r"(?:" + verb_alternation(ADD_VERBS) + r")\s+(?:a\s+)?(?:new\s+)?"
     r"(?:case\s*stud(?:y|ies))\b"
     r"|"
     r"\bcase\s*stud(?:y|ies)\b.{0,40}\b(?:add|include|insert)\b",

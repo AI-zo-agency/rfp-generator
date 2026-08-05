@@ -1,5 +1,4 @@
 """LLM-driven multi-section manuscript fixes from chat.
-
 The model reads the user query + full proposal (+ recent chat), decides what to
 change, and we apply that plan. No keyword/regex routing for intent, budget,
 KB hunts, or add-sections.
@@ -7,6 +6,7 @@ KB hunts, or add-sections.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Literal
@@ -47,7 +47,7 @@ def _format_recent_chat(
     return blob or "(no prior chat)"
 
 
-async def classify_chat_edit_intent(
+async def _classify_chat_edit_intent_once(
     *,
     user_message: str,
     draft: ProposalDraft,
@@ -56,7 +56,7 @@ async def classify_chat_edit_intent(
     rfp_client: str = "",
     conversation_history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """LLM decides advisory vs single_edit vs multi_patch — no keyword gates."""
+    """One classification attempt. Callers should use classify_chat_edit_intent."""
     outline = "\n".join(
         f"- {s.id}: {s.title}" for s in draft.sections[:40] if s.id and s.title
     )
@@ -118,7 +118,56 @@ async def classify_chat_edit_intent(
         }
     except LlmError as exc:
         logger.warning("Chat intent classify failed: %s", exc)
-        return {"intent": "none", "reason": str(exc)[:200]}
+        # `degraded` separates "the model decided none" from "the classifier could
+        # not run". Callers previously saw plain "none" for both and fell back to
+        # the keyword gate, whose safe default is advisory — so a provider
+        # rate-limit silently answered every edit request with an essay.
+        return {"intent": "none", "degraded": True, "reason": str(exc)[:200]}
+
+
+#: Extra attempts before reporting degraded routing. Bounded at one so a chat turn
+#: does not stall behind repeated classifier calls.
+_INTENT_CLASSIFY_RETRIES = 1
+_INTENT_CLASSIFY_BACKOFF_SECONDS = 1.5
+
+
+async def classify_chat_edit_intent(
+    *,
+    user_message: str,
+    draft: ProposalDraft,
+    focus_section_id: str | None = None,
+    rfp_title: str = "",
+    rfp_client: str = "",
+    conversation_history: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Classify a chat turn, retrying once when the classifier cannot run.
+
+    Returns ``degraded: True`` when every attempt failed. The caller must not
+    treat that as a confident "none" — routing then falls back to the keyword
+    gate, whose safe default is advisory, which is indistinguishable from the
+    assistant deciding not to edit.
+    """
+    attempt = 0
+    while True:
+        result = await _classify_chat_edit_intent_once(
+            user_message=user_message,
+            draft=draft,
+            focus_section_id=focus_section_id,
+            rfp_title=rfp_title,
+            rfp_client=rfp_client,
+            conversation_history=conversation_history,
+        )
+        if not result.get("degraded"):
+            return result
+        if attempt >= _INTENT_CLASSIFY_RETRIES:
+            logger.warning(
+                "Chat intent classifier degraded after %d attempt(s) — "
+                "routing falls back to keyword gate",
+                attempt + 1,
+            )
+            return result
+        attempt += 1
+        await asyncio.sleep(_INTENT_CLASSIFY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
 
 
 async def _plan_manuscript_fixes(

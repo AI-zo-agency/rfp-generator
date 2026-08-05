@@ -178,7 +178,7 @@ async def _post_gemini_chat(
     from app.services.proposal_generation_cancel import run_with_generation_cancel
 
     async def _post() -> httpx.Response:
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
             return await client.post(url, json=body)
 
     response = await run_with_generation_cancel(_post)
@@ -306,6 +306,29 @@ def _rate_limit_wait_seconds(attempt: int, response: httpx.Response) -> tuple[fl
     return wait, "exponential_backoff"
 
 
+#: Read timeout for a single LLM HTTP call.
+_HTTP_TIMEOUT_SECONDS = 180.0
+
+#: Long-output calls need real headroom: the Stage 3 budget pass asks for 8192
+#: tokens against a ~28k-char prompt on a heavy model, and was timing out at 180s
+#: purely because generation had not finished. That is slow, not broken.
+_HTTP_TIMEOUT_LONG_SECONDS = 300.0
+_LONG_OUTPUT_TOKEN_THRESHOLD = 4096
+
+
+def _http_timeout_for(max_tokens: int | None) -> float:
+    """Read timeout scaled to how much output the call asks for."""
+    if max_tokens is not None and max_tokens >= _LONG_OUTPUT_TOKEN_THRESHOLD:
+        return _HTTP_TIMEOUT_LONG_SECONDS
+    return _HTTP_TIMEOUT_SECONDS
+
+#: Retries for network-level failures. Kept low because each attempt can already
+#: cost the full read timeout — the point is to reach the provider fallback chain
+#: quickly, not to keep hammering one slow endpoint.
+_MAX_TRANSPORT_RETRIES = 1
+_TRANSPORT_RETRY_BACKOFF_SECONDS = 2.0
+
+
 @_langsmith_traceable(
     name="llm.post_chat",
     run_type="llm",
@@ -355,13 +378,49 @@ async def _post_chat(
     last_error: LlmError | None = None
     from app.services.proposal_generation_cancel import run_with_generation_cancel
 
+    transport_failures = 0
     for attempt in range(4):
 
+        timeout_s = _http_timeout_for(max_tokens)
+
         async def _post() -> httpx.Response:
-            async with httpx.AsyncClient(timeout=180.0) as client:
+            async with httpx.AsyncClient(timeout=timeout_s) as client:
                 return await client.post(url, headers=headers, json=body)
 
-        response = await run_with_generation_cancel(_post)
+        try:
+            response = await run_with_generation_cancel(_post)
+        except httpx.HTTPError as exc:
+            # Network-level failures (read timeout, connect error, protocol error)
+            # used to propagate raw out of this function. Every layer of resilience
+            # in this codebase catches LlmError only, so a single slow response
+            # bypassed ALL of them at once: this retry loop, the
+            # Gemini -> OpenRouter -> Fireworks fallback chain in chat_json, and each
+            # caller's own recovery (e.g. the budget's compact-output retry). One
+            # timeout killed a whole pipeline phase.
+            #
+            # ProposalGenerationCancelled is a separate class, so pressing Stop is
+            # still honoured rather than being retried.
+            transport_failures += 1
+            last_error = LlmError(
+                f"{provider} request failed: {exc.__class__.__name__}: {str(exc)[:200]}"
+            )
+            if transport_failures <= _MAX_TRANSPORT_RETRIES and attempt < 3:
+                wait_s = _TRANSPORT_RETRY_BACKOFF_SECONDS * transport_failures
+                logger.warning(
+                    "LLM transport error (%s): %s — retrying in %.1fs (attempt %d)",
+                    provider,
+                    exc.__class__.__name__,
+                    wait_s,
+                    transport_failures,
+                )
+                await asyncio.sleep(wait_s)
+                continue
+            logger.warning(
+                "LLM transport error (%s) exhausted retries: %s — falling back",
+                provider,
+                exc.__class__.__name__,
+            )
+            break
 
         if response.status_code == 429 and attempt < 3:
             wait_s, wait_source = _rate_limit_wait_seconds(attempt, response)

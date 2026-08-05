@@ -7,6 +7,10 @@ import {
   groupContainsSection,
   type OutlineTreeGroup,
 } from "@/lib/proposal-outline-tree";
+import {
+  classifySectionHealth,
+  deadSectionLabel,
+} from "@/lib/proposal-section-health";
 import type { OutlineSection } from "@/types/proposal";
 import type { SectionRevisionRecord } from "./DraftSectionEditor";
 
@@ -100,10 +104,14 @@ function SectionRow({
   onOpenRevision: (sectionId: string) => void;
   onDeleteSection?: (sectionId: string) => void;
 }) {
-  const hasContent = Boolean(section.content.trim());
-  const needsAttention = flagCount > 0 || hasRevision;
+  // A failed section holds a short [VERIFY: ...] stub, which is non-empty — a bare
+  // trim() check counted that as drafted, so failed sections showed a ticked
+  // checkbox and "Draft has content" while holding no draft at all.
+  const health = classifySectionHealth(section.content);
+  const hasContent = health === null;
+  const needsAttention = flagCount > 0 || hasRevision || health !== null;
   const titleHint = [
-    hasContent ? "Draft has content" : "Not drafted yet",
+    hasContent ? "Draft has content" : deadSectionLabel(health),
     flagCount > 0 ? `${flagCount} fill-in tag(s)` : "",
     hasRevision
       ? "Section updated — double-click title area in review for changes"

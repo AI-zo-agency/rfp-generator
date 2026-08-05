@@ -1,0 +1,115 @@
+{
+  "_comment": "Shared fixture for proposal section-health classification. Asserted by backend/tests/test_proposal_section_health.py AND frontend/src/lib/proposal-section-health.test.ts. Both implementations must agree on every case; edit this file, not one side.",
+  "cases": [
+    {
+      "name": "production comma variant (San Benito sections 9, 15, 16)",
+      "content": "[VERIFY: Section drafting failed, needs manual regeneration]",
+      "expected": "draft_failed"
+    },
+    {
+      "name": "canonical em dash constant",
+      "content": "[VERIFY: Section drafting failed \u2014 needs manual regeneration]",
+      "expected": "draft_failed"
+    },
+    {
+      "name": "hyphen separator",
+      "content": "[VERIFY: Section drafting failed - needs manual regeneration]",
+      "expected": "draft_failed"
+    },
+    {
+      "name": "en dash separator",
+      "content": "[VERIFY: Section drafting failed \u2013 needs manual regeneration]",
+      "expected": "draft_failed"
+    },
+    {
+      "name": "lowercase and extra whitespace",
+      "content": "  [verify:  section drafting failed,   needs manual regeneration]  ",
+      "expected": "draft_failed"
+    },
+    {
+      "name": "family B insufficient evidence",
+      "content": "[VERIFY: Draft content for Standard Contract Acknowledgment (Exhibit A) \u2014 insufficient evidence in corpus.]",
+      "expected": "no_evidence"
+    },
+    {
+      "name": "family B empty prose with requirements tail",
+      "content": "[VERIFY: Draft content for Project Approach \u2014 writer returned empty prose; re-run Phase 3 for this section using plan/winning-pattern context. Requirements: must describe QA process; must list milestones]",
+      "expected": "no_evidence"
+    },
+    {
+      "name": "empty string",
+      "content": "",
+      "expected": "empty"
+    },
+    {
+      "name": "whitespace only",
+      "content": "   \n\t  ",
+      "expected": "empty"
+    },
+    {
+      "name": "REGRESSION: drafted prose containing an inline VERIFY chip must be alive",
+      "content": "Z\u00f6 agency will deliver the redesign in three phases. [VERIFY: confirm final launch date with SBCOG] Each phase concludes with a stakeholder review.",
+      "expected": null
+    },
+    {
+      "name": "REGRESSION: drafted prose that STARTS with a VERIFY chip must be alive",
+      "content": "[VERIFY: confirm contract vehicle] The following acknowledgment applies to Exhibit A and is signed by an authorized representative of the firm.",
+      "expected": null
+    },
+    {
+      "name": "REGRESSION: prose ending in a bracket must be alive",
+      "content": "[VERIFY: confirm rate] Our blended rate applies to all labor categories [see Exhibit B]",
+      "expected": null
+    },
+    {
+      "name": "REGRESSION: real section whose body merely mentions drafting failed",
+      "content": "Our QA process ensures no section drafting failed, needs manual regeneration situations reach the client. We review every deliverable twice.",
+      "expected": null
+    },
+    {
+      "name": "REGRESSION: multiple inline VERIFY chips in a real draft",
+      "content": "We accept the terms in Exhibit A. [VERIFY: signatory name] [VERIFY: date] No exceptions are taken.",
+      "expected": null
+    },
+    {
+      "name": "unrelated whole-body tag is treated as drafted (out of scope, fails safe)",
+      "content": "[MANUAL FILL: Firm Name]",
+      "expected": null
+    },
+    {
+      "name": "ordinary drafted section",
+      "content": "The Town of Bethel seeks a modern community website. Our team will deliver discovery, design, and build phases across 16 weeks.",
+      "expected": null
+    },
+    {
+      "name": "PRODUCTION: section 3.3 headings + 3 MANUAL FILL tags, no prose",
+      "content": "### 3.3, City of Umatilla Digital Campaign 2006\n\n**Challenge**\n\n[MANUAL FILL: City of Umatilla Rock The Locks Festival campaign challenge - no source material available in knowledge base]\n\n**Solution / Our Approach**\n\n[MANUAL FILL: City of Umatilla Rock The Locks Festival campaign solution and approach - no source material available in knowledge base]\n\n**Client Voice**\n\n[MANUAL FILL: City of Umatilla client testimonial - no source material available in knowledge base]",
+      "expected": "placeholder_only"
+    },
+    {
+      "name": "headings + VERIFY tags only",
+      "content": "### 3.3 City of Umatilla Digital Campaign 2006\n\n**Challenge**\n\n[VERIFY: challenge details needed from knowledge base]\n\n**Solution / Our Approach**\n\n[VERIFY: solution details needed from knowledge base]",
+      "expected": "placeholder_only"
+    },
+    {
+      "name": "REGRESSION: real case study with a trailing VERIFY chip is alive",
+      "content": "### 3.2 Deschutes Brewery\n\n**Challenge**\n\nDeschutes needed a refreshed visual identity that carried across packaging, taproom signage and digital channels while keeping the equity of the existing wordmark. Retail partners were reporting shelf confusion across the seasonal range.\n\n**Solution**\n\nWe rebuilt the system around a single flexible mark, delivered packaging templates for twelve SKUs, and shipped a brand guide the internal team could run without us. [VERIFY: confirm 2025 volume figure]",
+      "expected": null
+    },
+    {
+      "name": "REGRESSION: short form/checklist section without tags is alive",
+      "content": "| Item | Status |\n|---|---|\n| W-9 | Attached |\n| Certificate of Insurance | Attached |",
+      "expected": null
+    },
+    {
+      "name": "REGRESSION: terse real line awaiting a value fill is alive",
+      "content": "Role: [MANUAL FILL: Title]",
+      "expected": null
+    },
+    {
+      "name": "REGRESSION: signature line awaiting a value fill is alive",
+      "content": "Sign: [MANUAL FILL: wet/digital signature]",
+      "expected": null
+    }
+  ]
+}

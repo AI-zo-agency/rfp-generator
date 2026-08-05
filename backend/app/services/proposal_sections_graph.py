@@ -329,7 +329,8 @@ def _apply_verified_corrections(text: str, rfp_client: str = "") -> str:
     if not text:
         return text
 
-    # 1. Legal name — must have apostrophe
+    # 1. Legal name — must have apostrophe (LLM often garbles Z'Onion → Zohman/ZOnion)
+    text = re.sub(r"\bZohman\b", "Z'Onion", text, flags=re.I)
     text = re.sub(r"\bZ[- ]?[Oo]nion\b", "Z'Onion", text)
     text = text.replace("ZOnion Creative", "Z'Onion Creative")
 

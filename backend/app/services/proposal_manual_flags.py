@@ -31,13 +31,37 @@ _MANUAL_FILL_REQUEST_RE = re.compile(
 )
 
 _MFILL_PLACEHOLDER_RE = re.compile(r"«MFILL_(\d+)»")
+# Word boundaries are load-bearing. Without \b on the trigger verbs and the
+# connectors, "as" matched inside ordinary words and the tail was written into the
+# manuscript as a literal value:
+#     "please use the case study in the KB"   -> "e study in the KB"   (c-as-e)
+#     "resolve these from the knowledge base" -> "e"                   (b-as-e)
+#     "fill this in based on the case study"  -> "ed on the case study" (b-as-ed)
+# Every one of those is an ordinary instruction, and each silently corrupted a
+# section. See tests/test_manual_fill_value_extraction.py.
 _USER_WITH_VALUE_RE = re.compile(
-    r"(?is)(?:fill|set|use|replace|enter|provide|resolve).{0,120}?"
-    r"(?:with|to|as|=|:)\s*[\"']?(.+?)[\"']?\s*$"
+    r"(?is)\b(?:fill|set|use|replace|enter|provide|resolve)\b.{0,120}?"
+    r"(?:\b(?:with|to|as)\b|=|:)\s*[\"']?(.+?)[\"']?\s*$"
 )
 _USER_IS_VALUE_RE = re.compile(
-    r"(?is)\b(?:is|are|=|:)\s*[\"']?([^\"'\n]{1,200})[\"']?\s*$"
+    r"(?is)(?:\b(?:is|are)\b|=|:)\s*[\"']?([^\"'\n]{1,200})[\"']?\s*$"
 )
+
+#: A one- or two-character capture is a regex artefact, not a value a user typed.
+_MIN_MANUAL_FILL_VALUE_CHARS = 3
+
+
+def _is_plausible_fill_value(value: str) -> bool:
+    """Reject captures that are fragments rather than real values."""
+    v = (value or "").strip()
+    if len(v) < _MIN_MANUAL_FILL_VALUE_CHARS:
+        return False
+    if "[" in v or "]" in v:
+        return False
+    # A value that is only stopwords is a slice of the instruction, not content.
+    if v.casefold() in {"the", "this", "that", "them", "these", "those", "it"}:
+        return False
+    return True
 _FEIN_RE = re.compile(r"\b\d{2}-\d{7}\b")
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE_RE = re.compile(
@@ -144,7 +168,10 @@ def _user_supplied_value_for_tag(user_message: str, tag: ManualFillTag) -> str |
     )
     if direct:
         value = direct.group(1).strip().rstrip(".")
-        if value and value.casefold() not in tag.text.casefold():
+        if (
+            _is_plausible_fill_value(value)
+            and value.casefold() not in tag.text.casefold()
+        ):
             return value
 
     # Description keywords appear in message + a with/to/is value.
@@ -155,15 +182,19 @@ def _user_supplied_value_for_tag(user_message: str, tag: ManualFillTag) -> str |
         if t.casefold() not in {"sonja", "ella", "the", "and", "for", "from", "with"}
     ]
     if desc_tokens and any(tok.casefold() in msg.casefold() for tok in desc_tokens[:4]):
-        with_match = _USER_WITH_VALUE_RE.search(msg)
+        # Scan the message with bracketed tags removed. Leftmost-match means the
+        # ":" inside "[MANUAL FILL: Title]" would otherwise win over the real
+        # "with", capturing "Title] with Director of Marketing".
+        msg_wo_tags = MANUAL_FILL_TAG_RE.sub(" ", msg)
+        with_match = _USER_WITH_VALUE_RE.search(msg_wo_tags)
         if with_match:
             value = with_match.group(1).strip().rstrip(".")
-            if value and "[" not in value:
+            if _is_plausible_fill_value(value):
                 return value
-        is_match = _USER_IS_VALUE_RE.search(msg)
+        is_match = _USER_IS_VALUE_RE.search(msg_wo_tags)
         if is_match:
             value = is_match.group(1).strip().rstrip(".")
-            if value and "[" not in value and len(value) < 200:
+            if _is_plausible_fill_value(value) and len(value) < 200:
                 return value
 
     # Single-tag shortcut: "the budget is $45,000" / "use $45,000" when only one tag.

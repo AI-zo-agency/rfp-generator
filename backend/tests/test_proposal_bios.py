@@ -246,6 +246,17 @@ Account lead
             "Ron Comer will work with Oyetola Oyewunmi and Shawn DiCriscio.",
         )
 
+    def test_legal_name_corrects_zohman_garble(self) -> None:
+        content = (
+            "CERTIFICATE OF LIABILITY INSURANCE — Named Insured: "
+            "Zohman Creative Group"
+        )
+
+        corrected = _apply_verified_corrections(content)
+
+        self.assertIn("Z'Onion Creative Group", corrected)
+        self.assertNotIn("Zohman", corrected)
+
     def test_section_payload_corrects_names_outside_bio_sections(self) -> None:
         section = _section_payload(
             section_id="section-1-org-structure",

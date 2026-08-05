@@ -100,6 +100,50 @@ class RedraftFailedSectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(out)
         spy.assert_not_awaited()
 
+    async def test_stored_comma_variant_triggers_a_rebuild(self) -> None:
+        """The exact string stored for San Benito sections 9, 15 and 16.
+
+        It differs from SECTION_DRAFT_FAILURE_PLACEHOLDER by one character (comma
+        vs em dash). Exact-equality matching skipped it, so chat fell through to
+        the advisory router and answered "I cannot improve this section" instead
+        of rebuilding it.
+        """
+        stored = "[VERIFY: Section drafting failed, needs manual regeneration]"
+        self.assertNotEqual(stored, SECTION_DRAFT_FAILURE_PLACEHOLDER.strip())
+
+        rebuilt = _section("s15", "Full acknowledgment prose.")
+        out, spy = await self._run(stored, (_draft(rebuilt), None, True, "ok"))
+
+        self.assertIsNotNone(out)
+        spy.assert_awaited_once()
+        self.assertTrue(out[5])
+
+    async def test_inline_verify_chip_is_left_to_the_normal_edit_paths(self) -> None:
+        """A drafted section that merely contains a VERIFY chip must not be rebuilt.
+
+        Rebuilding it would discard finished prose.
+        """
+        drafted = (
+            "We accept the terms of the exemplar agreement without exception. "
+            "[VERIFY: authorized signatory] The signed page is returned with our bid."
+        )
+        out, spy = await self._run(drafted, None)
+        self.assertIsNone(out)
+        spy.assert_not_awaited()
+
+    async def test_no_evidence_stub_explains_the_corpus_gap(self) -> None:
+        """Family B must not tell the user to 'try again shortly' — that loops."""
+        stub = "[VERIFY: Draft content for Exhibit A — insufficient evidence in corpus.]"
+        section = _section("s15", stub)
+        out, _spy = await self._run(
+            stub, (_draft(section), None, False, "phase3_failed: no evidence")
+        )
+        _sec, _d, _r, mode, reply, changed = out
+        self.assertFalse(changed)
+        self.assertEqual(mode, "none")
+        self.assertIn("knowledge base", reply)
+        self.assertNotIn("rate-limited", reply)
+
 
 if __name__ == "__main__":
     unittest.main()

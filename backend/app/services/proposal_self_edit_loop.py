@@ -307,6 +307,15 @@ async def _redraft_section_via_phase3_isolated(
             "designer_note": drafted.designer_note or existing.designer_note,
         }
     )
+    # Strip internal evidence markers ([E6]) and pricing flags before the section
+    # is persisted — this path bypassed the scrub every other write goes through,
+    # so rebuilt sections shipped "[E6]" in client-facing prose.
+    from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
+
+    scrubbed_body = scrub_client_facing_section_artifacts(updated.content or "")
+    if scrubbed_body != (updated.content or ""):
+        updated = updated.model_copy(update={"content": scrubbed_body})
+
     try:
         next_draft = replace_section_isolated(draft, updated)
     except SectionIsolationError as exc:

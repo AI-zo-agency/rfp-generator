@@ -1,0 +1,281 @@
+{
+  "_comment": "Labelled routing corpus for the deterministic chat-routing layer. Asserted by tests/test_chat_routing_accuracy.py. `edit` = _wants_section_edit must return this. `structure` = _is_outline_structure_ask must return this. Add a case here whenever a real user message is routed wrongly.",
+  "cases": [
+    {
+      "category": "advisory",
+      "message": "does this section meet the RFP?",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "advisory",
+      "message": "which case studies don't fit the RFP",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "advisory",
+      "message": "now check all case studies meet expetations of rfp if not then list which dont",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "advisory",
+      "message": "what's missing from this section?",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "advisory",
+      "message": "list the requirements this section fails",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "advisory",
+      "message": "is this compliant with the page limit?",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "advisory",
+      "message": "explain why this section is weak",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "advisory",
+      "message": "review all Our Work sections against requirements",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "advisory",
+      "message": "should we bid on this?",
+      "edit": false,
+      "structure": false
+    },
+
+    {
+      "category": "edit",
+      "message": "rewrite this section to be more punchy",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit",
+      "message": "shorten this to 300 words",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit",
+      "message": "fix the typo in the second paragraph",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit",
+      "message": "replace Maricopa with a tourism case study",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit",
+      "message": "make it more formal",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit",
+      "message": "remove the fabricated claims",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit",
+      "message": "fill the VERIFY tags from the knowledge base",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit",
+      "message": "improve this section — more punchy",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit",
+      "message": "add a paragraph about seasonal campaigns",
+      "edit": true,
+      "structure": false
+    },
+
+    {
+      "category": "edit-verb-gap",
+      "message": "tighten the opening paragraph",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit-verb-gap",
+      "message": "cut the last two sentences",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit-verb-gap",
+      "message": "reword this so it stops repeating section 2",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit-verb-gap",
+      "message": "trim this down a bit",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit-verb-gap",
+      "message": "polish the closing paragraph",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit-verb-gap",
+      "message": "expand the methodology part",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit-verb-gap",
+      "message": "reorder these bullets by priority",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit-verb-gap",
+      "message": "simplify the jargon here",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit-verb-gap",
+      "message": "strengthen the win themes",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "edit-verb-gap",
+      "message": "condense this into two paragraphs",
+      "edit": true,
+      "structure": false
+    },
+
+    {
+      "category": "structure",
+      "message": "add a new section titled Staff Planning",
+      "edit": true,
+      "structure": true
+    },
+    {
+      "category": "structure",
+      "message": "create a new case study for Bend",
+      "edit": true,
+      "structure": true
+    },
+    {
+      "category": "structure",
+      "message": "add another team bio",
+      "edit": true,
+      "structure": true
+    },
+    {
+      "category": "structure",
+      "message": "create a new sidebar section for references",
+      "edit": true,
+      "structure": true
+    },
+    {
+      "category": "structure",
+      "message": "insert a new case study from the KB",
+      "edit": true,
+      "structure": true
+    },
+    {
+      "category": "structure",
+      "message": "make a new tab for the project schedule",
+      "edit": true,
+      "structure": true
+    },
+    {
+      "category": "structure",
+      "message": "delete the section about subcontractors",
+      "edit": true,
+      "structure": true
+    },
+    {
+      "category": "structure",
+      "message": "add a new bio for Sonja",
+      "edit": true,
+      "structure": true
+    },
+
+    {
+      "category": "check-then-fix",
+      "message": "check which case studies fail the RFP then replace the weak ones from KB",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "check-then-fix",
+      "message": "can you check this and then fix whatever is wrong",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "check-then-fix",
+      "message": "review this section and tighten it up",
+      "edit": true,
+      "structure": false
+    },
+
+    {
+      "_note": "Guards against the broadened edit-verb list over-firing. An edit verb used as a noun, or inside a question about the draft, is not an instruction to change it.",
+      "category": "verb-as-noun",
+      "message": "does the budget cut affect this section?",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "verb-as-noun",
+      "message": "why did you cut that paragraph?",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "verb-as-noun",
+      "message": "what should I improve here?",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "verb-as-noun",
+      "message": "which sections need trimming?",
+      "edit": false,
+      "structure": false
+    },
+    {
+      "category": "polite-request",
+      "message": "can you shorten this?",
+      "edit": true,
+      "structure": false
+    },
+    {
+      "category": "polite-request",
+      "message": "please tighten this up",
+      "edit": true,
+      "structure": false
+    }
+  ]
+}
