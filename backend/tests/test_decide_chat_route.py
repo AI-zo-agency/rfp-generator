@@ -34,10 +34,25 @@ def route(intent="none", message="rewrite this section", selection=False, histor
 
 
 class DecideChatRouteTests(unittest.TestCase):
-    def test_selection_edit_always_mutates(self) -> None:
-        r = route(intent="advisory", message="what is this?", selection=True)
+    def test_selection_with_an_edit_instruction_mutates(self) -> None:
+        r = route(intent="none", message="make this shorter", selection=True)
         self.assertFalse(r.advisory)
         self.assertEqual(r.reason, "selection_edit")
+
+    def test_selection_with_a_question_answers_instead_of_mutating(self) -> None:
+        """Highlighting text scopes the ask; it does not authorise a rewrite.
+
+        This previously returned selection_edit for every pinned turn, so
+        "can you verify if it is Z'Onion?" silently rewrote the excerpt.
+        """
+        r = route(intent="none", message="what is this?", selection=True)
+        self.assertTrue(r.advisory)
+        self.assertEqual(r.reason, "selection_question")
+
+    def test_selection_respects_a_classifier_that_said_advisory(self) -> None:
+        r = route(intent="advisory", message="what is this?", selection=True)
+        self.assertTrue(r.advisory)
+        self.assertEqual(r.reason, "selection_classifier_advisory")
 
     def test_structure_ask_overrides_a_classifier_that_said_advisory(self) -> None:
         """Adding a section is a mutation even if the classifier disagreed."""

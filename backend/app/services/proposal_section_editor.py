@@ -145,6 +145,14 @@ Rules:
    - Prefer scannable structure over a dense wall of text
 9. If they need an edit, tell them to ask explicitly (e.g. "apply these fixes" or
    "replace 3.3 with a tourism case study from KB").
+9a. Highlighted excerpt + a verify/confirm/check question: they want a VERDICT on
+    that text, not a rewrite. Answer in this shape:
+    - State the verdict first: **Correct**, **Incorrect**, or **Cannot confirm**.
+    - Quote the KB fact you checked against and name its source doc
+      (e.g. 01_companyfacts). If no KB excerpt covers it, say so plainly —
+      never imply you verified something you only read back from the draft.
+    - If it is wrong, show the corrected value and offer to apply it. Do not
+      apply it in this turn.
 10. Budget/pricing/fees: follow the pricing playbook when provided — refuse invented
     numbers and reverse-engineered totals; flag out-of-guide scope with
     [PRICING FLAG: … — Sonja review required].
@@ -209,6 +217,53 @@ _FOLLOW_WITH_MUTATE_RE = re.compile(
     r"\b(?:then|and)\s+(?:please\s+)?(?:" + verb_alternation(EDIT_VERBS) + r")\b",
     re.I,
 )
+
+# Verification asks. None of these are edit verbs, and with an excerpt pinned
+# they are the most common thing a user actually wants: an answer about the
+# highlighted text, not a rewrite of it.
+_VERIFY_ASK_RE = re.compile(
+    r"\b(?:verify|verifying|confirm|confirming|"
+    r"double[\s-]?check|sanity[\s-]?check|cross[\s-]?check|fact[\s-]?check|"
+    r"are\s+you\s+sure|is\s+that\s+(?:right|correct|accurate)"
+    r")\b",
+    re.I,
+)
+
+
+def _selection_ask_is_advisory(
+    user_message: str,
+    *,
+    conversation_history: list[dict[str, str]] | None = None,
+) -> bool:
+    """True when a pinned-excerpt turn asks a question rather than ordering an edit.
+
+    Pinning an excerpt says WHAT the user is talking about, not that they want it
+    changed. Assuming otherwise made "can you verify if it is Z'Onion?" rewrite
+    the line instead of answering it.
+
+    The default here is the opposite of _wants_section_edit(): clicking
+    "Revise content" is itself edit intent, so a pinned turn edits unless it
+    reads as a question.
+    """
+    text = (user_message or "").strip()
+    if not text:
+        return False
+    # "check this and then fix it" — advisory opener, edit instruction.
+    if _FOLLOW_WITH_MUTATE_RE.search(text):
+        return False
+    # "yes" / "do it" after the assistant offered a change applies that change.
+    if _SHORT_CONFIRM_RE.match(text) and conversation_history:
+        return False
+    # An explicit edit verb wins unless the sentence is built as a question:
+    # "shorten this" edits, "is this short enough?" asks.
+    if _EDIT_INTENT_RE.search(text) and not _QUESTION_OPENER_RE.match(text):
+        return False
+    return bool(
+        _VERIFY_ASK_RE.search(text)
+        or _ADVISORY_INTENT_RE.search(text)
+        or _QUESTION_OPENER_RE.match(text)
+        or text.endswith("?")
+    )
 
 
 def _user_asks_replace_section_for_other_rfp_need(text: str) -> bool:
@@ -521,7 +576,8 @@ def decide_chat_route(
     directly instead of only through a 1,700-line dispatcher. Order matters and is
     load-bearing:
 
-    * a pinned excerpt edit is always an edit;
+    * a pinned excerpt edits unless the turn reads as a question about it —
+      highlighting text scopes the ask, it does not authorise a rewrite;
     * a structure ask (add/delete a section) always mutates, overriding even a
       classifier that said "advisory";
     * the LLM classifier decides next, because it reads the whole manuscript;
@@ -529,6 +585,14 @@ def decide_chat_route(
       does the keyword gate decide, and its default is advisory.
     """
     if selection_mode:
+        if chat_intent == "advisory":
+            return ChatRoute(advisory=True, reason="selection_classifier_advisory")
+        if chat_intent in {"single_edit", "multi_patch"}:
+            return ChatRoute(advisory=False, reason=f"selection_classifier_{chat_intent}")
+        if _selection_ask_is_advisory(
+            user_message, conversation_history=conversation_history
+        ):
+            return ChatRoute(advisory=True, reason="selection_question")
         return ChatRoute(advisory=False, reason="selection_edit")
     if _is_outline_structure_ask(user_message):
         return ChatRoute(advisory=False, reason="structure_ask")
@@ -888,6 +952,69 @@ def _rfp_section_requirements_block(
                 parts.append(f"Page limit hint: {sec.page_limit}")
             return "\n".join(parts)
     return ""
+
+
+# rfp_context is built by concatenation: up to 50k chars of raw RFP body
+# (RFP_PROMPT_MAX_CHARS), then HARD FACTS from load_rfp_for_proposal(), then the
+# mapped section requirements, manuscript digest and pricing guide appended by
+# improve_proposal_section(). Slicing that blob by position hands the excerpt
+# rewriter the RFP letterhead and drops every block assembled for it, so each
+# block gets its own budget instead of competing on offset.
+HARD_FACTS_MARKER = "## HARD FACTS (from full RFP text"
+REQUIREMENTS_MARKER = "--- Mapped section requirements ---"
+MANUSCRIPT_MARKER = "FULL PROPOSAL MANUSCRIPT (every section"
+PRICING_MARKER = "=== 00_Guide_Pricing (Supermemory) ==="
+
+_CONTEXT_BLOCK_BUDGETS: tuple[tuple[str, int], ...] = (
+    (HARD_FACTS_MARKER, 3_000),
+    (REQUIREMENTS_MARKER, 3_000),
+    (MANUSCRIPT_MARKER, 6_000),
+    (PRICING_MARKER, 4_000),
+)
+# What the KB query planner needs: what the RFP demands of this section, not the
+# prose already written elsewhere.
+_PLANNER_MARKERS = (HARD_FACTS_MARKER, REQUIREMENTS_MARKER)
+RFP_BODY_CONTEXT_CHARS = 2_000
+
+
+def _clip(text: str, limit: int) -> str:
+    text = text.strip()
+    if limit <= 0 or not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}\n…[truncated]"
+
+
+def _budget_rfp_context(
+    rfp_context: str,
+    *,
+    body_chars: int = RFP_BODY_CONTEXT_CHARS,
+    keep: tuple[str, ...] | None = None,
+) -> str:
+    """Rebuild rfp_context by block priority rather than by character offset.
+
+    `keep` selects which appended blocks to emit; boundaries are always computed
+    from the full marker set so a skipped block never bleeds into its neighbour.
+    """
+    if not rfp_context.strip():
+        return ""
+
+    found = sorted(
+        (at, marker, budget)
+        for marker, budget in _CONTEXT_BLOCK_BUDGETS
+        if (at := rfp_context.find(marker)) >= 0
+    )
+
+    body_end = found[0][0] if found else len(rfp_context)
+    parts = [_clip(rfp_context[:body_end], body_chars)]
+    for index, (start, marker, budget) in enumerate(found):
+        if keep is not None and marker not in keep:
+            continue
+        end = found[index + 1][0] if index + 1 < len(found) else len(rfp_context)
+        parts.append(_clip(rfp_context[start:end], budget))
+
+    return "\n\n".join(part for part in parts if part)
 
 
 def _manuscript_digest(draft: ProposalDraft, *, max_chars: int = 36_000) -> str:
@@ -1727,6 +1854,45 @@ async def _plan_edit_scope(
     )
 
 
+VERIFICATION_FACT_MIN_SIMILARITY = 0.55
+VERIFICATION_FACT_LIMIT = 12
+
+
+async def _verification_facts_block(queries: list[str]) -> str:
+    """Crisp KB memories with provenance, for "is this right?" questions.
+
+    _fetch_kb_blob_for_selection expands hits into whole documents, which buries a
+    one-line verified fact under OCR'd logo captions and drops the filename. A
+    verification answer needs the opposite: the exact memory plus the doc it came
+    from, so the reply can cite 01_companyfacts instead of hedging.
+    """
+    seen: set[str] = set()
+    lines: list[str] = []
+    for query in queries:
+        try:
+            hits = await supermemory.search_hybrid(
+                query=query,
+                limit=SEARCH_LIMIT,
+                include_full_docs=False,
+                filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
+            )
+        except Exception:
+            logger.warning("Verification KB search failed for %r", query[:80], exc_info=True)
+            continue
+        for hit in hits or []:
+            if float(hit.get("similarity") or 0) < VERIFICATION_FACT_MIN_SIMILARITY:
+                continue
+            fact = str(hit.get("memory") or "").strip()
+            if not fact or fact in seen:
+                continue
+            seen.add(fact)
+            source = str((hit.get("metadata") or {}).get("fileName") or "").strip()
+            lines.append(f"- {fact}" + (f"  [source: {source}]" if source else ""))
+            if len(lines) >= VERIFICATION_FACT_LIMIT:
+                return "\n".join(lines)
+    return "\n".join(lines)
+
+
 async def _section_chat_advisory_reply(
     *,
     section: ProposalSection,
@@ -1741,6 +1907,59 @@ async def _section_chat_advisory_reply(
 ) -> str:
     excerpt = (selection_text or "").strip()
     excerpt_block = f"\n\nHighlighted excerpt:\n\"{excerpt[:2000]}\"\n" if excerpt else ""
+
+    # "Can you verify this?" needs the knowledge base. Without retrieval the model
+    # can only restate the line it was asked to check, which reads as confirmation
+    # while proving nothing.
+    kb_block = ""
+    if _VERIFY_ASK_RE.search(user_message or ""):
+        seeds = [
+            f"{section.title} {excerpt[:160]}".strip(),
+            f"{section.title} {user_message[:160]}".strip(),
+        ]
+        queries = [
+            proposal_knowledge_base_tools.normalize_zo_kb_query(
+                seed, rfp_client=rfp.client, rfp_sector=rfp.sector, rfp_title=rfp.title
+            )
+            for seed in seeds
+            if seed
+        ]
+        reachable = True
+        facts = ""
+        try:
+            facts = await _verification_facts_block(queries)
+        except Exception:
+            reachable = False
+            logger.warning("Advisory KB lookup failed for %s", section.id, exc_info=True)
+
+        supporting = ""
+        if reachable:
+            try:
+                supporting, _contacts = await _fetch_kb_blob_for_selection(queries)
+            except Exception:
+                logger.warning("Advisory KB blob failed for %s", section.id, exc_info=True)
+
+        if not reachable:
+            # Never let an outage be reported as "the KB has no such document".
+            kb_block = (
+                "\n\nKB status: the knowledge base could not be reached for this "
+                "question. Say the check could not be run — do NOT state that the "
+                "fact is missing from the knowledge base.\n"
+            )
+        elif facts:
+            kb_block = (
+                "\n\nVerified KB facts (zö agency source of truth — check the "
+                "highlighted text against these and cite the [source: …] you used):\n"
+                f"{facts}\n"
+            )
+            if supporting.strip():
+                kb_block += f"\nSupporting KB excerpts:\n{supporting[:4000]}\n"
+        else:
+            kb_block = (
+                "\n\nKB status: searched the knowledge base and found no matching "
+                "verified fact for this question.\n"
+            )
+
     history_block = ""
     if conversation_history:
         history_block = "\n\nRecent chat:\n" + "\n".join(
@@ -1777,6 +1996,7 @@ async def _section_chat_advisory_reply(
         f"{section.title}\n\n"
         f"Open-tab draft:\n{(section.content or '')[:6000]}"
         f"{excerpt_block}"
+        f"{kb_block}"
         f"{history_block}\n\n"
         f"User message:\n{user_message.strip()}"
     )
@@ -2063,28 +2283,33 @@ async def _plan_selection_edit(
     full_content: str,
     selection_start: int,
     selection_end: int,
+    rfp_context: str = "",
 ) -> tuple[str, list[str]]:
     """LLM understands user intent and plans KB queries + editor instruction."""
     near_full = _selection_covers_most_of_section(full_content, selection_start, selection_end)
+    # Without the RFP's own demands the planner writes queries against the
+    # excerpt alone, so retrieval misses the facts the section is scored on.
+    requirements = _budget_rfp_context(rfp_context, body_chars=0, keep=_PLANNER_MARKERS)
+    user_content = (
+        f"Client: {rfp.client}\n"
+        f"Section: {section.title}\n"
+        f"User instruction:\n{user_message.strip()}\n\n"
+        f"Selected excerpt ({word_count(excerpt)} words, "
+        f"{'near-full section' if near_full else 'partial'}):\n"
+        f"\"\"\"{excerpt[:6000]}\"\"\"\n\n"
+        f"Full section length: {word_count(full_content)} words\n"
+        f"VERIFY tags in excerpt: {_gap_fields_from_text(excerpt) or '(none)'}"
+    )
+    if requirements:
+        user_content += f"\n\nWhat the RFP requires here:\n{requirements}"
     raw, _ = await llm.chat_json(
         [
             {"role": "system", "content": SELECTION_KB_PLAN_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Client: {rfp.client}\n"
-                    f"Section: {section.title}\n"
-                    f"User instruction:\n{user_message.strip()}\n\n"
-                    f"Selected excerpt ({word_count(excerpt)} words, "
-                    f"{'near-full section' if near_full else 'partial'}):\n"
-                    f"\"\"\"{excerpt[:6000]}\"\"\"\n\n"
-                    f"Full section length: {word_count(full_content)} words\n"
-                    f"VERIFY tags in excerpt: {_gap_fields_from_text(excerpt) or '(none)'}"
-                ),
-            },
+            {"role": "user", "content": user_content},
         ],
         max_tokens=1024,
         temperature=0.2,
+        node_name="chat_selection_kb_plan",
     )
     editor_instruction = str(raw.get("editorInstruction") or user_message).strip()
     if "kbQueries" in raw:
@@ -2697,7 +2922,7 @@ async def _improve_section_selection(
                 f"Selected excerpt (replace ONLY this span):\n\"\"\"{masked_excerpt}\"\"\"\n\n"
                 f"Full section (context — do NOT rewrite outside the excerpt):\n"
                 f"\"\"\"{masked_content[:8000]}\"\"\"\n\n"
-                f"RFP excerpt:\n{rfp_context[:2000]}\n\n"
+                f"RFP context:\n{_budget_rfp_context(rfp_context)}\n\n"
             )
             if evidence:
                 user_block += f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
@@ -4184,6 +4409,12 @@ async def improve_proposal_section(
     if not selection_mode:
         proposal_wide = True
 
+    # `user_message` gets prompt scaffolding prepended below (the evidence-gate
+    # stanza), so from that point on it is no longer what the user typed. Intent
+    # classification must read this copy instead: routing on the augmented string
+    # matched the stanza's own edit verbs and turned every question into an edit.
+    raw_user_message = user_message.strip()
+
     research = await aget_research_cache(rfp_id)
 
     # Shared Evidence Gate: decide KB vs write (same policy as drafting / repair).
@@ -4219,7 +4450,7 @@ async def improve_proposal_section(
     # Powerful chat ops: duplicate audit / fabrication purge (content → RFP → KB)
     from app.services.proposal_chat_ops import classify_chat_op, run_chat_ops
 
-    chat_op = classify_chat_op(user_message)
+    chat_op = classify_chat_op(raw_user_message)
     if chat_op != "none" and not selection_mode:
         before_ids = [(s.id, s.content or "") for s in draft.sections]
         updated_draft, ops_report = await run_chat_ops(
@@ -4298,6 +4529,9 @@ async def improve_proposal_section(
     # LLM understands the ask: multi-section apply/fix vs advisory vs single edit.
     # No RFP-specific or keyword regex — classification is model-driven.
     chat_intent = "none"
+    # The classifier only runs for non-selection chat, but a pinned question now
+    # reaches the advisory branch too — which reads this.
+    intent_degraded = False
     if not selection_mode:
         early_focus = _find_draft_section(draft, section_id) or (
             draft.sections[0] if draft.sections else None
@@ -4538,7 +4772,7 @@ async def improve_proposal_section(
     # keyword advisory regex — the model already decided the user wants edits.
     route = decide_chat_route(
         chat_intent=chat_intent,
-        user_message=user_message,
+        user_message=raw_user_message,
         selection_mode=bool(selection_mode),
         conversation_history=conversation_history,
     )
@@ -4557,7 +4791,7 @@ async def improve_proposal_section(
             section=section,
             rfp=rfp,
             rfp_context=rfp_context,
-            user_message=user_message,
+            user_message=raw_user_message,
             conversation_history=conversation_history,
             selection_text=selection_text,
             requirements_block=requirements_block,
@@ -4704,13 +4938,13 @@ async def improve_proposal_section(
             )
 
     if chat_intent not in {"single_edit", "multi_patch"} and not _wants_section_edit(
-        user_message, conversation_history=conversation_history
+        raw_user_message, conversation_history=conversation_history
     ):
         reply = await _section_chat_advisory_reply(
             section=section,
             rfp=rfp,
             rfp_context=rfp_context,
-            user_message=user_message,
+            user_message=raw_user_message,
             conversation_history=conversation_history,
             selection_text=selection_text,
             requirements_block=requirements_block,
@@ -4726,7 +4960,9 @@ async def improve_proposal_section(
             )
         return section, draft, research, provider, reply, False
 
-    latest_user_ask = user_message.strip()
+    # Downstream intent probes (percent-time column, add-section, budget playbook)
+    # read this — it must stay the user's own words, not the evidence stanza.
+    latest_user_ask = raw_user_message
 
     # "implement budget table here" → insert/replace table in THIS section only.
     if not selection_mode:
@@ -5408,6 +5644,7 @@ async def improve_proposal_section(
                 full_content=full_content,
                 selection_start=selection_start,
                 selection_end=selection_end,
+                rfp_context=rfp_context,
             )
             lean_patch = False
         evidence_blob = ""

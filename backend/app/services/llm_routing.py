@@ -84,6 +84,9 @@ _QUALITY_EXACT = frozenset(
         "money_intelligence_pass_b",
         "rfp_understanding",
         "capability_adjudicator",
+        # Picks the KB queries behind an excerpt revision — if it targets the
+        # wrong facts, the rewriter has nothing true to say.
+        "chat_selection_kb_plan",
     }
 )
 _QUALITY_PREFIXES = (
