@@ -111,8 +111,60 @@ def strip_internal_pricing_flags(text: str) -> str:
 
 
 def scrub_client_facing_section_artifacts(text: str) -> str:
-    """Strip evidence markers + pricing flags from manuscript section bodies."""
+    """Strip evidence markers + pricing flags from manuscript section bodies.
+
+    This is the AUTHORING-time scrub, applied when a section is generated or
+    edited (proposal_budget_content.py, proposal_self_edit_loop.py,
+    proposal_section_editor.py) and persisted to the draft. It deliberately
+    does NOT touch [MANUAL FILL], [DESIGNER NOTE], [VERIFY], or [FLAG FOR ...]
+    — those are legitimate in-progress handoffs (e.g. procurement-form fields
+    a human must still complete; see proposal_budget_content.py:112-168) that
+    must survive the authoring/editing round trip. Removing PRICING FLAG here
+    is safe because it is never a legitimate handoff — it is purely an internal
+    pricing-review note.
+
+    For the literal document that leaves the building (DOCX / Google Doc
+    export), use scrub_text_for_client_export below, which also strips the
+    handoff tags this function preserves.
+    """
     return strip_internal_pricing_flags(strip_evidence_citation_markers(text or ""))
+
+
+# --- Export-only scrub -----------------------------------------------------------
+#
+# [MANUAL FILL: ...], [DESIGNER NOTE: ...], [VERIFY: ...], and [FLAG FOR ...] are
+# legitimate while a proposal is being authored (see scrub_client_facing_section_
+# artifacts above), but none of them may ever appear in the file actually
+# submitted/sent to a client or RFP reviewer. Observed defect: DOCX export
+# rendered [DESIGNER NOTE: ...] as a styled "DESIGNER NOTE" block in the
+# generated .docx, and [PRICING FLAG: ...] reached plain-text export verbatim.
+_INTERNAL_HANDOFF_TAG_RE = re.compile(
+    r"\[(?:MANUAL\s+FILL|DESIGNER\s+NOTE|VERIFY|FLAG\s+FOR)\b[^\]]*\]",
+    re.IGNORECASE | re.S,
+)
+
+
+def strip_internal_handoff_tags(text: str) -> str:
+    """Remove [MANUAL FILL]/[DESIGNER NOTE]/[VERIFY]/[FLAG FOR ...] blocks.
+
+    Export-only: these tags must survive authoring (see
+    scrub_client_facing_section_artifacts) but must never reach a document
+    that leaves the agency.
+    """
+    if not text:
+        return text
+    cleaned = _INTERNAL_HANDOFF_TAG_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+def scrub_text_for_client_export(text: str) -> str:
+    """Full export-time scrub: everything scrub_client_facing_section_artifacts
+    strips from saved draft content, plus the internal handoff tags that are
+    allowed to persist through authoring but must never reach an exported
+    document (DOCX, Google Doc, plain text)."""
+    return strip_internal_handoff_tags(scrub_client_facing_section_artifacts(text or ""))
 
 
 def plain_text_for_export(markdown: str) -> str:
@@ -122,7 +174,7 @@ def plain_text_for_export(markdown: str) -> str:
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
     text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
-    text = strip_evidence_citation_markers(text)
+    text = scrub_text_for_client_export(text)
     return text.strip()
 
 
@@ -132,7 +184,7 @@ def _strip_inline_md(text: str) -> str:
     t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
     t = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", t)
     t = re.sub(r"`([^`]+)`", r"\1", t)
-    t = strip_evidence_citation_markers(t)
+    t = scrub_text_for_client_export(t)
     return t.strip()
 
 
@@ -232,6 +284,12 @@ def parse_markdown_parts(markdown: str) -> list[dict[str, Any]]:
             i += 1
         text = _strip_inline_md(" ".join(para_lines))
         if text:
+            # NOTE: _strip_inline_md now runs the export scrub, which removes
+            # [DESIGNER NOTE: ...] tags outright (they must never reach an
+            # exported document — see proposal_manuscript.strip_internal_
+            # handoff_tags). This regex can therefore no longer match; kept
+            # only so a "designer_note" part type is never silently produced
+            # again if the scrub order changes.
             designer = re.match(
                 r"^\[(?:DESIGNER NOTE|Designer Note)\s*:?\s*(.*)\]\s*$",
                 text,

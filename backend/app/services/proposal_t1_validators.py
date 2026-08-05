@@ -43,11 +43,29 @@ _PRODUCTION_NOTE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Allowed bracket tags that must never be treated as leaks.
+# Allowed bracket tags that must never be treated as note leaks.
+#
+# MANUAL FILL and DESIGNER NOTE were previously whitelisted here too, but they
+# are not "allowed" in the sense of belonging in a submitted document — they are
+# legitimate agency-internal handoffs during authoring (e.g. procurement-form
+# fields a human must still complete; see proposal_budget_content.py) that the
+# export scrub (proposal_manuscript.scrub_text_for_client_export) strips before
+# anything ships. They are narrowed out of this whitelist because neither
+# _FLAG_FOR_RE nor _PRODUCTION_NOTE_RE below can ever match a MANUAL FILL /
+# DESIGNER NOTE tag shape anyway (see test_proposal_t1_validators.py
+# test_does_not_flag_manual_fill_variants / test_does_not_flag_designer_note),
+# so narrowing this regex does not create new T1 blockers for them — only
+# VERIFY needs active masking here (it is already gated separately by
+# proposal_pipeline_status._VERIFY_RE, and must not double-report as a leak).
 _ALLOWED_BRACKET_TAG_RE = re.compile(
-    r"\[(?:VERIFY|MANUAL\s+FILL|DESIGNER\s+NOTE)\b[^\]]*\]",
+    r"\[VERIFY\b[^\]]*\]",
     re.IGNORECASE,
 )
+
+# [PRICING FLAG: ...] is never legitimate in shipped content — it is an
+# internal Sonja/pricing-review note (see proposal_budget_validation.py,
+# pricing_rate_binding.py) that must always surface as a note leak.
+_PRICING_FLAG_LEAK_RE = re.compile(r"\[PRICING\s+FLAG\b[^\]]*\]", re.IGNORECASE)
 
 # --- Truncation patterns ---------------------------------------------------------
 
@@ -104,7 +122,7 @@ def _finding(
 
 
 def _content_without_allowed_tags(content: str) -> str:
-    """Mask VERIFY / MANUAL FILL / DESIGNER NOTE so bracket scans ignore them."""
+    """Mask VERIFY tags so bracket scans (_PRODUCTION_NOTE_RE) ignore them."""
     return _ALLOWED_BRACKET_TAG_RE.sub(" ", content)
 
 
@@ -123,6 +141,17 @@ def scan_internal_note_leaks(draft: ProposalDraft) -> list[T1Finding]:
                     category="note_leak",
                     section=section,
                     message="Internal [FLAG FOR ...] note leaked into section content",
+                    excerpt=_excerpt(content, match),
+                )
+            )
+
+        for match in _PRICING_FLAG_LEAK_RE.finditer(content):
+            findings.append(
+                _finding(
+                    code="t1.note_leak.pricing_flag",
+                    category="note_leak",
+                    section=section,
+                    message="Internal [PRICING FLAG ...] note leaked into section content",
                     excerpt=_excerpt(content, match),
                 )
             )
