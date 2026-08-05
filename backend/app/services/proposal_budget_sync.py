@@ -312,20 +312,27 @@ def collect_deterministic_budget_mismatches(
     return out
 
 
+# Bold markers land on either side of the colon depending on the renderer:
+# render_budget_markdown emits "**Professional fees: $X**" while
+# render_embedded_budget_table_markdown emits "**Professional fees:** $X".
+# Both must parse — an unparsed label reads as a zero component below, which
+# would defeat the single-component carve-out in the parenthetical check.
+_PROSE_LABEL_VALUE = r"\*{0,2}\s*:\s*\*{0,2}\s*(\$[\d,]+(?:\.\d{2})?)"
+
 _PROSE_FEE_RE = re.compile(
-    r"(?i)\*{0,2}(?:Professional\s+(?:services\s+)?fees?|Total\s+agency\s+fees?)\*{0,2}"
-    r"\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+    r"(?i)\*{0,2}(?:Professional\s+(?:services\s+)?fees?|Total\s+agency\s+fees?)"
+    + _PROSE_LABEL_VALUE
 )
 _PROSE_DIRECT_RE = re.compile(
     r"(?i)\*{0,2}(?:Direct\s+travel\s*/\s*reimbursables|Direct\s+travel|"
-    r"Travel\s*/\s*reimbursables)\*{0,2}\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+    r"Travel\s*/\s*reimbursables)" + _PROSE_LABEL_VALUE
 )
 _PROSE_TOTAL_RE = re.compile(
     r"(?i)\*{0,2}(?:Total\s+proposed\s+investment|Total\s+client\s+invoicing|"
-    r"Grand\s+total)\*{0,2}\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+    r"Grand\s+total)" + _PROSE_LABEL_VALUE
 )
 _PROSE_PASSTHROUGH_RE = re.compile(
-    r"(?i)\*{0,2}Client\s+media\s+pass-?through[^:]*\*{0,2}\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+    r"(?i)\*{0,2}Client\s+media\s+pass-?through[^:]*" + _PROSE_LABEL_VALUE
 )
 
 
@@ -344,14 +351,15 @@ def collect_prose_arithmetic_violations(markdown: str) -> list[str]:
 
     fee_m = _PROSE_FEE_RE.search(text)
     total_m = _PROSE_TOTAL_RE.search(text)
-    if fee_m and total_m:
-        fee = _money(fee_m.group(1))
-        total = _money(total_m.group(1))
-        direct_m = _PROSE_DIRECT_RE.search(text)
-        direct = _money(direct_m.group(1)) if direct_m else 0.0
-        pt_m = _PROSE_PASSTHROUGH_RE.search(text)
-        passthrough = _money(pt_m.group(1)) if pt_m else 0.0
+    direct_m = _PROSE_DIRECT_RE.search(text)
+    pt_m = _PROSE_PASSTHROUGH_RE.search(text)
 
+    fee = _money(fee_m.group(1)) if fee_m else 0.0
+    direct = _money(direct_m.group(1)) if direct_m else 0.0
+    passthrough = _money(pt_m.group(1)) if pt_m else 0.0
+
+    if fee_m and total_m:
+        total = _money(total_m.group(1))
         expected = round(fee + direct + passthrough, 2)
         tol = max(1.0, total * 0.02)
         if abs(total - expected) > tol:
@@ -361,15 +369,28 @@ def collect_prose_arithmetic_violations(markdown: str) -> list[str]:
                 f"is ${total:,.0f}."
             )
 
-    for m in re.finditer(
-        r"(?i)Total[^.$]*(\$[\d,]+(?:\.\d{2})?)\s*\((\$[\d,]+(?:\.\d{2})?)[^)]*\)", text
-    ):
-        whole, part = _money(m.group(1)), _money(m.group(2))
-        if abs(whole - part) < 0.01 and whole > 0:
-            violations.append(
-                f"Budget total ${whole:,.0f} equals its own parenthetical breakdown — "
-                "the sentence claims the whole and a part are the same figure."
-            )
+    # A parenthetical that restates the whole total only omits something when the
+    # total actually HAS more than one component. Fee-only, travel-only and
+    # pass-through-only budgets are all shapes render_budget_markdown supports,
+    # and for each _rewrite_investment_sentence correctly emits
+    # "Total proposed investment: $X ($X in <the one component>)" — whole == part
+    # with nothing left out. Flagging that never self-resolves, because
+    # rerender_budget_section_from_canon reproduces identical text from the same
+    # canonical budget every retry round, so it ends as a spurious manual-fill
+    # handoff on a correct proposal. Zero parsed components is a different case:
+    # every renderer path that emits a parenthetical also emits at least one
+    # labelled component line, so prose with none is drifted text, not canon —
+    # keep checking it.
+    if len([c for c in (fee, direct, passthrough) if c > 0]) != 1:
+        for m in re.finditer(
+            r"(?i)Total[^.$]*(\$[\d,]+(?:\.\d{2})?)\s*\((\$[\d,]+(?:\.\d{2})?)[^)]*\)", text
+        ):
+            whole, part = _money(m.group(1)), _money(m.group(2))
+            if abs(whole - part) < 0.01 and whole > 0:
+                violations.append(
+                    f"Budget total ${whole:,.0f} equals its own parenthetical breakdown — "
+                    "the sentence claims the whole and a part are the same figure."
+                )
 
     return violations
 
