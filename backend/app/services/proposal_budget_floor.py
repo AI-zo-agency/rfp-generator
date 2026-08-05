@@ -158,3 +158,72 @@ def collect_underbid_violations(
         f"({', '.join(sorted(floors_by_service))}). Confirm this is a deliberate "
         "discount before submitting, or raise the priced fees to match the guide."
     ]
+
+
+# --- RFP constraint check -------------------------------------------------
+#
+# Observed defect: an MSU Denver RFP stated at Section 2.7 "All work under
+# this agreement shall be performed remotely... No on-site presence is
+# anticipated unless requested by MSU Denver." The generated budget included
+# a $2,500 travel line anyway. Nothing compared line items against the RFP's
+# own terms.
+#
+# Only direct_expense line items (travel, reimbursables — see
+# proposal_budget_validation.infer_line_item_type) are candidates: agency fee
+# and client pass-through lines are never billed-at-cost travel and are never
+# flagged by this check.
+#
+# This raises the same 422 as collect_underbid_violations, so a false
+# positive halts a whole proposal run just as a miss would let a bad line
+# ship. _REMOTE_ONLY_RE is deliberately narrow (specific "performed remotely"
+# / "no on-site presence" phrasings) so an incidental "remote" mention
+# ("remote desktop support", "remote sensing data", "the remote possibility
+# that...") never trips it. _ONSITE_REQUIRED_RE is deliberately broad — any
+# on-site obligation nearby a requirement verb (required/mandatory/expected/
+# shall/must/necessary), in either word order, within the same sentence —
+# so a hybrid engagement ("primarily remote, with occasional on-site
+# meetings") or a remote clause carved out for on-site kickoff/quarterly
+# visits never fires. Sentence-bounded via ``[^.]`` so a requirement verb in
+# one sentence can't combine with "on-site" in an unrelated later sentence.
+_REMOTE_ONLY_RE = re.compile(
+    r"(?i)\b(?:all\s+work[^.]{0,60}performed\s+remotely|"
+    r"work\s+shall\s+be\s+performed\s+remotely|"
+    r"no\s+on-?site\s+presence\s+is\s+anticipated|"
+    r"fully\s+remote\s+engagement)\b"
+)
+_ONSITE_REQUIRED_RE = re.compile(
+    r"(?i)\bon[\s-]?site\b[^.]{0,60}\b(?:required|mandatory|expected|shall|must|necessary)\b|"
+    r"\b(?:required|mandatory|expected|shall|must)\b[^.]{0,60}\bon[\s-]?site\b"
+)
+
+
+def collect_rfp_constraint_violations(budget: ProposalBudget, rfp_text: str) -> list[str]:
+    """Reject direct-expense line items (travel, reimbursables) the RFP's own terms forbid.
+
+    Empty/missing RFP text, or RFP text that does not clearly state a
+    remote-only engagement, never halts. An RFP that also calls out an
+    on-site obligation (kickoff, quarterly visits, hybrid work) never halts
+    either — only an unqualified remote-only clause with no on-site carve-out
+    does. Agency fee and client pass-through lines are never candidates; only
+    ``direct_expense`` lines (travel/reimbursables) can be flagged.
+    """
+    text = rfp_text or ""
+    if not text.strip():
+        return []
+    if not _REMOTE_ONLY_RE.search(text) or _ONSITE_REQUIRED_RE.search(text):
+        return []
+
+    offenders = [
+        (item.description or "line item", float(item.extended or 0))
+        for item in budget.line_items
+        if infer_line_item_type(item) == "direct_expense"
+    ]
+    if not offenders:
+        return []
+
+    listed = ", ".join(f"{d} (${x:,.2f})" for d, x in offenders)
+    return [
+        "The RFP states all work shall be performed remotely, but the budget prices "
+        f"travel/reimbursables: {listed}. Remove these lines or cite the clause that "
+        "authorises on-site work."
+    ]

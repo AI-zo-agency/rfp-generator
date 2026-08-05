@@ -6,7 +6,10 @@ import logging
 
 from app.models.pricing_rate_card import PricingRateCard
 from app.models.proposal import ProposalBudget, RfpSectionMap
-from app.services.proposal_budget_floor import collect_underbid_violations
+from app.services.proposal_budget_floor import (
+    collect_rfp_constraint_violations,
+    collect_underbid_violations,
+)
 from app.services.proposal_budget_validation import (
     assert_budget_invariants,
     reconcile_proposal_budget,
@@ -34,6 +37,11 @@ def run_budget_editor_pass(
     covers halts here rather than shipping with only an advisory flag. Missing
     or empty rate card never halts (the guide failing to load is not a pricing
     defect).
+
+    ``rfp_context`` is also checked against the RFP's own terms: a remote-only
+    engagement clause with no on-site carve-out halts here if the budget still
+    prices travel/reimbursables. Empty RFP text, or RFP text that does not
+    clearly state remote-only work, never halts.
     """
     before_revenue = budget.agency_revenue_estimate
     before_lump = budget.lump_sum_total
@@ -73,6 +81,16 @@ def run_budget_editor_pass(
             + "; ".join(underbid_violations)
             + " Re-run Phase 3.5 budget generation or raise line-item pricing to match "
             "the 00_Guide_Pricing floor before proceeding.",
+            status_code=422,
+        )
+
+    rfp_constraint_violations = collect_rfp_constraint_violations(finalized, rfp_context)
+    if rfp_constraint_violations:
+        raise ProposalError(
+            "BUDGET EDITOR FAILED — pipeline halted: "
+            + "; ".join(rfp_constraint_violations)
+            + " Re-run Phase 3.5 budget generation or remove the line items the RFP's own "
+            "terms forbid before proceeding.",
             status_code=422,
         )
 
