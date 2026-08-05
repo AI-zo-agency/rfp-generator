@@ -51,16 +51,9 @@ def _zo_mode_for_title(title: str) -> str:
     return "write"
 
 
-_LEDGER_STOPWORDS = {
-    "the", "and", "for", "with", "that", "this", "shall", "must", "will",
-    "from", "into", "are", "was", "were", "has", "have", "per", "each",
-    "any", "all", "your", "our", "their", "its",
-}
-
-
-def _ledger_keywords(text: str) -> set[str]:
-    words = re.findall(r"[a-z0-9]+", (text or "").lower())
-    return {w for w in words if len(w) > 3 and w not in _LEDGER_STOPWORDS}
+def _normalize(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace — for exact comparison."""
+    return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
 
 
 def _match_outline_sections(
@@ -71,29 +64,61 @@ def _match_outline_sections(
 ) -> list[str]:
     """Deterministic (no LLM) requirement -> section matching.
 
-    Conservative by design: prefer under-matching (reported as ``missing``, which
-    is the whole point of the ledger) over falsely marking a requirement covered.
+    Genuinely conservative: every branch is a whole-string comparison on
+    normalized text, never a substring test. A short generic title (Summary,
+    Cost, Team) is a substring of a large fraction of requirement texts, so the
+    old ``title in requirement`` branch produced silent false positives — and a
+    false "satisfied" hides the requirement from ``missing()``, which is the one
+    thing the ledger exists to catch.
+
+    Three ways a section can cover a requirement, in order of confidence:
+      1. the item's own ``target_section`` hint equals the section title;
+      2. one of the section's ``requirements`` bullets equals the requirement;
+      3. the section title equals the requirement text.
     """
-    req_l = (requirement_text or "").strip().lower()
-    hint_l = (target_hint or "").strip().lower()
+    req_n = _normalize(requirement_text)
+    hint_n = _normalize(target_hint)
     matches: list[str] = []
     for section in outline_sections:
-        title_l = (section.title or "").strip().lower()
-        if not title_l:
-            continue
-        if hint_l and (hint_l in title_l or title_l in hint_l):
+        title_n = _normalize(getattr(section, "title", "") or "")
+        if hint_n and title_n and hint_n == title_n:
             matches.append(section.id)
             continue
-        if req_l and len(title_l) > 3 and (title_l in req_l or req_l in title_l):
+        bullets = getattr(section, "requirements", None) or []
+        if req_n and any(_normalize(str(b)) == req_n for b in bullets):
+            matches.append(section.id)
+            continue
+        if req_n and title_n and title_n == req_n:
             matches.append(section.id)
     return matches
 
 
+# Word-boundary "form"/"forms" only. A bare substring test matched "in-form-ation",
+# "per-form-ance", "con-form-ing" and "plat-form" — four of the most common words in
+# a compliance matrix — and mislabelled ordinary narrative requirements as forms.
+_FORM_RE = re.compile(r"\bforms?\b")
+# Phrases that contain the word "form" but are not a document to return.
+_FORM_DENY_RE = re.compile(
+    r"\b(?:"
+    r"form(?:s)?\s+(?:of|a|an|the)\b"      # "in the form of", "form a team"
+    r"|in\s+form(?:s)?\b"
+    r"|form(?:al|ally|at|atting|ation|ative|ulate|ulated|ulation)\b"
+    r")"
+)
+
+
 def _classify_compliance_source(item: ComplianceItem) -> str:
-    blob = f"{item.requirement} {item.evidence_needed} {item.source_ref}".lower()
-    if "form" in blob:
+    blob = " ".join(
+        str(getattr(item, attr, "") or "")
+        for attr in ("requirement", "evidence_needed", "source_ref")
+    ).lower()
+    if _FORM_RE.search(blob) and not _FORM_DENY_RE.search(blob):
         return "form"
     return "required_content"
+
+
+def _slug(text: str, *, limit: int = 48) -> str:
+    return "-".join(re.findall(r"[a-z0-9]+", (text or "").lower()))[:limit]
 
 
 def build_requirement_ledger(
@@ -112,6 +137,20 @@ def build_requirement_ledger(
     Phase 2.
     """
     requirements: list[LedgerRequirement] = []
+    used_ids: set[str] = set()
+
+    def _unique(candidate: str, fallback: str) -> str:
+        """Ids are keys for later stages; the LLM can emit the same id twice."""
+        base = (candidate or "").strip() or fallback
+        if base not in used_ids:
+            used_ids.add(base)
+            return base
+        suffix = 2
+        while f"{base}-{suffix}" in used_ids:
+            suffix += 1
+        unique = f"{base}-{suffix}"
+        used_ids.add(unique)
+        return unique
 
     for index, item in enumerate(compliance_items or [], start=1):
         try:
@@ -126,7 +165,7 @@ def build_requirement_ledger(
             evidence_needed = (getattr(item, "evidence_needed", "") or "").strip()
             requirements.append(
                 LedgerRequirement(
-                    id=getattr(item, "id", "") or f"comp-{index}",
+                    id=_unique(getattr(item, "id", "") or "", f"comp-{index}"),
                     text=text,
                     source=_classify_compliance_source(item),  # type: ignore[arg-type]
                     mandatory=bool(getattr(item, "mandatory", True)),
@@ -149,9 +188,14 @@ def build_requirement_ledger(
                 outline_sections=outline_sections,
             )
             weight = getattr(crit, "weight", None)
+            # Slug, not position: criterion identity must survive a Phase 2 re-run
+            # that returns the same criteria in a different order.
+            slug = _slug(name)
             requirements.append(
                 LedgerRequirement(
-                    id=f"scored-{index}",
+                    id=_unique(
+                        f"scored-{slug}" if slug else "", f"scored-{index}"
+                    ),
                     text=name,
                     source="scored_criterion",
                     mandatory=True,

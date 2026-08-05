@@ -8,11 +8,19 @@ f"Compliance item count: {len(...)}".
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from app.models.proposal import ProposalResearchCache
+from app.core import config
+from app.models.proposal import ProposalResearchCache, RfpSectionMap
 from app.models.requirement_ledger import LedgerRequirement, RequirementLedger
-from app.services.proposal_intelligence.assembler import derive_legacy_fields
+from app.services import proposal_repository as repo
+from app.services.proposal_intelligence.assembler import (
+    build_requirement_ledger,
+    derive_legacy_fields,
+)
 from app.services.proposal_intelligence.schemas import (
     ComplianceItem,
     ComplianceMatrix,
@@ -181,6 +189,240 @@ class RequirementLedgerEndToEndTests(unittest.TestCase):
         self.assertIsNotNone(research.requirement_ledger)
         self.assertTrue(research.requirement_ledger.requirements)
         self.assertTrue(research.requirement_ledger.scored())
+
+
+def _ledger_with(text: str) -> RequirementLedger:
+    return RequirementLedger(
+        requirements=[LedgerRequirement(id="r1", text=text, satisfiedBy=["sec-1"])]
+    )
+
+
+class LedgerSurvivesRoutineResavesTests(unittest.IsolatedAsyncioTestCase):
+    """C1: a persisted ledger must survive a Sections 1-3 regeneration.
+
+    _generate_sections_1_3_inner (proposal_generator.py:1743) and
+    _persist_sections_1_3_partial (:970) rebuild ProposalResearchCache from a
+    hand-written whitelist of prior fields. rfpSections is copied forward;
+    requirementLedger was not, and merge_research_preserve_audit_fields only
+    protected the three audit fields — so a routine "regenerate the company
+    section" wiped the ledger and Task 2's coverage gate would silently no-op.
+
+    This is a real sqlite round trip, not a mock: the defect lives in the
+    save path, so a mocked store would not see it.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._db = Path(self._tmpdir.name) / "ledger.db"
+        self._patchers = [
+            patch.object(config.settings, "database_path", self._db),
+            patch.object(repo, "_use_supabase", return_value=False),
+            patch("app.services.rfp_repository._use_supabase", return_value=False),
+            patch("app.services.supabase_db.use_supabase_db", return_value=False),
+        ]
+        for p in self._patchers:
+            p.start()
+        repo.init_proposal_db()
+
+    async def asyncTearDown(self) -> None:
+        for p in reversed(self._patchers):
+            p.stop()
+        self._tmpdir.cleanup()
+
+    async def test_sections_1_3_regeneration_does_not_wipe_the_ledger(self) -> None:
+        rfp_id = "rfp-c1"
+
+        # Phase 2 save: ledger persisted alongside rfpSections.
+        await repo.asave_research_cache(
+            ProposalResearchCache(
+                rfpId=rfp_id,
+                rfpSections=[RfpSectionMap(id="sec-1", title="Attachments")],
+                requirementLedger=_ledger_with("A cover letter"),
+                updatedAt="2026-08-05T00:00:00Z",
+            )
+        )
+        after_phase2 = await repo.aget_research_cache(rfp_id)
+        self.assertIsNotNone(after_phase2.requirement_ledger)
+
+        # Sections 1-3 regeneration: rebuilt from the prior-field whitelist,
+        # which forwards rfpSections but leaves requirementLedger null.
+        await repo.asave_research_cache(
+            ProposalResearchCache(
+                rfpId=rfp_id,
+                rfpSections=after_phase2.rfp_sections,
+                questions=after_phase2.questions,
+                evidenceCorpus=after_phase2.evidence_corpus,
+                retrievalRounds=after_phase2.retrieval_rounds,
+                coverageThreshold=after_phase2.coverage_threshold,
+                updatedAt="2026-08-05T01:00:00Z",
+            )
+        )
+
+        after_regen = await repo.aget_research_cache(rfp_id)
+        self.assertTrue(after_regen.rfp_sections, "rfp_sections must survive")
+        self.assertIsNotNone(
+            after_regen.requirement_ledger,
+            "ledger was wiped by a routine sections-1-3 regeneration",
+        )
+        self.assertEqual(
+            [r.text for r in after_regen.requirement_ledger.requirements],
+            ["A cover letter"],
+        )
+
+    async def test_a_freshly_built_ledger_still_overwrites_the_stored_one(self) -> None:
+        """Preservation must not freeze the ledger: a real Phase 2 re-run wins."""
+        rfp_id = "rfp-c1-refresh"
+        await repo.asave_research_cache(
+            ProposalResearchCache(
+                rfpId=rfp_id,
+                requirementLedger=_ledger_with("stale requirement"),
+                updatedAt="2026-08-05T00:00:00Z",
+            )
+        )
+        await repo.asave_research_cache(
+            ProposalResearchCache(
+                rfpId=rfp_id,
+                requirementLedger=_ledger_with("fresh requirement"),
+                updatedAt="2026-08-05T02:00:00Z",
+            )
+        )
+        reloaded = await repo.aget_research_cache(rfp_id)
+        self.assertEqual(
+            [r.text for r in reloaded.requirement_ledger.requirements],
+            ["fresh requirement"],
+        )
+
+
+class ComplianceSourceClassificationTests(unittest.TestCase):
+    """I2: 'form' was matched as a bare substring, so "in-form-ation" and
+    "per-form-ance" — two of the most common words in a compliance matrix —
+    were mislabelled as forms."""
+
+    def _source_for(self, requirement: str) -> str:
+        ledger = build_requirement_ledger(
+            [ComplianceItem(id="c1", requirement=requirement)], [], []
+        )
+        return ledger.requirements[0].source
+
+    def test_information_is_not_a_form(self) -> None:
+        self.assertEqual(
+            self._source_for("Provide information about your firm"), "required_content"
+        )
+
+    def test_performance_is_not_a_form(self) -> None:
+        self.assertEqual(
+            self._source_for("Performance metrics and KPIs"), "required_content"
+        )
+
+    def test_conforming_is_not_a_form(self) -> None:
+        self.assertEqual(
+            self._source_for("Describe conforming products"), "required_content"
+        )
+
+    def test_platform_is_not_a_form(self) -> None:
+        self.assertEqual(
+            self._source_for("Platform uptime guarantee"), "required_content"
+        )
+
+    def test_a_real_form_is_still_classified_as_a_form(self) -> None:
+        self.assertEqual(self._source_for("Submit the attached W-9 form"), "form")
+        self.assertEqual(self._source_for("Return all required forms"), "form")
+
+
+class MatcherPrecisionTests(unittest.TestCase):
+    """I3/I4: the matcher produced silent false positives on short generic
+    titles, and never consulted section.requirements at all."""
+
+    def _satisfied_by(
+        self, requirement: str, sections: list[RfpSectionMap], hint: str = ""
+    ) -> list[str]:
+        ledger = build_requirement_ledger(
+            [ComplianceItem(id="c1", requirement=requirement, targetSection=hint)],
+            [],
+            sections,
+        )
+        return ledger.requirements[0].satisfied_by
+
+    def test_a_section_titled_summary_does_not_satisfy_an_insurance_requirement(
+        self,
+    ) -> None:
+        """"Summary" is a substring of the requirement text — a false positive
+        that makes the requirement invisible to missing()."""
+        sections = [RfpSectionMap(id="s3", title="Summary")]
+        self.assertEqual(
+            self._satisfied_by("Provide a summary of your insurance coverage", sections),
+            [],
+        )
+
+    def test_a_section_titled_cost_does_not_satisfy_a_cost_proposal_requirement(
+        self,
+    ) -> None:
+        sections = [RfpSectionMap(id="s4", title="Cost")]
+        self.assertEqual(
+            self._satisfied_by("Provide a detailed cost proposal", sections), []
+        )
+
+    def test_a_matching_requirements_bullet_satisfies_the_requirement(self) -> None:
+        """I4: the section carries the requirement verbatim in its bullets and
+        must count as covering it, regardless of its title."""
+        sections = [
+            RfpSectionMap(
+                id="s5",
+                title="Technical Approach",
+                requirements=["Proof of general liability insurance"],
+            )
+        ]
+        self.assertEqual(
+            self._satisfied_by("Proof of general liability insurance", sections), ["s5"]
+        )
+
+    def test_an_exact_title_match_still_satisfies_the_requirement(self) -> None:
+        sections = [RfpSectionMap(id="s6", title="Cover Letter")]
+        self.assertEqual(self._satisfied_by("Cover Letter", sections), ["s6"])
+
+    def test_a_target_section_hint_still_matches_its_section(self) -> None:
+        sections = [RfpSectionMap(id="s7", title="Attachments")]
+        self.assertEqual(
+            self._satisfied_by("W-9 tax form", sections, hint="Attachments"), ["s7"]
+        )
+
+
+class LedgerIdentityTests(unittest.TestCase):
+    """Minor: ids must be unique, and scored ids must survive reordering."""
+
+    def test_two_compliance_items_sharing_an_id_get_distinct_ledger_ids(self) -> None:
+        ledger = build_requirement_ledger(
+            [
+                ComplianceItem(id="c1", requirement="A cover letter"),
+                ComplianceItem(id="c1", requirement="Proof of insurance"),
+            ],
+            [],
+            [],
+        )
+        ids = [r.id for r in ledger.requirements]
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(len(set(ids)), 2, f"duplicate ledger ids: {ids}")
+
+    def test_scored_ids_survive_reordering_of_the_criteria(self) -> None:
+        first = build_requirement_ledger(
+            [],
+            [
+                EvaluationCriterion(name="Technical Approach", weight=30.0),
+                EvaluationCriterion(name="Cost", weight=20.0),
+            ],
+            [],
+        )
+        second = build_requirement_ledger(
+            [],
+            [
+                EvaluationCriterion(name="Cost", weight=20.0),
+                EvaluationCriterion(name="Technical Approach", weight=30.0),
+            ],
+            [],
+        )
+        by_text_first = {r.text: r.id for r in first.requirements}
+        by_text_second = {r.text: r.id for r in second.requirements}
+        self.assertEqual(by_text_first, by_text_second)
 
 
 if __name__ == "__main__":
