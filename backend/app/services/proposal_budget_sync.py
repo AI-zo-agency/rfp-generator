@@ -312,6 +312,68 @@ def collect_deterministic_budget_mismatches(
     return out
 
 
+_PROSE_FEE_RE = re.compile(
+    r"(?i)\*{0,2}(?:Professional\s+(?:services\s+)?fees?|Total\s+agency\s+fees?)\*{0,2}"
+    r"\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+)
+_PROSE_DIRECT_RE = re.compile(
+    r"(?i)\*{0,2}(?:Direct\s+travel\s*/\s*reimbursables|Direct\s+travel|"
+    r"Travel\s*/\s*reimbursables)\*{0,2}\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+)
+_PROSE_TOTAL_RE = re.compile(
+    r"(?i)\*{0,2}(?:Total\s+proposed\s+investment|Total\s+client\s+invoicing|"
+    r"Grand\s+total)\*{0,2}\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+)
+_PROSE_PASSTHROUGH_RE = re.compile(
+    r"(?i)\*{0,2}Client\s+media\s+pass-?through[^:]*\*{0,2}\s*:\s*(\$[\d,]+(?:\.\d{2})?)"
+)
+
+
+def _money(token: str) -> float:
+    return float(token.replace("$", "").replace(",", ""))
+
+
+def collect_prose_arithmetic_violations(markdown: str) -> list[str]:
+    """Verify the rendered budget adds up, independently of the canonical object.
+
+    The existing prose check compares each labelled figure against its own
+    canonical field and never across fields, so fee == travel == total passed.
+    """
+    text = markdown or ""
+    violations: list[str] = []
+
+    fee_m = _PROSE_FEE_RE.search(text)
+    total_m = _PROSE_TOTAL_RE.search(text)
+    if fee_m and total_m:
+        fee = _money(fee_m.group(1))
+        total = _money(total_m.group(1))
+        direct_m = _PROSE_DIRECT_RE.search(text)
+        direct = _money(direct_m.group(1)) if direct_m else 0.0
+        pt_m = _PROSE_PASSTHROUGH_RE.search(text)
+        passthrough = _money(pt_m.group(1)) if pt_m else 0.0
+
+        expected = round(fee + direct + passthrough, 2)
+        tol = max(1.0, total * 0.02)
+        if abs(total - expected) > tol:
+            violations.append(
+                f"Budget prose does not add up: fees ${fee:,.0f} + direct ${direct:,.0f} "
+                f"+ pass-through ${passthrough:,.0f} = ${expected:,.0f}, but the stated total "
+                f"is ${total:,.0f}."
+            )
+
+    for m in re.finditer(
+        r"(?i)Total[^.$]*(\$[\d,]+(?:\.\d{2})?)\s*\((\$[\d,]+(?:\.\d{2})?)[^)]*\)", text
+    ):
+        whole, part = _money(m.group(1)), _money(m.group(2))
+        if abs(whole - part) < 0.01 and whole > 0:
+            violations.append(
+                f"Budget total ${whole:,.0f} equals its own parenthetical breakdown — "
+                "the sentence claims the whole and a part are the same figure."
+            )
+
+    return violations
+
+
 def _template_for_claim(claim_type: str, value: float) -> str | None:
     templates = {
         "agency_fee": f"Total Year 1 agency fee: {_usd(value)}.",
@@ -419,6 +481,22 @@ async def run_budget_grounding_check(
 ) -> list[BudgetNarrativeMismatch]:
     """Phase 3.5d: detect claims-vs-canonical budget mismatches across manuscript."""
     deterministic = collect_deterministic_budget_mismatches(draft, budget)
+
+    budget_idx = find_budget_section_index(draft.sections)
+    if budget_idx is not None:
+        budget_section = draft.sections[budget_idx]
+        for violation in collect_prose_arithmetic_violations(budget_section.content or ""):
+            deterministic.append(
+                BudgetNarrativeMismatch(
+                    sectionId=budget_section.id,
+                    sectionTitle=budget_section.title or "",
+                    sentence=violation[:500],
+                    claimedField="prose_arithmetic",
+                    canonicalValue=None,
+                    matches=False,
+                    note=violation,
+                )
+            )
 
     sections = [
         {
