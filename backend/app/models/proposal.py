@@ -2,6 +2,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.models.requirement_ledger import RequirementLedger
+
 if TYPE_CHECKING:
     from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
 
@@ -507,6 +509,15 @@ class ProposalResearchCache(BaseModel):
 
     rfp_id: str = Field(alias="rfpId")
     rfp_sections: list[RfpSectionMap] = Field(default_factory=list, alias="rfpSections")
+    requirement_ledger: RequirementLedger | None = Field(
+        default=None,
+        alias="requirementLedger",
+        description=(
+            "Persisted per-requirement matrix (compliance + scored criteria) so "
+            "coverage/duplication can be audited against sections Phase 2 never "
+            "emitted, not just against research.rfp_sections."
+        ),
+    )
     questions: list[ResearchQuestion] = Field(default_factory=list)
     brand_voice: ProposalBrandVoice | None = Field(default=None, alias="brandVoice")
     evidence_corpus: list[EvidenceItem] = Field(default_factory=list, alias="evidenceCorpus")

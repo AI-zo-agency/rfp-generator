@@ -1117,6 +1117,7 @@ async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
     rfp_sections = legacy.get("rfpSections") or []
     section_queries = legacy.get("sectionQueries") or {}
     proof_points = legacy.get("proofPoints") or []
+    requirement_ledger = legacy.get("requirementLedger")
 
     loss_lessons, writing_avoidances, _loss_sources = await build_loss_lessons_for_rfp(
         rfp=rfp,
@@ -1175,6 +1176,7 @@ async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
     research = ProposalResearchCache(
         rfpId=rfp.id,
         rfpSections=rfp_sections,
+        requirementLedger=requirement_ledger,
         questions=prior_research.questions if prior_research else [],
         brandVoice=prior_research.brand_voice if prior_research else None,
         evidenceCorpus=evidence_corpus,
