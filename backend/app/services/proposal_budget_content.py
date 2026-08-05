@@ -496,28 +496,22 @@ def render_offer_form_of2_from_canonical(
 
 
 def _professional_fees_and_direct(budget: ProposalBudget) -> tuple[float, float]:
-    """Split agency professional fees from travel/reimbursables (line or direct bucket).
+    """Split agency professional fees from travel/reimbursables.
 
-    Client media pass-through lines are excluded from professional fees.
+    Delegates classification to infer_line_item_type so this cannot disagree with
+    split_line_item_totals — that disagreement is what let one travel row count as
+    fee, travel and total simultaneously.
     """
-    from app.services.proposal_budget_validation import infer_line_item_type
+    from app.services.proposal_budget_validation import (
+        direct_expense_subtotal,
+        split_line_item_totals,
+    )
 
-    fee_sum = 0.0
-    travel_in_lines = 0.0
-    for item in budget.line_items:
-        if item.extended is None:
-            continue
-        if infer_line_item_type(item) == "client_passthrough":
-            continue
-        ext = float(item.extended)
-        if _line_looks_like_travel(item):
-            travel_in_lines += ext
-        else:
-            fee_sum += ext
+    _line_sum, fee_sum, _passthrough = split_line_item_totals(budget.line_items)
+    travel_in_lines = direct_expense_subtotal(budget.line_items)
     direct = round(float(budget.direct_expenses_total or 0), 2)
     # Travel lives in lines XOR directExpensesTotal after dedupe.
-    reimbursables = round(travel_in_lines + direct, 2)
-    return round(fee_sum, 2), reimbursables
+    return round(fee_sum, 2), round(travel_in_lines + direct, 2)
 
 
 def _sync_narrative_total(
@@ -1060,10 +1054,22 @@ def insert_budget_table_into_section(content: str, budget_markdown: str) -> tupl
 
 def canonical_budget_summary_figures(budget: ProposalBudget) -> dict[str, float]:
     """Distinct agency / pass-through / direct / total figures from the fee table."""
-    from app.services.proposal_budget_validation import split_line_item_totals
+    from app.services.proposal_budget_validation import (
+        direct_expense_subtotal,
+        split_line_item_totals,
+    )
 
     line_sum, agency_fee, passthrough = split_line_item_totals(budget.line_items or [])
-    direct = round(float(budget.direct_expenses_total or 0), 2)
+    # Travel lives in lines XOR directExpensesTotal after dedupe (see
+    # _professional_fees_and_direct). line_sum already includes travel_in_lines
+    # (split_line_item_totals sums agency + passthrough + direct), so adding it
+    # again to line_sum would double-count. agency_fee, by contrast, now
+    # excludes travel entirely, so agency_revenue needs the full travel amount
+    # (in-lines + explicit field) or it would silently drop travel that used to
+    # be folded into the old (buggy) agency_fee.
+    travel_in_lines = direct_expense_subtotal(budget.line_items or [])
+    explicit_direct = round(float(budget.direct_expenses_total or 0), 2)
+    direct = round(travel_in_lines + explicit_direct, 2)
     if agency_fee <= 0 and budget.agency_fee_subtotal is not None:
         agency_fee = round(float(budget.agency_fee_subtotal), 2)
     if passthrough <= 0 and budget.client_media_passthrough is not None:
@@ -1078,7 +1084,7 @@ def canonical_budget_summary_figures(budget: ProposalBudget) -> dict[str, float]
     total = budget.total_client_invoicing
     if total is None or float(total) <= 0:
         if line_sum > 0:
-            total = round(float(line_sum) + direct, 2)
+            total = round(float(line_sum) + explicit_direct, 2)
         else:
             total = round(agency_fee + passthrough + direct, 2)
     else:

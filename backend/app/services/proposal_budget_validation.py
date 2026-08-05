@@ -46,6 +46,15 @@ _PASSTHROUGH_LINE_RE = re.compile(
     r"gross\s+media|net\s+media|advertising\s+spend|media\s+placement",
     re.I,
 )
+# Travel and reimbursables are billed at cost — they are neither agency fee nor
+# client media. Without this branch infer_line_item_type fell through to
+# "agency_fee", while proposal_budget_content routed the same row to
+# reimbursables, so one row was counted in both buckets.
+_DIRECT_EXPENSE_LINE_RE = re.compile(
+    r"\b(travel|airfare|lodging|per\s*diem|mileage|ground\s+transport|hotel|"
+    r"reimbursable|out[\s-]of[\s-]pocket)\b",
+    re.I,
+)
 _AGENCY_FEE_LINE_RE = re.compile(
     r"\bcommission\b|\bagency\s+fee\b|\bproject\s+management\b|\bstrategy\b|"
     r"\bresearch\b|\breporting\b|\bcreative\b|\bdesign\b|\baccount\s+management\b",
@@ -187,12 +196,17 @@ def scale_line_items_to_hard_cap(
     if hard_cap <= 0:
         return line_items, []
     _, agency_fee, _ = split_line_item_totals(line_items)
-    current = round(agency_fee + float(direct_expenses or 0), 2)
+    # agency_fee now excludes travel/reimbursable line items (direct_expense
+    # type) — fold those back in here or the cap check would silently ignore
+    # travel that lives in lines instead of the explicit direct_expenses field.
+    travel_in_lines = direct_expense_subtotal(line_items)
+    total_direct = round(travel_in_lines + float(direct_expenses or 0), 2)
+    current = round(agency_fee + total_direct, 2)
     if current <= hard_cap + 0.01:
         return line_items, []
 
-    # Leave room for direct expenses inside the cap.
-    target_agency = max(0.0, round(hard_cap - float(direct_expenses or 0), 2))
+    # Leave room for direct expenses (explicit + in-line travel) inside the cap.
+    target_agency = max(0.0, round(hard_cap - total_direct, 2))
     if agency_fee <= 0 or target_agency <= 0:
         return line_items, [
             f"[PRICING FLAG: Proposed total {_usd(current)} exceeds RFP hard cap {_usd(hard_cap)} "
@@ -331,6 +345,8 @@ def infer_line_item_type(item: BudgetLineItem) -> BudgetLineItemType:
         r"\bagency\s+commission\b", blob, re.I
     ):
         return "client_passthrough"
+    if _DIRECT_EXPENSE_LINE_RE.search(blob):
+        return "direct_expense"
     if _AGENCY_FEE_LINE_RE.search(blob):
         return "agency_fee"
     return "agency_fee"
@@ -351,15 +367,29 @@ def split_line_item_totals(
     """
     agency = 0.0
     passthrough = 0.0
+    direct = 0.0
     for item in line_items:
         ext = float(item.extended or 0)
-        if infer_line_item_type(item) == "client_passthrough":
+        kind = infer_line_item_type(item)
+        if kind == "client_passthrough":
             passthrough += ext
+        elif kind == "direct_expense":
+            direct += ext
         else:
             agency += ext
     agency = round(agency, 2)
     passthrough = round(passthrough, 2)
-    return round(agency + passthrough, 2), agency, passthrough
+    direct = round(direct, 2)
+    return round(agency + passthrough + direct, 2), agency, passthrough
+
+
+def direct_expense_subtotal(line_items: list[BudgetLineItem]) -> float:
+    """Travel / reimbursables carried as line items, billed at cost."""
+    total = 0.0
+    for item in line_items:
+        if infer_line_item_type(item) == "direct_expense":
+            total += float(item.extended or 0)
+    return round(total, 2)
 
 
 def collect_pm_ratio_violations(budget: ProposalBudget) -> list[str]:
@@ -1026,14 +1056,22 @@ def reconcile_proposal_budget(
     line_items = resync_line_items_rate_extended(line_items)
 
     line_sum, agency_fee, passthrough = split_line_item_totals(line_items)
-    direct = round(float(budget.direct_expenses_total or 0), 2)
+    # line_sum already includes direct_expense (travel) line items — it sums
+    # all three buckets. agency_fee now excludes them. `explicit_direct` is the
+    # residual directExpensesTotal field (dedupe_travel_vs_direct_expenses
+    # above zeroes it when travel already lives in a line, so line_sum and
+    # explicit_direct never double-count). `direct` is the FULL travel spend
+    # regardless of source and is only safe to pair with agency_fee, never
+    # with line_sum (which would double-count the in-line portion).
+    explicit_direct = round(float(budget.direct_expenses_total or 0), 2)
+    direct = round(direct_expense_subtotal(line_items) + explicit_direct, 2)
     commission_style = is_commission_style_budget(budget) or passthrough > 0
 
     if commission_style and passthrough > 0:
         agency_revenue = round(agency_fee + direct, 2)
-        total_invoicing = round(line_sum + direct, 2)
+        total_invoicing = round(line_sum + explicit_direct, 2)
     else:
-        agency_revenue = round(line_sum + direct, 2)
+        agency_revenue = round(line_sum + explicit_direct, 2)
         total_invoicing = agency_revenue
         agency_fee = round(line_sum, 2)
         passthrough = 0.0
@@ -1115,7 +1153,11 @@ def reconcile_proposal_budget(
     if updates.get("total_client_invoicing") is None:
         media = float(updates.get("client_media_passthrough") or 0)
         if media > 0:
-            updates["total_client_invoicing"] = round(agency_revenue + media + direct, 2)
+            # agency_revenue here already carries travel (either via line_sum in
+            # the non-commission branch, or via the full `direct` in the
+            # commission branch) — add only the explicit residual to avoid
+            # double-counting in-line travel a second time.
+            updates["total_client_invoicing"] = round(agency_revenue + media + explicit_direct, 2)
 
     computed = agency_revenue
     requires_lump_hourly = rfp_requires_lump_sum_and_hourly(rfp_sections, rfp_context)
@@ -1190,7 +1232,13 @@ def collect_budget_invariant_violations(budget: ProposalBudget) -> list[str]:
     """Return human-readable violations when budget math or flags are unreconciled."""
     violations: list[str] = []
     line_sum = sum_line_items_extended(budget)
-    direct = round(float(budget.direct_expenses_total or 0), 2)
+    # agency_fee excludes direct_expense (travel) line items — reconcile_proposal_budget's
+    # agency_revenue_estimate is agency_fee + ALL direct spend (in-line travel plus the
+    # explicit directExpensesTotal residual), so `direct` here must match that or a
+    # legitimately-reconciled travel line would trip a false invariant violation.
+    direct = round(
+        direct_expense_subtotal(budget.line_items) + float(budget.direct_expenses_total or 0), 2
+    )
     _, agency_fee, passthrough = split_line_item_totals(budget.line_items)
     expected_agency = round(agency_fee + direct, 2)
 
@@ -1262,13 +1310,17 @@ def validate_budget_canonical(budget: ProposalBudget) -> list[str]:
     if stored_sum is not None and abs(float(stored_sum) - line_sum) > 0.01:
         errors.append(f"lineItemSum ({stored_sum}) != actual line-item sum ({line_sum})")
 
-    direct = round(float(budget.direct_expenses_total or 0), 2)
+    # explicit_direct pairs with line_sum (sum_line_items_extended / split_line_item_totals'
+    # line_sum both already include in-line travel — adding it again would double-count).
+    # `direct` (explicit + in-line travel) pairs with agency_fee, which now excludes travel.
+    explicit_direct = round(float(budget.direct_expenses_total or 0), 2)
     _, agency_fee, passthrough = split_line_item_totals(budget.line_items)
+    direct = round(direct_expense_subtotal(budget.line_items) + explicit_direct, 2)
     expected_agency = round(agency_fee + direct, 2)
 
     revenue = budget.agency_revenue_estimate
     if revenue is not None and passthrough > 0:
-        if abs(float(revenue) - line_sum - direct) < 1.0 and abs(float(revenue) - expected_agency) > 1.0:
+        if abs(float(revenue) - line_sum - explicit_direct) < 1.0 and abs(float(revenue) - expected_agency) > 1.0:
             errors.append(
                 f"agencyRevenueEstimate ({revenue}) conflates pass-through media with agency fee — "
                 f"must be agency fee subtotal ({agency_fee}) + direct ({direct}) = {expected_agency}, "
@@ -1276,11 +1328,11 @@ def validate_budget_canonical(budget: ProposalBudget) -> list[str]:
             )
 
     if passthrough > 0 and budget.total_client_invoicing is not None:
-        expected_invoicing = round(line_sum + direct, 2)
+        expected_invoicing = round(line_sum + explicit_direct, 2)
         if abs(float(budget.total_client_invoicing) - expected_invoicing) > 1.0:
             errors.append(
                 f"totalClientInvoicing ({budget.total_client_invoicing}) != "
-                f"line items ({line_sum}) + direct ({direct})"
+                f"line items ({line_sum}) + direct ({explicit_direct})"
             )
 
     rendered = render_budget_markdown_for_validation(budget)
