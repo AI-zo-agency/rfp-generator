@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { createMarkdownSourceMap } from "@/lib/markdown-source-map";
 import { getTextareaCaretViewportRect, scrollTextareaToRange } from "@/lib/textarea-selection";
 import type { FlagHighlightRange } from "@/lib/proposal-manual-flags";
 import type { OutlineSection } from "@/types/proposal";
@@ -42,45 +43,6 @@ interface DraftSectionEditorProps {
   onRevisionDrawerOpenChange?: (open: boolean) => void;
 }
 
-function findRangeInContent(content: string, selected: string): { start: number; end: number } | null {
-  const trimmed = selected.trim();
-  if (trimmed.length < 3) return null;
-  const exact = content.indexOf(selected);
-  if (exact >= 0) return { start: exact, end: exact + selected.length };
-  const loose = content.indexOf(trimmed);
-  if (loose >= 0) return { start: loose, end: loose + trimmed.length };
-  const collapsed = (s: string) => s.replace(/\s+/g, " ").trim();
-  const needle = collapsed(trimmed);
-  const hay = collapsed(content);
-  const at = hay.indexOf(needle);
-  if (at < 0) return null;
-  // Approximate back to original offsets via prefix length
-  let orig = 0;
-  let compact = 0;
-  while (orig < content.length && compact < at) {
-    if (/\s/.test(content[orig]!)) {
-      while (orig < content.length && /\s/.test(content[orig]!)) orig += 1;
-      compact += 1;
-    } else {
-      orig += 1;
-      compact += 1;
-    }
-  }
-  const start = orig;
-  let end = start;
-  let seen = 0;
-  while (end < content.length && seen < needle.length) {
-    if (/\s/.test(content[end]!)) {
-      while (end < content.length && /\s/.test(content[end]!)) end += 1;
-      seen += 1;
-    } else {
-      end += 1;
-      seen += 1;
-    }
-  }
-  return end > start ? { start, end } : null;
-}
-
 export function DraftSectionEditor({
   section,
   wordCount,
@@ -105,6 +67,10 @@ export function DraftSectionEditor({
   const [previewMode, setPreviewMode] = useState(() => Boolean(value));
 
   const busy = disabled || chatBusy;
+
+  // Preview selections arrive as rendered text; this maps them back onto raw
+  // markdown offsets. Projected once per section body, not once per mouseup.
+  const sourceMap = useMemo(() => createMarkdownSourceMap(value), [value]);
 
   useEffect(() => {
     setSelection(null);
@@ -189,7 +155,7 @@ export function DraftSectionEditor({
       setSelection(null);
       return;
     }
-    const range = findRangeInContent(value, text);
+    const range = sourceMap.find(text);
     if (!range) {
       setSelection(null);
       return;
@@ -206,7 +172,7 @@ export function DraftSectionEditor({
     } catch {
       setSelection(null);
     }
-  }, [value]);
+  }, [sourceMap, value]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
