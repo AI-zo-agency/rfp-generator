@@ -48,6 +48,10 @@ from app.services.evidence_trust.rfp_hard_facts import (
     evaluation_table_is_reliable,
     extract_rfp_hard_facts,
 )
+from app.services.go_no_go_opportunity import (
+    apply_opportunity_score_caps,
+    format_opportunity_facts_lines,
+)
 from app.services.proposal_rfp_excerpt import build_priority_rfp_excerpt
 
 EVALUATION_QUESTIONS: list[tuple[str, str]] = [
@@ -140,19 +144,26 @@ worthScore ("Worth It Score") — financial return vs pursuit effort:
   2 = modest value with heavy pursuit overhead OR clearly poor economics
   1 = poor return relative to effort
   0 = not worth pursuing
-  Do NOT set Worth ≤ 2 solely because budget is undisclosed when the scope is otherwise in-lane and
-  pursuit effort is normal. Undisclosed budget alone → usually Worth 3 (mixed), not 2.
+  Do NOT set Worth ≤ 2 solely because budget is undisclosed when HARD FACTS say
+  opportunity class is professional_services and pursuit effort is normal → usually Worth 3 (mixed).
+  EXCEPTION: when HARD FACTS say opportunity class is open_competition (or compensation is
+  unpaid/prize_only) without confirmed_fee → Worth ≤ 1 and prefer no_go. Do not invent a fee.
 
 decisionMatrix — exactly 5 rows; each score is independent (they will often differ):
-  1. Technical Capability Match — scope execution per KB
+  1. Technical Capability Match — scope execution per KB (verified proof only; adjacent ≠ verified)
   2. Resource Availability — team bandwidth, geography, live-demo/on-site needs
-  3. Financial Viability — agency revenue vs cost (use commission math when budget is mostly media spend)
-  4. Strategic Value — reference value, sector/geography expansion
-  5. Win Probability — competition, proximity, scoring criteria alignment, disqualification risk
+  3. Financial Viability — agency revenue vs cost (use commission math when budget is mostly media spend).
+     open_competition / unpaid / prize_only without confirmed fee → 0 (do not invent payout)
+  4. Strategic Value — reference value, sector/geography expansion.
+     open_competition without confirmed fee → ≤ 2 (not a paid municipal brand-system showcase)
+  5. Win Probability — competition, proximity, scoring criteria alignment, disqualification risk.
+     open competition vs the public → ≤ 2 unless fee + eligibility are confirmed
 
 Overall Go Score = arithmetic average of the 5 decisionMatrix scores (not fitScore/worthScore).
 Use the full 0–5 range. Strong RFPs with local presence and high contract value should score 4–5 on several dimensions.
 Weak or distant low-value RFPs should score 1–2 on Financial Viability and Win Probability.
+Classify the deal BEFORE scoring: community design contests / "submit your seal" open calls are NOT
+paid professional-services procurements even if the header says "Sealed Bid" or "RFP".
 
 EVIDENCE CALIBRATION (accurate — neither reject-everything NOR invent pessimism):
 - Score each matrix row against THIS RFP's stated requirements and the KB excerpts returned for the searches run.
@@ -862,6 +873,11 @@ def _build_scoring_factors(rfp: RfpRecord, content: RfpContentInfo) -> str:
         lines.append(
             "- Other dollar amounts in RFP: " + ", ".join(hard["other_dollar_amounts"][:10])
         )
+
+    opp_class = hard.get("opportunity_class") or "ambiguous"
+    compensation = hard.get("compensation_signal") or "undisclosed"
+    lines.append("- OPPORTUNITY SHAPE (deterministic — respect these caps):")
+    lines.extend(format_opportunity_facts_lines(opp_class, compensation))
 
     term_matches = re.findall(
         r"(\d+)\s*(?:-|\s)?\s*(?:month|year)s?",
@@ -1666,6 +1682,7 @@ def _apply_hard_rules(
     *,
     deadline: dict[str, Any] | None = None,
     evaluation_points_found: bool = False,
+    hard_facts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if raw.get("insufficientData"):
         raw["recommendation"] = None
@@ -1724,6 +1741,18 @@ def _apply_hard_rules(
     )
     # Re-normalize matrix after possible score bumps in scrubber.
     raw["decisionMatrix"] = _normalize_decision_matrix(raw.get("decisionMatrix"))
+
+    facts = hard_facts or {}
+    opp_class = facts.get("opportunity_class")
+    compensation = facts.get("compensation_signal")
+    if opp_class and compensation:
+        apply_opportunity_score_caps(
+            raw,
+            opportunity_class=opp_class,
+            compensation_signal=compensation,
+            contract_value_lines=list(facts.get("contract_value_lines") or []),
+        )
+        raw["decisionMatrix"] = _normalize_decision_matrix(raw.get("decisionMatrix"))
 
     if deadline is not None:
         raw["deadline"] = deadline
@@ -2102,7 +2131,8 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 - Never invent evaluation % / point totals when HARD FACTS say not found.
 - Never invent team names; never invent "Drew Stone".
 - Spell Ella Lindau correctly (not Lindeau).
-- Undisclosed budget alone ≠ Worth 2 and Financial 2 — usually Worth ~3 when scope is in-lane.
+- Undisclosed budget alone ≠ Worth 2 when opportunity class is professional_services — usually Worth ~3.
+- open_competition / unpaid / prize_only without confirmed fee → Financial 0, Worth ≤1, prefer no_go.
 - Never cite small-business gross-receipts thresholds (e.g. $30M) as contract value.
 
 ## RFP
@@ -2125,6 +2155,7 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
                 raw,
                 deadline=deadline_info,
                 evaluation_points_found=evaluation_points_found,
+                hard_facts=hard_facts,
             )
             normalized = _coerce_go_no_go_raw(normalized)
             analysis = GoNoGoAnalysis.model_validate({**normalized, "provider": provider})

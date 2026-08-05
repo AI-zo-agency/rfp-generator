@@ -223,12 +223,21 @@ def extract_rfp_hard_facts(text: str) -> dict[str, Any]:
         except (IndexError, ValueError):
             continue
 
+    from app.services.go_no_go_opportunity import classify_opportunity
+
+    opportunity_class, compensation_signal = classify_opportunity(body)
+    # Contract ceiling lines are authoritative confirmed fee even if prose is thin.
+    if contract_lines and compensation_signal == "undisclosed":
+        compensation_signal = "confirmed_fee"
+
     facts = {
         "contract_value_lines": contract_lines,
         "other_dollar_amounts": other_dollars,
         "eligibility_dollar_lines": eligibility_dollars,
         "evaluation_lines": evaluation_lines,
         "evaluation_total": total_pts if total_pts > 0 else None,
+        "opportunity_class": opportunity_class,
+        "compensation_signal": compensation_signal,
     }
     # Drop unreliable / thin false-positive tables entirely.
     if not evaluation_table_is_reliable(facts):
@@ -286,6 +295,24 @@ def format_hard_facts_block(facts: dict[str, Any]) -> str:
     if others:
         lines.append("### Other dollar amounts mentioned")
         lines.extend(f"- {d}" for d in others[:8])
+
+    opp = facts.get("opportunity_class")
+    comp = facts.get("compensation_signal")
+    if opp or comp:
+        lines.append("### Opportunity shape (deterministic — score from this)")
+        if opp:
+            lines.append(f"- Opportunity class: {opp}")
+        if comp:
+            lines.append(f"- Compensation signal: {comp}")
+        lines.append(
+            "- open_competition without confirmed_fee → Financial 0, Worth ≤1, "
+            "Strategic ≤2, Win ≤2, prefer no_go (not a paid services engagement)."
+        )
+        lines.append(
+            "- professional_services + undisclosed budget → Worth ~3 allowed; "
+            "do not invent a fee and do not force Financial to 0 solely for undisclosed budget."
+        )
+
     lines.append(
         "If a contract ceiling or evaluation point row appears above, cite it. "
         "If not, say undisclosed — never invent, never re-label eligibility thresholds as budget."
