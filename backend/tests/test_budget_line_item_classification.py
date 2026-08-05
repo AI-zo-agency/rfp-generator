@@ -10,12 +10,19 @@ from __future__ import annotations
 import itertools
 import unittest
 
-from app.models.proposal import BudgetLineItem
-from app.services.proposal_budget_content import _professional_fees_and_direct
+from app.models.proposal import BudgetLineItem, ProposalBudget
+from app.services.proposal_budget_content import (
+    _professional_fees_and_direct,
+    canonical_budget_summary_figures,
+    reconcile_budget_summary_prose,
+)
 from app.services.proposal_budget_validation import (
     direct_expense_subtotal,
     infer_line_item_type,
+    reconcile_proposal_budget,
+    scale_line_items_to_hard_cap,
     split_line_item_totals,
+    validate_budget_canonical,
 )
 
 # BudgetLineItem requires `id` and `category` (app/models/proposal.py:72-73) but
@@ -83,6 +90,120 @@ class ClassificationTests(unittest.TestCase):
         _line_sum, agency_fee, _pt = split_line_item_totals(items)
         self.assertEqual(fees, agency_fee)
         self.assertEqual(reimbursables, direct_expense_subtotal(items))
+
+
+def _budget(items: list[BudgetLineItem], **kw) -> ProposalBudget:
+    return ProposalBudget(rfpId="r1", updatedAt="t", lineItems=items, **kw)
+
+
+class ReconcileDoesNotRelabelTravelAsFeeTests(unittest.TestCase):
+    """The $3,500 defect end-to-end, not just at the classifier.
+
+    split_line_item_totals returning agency_fee=0 is not enough: reconcile
+    overwrote it with line_sum (which includes travel) on the non-commission
+    path, and every downstream consumer reads the stored agencyFeeSubtotal.
+    """
+
+    def test_all_travel_budget_stores_zero_agency_fee(self) -> None:
+        reconciled = reconcile_proposal_budget(
+            _budget([_item("Travel — on-site listening sessions", 3500, category="travel")])
+        )
+        self.assertEqual(reconciled.agency_fee_subtotal, 0.0, "travel is not an agency fee")
+        self.assertEqual(reconciled.agency_revenue_estimate, 3500.0)
+        self.assertEqual(reconciled.line_item_sum, 3500.0)
+        self.assertEqual(validate_budget_canonical(reconciled), [])
+
+    def test_mixed_budget_stores_fees_without_travel(self) -> None:
+        reconciled = reconcile_proposal_budget(
+            _budget(
+                [
+                    _item("Strategy & creative foundation", 14000),
+                    _item("Travel — site visits", 3500),
+                ]
+            )
+        )
+        self.assertEqual(reconciled.agency_fee_subtotal, 14000.0)
+        self.assertEqual(reconciled.agency_revenue_estimate, 17500.0)
+        self.assertEqual(reconciled.line_item_sum, 17500.0)
+        self.assertEqual(validate_budget_canonical(reconciled), [])
+
+    def test_client_figures_do_not_report_travel_as_fee(self) -> None:
+        reconciled = reconcile_proposal_budget(
+            _budget([_item("Travel — on-site listening sessions", 3500, category="travel")])
+        )
+        figs = canonical_budget_summary_figures(reconciled)
+        self.assertEqual(figs["agency_fee"], 0.0)
+        self.assertEqual(figs["direct"], 3500.0)
+        self.assertEqual(figs["total"], 3500.0)
+
+    def test_client_prose_does_not_call_travel_an_agency_fee(self) -> None:
+        """fee == travel == total in one rendered sentence is the whole defect."""
+        reconciled = reconcile_proposal_budget(
+            _budget([_item("Travel — on-site listening sessions", 3500, category="travel")])
+        )
+        content = (
+            "Total Year 1 agency fee: $1. "
+            "Client media pass-through billed at net: $1. "
+            "Direct travel/reimbursables: $1. "
+            "Total Year 1 client invoicing: $1."
+        )
+        out, _n = reconcile_budget_summary_prose(content, reconciled)
+        self.assertIn("Direct travel/reimbursables: $3,500", out)
+        self.assertNotIn("agency fee: $3,500", out)
+
+    def test_manuscript_sync_slots_do_not_report_travel_as_fee(self) -> None:
+        """proposal_budget_sync carried the same agency_revenue fallback."""
+        from app.services.proposal_budget_sync import _canonical_slot_values
+
+        reconciled = reconcile_proposal_budget(
+            _budget([_item("Travel — on-site listening sessions", 3500, category="travel")])
+        )
+        slots = _canonical_slot_values(reconciled)
+        self.assertEqual(slots["agency_fee"], 0.0)
+        self.assertEqual(slots["direct_expenses"], 3500.0)
+        self.assertEqual(slots["total_invoicing"], 3500.0)
+
+
+class HardCapDoesNotScaleTravelTests(unittest.TestCase):
+    """Travel is billed at cost — scaling it to fit a fee ceiling invents a discount."""
+
+    def test_travel_is_reserved_from_the_cap_and_left_at_cost(self) -> None:
+        scaled, notes = scale_line_items_to_hard_cap(
+            [
+                _item("Strategy and creative delivery", 190_000),
+                _item("Travel — site visits", 10_000),
+            ],
+            hard_cap=100_000.0,
+            direct_expenses=0.0,
+        )
+        self.assertTrue(notes)
+        by_desc = {i.description: round(float(i.extended or 0), 2) for i in scaled}
+        self.assertEqual(by_desc["Travel — site visits"], 10_000.0, "travel must not be scaled")
+        self.assertEqual(by_desc["Strategy and creative delivery"], 90_000.0)
+        # The cap is spent exactly, not under-spent by a silently discounted travel row.
+        self.assertEqual(round(sum(by_desc.values()), 2), 100_000.0)
+
+
+class DedupeUsesTheSharedClassifierTests(unittest.TestCase):
+    """dedupe_travel_vs_direct_expenses must see every row infer_line_item_type calls direct."""
+
+    def test_reimbursable_wording_clears_the_duplicate_direct_bucket(self) -> None:
+        reconciled = reconcile_proposal_budget(
+            _budget(
+                [
+                    _item("Strategy", 14000),
+                    _item("Reimbursable out-of-pocket expenses", 3500),
+                ],
+                directExpensesTotal=3500,
+            )
+        )
+        self.assertEqual(
+            reconciled.agency_revenue_estimate,
+            17500.0,
+            "the same $3,500 was counted in a line item and in directExpensesTotal",
+        )
+        self.assertEqual(reconciled.agency_fee_subtotal, 14000.0)
+        self.assertEqual(validate_budget_canonical(reconciled), [])
 
 
 if __name__ == "__main__":

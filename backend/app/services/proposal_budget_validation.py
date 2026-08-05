@@ -224,7 +224,12 @@ def scale_line_items_to_hard_cap(
 
     scaled: list[BudgetLineItem] = []
     for item in line_items:
-        if infer_line_item_type(item) == "client_passthrough":
+        # Pass-through media and travel/reimbursables are billed at cost — only
+        # agency fee is negotiable against the ceiling. target_agency above
+        # already reserved the full travel amount out of the cap, so scaling a
+        # direct_expense row here would discount it twice and under-spend the
+        # ceiling (and make the "auto-scaled agency fee lines" flag a lie).
+        if infer_line_item_type(item) in ("client_passthrough", "direct_expense"):
             scaled.append(item)
             continue
         ext = float(item.extended or 0)
@@ -1073,7 +1078,14 @@ def reconcile_proposal_budget(
     else:
         agency_revenue = round(line_sum + explicit_direct, 2)
         total_invoicing = agency_revenue
-        agency_fee = round(line_sum, 2)
+        # Non-commission budgets fold any stray pass-through back into fees, but
+        # NEVER travel: line_sum includes direct_expense rows, so assigning it
+        # verbatim re-labelled the $3,500 travel row as the agency fee after
+        # split_line_item_totals had correctly excluded it — and every consumer
+        # reads this stored agencyFeeSubtotal (proposal_budget_content,
+        # proposal_budget_sync, proposal_section_editor), so the defect
+        # reappeared downstream with all gates green.
+        agency_fee = round(line_sum - direct_expense_subtotal(line_items), 2)
         passthrough = 0.0
 
     if commission_style and agency_revenue <= 0:

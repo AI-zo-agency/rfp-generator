@@ -218,10 +218,6 @@ def find_budget_section_index(sections: list[ProposalSection]) -> int | None:
 
 
 
-_TRAVEL_RE = re.compile(
-    r"\b(travel|airfare|lodging|per\s*diem|mileage|ground\s+transport|hotel)\b",
-    re.I,
-)
 _DOLLAR_RE = re.compile(r"\$[\d,]+(?:\.\d{1,2})?")
 _INTERNAL_OPT_RE = re.compile(
     r"(?i)\bagency\s+revenue\s+estimate\b|\bmargin\b|\bsonja\b|\b00_guide_pricing\b"
@@ -234,8 +230,17 @@ _OF2_TABLE_RE = re.compile(
 
 
 def _line_looks_like_travel(item: BudgetLineItem) -> bool:
-    blob = f"{item.category or ''} {item.description or ''} {item.notes or ''}"
-    return bool(_TRAVEL_RE.search(blob))
+    """One canonical travel test — infer_line_item_type owns the vocabulary.
+
+    This used to carry its own _TRAVEL_RE, a strict subset of the classifier's
+    (no "reimbursable", no "out-of-pocket"). dedupe_travel_vs_direct_expenses
+    therefore failed to clear a duplicated directExpensesTotal for those rows,
+    so the same dollars were counted in a line item AND in the direct bucket
+    with every gate green — the same class of defect as the $3,500 travel row.
+    """
+    from app.services.proposal_budget_validation import infer_line_item_type
+
+    return infer_line_item_type(item) == "direct_expense"
 
 
 def dedupe_travel_vs_direct_expenses(budget: ProposalBudget) -> ProposalBudget:
@@ -1126,7 +1131,14 @@ def reconcile_budget_summary_prose(
     if not text.strip():
         return text, 0
     figs = canonical_budget_summary_figures(budget)
-    agency = figs["agency_fee"] if figs["agency_fee"] > 0 else figs["agency_revenue"]
+    # agency_revenue is only a stand-in for a MISSING fee (no line items, no
+    # stored subtotal). A zero fee next to real travel is a true zero — an
+    # all-travel budget — and substituting agency_revenue there reprints the
+    # travel dollars as "Total Year 1 agency fee", which is exactly the
+    # fee == travel == total sentence this task exists to eliminate.
+    agency = figs["agency_fee"]
+    if agency <= 0 and figs["direct"] <= 0:
+        agency = figs["agency_revenue"]
     passthrough = figs["passthrough"]
     direct = figs["direct"]
     total = figs["total"]

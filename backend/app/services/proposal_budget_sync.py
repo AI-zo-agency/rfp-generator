@@ -151,7 +151,13 @@ def _canonical_slot_values(budget: ProposalBudget) -> dict[str, float]:
     from app.services.proposal_budget_content import canonical_budget_summary_figures
 
     figs = canonical_budget_summary_figures(budget)
-    agency = figs["agency_fee"] if figs["agency_fee"] > 0 else figs["agency_revenue"]
+    # agency_revenue substitutes only for a MISSING fee. A zero fee alongside
+    # real travel is a true zero (all-travel budget) — backfilling it here
+    # would sync "Agency fee: $3,500" into the manuscript for a budget whose
+    # only line is $3,500 of travel. Mirrors reconcile_budget_summary_prose.
+    agency = figs["agency_fee"]
+    if agency <= 0 and figs["direct"] <= 0:
+        agency = figs["agency_revenue"]
     return {
         "agency_fee": round(float(agency or 0), 2),
         "media_passthrough": round(float(figs["passthrough"] or 0), 2),
