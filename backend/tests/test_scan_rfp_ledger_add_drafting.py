@@ -57,8 +57,15 @@ from app.models.rfp import RfpRecord
 from app.services import proposal_repository as repo
 
 EXISTING_APPROACH_CONTENT = "\n\n".join(
-    " ".join(["existing"] * 40) for _ in range(4)
+    " ".join(["existing"] * 40) + "." for _ in range(4)
 )  # 160w, unrelated section already in the draft
+# Task 12: repair_truncated_sections_from_kb now runs inside the real
+# verify_scrub_only path this file drives end to end, detecting with the T1
+# scanner (proposal_t1_validators.scan_truncation_artifacts). That scanner
+# requires terminal punctuation on a section's last line or it reads as a
+# mid-sentence cutoff — the trailing "." above keeps this filler content from
+# being (mis)flagged as truncated, which would otherwise route it into a
+# REAL, unstubbed llm.chat_json call in these tests.
 
 
 def _rfp(rfp_id: str, **overrides) -> RfpRecord:
@@ -195,6 +202,21 @@ def _fake_chat_json_soft(call_log: list[str]):
     return _fake
 
 
+async def _no_live_chat_json(messages, **kwargs):
+    """Belt-and-braces hermeticity: Task 12's truncation repair calls
+    llm.chat_json (not chat_json_soft) with node_name="scan_truncation_kb_repair"
+    on any section the T1 scanner flags. Nothing in this file's fixtures
+    should trip that scanner — see EXISTING_APPROACH_CONTENT's trailing "."
+    above — but a real call here would mean a live network hit, so this stub
+    fails loudly instead of silently reaching the network if that ever
+    regresses.
+    """
+    raise AssertionError(
+        f"unexpected LIVE llm.chat_json call in a hermetic test: "
+        f"node_name={kwargs.get('node_name')!r}"
+    )
+
+
 async def _fake_retrieve_for_section(entry, *, rfp_client="", start_index=1, claim=None):
     return [
         EvidenceItem(
@@ -229,6 +251,7 @@ class LedgerAddDraftingDrivesRealEntryPointTests(_RealDbTestCase):
                 "app.services.proposal_intelligence.jit_retrieval.retrieve_for_section",
                 new=_fake_retrieve_for_section,
             ),
+            patch("app.services.llm.chat_json", new=_no_live_chat_json),
         ):
             _review, _research, draft_after, report = await run_fulfill_rfp_gaps(
                 rfp_id, mode="verify_scrub_only"
@@ -273,6 +296,7 @@ class LedgerAddDraftingDrivesRealEntryPointTests(_RealDbTestCase):
                 "app.services.proposal_intelligence.jit_retrieval.retrieve_for_section",
                 new=_fake_retrieve_for_section,
             ),
+            patch("app.services.llm.chat_json", new=_no_live_chat_json),
         ):
             _review2, _research2, draft_after2, report2 = await run_fulfill_rfp_gaps(
                 rfp_id, mode="verify_scrub_only"
@@ -320,6 +344,7 @@ class LedgerAddDraftingDrivesRealEntryPointTests(_RealDbTestCase):
                 "app.services.llm.chat_json_soft",
                 new=_failing_chat_json_soft,
             ),
+            patch("app.services.llm.chat_json", new=_no_live_chat_json),
         ):
             _review, _research, draft_after, report = await run_fulfill_rfp_gaps(
                 rfp_id, mode="verify_scrub_only"

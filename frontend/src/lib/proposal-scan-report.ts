@@ -18,6 +18,8 @@ export interface ScanRfpFulfillReport {
   ledgerMergesSectionTitles?: string[];
   ledgerCutsApplied?: number;
   ledgerCutsSectionTitles?: string[];
+  truncationRepairedCount?: number;
+  truncationRepairedSectionTitles?: string[];
   truncatedSectionsCount?: number;
   truncatedSectionTitles?: string[];
   unverifiedClaimsCount?: number;
@@ -69,6 +71,15 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
   if (kept > 0) {
     clauses.push(
       `kept ${kept} [VERIFY] tag(s) only because the RFP critically requires them`
+    );
+  }
+
+  const repaired = report.truncationRepairedCount ?? 0;
+  if (repaired > 0) {
+    clauses.push(
+      `completed ${repaired} section(s) that were cut off mid-sentence${namedList(
+        report.truncationRepairedSectionTitles
+      )}`
     );
   }
 

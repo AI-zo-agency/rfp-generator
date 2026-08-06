@@ -62,6 +62,54 @@ describe("buildScanRfpBanner", () => {
     );
   });
 
+  it("reports repaired truncation separately from what still needs review", () => {
+    const banner = buildScanRfpBanner({
+      truncationRepairedCount: 2,
+      truncationRepairedSectionTitles: [
+        "Gil Aranowitz — Bio",
+        "Case Study — Deschutes Brewery",
+      ],
+      truncatedSectionsCount: 1,
+      truncatedSectionTitles: ["Case Study — City of Umatilla"],
+    });
+    expect(banner).toBe(
+      'Completed 2 section(s) that were cut off mid-sentence (' +
+        '"Gil Aranowitz — Bio", "Case Study — Deschutes Brewery"); ' +
+        'found 1 section(s) with truncated content that need review ' +
+        '("Case Study — City of Umatilla").'
+    );
+  });
+
+  it("does not report a merged-away (cross-referenced) section as truncated", () => {
+    // Regression: the reconciler's MERGE cross-reference note used to end in
+    // a bare markdown-italics "_", which the backend T1 truncation gate
+    // misread as a mid-sentence cutoff — every section a MERGE
+    // cross-referenced was reported here as needing review even though nothing
+    // was cut off. This banner-level test locks in the observable contract:
+    // a merge with no truncation findings must never produce a truncation
+    // clause naming the merged-away section.
+    const banner = buildScanRfpBanner({
+      ledgerMergesApplied: 1,
+      ledgerMergesSectionTitles: ["Section 1.5"],
+      truncationRepairedCount: 2,
+      truncationRepairedSectionTitles: [
+        "Gil Aranowitz — Bio",
+        "Case Study — Deschutes Brewery",
+      ],
+      truncatedSectionsCount: 1,
+      truncatedSectionTitles: ["Case Study — City of Umatilla"],
+    });
+    expect(banner).not.toContain("Attachments Checklist");
+    expect(banner).not.toContain("Contract Acknowledgment");
+    expect(banner).toBe(
+      "Merged 1 duplicated requirement(s); " +
+        'completed 2 section(s) that were cut off mid-sentence (' +
+        '"Gil Aranowitz — Bio", "Case Study — Deschutes Brewery"); ' +
+        'found 1 section(s) with truncated content that need review ' +
+        '("Case Study — City of Umatilla").'
+    );
+  });
+
   it("omits a clause entirely when its count is zero instead of printing 0", () => {
     const banner = buildScanRfpBanner({
       verifyTagsRemoved: 5,

@@ -93,6 +93,11 @@ _QUALITY_EXACT = frozenset(
         # Requirement-ledger ADD (Task 10) — drafts client-facing prose for a
         # section that had no draft content at all; a client reads this.
         "ledger_add_section_draft",
+        # Scan-RFP truncation repair (Task 12) — completes a section a
+        # client reads that was cut off mid-sentence; grounded on KB
+        # evidence, so getting the completion right matters the same way
+        # ledger_add_section_draft does.
+        "scan_truncation_kb_repair",
     }
 )
 _QUALITY_PREFIXES = (

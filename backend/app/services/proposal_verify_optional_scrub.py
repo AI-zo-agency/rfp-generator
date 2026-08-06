@@ -356,6 +356,31 @@ async def run_verify_scrub_only_scan(
         if ledger_draft_logs:
             await asave_proposal_draft(draft)
 
+    # Task 12: the button's only truncation handling used to be reporting it
+    # (below) — repair_truncated_manuscript_sections exists but only ran on
+    # mode="full", which this button never calls, so bios/case studies cut
+    # off mid-sentence shipped that way every time. repair_truncated_sections_
+    # from_kb is safe to run unconditionally here: it detects with the same
+    # T1 scanner the report below uses, only ever appends a KB-grounded
+    # completion to a section's existing verbatim prefix (never invents a
+    # fact, never a wholesale rewrite — see the module note in
+    # proposal_fulfill_truncation_repair.py), and never raises.
+    from app.services.proposal_fulfill_truncation_repair import (
+        repair_truncated_sections_from_kb,
+    )
+
+    titles_before_repair = {s.id: s.title for s in draft.sections}
+    (
+        draft,
+        truncation_repaired_ids,
+        truncation_still_truncated_ids,
+        truncation_repair_logs,
+    ) = await repair_truncated_sections_from_kb(
+        draft=draft, rfp=rfp, rfp_context=rfp_text
+    )
+    if truncation_repaired_ids:
+        await asave_proposal_draft(draft)
+
     verify_ids = {
         s.id for s in draft.sections if count_verify_tags(s.content or "") > 0
     }
@@ -382,9 +407,18 @@ async def run_verify_scrub_only_scan(
             {m.owner_section_title for m in ledger_result.applied_merges}
         ),
         "ledgerCutsSectionTitles": [c.section_title for c in ledger_result.applied_cuts],
+        # Task 12 — sections the KB-grounded pass above completed vs. sections
+        # it could not (still truncated; see truncatedSectionsCount/Titles
+        # further down, which is the post-repair T1 rescan and is the source
+        # of truth for what still needs a human).
+        "truncationRepairedCount": len(truncation_repaired_ids),
+        "truncationRepairedSectionTitles": [
+            titles_before_repair.get(sid, sid) for sid in truncation_repaired_ids
+        ],
     }
     report["logs"].extend(ledger_result.logs)
     report["logs"].extend(ledger_draft_logs)
+    report["logs"].extend(truncation_repair_logs)
     if ledger_result.applied_additions:
         added_by_id = {a.section_id: a for a in ledger_result.applied_additions}
         still_stub = [
@@ -436,10 +470,12 @@ async def run_verify_scrub_only_scan(
     # Task 11: the presubmit review already runs truncation (T1) and
     # hallucination detection as part of scan_manuscript_consistency /
     # _scan_hallucinations — both were DETECTED and then discarded because
-    # nothing counted them into the fulfill report the UI reads. Surfacing
-    # only; this does NOT run truncation repair (repair_truncated_manuscript_
-    # sections lives only on the mode="full" path, which the Scan-RFP button
-    # never calls — see proposal_fulfill_rfp_gaps.run_fulfill_rfp_gaps).
+    # nothing counted them into the fulfill report the UI reads. This rescan
+    # runs AFTER Task 12's repair_truncated_sections_from_kb (above) and
+    # after the VERIFY scrub, so truncatedSectionsCount/Titles here is
+    # exactly what's still truncated once repair has had its shot — not a
+    # stale pre-repair count. See truncationRepairedCount/
+    # truncationRepairedSectionTitles above for what repair already fixed.
     truncated_section_ids: list[str] = []
     for issue in review.issues:
         if issue.category == "truncation" and issue.section_id:
@@ -468,7 +504,8 @@ async def run_verify_scrub_only_scan(
     logger.info(
         "scan-rfp:report rfp_id=%s sections_scanned=%s verify_removed=%s "
         "verify_kept=%s ledger_added=%s ledger_added_titles=%s ledger_merged=%s "
-        "ledger_cut=%s truncated_sections=%s truncated_titles=%s "
+        "ledger_cut=%s truncation_repaired=%s truncation_repaired_titles=%s "
+        "truncation_still_truncated_ids=%s truncated_sections=%s truncated_titles=%s "
         "unverified_claims=%s",
         rfp_id,
         report.get("sectionsScanned"),
@@ -478,6 +515,9 @@ async def run_verify_scrub_only_scan(
         report.get("ledgerAdditionsSectionTitles"),
         report.get("ledgerMergesApplied"),
         report.get("ledgerCutsApplied"),
+        report.get("truncationRepairedCount"),
+        report.get("truncationRepairedSectionTitles"),
+        truncation_still_truncated_ids,
         report.get("truncatedSectionsCount"),
         report.get("truncatedSectionTitles"),
         report.get("unverifiedClaimsCount"),
