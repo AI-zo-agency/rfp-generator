@@ -1323,7 +1323,8 @@ function ProposalDraftWorkspaceInner({
       title: "Scan RFP & scrub VERIFY tags?",
       description:
         "Reads every section with [VERIFY], checks the RFP, and removes tags that are not critically required.\n\n" +
-        "Does NOT invent facts. Does NOT add sections, budget, or KPIs.\n\n" +
+        "Also reconciles the RFP's requirement checklist: adds any missing required section (drafted from the knowledge base), merges duplicated coverage into a single owning section, trims content to the RFP's page limit, and runs the budget checks.\n\n" +
+        "Does NOT invent facts.\n\n" +
         "A saved version is stored first.",
       confirmLabel: "Scan RFP",
       tone: "default",
