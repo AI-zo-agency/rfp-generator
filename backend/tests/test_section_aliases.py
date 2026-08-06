@@ -550,7 +550,17 @@ def _plan_executive_summary_vs_approach_summary() -> ProposalExecutionPlan:
 
 
 class CriticalRegressionEndToEndTests(unittest.TestCase):
-    def test_c1_key_personnel_is_reported_missing_and_then_amended_in(self) -> None:
+    """Post-incident correction: a live full-generation run duplicated 21
+    sections because amend_outline_for_missing_requirements used to amend
+    one new section per missing scored_criterion (a scoring CATEGORY name,
+    not a deliverable) — see proposal_rfp_compliance.py's
+    _ADD_ELIGIBLE_SOURCES module note. C1/C2 below still prove the alias
+    table stops the two criteria from being silently merged into one
+    section's satisfied_by; what changed is that the missing criterion now
+    stays advisory (visible via ledger.missing(), never auto-amended) rather
+    than getting its own duplicate stub section."""
+
+    def test_c1_key_personnel_is_reported_missing_and_never_merged_or_amended(self) -> None:
         plan = _plan_key_personnel_and_staffing_plan_scored_separately()
 
         # Pre-amendment: the matcher alone must report it MISSING. Built
@@ -568,10 +578,10 @@ class CriticalRegressionEndToEndTests(unittest.TestCase):
             "the section that IS present must still be satisfied",
         )
 
-        # Post-amendment: it gets its own section, with its own points.
+        # A scored_criterion is never auto-amended — it stays advisory.
         legacy = derive_legacy_fields(plan)
         titles = [s.title for s in legacy["rfpSections"]]
-        self.assertIn("Key Personnel", titles)
+        self.assertNotIn("Key Personnel", titles)
         self.assertIn("Staffing Plan", titles)
 
         ledger = legacy["requirementLedger"]
@@ -583,10 +593,15 @@ class CriticalRegressionEndToEndTests(unittest.TestCase):
             "two separately-scored criteria must not share one owning section",
         )
         self.assertEqual(staffing_plan.satisfied_by, ["sec-sp"])
-        added = next(s for s in legacy["rfpSections"] if s.title == "Key Personnel")
-        self.assertEqual(added.evaluation_weight, 15.0)
+        self.assertIn(
+            "Key Personnel",
+            {r.text for r in ledger.missing()},
+            "stays advisory-missing for a human to judge, not silently added",
+        )
 
-    def test_c2_executive_summary_is_reported_missing_and_then_amended_in(self) -> None:
+    def test_c2_executive_summary_is_reported_missing_and_never_absorbed_or_amended(
+        self,
+    ) -> None:
         plan = _plan_executive_summary_vs_approach_summary()
 
         pre = build_requirement_ledger(
@@ -601,7 +616,7 @@ class CriticalRegressionEndToEndTests(unittest.TestCase):
 
         legacy = derive_legacy_fields(plan)
         titles = [s.title for s in legacy["rfpSections"]]
-        self.assertIn("Executive Summary", titles)
+        self.assertNotIn("Executive Summary", titles)
         self.assertIn("Approach Summary", titles, "must not disturb the existing subsection")
 
         ledger = legacy["requirementLedger"]
@@ -611,8 +626,11 @@ class CriticalRegressionEndToEndTests(unittest.TestCase):
             exec_summary.satisfied_by,
             "a 20-point criterion must not be absorbed by an approach subsection",
         )
-        added = next(s for s in legacy["rfpSections"] if s.title == "Executive Summary")
-        self.assertEqual(added.evaluation_weight, 20.0)
+        self.assertIn(
+            "Executive Summary",
+            {r.text for r in ledger.missing()},
+            "stays advisory-missing for a human to judge, not silently added",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -652,21 +670,24 @@ def _plan_with_letter_of_transmittal() -> ProposalExecutionPlan:
 
 
 class EndToEndAmendmentProofTests(unittest.TestCase):
-    def test_proof_a_missing_scored_technical_approach_is_amended_into_the_outline(
+    def test_proof_a_a_missing_scored_technical_approach_is_never_auto_amended(
         self,
     ) -> None:
+        """Post-incident correction: a scored_criterion (an evaluation-scoring
+        CATEGORY name, not a deliverable) is never auto-amended into the
+        outline — see amend_outline_for_missing_requirements' module note and
+        proposal_rfp_compliance.py's _ADD_ELIGIBLE_SOURCES. It stays visible
+        via ledger.missing() for a human to judge instead of becoming a
+        duplicate stub section."""
         legacy = derive_legacy_fields(_plan_missing_technical_approach())
         titles = [s.title for s in legacy["rfpSections"]]
-        self.assertIn("Technical Approach", titles)
+        self.assertNotIn("Technical Approach", titles)
         self.assertIn("Pricing Proposal", titles, "must not drop the existing section")
 
         ledger = legacy["requirementLedger"]
         technical_approach = next(r for r in ledger.requirements if r.text == "Technical Approach")
-        self.assertTrue(technical_approach.satisfied_by)
-        self.assertNotIn("Technical Approach", {r.text for r in ledger.missing()})
-
-        amended = next(s for s in legacy["rfpSections"] if s.title == "Technical Approach")
-        self.assertEqual(amended.evaluation_weight, 30.0, "must not drop the evaluation points")
+        self.assertFalse(technical_approach.satisfied_by)
+        self.assertIn("Technical Approach", {r.text for r in ledger.missing()})
 
     def test_proof_b_cover_letter_already_present_as_letter_of_transmittal_is_not_duplicated(
         self,

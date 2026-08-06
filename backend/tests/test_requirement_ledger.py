@@ -176,22 +176,34 @@ class RequirementLedgerEndToEndTests(unittest.TestCase):
         # real defect), and derive_legacy_fields now wires
         # amend_outline_for_missing_requirements at this exact point — so
         # instead of merely surfacing as missing for a human to notice later,
-        # both get their own section appended to the outline BEFORE drafting,
-        # and are satisfied by it once the ledger is rebuilt against the
-        # amended outline. Neither is missing anymore because the defect is
-        # actually fixed, not just detected.
+        # the genuinely missing required_content item ("A cover letter") gets
+        # its own section appended to the outline BEFORE drafting, and is
+        # satisfied by it once the ledger is rebuilt against the amended
+        # outline.
+        #
+        # Post-incident correction (Task 15): "Technical Approach" is a
+        # scored_criterion (an evaluation-scoring CATEGORY name, not a
+        # deliverable) — see proposal_rfp_compliance.py's
+        # _ADD_ELIGIBLE_SOURCES module note and
+        # amend_outline_for_missing_requirements' docstring. A live
+        # full-generation run duplicated 21 sections this way, so it now
+        # stays advisory (visible via ledger.missing()) rather than being
+        # auto-amended into the outline.
         missing_texts = {r.text for r in ledger.missing()}
         self.assertNotIn("A cover letter", missing_texts)
-        self.assertNotIn("Technical Approach", missing_texts)
+        self.assertIn("Technical Approach", missing_texts)
 
         cover_letter = next(r for r in ledger.requirements if r.text == "A cover letter")
         technical_approach = next(r for r in ledger.requirements if r.text == "Technical Approach")
         self.assertTrue(cover_letter.satisfied_by, "must be satisfied by the amended section")
-        self.assertTrue(technical_approach.satisfied_by, "must be satisfied by the amended section")
+        self.assertFalse(
+            technical_approach.satisfied_by,
+            "a scored_criterion is never auto-amended, so nothing satisfies it",
+        )
 
         amended_titles = {s.title for s in legacy["rfpSections"]}
         self.assertIn("A cover letter", amended_titles)
-        self.assertIn("Technical Approach", amended_titles)
+        self.assertNotIn("Technical Approach", amended_titles)
 
         # The matched, form-carried requirement should NOT be reported missing.
         self.assertNotIn("W-9 tax form", missing_texts)

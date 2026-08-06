@@ -361,8 +361,8 @@ class AmendOutlineForMissingRequirementsTests(unittest.TestCase):
                 LedgerRequirement(id="r1", text="Cover Letter", satisfiedBy=[]),
                 LedgerRequirement(
                     id="r2",
-                    text="Technical Approach",
-                    source="scored_criterion",
+                    text="Standard Form 330",
+                    source="form",
                     points=30.0,
                     satisfiedBy=[],
                 ),
@@ -374,8 +374,30 @@ class AmendOutlineForMissingRequirementsTests(unittest.TestCase):
 
         titles = [s.title for s in amended]
         self.assertIn("Cover Letter", titles)
-        self.assertIn("Technical Approach", titles)
+        self.assertIn("Standard Form 330", titles)
         self.assertEqual(len(amended), 3, "must not duplicate the already-satisfied section")
+
+    def test_a_missing_scored_criterion_is_never_amended_into_the_outline(self) -> None:
+        """Post-incident correction (identical defect to Scan-RFP's
+        reconciler — see proposal_rfp_compliance.py's _ADD_ELIGIBLE_SOURCES
+        module note): a scored_criterion is an evaluation-scoring CATEGORY
+        name, not a deliverable. A live full-generation run duplicated 21
+        sections this way. It must stay visible via ledger.missing() for a
+        human to judge, never auto-amended into the outline."""
+        ledger = RequirementLedger(
+            requirements=[
+                LedgerRequirement(
+                    id="r1",
+                    text="Technical Approach",
+                    source="scored_criterion",
+                    points=30.0,
+                    satisfiedBy=[],
+                ),
+            ]
+        )
+        amended = amend_outline_for_missing_requirements(ledger, [])
+        self.assertEqual(amended, [], "a scored_criterion must never be auto-amended")
+        self.assertIn("Technical Approach", {r.text for r in ledger.missing()})
 
     def test_is_idempotent_against_its_own_output(self) -> None:
         ledger = RequirementLedger(
@@ -386,13 +408,15 @@ class AmendOutlineForMissingRequirementsTests(unittest.TestCase):
         self.assertEqual(len(second), len(first))
 
     def test_a_fractional_criterion_weight_is_not_truncated(self) -> None:
-        """An RFP can weight a criterion at 12.5 pts; int() silently made it 12."""
+        """An RFP can weight a criterion at 12.5 pts; int() silently made it 12.
+        Uses source="form" (ADD-eligible) since a scored_criterion is never
+        amended — see test_a_missing_scored_criterion_is_never_amended_into_the_outline."""
         ledger = RequirementLedger(
             requirements=[
                 LedgerRequirement(
                     id="r1",
                     text="Technical Approach",
-                    source="scored_criterion",
+                    source="form",
                     points=12.5,
                     satisfiedBy=[],
                 )

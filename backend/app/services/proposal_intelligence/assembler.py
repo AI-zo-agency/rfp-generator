@@ -15,6 +15,7 @@ from app.services.proposal_intelligence.schemas import (
     EvaluationCriterion,
     ProposalExecutionPlan,
 )
+from app.services.proposal_rfp_compliance import _ADD_ELIGIBLE_SOURCES
 from app.services.proposal_section_aliases import PROPOSAL_SECTION_ALIAS_GROUPS
 
 
@@ -483,10 +484,30 @@ def amend_outline_for_missing_requirements(
     function is now wired at its Phase 2 call site, ``derive_legacy_fields``,
     which rebuilds the ledger against the amended outline immediately after
     calling this so ``satisfied_by`` reflects the sections just added.
+
+    Post-incident correction (same defect as Scan-RFP's reconciler — see
+    proposal_rfp_compliance.py's module note on ``_ADD_ELIGIBLE_SOURCES``): a
+    live proposal generated from scratch grew from 23 to 43 sections because
+    this function amended one new section per missing ``scored_criterion`` —
+    an evaluation-scoring CATEGORY name ("Relevant Experience", "Cost and
+    Overall Value"), not a submittable deliverable — even though every one
+    was already covered under a requirement-phrased section title the
+    matcher shares no meaningful tokens with. Only sources in
+    ``_ADD_ELIGIBLE_SOURCES`` (``required_content``, ``form``) are amended in
+    here, imported from ``proposal_rfp_compliance`` rather than redefined so
+    the two reconcilers (this one, pre-draft; the other, post-draft) can
+    never drift on what counts as addable. A missing ``scored_criterion``
+    stays visible via ``ledger.missing()`` / ``RequirementLedger.scored()``
+    for a human to judge — it is never silently added as a duplicate
+    section. Do NOT fix a matcher miss by loosening ``_match_outline_sections``
+    instead — see test_outline_coverage.py / test_section_aliases.py's
+    false-positive battery for what that reintroduces.
     """
     existing_ids = {s.id for s in outline_sections}
     amended = list(outline_sections)
     for requirement in ledger.missing():
+        if requirement.source not in _ADD_ELIGIBLE_SOURCES:
+            continue
         section_id = f"ledger-{requirement.id}"
         if section_id in existing_ids:
             continue
