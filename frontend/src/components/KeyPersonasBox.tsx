@@ -7,6 +7,7 @@ interface KeyPersonasBoxProps {
   rfpId?: string;
   initialSelectedIds?: string[];
   onSelectionChange?: (selectedPersonaIds: string[]) => void;
+  onBioRebuildStarted?: () => void;
   className?: string;
 }
 
@@ -14,6 +15,7 @@ export function KeyPersonasBox({
   rfpId,
   initialSelectedIds = [],
   onSelectionChange,
+  onBioRebuildStarted,
   className = "",
 }: KeyPersonasBoxProps) {
   const [isOpen, setIsOpen] = useState(false);
@@ -64,6 +66,7 @@ export function KeyPersonasBox({
         rfpId={rfpId}
         initialSelectedIds={selectedIds}
         onSelectionChange={handleSelectionChange}
+        onBioRebuildStarted={onBioRebuildStarted}
       />
     </div>
   );

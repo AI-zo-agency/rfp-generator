@@ -14,6 +14,7 @@ interface KeyPersonasModalProps {
   rfpId?: string;
   initialSelectedIds?: string[];
   onSelectionChange?: (selectedPersonaIds: string[]) => void;
+  onBioRebuildStarted?: () => void;
 }
 
 export function KeyPersonasModal({
@@ -22,6 +23,7 @@ export function KeyPersonasModal({
   rfpId,
   initialSelectedIds = [],
   onSelectionChange,
+  onBioRebuildStarted,
 }: KeyPersonasModalProps) {
   const [personas, setPersonas] = useState<KeyPersonaItem[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>(initialSelectedIds);
@@ -84,10 +86,13 @@ export function KeyPersonasModal({
       setSaving(true);
       setSaveSuccess(false);
       try {
-        const ok = await saveProposalKeyPersonas(rfpId, nextSelected);
-        if (ok) {
+        const result = await saveProposalKeyPersonas(rfpId, nextSelected);
+        if (result.ok) {
           setSaveSuccess(true);
           window.setTimeout(() => setSaveSuccess(false), 2000);
+        }
+        if (result.bioRebuildStarted) {
+          onBioRebuildStarted?.();
         }
       } catch {
         // silent fallback
@@ -95,7 +100,7 @@ export function KeyPersonasModal({
         setSaving(false);
       }
     },
-    [rfpId, onSelectionChange]
+    [rfpId, onSelectionChange, onBioRebuildStarted]
   );
 
   const togglePersona = useCallback(

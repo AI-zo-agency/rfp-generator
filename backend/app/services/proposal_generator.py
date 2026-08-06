@@ -1280,6 +1280,7 @@ async def generate_sections_1_3(
     rfp_id: str,
     *,
     force_regenerate: bool = False,
+    regenerate_section_2_only: bool = False,
 ) -> tuple[ProposalDraft, ProposalBrandVoice, ProposalResearchCache]:
     if not llm.is_configured():
         raise ProposalError("LLM not configured.", status_code=503)
@@ -1290,7 +1291,9 @@ async def generate_sections_1_3(
         force_regenerate=bool(force_regenerate),
     ):
         return await _generate_sections_1_3_inner(
-            rfp_id, force_regenerate=force_regenerate
+            rfp_id,
+            force_regenerate=force_regenerate,
+            regenerate_section_2_only=regenerate_section_2_only,
         )
 
 
@@ -1298,10 +1301,31 @@ async def _generate_sections_1_3_inner(
     rfp_id: str,
     *,
     force_regenerate: bool = False,
+    regenerate_section_2_only: bool = False,
 ) -> tuple[ProposalDraft, ProposalBrandVoice, ProposalResearchCache]:
     rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
 
     existing_draft = await aget_proposal_draft(rfp_id)
+    # Persona-triggered Section 2 rebuild: strip existing bio tabs from the
+    # in-memory copy so the has_section2 cache check below sees an empty
+    # Section 2 no matter what the client last autosaved. Without this, a
+    # racing client PUT could resurrect the old bios between the persona-save
+    # endpoint stripping them and this generator reading the draft, and the
+    # rebuild would silently no-op via the "Sections 1–3 already complete"
+    # cache path. Save the stripped draft too so downstream partial merges
+    # don't fold the old bios back in.
+    if regenerate_section_2_only and existing_draft:
+        stripped = [
+            s
+            for s in existing_draft.sections
+            if not (
+                s.id.startswith("section-2-bio-")
+                and s.id != "section-2-bio-placeholder"
+            )
+        ]
+        if len(stripped) != len(existing_draft.sections):
+            existing_draft.sections = stripped
+            await asave_proposal_draft(existing_draft)
     existing_sections_1_3: list[ProposalSection] = []
     has_section1 = has_section2 = has_section3 = False
     existing_section1: list[ProposalSection] = []

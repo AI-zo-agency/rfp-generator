@@ -1919,10 +1919,15 @@ export async function fetchKeyPersonas(
   return { total: 0, personas: [] };
 }
 
+export interface SaveKeyPersonasResult {
+  ok: boolean;
+  bioRebuildStarted?: boolean;
+}
+
 export async function saveProposalKeyPersonas(
   rfpId: string,
   selectedPersonaIds: string[]
-): Promise<boolean> {
+): Promise<SaveKeyPersonasResult> {
   const res = await fetch(
     `/api/rfps/${encodeURIComponent(rfpId)}/proposal/key-personas`,
     {
@@ -1931,6 +1936,14 @@ export async function saveProposalKeyPersonas(
       body: JSON.stringify({ selectedPersonaIds }),
     }
   );
-  return res.ok;
+  if (!res.ok) return { ok: false };
+  try {
+    const data = (await res.json()) as {
+      bioRebuildStarted?: boolean;
+    };
+    return { ok: true, bioRebuildStarted: Boolean(data.bioRebuildStarted) };
+  } catch {
+    return { ok: true };
+  }
 }
 
