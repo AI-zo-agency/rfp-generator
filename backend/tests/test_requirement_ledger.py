@@ -172,11 +172,26 @@ class RequirementLedgerEndToEndTests(unittest.TestCase):
         self.assertEqual(scored[0].text, "Technical Approach")
         self.assertEqual(scored[0].points, 30.0)
 
-        # Neither requirement was mapped to an outline section (the real defect) —
-        # both must surface as missing, not be silently dropped.
+        # Task 8: neither requirement was mapped to an outline section (the
+        # real defect), and derive_legacy_fields now wires
+        # amend_outline_for_missing_requirements at this exact point — so
+        # instead of merely surfacing as missing for a human to notice later,
+        # both get their own section appended to the outline BEFORE drafting,
+        # and are satisfied by it once the ledger is rebuilt against the
+        # amended outline. Neither is missing anymore because the defect is
+        # actually fixed, not just detected.
         missing_texts = {r.text for r in ledger.missing()}
-        self.assertIn("A cover letter", missing_texts)
-        self.assertIn("Technical Approach", missing_texts)
+        self.assertNotIn("A cover letter", missing_texts)
+        self.assertNotIn("Technical Approach", missing_texts)
+
+        cover_letter = next(r for r in ledger.requirements if r.text == "A cover letter")
+        technical_approach = next(r for r in ledger.requirements if r.text == "Technical Approach")
+        self.assertTrue(cover_letter.satisfied_by, "must be satisfied by the amended section")
+        self.assertTrue(technical_approach.satisfied_by, "must be satisfied by the amended section")
+
+        amended_titles = {s.title for s in legacy["rfpSections"]}
+        self.assertIn("A cover letter", amended_titles)
+        self.assertIn("Technical Approach", amended_titles)
 
         # The matched, form-carried requirement should NOT be reported missing.
         self.assertNotIn("W-9 tax form", missing_texts)

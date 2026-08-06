@@ -15,6 +15,7 @@ from app.services.proposal_intelligence.schemas import (
     EvaluationCriterion,
     ProposalExecutionPlan,
 )
+from app.services.proposal_section_aliases import PROPOSAL_SECTION_ALIAS_GROUPS
 
 
 def refresh_proposal_memory(plan: ProposalExecutionPlan) -> ProposalExecutionPlan:
@@ -96,6 +97,63 @@ _MIN_SHORTER_SIDE_COVERAGE = 0.5
 # wording-variant pair scores >= 0.333 here, every reproduced false positive
 # <= 0.125.
 _MIN_LONGER_SIDE_COVERAGE = 1 / 3
+# Stricter longer-side floor for the narrow case where a MULTI-token title's
+# entire token set is swallowed by the requirement (or vice versa) — e.g. a
+# title "Key Staff" (2 tokens) vs a short, UNRELATED requirement "Key
+# deliverable needs staff approval" (5 tokens) hits inter=2, shorter=1.0,
+# longer=2/5=0.4: comfortably above the base 1/3 floor by pure coincidence,
+# because both of two ordinary English words happen to appear in an unrelated
+# sentence. "Our Work"/"Our work order requires site approval" and "Project
+# Team"/"Project closeout needs team signoff" hit the same trap at exactly
+# 1/3. A single-token full match (e.g. "References" vs a 3-token title) does
+# NOT get this stricter floor — that is the genuine wording-variant case this
+# matcher exists to catch, and it sits at exactly 1/3 with no headroom to
+# spare (see _MIN_LONGER_SIDE_COVERAGE's docstring). The failure mode is
+# specific to MULTI-token full containment, so only that case is tightened.
+_MIN_LONGER_SIDE_COVERAGE_FULL_CONTAINMENT = 0.5
+
+
+def _alias_whole_concept_match(ta: set[str], tb: set[str]) -> bool:
+    """Curated-synonym channel: standard procurement equivalences that share
+    zero (or only "boring") tokens and so can never pass the overlap-scoring
+    channel above — "Cover Letter"/"Letter of Transmittal", "Key
+    Personnel"/"Staffing Plan", "Project Schedule"/"Timeline", "Company
+    Overview"/"About Us", "Executive Summary"/"Summary of Approach". See
+    proposal_section_aliases.py for the table and the conservative judgment
+    behind each entry.
+
+    Whole-concept only, never a token within a longer ask: a side matches an
+    alias phrase only when its ENTIRE meaningful token set equals that
+    phrase's token set. "Timeline" (a real alias entry) therefore does NOT
+    satisfy "Provide a timeline for subcontractor onboarding and describe
+    your quality assurance methodology" — that requirement's token set has
+    six members, nowhere near {"timeline"}. A single-token alias is safe
+    here for the same reason a single-token title is unsafe in the overlap
+    channel above: that channel tests substring/subset containment, this one
+    tests set EQUALITY.
+    """
+    if not ta or not tb:
+        return False
+    fa, fb = frozenset(ta), frozenset(tb)
+    for group in _ALIAS_GROUPS_BY_TOKENS:
+        if fa in group and fb in group:
+            return True
+    return False
+
+
+# Precomputed once: each alias phrase's meaningful-token-set, grouped exactly
+# as proposal_section_aliases.py groups the phrases. Built with the same
+# _normalize/_match_tokens pipeline used at match time, so an alias phrase's
+# stopwords/short-word handling always agrees with a real title or
+# requirement's — e.g. "about us" reduces to {"about"} on both sides ("us" is
+# 2 characters, filtered by _match_tokens), which is what lets "About Us"
+# alone stand in for "Company Overview" without a special case.
+_ALIAS_GROUPS_BY_TOKENS: tuple[frozenset[frozenset[str]], ...] = tuple(
+    frozenset(
+        frozenset(_match_tokens(_normalize(phrase))) for phrase in group
+    )
+    for group in PROPOSAL_SECTION_ALIAS_GROUPS
+)
 
 
 def _scored_token_overlap_match(
@@ -110,15 +168,21 @@ def _scored_token_overlap_match(
 
     Not a bare substring or Jaccard test — those are exactly what produced the
     silent false positives this module used to have (a short generic title is
-    a substring of a huge fraction of requirement texts). Three guards:
+    a substring of a huge fraction of requirement texts). Four channels, in
+    order:
       1. the overlap must cover at least half the SHORTER side's meaningful
          tokens (not a token or two out of a long sentence);
       2. the overlap must also cover a third of the LONGER side — a short
          generic title cannot claim a long, specific, multi-part requirement
-         just because one of its words appears in it;
+         just because one of its words appears in it (raised to one half when
+         a MULTI-token side is fully swallowed by coincidence — see
+         _MIN_LONGER_SIDE_COVERAGE_FULL_CONTAINMENT);
       3. if every shared token is on the "boring" denylist above, reject —
          "Executive Summary" and "insurance coverage summary" share only
-         "summary", which proves nothing about the topic.
+         "summary", which proves nothing about the topic;
+      4. failing all of the above, fall through to the curated alias table
+         (_alias_whole_concept_match) for standard procurement synonyms that
+         share no usable tokens at all.
 
     Deliberately biased toward false NEGATIVES. A missed match leaves a
     requirement in ``missing()`` for a human to dismiss; a false match marks it
@@ -128,17 +192,25 @@ def _scored_token_overlap_match(
     vs a "References" tab) will NOT auto-match. That is intended.
 
     Measured against 10 realistic RFP wording-variant pairs and a false-positive
-    battery; see task-2-report.md and tests/test_outline_coverage.py.
+    battery; see task-2-report.md, task-8-report.md and
+    tests/test_outline_coverage.py / tests/test_section_aliases.py.
     """
     ta, tb = _match_tokens(req_n), _match_tokens(title_n)
     if not ta or not tb:
         return False
     inter = ta & tb
-    if not inter or inter <= _BORING_SHARED_TOKENS:
-        return False
-    if (len(inter) / min(len(ta), len(tb))) < threshold:
-        return False
-    return (len(inter) / max(len(ta), len(tb))) >= longer_side_threshold
+    if inter and not (inter <= _BORING_SHARED_TOKENS):
+        shorter_len = min(len(ta), len(tb))
+        required_longer = longer_side_threshold
+        if len(inter) == shorter_len and shorter_len >= 2:
+            required_longer = max(
+                longer_side_threshold, _MIN_LONGER_SIDE_COVERAGE_FULL_CONTAINMENT
+            )
+        if (len(inter) / shorter_len) >= threshold and (
+            len(inter) / max(len(ta), len(tb))
+        ) >= required_longer:
+            return True
+    return _alias_whole_concept_match(ta, tb)
 
 
 def _match_outline_sections(
@@ -394,22 +466,23 @@ def amend_outline_for_missing_requirements(
 ) -> list[RfpSectionMap]:
     """Append one section per missing mandatory requirement.
 
-    Task 2 Step 4's interface, implemented and unit-tested — but **not called
-    from derive_legacy_fields**. Task 1's review measured ``_match_outline_sections``
-    at 10/10 misses on realistic wording variants before Step 0's fix; Step 0
-    raises that to a measured partial hit rate (see task-2-report.md) but three
-    of the ten pairs (Key Personnel/Staffing Plan, Project Schedule/Timeline,
-    Company Overview/About Us) still miss because they share zero tokens — no
-    deterministic lexical matcher can bridge a pure synonym without a domain
-    dictionary this task was not asked to build. Amending the outline on a
-    signal that still misses real synonyms would add a duplicate section for a
-    requirement that is already covered — manufacturing the exact
+    Task 2 Step 4's interface, implemented and unit-tested. Originally shipped
+    **not called from derive_legacy_fields**: Task 1's review measured
+    ``_match_outline_sections`` at 10/10 misses on realistic wording variants
+    before Step 0's fix; Step 0 raised that to a measured 6/10, but four
+    pairs — Key Personnel/Staffing Plan, Project Schedule/Timeline, Company
+    Overview/About Us, Executive Summary/Summary of Approach — still missed
+    because they share zero (or only "boring") tokens, and auto-adding on a
+    signal that still misses real synonyms would add a duplicate section for
+    a requirement that is already covered, manufacturing the exact
     insurance-x3 duplication this plan exists to remove.
 
-    The gate ships advisory-only for now: ``RequirementLedger.missing()`` is
-    already persisted on ``ProposalResearchCache.requirement_ledger`` (Task 1)
-    for the ending report / manual review to surface. Wire this function in
-    once matcher precision is validated against real RFPs.
+    Task 8's curated alias table (``proposal_section_aliases.py``) closes
+    those four gaps deterministically — no LLM call — raising the matcher to
+    a measured 10/10 with zero false positives (task-8-report.md). This
+    function is now wired at its Phase 2 call site, ``derive_legacy_fields``,
+    which rebuilds the ledger against the amended outline immediately after
+    calling this so ``satisfied_by`` reflects the sections just added.
     """
     existing_ids = {s.id for s in outline_sections}
     amended = list(outline_sections)
@@ -501,6 +574,37 @@ def derive_legacy_fields(plan: ProposalExecutionPlan) -> dict[str, Any]:
         list(plan.opportunity.evaluation.criteria),
         rfp_sections,
     )
+
+    # Step 5 (Task 8): amend the outline itself when a mandatory requirement —
+    # a compliance item OR a scored criterion, RequirementLedger.missing()
+    # already treats every scored criterion as mandatory so neither class is
+    # silently skipped here — has no covering section. This used to be
+    # advisory-only (missing() persisted for a human to read in the ending
+    # report) because the matcher measured 6/10 on realistic wording variants;
+    # auto-adding at that precision would have put a second cover letter
+    # beside an existing "Letter of Transmittal". The curated alias table
+    # (proposal_section_aliases.py) closes the remaining gaps deterministically
+    # — no LLM call — raising the matcher to a measured 10/10 with zero false
+    # positives (task-8-report.md), so it is now safe to amend BEFORE drafting
+    # rather than after, meaning the new section gets drafted like any other
+    # instead of surfacing only in an ending report nobody reads until
+    # submission is already assembled.
+    amended_sections = amend_outline_for_missing_requirements(
+        requirement_ledger, rfp_sections
+    )
+    if len(amended_sections) != len(rfp_sections):
+        rfp_sections = amended_sections
+        # Rebuild so satisfied_by reflects the sections just added — each new
+        # section's title is the requirement's own text, so
+        # _match_outline_sections' exact-title-equals-requirement branch picks
+        # it up deterministically on this second pass. Without the rebuild the
+        # requirement would still read as "missing" despite now having a
+        # section, making Step 5 self-defeating.
+        requirement_ledger = build_requirement_ledger(
+            list(plan.opportunity.compliance.items),
+            list(plan.opportunity.evaluation.criteria),
+            rfp_sections,
+        )
 
     return {
         "rfpSections": rfp_sections,
