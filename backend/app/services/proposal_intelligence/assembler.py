@@ -81,21 +81,54 @@ def _match_tokens(normalized_text: str) -> set[str]:
     }
 
 
-def _scored_token_overlap_match(req_n: str, title_n: str, *, threshold: float = 0.5) -> bool:
+# Coverage of the SHORTER side — is the smaller of the two texts mostly
+# accounted for by the overlap?
+_MIN_SHORTER_SIDE_COVERAGE = 0.5
+# Coverage of the LONGER side — how much of the bigger, MORE SPECIFIC text does
+# the overlap actually explain? This is the guard that stops a one-token title
+# ("Team", "Overview", "Approach", "Insurance") from satisfying a long
+# enumerated requirement. Such a title trivially scores 1.0 on the shorter side
+# whenever its single word appears anywhere in the requirement, so the shorter
+# side alone cannot tell "References" vs "Client References and Testimonials"
+# (a real wording variant) from "Team" vs "...your project team, subcontractors,
+# and key personnel including resumes and organizational charts" (a section that
+# answers a fraction of the ask). Measured separation is wide: every genuine
+# wording-variant pair scores >= 0.333 here, every reproduced false positive
+# <= 0.125.
+_MIN_LONGER_SIDE_COVERAGE = 1 / 3
+
+
+def _scored_token_overlap_match(
+    req_n: str,
+    title_n: str,
+    *,
+    threshold: float = _MIN_SHORTER_SIDE_COVERAGE,
+    longer_side_threshold: float = _MIN_LONGER_SIDE_COVERAGE,
+) -> bool:
     """Wording-variant match: "Cover Letter" vs "Letter of Transmittal",
     "Insurance Certificate" vs "Certificate of Insurance", etc.
 
     Not a bare substring or Jaccard test — those are exactly what produced the
     silent false positives this module used to have (a short generic title is
-    a substring of a huge fraction of requirement texts). Two extra guards:
-      1. every shared token must clear a coverage threshold against the
-         SHORTER side (half its meaningful tokens, not a token or two out of
-         a long sentence);
-      2. if every shared token is on the "boring" denylist above, reject —
+    a substring of a huge fraction of requirement texts). Three guards:
+      1. the overlap must cover at least half the SHORTER side's meaningful
+         tokens (not a token or two out of a long sentence);
+      2. the overlap must also cover a third of the LONGER side — a short
+         generic title cannot claim a long, specific, multi-part requirement
+         just because one of its words appears in it;
+      3. if every shared token is on the "boring" denylist above, reject —
          "Executive Summary" and "insurance coverage summary" share only
          "summary", which proves nothing about the topic.
-    Measured against 10 realistic RFP wording-variant pairs and 2 explicit
-    false-positive guards; see task-2-report.md for the before/after table.
+
+    Deliberately biased toward false NEGATIVES. A missed match leaves a
+    requirement in ``missing()`` for a human to dismiss; a false match marks it
+    satisfied and hides it forever, which is the single defect the ledger
+    exists to catch. Consequence: a long requirement whose section title is a
+    single word ("Provide three professional references from municipal clients"
+    vs a "References" tab) will NOT auto-match. That is intended.
+
+    Measured against 10 realistic RFP wording-variant pairs and a false-positive
+    battery; see task-2-report.md and tests/test_outline_coverage.py.
     """
     ta, tb = _match_tokens(req_n), _match_tokens(title_n)
     if not ta or not tb:
@@ -103,8 +136,9 @@ def _scored_token_overlap_match(req_n: str, title_n: str, *, threshold: float = 
     inter = ta & tb
     if not inter or inter <= _BORING_SHARED_TOKENS:
         return False
-    shorter_len = min(len(ta), len(tb))
-    return (len(inter) / shorter_len) >= threshold
+    if (len(inter) / min(len(ta), len(tb))) < threshold:
+        return False
+    return (len(inter) / max(len(ta), len(tb))) >= longer_side_threshold
 
 
 def _match_outline_sections(

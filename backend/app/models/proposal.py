@@ -168,7 +168,12 @@ class ProofPoint(BaseModel):
     narrative_hook: str = Field(default="", alias="narrativeHook")
     relevance: str = "high"
     section_ids: list[str] = Field(default_factory=list, alias="sectionIds")
-    evaluation_weight: int | None = Field(default=None, alias="evaluationWeight")
+    # Mirrors RfpSectionMap.evaluation_weight — proposal_proof_points.py:121
+    # feeds section.evaluation_weight into the payload this model validates.
+    # A narrower type here does not crash (the model_validate at :181 sits
+    # inside a try/except) but silently DROPS the proof point, which is harder
+    # to spot than a ValidationError.
+    evaluation_weight: int | float | None = Field(default=None, alias="evaluationWeight")
 
 
 class FeeJustificationMemo(BaseModel):

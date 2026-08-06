@@ -169,6 +169,101 @@ class MatcherPrecisionMeasurementTests(unittest.TestCase):
         self.assertFalse(self._matches("Provide a detailed cost proposal", "Cost"))
 
 
+# ---------------------------------------------------------------------------
+# The false-positive battery.
+#
+# The first cut of the scored-overlap tier only tested the two guards the brief
+# named ("Summary", "Cost") — both of which happen to be on the small
+# _BORING_SHARED_TOKENS denylist. Every OTHER single-word title was wide open:
+# a title normalizing to ONE meaningful token scores 1.0 on the shorter-side
+# coverage test whenever that word appears anywhere in the requirement, so
+# "Team" silently satisfied "...your project team, subcontractors, and key
+# personnel including resumes and organizational charts". That marks the
+# requirement satisfied and hides it from ledger.missing() forever — the exact
+# defect the ledger exists to catch, and worse than the strict-exact matcher it
+# replaced (which was useless but safe).
+#
+# Fixed by also requiring coverage of the LONGER side (see
+# _MIN_LONGER_SIDE_COVERAGE). These titles are ordinary proposal section names,
+# not adversarial probes, so this battery is committed to keep it that way.
+# ---------------------------------------------------------------------------
+
+_SINGLE_TOKEN_TITLE_FALSE_POSITIVES: list[tuple[str, str]] = [
+    (
+        "Overview",
+        "Describe your firm's overall management approach, staffing plan, quality "
+        "control procedures, and organizational overview of the proposed engagement",
+    ),
+    (
+        "Team",
+        "Provide detailed information about your project team, subcontractors, and "
+        "key personnel including resumes and organizational charts",
+    ),
+    (
+        "Experience",
+        "Summarize your firm's relevant experience including similar projects, client "
+        "references, and staff experience with municipal contracts",
+    ),
+    ("Approach", "Provide your project management approach and quality assurance plan."),
+    ("Insurance", "Submit your firm's insurance certificate and bonding capacity docs."),
+    (
+        "References",
+        "Provide a minimum of three professional references from municipal clients "
+        "served within the past five years, including contact name, title, phone and email",
+    ),
+    (
+        "Qualifications",
+        "Describe the qualifications of your proposed project manager, including "
+        "certifications, years of relevant experience, and professional licenses held",
+    ),
+    ("Summary", "Provide a summary of your insurance coverage"),
+    ("Cost", "Provide a detailed cost proposal"),
+]
+
+
+class SingleTokenTitleFalsePositiveTests(unittest.TestCase):
+    """A one-word section title must not claim a long, specific requirement."""
+
+    def _matches(self, requirement_text: str, section_title: str) -> bool:
+        sections = [RfpSectionMap(id="sec", title=section_title)]
+        return bool(
+            _match_outline_sections(
+                requirement_text=requirement_text,
+                target_hint="",
+                outline_sections=sections,
+            )
+        )
+
+    def test_no_single_token_title_satisfies_a_long_specific_requirement(self) -> None:
+        false_positives = [
+            (title, requirement)
+            for title, requirement in _SINGLE_TOKEN_TITLE_FALSE_POSITIVES
+            if self._matches(requirement, title)
+        ]
+        self.assertEqual(
+            false_positives,
+            [],
+            "a false 'satisfied' hides the requirement from ledger.missing() forever",
+        )
+
+    def test_the_reproduced_team_case_specifically(self) -> None:
+        """Named in the review: an org-chart-only "Team" tab must not discharge a
+        requirement demanding subcontractor disclosures and key-personnel resumes."""
+        self.assertFalse(
+            self._matches(
+                "Provide detailed information about your project team, subcontractors, "
+                "and key personnel including resumes and organizational charts",
+                "Team",
+            )
+        )
+
+    def test_a_genuine_short_requirement_still_matches_its_short_title(self) -> None:
+        """The longer-side guard must not make the matcher useless: when both
+        sides really are short and about the same thing, it still matches."""
+        self.assertTrue(self._matches("Statement of Qualifications", "Qualifications"))
+        self.assertTrue(self._matches("References", "Client References and Testimonials"))
+
+
 class GateReportsMissingScoredCriteriaTests(unittest.TestCase):
     """The reviewer's explicit acceptance check: prove the gate fires on a real
     miss, and prove it stays quiet when the same ask is covered under a
@@ -268,6 +363,79 @@ class AmendOutlineForMissingRequirementsTests(unittest.TestCase):
         first = amend_outline_for_missing_requirements(ledger, [])
         second = amend_outline_for_missing_requirements(ledger, first)
         self.assertEqual(len(second), len(first))
+
+    def test_a_fractional_criterion_weight_is_not_truncated(self) -> None:
+        """An RFP can weight a criterion at 12.5 pts; int() silently made it 12."""
+        ledger = RequirementLedger(
+            requirements=[
+                LedgerRequirement(
+                    id="r1",
+                    text="Technical Approach",
+                    source="scored_criterion",
+                    points=12.5,
+                    satisfiedBy=[],
+                )
+            ]
+        )
+        amended = amend_outline_for_missing_requirements(ledger, [])
+        self.assertEqual(amended[0].evaluation_weight, 12.5)
+
+
+class FractionalWeightFlowsThroughDownstreamModelsTests(unittest.TestCase):
+    """A fractional weight must survive every model it is handed to.
+
+    proposal_ending_report.py:228 assigns ``mapped.evaluation_weight`` straight
+    into EndingRequirementStatus, and proposal_proof_points.py:121 feeds it into
+    the payload ProofPoint validates. While those stayed ``int | None`` and
+    RfpSectionMap was widened, a fractional weight raised ValidationError in the
+    first case and was silently dropped in the second.
+    """
+
+    def test_ending_requirement_status_accepts_a_fractional_weight(self) -> None:
+        from app.services.proposal_ending_report import EndingRequirementStatus
+
+        status = EndingRequirementStatus(
+            sectionId="s1",
+            sectionTitle="Technical Approach",
+            requirement="Technical Approach",
+            covered=False,
+            evaluationWeight=12.5,
+        )
+        self.assertEqual(status.evaluation_weight, 12.5)
+
+    def test_proof_point_accepts_a_fractional_weight(self) -> None:
+        from app.models.proposal import ProofPoint
+
+        point = ProofPoint.model_validate(
+            {
+                "requirement": "Technical Approach",
+                "caseStudy": "City of Test",
+                "evaluationWeight": 12.5,
+            }
+        )
+        self.assertEqual(point.evaluation_weight, 12.5)
+
+    def test_whole_number_weights_still_serialize_as_integers(self) -> None:
+        """The union is int | float, not float, precisely so existing consumers
+        keep seeing 30 rather than 30.0 on the wire."""
+        import json
+
+        from app.services.proposal_ending_report import EndingRequirementStatus
+
+        section = RfpSectionMap(id="s1", title="T", evaluationWeight=30)
+        self.assertEqual(
+            json.loads(section.model_dump_json(by_alias=True))["evaluationWeight"], 30
+        )
+        status = EndingRequirementStatus(
+            sectionId="s1",
+            sectionTitle="T",
+            requirement="r",
+            covered=True,
+            evaluationWeight=30,
+        )
+        self.assertEqual(
+            json.loads(status.model_dump_json(by_alias=True))["evaluationWeight"], 30
+        )
 
 
 if __name__ == "__main__":

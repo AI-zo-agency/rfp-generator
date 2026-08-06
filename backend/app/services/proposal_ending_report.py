@@ -26,7 +26,11 @@ class EndingRequirementStatus(BaseModel):
     section_title: str = Field(alias="sectionTitle")
     requirement: str
     covered: bool
-    evaluation_weight: int | None = Field(default=None, alias="evaluationWeight")
+    # Must mirror RfpSectionMap.evaluation_weight: :228 assigns
+    # mapped.evaluation_weight straight through, so a narrower type here is a
+    # ValidationError, not a cosmetic mismatch. int | float (not plain float)
+    # keeps whole-number weights serializing as 30 rather than 30.0.
+    evaluation_weight: int | float | None = Field(default=None, alias="evaluationWeight")
 
 
 class RequirementSectionRollup(BaseModel):
