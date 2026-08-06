@@ -374,6 +374,30 @@ async def run_verify_scrub_only_scan(
         if ledger_draft_logs:
             await asave_proposal_draft(draft)
 
+    # Task 17: the Scan-RFP button never touched the budget at all — this
+    # module's own docstring above says so ("Does NOT add closing tabs,
+    # structure, budget, or KPI passes"), and run_fulfill_budget_scan only
+    # ran on mode="full", which the frontend never sends. So none of the
+    # budget protections this project already built (prose arithmetic, the
+    # underbid floor, RFP-forbidden travel, line-item classification) ever
+    # ran on a Scan-RFP click. check_and_repair_budget_for_scan reuses the
+    # SAME deterministic machinery Phase 3.5 / mode="full" already use
+    # (run_budget_editor_pass + its sub-checks) but never lets a budget
+    # defect raise past this point — a bad budget surfaces as a finding in
+    # the report below, never a 500, and never an aborted scan. No budget
+    # yet is not an error. Zero LLM calls.
+    from app.services.proposal_scan_budget_check import check_and_repair_budget_for_scan
+
+    budget_check = check_and_repair_budget_for_scan(
+        rfp_id=rfp_id, draft=draft, research=research, rfp_text=rfp_text
+    )
+    if budget_check.changed:
+        draft = budget_check.draft
+        research = budget_check.research
+        await asave_proposal_draft(draft)
+        if research:
+            await asave_research_cache(research)
+
     # Task 12: the button's only truncation handling used to be reporting it
     # (below) — repair_truncated_manuscript_sections exists but only ran on
     # mode="full", which this button never calls, so bios/case studies cut
@@ -496,10 +520,28 @@ async def run_verify_scrub_only_scan(
         "truncationRepairedSectionTitles": [
             titles_before_repair.get(sid, sid) for sid in truncation_repaired_ids
         ],
+        # Task 17 — budget outcome, distinct from "not checked": "none" (no
+        # budget yet — not an error), "ok" (checked, clean), "repaired"
+        # (deterministic fix — arithmetic/classification/prose), or
+        # "needs_human" / "repaired_needs_human" (a pricing JUDGEMENT call —
+        # underbid vs the guide floor, RFP-forbidden travel — reported, never
+        # invented). A silent pass here would read identically to "never
+        # ran", the exact ambiguity this project has already been burned by
+        # twice (see the module note on proposal_scan_budget_check.py).
+        "budgetStatus": budget_check.status,
+        "budgetChanged": budget_check.changed,
+        "budgetRepairedNotes": budget_check.repaired_notes,
+        "budgetEscalationNotes": budget_check.escalation_notes,
     }
     report["logs"].extend(ledger_result.logs)
     report["logs"].extend(ledger_draft_logs)
+    report["logs"].extend(budget_check.logs)
     report["logs"].extend(truncation_repair_logs)
+    if budget_check.status in ("needs_human", "repaired_needs_human"):
+        report["humanDecisionGaps"].append(
+            "budget:needs-review — "
+            + "; ".join(budget_check.escalation_notes)[:400]
+        )
     if outstanding_checklist.needs_attachment:
         report["logs"].append(
             "submission-checklist:attachment — "
@@ -639,7 +681,7 @@ async def run_verify_scrub_only_scan(
         "truncation_repaired=%s truncation_repaired_titles=%s "
         "truncation_still_truncated_ids=%s truncated_sections=%s truncated_titles=%s "
         "unverified_claims=%s submission_needs_drafting=%s submission_needs_attachment=%s "
-        "submission_needs_attachment_titles=%s",
+        "submission_needs_attachment_titles=%s budget_status=%s budget_changed=%s",
         rfp_id,
         report.get("sectionsScanned"),
         report.get("verifyTagsRemoved"),
@@ -659,6 +701,8 @@ async def run_verify_scrub_only_scan(
         report.get("submissionNeedsDraftingCount"),
         report.get("submissionNeedsAttachmentCount"),
         report.get("submissionNeedsAttachmentTitles"),
+        report.get("budgetStatus"),
+        report.get("budgetChanged"),
     )
     return review, updated_research, draft, report
 

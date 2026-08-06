@@ -265,4 +265,70 @@ describe("buildScanRfpBanner", () => {
         "coverage against the RFP (no research cache persisted for this proposal)."
     );
   });
+
+  // Task 17 — the budget check must never read as a silent pass: "checked,
+  // no problems" must look different from "never ran" (no clause at all).
+  describe("budget outcome clause", () => {
+    it("says the budget was checked with no problems when status is ok", () => {
+      const banner = buildScanRfpBanner({ budgetStatus: "ok" });
+      expect(banner).toBe("Checked the budget — no problems found.");
+    });
+
+    it("names what was repaired when status is repaired", () => {
+      const banner = buildScanRfpBanner({
+        budgetStatus: "repaired",
+        budgetRepairedNotes: [
+          "1 line item(s) recalculated (classification and/or arithmetic — e.g. a travel line no longer double-counted as an agency fee)",
+        ],
+      });
+      expect(banner).toBe(
+        "Repaired the budget (1 line item(s) recalculated (classification and/or " +
+          "arithmetic — e.g. a travel line no longer double-counted as an agency fee))."
+      );
+    });
+
+    it("surfaces the escalation reason when the budget needs a human", () => {
+      const banner = buildScanRfpBanner({
+        budgetStatus: "needs_human",
+        budgetEscalationNotes: [
+          "Proposed agency fees $3,500.00 are below 60% of the 00_Guide_Pricing floor $24,000.00",
+        ],
+      });
+      expect(banner).toBe(
+        "Budget needs a human review before submission (Proposed agency fees " +
+          "$3,500.00 are below 60% of the 00_Guide_Pricing floor $24,000.00)."
+      );
+    });
+
+    it("names both the repair and the remaining escalation for repaired_needs_human", () => {
+      const banner = buildScanRfpBanner({
+        budgetStatus: "repaired_needs_human",
+        budgetRepairedNotes: ["agency fee subtotal corrected"],
+        budgetEscalationNotes: ["travel/reimbursables priced in a remote-only engagement"],
+      });
+      expect(banner).toBe(
+        "Partially repaired the budget (agency fee subtotal corrected) but it still needs " +
+          "a human review before submission (travel/reimbursables priced in a remote-only engagement)."
+      );
+    });
+
+    it("adds no clause at all when there is no budget yet", () => {
+      const banner = buildScanRfpBanner({ budgetStatus: "none", verifyTagsRemoved: 0 });
+      expect(banner).toBe(
+        "No changes needed — the proposal already covers every mandatory requirement and is within the page limit."
+      );
+    });
+
+    it("combines with unrelated clauses in the same style as other findings", () => {
+      const banner = buildScanRfpBanner({
+        verifyTagsRemoved: 2,
+        budgetStatus: "repaired",
+        budgetRepairedNotes: ["agency revenue estimate corrected ($3500 → $0)"],
+      });
+      expect(banner).toBe(
+        "Removed 2 optional [VERIFY] tag(s); repaired the budget " +
+          "(agency revenue estimate corrected ($3500 → $0))."
+      );
+    });
+  });
 });

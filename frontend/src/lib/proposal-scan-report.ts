@@ -65,6 +65,20 @@ export interface ScanRfpFulfillReport {
    * resolves the item (never re-flagged for something already handled). */
   submissionNeedsAttachmentCount?: number;
   submissionNeedsAttachmentTitles?: string[];
+  /** Task 17: the Scan-RFP button used to never touch the budget at all —
+   * "none" (no budget yet, not an error), "ok" (checked, clean), "repaired"
+   * (deterministic fix — arithmetic, line-item classification, or prose
+   * re-sync), "needs_human" / "repaired_needs_human" (a pricing JUDGEMENT
+   * call — underbid vs the 00_Guide_Pricing floor, an RFP-forbidden travel
+   * line, or a genuinely unrepairable invariant — reported, never a
+   * fabricated dollar amount). Always surfaced explicitly so a clean budget
+   * reads as "checked, no problems" rather than looking identical to "never
+   * ran" — the same silent-pass ambiguity this project has already been
+   * burned by twice. */
+  budgetStatus?: "none" | "ok" | "repaired" | "needs_human" | "repaired_needs_human";
+  budgetChanged?: boolean;
+  budgetRepairedNotes?: string[];
+  budgetEscalationNotes?: string[];
 }
 
 const NOTHING_CHANGED_MESSAGE =
@@ -194,6 +208,34 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
   const claims = report.unverifiedClaimsCount ?? 0;
   if (claims > 0) {
     clauses.push(`flagged ${claims} unverified/fabricated claim(s) for review`);
+  }
+
+  // Task 17: always say what happened to the budget, distinct from "not
+  // checked" — a silent pass here reads identically to the scan never
+  // touching the budget at all, which is the exact ambiguity that has
+  // already burned this project twice.
+  const budgetStatus = report.budgetStatus;
+  const repairedNotes = (report.budgetRepairedNotes ?? []).join("; ");
+  const escalationNotes = (report.budgetEscalationNotes ?? []).join("; ");
+  if (budgetStatus === "ok") {
+    clauses.push("checked the budget — no problems found");
+  } else if (budgetStatus === "repaired") {
+    clauses.push(
+      `repaired the budget${repairedNotes ? ` (${repairedNotes})` : ""}`
+    );
+  } else if (budgetStatus === "needs_human") {
+    clauses.push(
+      `budget needs a human review before submission${
+        escalationNotes ? ` (${escalationNotes})` : ""
+      }`
+    );
+  } else if (budgetStatus === "repaired_needs_human") {
+    clauses.push(
+      `partially repaired the budget${repairedNotes ? ` (${repairedNotes})` : ""} ` +
+        `but it still needs a human review before submission${
+          escalationNotes ? ` (${escalationNotes})` : ""
+        }`
+    );
   }
 
   if (report.ledgerCheckSkippedReason) {
