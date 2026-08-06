@@ -21,6 +21,8 @@ from app.services.go_no_go_service import (
     _assess_rfp_content,
     _build_rfp_context,
 )
+from app.services.rfp_content import combine_rfp_text
+from app.services.rfp_page_limit import resolve_page_limit
 from app.services.proposal_brand_voice import format_register_block
 from app.services.proposal_langchain import run_tool_research_agent
 from app.services.proposal_voice_enforcement import (
@@ -281,16 +283,24 @@ def _remaining_word_budget(
     rfp: RfpRecord,
     already_written: list[ProposalSection],
     drafting_count: int,
+    rfp_text: str | None = None,
 ) -> int | None:
     """Words the drafting graph may spend, given the RFP's page limit.
 
-    Returns None when the RFP states no page limit — sections then keep their
-    natural targets, as before.
+    The page limit is ``rfp.page_limit`` (the manual upload-form field) when
+    set; otherwise it's whatever ``parse_page_limit`` can safely extract from
+    ``rfp_text`` — the RFP almost never had ``page_limit`` populated (it's
+    manual-only), which is exactly why this returned None and the entire
+    allocation system downstream went inert. See rfp_page_limit.py.
+
+    Returns None when neither source states a page limit — sections then
+    keep their natural targets, as before.
     """
-    if not rfp.page_limit or rfp.page_limit <= 0 or drafting_count <= 0:
+    page_limit = resolve_page_limit(rfp.page_limit, rfp_text)
+    if not page_limit or page_limit <= 0 or drafting_count <= 0:
         return None
 
-    total = rfp.page_limit * WORDS_PER_PAGE
+    total = page_limit * WORDS_PER_PAGE
     spent = sum(
         len((section.content or "").split())
         for section in already_written
@@ -306,7 +316,7 @@ def _remaining_word_budget(
             "reserve=%dw remaining=%dw < floor=%dw — drafting at the floor; "
             "outline is too large for the page limit",
             rfp.id,
-            rfp.page_limit,
+            page_limit,
             total,
             spent,
             reserve,
@@ -319,7 +329,7 @@ def _remaining_word_budget(
         "page budget for %s: limit=%dpg total=%dw spent=%dw reserve=%dw "
         "available=%dw across %d sections",
         rfp.id,
-        rfp.page_limit,
+        page_limit,
         total,
         spent,
         reserve,
@@ -1787,7 +1797,8 @@ async def run_phase3_drafting(rfp_id: str) -> tuple[ProposalDraft, ProposalResea
 async def _run_phase3_drafting_inner(
     rfp_id: str,
 ) -> tuple[ProposalDraft, ProposalResearchCache]:
-    rfp, _content, rfp_context = _load_rfp_for_proposal(rfp_id)
+    rfp, content, rfp_context = _load_rfp_for_proposal(rfp_id)
+    rfp_source_text = combine_rfp_text(content.description, content.pdf_text)
     research = await aget_research_cache(rfp_id)
     if not _phase2_plan_ready(research):
         step_trace(
@@ -1898,6 +1909,7 @@ async def _run_phase3_drafting_inner(
         rfp=rfp,
         already_written=[*static_sections, *already_filled],
         drafting_count=len(sections_to_draft),
+        rfp_text=rfp_source_text,
     )
 
     with pipeline_step("drafting_graph", section_count=len(sections_to_draft)):
@@ -1927,6 +1939,11 @@ async def _run_phase3_drafting_inner(
             ),
             fact_ledger=research.fact_ledger,
             evidence_allocation=research.evidence_allocation,
+            requirement_ledger=(
+                research.requirement_ledger.model_dump(by_alias=True)
+                if research.requirement_ledger
+                else None
+            ),
             doc_word_budget=doc_word_budget,
             on_sections_drafted=_on_phase3_batch,
         )

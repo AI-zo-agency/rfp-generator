@@ -12,6 +12,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.models.proposal import EvidenceItem, ProposalBrandVoice, ProposalSection, RfpSectionMap, LossLesson
+from app.models.requirement_ledger import LedgerRequirement, RequirementLedger
 from app.services.proposal_brand_voice import (
     classify_section_register,
     format_brand_voice_block,
@@ -224,6 +225,79 @@ def allocate_word_budget(
     for target in natural_targets:
         above_floor = max(0, target - floor)
         out.append(floor + int(headroom * (above_floor / natural_headroom)))
+    return out
+
+
+def allocate_words_by_points(
+    requirements: list[LedgerRequirement],
+    budget: int | None,
+    *,
+    floor: int = MIN_SECTION_WORDS,
+) -> dict[str, int]:
+    """Split a word budget across mandatory ledger requirements weighted by
+    ``points``, so a 30-point scored criterion gets proportionally more room
+    than a 10-point one — and boilerplate requirements with no points get
+    none of the headroom above the floor.
+
+    This is the deterministic ledger signal (Task 1-3's ``RequirementLedger``)
+    rather than the LLM-estimated ``evaluationWeight`` on ``RfpSectionMap``,
+    which may be absent or noisy. Mirrors ``allocate_word_budget``'s
+    fail-safe contract:
+
+    - No requirements -> ``{}``.
+    - No/zero budget -> every mandatory requirement gets ``floor`` words
+      (a neutral default, not a crash).
+    - No points anywhere (or they sum to zero) -> even split across the
+      mandatory requirements, never a divide-by-zero.
+    - Budget too tight for everyone to clear the floor -> even split at
+      (at least) the absolute floor, same as ``allocate_word_budget``.
+    """
+    mandatory = [r for r in requirements if r.mandatory]
+    count = len(mandatory)
+    if count == 0:
+        return {}
+
+    if not budget or budget <= 0:
+        return {r.id: floor for r in mandatory}
+
+    if floor * count >= budget:
+        share = max(ABSOLUTE_MIN_SECTION_WORDS, budget // count)
+        return {r.id: share for r in mandatory}
+
+    total_points = sum(r.points or 0.0 for r in mandatory)
+    if total_points <= 0:
+        share = budget // count
+        return {r.id: share for r in mandatory}
+
+    headroom = budget - floor * count
+    out: dict[str, int] = {}
+    for r in mandatory:
+        weight = (r.points or 0.0) / total_points
+        out[r.id] = floor + int(headroom * weight)
+    return out
+
+
+def section_weights_from_ledger(
+    ledger: RequirementLedger | None,
+    budget: int | None,
+) -> dict[str, int]:
+    """Aggregate ``allocate_words_by_points`` onto the section(s) each
+    requirement is satisfied by (``LedgerRequirement.satisfied_by``), so a
+    section carrying high-point requirements can be weighted heavier than a
+    boilerplate section the ledger never scored. A section satisfying more
+    than one requirement sums their shares. Never raises: an empty/missing
+    ledger just yields no weights, leaving section targets exactly as before.
+    """
+    if ledger is None or not ledger.requirements:
+        return {}
+    per_requirement = allocate_words_by_points(ledger.requirements, budget)
+    out: dict[str, int] = {}
+    for requirement in ledger.requirements:
+        words = per_requirement.get(requirement.id)
+        if not words:
+            continue
+        for section_id in requirement.satisfied_by:
+            out[section_id] = out.get(section_id, 0) + words
     return out
 
 
@@ -1395,6 +1469,7 @@ async def run_drafting_graph(
     execution_plan: dict[str, Any] | None = None,
     fact_ledger: dict[str, Any] | None = None,
     evidence_allocation: dict[str, Any] | None = None,
+    requirement_ledger: dict[str, Any] | None = None,
     doc_word_budget: int | None = None,
     on_sections_drafted: SectionDraftedCallback | None = None,
 ) -> tuple[list[ProposalSection], str, list[EvidenceItem]]:
@@ -1420,9 +1495,43 @@ async def run_drafting_graph(
     if alloc_dict is not None and hasattr(alloc_dict, "model_dump"):
         alloc_dict = alloc_dict.model_dump(by_alias=True)  # type: ignore[union-attr]
 
+    requirement_ledger_model: RequirementLedger | None = None
+    if requirement_ledger:
+        rl_raw: Any = requirement_ledger
+        if hasattr(rl_raw, "model_dump"):
+            rl_raw = rl_raw.model_dump(by_alias=True)  # type: ignore[union-attr]
+        if isinstance(rl_raw, dict):
+            try:
+                requirement_ledger_model = RequirementLedger.model_validate(rl_raw)
+            except Exception:  # noqa: BLE001 — a malformed ledger must never block drafting
+                requirement_ledger_model = None
+
     section_dicts = [s.model_dump(by_alias=True) for s in rfp_sections]
     if doc_word_budget and section_dicts:
         natural = [_word_target(s) for s in section_dicts]
+        if requirement_ledger_model is not None:
+            # Fill in the gap only: sections that already carry an explicit
+            # word/page/weight signal keep it untouched. Sections with none
+            # of those (the boilerplate the 22-section MSU Denver draft
+            # padded out) get weighted by the ledger's evaluation points
+            # instead of the flat DEFAULT_WORD_TARGET.
+            ledger_weights = section_weights_from_ledger(
+                requirement_ledger_model, doc_word_budget
+            )
+            for i, section in enumerate(section_dicts):
+                has_explicit_signal = bool(
+                    section.get("wordTarget")
+                    or section.get("word_target")
+                    or section.get("pageLimit")
+                    or section.get("page_limit")
+                    or section.get("evaluationWeight")
+                    or section.get("evaluation_weight")
+                )
+                if has_explicit_signal:
+                    continue
+                weight_words = ledger_weights.get(str(section.get("id") or ""))
+                if weight_words:
+                    natural[i] = max(MIN_SECTION_WORDS, min(1200, weight_words))
         allocated = allocate_word_budget(natural, doc_word_budget)
         for section, target in zip(section_dicts, allocated):
             section["wordTarget"] = target
