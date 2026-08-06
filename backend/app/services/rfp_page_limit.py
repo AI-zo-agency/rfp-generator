@@ -135,16 +135,35 @@ _LIMIT_RE = re.compile(
 # the returned limit when the clause it sits in names the submission as a
 # whole. Word list per the task ruling: proposal / quote / response /
 # submission / bid (+ "quotation" and plural forms as natural variants).
+#
+# "responses?" is deliberately kept even though it can appear in transitional
+# phrasing ("submit a technical response, and resumes...") because "the
+# technical response" is itself standard RFP shorthand for the whole
+# submitted document (see test_same_limit_repeated_is_not_ambiguous). The
+# clause-boundary comma below is what keeps that word from bleeding across
+# "and" into an unrelated sub-part's clause; narrowing the word list isn't
+# needed once the boundary is correct.
+#
+# The trailing negative lookahead excludes possessive uses ("The proposal's
+# cost volume is limited to 5 pages") — "proposal's X" names X, not the
+# proposal, as the thing being limited, so it must not qualify as a
+# whole-submission mention.
 _WHOLE_SUBMISSION_SUBJECT_RE = re.compile(
-    r"\b(?:proposals?|quotes?|quotations?|responses?|submissions?|bids?)\b",
+    r"\b(?:proposals?|quotes?|quotations?|responses?|submissions?|bids?)\b(?!['’]s)",
     re.IGNORECASE,
 )
 
 # A clause boundary — the subject search for a match must not cross into an
-# earlier, unrelated sentence (e.g. a document that mentions "the proposal"
-# two sentences before an unrelated "Resumes are limited to 2 pages" line
-# must not let that earlier mention qualify the resume sub-limit).
-_CLAUSE_BOUNDARY_RE = re.compile(r"[.;:\n]")
+# earlier, unrelated sentence or clause (e.g. a document that mentions "the
+# proposal" two sentences before an unrelated "Resumes are limited to 2
+# pages" line must not let that earlier mention qualify the resume
+# sub-limit). The comma is included because a huge share of real per-
+# attachment sub-limits are phrased as a single sentence with the whole-
+# submission word and the sub-part word in different comma-separated
+# clauses — "As part of the proposal, resumes are limited to 2 pages each."
+# — where only a period/semicolon/colon boundary would let "the proposal"
+# incorrectly qualify "resumes".
+_CLAUSE_BOUNDARY_RE = re.compile(r"[.;:,\n]")
 
 
 def _match_to_number(match: re.Match[str]) -> int | None:
