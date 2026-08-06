@@ -178,13 +178,27 @@ class MissingRequirementIsAddedTests(unittest.TestCase):
         """Among the sources ADD is eligible for (required_content, form), a
         pointed one is still added first — the ordering priority is
         unaffected by the source restriction, only WHICH sources are
-        eligible at all changed."""
+        eligible at all changed.
+
+        Fixture text is deliberately unambiguous real deliverable phrasing
+        ("Provide a detailed project schedule...", "...signed W-9 form")
+        rather than bare placeholders like "Appendix B": every ledger handed
+        to reconcile_requirement_ledger is re-classified from its TEXT on
+        every scan (_reclassify_persisted_ledger, task 18), so placeholder
+        filler would silently re-label itself out of _ADD_ELIGIBLE_SOURCES
+        and make this ordering test assert nothing. This test is about ADD
+        ORDERING, not classification — see
+        test_scan_rfp_fail_closed_classification.py for the latter."""
         ledger = RequirementLedger(
             requirements=[
-                _req("r-unscored", "Appendix B", satisfiedBy=[]),
+                _req(
+                    "r-unscored",
+                    "Provide a detailed project schedule with milestones",
+                    satisfiedBy=[],
+                ),
                 _req(
                     "r-form-scored",
-                    "Key Personnel Matrix",
+                    "Submit a completed and signed W-9 form",
                     source="form",
                     points=15.0,
                     satisfiedBy=[],

@@ -69,7 +69,7 @@ NON_ADDABLE_REQUIREMENTS = [
     "due date",
 ]
 
-# All 7 are real, from this user's live RFPs. Every one must stay addable
+# All 9 are real, from this user's live RFPs. Every one must stay addable
 # (or, for the W-9, stay classified "form" — a separate, already-working
 # category the fix must not disturb).
 ADDABLE_REQUIREMENTS = [
@@ -82,6 +82,11 @@ ADDABLE_REQUIREMENTS = [
     "proposed team member",
     "Describe your firm's technical approach to meeting the requirements "
     "in Section 3",
+    # Round-2 additions: the first cut of the positive signal list was too
+    # tight and swallowed these two genuine deliverables onto the compliance
+    # checklist. Both are real proposal SECTIONS a vendor must write/assemble.
+    "Provide information about your firm",
+    "Key Personnel Matrix",
 ]
 
 _FORM_TEXT = "Submit a completed and signed W-9 form"
@@ -203,12 +208,66 @@ class FreshClassificationTests(unittest.TestCase):
             self._source_for(ADDABLE_REQUIREMENTS[6]), "required_content"
         )
 
+    def test_provide_information_about_your_firm_is_addable(self) -> None:
+        self.assertEqual(
+            self._source_for(ADDABLE_REQUIREMENTS[7]), "required_content"
+        )
+
+    def test_key_personnel_matrix_is_addable(self) -> None:
+        self.assertEqual(
+            self._source_for(ADDABLE_REQUIREMENTS[8]), "required_content"
+        )
+
     def test_every_non_addable_requirement_is_covered(self) -> None:
         """Guard against silently dropping an item from the required list."""
         self.assertEqual(len(NON_ADDABLE_REQUIREMENTS), 8)
 
     def test_every_addable_requirement_is_covered(self) -> None:
-        self.assertEqual(len(ADDABLE_REQUIREMENTS), 7)
+        self.assertEqual(len(ADDABLE_REQUIREMENTS), 9)
+
+
+class HardBoundaryTests(unittest.TestCase):
+    """The boundary the round-2 widening must not cross: a bare identity/
+    contact FIELD inside a section vs a SECTION about the firm. Both sides
+    pinned explicitly, because widening the positive signals to recognise
+    "information about your firm" is exactly the change that could have
+    swallowed "Include contact information" back into addability.
+
+    Held by two independent mechanisms: _ADMIN_INCLUDE_FIELD_RE runs BEFORE
+    the narrative test and catches the bare-field phrasings outright, and
+    the "information"/"details"/"list"/"statement" nouns are anchored to a
+    following "about|on|regarding|of" so a bare "contact information" can
+    never reach them anyway."""
+
+    def _source_for(self, requirement: str) -> str:
+        ledger = build_requirement_ledger(
+            [ComplianceItem(id="c1", requirement=requirement, mandatory=True)], [], []
+        )
+        return ledger.requirements[0].source
+
+    def test_a_bare_contractor_name_field_is_a_field_not_a_section(self) -> None:
+        self.assertEqual(
+            self._source_for("Include contractor's name(s)"), "submission_instruction"
+        )
+
+    def test_a_bare_contact_information_field_is_a_field_not_a_section(self) -> None:
+        self.assertEqual(
+            self._source_for("Include contact information (Address, phone, Fax, Email)"),
+            "submission_instruction",
+        )
+
+    def test_information_about_your_firm_is_a_section_not_a_field(self) -> None:
+        self.assertEqual(
+            self._source_for("Provide information about your firm"), "required_content"
+        )
+
+    def test_the_two_sides_of_the_boundary_classify_differently(self) -> None:
+        """Stated as one assertion so a future widening that collapses the
+        boundary fails here loudly, not just in one of the two tests above."""
+        self.assertNotEqual(
+            self._source_for("Include contact information (Address, phone, Fax, Email)"),
+            self._source_for("Provide information about your firm"),
+        )
 
 
 class KvccLiveIncidentReproductionTests(unittest.TestCase):

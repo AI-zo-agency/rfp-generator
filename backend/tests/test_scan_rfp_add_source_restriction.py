@@ -82,6 +82,23 @@ def _para(word: str, count: int) -> str:
     return " ".join([word] * count)
 
 
+def _addable_text(i: int) -> str:
+    """Unambiguously addable requirement text for the blast-radius fixtures.
+
+    These tests are about the GUARD (how many additions one pass may apply),
+    not about classification — but every ledger handed to
+    reconcile_requirement_ledger is re-classified from its TEXT on every scan
+    (_reclassify_persisted_ledger, task 18), and the classifier's default is
+    fail-closed (assembler.py's _classify_compliance_source). Bare
+    placeholder filler like "Required deliverable 0" therefore re-labels
+    itself out of _ADD_ELIGIBLE_SOURCES and leaves the guard with nothing to
+    guard. Real deliverable phrasing ("...project schedule...") keeps these
+    fixtures eligible so the guard's own behavior is what gets asserted. See
+    test_scan_rfp_fail_closed_classification.py for classification coverage.
+    """
+    return f"Provide a detailed project schedule for deliverable {i}"
+
+
 # The five real (criterion name, covering section title) pairs from the live
 # incident banner, verified by execution to be 5-of-5 lexical misses.
 REAL_SCORED_CRITERIA_FROM_INCIDENT = [
@@ -236,7 +253,7 @@ class BlastRadiusGuardTests(unittest.TestCase):
         requirement_count = _BLAST_RADIUS_MAX_ADDITIONS + 2
         ledger = RequirementLedger(
             requirements=[
-                _req(f"r-{i}", f"Required deliverable {i}", satisfiedBy=[])
+                _req(f"r-{i}", _addable_text(i), satisfiedBy=[])
                 for i in range(requirement_count)
             ]
         )
@@ -272,7 +289,7 @@ class BlastRadiusGuardTests(unittest.TestCase):
         # to engage.
         ledger = RequirementLedger(
             requirements=[
-                _req(f"r-{i}", f"Required deliverable {i}", satisfiedBy=[])
+                _req(f"r-{i}", _addable_text(i), satisfiedBy=[])
                 for i in range(3)
             ]
         )
@@ -292,7 +309,7 @@ class BlastRadiusGuardTests(unittest.TestCase):
         # under both the absolute cap and the fraction) must apply.
         ledger = RequirementLedger(
             requirements=[
-                _req(f"r-{i}", f"Required deliverable {i}", satisfiedBy=[])
+                _req(f"r-{i}", _addable_text(i), satisfiedBy=[])
                 for i in range(2)
             ]
         )

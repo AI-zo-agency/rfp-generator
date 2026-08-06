@@ -375,6 +375,19 @@ def _is_administrative_submission_instruction(blob: str) -> bool:
 # a font rule as a client-facing proposal section — the one failure mode
 # this exists to close off, so the signal list below is deliberately
 # conservative and verb/noun-anchored, never a bare keyword.
+#
+# Round-2 widening (same task): the first cut of this signal list was too
+# tight and swallowed genuine deliverables — "Provide information about your
+# firm" and "Key Personnel Matrix" are both real proposal SECTIONS and were
+# landing on the compliance checklist. The default stays fail-closed; only
+# the positive signals widened. The hard boundary the widening must not
+# cross is "Include contractor's name(s)" (a FIELD inside a section) vs
+# "Provide information about your firm" (a SECTION). That boundary is held
+# by TWO independent mechanisms, not one: _ADMIN_INCLUDE_FIELD_RE runs
+# BEFORE this test and catches the bare-field phrasings outright, and the
+# "information"/"details"/"list"/"statement" nouns below are anchored to a
+# following "about|on|regarding|of" so a bare "contact information" can
+# never reach them anyway.
 _NARRATIVE_VERB_RE = re.compile(
     r"\b(?:"
     r"describe"
@@ -405,6 +418,30 @@ _NARRATIVE_NOUN_RE = re.compile(
     r"|executive\s+summary"
     r"|work\s+plan"
     r"|timelines?"
+    # --- Round-2 additions. -------------------------------------------
+    # Standard proposal-section nouns that stand alone safely: none of
+    # them appears anywhere in the 8-item MUST-NOT-ADD list, and each
+    # names a section a vendor actually assembles.
+    r"|matri(?:x|ces)"
+    r"|personnel"
+    r"|staffing"
+    r"|samples?"
+    r"|examples?"
+    r"|portfolio"
+    r"|certificate\s+of"
+    r"|evidence\s+of"
+    # Nouns too generic to stand alone — anchored to the "about|on|
+    # regarding|of" that turns them into a named deliverable. "contact
+    # information" (a bare field list) cannot reach these; "information
+    # ABOUT your firm" (a section) can. Same for "list of subcontractors"
+    # vs a bare "list", "statement of qualifications" vs a bare
+    # "statement", "details OF your quality process" vs a bare "details".
+    r"|information\s+(?:about|on|regarding)"
+    r"|details\s+(?:of|about|on|regarding)"
+    r"|list\s+of"
+    r"|statement\s+of"
+    r"|summary\s+of"
+    r"|overview\s+of"
     r")\b"
 )
 
@@ -419,13 +456,15 @@ def _looks_like_narrative_deliverable(blob: str) -> bool:
       1. an authoring verb phrase addressed to the vendor ("describe",
          "provide a plan", "explain your", ...);
       2. a deliverable noun naming a standard proposal section ("approach",
-         "references", "cover letter", ...).
+         "references", "cover letter", "personnel", "certificate of",
+         "information about", ...).
 
-    Verified against every example in task-19-report.md: all 8 real
-    non-addable items (statutory compliance, a FOAA exemption instruction, a
-    font rule, plus the 5 administrative items the deny list above already
-    catches) fail both channels; all 7 real addable deliverables pass at
-    least one.
+    Verified against every example in task-19-report.md, both rounds: all 8
+    real non-addable items (statutory compliance, a FOAA exemption
+    instruction, a font rule, plus the 5 administrative items the deny list
+    above already catches) fail both channels; all real addable deliverables
+    — including round 2's "Provide information about your firm" and "Key
+    Personnel Matrix" — pass at least one.
     """
     return bool(_NARRATIVE_VERB_RE.search(blob) or _NARRATIVE_NOUN_RE.search(blob))
 

@@ -323,7 +323,20 @@ class LedgerSurvivesRoutineResavesTests(unittest.IsolatedAsyncioTestCase):
 class ComplianceSourceClassificationTests(unittest.TestCase):
     """I2: 'form' was matched as a bare substring, so "in-form-ation" and
     "per-form-ance" — two of the most common words in a compliance matrix —
-    were mislabelled as forms."""
+    were mislabelled as forms.
+
+    These tests assert the SUBSTRING bug stays fixed: none of these four
+    strings may ever classify as "form". They originally spelled that as
+    ``== "required_content"`` because, at the time, the only two outcomes
+    after the administrative check were "form" or "required_content", so
+    "not a form" and "required_content" were the same assertion by
+    elimination. That is no longer true: _classify_compliance_source is now
+    fail-closed (task 19 — see assembler.py's module note), so a string that
+    is neither a form NOR a positively-recognised narrative deliverable
+    lands on "submission_instruction" instead. Each test below therefore
+    asserts the real intent — not a form — and additionally pins the exact
+    non-form source it does get, so the test stays meaningful rather than
+    merely non-vacuous."""
 
     def _source_for(self, requirement: str) -> str:
         ledger = build_requirement_ledger(
@@ -332,24 +345,32 @@ class ComplianceSourceClassificationTests(unittest.TestCase):
         return ledger.requirements[0].source
 
     def test_information_is_not_a_form(self) -> None:
-        self.assertEqual(
-            self._source_for("Provide information about your firm"), "required_content"
-        )
+        source = self._source_for("Provide information about your firm")
+        self.assertNotEqual(source, "form", '"in-form-ation" is not a form')
+        # A named narrative deliverable ("information ABOUT your firm" — a
+        # section, unlike the bare field list "contact information").
+        self.assertEqual(source, "required_content")
 
     def test_performance_is_not_a_form(self) -> None:
-        self.assertEqual(
-            self._source_for("Performance metrics and KPIs"), "required_content"
-        )
+        source = self._source_for("Performance metrics and KPIs")
+        self.assertNotEqual(source, "form", '"per-form-ance" is not a form')
+        # Not a form, and not positively recognisable as a narrative
+        # deliverable either — fail-closed puts it on the compliance
+        # checklist, where a human reads it, rather than guessing it into a
+        # client-facing section.
+        self.assertEqual(source, "submission_instruction")
 
     def test_conforming_is_not_a_form(self) -> None:
-        self.assertEqual(
-            self._source_for("Describe conforming products"), "required_content"
-        )
+        source = self._source_for("Describe conforming products")
+        self.assertNotEqual(source, "form", '"con-form-ing" is not a form')
+        # "Describe" is an authoring verb — a genuine narrative deliverable.
+        self.assertEqual(source, "required_content")
 
     def test_platform_is_not_a_form(self) -> None:
-        self.assertEqual(
-            self._source_for("Platform uptime guarantee"), "required_content"
-        )
+        source = self._source_for("Platform uptime guarantee")
+        self.assertNotEqual(source, "form", '"plat-form" is not a form')
+        # Same fail-closed reasoning as test_performance_is_not_a_form.
+        self.assertEqual(source, "submission_instruction")
 
     def test_a_real_form_is_still_classified_as_a_form(self) -> None:
         self.assertEqual(self._source_for("Submit the attached W-9 form"), "form")
