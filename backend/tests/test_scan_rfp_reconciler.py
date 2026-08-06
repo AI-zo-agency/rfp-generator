@@ -1,4 +1,5 @@
-"""Task 5: Scan-RFP becomes a reconciler that fixes an EXISTING draft.
+"""Task 5 (+ Task 9 ADD wiring): Scan-RFP becomes a reconciler that fixes an
+EXISTING draft.
 
 Root defect (verified at HEAD 81e649b, proposal_rfp_compliance.py:197-204,
 ``scan_uncovered_requirement_gaps``)::
@@ -19,23 +20,28 @@ fix (every verifier iterating sections instead of requirements).
 replaces that section-driven walk with a requirement-driven one, reading the
 persisted ``RequirementLedger`` three ways:
 
-    len(satisfied_by) == 0  -> surfaced as a proposed ADD, never auto-applied
-                                (the matcher was measured at 6/10 on wording
-                                variants — see task-2-report.md; auto-adding
-                                on that signal would create a second cover
-                                letter next to an existing "Letter of
-                                Transmittal", manufacturing the exact
-                                duplication this plan removes)
+    len(satisfied_by) == 0  -> ADD: applied. Task 5 shipped this surfaced-
+                                only (matcher measured 6/10 on wording
+                                variants — task-2-report.md); Task 9 wires it
+                                to actually add a [MANUAL FILL] stub section
+                                now that the matcher is measured 8/10 with
+                                zero false positives (two unsafe aliases
+                                removed — proposal_section_aliases.py).
     len(satisfied_by) == 1  -> correct, left alone
     len(satisfied_by) >  1  -> MERGE: applied. Cross-referenced instead of
                                 restated, via resolve_duplicate_owners
-                                (app/services/proposal_intelligence/assembler.py)
+                                (app/services/proposal_intelligence/assembler.py).
+                                The MERGE owner is protected from CUT in the
+                                same pass (Task 9): it just became the sole
+                                bearer of that requirement's detail.
     over page budget        -> CUT: applied. Lowest-scoring content trimmed
-                                first; content carrying evaluation points is
-                                never cut below a usable floor.
+                                first; content carrying evaluation points, or
+                                designated a MERGE owner this pass, is never
+                                cut below a usable floor / at all.
 
 Pure and deterministic — makes zero LLM calls (net LLM delta for this pass
-is zero; nothing here calls out to redraft_section_agent or chat_json).
+is zero; nothing here calls out to redraft_section_agent or chat_json). The
+added stub section is a deterministic [MANUAL FILL] tag, not an LLM call.
 """
 
 from __future__ import annotations
@@ -54,7 +60,7 @@ from app.models.rfp import RfpRecord
 from app.services.proposal_rfp_compliance import (
     AppliedCutAction,
     AppliedMergeAction,
-    ProposedRequirementAddition,
+    AppliedRequirementAddition,
     reconcile_requirement_ledger,
 )
 
@@ -107,10 +113,10 @@ def _para(word: str, count: int) -> str:
     return " ".join([word] * count)
 
 
-class MissingRequirementIsSurfacedNotAppliedTests(unittest.TestCase):
-    """0 satisfied_by -> proposed ADD, never auto-applied to the draft."""
+class MissingRequirementIsAddedTests(unittest.TestCase):
+    """0 satisfied_by -> ADD: a new [MANUAL FILL] stub section is applied."""
 
-    def test_missing_mandatory_requirement_is_reported_as_a_proposed_addition(self) -> None:
+    def test_missing_mandatory_requirement_is_reported_as_an_applied_addition(self) -> None:
         ledger = RequirementLedger(
             requirements=[_req("r1", "A signed cover letter", satisfiedBy=[])]
         )
@@ -120,13 +126,16 @@ class MissingRequirementIsSurfacedNotAppliedTests(unittest.TestCase):
 
         result = reconcile_requirement_ledger(draft=draft, research=research, rfp=rfp)
 
-        self.assertEqual(len(result.proposed_additions), 1)
-        addition = result.proposed_additions[0]
-        self.assertIsInstance(addition, ProposedRequirementAddition)
+        self.assertEqual(len(result.applied_additions), 1)
+        addition = result.applied_additions[0]
+        self.assertIsInstance(addition, AppliedRequirementAddition)
         self.assertEqual(addition.requirement_id, "r1")
         self.assertEqual(addition.requirement_text, "A signed cover letter")
+        self.assertEqual(addition.section_id, "ledger-r1")
 
-    def test_draft_is_not_mutated_by_a_proposed_addition(self) -> None:
+    def test_draft_gains_a_new_manual_fill_stub_section_for_the_missing_requirement(
+        self,
+    ) -> None:
         ledger = RequirementLedger(
             requirements=[_req("r1", "A signed cover letter", satisfiedBy=[])]
         )
@@ -136,11 +145,19 @@ class MissingRequirementIsSurfacedNotAppliedTests(unittest.TestCase):
 
         result = reconcile_requirement_ledger(draft=draft, research=research, rfp=rfp)
 
-        self.assertFalse(result.changed)
+        self.assertTrue(result.changed)
         self.assertEqual(result.applied_merges, [])
         self.assertEqual(result.applied_cuts, [])
-        self.assertEqual(len(result.draft.sections), 1)
-        self.assertEqual(result.draft.sections[0].content, "Our approach is...")
+        self.assertEqual(len(result.draft.sections), 2)
+        # The original section is completely untouched.
+        original = next(s for s in result.draft.sections if s.id == "s1")
+        self.assertEqual(original.content, "Our approach is...")
+        # The new section names the requirement verbatim and never invents
+        # an answer for it.
+        added = next(s for s in result.draft.sections if s.id == "ledger-r1")
+        self.assertIn("[MANUAL FILL", added.content)
+        self.assertIn("A signed cover letter", added.content)
+        self.assertTrue(added.required)
 
     def test_missing_but_non_mandatory_requirement_is_not_surfaced(self) -> None:
         ledger = RequirementLedger(
@@ -151,8 +168,31 @@ class MissingRequirementIsSurfacedNotAppliedTests(unittest.TestCase):
         draft = _draft(_section("s1", "Approach", "text"))
         research = _research(ledger)
         result = reconcile_requirement_ledger(draft=draft, research=research, rfp=_rfp())
-        self.assertEqual(result.proposed_additions, [])
+        self.assertEqual(result.applied_additions, [])
         self.assertFalse(result.changed)
+        self.assertEqual(len(result.draft.sections), 1)
+
+    def test_scored_missing_requirements_are_added_before_unscored_ones(self) -> None:
+        ledger = RequirementLedger(
+            requirements=[
+                _req("r-unscored", "Appendix B", satisfiedBy=[]),
+                _req(
+                    "r-scored",
+                    "Key Personnel Matrix",
+                    source="scored_criterion",
+                    points=15.0,
+                    satisfiedBy=[],
+                ),
+            ]
+        )
+        draft = _draft(_section("s1", "Approach", "text"))
+        research = _research(ledger)
+        result = reconcile_requirement_ledger(draft=draft, research=research, rfp=_rfp())
+
+        self.assertEqual(
+            [a.requirement_id for a in result.applied_additions],
+            ["r-scored", "r-unscored"],
+        )
 
 
 class DuplicatedRequirementIsMergedTests(unittest.TestCase):
@@ -370,6 +410,9 @@ class IdempotenceTests(unittest.TestCase):
 
         first = reconcile_requirement_ledger(draft=draft, research=research, rfp=rfp)
         self.assertTrue(first.changed)
+        self.assertEqual(
+            [a.requirement_id for a in first.applied_additions], ["r-missing"]
+        )
 
         second = reconcile_requirement_ledger(
             draft=first.draft, research=research, rfp=rfp
@@ -377,11 +420,13 @@ class IdempotenceTests(unittest.TestCase):
         self.assertFalse(second.changed, "second run must be a no-op")
         self.assertEqual(second.applied_merges, [])
         self.assertEqual(second.applied_cuts, [])
-        # Proposed additions are re-derived from the (unchanged) ledger every
-        # time — same requirement, same report, not a mutation.
+        # The second run must not add a second stub section for the same
+        # requirement — the added section's id already exists on the draft.
+        self.assertEqual(second.applied_additions, [])
         self.assertEqual(
-            [a.requirement_id for a in second.proposed_additions],
-            [a.requirement_id for a in first.proposed_additions],
+            len([s for s in second.draft.sections if s.id == "ledger-r-missing"]),
+            1,
+            "must not duplicate the added section",
         )
         self.assertEqual(
             [s.content for s in second.draft.sections],
@@ -401,7 +446,7 @@ class CompliantDraftIsUntouchedTests(unittest.TestCase):
         result = reconcile_requirement_ledger(draft=draft, research=research, rfp=_rfp())
 
         self.assertFalse(result.changed)
-        self.assertEqual(result.proposed_additions, [])
+        self.assertEqual(result.applied_additions, [])
         self.assertEqual(result.applied_merges, [])
         self.assertEqual(result.applied_cuts, [])
         self.assertEqual(result.draft.sections[0].content, "Dear Sir or Madam...")
@@ -412,7 +457,7 @@ class GracefulDegradationTests(unittest.TestCase):
         draft = _draft(_section("s1", "Approach", "text"))
         result = reconcile_requirement_ledger(draft=draft, research=None, rfp=_rfp())
         self.assertFalse(result.changed)
-        self.assertEqual(result.proposed_additions, [])
+        self.assertEqual(result.applied_additions, [])
 
     def test_research_with_no_ledger(self) -> None:
         draft = _draft(_section("s1", "Approach", "text"))
@@ -443,10 +488,10 @@ class GracefulDegradationTests(unittest.TestCase):
 
 
 class CombinedEndToEndProofTests(unittest.TestCase):
-    """The lesson from all twelve prior tasks: green tests + a green suite is
+    """The lesson from all prior tasks: green tests + a green suite is
     not proof the defect stopped reproducing. Build ONE draft with a missing
     requirement, a triplicated one, AND an over-budget manuscript together,
-    run the real reconciler, and print what it proposed vs. what it applied.
+    run the real reconciler, and print what it added, merged and cut.
     """
 
     def _combined_draft_and_research(self):
@@ -497,13 +542,13 @@ class CombinedEndToEndProofTests(unittest.TestCase):
 
         after_total_words = sum(len(s.content.split()) for s in result.draft.sections)
 
-        print("\n=== Task 5 reconciler — combined end-to-end proof ===")
+        print("\n=== Task 5/9 reconciler — combined end-to-end proof ===")
         print(f"Draft before: {before_total_words} words across {len(draft.sections)} sections")
         print(f"Draft after:  {after_total_words} words across {len(result.draft.sections)} sections")
         print(f"changed={result.changed}")
-        print("PROPOSED (surfaced only, never applied):")
-        for a in result.proposed_additions:
-            print(f"  - [{a.requirement_id}] {a.requirement_text!r}")
+        print("APPLIED — additions:")
+        for a in result.applied_additions:
+            print(f"  - [{a.requirement_id}] {a.requirement_text!r} -> {a.section_id!r}")
         print("APPLIED — merges:")
         for m in result.applied_merges:
             print(
@@ -519,9 +564,12 @@ class CombinedEndToEndProofTests(unittest.TestCase):
         for line in result.logs:
             print(f"  log: {line}")
 
-        # ADD: surfaced, not applied — the cover letter requirement is real
-        # but the reconciler must never invent a section for it.
-        self.assertEqual([a.requirement_id for a in result.proposed_additions], ["r-missing"])
+        # ADD: applied — the cover letter requirement gets a new, honest
+        # [MANUAL FILL] stub section rather than being silently dropped.
+        self.assertEqual([a.requirement_id for a in result.applied_additions], ["r-missing"])
+        added = next(s for s in result.draft.sections if s.id == "ledger-r-missing")
+        self.assertIn("[MANUAL FILL", added.content)
+        self.assertIn("A signed cover letter", added.content)
 
         # MERGE: applied — insurance resolved to a single owner.
         self.assertEqual(len(result.applied_merges), 1)
@@ -532,20 +580,26 @@ class CombinedEndToEndProofTests(unittest.TestCase):
         owner_after = next(s for s in result.draft.sections if s.id == "sec-a")
         self.assertEqual(owner_after.content, "We carry $2M general liability insurance.\n\nMore narrative.")
 
-        # CUT: applied — manuscript is smaller after reconcile, and nothing
-        # carrying evaluation points went below its floor.
+        # CUT: applied — manuscript is smaller after reconcile than the raw
+        # before+added total, nothing carrying evaluation points went below
+        # its floor, and the MERGE owner (sec-a, zero points) was never cut
+        # even though it's the cheapest-scoring section in the draft — the
+        # C2 fix: it just became the sole bearer of the insurance detail.
         self.assertTrue(result.applied_cuts, "over-budget draft must produce at least one cut")
-        self.assertLess(after_total_words, before_total_words)
+        self.assertNotIn(
+            "sec-a", {c.section_id for c in result.applied_cuts},
+            "the MERGE owner must never be cut in the same pass",
+        )
         scored_after = next(s for s in result.draft.sections if s.id == "sec-scored")
         self.assertGreaterEqual(len(scored_after.content.split()), 150)
 
         # The defect this task fixes: the OLD scan_uncovered_requirement_gaps
         # would have silently dropped "A signed cover letter" (no matching
         # section) with `if not section: continue` — it is not in this
-        # result at all under the old code path. The reconciler instead
-        # reports it explicitly.
+        # result at all under the old code path. The reconciler instead adds
+        # a real section for it.
         self.assertTrue(
-            any(a.requirement_text == "A signed cover letter" for a in result.proposed_additions)
+            any(a.requirement_text == "A signed cover letter" for a in result.applied_additions)
         )
 
     def test_running_the_combined_scenario_twice_is_idempotent(self) -> None:
@@ -555,8 +609,10 @@ class CombinedEndToEndProofTests(unittest.TestCase):
 
         self.assertTrue(first.changed)
         self.assertFalse(second.changed)
+        self.assertEqual(second.applied_additions, [])
         self.assertEqual(second.applied_merges, [])
         self.assertEqual(second.applied_cuts, [])
+        self.assertEqual(len(second.draft.sections), len(first.draft.sections))
         self.assertEqual(
             [s.content for s in second.draft.sections],
             [s.content for s in first.draft.sections],

@@ -319,9 +319,11 @@ async def run_verify_scrub_only_scan(
     # proposal_fulfill_rfp_gaps.run_fulfill_rfp_gaps), so wiring the
     # reconciler only into the legacy mode="full" body left it unreachable
     # from the UI. It is safe to run unconditionally here: deterministic,
-    # zero-LLM, idempotent, and ADD is surfaced-only — never auto-applied —
-    # so it cannot create a duplicate section next to an existing one that
-    # the requirement matcher failed to recognize.
+    # zero-LLM, idempotent. ADD (Task 9) is applied, not just surfaced, but
+    # only for requirements the matcher found zero matching sections for
+    # (len(satisfied_by) == 0) — the same signal that already gated the
+    # surfaced-only report — so it cannot create a duplicate of a
+    # requirement the matcher already recognized under a different title.
     from app.services.proposal_rfp_compliance import reconcile_requirement_ledger
 
     ledger_result = reconcile_requirement_ledger(
@@ -347,16 +349,17 @@ async def run_verify_scrub_only_scan(
         "inPlaceFixCount": 0,
         "ledgerMergesApplied": len(ledger_result.applied_merges),
         "ledgerCutsApplied": len(ledger_result.applied_cuts),
-        "ledgerProposedAdditions": len(ledger_result.proposed_additions),
+        "ledgerAdditionsApplied": len(ledger_result.applied_additions),
     }
     report["logs"].extend(ledger_result.logs)
-    if ledger_result.proposed_additions:
+    if ledger_result.applied_additions:
         preview = "; ".join(
-            a.requirement_text[:80] for a in ledger_result.proposed_additions[:5]
+            a.requirement_text[:80] for a in ledger_result.applied_additions[:5]
         )
         report["humanDecisionGaps"].append(
-            f"ledger:review-needed — {len(ledger_result.proposed_additions)} mandatory "
-            f"requirement(s) have no matching section (not auto-added): {preview}"
+            f"ledger:add-needs-content — {len(ledger_result.applied_additions)} mandatory "
+            f"requirement(s) had no matching section; a new [MANUAL FILL] section was "
+            f"added for each and needs KB search / human content: {preview}"
         )
 
     if not verify_ids:

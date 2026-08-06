@@ -1,4 +1,5 @@
-"""Task 5b: the REAL Scan-RFP button entry point must reach the reconciler.
+"""Task 5b/9: the REAL Scan-RFP button entry point must reach the reconciler,
+and ADD must actually add a section, not just report one.
 
 Root defect (verified at HEAD 9dce731):
 
@@ -11,7 +12,11 @@ Task 5 built ``reconcile_requirement_ledger`` and wired it into
 ``proposal_rfp_compliance.py`` / ``proposal_submission_gap_finalizer.py`` —
 but nothing on the button's actual code path (``mode="verify_scrub_only"``,
 the ONLY mode the frontend ever sends) ever called it. Clicking "SCAN RFP &
-ADD MISSING PIECES" never reached the reconciler.
+ADD MISSING PIECES" never reached the reconciler. Task 5 also shipped ADD
+surfaced-only (matcher measured 6/10 on wording variants) — so even once the
+button reached the reconciler, "ADD MISSING PIECES" never actually added
+anything. Task 9 wires ADD to apply now that the matcher is measured 8/10
+with zero false positives (two unsafe aliases removed this round).
 
 ``test_scan_rfp_reconciler.py`` already proves the reconciler is correct in
 isolation (calling ``reconcile_requirement_ledger`` directly). This file
@@ -116,7 +121,16 @@ class _RealDbTestCase(unittest.IsolatedAsyncioTestCase):
         ]
         ledger = RequirementLedger(
             requirements=[
-                _req("r-missing", "A signed cover letter", satisfiedBy=[]),
+                # Mandatory AND scored — matches the task-9 verification
+                # scenario ("missing a mandatory scored requirement"), and
+                # exercises the scored-first ADD ordering.
+                _req(
+                    "r-missing",
+                    "A signed cover letter",
+                    source="scored_criterion",
+                    points=5.0,
+                    satisfiedBy=[],
+                ),
                 _req(
                     "r-dup",
                     "Proof of insurance",
@@ -176,19 +190,37 @@ class RealVerifyScrubOnlyPathReachesReconcilerTests(_RealDbTestCase):
 
         after_total_words = sum(len(s.content.split()) for s in draft_after.sections)
 
-        print("\n=== Task 5b — REAL verify_scrub_only entry point, first run ===")
+        print("\n=== Task 9 — REAL verify_scrub_only entry point, first run ===")
         print(f"report.mode = {report.get('mode')!r}")
         print(f"before: {before_total_words}w across {len(draft_before.sections)} sections")
         print(f"after:  {after_total_words}w across {len(draft_after.sections)} sections")
+        print(f"ledgerAdditionsApplied={report.get('ledgerAdditionsApplied')}")
         print(f"ledgerMergesApplied={report.get('ledgerMergesApplied')}")
         print(f"ledgerCutsApplied={report.get('ledgerCutsApplied')}")
-        print(f"ledgerProposedAdditions={report.get('ledgerProposedAdditions')}")
         for line in report.get("logs", []):
             print(f"  log: {line}")
         for gap in report.get("humanDecisionGaps", []):
             print(f"  human-decision-gap: {gap}")
 
         self.assertEqual(report.get("mode"), "verify_scrub_only")
+
+        # ADD: applied. A new [MANUAL FILL] stub section is created for the
+        # missing, mandatory, SCORED cover-letter requirement — it can no
+        # longer be silently dropped.
+        self.assertEqual(
+            len(draft_after.sections), 6, "ADD must create exactly one new section"
+        )
+        added = next(s for s in draft_after.sections if s.id == "ledger-r-missing")
+        self.assertIn("[MANUAL FILL", added.content)
+        self.assertIn("A signed cover letter", added.content)
+        self.assertEqual(report.get("ledgerAdditionsApplied"), 1)
+        self.assertTrue(
+            any(
+                "cover letter" in g.casefold()
+                for g in report.get("humanDecisionGaps", [])
+            ),
+            "the added section must still be surfaced as needing human content",
+        )
 
         # MERGE: applied. The insurance requirement (claimed by sec-a/b/c)
         # collapses to a single owner; the others get a cross-reference, not
@@ -201,28 +233,13 @@ class RealVerifyScrubOnlyPathReachesReconcilerTests(_RealDbTestCase):
         self.assertIn("[LEDGER-XREF:r-dup]", sec_c.content)
         self.assertEqual(report.get("ledgerMergesApplied"), 1)
 
-        # CUT: applied. Manuscript shrinks toward the 350-word budget;
-        # scored content is trimmed only after unscored content, and never
-        # below its protected floor.
-        self.assertLess(after_total_words, before_total_words)
+        # CUT: applied. scored content is trimmed only after unscored
+        # content, never below its protected floor, and the MERGE owner
+        # (sec-a) is never cut in the same pass — the C2 fix.
         scored_after = next(s for s in draft_after.sections if s.id == "sec-scored")
         self.assertGreaterEqual(len(scored_after.content.split()), 150)
         self.assertGreaterEqual(report.get("ledgerCutsApplied", 0), 1)
-
-        # ADD: surfaced only, never applied. No new section for the missing
-        # cover letter requirement, but it IS visible in the report so a
-        # human can act on it.
-        self.assertEqual(
-            len(draft_after.sections), 5, "ADD must never create a new section"
-        )
-        self.assertEqual(report.get("ledgerProposedAdditions"), 1)
-        self.assertTrue(
-            any(
-                "cover letter" in g.casefold()
-                for g in report.get("humanDecisionGaps", [])
-            ),
-            "the missing requirement must be surfaced in humanDecisionGaps",
-        )
+        self.assertEqual(sec_a.content, SEC_A_CONTENT, "MERGE owner must never be cut")
 
     async def test_running_the_real_entry_point_twice_is_a_no_op_the_second_time(
         self,
@@ -239,33 +256,37 @@ class RealVerifyScrubOnlyPathReachesReconcilerTests(_RealDbTestCase):
             rfp_id, mode="verify_scrub_only"
         )
 
-        print("\n=== Task 5b — REAL verify_scrub_only entry point, idempotence ===")
+        print("\n=== Task 9 — REAL verify_scrub_only entry point, idempotence ===")
         print(
-            f"first:  merges={report1.get('ledgerMergesApplied')} "
+            f"first:  additions={report1.get('ledgerAdditionsApplied')} "
+            f"merges={report1.get('ledgerMergesApplied')} "
             f"cuts={report1.get('ledgerCutsApplied')}"
         )
         print(
-            f"second: merges={report2.get('ledgerMergesApplied')} "
+            f"second: additions={report2.get('ledgerAdditionsApplied')} "
+            f"merges={report2.get('ledgerMergesApplied')} "
             f"cuts={report2.get('ledgerCutsApplied')}"
         )
 
+        self.assertGreaterEqual(report1.get("ledgerAdditionsApplied", 0), 1)
         self.assertGreaterEqual(report1.get("ledgerMergesApplied", 0), 1)
         self.assertGreaterEqual(report1.get("ledgerCutsApplied", 0), 1)
 
+        # Second run must be a genuine no-op: it must NOT add a second copy
+        # of the same section (the hard idempotence requirement for ADD).
+        self.assertEqual(report2.get("ledgerAdditionsApplied"), 0)
         self.assertEqual(report2.get("ledgerMergesApplied"), 0)
         self.assertEqual(report2.get("ledgerCutsApplied"), 0)
+        self.assertEqual(
+            len(draft2.sections), len(draft1.sections), "must not duplicate the added section"
+        )
         self.assertEqual(
             [s.content for s in draft2.sections],
             [s.content for s in draft1.sections],
             "second run must not change the draft at all",
         )
-        # Proposed additions are still surfaced every run (re-derived from
-        # the ledger, not a mutation) — same count both times.
-        self.assertEqual(
-            report2.get("ledgerProposedAdditions"), report1.get("ledgerProposedAdditions")
-        )
 
-    async def test_missing_requirement_is_surfaced_without_mutating_the_draft(self) -> None:
+    async def test_missing_requirement_is_added_through_the_real_path(self) -> None:
         from app.services.proposal_fulfill_rfp_gaps import run_fulfill_rfp_gaps
 
         rfp_id = "rfp-scan-wiring-add-only"
@@ -291,13 +312,25 @@ class RealVerifyScrubOnlyPathReachesReconcilerTests(_RealDbTestCase):
             rfp_id, mode="verify_scrub_only"
         )
 
-        self.assertEqual(len(draft_after.sections), 1, "ADD must not create a section")
+        self.assertEqual(len(draft_after.sections), 2, "ADD must create exactly one new section")
+        original = next(s for s in draft_after.sections if s.id == "s1")
         self.assertEqual(
-            draft_after.sections[0].content,
+            original.content,
             "Our approach is sound.",
             "the existing section content must be untouched",
         )
-        self.assertEqual(report.get("ledgerProposedAdditions"), 1)
+        added = next(s for s in draft_after.sections if s.id == "ledger-r1")
+        self.assertIn("[MANUAL FILL", added.content)
+        self.assertIn("A signed cover letter", added.content)
+        self.assertEqual(report.get("ledgerAdditionsApplied"), 1)
+
+        # Idempotence: running it again on the now-added draft must not
+        # create a second copy.
+        _review2, _research2, draft_after2, report2 = await run_fulfill_rfp_gaps(
+            rfp_id, mode="verify_scrub_only"
+        )
+        self.assertEqual(len(draft_after2.sections), 2)
+        self.assertEqual(report2.get("ledgerAdditionsApplied"), 0)
 
     async def test_missing_ledger_page_limit_and_empty_ledger_degrade_gracefully(
         self,
@@ -324,7 +357,7 @@ class RealVerifyScrubOnlyPathReachesReconcilerTests(_RealDbTestCase):
         self.assertEqual(draft_after.sections[0].content, "Plain prose, no tags.")
         self.assertEqual(report.get("ledgerMergesApplied"), 0)
         self.assertEqual(report.get("ledgerCutsApplied"), 0)
-        self.assertEqual(report.get("ledgerProposedAdditions"), 0)
+        self.assertEqual(report.get("ledgerAdditionsApplied"), 0)
 
 
 if __name__ == "__main__":

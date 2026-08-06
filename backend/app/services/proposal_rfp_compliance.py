@@ -235,7 +235,7 @@ def scan_uncovered_requirement_gaps(
 
 
 # ---------------------------------------------------------------------------
-# Requirement-ledger reconciler (Task 5).
+# Requirement-ledger reconciler (Task 5, ADD wired in Task 9).
 #
 # scan_uncovered_requirement_gaps above walks research.rfp_sections and skips
 # any requirement with no matching section (`if not section: continue`) — it
@@ -243,19 +243,38 @@ def scan_uncovered_requirement_gaps(
 # budget at all. reconcile_requirement_ledger replaces that section-driven
 # walk with a requirement-driven one over the persisted RequirementLedger:
 #
-#     len(satisfied_by) == 0  -> surfaced as a proposed ADD, never applied
+#     len(satisfied_by) == 0  -> ADD: applied (new stub section, MANUAL FILL)
 #     len(satisfied_by) == 1  -> correct, left alone
 #     len(satisfied_by) >  1  -> MERGE: applied (cross-reference, not restate)
 #     over page budget        -> CUT: applied (lowest-scoring content first)
 #
-# ADD is surfaced-only by design: _match_outline_sections (assembler.py) was
-# measured at 6/10 on realistic wording-variant pairs, so missing() over-
-# reports — a requirement genuinely covered under a different title reads as
-# missing. Auto-adding a section on that signal risks a second "Letter of
-# Transmittal" next to an existing "Cover Letter" — manufacturing the exact
-# duplication this plan removes. MERGE and CUT act on stronger signals
-# (duplicated() found >=2 real matches; page count is measured, not guessed)
-# so they are safe to apply automatically.
+# ADD was surfaced-only through Task 8: _match_outline_sections (assembler.py)
+# was measured at 6/10 on realistic wording-variant pairs, so missing()
+# over-reported — a requirement genuinely covered under a different title
+# read as missing, and auto-adding on that signal risked a second "Letter of
+# Transmittal" next to an existing "Cover Letter". Task 8's alias table (and
+# this round's removal of two unsafe aliases — proposal_section_aliases.py)
+# raised the matcher to a measured 8/10 with zero false positives in every
+# battery, so the precision objection that justified surfaced-only no longer
+# holds. ADD now applies exactly the same len(satisfied_by) == 0 signal
+# missing() already used — only the action changed. The added section is a
+# deterministic [MANUAL FILL] stub (see MANUAL_FILL_MARKER) naming the
+# requirement verbatim; it never invents content and is never mistaken for
+# an open placeholder gap by scan_open_submission_tags. Idempotent by
+# construction: the section id is derived from the requirement id
+# (`ledger-{requirement.id}`), so a requirement that already got a section on
+# a prior pass is skipped, not re-added, even though satisfied_by on the
+# persisted ledger is never mutated to reflect it.
+#
+# MERGE and CUT act on stronger signals (duplicated() found >=2 real matches;
+# page count is measured, not guessed) and were already applied automatically.
+# A section a MERGE resolution designates as owner in THIS pass is exempt
+# from CUT in the same pass — it just became the sole bearer of that
+# requirement's substance (limits, carriers, amounts); trimming it right
+# after could delete the very detail MERGE just consolidated there. Exemption
+# is computed from every duplicate-owner resolution the ledger currently
+# implies (not just the ones that made a fresh edit this run), so it holds on
+# every re-run, not only the first.
 #
 # Pure and deterministic — zero LLM calls, never raises.
 # ---------------------------------------------------------------------------
@@ -277,20 +296,28 @@ _SCORED_SECTION_FLOOR_WORDS = 150
 _UNSCORED_SECTION_FLOOR_WORDS = 50
 
 _LEDGER_XREF_MARKER_TEMPLATE = "[LEDGER-XREF:{requirement_id}]"
+_ADDED_SECTION_ID_TEMPLATE = "ledger-{requirement_id}"
+# Same generic-confirmation owner proposal_manual_flags.py uses for
+# non-bio, non-budget MANUAL FILL handoffs.
+_ADDED_SECTION_MANUAL_FILL_OWNER = "Sonja"
 
 
 @dataclass(frozen=True)
-class ProposedRequirementAddition:
-    """A mandatory ledger requirement no section covers.
+class AppliedRequirementAddition:
+    """A mandatory ledger requirement no section covered — a new stub
+    section was added for it.
 
-    Surfaced for human review ONLY — never auto-applied to the draft. See the
-    module-level note above on why: the matcher behind this signal misses
-    ~4/10 real wording variants, and a false "missing" auto-added as a new
-    section duplicates a requirement that was already covered.
+    Applied, not merely surfaced: see the module-level note above on why ADD
+    graduated from surfaced-only (Task 5) to applied (Task 9) once the
+    matcher behind len(satisfied_by) == 0 was raised to a measured 8/10 with
+    zero false positives. The stub itself never invents facts — it is a
+    [MANUAL FILL] marker naming the requirement verbatim.
     """
 
     requirement_id: str
     requirement_text: str
+    section_id: str
+    section_title: str
     source: str
     points: float | None
     kb_queries: list[str]
@@ -324,7 +351,7 @@ class AppliedCutAction:
 class LedgerReconcileResult:
     draft: ProposalDraft
     changed: bool
-    proposed_additions: list[ProposedRequirementAddition]
+    applied_additions: list[AppliedRequirementAddition]
     applied_merges: list[AppliedMergeAction]
     applied_cuts: list[AppliedCutAction]
     logs: list[str]
@@ -413,6 +440,37 @@ def _trim_trailing_paragraphs(
     return "\n\n".join(kept), removed
 
 
+def _build_added_requirement_section(requirement) -> ProposalSection:
+    """Deterministic stub for a mandatory requirement no section covers.
+
+    Zero LLM calls (net LLM delta stays zero). Names the requirement
+    verbatim inside a [MANUAL FILL] tag — the existing convention
+    scan_open_submission_tags already treats as a legitimate human handoff,
+    not an open placeholder — so a human or a later KB-search pass fills it
+    in without this function ever inventing a fact.
+    """
+    text = (requirement.text or "").strip() or requirement.id
+    content = (
+        f"[MANUAL FILL: {_ADDED_SECTION_MANUAL_FILL_OWNER} — {text[:200]}]\n\n"
+        "No section in the draft addressed this mandatory RFP requirement; "
+        "the requirement-ledger reconciler added this section as a "
+        "placeholder so it cannot silently ship missing. Search the KB for "
+        "supporting facts and replace the tag above before submission — "
+        "never invent the answer."
+    )
+    return ProposalSection(
+        id=_ADDED_SECTION_ID_TEMPLATE.format(requirement_id=requirement.id),
+        title=text[:120],
+        content=content,
+        required=True,
+        custom=True,
+        source="rfp",
+        mode="write",
+        status="outline",
+        word_target=300,
+    )
+
+
 def _section_evaluation_points(ledger: RequirementLedger, section_id: str) -> float:
     return sum(
         r.points
@@ -430,19 +488,21 @@ def reconcile_requirement_ledger(
 ) -> LedgerReconcileResult:
     """Ledger-driven reconciler for an EXISTING draft — fixes it in place
     instead of regenerating it. See the module note above for the three-way
-    read and why ADD is surfaced-only while MERGE/CUT are applied.
+    read: ADD, MERGE and CUT are all applied, with MERGE owners protected
+    from CUT in the same pass.
 
-    Idempotent: a second call on the result of the first finds the merge
-    markers already present and the word count already under budget, so it
-    returns changed=False. Never raises — missing research, a missing or
-    empty ledger, and no resolvable page limit all degrade to a no-op.
+    Idempotent: a second call on the result of the first finds the added
+    sections and merge markers already present and the word count already
+    under budget, so it returns changed=False. Never raises — missing
+    research, a missing or empty ledger, and no resolvable page limit all
+    degrade to a no-op.
     """
     ledger = research.requirement_ledger if research else None
     if not ledger or not ledger.requirements:
         return LedgerReconcileResult(
             draft=draft,
             changed=False,
-            proposed_additions=[],
+            applied_additions=[],
             applied_merges=[],
             applied_cuts=[],
             logs=["ledger: no requirement ledger present — nothing to reconcile"],
@@ -450,29 +510,50 @@ def reconcile_requirement_ledger(
 
     logs: list[str] = []
     sections = list(draft.sections)
-    section_index_by_id = {s.id: i for i, s in enumerate(sections)}
     changed = False
 
-    # ADD — surfaced only, never applied.
-    proposed_additions = [
-        ProposedRequirementAddition(
-            requirement_id=r.id,
-            requirement_text=r.text,
-            source=r.source,
-            points=r.points,
-            kb_queries=list(r.kb_queries),
+    # ADD — applied. len(satisfied_by) == 0, the exact signal missing() used
+    # when ADD was surfaced-only; scored requirements (points set) are added
+    # first so a partially-applied pass (e.g. a future size cap) favors the
+    # requirements that carry evaluation weight.
+    applied_additions: list[AppliedRequirementAddition] = []
+    existing_section_ids = {s.id for s in sections}
+    missing_requirements = sorted(
+        ledger.missing(),
+        key=lambda r: (r.points is None, -(r.points or 0.0)),
+    )
+    for requirement in missing_requirements:
+        section_id = _ADDED_SECTION_ID_TEMPLATE.format(requirement_id=requirement.id)
+        if section_id in existing_section_ids:
+            continue  # idempotent: already added on a prior run
+        new_section = _build_added_requirement_section(requirement)
+        sections.append(new_section)
+        existing_section_ids.add(section_id)
+        changed = True
+        applied_additions.append(
+            AppliedRequirementAddition(
+                requirement_id=requirement.id,
+                requirement_text=requirement.text,
+                section_id=new_section.id,
+                section_title=new_section.title,
+                source=requirement.source,
+                points=requirement.points,
+                kb_queries=list(requirement.kb_queries),
+            )
         )
-        for r in ledger.missing()
-    ]
-    if proposed_additions:
+    if applied_additions:
         logs.append(
-            f"ledger:add — {len(proposed_additions)} mandatory requirement(s) have no "
-            "matching section; surfaced for review, NOT auto-added."
+            f"ledger:add — {len(applied_additions)} mandatory requirement(s) had no "
+            "matching section; added as new draft section(s) flagged [MANUAL FILL] "
+            "for KB search / human content."
         )
+
+    section_index_by_id = {s.id: i for i, s in enumerate(sections)}
 
     # MERGE — applied. Acts on duplicated(), a stronger signal than missing():
     # the matcher found >=2 real section matches, not zero.
     applied_merges: list[AppliedMergeAction] = []
+    protected_owner_ids: set[str] = set()
     from app.services.proposal_intelligence.assembler import resolve_duplicate_owners
 
     _, resolutions = resolve_duplicate_owners(
@@ -484,6 +565,12 @@ def reconcile_requirement_ledger(
         )
         if not owner:
             continue
+        # Every resolution's owner is protected from CUT below, whether or
+        # not this particular run has any fresh cross-reference edit to make
+        # for it — an idempotent no-op MERGE pass must still protect the
+        # same owner CUT would have seen on the run that actually wrote the
+        # cross-reference markers.
+        protected_owner_ids.add(owner.id)
         cross_ref_ids: list[str] = []
         for cross_id in resolution.cross_reference_section_ids:
             section = _resolve_draft_section_by_id(sections, research, cross_id)
@@ -522,7 +609,9 @@ def reconcile_requirement_ledger(
         )
 
     # CUT — applied. Lowest-scoring content first; a section carrying
-    # evaluation points is never cut below its floor.
+    # evaluation points is never cut below its floor; a section this pass's
+    # MERGE made the sole owner of a requirement's detail is never cut at
+    # all in the same pass (see module note above).
     applied_cuts: list[AppliedCutAction] = []
     page_limit = resolve_page_limit(getattr(rfp, "page_limit", None), rfp_text)
     if page_limit and page_limit > 0:
@@ -542,6 +631,14 @@ def reconcile_requirement_ledger(
                 if remaining <= 0:
                     break
                 section = sections[idx]
+                if section.id in protected_owner_ids:
+                    logs.append(
+                        f"ledger:cut — declined to trim {section.title!r} "
+                        f"({section.id}): this pass's MERGE made it the sole "
+                        "bearer of a consolidated requirement's detail; "
+                        "protected from cutting in the same pass."
+                    )
+                    continue
                 points = _section_evaluation_points(ledger, section.id)
                 floor = (
                     _SCORED_SECTION_FLOOR_WORDS
@@ -584,7 +681,7 @@ def reconcile_requirement_ledger(
         return LedgerReconcileResult(
             draft=draft,
             changed=False,
-            proposed_additions=proposed_additions,
+            applied_additions=[],
             applied_merges=[],
             applied_cuts=[],
             logs=logs,
@@ -595,7 +692,7 @@ def reconcile_requirement_ledger(
     return LedgerReconcileResult(
         draft=new_draft,
         changed=True,
-        proposed_additions=proposed_additions,
+        applied_additions=applied_additions,
         applied_merges=applied_merges,
         applied_cuts=applied_cuts,
         logs=logs,

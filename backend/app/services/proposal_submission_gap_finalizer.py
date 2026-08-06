@@ -284,13 +284,14 @@ async def run_submission_gap_finalize_pass(
         draft = ledger_result.draft
         await asave_proposal_draft(draft)
     logs.extend(ledger_result.logs)
-    if ledger_result.proposed_additions:
+    if ledger_result.applied_additions:
         preview = "; ".join(
-            a.requirement_text[:80] for a in ledger_result.proposed_additions[:5]
+            a.requirement_text[:80] for a in ledger_result.applied_additions[:5]
         )
         logs.append(
-            f"ledger:review-needed — {len(ledger_result.proposed_additions)} mandatory "
-            f"requirement(s) have no matching section (not auto-added): {preview}"
+            f"ledger:add-needs-content — {len(ledger_result.applied_additions)} mandatory "
+            f"requirement(s) had no matching section; added as new [MANUAL FILL] "
+            f"section(s): {preview}"
         )
 
     gaps = scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
@@ -423,15 +424,15 @@ async def run_requirement_ledger_reconcile_pass(
     research: ProposalResearchCache | None = None,
     rfp_text: str | None = None,
 ) -> LedgerReconcileResult:
-    """Standalone entry point for the Task 5 reconciler.
+    """Standalone entry point for the Task 5/9 reconciler.
 
     ``run_submission_gap_finalize_pass`` already calls this internally on
     every invocation, so callers that only need the KB-fill/VERIFY-scrub
     pipeline don't need this. This exists for a caller that wants the
-    structured result on its own — e.g. a future "review proposed additions"
-    panel — where ``LedgerReconcileResult.proposed_additions`` (never
-    applied) must stay visibly distinct from ``applied_merges`` /
-    ``applied_cuts`` (already saved to the draft).
+    structured result on its own — e.g. a review panel that wants to show
+    ``LedgerReconcileResult.applied_additions`` (new [MANUAL FILL] stub
+    sections, saved to the draft, still needing human content) distinctly
+    from ``applied_merges`` / ``applied_cuts``.
     """
     if rfp is None:
         rfp, _, _ = await aload_rfp_for_proposal(rfp_id)
