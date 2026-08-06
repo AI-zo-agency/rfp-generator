@@ -195,5 +195,120 @@ class KvccReproductionTests(unittest.TestCase):
         self.assertEqual(added_titles, {"Provide a detailed project schedule with milestones"})
 
 
+class PersistedLedgerStaleClassificationTests(unittest.TestCase):
+    """Task 18: the classifier fix above only helps a ledger BUILT after it
+    shipped. Every real proposal has a ledger built and persisted BEFORE
+    0c7139f — reconcile_requirement_ledger read research.requirement_ledger
+    completely as-is, so the five real KVCC items stayed labelled
+    source="required_content" (the pre-fix classification) forever, and kept
+    showing up in the banner as declined section additions instead of the
+    submission-instructions checklist. Live evidence: ledger_additions_
+    declined=8 on a KVCC scan run well after 0c7139f landed.
+
+    Reproduces the bug by persisting a ledger with the OLD label directly
+    (bypassing build_requirement_ledger, which would classify correctly) —
+    exactly what research.requirement_ledger looks like for every existing
+    proposal today."""
+
+    def _stale_ledger(self) -> RequirementLedger:
+        # source="required_content" is the OLD (pre-0c7139f) label every one
+        # of these five real items was persisted with — reproduced verbatim,
+        # not re-derived from the current classifier.
+        requirements = [
+            LedgerRequirement(
+                id=f"admin-{i}",
+                text=text,
+                source="required_content",
+                mandatory=True,
+            )
+            for i, text in enumerate(REAL_ADMINISTRATIVE_ITEMS_FROM_INCIDENT)
+        ]
+        return RequirementLedger(requirements=requirements)
+
+    def test_stale_required_content_labels_are_reclassified_on_reconcile(self) -> None:
+        ledger = self._stale_ledger()
+        draft = _draft(_section("s1", "Approach"))
+        research = _research(ledger)
+
+        result = reconcile_requirement_ledger(draft=draft, research=research, rfp=_rfp())
+
+        # The five items must now surface as the submission-instructions
+        # compliance checklist, not as declined/attempted section additions.
+        advisory_texts = {a.requirement_text for a in result.advisory_submission_instructions}
+        self.assertEqual(advisory_texts, set(REAL_ADMINISTRATIVE_ITEMS_FROM_INCIDENT))
+        self.assertEqual(
+            result.applied_additions,
+            [],
+            "re-classified administrative items must never be auto-added",
+        )
+        self.assertEqual(
+            result.declined_addition_count,
+            0,
+            "re-classified administrative items must not even be attempted as "
+            "additions, let alone declined",
+        )
+
+        # The corrected ledger must be handed back for the caller to persist
+        # (proposal_verify_optional_scrub.py's `if ledger_result.built_ledger
+        # is not None` gate) so the NEXT scan reads the fix straight from
+        # storage instead of re-deriving it every time.
+        self.assertIsNotNone(result.built_ledger)
+        corrected_sources = {r.text: r.source for r in result.built_ledger.requirements}
+        for text in REAL_ADMINISTRATIVE_ITEMS_FROM_INCIDENT:
+            self.assertEqual(corrected_sources[text], "submission_instruction", text)
+
+        # Only `source` changed — id/text/mandatory/satisfied_by/points must
+        # be byte-for-byte identical to the persisted (stale) ledger, since
+        # the reconciler depends on that state for idempotence.
+        original_by_id = {r.id: r for r in ledger.requirements}
+        for corrected in result.built_ledger.requirements:
+            original = original_by_id[corrected.id]
+            self.assertEqual(corrected.text, original.text)
+            self.assertEqual(corrected.mandatory, original.mandatory)
+            self.assertEqual(corrected.points, original.points)
+            self.assertEqual(corrected.satisfied_by, original.satisfied_by)
+            self.assertEqual(corrected.kb_queries, original.kb_queries)
+
+    def test_reclassification_is_idempotent_on_a_second_scan(self) -> None:
+        """A second scan re-classifies to the same values and reports no
+        change — the ledger returned by the first call is already correctly
+        classified, so re-running against IT must be a true no-op."""
+        ledger = self._stale_ledger()
+        draft = _draft(_section("s1", "Approach"))
+        research = _research(ledger)
+
+        first = reconcile_requirement_ledger(draft=draft, research=research, rfp=_rfp())
+        self.assertIsNotNone(first.built_ledger)
+
+        research_after_first_scan = _research(first.built_ledger)
+        second = reconcile_requirement_ledger(
+            draft=first.draft, research=research_after_first_scan, rfp=_rfp()
+        )
+
+        self.assertIsNone(
+            second.built_ledger,
+            "already-correct source classifications must not be reported as "
+            "changed or re-persisted on a second scan",
+        )
+        second_sources = {a.requirement_text for a in second.advisory_submission_instructions}
+        first_sources = {a.requirement_text for a in first.advisory_submission_instructions}
+        self.assertEqual(second_sources, first_sources)
+
+    def test_a_ledger_requirement_missing_classifier_fields_does_not_raise(self) -> None:
+        """Degrade gracefully: a requirement the classifier can't evaluate
+        must never crash the scan — it just keeps its persisted source."""
+        ledger = RequirementLedger(
+            requirements=[
+                LedgerRequirement(id="r1", text="", source="required_content", mandatory=True),
+            ]
+        )
+        draft = _draft(_section("s1", "Approach"))
+        research = _research(ledger)
+
+        # Must not raise.
+        result = reconcile_requirement_ledger(draft=draft, research=research, rfp=_rfp())
+        self.assertIsInstance(result, object)
+
+
 if __name__ == "__main__":
     unittest.main()

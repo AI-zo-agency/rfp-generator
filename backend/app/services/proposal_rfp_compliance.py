@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
-from app.models.requirement_ledger import RequirementLedger
+from app.models.requirement_ledger import LedgerRequirement, RequirementLedger
 from app.models.rfp import RfpRecord
 from app.services.proposal_budget_content import find_budget_section_index
 from app.services.proposal_budget_validation import (
@@ -480,11 +480,16 @@ class LedgerReconcileResult:
     declined_addition_count: int = 0
     declined_addition_titles: list[str] = field(default_factory=list)
     declined_addition_reason: str | None = None
-    # Set only when research.requirement_ledger was missing/empty and this
-    # call built one on demand (see _build_ledger_on_demand below) — the
-    # caller persists it onto the research cache so the NEXT scan reads it
-    # back instead of rebuilding it every time. None on every other path,
-    # including "ledger present, nothing to reconcile".
+    # Set whenever this call produced a ledger the caller should persist back
+    # onto research.requirement_ledger, in either of two cases: (1)
+    # research.requirement_ledger was missing/empty and this call built one
+    # on demand (see _build_ledger_on_demand below), or (2) a ledger WAS
+    # persisted but had stale source classification(s) from before a
+    # classifier fix, corrected in place (see _reclassify_persisted_ledger
+    # below). Either way the caller persists it so the NEXT scan reads the
+    # corrected/built ledger back instead of redoing the work every time.
+    # None on every other path, including "ledger present and already
+    # correctly classified — nothing to reconcile".
     built_ledger: RequirementLedger | None = None
     # Set only when the reconcile could not run at all — no persisted ledger
     # AND nothing to build one from. Distinguishes "checked and found nothing
@@ -695,6 +700,84 @@ def _build_ledger_on_demand(
     )
 
 
+# Sources _classify_compliance_source can actually produce for a compliance-
+# matrix item (see its body in proposal_intelligence/assembler.py).
+# "scored_criterion" is set explicitly by build_requirement_ledger for
+# evaluation criteria — the classifier is never consulted for those — and
+# "eligibility" is reserved/unused (see requirement_ledger.py's module note).
+# Re-classifying either would run a matcher over text it was never designed
+# to judge, so _reclassify_persisted_ledger below leaves both untouched.
+_RECLASSIFIABLE_SOURCES = frozenset({"required_content", "form", "submission_instruction"})
+
+
+def _reclassify_persisted_ledger(
+    ledger: RequirementLedger,
+) -> tuple[RequirementLedger, int]:
+    """Re-run the CURRENT _classify_compliance_source matcher over a ledger
+    that was already persisted onto research.requirement_ledger, so a
+    classifier fix (e.g. the submission_instruction patterns added alongside
+    _ADD_ELIGIBLE_SOURCES — see that module note) reaches every EXISTING
+    proposal instead of only ones whose ledger gets built fresh after the fix
+    ships.
+
+    build_requirement_ledger only ever runs _classify_compliance_source once,
+    at Phase 2 build time. reconcile_requirement_ledger's normal path then
+    reads research.requirement_ledger completely as-is, so a persisted
+    "required_content" label assigned BEFORE a classifier fix never gets
+    corrected — every real proposal a live user opens predates whatever
+    classifier fix shipped most recently. Same defect shape
+    _build_ledger_on_demand fixed for a MISSING ledger, applied here to a
+    STALE one.
+
+    Only re-classifies sources the classifier can actually produce — see
+    _RECLASSIFIABLE_SOURCES. Re-classifies ``source`` ONLY: ``satisfied_by``,
+    ``points``, ``id``, ``mandatory`` and ``kb_queries`` are left
+    byte-for-byte untouched on every requirement, changed or not — the
+    reconciler depends on that state (matcher results, evaluation weight)
+    for idempotence, and none of it is a function of source classification.
+
+    Never raises: a requirement the classifier can't evaluate (missing text,
+    or any other error probing it) keeps its persisted source unchanged
+    rather than blocking the scan, same as build_requirement_ledger's own
+    per-item try/except.
+
+    Returns ``(ledger, 0)`` — the SAME ledger object, unchanged — when every
+    requirement's persisted source already matches the current classifier,
+    so a second scan (or a proposal whose ledger was already built post-fix)
+    is a true no-op: nothing to log, nothing new to persist. Otherwise
+    returns a new ``RequirementLedger`` with only the reclassified
+    requirements replaced, and the count of requirements that changed.
+    """
+    from app.services.proposal_intelligence.assembler import _classify_compliance_source
+    from app.services.proposal_intelligence.schemas import ComplianceItem
+
+    changed_count = 0
+    updated: list[LedgerRequirement] = []
+    for requirement in ledger.requirements:
+        if requirement.source not in _RECLASSIFIABLE_SOURCES:
+            updated.append(requirement)
+            continue
+        try:
+            probe = ComplianceItem(
+                id=requirement.id or "probe",
+                requirement=requirement.text or "",
+                evidence_needed=(requirement.kb_queries[0] if requirement.kb_queries else ""),
+            )
+            new_source = _classify_compliance_source(probe)
+        except Exception:  # noqa: BLE001 — malformed persisted entry keeps its label
+            updated.append(requirement)
+            continue
+        if new_source == requirement.source:
+            updated.append(requirement)
+            continue
+        changed_count += 1
+        updated.append(requirement.model_copy(update={"source": new_source}))
+
+    if changed_count == 0:
+        return ledger, 0
+    return RequirementLedger(requirements=updated), changed_count
+
+
 def reconcile_requirement_ledger(
     *,
     draft: ProposalDraft,
@@ -741,6 +824,24 @@ def reconcile_requirement_ledger(
         )
         ledger = on_demand_ledger
         built_ledger = on_demand_ledger
+    else:
+        # Ledger IS persisted — but a persisted ledger can still carry STALE
+        # source classifications from before a classifier fix shipped (see
+        # _reclassify_persisted_ledger's docstring). Re-classify before this
+        # pass's ADD/advisory logic reads `source`, so the fix reaches this
+        # already-existing proposal, not only ones whose ledger is built
+        # fresh from here on.
+        reclassified_ledger, reclassified_count = _reclassify_persisted_ledger(ledger)
+        if reclassified_count:
+            logger.info(
+                "ledger:reconcile rfp_id=%s persisted ledger had %d stale "
+                "source classification(s) — re-classified with the current "
+                "matcher before reconciling",
+                getattr(rfp, "id", None),
+                reclassified_count,
+            )
+            ledger = reclassified_ledger
+            built_ledger = reclassified_ledger
 
     logs: list[str] = []
     sections = list(draft.sections)
