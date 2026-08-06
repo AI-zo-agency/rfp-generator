@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
+from app.models.requirement_ledger import RequirementLedger
 from app.models.rfp import RfpRecord
 from app.services.proposal_budget_content import find_budget_section_index
 from app.services.proposal_budget_validation import (
     derive_commission_agency_revenue,
     is_commission_style_budget,
 )
+from app.services.rfp_page_limit import resolve_page_limit
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +232,374 @@ def scan_uncovered_requirement_gaps(
             )
 
     return gaps[:15]
+
+
+# ---------------------------------------------------------------------------
+# Requirement-ledger reconciler (Task 5).
+#
+# scan_uncovered_requirement_gaps above walks research.rfp_sections and skips
+# any requirement with no matching section (`if not section: continue`) — it
+# structurally cannot ADD anything, and it never checks duplication or page
+# budget at all. reconcile_requirement_ledger replaces that section-driven
+# walk with a requirement-driven one over the persisted RequirementLedger:
+#
+#     len(satisfied_by) == 0  -> surfaced as a proposed ADD, never applied
+#     len(satisfied_by) == 1  -> correct, left alone
+#     len(satisfied_by) >  1  -> MERGE: applied (cross-reference, not restate)
+#     over page budget        -> CUT: applied (lowest-scoring content first)
+#
+# ADD is surfaced-only by design: _match_outline_sections (assembler.py) was
+# measured at 6/10 on realistic wording-variant pairs, so missing() over-
+# reports — a requirement genuinely covered under a different title reads as
+# missing. Auto-adding a section on that signal risks a second "Letter of
+# Transmittal" next to an existing "Cover Letter" — manufacturing the exact
+# duplication this plan removes. MERGE and CUT act on stronger signals
+# (duplicated() found >=2 real matches; page count is measured, not guessed)
+# so they are safe to apply automatically.
+#
+# Pure and deterministic — zero LLM calls, never raises.
+# ---------------------------------------------------------------------------
+
+# Same 350-words/page ratio as proposal_drafting_graph.WORDS_PER_PAGE /
+# proposal_presubmit_review's page-limit check. Duplicated as a local
+# constant rather than imported: proposal_drafting_graph.py pulls in
+# langgraph, and this module is imported by many lightweight consumers
+# (self_edit_loop, presubmit_review, ending_report, manual_flags) that only
+# need ComplianceGap. Matches proposal_presubmit_review.py's existing
+# precedent of hardcoding the same ratio rather than importing it.
+_WORDS_PER_PAGE = 350
+# A section carrying evaluation points must never be cut below this — same
+# value as proposal_drafting_graph.MIN_SECTION_WORDS, the floor generation
+# already uses so a page-budget response still reads as a real answer.
+_SCORED_SECTION_FLOOR_WORDS = 150
+# Content with no scored requirement attached is the lowest priority to keep
+# — same value as proposal_drafting_graph.ABSOLUTE_MIN_SECTION_WORDS.
+_UNSCORED_SECTION_FLOOR_WORDS = 50
+
+_LEDGER_XREF_MARKER_TEMPLATE = "[LEDGER-XREF:{requirement_id}]"
+
+
+@dataclass(frozen=True)
+class ProposedRequirementAddition:
+    """A mandatory ledger requirement no section covers.
+
+    Surfaced for human review ONLY — never auto-applied to the draft. See the
+    module-level note above on why: the matcher behind this signal misses
+    ~4/10 real wording variants, and a false "missing" auto-added as a new
+    section duplicates a requirement that was already covered.
+    """
+
+    requirement_id: str
+    requirement_text: str
+    source: str
+    points: float | None
+    kb_queries: list[str]
+
+
+@dataclass(frozen=True)
+class AppliedMergeAction:
+    """A requirement claimed by more than one section, resolved to a single
+    owner. The other sections keep a cross-reference marker instead of
+    restating the requirement's substance."""
+
+    requirement_id: str
+    requirement_text: str
+    owner_section_id: str
+    owner_section_title: str
+    cross_reference_section_ids: list[str]
+    note: str
+
+
+@dataclass(frozen=True)
+class AppliedCutAction:
+    """Trailing content trimmed from one section to fit the RFP's page budget."""
+
+    section_id: str
+    section_title: str
+    words_removed: int
+    had_evaluation_points: bool
+
+
+@dataclass(frozen=True)
+class LedgerReconcileResult:
+    draft: ProposalDraft
+    changed: bool
+    proposed_additions: list[ProposedRequirementAddition]
+    applied_merges: list[AppliedMergeAction]
+    applied_cuts: list[AppliedCutAction]
+    logs: list[str]
+
+
+def _word_count(text: str | None) -> int:
+    return len((text or "").split())
+
+
+def _cross_reference_marker(requirement_id: str) -> str:
+    return _LEDGER_XREF_MARKER_TEMPLATE.format(requirement_id=requirement_id)
+
+
+def _append_cross_reference(
+    content: str,
+    *,
+    requirement_id: str,
+    requirement_text: str,
+    owner_title: str,
+) -> str:
+    marker = _cross_reference_marker(requirement_id)
+    note = (
+        f"\n\n{marker} _Cross-reference: “{requirement_text[:160].strip()}” is "
+        f"fully addressed in “{owner_title}” — see that section; not "
+        "restated here to avoid duplication._"
+    )
+    return (content or "").rstrip() + note
+
+
+def _resolve_draft_section_by_id(
+    sections: list[ProposalSection],
+    research: ProposalResearchCache | None,
+    section_id: str,
+) -> ProposalSection | None:
+    """Ledger satisfied_by ids are RfpSectionMap ids. Those match ProposalSection
+    ids by construction within one generation pass, but can drift after an
+    independent research/draft reload — fall back to the same title-matching
+    _section_for_mapped_title already uses at the compliance-scan boundary."""
+    for section in sections:
+        if section.id == section_id:
+            return section
+    if not research:
+        return None
+    mapped = next((m for m in research.rfp_sections if m.id == section_id), None)
+    if not mapped:
+        return None
+    title_key = (mapped.title or "").strip().casefold()
+    if title_key:
+        for section in sections:
+            if (section.title or "").strip().casefold() == title_key:
+                return section
+    words = _words_from_title(mapped.title or "")
+    if not words:
+        return None
+    for section in sections:
+        title_cf = (section.title or "").casefold()
+        if any(word in title_cf for word in words):
+            return section
+    return None
+
+
+def _trim_trailing_paragraphs(
+    content: str,
+    *,
+    max_words_to_remove: int,
+    floor_words: int,
+) -> tuple[str, int]:
+    """Drop whole trailing paragraphs (never mid-sentence, never the last
+    paragraph, never below floor_words total)."""
+    paragraphs = [p for p in (content or "").split("\n\n") if p.strip()]
+    if len(paragraphs) <= 1 or max_words_to_remove <= 0:
+        return content, 0
+    total_words = sum(_word_count(p) for p in paragraphs)
+    kept = list(paragraphs)
+    removed = 0
+    while len(kept) > 1:
+        last_words = _word_count(kept[-1])
+        if removed + last_words > max_words_to_remove:
+            break
+        if total_words - removed - last_words < floor_words:
+            break
+        kept.pop()
+        removed += last_words
+    if removed <= 0:
+        return content, 0
+    return "\n\n".join(kept), removed
+
+
+def _section_evaluation_points(ledger: RequirementLedger, section_id: str) -> float:
+    return sum(
+        r.points
+        for r in ledger.requirements
+        if r.points and section_id in r.satisfied_by
+    )
+
+
+def reconcile_requirement_ledger(
+    *,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    rfp: RfpRecord,
+    rfp_text: str | None = None,
+) -> LedgerReconcileResult:
+    """Ledger-driven reconciler for an EXISTING draft — fixes it in place
+    instead of regenerating it. See the module note above for the three-way
+    read and why ADD is surfaced-only while MERGE/CUT are applied.
+
+    Idempotent: a second call on the result of the first finds the merge
+    markers already present and the word count already under budget, so it
+    returns changed=False. Never raises — missing research, a missing or
+    empty ledger, and no resolvable page limit all degrade to a no-op.
+    """
+    ledger = research.requirement_ledger if research else None
+    if not ledger or not ledger.requirements:
+        return LedgerReconcileResult(
+            draft=draft,
+            changed=False,
+            proposed_additions=[],
+            applied_merges=[],
+            applied_cuts=[],
+            logs=["ledger: no requirement ledger present — nothing to reconcile"],
+        )
+
+    logs: list[str] = []
+    sections = list(draft.sections)
+    section_index_by_id = {s.id: i for i, s in enumerate(sections)}
+    changed = False
+
+    # ADD — surfaced only, never applied.
+    proposed_additions = [
+        ProposedRequirementAddition(
+            requirement_id=r.id,
+            requirement_text=r.text,
+            source=r.source,
+            points=r.points,
+            kb_queries=list(r.kb_queries),
+        )
+        for r in ledger.missing()
+    ]
+    if proposed_additions:
+        logs.append(
+            f"ledger:add — {len(proposed_additions)} mandatory requirement(s) have no "
+            "matching section; surfaced for review, NOT auto-added."
+        )
+
+    # MERGE — applied. Acts on duplicated(), a stronger signal than missing():
+    # the matcher found >=2 real section matches, not zero.
+    applied_merges: list[AppliedMergeAction] = []
+    from app.services.proposal_intelligence.assembler import resolve_duplicate_owners
+
+    _, resolutions = resolve_duplicate_owners(
+        ledger, research.rfp_sections if research else []
+    )
+    for resolution in resolutions:
+        owner = _resolve_draft_section_by_id(
+            sections, research, resolution.owner_section_id
+        )
+        if not owner:
+            continue
+        cross_ref_ids: list[str] = []
+        for cross_id in resolution.cross_reference_section_ids:
+            section = _resolve_draft_section_by_id(sections, research, cross_id)
+            if not section:
+                continue
+            marker = _cross_reference_marker(resolution.requirement_id)
+            if marker in (section.content or ""):
+                continue  # idempotent: already merged on a prior run
+            idx = section_index_by_id.get(section.id)
+            if idx is None:
+                continue
+            new_content = _append_cross_reference(
+                section.content or "",
+                requirement_id=resolution.requirement_id,
+                requirement_text=resolution.requirement_text,
+                owner_title=owner.title,
+            )
+            sections[idx] = section.model_copy(update={"content": new_content})
+            cross_ref_ids.append(section.id)
+            changed = True
+        if cross_ref_ids:
+            applied_merges.append(
+                AppliedMergeAction(
+                    requirement_id=resolution.requirement_id,
+                    requirement_text=resolution.requirement_text,
+                    owner_section_id=owner.id,
+                    owner_section_title=owner.title,
+                    cross_reference_section_ids=cross_ref_ids,
+                    note=resolution.note,
+                )
+            )
+    if applied_merges:
+        logs.append(
+            f"ledger:merge — {len(applied_merges)} duplicated requirement(s) resolved to "
+            "a single owner; cross-referenced elsewhere, not restated."
+        )
+
+    # CUT — applied. Lowest-scoring content first; a section carrying
+    # evaluation points is never cut below its floor.
+    applied_cuts: list[AppliedCutAction] = []
+    page_limit = resolve_page_limit(getattr(rfp, "page_limit", None), rfp_text)
+    if page_limit and page_limit > 0:
+        budget_words = page_limit * _WORDS_PER_PAGE
+        current_words = sum(_word_count(s.content) for s in sections)
+        overage = current_words - budget_words
+        if overage > 0:
+            ordered_indexes = sorted(
+                range(len(sections)),
+                key=lambda i: (
+                    _section_evaluation_points(ledger, sections[i].id),
+                    -_word_count(sections[i].content),
+                ),
+            )
+            remaining = overage
+            for idx in ordered_indexes:
+                if remaining <= 0:
+                    break
+                section = sections[idx]
+                points = _section_evaluation_points(ledger, section.id)
+                floor = (
+                    _SCORED_SECTION_FLOOR_WORDS
+                    if points > 0
+                    else _UNSCORED_SECTION_FLOOR_WORDS
+                )
+                new_content, removed = _trim_trailing_paragraphs(
+                    section.content or "",
+                    max_words_to_remove=remaining,
+                    floor_words=floor,
+                )
+                if removed <= 0:
+                    continue
+                sections[idx] = section.model_copy(update={"content": new_content})
+                remaining -= removed
+                changed = True
+                applied_cuts.append(
+                    AppliedCutAction(
+                        section_id=section.id,
+                        section_title=section.title,
+                        words_removed=removed,
+                        had_evaluation_points=points > 0,
+                    )
+                )
+            if applied_cuts:
+                total_removed = sum(c.words_removed for c in applied_cuts)
+                logs.append(
+                    f"ledger:cut — removed {total_removed} word(s) across "
+                    f"{len(applied_cuts)} section(s) to fit the {page_limit}-page budget "
+                    f"({budget_words} words)."
+                )
+            if remaining > 0:
+                logs.append(
+                    f"ledger:cut — still {remaining} word(s) over budget after trimming "
+                    "to protected floors; no further content is safe to remove "
+                    "automatically."
+                )
+
+    if not changed:
+        return LedgerReconcileResult(
+            draft=draft,
+            changed=False,
+            proposed_additions=proposed_additions,
+            applied_merges=[],
+            applied_cuts=[],
+            logs=logs,
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+    new_draft = draft.model_copy(update={"sections": sections, "updated_at": now})
+    return LedgerReconcileResult(
+        draft=new_draft,
+        changed=True,
+        proposed_additions=proposed_additions,
+        applied_merges=applied_merges,
+        applied_cuts=applied_cuts,
+        logs=logs,
+    )
 
 
 def scan_budget_revenue_gaps(

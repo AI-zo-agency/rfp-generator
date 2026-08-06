@@ -24,7 +24,12 @@ from app.services.proposal_repository import (
 )
 from app.services.proposal_retrieval_gap_fill import _merge_hits, _search_throttled
 from app.services.proposal_retrieval_graph import EXCERPT_MAX_CHARS, _hit_excerpt, _hit_label
-from app.services.proposal_rfp_compliance import ComplianceGap, scan_rfp_compliance_gaps
+from app.services.proposal_rfp_compliance import (
+    ComplianceGap,
+    LedgerReconcileResult,
+    reconcile_requirement_ledger,
+    scan_rfp_compliance_gaps,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +273,26 @@ async def run_submission_gap_finalize_pass(
     research = research if research is not None else await aget_research_cache(rfp_id)
 
     logs: list[str] = []
+
+    # Ledger reconcile runs first and unconditionally — it acts on
+    # duplication and page-budget signals that scan_rfp_compliance_gaps below
+    # never checks at all, so gating it behind "gaps" would skip it on a
+    # draft with zero legacy compliance gaps but triplicated insurance
+    # language. See proposal_rfp_compliance.reconcile_requirement_ledger.
+    ledger_result = reconcile_requirement_ledger(draft=draft, research=research, rfp=rfp)
+    if ledger_result.changed:
+        draft = ledger_result.draft
+        await asave_proposal_draft(draft)
+    logs.extend(ledger_result.logs)
+    if ledger_result.proposed_additions:
+        preview = "; ".join(
+            a.requirement_text[:80] for a in ledger_result.proposed_additions[:5]
+        )
+        logs.append(
+            f"ledger:review-needed — {len(ledger_result.proposed_additions)} mandatory "
+            f"requirement(s) have no matching section (not auto-added): {preview}"
+        )
+
     gaps = scan_rfp_compliance_gaps(draft=draft, research=research, rfp=rfp)
     if not gaps:
         logger.info("Gap finalize for %s: no compliance gaps", rfp_id)
@@ -388,6 +413,41 @@ async def run_submission_gap_finalize_pass(
 
     await asave_proposal_draft(draft)
     return draft, logs, research
+
+
+async def run_requirement_ledger_reconcile_pass(
+    rfp_id: str,
+    *,
+    rfp: RfpRecord | None = None,
+    draft: ProposalDraft | None = None,
+    research: ProposalResearchCache | None = None,
+    rfp_text: str | None = None,
+) -> LedgerReconcileResult:
+    """Standalone entry point for the Task 5 reconciler.
+
+    ``run_submission_gap_finalize_pass`` already calls this internally on
+    every invocation, so callers that only need the KB-fill/VERIFY-scrub
+    pipeline don't need this. This exists for a caller that wants the
+    structured result on its own — e.g. a future "review proposed additions"
+    panel — where ``LedgerReconcileResult.proposed_additions`` (never
+    applied) must stay visibly distinct from ``applied_merges`` /
+    ``applied_cuts`` (already saved to the draft).
+    """
+    if rfp is None:
+        rfp, _, _ = await aload_rfp_for_proposal(rfp_id)
+    draft = draft or await aget_proposal_draft(rfp_id)
+    if not draft:
+        raise ProposalError(
+            "No proposal draft for requirement ledger reconcile.", status_code=400
+        )
+    research = research if research is not None else await aget_research_cache(rfp_id)
+
+    result = reconcile_requirement_ledger(
+        draft=draft, research=research, rfp=rfp, rfp_text=rfp_text
+    )
+    if result.changed:
+        await asave_proposal_draft(result.draft)
+    return result
 
 
 def attach_manual_fill_flags_to_review(
