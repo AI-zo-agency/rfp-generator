@@ -500,6 +500,10 @@ def reconcile_requirement_ledger(
     """
     ledger = research.requirement_ledger if research else None
     if not ledger or not ledger.requirements:
+        logger.info(
+            "ledger:reconcile rfp_id=%s skipped — no requirement ledger present",
+            getattr(rfp, "id", None),
+        )
         return LedgerReconcileResult(
             draft=draft,
             changed=False,
@@ -677,6 +681,21 @@ def reconcile_requirement_ledger(
                     "to protected floors; no further content is safe to remove "
                     "automatically."
                 )
+
+    added_titles = [a.section_title for a in applied_additions]
+    merged_owner_titles = sorted({m.owner_section_title for m in applied_merges})
+    cut_titles = [c.section_title for c in applied_cuts]
+    logger.info(
+        "ledger:reconcile rfp_id=%s added=%d merged=%d cut=%d "
+        "added_titles=%s merged_owner_titles=%s cut_titles=%s",
+        getattr(rfp, "id", None),
+        len(applied_additions),
+        len(applied_merges),
+        len(applied_cuts),
+        added_titles,
+        merged_owner_titles,
+        cut_titles,
+    )
 
     if not changed:
         return LedgerReconcileResult(

@@ -372,6 +372,15 @@ async def run_verify_scrub_only_scan(
         "ledgerMergesApplied": len(ledger_result.applied_merges),
         "ledgerCutsApplied": len(ledger_result.applied_cuts),
         "ledgerAdditionsApplied": len(ledger_result.applied_additions),
+        # Titles, not just counts — the UI banner needs to say WHICH section
+        # was added/merged/trimmed, not just how many.
+        "ledgerAdditionsSectionTitles": [
+            a.section_title for a in ledger_result.applied_additions
+        ],
+        "ledgerMergesSectionTitles": sorted(
+            {m.owner_section_title for m in ledger_result.applied_merges}
+        ),
+        "ledgerCutsSectionTitles": [c.section_title for c in ledger_result.applied_cuts],
     }
     report["logs"].extend(ledger_result.logs)
     report["logs"].extend(ledger_draft_logs)
@@ -422,6 +431,29 @@ async def run_verify_scrub_only_scan(
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp, draft=draft, research=research, finalized=False
     )
+
+    # Task 11: the presubmit review already runs truncation (T1) and
+    # hallucination detection as part of scan_manuscript_consistency /
+    # _scan_hallucinations — both were DETECTED and then discarded because
+    # nothing counted them into the fulfill report the UI reads. Surfacing
+    # only; this does NOT run truncation repair (repair_truncated_manuscript_
+    # sections lives only on the mode="full" path, which the Scan-RFP button
+    # never calls — see proposal_fulfill_rfp_gaps.run_fulfill_rfp_gaps).
+    truncated_section_ids: list[str] = []
+    for issue in review.issues:
+        if issue.category == "truncation" and issue.section_id:
+            if issue.section_id not in truncated_section_ids:
+                truncated_section_ids.append(issue.section_id)
+    truncated_titles_by_id = {s.id: s.title for s in draft.sections}
+    report["truncatedSectionsCount"] = len(truncated_section_ids)
+    report["truncatedSectionTitles"] = [
+        truncated_titles_by_id.get(sid, sid) for sid in truncated_section_ids
+    ]
+    report["unverifiedClaimsCount"] = sum(
+        1 for issue in review.issues
+        if issue.category in ("fabricated_fact", "unverified_claim")
+    )
+
     now = datetime.now(timezone.utc).isoformat()
     updated_research = (
         research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)
@@ -431,6 +463,24 @@ async def run_verify_scrub_only_scan(
         update={"last_fulfill_report": report, "updated_at": now}
     )
     await asave_proposal_draft(draft)
+
+    logger.info(
+        "scan-rfp:report rfp_id=%s sections_scanned=%s verify_removed=%s "
+        "verify_kept=%s ledger_added=%s ledger_added_titles=%s ledger_merged=%s "
+        "ledger_cut=%s truncated_sections=%s truncated_titles=%s "
+        "unverified_claims=%s",
+        rfp_id,
+        report.get("sectionsScanned"),
+        report.get("verifyTagsRemoved"),
+        report.get("verifyTagsKept"),
+        report.get("ledgerAdditionsApplied"),
+        report.get("ledgerAdditionsSectionTitles"),
+        report.get("ledgerMergesApplied"),
+        report.get("ledgerCutsApplied"),
+        report.get("truncatedSectionsCount"),
+        report.get("truncatedSectionTitles"),
+        report.get("unverifiedClaimsCount"),
+    )
     return review, updated_research, draft, report
 
 
