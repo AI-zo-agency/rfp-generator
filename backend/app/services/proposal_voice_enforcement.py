@@ -99,9 +99,7 @@ _UNVERIFIED_STATIC_DELEGATION_RES = (
 )
 
 # Answer-shaped signal each unverified-delegation ask requires in the static
-# section's own text before it can be treated as covered. Order matches
-# _UNVERIFIED_STATIC_DELEGATION_RES; "description of the firm" has no fixed
-# answer shape, so it only requires the static text to carry real prose.
+# section's own text before it can be treated as covered.
 _FIRM_TYPE_ANSWER_RE = re.compile(
     r"\b(corporation|corp\.?|l\.?l\.?c\.?|partnership|sole\s+proprietorship|"
     r"s-?corp(?:oration)?|c-?corp(?:oration)?|nonprofit|non-profit|"
@@ -112,16 +110,24 @@ _FOUNDING_FACT_ANSWER_RE = re.compile(
     r"\b(19|20)\d{2}\b|\b(established|founded|formed|incorporated|since)\b",
     re.IGNORECASE,
 )
-_HAS_REAL_PROSE_RE = re.compile(r".{200,}", re.DOTALL)
 
-_DELEGATION_PROOF_CHECKS: tuple[tuple[re.Pattern[str], re.Pattern[str]], ...] = (
+# ``None`` = this ask has NO answer shape to look for, so it can never be
+# proven mechanically. An earlier revision used a ">= 200 characters of prose"
+# heuristic here; that is failing open — 200 characters of entirely unrelated
+# prose passes it — which recreates the exact "assume the delegation landed"
+# defect this module exists to stop. An open-ended "describe the firm" is now
+# never auto-satisfied on its own. It can only be discharged through the
+# specific sub-asks it enumerates ("...including the year the firm was
+# established, type of firm (partnership, corporation, etc.)"), each of which
+# is checked on its own answer shape below.
+_DELEGATION_PROOF_CHECKS: tuple[tuple[re.Pattern[str], re.Pattern[str] | None], ...] = (
     (
         re.compile(
             r"\b(?:brief\s+)?description\s+of\s+(?:the\s+)?(?:firm|agency|company|"
             r"organi[sz]ation|proposer|vendor)\b",
             re.IGNORECASE,
         ),
-        _HAS_REAL_PROSE_RE,
+        None,
     ),
     (
         re.compile(
@@ -169,15 +175,28 @@ def static_section_covers_requirement(requirement_text: str, static_section_text
     Observed: "type of firm" was deleted from the outline whenever the RFP
     text merely contained that phrase, with no check that static Section 1.3
     ever stated whether zö is an LLC, corporation, etc.
+
+    A compound RFP ask enumerates several facts at once ("a brief description
+    of the firm, including the year the firm was established, type of firm..."),
+    so **every** enumerated fact with a checkable answer shape must appear in
+    the static text — proving one of three does not discharge the other two.
+    An ask whose only match is the open-ended "describe the firm" pattern has
+    nothing checkable and is never auto-satisfied.
     """
     text = (requirement_text or "").strip()
     haystack = static_section_text or ""
     if not text or not haystack.strip():
         return False
-    for ask_re, answer_re in _DELEGATION_PROOF_CHECKS:
-        if ask_re.search(text):
-            return bool(answer_re.search(haystack))
-    return False
+    required_answers = [
+        answer_re
+        for ask_re, answer_re in _DELEGATION_PROOF_CHECKS
+        if answer_re is not None and ask_re.search(text)
+    ]
+    if not required_answers:
+        # Either this is not a delegation ask at all, or its only match was the
+        # unprovable open-ended one — fail closed, keep the requirement visible.
+        return False
+    return all(answer_re.search(haystack) for answer_re in required_answers)
 
 
 def contains_vendor_language(content: str) -> bool:

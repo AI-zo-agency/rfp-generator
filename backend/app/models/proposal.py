@@ -23,7 +23,11 @@ class RfpSectionMap(BaseModel):
     requirements: list[str] = Field(default_factory=list)
     retrieval_focus: list[str] = Field(default_factory=list, alias="retrievalFocus")
     zo_mode: ZoSectionMode = Field(default="write", alias="zoMode")
-    evaluation_weight: int | None = Field(default=None, alias="evaluationWeight")
+    # int | float, not int: LedgerRequirement.points is a float, and an RFP can
+    # weight a criterion at 12.5 pts. A bare `int` silently truncated that to 12.
+    # The union (not a plain `float`) keeps whole-number weights serializing as
+    # `30`, not `30.0`, so no existing consumer sees a changed wire format.
+    evaluation_weight: int | float | None = Field(default=None, alias="evaluationWeight")
     coverage_percent: int | None = Field(default=None, alias="coveragePercent")
     uncovered_requirements: list[str] = Field(
         default_factory=list, alias="uncoveredRequirements"

@@ -299,9 +299,9 @@ def amend_outline_for_missing_requirements(
                 title=requirement.text,
                 requirements=[requirement.text],
                 zoMode="write",
-                evaluationWeight=(
-                    int(requirement.points) if requirement.points is not None else None
-                ),
+                # Stays a float: an RFP can weight a criterion at 12.5 pts and
+                # the old int() cast silently truncated that to 12.
+                evaluationWeight=requirement.points,
             )
         )
         existing_ids.add(section_id)
