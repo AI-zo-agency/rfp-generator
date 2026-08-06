@@ -11,7 +11,11 @@ from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSe
 from app.models.rfp import RfpRecord
 from app.services import llm
 from app.services.proposal_rfp_excerpt import submission_documents_excerpt
-from app.services.proposal_rfp_compliance import requirement_likely_covered
+from app.services.proposal_rfp_compliance import (
+    MANUAL_FILL_MARKER,
+    OPEN_TAG_MARKERS,
+    requirement_likely_covered,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -594,33 +598,234 @@ def merge_submission_items_into_research(
     return research.model_copy(update={"rfp_sections": existing})
 
 
-def list_submission_checklist_from_rfp(rfp_text: str) -> list[str]:
-    """Human-readable lines for ending report — documents to be submitted."""
+# Task 15: kind classification for the submission checklist. Zero LLM calls —
+# every entry is regex over RFP text, same as before this dataclass existed.
+#
+# "narrative" — a section the pipeline can draft from the KB (prose the
+# writer/reviewer can produce and keep improving).
+# "attachment" — a signed/scanned/notarized PHYSICAL document (or an
+# external form/exhibit) a human must obtain and attach. Never satisfiable
+# by prose: a drafted section ABOUT a W-9 is not a W-9. See
+# outstanding_submission_checklist_for_scan's module note below for why the
+# scan must never paper over one of these with a [MANUAL FILL] stub that
+# reads like the real thing was handled.
+
+
+@dataclass(frozen=True)
+class SubmissionChecklistItem:
+    label: str
+    kind: str  # "narrative" | "attachment"
+    pattern: str
+
+
+_SUBMISSION_CHECKLIST_PATTERNS: tuple[SubmissionChecklistItem, ...] = (
+    SubmissionChecklistItem(
+        "Acknowledgement of Addenda (return with proposal)",
+        "attachment",
+        r"acknowledg(?:e|ement|ment)s?\s+of\s+addenda|addenda\s+acknowledg|receipt\s+of\s+addenda",
+    ),
+    SubmissionChecklistItem(
+        "Affirmative Action Questionnaire (signed)", "attachment", r"affirmative action"
+    ),
+    SubmissionChecklistItem(
+        "Assurance of Compliance (signed)", "attachment", r"assurance of compliance"
+    ),
+    SubmissionChecklistItem(
+        "Non-Collusion Affidavit (often notarized)", "attachment", r"non[- ]?collusion"
+    ),
+    SubmissionChecklistItem(
+        "Statement of Ownership Disclosure",
+        "attachment",
+        r"statement of ownership|ownership disclosure",
+    ),
+    SubmissionChecklistItem(
+        "Vendor / Contractor Questionnaire",
+        "attachment",
+        r"vendor questionnaire|contractor questionnaire",
+    ),
+    SubmissionChecklistItem(
+        "Financial stability narrative (in proposal body)",
+        "narrative",
+        r"financial stability",
+    ),
+    SubmissionChecklistItem(
+        "Awards & recognitions (in proposal body)",
+        "narrative",
+        r"awards?\s*(?:and|&)\s*recognition",
+    ),
+    SubmissionChecklistItem(
+        "Offeror commitment / closing statement",
+        "narrative",
+        r"closing\s+statement|offeror.?s?\s+statement|commitment\s+to\s+(?:perform|deliver)",
+    ),
+    SubmissionChecklistItem(
+        "Certificate(s) of Insurance", "attachment", r"certificate(?:s)?\s+of\s+insurance|\bCOI\b"
+    ),
+    SubmissionChecklistItem("IRS Form W-9", "attachment", r"\bW[- ]?9\b"),
+    SubmissionChecklistItem(
+        "Official pricing / quotation form",
+        "attachment",
+        r"pricing\s+proposal\s+form|cost\s+proposal\s+form|quotation\s*/?\s*pricing",
+    ),
+    SubmissionChecklistItem(
+        "Authorized signature page",
+        "attachment",
+        r"authorized\s+(?:representative|signatory|signature)|signature\s+(?:block|page)",
+    ),
+    SubmissionChecklistItem(
+        "Contract / agreement acknowledgment",
+        "attachment",
+        r"exemplar\s+agreement|sample\s+(?:agreement|contract)|exceptions?\s+to\s+(?:the\s+)?(?:agreement|contract)",
+    ),
+    SubmissionChecklistItem(
+        "Contractor Vendor Certification / Exhibit H",
+        "attachment",
+        r"contractor vendor certification|\bCVC\b|exhibit\s+h\b",
+    ),
+    SubmissionChecklistItem(
+        "Required attachments checklist",
+        "attachment",
+        r"required\s+attachments?|documents?\s+to\s+(?:be\s+)?(?:submitted|included|attached)|submission\s+checklist",
+    ),
+    SubmissionChecklistItem(
+        "Named exhibits / appendices / attachments",
+        "attachment",
+        r"\bexhibit\s+[A-Z0-9]+\b|\bappendix\s+[A-Z0-9]+\b|\battachment\s+\d+\b",
+    ),
+)
+
+# Compulsory close always appears on the checklist, whether or not the RFP
+# text matched the "closing statement" pattern above — see
+# list_submission_checklist_items_from_rfp.
+_COMPULSORY_CLOSE = SubmissionChecklistItem(
+    "Offeror commitment / closing statement", "narrative", ""
+)
+
+
+def list_submission_checklist_items_from_rfp(rfp_text: str) -> list[SubmissionChecklistItem]:
+    """Kind-classified checklist — narrative vs attachment. Zero LLM calls,
+    pure regex over RFP text, same patterns list_submission_checklist_from_rfp
+    always used; this just keeps each pattern's kind alongside its label so a
+    caller can separate "the pipeline can draft this" from "a human must
+    attach a physical document" instead of reporting one undifferentiated
+    list."""
     text = rfp_text or ""
-    found: list[str] = []
-    patterns = (
-        (r"acknowledg(?:e|ement|ment)s?\s+of\s+addenda|addenda\s+acknowledg|receipt\s+of\s+addenda", "Acknowledgement of Addenda (return with proposal)"),
-        (r"affirmative action", "Affirmative Action Questionnaire (signed)"),
-        (r"assurance of compliance", "Assurance of Compliance (signed)"),
-        (r"non[- ]?collusion", "Non-Collusion Affidavit (often notarized)"),
-        (r"statement of ownership|ownership disclosure", "Statement of Ownership Disclosure"),
-        (r"vendor questionnaire|contractor questionnaire", "Vendor / Contractor Questionnaire"),
-        (r"financial stability", "Financial stability narrative (in proposal body)"),
-        (r"awards?\s*(?:and|&)\s*recognition", "Awards & recognitions (in proposal body)"),
-        (r"closing\s+statement|offeror.?s?\s+statement|commitment\s+to\s+(?:perform|deliver)", "Offeror commitment / closing statement"),
-        (r"certificate(?:s)?\s+of\s+insurance|\bCOI\b", "Certificate(s) of Insurance"),
-        (r"\bW[- ]?9\b", "IRS Form W-9"),
-        (r"pricing\s+proposal\s+form|cost\s+proposal\s+form|quotation\s*/?\s*pricing", "Official pricing / quotation form"),
-        (r"authorized\s+(?:representative|signatory|signature)|signature\s+(?:block|page)", "Authorized signature page"),
-        (r"exemplar\s+agreement|sample\s+(?:agreement|contract)|exceptions?\s+to\s+(?:the\s+)?(?:agreement|contract)", "Contract / agreement acknowledgment"),
-        (r"contractor vendor certification|\bCVC\b|exhibit\s+h\b", "Contractor Vendor Certification / Exhibit H"),
-        (r"required\s+attachments?|documents?\s+to\s+(?:be\s+)?(?:submitted|included|attached)|submission\s+checklist", "Required attachments checklist"),
-        (r"\bexhibit\s+[A-Z0-9]+\b|\bappendix\s+[A-Z0-9]+\b|\battachment\s+\d+\b", "Named exhibits / appendices / attachments"),
-    )
-    for pat, label in patterns:
-        if re.search(pat, text, re.I) and label not in found:
-            found.append(label)
-    # Compulsory close always appears on the checklist.
-    if "Offeror commitment / closing statement" not in found:
-        found.append("Offeror commitment / closing statement")
+    found: list[SubmissionChecklistItem] = []
+    seen_labels: set[str] = set()
+    for item in _SUBMISSION_CHECKLIST_PATTERNS:
+        if item.pattern and re.search(item.pattern, text, re.I) and item.label not in seen_labels:
+            found.append(item)
+            seen_labels.add(item.label)
+    if _COMPULSORY_CLOSE.label not in seen_labels:
+        found.append(_COMPULSORY_CLOSE)
     return found
+
+
+def list_submission_checklist_from_rfp(rfp_text: str) -> list[str]:
+    """Human-readable lines for ending report — documents to be submitted.
+
+    Backward-compatible label-only view over
+    list_submission_checklist_items_from_rfp; existing callers (e.g.
+    proposal_presubmit_review.py) only ever needed the label text.
+    """
+    return [item.label for item in list_submission_checklist_items_from_rfp(rfp_text)]
+
+
+@dataclass(frozen=True)
+class OutstandingSubmissionChecklist:
+    """The Task 15 scan-path split: what THIS RFP demands as physical
+    documents vs narrative sections, filtered down to what is still
+    outstanding in the CURRENT draft — so a re-scan does not nag about an
+    attachment the user already resolved. See
+    outstanding_submission_checklist_for_scan's docstring for the
+    resolution rule.
+    """
+
+    needs_drafting: list[str]
+    needs_attachment: list[str]
+
+
+def _content_matches_checklist_item(item: SubmissionChecklistItem, content: str) -> bool:
+    """Does this content actually cover the item?
+
+    Prefers the item's OWN detection regex — the exact pattern that decided
+    the RFP demands it in the first place — over the fuzzy keyword-overlap
+    heuristic (requirement_likely_covered). That heuristic drops stopword-
+    filtered tokens under 5 characters and, critically, treats an EMPTY
+    token list as "covered" (see its docstring/call sites in
+    proposal_rfp_compliance.py) — harmless for a long descriptive label, but
+    a short/abbreviated attachment label like "IRS Form W-9" or a "COI"
+    pattern reduces to zero eligible tokens and would vacuously match ANY
+    non-empty section, silently marking every physical-document requirement
+    "resolved" the instant the draft had any content at all. Attachment
+    items therefore never fall back to the fuzzy heuristic; narrative items
+    do, since their labels are verbose enough to produce real tokens and a
+    human may reasonably paraphrase RFP wording when drafting prose.
+    """
+    if item.pattern and re.search(item.pattern, content, re.I):
+        return True
+    if item.kind == "attachment":
+        return False
+    return requirement_likely_covered(item.label, content)
+
+
+def _checklist_item_resolved_in_manuscript(
+    item: SubmissionChecklistItem, draft: ProposalDraft
+) -> bool:
+    """True when the current draft already resolves this checklist item.
+
+    Narrative items: a match anywhere in the manuscript is enough — the
+    pipeline or a human already wrote it.
+
+    Attachment items: a match is NOT enough by itself — a section that
+    merely TALKS ABOUT the W-9 (e.g. a [MANUAL FILL: attach signed/complete
+    file ...] stub left by ensure_all_rfp_submission_requirements) is not
+    the W-9. An attachment only counts as resolved when some section's own
+    content covers the topic AND carries no open MANUAL FILL / placeholder
+    marker — i.e. a human has since replaced the stub with a real
+    confirmation (e.g. "W-9 attached as Exhibit C"). Until then it must
+    keep being flagged on every scan; this is the exact failure mode Task
+    15 exists to stop (drafted-prose-as-attachment silently reading as
+    handled).
+    """
+    if item.kind != "attachment":
+        return _content_matches_checklist_item(item, _manuscript_blob(draft))
+    for section in draft.sections:
+        content = section.content or ""
+        if not content.strip():
+            continue
+        if not _content_matches_checklist_item(item, content):
+            continue
+        if MANUAL_FILL_MARKER in content:
+            continue
+        if any(marker in content.upper() for marker in OPEN_TAG_MARKERS):
+            continue
+        return True
+    return False
+
+
+def outstanding_submission_checklist_for_scan(
+    rfp_text: str, draft: ProposalDraft
+) -> OutstandingSubmissionChecklist:
+    """Scan-path entry point (Task 15): run the RFP attachment checklist
+    inside Scan-RFP itself, independent of whatever the compliance matrix
+    happened to capture — this is exactly the gap that let a required W-9
+    or Certificate of Insurance go unmentioned in the scan report before a
+    human found out the hard way. Zero LLM calls, deterministic, idempotent:
+    an item already resolved in the current draft (see
+    _checklist_item_resolved_in_manuscript) is dropped from both lists on
+    every subsequent scan.
+    """
+    items = list_submission_checklist_items_from_rfp(rfp_text)
+    needs_drafting: list[str] = []
+    needs_attachment: list[str] = []
+    for item in items:
+        if _checklist_item_resolved_in_manuscript(item, draft):
+            continue
+        if item.kind == "attachment":
+            needs_attachment.append(item.label)
+        else:
+            needs_drafting.append(item.label)
+    return OutstandingSubmissionChecklist(
+        needs_drafting=needs_drafting, needs_attachment=needs_attachment
+    )

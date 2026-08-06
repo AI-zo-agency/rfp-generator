@@ -41,6 +41,20 @@ export interface ScanRfpFulfillReport {
    * from "never checked" so ledger_added/merged/cut reading 0 doesn't look
    * like a silent no-op. */
   ledgerCheckSkippedReason?: string | null;
+  /** Narrative submission items (financial stability, awards, closing
+   * statement, ...) the RFP's submission instructions call for that the
+   * pipeline can still draft from the KB — kept strictly separate from
+   * needsAttachment below. See buildScanRfpBanner's module note. */
+  submissionNeedsDraftingCount?: number;
+  submissionNeedsDraftingTitles?: string[];
+  /** Signed/scanned PHYSICAL documents (W-9, Certificate of Insurance,
+   * addenda acknowledgement, notarized affidavits, ...) a human must
+   * obtain and attach — never satisfiable by a drafted section, however
+   * complete that section's prose is. Reported independent of whatever the
+   * compliance matrix happened to capture, and dropped once the draft
+   * resolves the item (never re-flagged for something already handled). */
+  submissionNeedsAttachmentCount?: number;
+  submissionNeedsAttachmentTitles?: string[];
 }
 
 const NOTHING_CHANGED_MESSAGE =
@@ -87,6 +101,30 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
       } may not be covered${namedList(
         report.ledgerScoredCriteriaAdvisoryTitles
       )} — review manually`
+    );
+  }
+
+  // Task 15: kept as two distinct clauses on purpose — "needs drafting" is a
+  // narrative section the pipeline can still write from the KB; "needs an
+  // attachment" is a hard submission blocker only a human can resolve
+  // (upload/sign/scan). Collapsing these into one line is exactly the
+  // failure mode this fix exists to prevent — a missing W-9 must never read
+  // like "one more section to write."
+  const needsAttachment = report.submissionNeedsAttachmentCount ?? 0;
+  if (needsAttachment > 0) {
+    clauses.push(
+      `needs ${needsAttachment} physical document(s) attached before submission${namedList(
+        report.submissionNeedsAttachmentTitles
+      )} — signed/scanned files only, drafting cannot satisfy these`
+    );
+  }
+
+  const needsDrafting = report.submissionNeedsDraftingCount ?? 0;
+  if (needsDrafting > 0) {
+    clauses.push(
+      `${needsDrafting} narrative submission item(s) still need drafting${namedList(
+        report.submissionNeedsDraftingTitles
+      )}`
     );
   }
 

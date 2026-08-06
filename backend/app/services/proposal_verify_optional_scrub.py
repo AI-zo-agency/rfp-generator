@@ -399,6 +399,25 @@ async def run_verify_scrub_only_scan(
     if truncation_repaired_ids:
         await asave_proposal_draft(draft)
 
+    # Task 15: run the RFP submission-attachment checklist inside the scan
+    # path itself. It never ran here before — only inside mode="full"
+    # (ensure_all_rfp_submission_requirements), and the real Scan-RFP button
+    # always calls mode="verify_scrub_only" (see run_fulfill_rfp_gaps above),
+    # so the scan relied entirely on whatever the compliance matrix happened
+    # to capture. This is independent of that matrix: a required W-9 or
+    # Certificate of Insurance the matrix missed is still reported. Zero new
+    # LLM calls — outstanding_submission_checklist_for_scan is pure regex
+    # over rfp_text plus a manuscript keyword scan (same cost class as the
+    # VERIFY scrub already running in this function); it never drafts a
+    # section, so an attachment-class item is flagged, never papered over
+    # with prose. Idempotent: an item already resolved in the draft (see
+    # its docstring) is dropped from both lists on the next scan.
+    from app.services.proposal_rfp_submission_requirements import (
+        outstanding_submission_checklist_for_scan,
+    )
+
+    outstanding_checklist = outstanding_submission_checklist_for_scan(rfp_text, draft)
+
     verify_ids = {
         s.id for s in draft.sections if count_verify_tags(s.content or "") > 0
     }
@@ -412,6 +431,15 @@ async def run_verify_scrub_only_scan(
         "closingAdded": [],
         "closingAddedSections": [],
         "humanDecisionGaps": [],
+        # Task 15 — the two categories the user must see kept visibly
+        # distinct: a narrative section the pipeline can draft from the KB
+        # vs a signed/scanned physical document a human must attach. Never
+        # merged into one undifferentiated list — see
+        # outstanding_submission_checklist_for_scan's module note.
+        "submissionNeedsDraftingCount": len(outstanding_checklist.needs_drafting),
+        "submissionNeedsDraftingTitles": outstanding_checklist.needs_drafting,
+        "submissionNeedsAttachmentCount": len(outstanding_checklist.needs_attachment),
+        "submissionNeedsAttachmentTitles": outstanding_checklist.needs_attachment,
         "inPlaceFixCount": 0,
         "ledgerMergesApplied": len(ledger_result.applied_merges),
         "ledgerCutsApplied": len(ledger_result.applied_cuts),
@@ -457,6 +485,20 @@ async def run_verify_scrub_only_scan(
     report["logs"].extend(ledger_result.logs)
     report["logs"].extend(ledger_draft_logs)
     report["logs"].extend(truncation_repair_logs)
+    if outstanding_checklist.needs_attachment:
+        report["logs"].append(
+            "submission-checklist:attachment — "
+            f"{len(outstanding_checklist.needs_attachment)} physical document(s) this RFP "
+            "requires are not yet resolved in the draft: "
+            + "; ".join(outstanding_checklist.needs_attachment[:8])
+        )
+    if outstanding_checklist.needs_drafting:
+        report["logs"].append(
+            "submission-checklist:narrative — "
+            f"{len(outstanding_checklist.needs_drafting)} narrative item(s) this RFP's "
+            "submission instructions call for still need drafting: "
+            + "; ".join(outstanding_checklist.needs_drafting[:8])
+        )
     if ledger_result.applied_additions:
         added_by_id = {a.section_id: a for a in ledger_result.applied_additions}
         still_stub = [
@@ -581,7 +623,8 @@ async def run_verify_scrub_only_scan(
         "ledger_cut=%s ledger_scored_advisory=%s ledger_additions_declined=%s "
         "truncation_repaired=%s truncation_repaired_titles=%s "
         "truncation_still_truncated_ids=%s truncated_sections=%s truncated_titles=%s "
-        "unverified_claims=%s",
+        "unverified_claims=%s submission_needs_drafting=%s submission_needs_attachment=%s "
+        "submission_needs_attachment_titles=%s",
         rfp_id,
         report.get("sectionsScanned"),
         report.get("verifyTagsRemoved"),
@@ -598,6 +641,9 @@ async def run_verify_scrub_only_scan(
         report.get("truncatedSectionsCount"),
         report.get("truncatedSectionTitles"),
         report.get("unverifiedClaimsCount"),
+        report.get("submissionNeedsDraftingCount"),
+        report.get("submissionNeedsAttachmentCount"),
+        report.get("submissionNeedsAttachmentTitles"),
     )
     return review, updated_research, draft, report
 

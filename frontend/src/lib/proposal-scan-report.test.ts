@@ -183,6 +183,36 @@ describe("buildScanRfpBanner", () => {
     );
   });
 
+  it("keeps a physical-document attachment distinct from a narrative section still needing drafting", () => {
+    // Task 15: the report must never collapse "needs an attachment" (a hard
+    // submission blocker only a human can resolve — signed W-9, Certificate
+    // of Insurance) into "needs drafting" (a narrative section the pipeline
+    // can still write). A drafted section about a W-9 is not a W-9.
+    const banner = buildScanRfpBanner({
+      submissionNeedsDraftingCount: 1,
+      submissionNeedsDraftingTitles: [
+        "Financial stability narrative (in proposal body)",
+      ],
+      submissionNeedsAttachmentCount: 2,
+      submissionNeedsAttachmentTitles: ["IRS Form W-9", "Certificate(s) of Insurance"],
+    });
+    expect(banner).toBe(
+      'Needs 2 physical document(s) attached before submission ' +
+        '("IRS Form W-9", "Certificate(s) of Insurance") — signed/scanned files only, ' +
+        "drafting cannot satisfy these; 1 narrative submission item(s) still need drafting " +
+        '("Financial stability narrative (in proposal body)").'
+    );
+  });
+
+  it("omits the attachment/drafting clauses entirely when both counts are zero", () => {
+    const banner = buildScanRfpBanner({
+      submissionNeedsDraftingCount: 0,
+      submissionNeedsAttachmentCount: 0,
+      verifyTagsRemoved: 2,
+    });
+    expect(banner).toBe("Removed 2 optional [VERIFY] tag(s).");
+  });
+
   it("appends the skip-reason clause alongside other real changes", () => {
     const banner = buildScanRfpBanner({
       verifyTagsRemoved: 3,
