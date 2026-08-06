@@ -24,13 +24,21 @@ LedgerRequirementSource = Literal[
 # module note) is deliberately NOT "eligibility". "eligibility" is reserved
 # for a go/no-go GATE — whether zö should bid at all (small-business
 # set-aside, licensure, bonding capacity) — a decision made once, before a
-# draft exists. "submission_instruction" is an administrative/procedural
-# constraint on an ALREADY-DECIDED bid — a deadline, delivery address,
-# labelling instruction, validity period, copy count, or format rule you
-# COMPLY WITH by following it, not a deliverable you WRITE a proposal section
-# to satisfy. Conflating the two would make a real go/no-go signal
-# (mis)appear on every draft's requirement ledger. "eligibility" remains
-# unused/reserved; nothing in the ledger pipeline currently produces it.
+# draft exists. "submission_instruction" is a compliance obligation on an
+# ALREADY-DECIDED bid you COMPLY WITH, not a deliverable you WRITE a
+# proposal section to satisfy — a deadline, delivery address, labelling
+# instruction, validity period, copy count, or format rule (the phrasings
+# _ADMIN_INSTRUCTION_PATTERNS recognises explicitly), OR — as of the fourth
+# instance of this defect class, see assembler.py's
+# _classify_compliance_source module note — anything else that fails to
+# positively read as a narrative deliverable or a form. The classifier is
+# fail-closed: it no longer guesses "required_content" for phrasing it does
+# not recognise, so a blanket statutory-compliance clause or an unanticipated
+# format rule lands here too, still visible to the user, never silently
+# turned into a client-facing section. Conflating this with "eligibility"
+# would make a real go/no-go signal (mis)appear on every draft's requirement
+# ledger. "eligibility" remains unused/reserved; nothing in the ledger
+# pipeline currently produces it.
 
 
 class LedgerRequirement(BaseModel):

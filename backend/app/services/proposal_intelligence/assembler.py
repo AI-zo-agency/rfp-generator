@@ -345,6 +345,91 @@ def _is_administrative_submission_instruction(blob: str) -> bool:
     return any(pattern.search(blob) for pattern in _ADMIN_INSTRUCTION_PATTERNS)
 
 
+# Fourth instance of the same defect class (see proposal_rfp_compliance.py's
+# _ADD_ELIGIBLE_SOURCES module note for the first three — scored_criterion,
+# the blast-radius guard, then the submission-instruction deny-list just
+# above). Live incident, a real KVCC scan: a blanket statutory-compliance
+# clause ("Comply with all applicable federal, state and local statutes,
+# laws, codes, rules, regulations, ordinances and orders"), a public-records
+# exemption instruction, and a font/format rule all became "missing
+# sections" in the client-facing banner, because none of their exact
+# phrasing was anticipated by _ADMIN_INSTRUCTION_PATTERNS. Adding a fifth
+# pattern set fixes today's three phrasings and fails the same way on the
+# next one nobody anticipated; RFP prose is unbounded, so a deny list can
+# never be complete.
+#
+# The fix inverts the default instead of extending the deny list.
+# _classify_compliance_source no longer returns "required_content" (the
+# add-eligible source) for anything it merely FAILS to recognise as
+# administrative or a form. Once an item clears those two checks, it is
+# add-eligible ONLY if it positively reads as a narrative deliverable —
+# something a vendor actually WRITES a proposal section to satisfy. Every
+# other case — including every phrasing nobody has anticipated yet — falls
+# through to "submission_instruction", the same non-addable-but-still-
+# surfaced compliance-checklist bucket the deny list above already
+# populates (see AdvisorySubmissionInstruction /
+# ledgerSubmissionInstructions* in the frontend banner). A miss here (a
+# genuine deliverable phrased in a way _looks_like_narrative_deliverable
+# does not recognise) is safe: the item still shows up on the compliance
+# checklist for a human to read. A false positive is what actually shipped
+# a font rule as a client-facing proposal section — the one failure mode
+# this exists to close off, so the signal list below is deliberately
+# conservative and verb/noun-anchored, never a bare keyword.
+_NARRATIVE_VERB_RE = re.compile(
+    r"\b(?:"
+    r"describe"
+    r"|provide\s+a\s+(?:narrative|plan|approach|schedule|methodology)\b"
+    r"|explain\s+your"
+    r"|outline\s+your"
+    r"|detail\s+your"
+    r"|submit\s+a\s+plan\s+for"
+    r"|include\s+a\s+section\s+on"
+    r"|demonstrate\s+your"
+    r"|summarize\s+your\s+experience\s+with"
+    r")\b"
+)
+_NARRATIVE_NOUN_RE = re.compile(
+    r"\b(?:"
+    r"approach"
+    r"|methodolog(?:y|ies)"
+    r"|plans?"
+    r"|schedules?"
+    r"|narrative"
+    r"|case\s+stud(?:y|ies)"
+    r"|references?"
+    r"|qualifications?"
+    r"|experience"
+    r"|r[ée]sum[ée]s?"
+    r"|bios?"
+    r"|cover\s+letter"
+    r"|executive\s+summary"
+    r"|work\s+plan"
+    r"|timelines?"
+    r")\b"
+)
+
+
+def _looks_like_narrative_deliverable(blob: str) -> bool:
+    """Positive test: does this requirement name prose a vendor WRITES?
+
+    The ONLY way a compliance-matrix item can reach "required_content" once
+    it has already cleared the administrative-instruction and form checks
+    — see the module note above for why the default is fail-closed rather
+    than fail-open. Either channel is sufficient:
+      1. an authoring verb phrase addressed to the vendor ("describe",
+         "provide a plan", "explain your", ...);
+      2. a deliverable noun naming a standard proposal section ("approach",
+         "references", "cover letter", ...).
+
+    Verified against every example in task-19-report.md: all 8 real
+    non-addable items (statutory compliance, a FOAA exemption instruction, a
+    font rule, plus the 5 administrative items the deny list above already
+    catches) fail both channels; all 7 real addable deliverables pass at
+    least one.
+    """
+    return bool(_NARRATIVE_VERB_RE.search(blob) or _NARRATIVE_NOUN_RE.search(blob))
+
+
 def _classify_compliance_source(item: ComplianceItem) -> str:
     blob = " ".join(
         str(getattr(item, attr, "") or "")
@@ -354,7 +439,14 @@ def _classify_compliance_source(item: ComplianceItem) -> str:
         return "submission_instruction"
     if _FORM_RE.search(blob) and not _FORM_DENY_RE.search(blob):
         return "form"
-    return "required_content"
+    if _looks_like_narrative_deliverable(blob):
+        return "required_content"
+    # Fail closed (see module note above): anything that reaches here is
+    # neither a recognised administrative instruction, a form, nor a
+    # positively-recognised narrative deliverable. It stays visible on the
+    # compliance checklist instead of silently becoming a client-facing
+    # section.
+    return "submission_instruction"
 
 
 def _slug(text: str, *, limit: int = 48) -> str:

@@ -341,19 +341,26 @@ _ADDED_SECTION_MANUAL_FILL_OWNER = "Sonja"
 # ADD is only safe for ledger sources that name an actual submittable
 # deliverable — see the module note above. "scored_criterion" (an evaluation
 # scoring category), "eligibility" (a go/no-go gate, not a proposal section),
-# and "submission_instruction" (an administrative/procedural constraint you
-# COMPLY WITH — a deadline, delivery address, labelling rule, validity
-# window, copy count, or format rule — never a deliverable you WRITE a
-# section for; see proposal_intelligence/assembler.py's
-# _is_administrative_submission_instruction) are deliberately excluded:
-# len(satisfied_by) == 0 for those means "the matcher didn't find a lexical
-# match" or "this was never section-shaped to begin with", not "this is
-# missing a section". Third instance of the same defect: a live KVCC scan
-# flagged 8 administrative compliance-matrix items ("Proposal must be
-# received no later than August 3, 2026 by 3:00 P.M. (ET)", "Include
-# contractor's name(s)", ...) as missing sections; the blast-radius guard
-# below happened to catch it that time only because 8 exceeded the cap — with
-# 4 such items it would have silently added them.
+# and "submission_instruction" (a compliance obligation you COMPLY WITH —
+# a deadline, delivery address, labelling rule, validity window, copy count,
+# format rule, or, as of the fourth instance below, ANY phrasing that fails
+# to positively read as a narrative deliverable — never a section you WRITE;
+# see proposal_intelligence/assembler.py's _classify_compliance_source) are
+# deliberately excluded: len(satisfied_by) == 0 for those means "the matcher
+# didn't find a lexical match" or "this was never section-shaped to begin
+# with", not "this is missing a section". Third instance of the same defect:
+# a live KVCC scan flagged 8 administrative compliance-matrix items
+# ("Proposal must be received no later than August 3, 2026 by 3:00 P.M.
+# (ET)", "Include contractor's name(s)", ...) as missing sections; the
+# blast-radius guard below happened to catch it that time only because 8
+# exceeded the cap — with 4 such items it would have silently added them.
+# Fourth instance (task-19-report.md): a *different* live KVCC scan flagged
+# a blanket statutory-compliance clause, a public-records exemption
+# instruction, and a font/format rule as missing sections — none matched the
+# third instance's deny-list patterns, proving a deny list can never be
+# complete. The classifier's default is now fail-closed instead of extended
+# with a fifth pattern set: see assembler.py's _classify_compliance_source
+# module note.
 _ADD_ELIGIBLE_SOURCES = frozenset({"required_content", "form"})
 
 # Blast-radius guard (see module note above). Both are module-level named
@@ -437,18 +444,24 @@ class AdvisoryScoredCriterion:
 
 @dataclass(frozen=True)
 class AdvisorySubmissionInstruction:
-    """An administrative/procedural submission constraint
-    (source="submission_instruction") — a deadline, delivery method,
-    labelling rule, validity window, copy count, or format rule. Never
-    auto-added (see _ADD_ELIGIBLE_SOURCES' module note): nobody writes a
-    proposal section titled "Proposal must be received no later than August
-    3, 2026 by 3:00 P.M. (ET)". Unlike AdvisoryScoredCriterion, this is not a
-    matcher-precision judgment call for a human to review — it is a real
-    obligation that must stay visible, just not as a candidate section. The
-    Scan-RFP banner reports these as a compliance checklist ("N submission
-    requirement(s) to comply with: ...") distinct from both the drafting and
-    attachment checklists proposal_rfp_submission_requirements.py already
-    surfaces."""
+    """A compliance obligation (source="submission_instruction") — a
+    deadline, delivery method, labelling rule, validity window, copy count,
+    or format rule the deny list in assembler.py recognises explicitly, OR
+    (as of task-19-report.md, the fourth instance of this defect class) any
+    compliance-matrix item that fails to positively read as a narrative
+    deliverable or a form — a blanket statutory-compliance clause, a
+    public-records exemption instruction, an unanticipated format rule, or
+    any other phrasing nobody has seen yet. Never auto-added (see
+    _ADD_ELIGIBLE_SOURCES' module note): nobody writes a proposal section
+    titled "Proposal must be received no later than August 3, 2026 by 3:00
+    P.M. (ET)", and nobody writes one titled "Comply with all applicable
+    federal, state and local statutes..." either. Unlike
+    AdvisoryScoredCriterion, this is not a matcher-precision judgment call
+    for a human to review — it is a real obligation that must stay visible,
+    just not as a candidate section. The Scan-RFP banner reports these as a
+    compliance checklist ("N submission requirement(s) to comply with: ...")
+    distinct from both the drafting and attachment checklists
+    proposal_rfp_submission_requirements.py already surfaces."""
 
     requirement_id: str
     requirement_text: str
