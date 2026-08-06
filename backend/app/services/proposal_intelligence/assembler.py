@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -262,6 +263,95 @@ def build_requirement_ledger(
             continue
 
     return RequirementLedger(requirements=requirements)
+
+
+@dataclass(frozen=True)
+class DuplicateOwnerResolution:
+    """One requirement's ownership decision when more than one section
+    satisfies it — the mapping that killed the insurance-x3 duplication
+    (Section 1.5, the attachments checklist, and the contract acknowledgment
+    all restated coverage because nothing owned it).
+
+    Deliberately does NOT prune ``LedgerRequirement.satisfied_by``: that list
+    is factual matcher evidence (``_match_outline_sections``, measured 6/10 on
+    wording variants — see task-2-report.md), not an ownership claim, and a
+    requirement must never look missing again just because ownership was
+    resolved. This record is the additive ownership claim instead.
+    """
+
+    requirement_id: str
+    requirement_text: str
+    owner_section_id: str
+    cross_reference_section_ids: list[str]
+    note: str
+
+
+def resolve_duplicate_owners(
+    ledger: RequirementLedger | None,
+    outline_sections: list[RfpSectionMap] | None,
+) -> tuple[RequirementLedger, list[DuplicateOwnerResolution]]:
+    """Assign exactly one owning section per requirement ``duplicated()`` finds.
+
+    Owner = the candidate section with the highest evaluation points; ties
+    break toward the earliest RFP-ordered section (its position in
+    ``outline_sections``, the list's own order). Every other section that
+    matched keeps the topic only as a cross-reference — it must never restate
+    the requirement's substance (limits, carriers, coverage types, etc.).
+
+    This operates strictly WITHIN one requirement's own ``satisfied_by``
+    list. It never compares text or topic across different
+    ``LedgerRequirement`` entries, so two genuinely different requirements
+    that both happen to mention insurance ("provide proof of general
+    liability insurance" vs "acknowledge the insurance provisions of the
+    standard contract") can never be merged into each other — merging
+    distinct requirements would lose a required response, which is worse
+    than the duplication this function exists to resolve.
+
+    Returns the ledger unchanged (same requirements, same ``satisfied_by``)
+    alongside the list of resolutions — never raises: ``None``/empty inputs
+    degrade to an empty ledger and no resolutions.
+    """
+    if ledger is None:
+        return RequirementLedger(requirements=[]), []
+
+    sections = outline_sections or []
+    order_index = {s.id: i for i, s in enumerate(sections)}
+    weight_by_id: dict[str, float] = {}
+    for s in sections:
+        raw_weight = getattr(s, "evaluation_weight", None)
+        try:
+            weight_by_id[s.id] = float(raw_weight) if raw_weight is not None else 0.0
+        except (TypeError, ValueError):
+            weight_by_id[s.id] = 0.0
+
+    resolutions: list[DuplicateOwnerResolution] = []
+    for requirement in ledger.requirements:
+        candidates = list(requirement.satisfied_by)
+        if len(candidates) <= 1:
+            continue
+        ordered = sorted(
+            candidates,
+            key=lambda sid: (
+                -weight_by_id.get(sid, 0.0),
+                order_index.get(sid, len(sections)),
+            ),
+        )
+        owner = ordered[0]
+        cross_refs = ordered[1:]
+        resolutions.append(
+            DuplicateOwnerResolution(
+                requirement_id=requirement.id,
+                requirement_text=requirement.text,
+                owner_section_id=owner,
+                cross_reference_section_ids=cross_refs,
+                note=(
+                    f"{requirement.text!r} is owned by section {owner!r}; "
+                    "do not restate its specifics (limits, carriers, coverage "
+                    "types, or similar detail) here — cross-reference it instead."
+                ),
+            )
+        )
+    return ledger, resolutions
 
 
 def amend_outline_for_missing_requirements(
