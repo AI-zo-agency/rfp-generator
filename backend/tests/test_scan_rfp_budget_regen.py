@@ -16,6 +16,8 @@ from app.models.proposal import (
 from app.models.rfp import RfpRecord
 from app.services.proposal_fulfill_rfp_budget_kpi import (
     manuscript_budget_is_missing,
+    manuscript_cost_section_is_hollow,
+    pricing_model_lacks_professional_fees,
     run_fulfill_budget_scan,
 )
 
@@ -78,6 +80,54 @@ class ManuscriptBudgetMissingTests(unittest.TestCase):
             updatedAt="2026-08-05T00:00:00+00:00",
         )
         self.assertFalse(manuscript_budget_is_missing(draft, research))
+
+    def test_travel_only_cost_proposal_counts_as_missing(self) -> None:
+        hollow = (
+            "Proposed Investment\n"
+            "Direct travel / reimbursables: $2,500\n"
+            "Total proposed investment: $2,500 Rates follow zö's Industry Average "
+            "pricing guide for comparable municipal / education marketing engagements.\n\n"
+            "Complete website redesign. Total proposed investment: $2,500 "
+            "($2,500 in direct travel expenses).\n"
+        )
+        self.assertTrue(manuscript_cost_section_is_hollow(hollow))
+        travel_budget = ProposalBudget(
+            rfpId="rfp-regen",
+            updatedAt="2026-08-05T00:00:00+00:00",
+            lineItems=[
+                BudgetLineItem(
+                    id="T1",
+                    description="Travel / reimbursables",
+                    category="Travel",
+                    extended=2500,
+                )
+            ],
+            lumpSumTotal=2500,
+            directExpensesTotal=2500,
+            agencyRevenueEstimate=0,
+        )
+        self.assertTrue(pricing_model_lacks_professional_fees(travel_budget))
+        draft = ProposalDraft(
+            rfpId="rfp-regen",
+            updatedAt="2026-08-05T00:00:00+00:00",
+            sections=[
+                ProposalSection(
+                    id="sec-cost",
+                    title=(
+                        "Cost Proposal That Includes All Charges, Including "
+                        "One-Time Build and Migration and One-Time Recommended On-Site Training"
+                    ),
+                    content=hollow,
+                    status="generated",
+                )
+            ],
+        )
+        research = ProposalResearchCache(
+            rfpId="rfp-regen",
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=travel_budget,
+        )
+        self.assertTrue(manuscript_budget_is_missing(draft, research))
 
 
 class BudgetRegenWiringTests(unittest.TestCase):

@@ -98,29 +98,94 @@ def patch_budget_section_for_rfp(
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 
 
+_TRAVEL_ONLY_TOTAL_RE = re.compile(
+    r"(?is)direct\s+travel\s*/\s*reimbursables:\s*\$?\s*([\d,]+(?:\.\d+)?)"
+    r".{0,400}?total\s+proposed\s+investment:\s*\$?\s*([\d,]+(?:\.\d+)?)"
+)
+
+
+def _parse_money(raw: str) -> float:
+    try:
+        return float(raw.replace(",", ""))
+    except ValueError:
+        return 0.0
+
+
+def pricing_model_lacks_professional_fees(budget: object | None) -> bool:
+    """True when the cached budget is travel/pass-through only — not a real fee proposal."""
+    if budget is None:
+        return True
+    from app.services.proposal_budget_validation import (
+        infer_line_item_type,
+        split_line_item_totals,
+    )
+
+    line_items = list(getattr(budget, "line_items", None) or [])
+    lump = float(getattr(budget, "lump_sum_total", None) or 0)
+    revenue = float(getattr(budget, "agency_revenue_estimate", None) or 0)
+    direct = float(getattr(budget, "direct_expenses_total", None) or 0)
+
+    if not line_items and lump <= 0 and revenue <= 0:
+        return True
+
+    _passthrough, agency_fee, _ = split_line_item_totals(line_items)
+    professional = [
+        item
+        for item in line_items
+        if infer_line_item_type(item) not in {"direct_expense", "client_passthrough"}
+        and float(getattr(item, "extended", None) or 0) > 0
+    ]
+    if professional and (agency_fee > 0 or revenue > 0):
+        return False
+    # Travel-only envelope: lump ≈ direct, no agency fee lines.
+    if agency_fee <= 0 and revenue <= 0 and direct > 0 and (
+        lump <= 0 or abs(lump - direct) < 1.0
+    ):
+        return True
+    if not professional and lump <= direct + 1.0:
+        return True
+    return False
+
+
+def manuscript_cost_section_is_hollow(content: str) -> bool:
+    """True when Cost Proposal prose is empty, stub, or travel-equals-total only."""
+    text = (content or "").strip()
+    if not text:
+        return True
+    upper = text.upper()
+    if "[MANUAL FILL" in upper and "$" not in text:
+        return True
+    match = _TRAVEL_ONLY_TOTAL_RE.search(text)
+    if match:
+        travel = _parse_money(match.group(1))
+        total = _parse_money(match.group(2))
+        if travel > 0 and abs(travel - total) < 1.0:
+            return True
+    # "Total proposed investment: $X ($X in direct travel expenses)" with no labor table.
+    if re.search(
+        r"(?is)total proposed investment:\s*\$[\d,]+.*\(\$[\d,]+\s+in\s+direct\s+travel",
+        text,
+    ) and not re.search(r"(?i)\|[^|\n]*(?:labor|strategy|development|design|hours)", text):
+        return True
+    return False
+
+
 def manuscript_budget_is_missing(
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
 ) -> bool:
     """True when Scan RFP should regenerate Phase 3.5 budget (not just reconcile)."""
     budget = research.budget if research else None
-    if budget is None:
-        return True
-    line_items = list(getattr(budget, "line_items", None) or [])
-    lump = float(getattr(budget, "lump_sum_total", None) or 0)
-    revenue = float(getattr(budget, "agency_revenue_estimate", None) or 0)
-    if not line_items and lump <= 0 and revenue <= 0:
+    if pricing_model_lacks_professional_fees(budget):
         return True
 
     idx = find_budget_section_index(draft.sections)
     if idx is None:
-        # Pricing model exists — reconcile path can write the section; no full regen.
+        # Pricing model has fees — reconcile path can write the section; no full regen
+        # unless the model itself is hollow (already handled above).
         return False
-    content = (draft.sections[idx].content or "").strip()
-    if not content:
-        return False
-    upper = content.upper()
-    if "[MANUAL FILL" in upper and "$" not in content:
+    content = draft.sections[idx].content or ""
+    if manuscript_cost_section_is_hollow(content):
         return True
     return False
 
@@ -154,7 +219,8 @@ async def run_fulfill_budget_scan(
 
     if manuscript_budget_is_missing(draft, research):
         logs.append(
-            "Budget: pricing model / manuscript budget missing — regenerating via Phase 3.5."
+            "Budget: pricing model / Cost Proposal missing or travel-only — "
+            "regenerating full Phase 3.5 fee proposal."
         )
         try:
             draft, research, _budget = await _regen_budget_via_phase_3_5(rfp_id)
