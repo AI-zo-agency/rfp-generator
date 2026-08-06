@@ -1502,6 +1502,15 @@ export async function runFulfillRfpGaps(
     submissionDeliverablesAdded?: Array<{ id: string; title: string; kind?: string }>;
     logs?: string[];
     humanDecisionGaps?: string[];
+    ledgerAdditionsApplied?: number;
+    ledgerAdditionsSectionTitles?: string[];
+    ledgerMergesApplied?: number;
+    ledgerMergesSectionTitles?: string[];
+    ledgerCutsApplied?: number;
+    ledgerCutsSectionTitles?: string[];
+    truncatedSectionsCount?: number;
+    truncatedSectionTitles?: string[];
+    unverifiedClaimsCount?: number;
   };
 }> {
   const res = await fetch(`/api/rfps/${rfpId}/proposal/fulfill-rfp-gaps`, {
@@ -1519,6 +1528,10 @@ export async function runFulfillRfpGaps(
     research?: ProposalResearch;
     draft?: ApiProposalDraft;
     fulfillReport?: {
+      mode?: string;
+      sectionsScanned?: number;
+      verifyTagsRemoved?: number;
+      verifyTagsKept?: number;
       closingDetected?: string[];
       closingDetectedSections?: Array<{ id: string; title: string }>;
       closingAlreadyPresent?: Array<{ id: string; title: string }>;
@@ -1533,6 +1546,15 @@ export async function runFulfillRfpGaps(
       }>;
       logs?: string[];
       humanDecisionGaps?: string[];
+      ledgerAdditionsApplied?: number;
+      ledgerAdditionsSectionTitles?: string[];
+      ledgerMergesApplied?: number;
+      ledgerMergesSectionTitles?: string[];
+      ledgerCutsApplied?: number;
+      ledgerCutsSectionTitles?: string[];
+      truncatedSectionsCount?: number;
+      truncatedSectionTitles?: string[];
+      unverifiedClaimsCount?: number;
     };
   };
   try {

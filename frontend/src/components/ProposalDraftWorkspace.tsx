@@ -16,6 +16,7 @@ import {
 } from "@/lib/proposal-draft";
 import { getManuscriptSections, normalizeOutlineSectionOrder, resolveManuscriptJumpTarget, buildManuscriptIndexMap } from "@/lib/proposal-outline-tree";
 import { isSectionDrafted } from "@/lib/proposal-section-health";
+import { buildScanRfpBanner } from "@/lib/proposal-scan-report";
 import {
   buildPipelineStatus,
   fetchProposalDraft,
@@ -1353,19 +1354,12 @@ function ProposalDraftWorkspaceInner({
       setResearch(updatedResearch);
       applyOutlineFromServer(draft);
       await saveProposalDraft(rfp.id, draft);
-      const removed = fulfillReport.verifyTagsRemoved ?? 0;
-      const kept = fulfillReport.verifyTagsKept ?? 0;
-      const scanned = fulfillReport.sectionsScanned ?? 0;
-      setGapResolveNotice(
-        scanned === 0
-          ? "No [VERIFY] tags found in the manuscript."
-          : `VERIFY scrub done — scanned ${scanned} section(s); removed ${removed} optional tag(s); kept ${kept} RFP-critical tag(s). Saved version available.`
-      );
-      setGenerateNotice(
-        scanned === 0
-          ? "No [VERIFY] tags to clean."
-          : `Removed ${removed} optional [VERIFY] tag(s); kept ${kept} only if critically required by the RFP.`
-      );
+      // Task 11: the reconciler (ADD/MERGE/CUT) and the truncation/
+      // hallucination detectors already ran inside fulfillReport / review —
+      // report everything that happened, not just the VERIFY-tag counts.
+      const scanBanner = buildScanRfpBanner(fulfillReport);
+      setGapResolveNotice(`${scanBanner} Saved version available.`);
+      setGenerateNotice(scanBanner);
       setGenerateError(null);
       setActiveTab("content");
     } catch (error) {
