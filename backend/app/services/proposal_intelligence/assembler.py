@@ -268,12 +268,90 @@ _FORM_DENY_RE = re.compile(
     r")"
 )
 
+# Third instance of the same defect class (see proposal_rfp_compliance.py's
+# _ADD_ELIGIBLE_SOURCES module note for the first two — scored_criterion,
+# then the blast-radius guard). Live incident: a real KVCC scan flagged 8
+# compliance-matrix items as "missing sections" that were all administrative
+# submission mechanics — a deadline, a labelling/delivery instruction, two
+# bare contact-detail field lists, and a proposal-validity window. Nobody
+# writes a proposal SECTION titled "Proposal must be received no later than
+# August 3, 2026 by 3:00 P.M. (ET)"; it is an obligation you comply with, not
+# prose you draft. These patterns are deliberately narrow and phrase-anchored
+# (not bare keyword hits) so they catch the submission-mechanics phrasing
+# RFPs actually use without swallowing real deliverables that happen to share
+# a word with one ("Provide three client references with contact
+# information" must stay a deliverable even though it contains "contact
+# information" — see _ADMIN_INCLUDE_FIELD_RE below, anchored to the start of
+# the requirement text for exactly this reason).
+_ADMIN_INSTRUCTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Deadlines / submission timing.
+    re.compile(r"\bno\s+later\s+than\b"),
+    re.compile(r"\bmust\s+be\s+received\s+(?:by|prior\s+to)\b"),
+    re.compile(r"\bpostmarked\s+by\b"),
+    re.compile(r"\bsubmission\s+deadline\b"),
+    # Delivery method / marking / addressing.
+    re.compile(r"\bmust\s+be\s+marked\b"),
+    re.compile(r"\bmarked\s+[\"“'][^\"”']+[\"”']\b"),
+    re.compile(r"\bsubmitted\s+to\s+(?:the\s+)?specified\s+(?:address|email)\b"),
+    re.compile(r"\bhand[- ]delivered\b"),
+    re.compile(r"\bsealed\s+envelope\b"),
+    re.compile(r"\belectronic\s+submission\s+only\b"),
+    # Validity / expiration windows.
+    re.compile(r"\bvalid\s+for\s+at\s+least\b"),
+    re.compile(r"\bremain\s+valid\s+for\b"),
+    re.compile(r"\birrevocable\s+for\b"),
+    # Copy counts.
+    re.compile(r"\bsubmit\s+one\s+original\s+and\b"),
+    re.compile(r"\b(?:one|two|three|four|five|\d+)\s+(?:\(\d+\)\s+)?copies\b"),
+    # Font / margin / spacing format rules.
+    re.compile(r"\bfont\s+size\b"),
+    re.compile(r"\b\d+[- ]point\s+font\b"),
+    re.compile(r"\bsingle[- ]spaced\b"),
+    re.compile(r"\bdouble[- ]spaced\b"),
+    re.compile(r"\bmargins?\s+(?:of\s+)?\d"),
+    # Page-count instructions.
+    re.compile(r"\bshall\s+not\s+exceed\s+\(?\d+\)?\s+pages?\b"),
+    re.compile(r"\bnot\s+to\s+exceed\s+\(?\d+\)?\s+pages?\b"),
+    re.compile(r"\bpage\s+limit\s+of\b"),
+)
+
+# "Include <field>" is only administrative when <field> is a bare
+# contact/identity detail — never when it is a narrative deliverable that
+# happens to mention one ("Include a cover letter signed by an authorized
+# representative" must stay a deliverable). Anchored to the START of the
+# requirement text: a compliance-matrix item is normally the whole bullet, so
+# "Include contact information (Address, phone, Fax, Email)" is this
+# instruction verbatim, while "Provide three client references with contact
+# information" never matches because it does not begin with "include".
+_ADMIN_INCLUDE_FIELD_RE = re.compile(
+    r"^include\s+(?:the\s+)?(?:"
+    r"contractor'?s?\s+name(?:\(s\)|s)?"
+    r"|compan(?:y'?s?|ies)\s+name"
+    r"|firm'?s?\s+name"
+    r"|business\s+name"
+    r"|contact\s+information"
+    r"|(?:mailing\s+)?address(?:es)?(?:,?\s+phone(?:\s+number)?)?"
+    r")\b"
+)
+
+
+def _is_administrative_submission_instruction(blob: str) -> bool:
+    """True for a procedural submission constraint you COMPLY WITH — a
+    deadline, delivery method, labelling rule, validity window, copy count,
+    format rule, or bare contact-field list — never a deliverable you WRITE
+    a section for. See the module note above."""
+    if _ADMIN_INCLUDE_FIELD_RE.search(blob):
+        return True
+    return any(pattern.search(blob) for pattern in _ADMIN_INSTRUCTION_PATTERNS)
+
 
 def _classify_compliance_source(item: ComplianceItem) -> str:
     blob = " ".join(
         str(getattr(item, attr, "") or "")
         for attr in ("requirement", "evidence_needed", "source_ref")
     ).lower()
+    if _is_administrative_submission_instruction(blob):
+        return "submission_instruction"
     if _FORM_RE.search(blob) and not _FORM_DENY_RE.search(blob):
         return "form"
     return "required_content"

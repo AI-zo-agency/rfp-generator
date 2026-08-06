@@ -340,9 +340,20 @@ _ADDED_SECTION_MANUAL_FILL_OWNER = "Sonja"
 
 # ADD is only safe for ledger sources that name an actual submittable
 # deliverable — see the module note above. "scored_criterion" (an evaluation
-# scoring category) and "eligibility" (a go/no-go gate, not a proposal
-# section) are deliberately excluded: len(satisfied_by) == 0 for those means
-# "the matcher didn't find a lexical match", not "this is missing".
+# scoring category), "eligibility" (a go/no-go gate, not a proposal section),
+# and "submission_instruction" (an administrative/procedural constraint you
+# COMPLY WITH — a deadline, delivery address, labelling rule, validity
+# window, copy count, or format rule — never a deliverable you WRITE a
+# section for; see proposal_intelligence/assembler.py's
+# _is_administrative_submission_instruction) are deliberately excluded:
+# len(satisfied_by) == 0 for those means "the matcher didn't find a lexical
+# match" or "this was never section-shaped to begin with", not "this is
+# missing a section". Third instance of the same defect: a live KVCC scan
+# flagged 8 administrative compliance-matrix items ("Proposal must be
+# received no later than August 3, 2026 by 3:00 P.M. (ET)", "Include
+# contractor's name(s)", ...) as missing sections; the blast-radius guard
+# below happened to catch it that time only because 8 exceeded the cap — with
+# 4 such items it would have silently added them.
 _ADD_ELIGIBLE_SOURCES = frozenset({"required_content", "form"})
 
 # Blast-radius guard (see module note above). Both are module-level named
@@ -425,6 +436,25 @@ class AdvisoryScoredCriterion:
 
 
 @dataclass(frozen=True)
+class AdvisorySubmissionInstruction:
+    """An administrative/procedural submission constraint
+    (source="submission_instruction") — a deadline, delivery method,
+    labelling rule, validity window, copy count, or format rule. Never
+    auto-added (see _ADD_ELIGIBLE_SOURCES' module note): nobody writes a
+    proposal section titled "Proposal must be received no later than August
+    3, 2026 by 3:00 P.M. (ET)". Unlike AdvisoryScoredCriterion, this is not a
+    matcher-precision judgment call for a human to review — it is a real
+    obligation that must stay visible, just not as a candidate section. The
+    Scan-RFP banner reports these as a compliance checklist ("N submission
+    requirement(s) to comply with: ...") distinct from both the drafting and
+    attachment checklists proposal_rfp_submission_requirements.py already
+    surfaces."""
+
+    requirement_id: str
+    requirement_text: str
+
+
+@dataclass(frozen=True)
 class LedgerReconcileResult:
     draft: ProposalDraft
     changed: bool
@@ -435,6 +465,14 @@ class LedgerReconcileResult:
     # Missing scored criteria — always populated when any exist, whether or
     # not anything else in this pass changed. See AdvisoryScoredCriterion.
     advisory_scored_criteria: list[AdvisoryScoredCriterion] = field(default_factory=list)
+    # Administrative/procedural submission constraints (source=
+    # "submission_instruction") — always populated when any exist, whether
+    # or not anything else in this pass changed. See
+    # AdvisorySubmissionInstruction. Never auto-added, but never silently
+    # dropped either — the caller surfaces this as a compliance checklist.
+    advisory_submission_instructions: list[AdvisorySubmissionInstruction] = field(
+        default_factory=list
+    )
     # Set only when the blast-radius guard declined to apply otherwise-
     # eligible additions this pass (see _BLAST_RADIUS_MAX_ADDITIONS /
     # _BLAST_RADIUS_MAX_GROWTH_FRACTION above). 0 / [] / None on every other
@@ -715,6 +753,7 @@ def reconcile_requirement_ledger(
     # requirements that carry evaluation weight.
     applied_additions: list[AppliedRequirementAddition] = []
     advisory_scored_criteria: list[AdvisoryScoredCriterion] = []
+    advisory_submission_instructions: list[AdvisorySubmissionInstruction] = []
     declined_addition_count = 0
     declined_addition_titles: list[str] = []
     declined_addition_reason: str | None = None
@@ -750,6 +789,39 @@ def reconcile_requirement_ledger(
             f"covered: {names} — a scoring category name rarely matches the "
             "requirement-phrased section that actually covers it, so this is "
             "never auto-added; review manually."
+        )
+
+    # A submission_instruction is an administrative constraint you comply
+    # with, never a deliverable — see _ADD_ELIGIBLE_SOURCES' module note.
+    # Unlike a scored_criterion (a matcher-precision judgment call), this is
+    # never "genuinely uncovered" in the sense of needing a section at all —
+    # it is a real obligation (a deadline, a labelling rule, a validity
+    # window) that must stay visible as a compliance checklist item so a
+    # human doesn't miss the August 3 deadline just because it was correctly
+    # never turned into a stub section.
+    for requirement in missing_requirements:
+        if requirement.source == "submission_instruction":
+            advisory_submission_instructions.append(
+                AdvisorySubmissionInstruction(
+                    requirement_id=requirement.id,
+                    requirement_text=requirement.text,
+                )
+            )
+    if advisory_submission_instructions:
+        names = ", ".join(
+            f'"{a.requirement_text[:80]}"'
+            for a in advisory_submission_instructions[:5]
+        )
+        extra = len(advisory_submission_instructions) - min(
+            5, len(advisory_submission_instructions)
+        )
+        if extra > 0:
+            names += f", +{extra} more"
+        logs.append(
+            f"ledger:submission-instructions — {len(advisory_submission_instructions)} "
+            f"administrative submission requirement(s) to comply with: {names} — "
+            "deadlines, delivery instructions and similar constraints are never "
+            "drafted as a section; review and comply with each one manually."
         )
 
     eligible_missing = [
@@ -964,6 +1036,7 @@ def reconcile_requirement_ledger(
             applied_cuts=[],
             logs=logs,
             advisory_scored_criteria=advisory_scored_criteria,
+            advisory_submission_instructions=advisory_submission_instructions,
             declined_addition_count=declined_addition_count,
             declined_addition_titles=declined_addition_titles,
             declined_addition_reason=declined_addition_reason,
@@ -980,6 +1053,7 @@ def reconcile_requirement_ledger(
         applied_cuts=applied_cuts,
         logs=logs,
         advisory_scored_criteria=advisory_scored_criteria,
+        advisory_submission_instructions=advisory_submission_instructions,
         declined_addition_count=declined_addition_count,
         declined_addition_titles=declined_addition_titles,
         declined_addition_reason=declined_addition_reason,

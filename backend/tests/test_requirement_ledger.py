@@ -356,6 +356,143 @@ class ComplianceSourceClassificationTests(unittest.TestCase):
         self.assertEqual(self._source_for("Return all required forms"), "form")
 
 
+class AdministrativeSubmissionInstructionClassificationTests(unittest.TestCase):
+    """Task 16: the third instance of the same defect — the ledger tried to
+    ADD a section for administrative submission mechanics, not just scored
+    criteria (Task 14) or over-broad matcher hits (I2/I3/I4). Verbatim from a
+    real KVCC scan: 8 compliance-matrix items the reconciler wanted to add as
+    sections were all submission instructions ("Proposal must be received no
+    later than August 3, 2026 by 3:00 P.M. (ET)", "Include contractor's
+    name(s)", ...), never deliverables. Nobody writes a proposal section
+    titled with a deadline; "Include contact information (Address, phone,
+    Fax, Email)" is a FIELD inside a section, not a section."""
+
+    def _source_for(self, requirement: str) -> str:
+        ledger = build_requirement_ledger(
+            [ComplianceItem(id="c1", requirement=requirement)], [], []
+        )
+        return ledger.requirements[0].source
+
+    # --- The five real KVCC items: all administrative, never addable. -----
+
+    def test_a_hard_deadline_is_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for(
+                "Proposal must be received no later than August 3, 2026 by "
+                "3:00 P.M. (ET)"
+            ),
+            "submission_instruction",
+        )
+
+    def test_a_labelling_and_delivery_instruction_is_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for(
+                "Proposal must be marked 'Marketing Plan' and submitted to "
+                "specified address or email"
+            ),
+            "submission_instruction",
+        )
+
+    def test_a_bare_contractor_name_field_is_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for("Include contractor's name(s)"), "submission_instruction"
+        )
+
+    def test_a_bare_contact_information_field_is_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for(
+                "Include contact information (Address, phone, Fax, Email)"
+            ),
+            "submission_instruction",
+        )
+
+    def test_a_proposal_validity_window_is_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for(
+                "Proposal must be valid for at least thirty (30) days after "
+                "proposal due date"
+            ),
+            "submission_instruction",
+        )
+
+    # --- Obvious siblings: still administrative. ---------------------------
+
+    def test_a_copy_count_instruction_is_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for("Submit one original and three copies of the proposal"),
+            "submission_instruction",
+        )
+
+    def test_a_font_and_margin_format_rule_is_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for(
+                "Proposals must use 11-point font and 1-inch margins throughout"
+            ),
+            "submission_instruction",
+        )
+
+    def test_a_page_count_instruction_is_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for("The technical proposal shall not exceed 20 pages"),
+            "submission_instruction",
+        )
+
+    def test_a_hand_delivery_instruction_is_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for(
+                "Proposals must be hand-delivered in a sealed envelope"
+            ),
+            "submission_instruction",
+        )
+
+    # --- The hard boundary: these must stay addable deliverables. ---------
+
+    def test_a_project_schedule_deliverable_is_not_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for("Provide a detailed project schedule with milestones"),
+            "required_content",
+        )
+
+    def test_a_signed_w9_is_still_classified_as_a_form_not_administrative(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self._source_for("Submit a completed and signed W-9 form"), "form"
+        )
+
+    def test_a_narrative_approach_description_is_not_administrative(self) -> None:
+        self.assertEqual(
+            self._source_for("Describe your approach to content migration"),
+            "required_content",
+        )
+
+    def test_references_with_contact_information_is_a_deliverable_not_administrative(
+        self,
+    ) -> None:
+        """The hard boundary named in the incident report: "include contact
+        information" is administrative, but "provide references WITH contact
+        information" is a real deliverable (three references) that merely
+        carries contact details as part of a larger narrative ask — it must
+        never be swallowed by the bare-field-list pattern just because it
+        shares the words "contact information"."""
+        self.assertEqual(
+            self._source_for(
+                "Provide three client references with contact information"
+            ),
+            "required_content",
+        )
+
+    def test_a_signed_cover_letter_is_a_deliverable_not_a_bare_field_list(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self._source_for(
+                "Include a cover letter signed by an authorized representative"
+            ),
+            "required_content",
+        )
+
+
 class MatcherPrecisionTests(unittest.TestCase):
     """I3/I4: the matcher produced silent false positives on short generic
     titles, and never consulted section.requirements at all."""

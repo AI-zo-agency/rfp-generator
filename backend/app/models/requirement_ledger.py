@@ -13,8 +13,24 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 LedgerRequirementSource = Literal[
-    "required_content", "scored_criterion", "form", "eligibility"
+    "required_content",
+    "scored_criterion",
+    "form",
+    "eligibility",
+    "submission_instruction",
 ]
+# "submission_instruction" (added alongside the third instance of the same
+# defect class — see proposal_rfp_compliance.py's _ADD_ELIGIBLE_SOURCES
+# module note) is deliberately NOT "eligibility". "eligibility" is reserved
+# for a go/no-go GATE — whether zö should bid at all (small-business
+# set-aside, licensure, bonding capacity) — a decision made once, before a
+# draft exists. "submission_instruction" is an administrative/procedural
+# constraint on an ALREADY-DECIDED bid — a deadline, delivery address,
+# labelling instruction, validity period, copy count, or format rule you
+# COMPLY WITH by following it, not a deliverable you WRITE a proposal section
+# to satisfy. Conflating the two would make a real go/no-go signal
+# (mis)appear on every draft's requirement ledger. "eligibility" remains
+# unused/reserved; nothing in the ledger pipeline currently produces it.
 
 
 class LedgerRequirement(BaseModel):

@@ -183,6 +183,48 @@ describe("buildScanRfpBanner", () => {
     );
   });
 
+  it("reports administrative submission instructions as a compliance checklist, never as an addition", () => {
+    // Task 16 / live KVCC incident regression: "Proposal must be received no
+    // later than August 3, 2026 by 3:00 P.M. (ET)" and its siblings are
+    // administrative constraints you comply with, not deliverables — they
+    // must never read as "Added ... section(s)" or even "declined to add",
+    // and must never be silently dropped either.
+    const banner = buildScanRfpBanner({
+      ledgerAdditionsApplied: 1,
+      ledgerAdditionsSectionTitles: ["Provide a detailed project schedule with milestones"],
+      // 8 items — the exact count from the live KVCC banner (5 named + "+3 more").
+      ledgerSubmissionInstructionsCount: 8,
+      ledgerSubmissionInstructionsTitles: [
+        "Proposal must be received no later than August 3, 2026 by 3:00 P.M. (ET)",
+        "Proposal must be marked 'Marketing Plan' and submitted to specified address or email",
+        "Include contractor's name(s)",
+        "Include contact information (Address, phone, Fax, Email)",
+        "Proposal must be valid for at least thirty (30) days after proposal due date",
+        "Submit one original and three copies of the proposal",
+        "Proposals must use 11-point font and 1-inch margins throughout",
+        "The technical proposal shall not exceed 20 pages",
+      ],
+    });
+    expect(banner).not.toContain("declined to add");
+    expect(banner).toBe(
+      'Added 1 missing required section(s) ' +
+        '("Provide a detailed project schedule with milestones"); ' +
+        '8 submission requirement(s) to comply with (' +
+        '"Proposal must be received no later than August 3, 2026 by 3:00 P.M. (ET)", ' +
+        '"Proposal must be marked \'Marketing Plan\' and submitted to specified address or email", ' +
+        '"Include contractor\'s name(s)", "Include contact information (Address, phone, Fax, Email)", ' +
+        '"Proposal must be valid for at least thirty (30) days after proposal due date", +3 more).'
+    );
+  });
+
+  it("omits the submission-instructions clause entirely when the count is zero", () => {
+    const banner = buildScanRfpBanner({
+      verifyTagsRemoved: 2,
+      ledgerSubmissionInstructionsCount: 0,
+    });
+    expect(banner).toBe("Removed 2 optional [VERIFY] tag(s).");
+  });
+
   it("keeps a physical-document attachment distinct from a narrative section still needing drafting", () => {
     // Task 15: the report must never collapse "needs an attachment" (a hard
     // submission blocker only a human can resolve — signed W-9, Certificate

@@ -24,6 +24,16 @@ export interface ScanRfpFulfillReport {
    * judge whether each one is genuinely uncovered. */
   ledgerScoredCriteriaAdvisoryCount?: number;
   ledgerScoredCriteriaAdvisoryTitles?: string[];
+  /** Administrative/procedural submission constraints (source=
+   * "submission_instruction") — deadlines, delivery/labelling instructions,
+   * validity windows, copy counts, format rules. Never auto-added as a
+   * section (nobody drafts a section titled "Proposal must be received no
+   * later than August 3, 2026 by 3:00 P.M. (ET)") but never silently
+   * dropped either — a real obligation the user must still see and comply
+   * with, reported as its own compliance checklist distinct from the
+   * drafting/attachment submission checklists below. */
+  ledgerSubmissionInstructionsCount?: number;
+  ledgerSubmissionInstructionsTitles?: string[];
   /** Set only when the blast-radius guard declined to apply otherwise-
    * eligible additions this pass (too many sections / too much growth for
    * one click) — surfaced so the banner says what it declined and why,
@@ -90,6 +100,19 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
       `declined to add ${declined} section(s) automatically${namedList(
         report.ledgerAdditionsDeclinedTitles
       )} (${report.ledgerAdditionsDeclinedReason ?? "over the safety guard"})`
+    );
+  }
+
+  // Task 16: administrative submission constraints (deadlines, delivery
+  // instructions, validity windows, ...) are real obligations, not
+  // deliverables — reported as their own compliance checklist so a real
+  // deadline never reads as just a declined/dropped addition.
+  const submissionInstructions = report.ledgerSubmissionInstructionsCount ?? 0;
+  if (submissionInstructions > 0) {
+    clauses.push(
+      `${submissionInstructions} submission requirement(s) to comply with${namedList(
+        report.ledgerSubmissionInstructionsTitles
+      )}`
     );
   }
 

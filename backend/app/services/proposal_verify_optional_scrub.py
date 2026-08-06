@@ -467,6 +467,21 @@ async def run_verify_scrub_only_scan(
         "ledgerScoredCriteriaAdvisoryTitles": [
             a.requirement_text for a in ledger_result.advisory_scored_criteria
         ],
+        # Task 16: administrative/procedural submission constraints (source=
+        # "submission_instruction") — deadlines, delivery/labelling
+        # instructions, validity windows, copy counts, format rules. Never
+        # auto-added as a section (see proposal_rfp_compliance.py's
+        # _ADD_ELIGIBLE_SOURCES module note) but never silently dropped
+        # either — reported here as its own compliance checklist so the
+        # banner can say "N submission requirement(s) to comply with" and a
+        # real deadline (e.g. "Proposal must be received no later than
+        # August 3, 2026 by 3:00 P.M. (ET)") stays visible.
+        "ledgerSubmissionInstructionsCount": len(
+            ledger_result.advisory_submission_instructions
+        ),
+        "ledgerSubmissionInstructionsTitles": [
+            a.requirement_text for a in ledger_result.advisory_submission_instructions
+        ],
         # Set only when the blast-radius guard declined to apply otherwise-
         # eligible additions this pass — see _BLAST_RADIUS_MAX_ADDITIONS /
         # _BLAST_RADIUS_MAX_GROWTH_FRACTION in proposal_rfp_compliance.py.
