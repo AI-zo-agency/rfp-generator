@@ -86,7 +86,13 @@ def _rfp(rfp_id: str, **overrides) -> RfpRecord:
 
 
 def _req(rid: str, text: str, **kw) -> LedgerRequirement:
-    kw.setdefault("source", "scored_criterion")
+    # required_content, not scored_criterion: reconcile_requirement_ledger's
+    # ADD only applies to sources that name an actual deliverable (see
+    # proposal_rfp_compliance.py's module note) — a scored_criterion is a
+    # scoring category and is never auto-added, so it would never reach this
+    # drafting pass. This file exists to test drafting content for a section
+    # ADD actually created, so its fixture needs an ADD-eligible source.
+    kw.setdefault("source", "required_content")
     kw.setdefault("mandatory", True)
     kw.setdefault("satisfiedBy", [])
     return LedgerRequirement(id=rid, text=text, **kw)

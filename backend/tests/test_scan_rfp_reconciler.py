@@ -172,10 +172,46 @@ class MissingRequirementIsAddedTests(unittest.TestCase):
         self.assertFalse(result.changed)
         self.assertEqual(len(result.draft.sections), 1)
 
-    def test_scored_missing_requirements_are_added_before_unscored_ones(self) -> None:
+    def test_scored_eligible_missing_requirements_are_added_before_unscored_ones(
+        self,
+    ) -> None:
+        """Among the sources ADD is eligible for (required_content, form), a
+        pointed one is still added first — the ordering priority is
+        unaffected by the source restriction, only WHICH sources are
+        eligible at all changed."""
         ledger = RequirementLedger(
             requirements=[
                 _req("r-unscored", "Appendix B", satisfiedBy=[]),
+                _req(
+                    "r-form-scored",
+                    "Key Personnel Matrix",
+                    source="form",
+                    points=15.0,
+                    satisfiedBy=[],
+                ),
+            ]
+        )
+        draft = _draft(_section("s1", "Approach", "text"))
+        research = _research(ledger)
+        result = reconcile_requirement_ledger(draft=draft, research=research, rfp=_rfp())
+
+        self.assertEqual(
+            [a.requirement_id for a in result.applied_additions],
+            ["r-form-scored", "r-unscored"],
+        )
+
+    def test_missing_scored_criterion_is_never_auto_added_but_reported_as_advisory(
+        self,
+    ) -> None:
+        """Live-incident regression: a scored_criterion is a scoring
+        CATEGORY name (e.g. "Cost and Overall Value"), not a deliverable —
+        the matcher missing a lexical match for it does not mean the RFP
+        requirement is uncovered; it usually means the proposal covers it
+        under a requirement-phrased title the category name doesn't share
+        tokens with. ADD must never auto-add it; it must be surfaced as
+        advisory so a human judges."""
+        ledger = RequirementLedger(
+            requirements=[
                 _req(
                     "r-scored",
                     "Key Personnel Matrix",
@@ -189,9 +225,16 @@ class MissingRequirementIsAddedTests(unittest.TestCase):
         research = _research(ledger)
         result = reconcile_requirement_ledger(draft=draft, research=research, rfp=_rfp())
 
-        self.assertEqual(
-            [a.requirement_id for a in result.applied_additions],
-            ["r-scored", "r-unscored"],
+        self.assertEqual(result.applied_additions, [])
+        self.assertEqual(len(result.draft.sections), 1, "no stub section added")
+        self.assertEqual(len(result.advisory_scored_criteria), 1)
+        advisory = result.advisory_scored_criteria[0]
+        self.assertEqual(advisory.requirement_id, "r-scored")
+        self.assertEqual(advisory.requirement_text, "Key Personnel Matrix")
+        self.assertEqual(advisory.points, 15.0)
+        self.assertTrue(
+            any("may not be covered" in line for line in result.logs),
+            f"expected an advisory log line, got: {result.logs}",
         )
 
 

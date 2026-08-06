@@ -430,6 +430,21 @@ async def run_verify_scrub_only_scan(
         # say WHY ledger_added/merged/cut are 0 instead of reading identically
         # to "already compliant, nothing to fix". None on every other path.
         "ledgerCheckSkippedReason": ledger_result.skipped_reason,
+        # A missing scored_criterion is never auto-added (see
+        # proposal_rfp_compliance.py's module note — a scoring category name
+        # rarely lexically matches the requirement-phrased section that
+        # covers it) — surfaced here instead so the banner can say "N scored
+        # criteri(a) may not be covered" and let a human judge.
+        "ledgerScoredCriteriaAdvisoryCount": len(ledger_result.advisory_scored_criteria),
+        "ledgerScoredCriteriaAdvisoryTitles": [
+            a.requirement_text for a in ledger_result.advisory_scored_criteria
+        ],
+        # Set only when the blast-radius guard declined to apply otherwise-
+        # eligible additions this pass — see _BLAST_RADIUS_MAX_ADDITIONS /
+        # _BLAST_RADIUS_MAX_GROWTH_FRACTION in proposal_rfp_compliance.py.
+        "ledgerAdditionsDeclinedCount": ledger_result.declined_addition_count,
+        "ledgerAdditionsDeclinedTitles": ledger_result.declined_addition_titles,
+        "ledgerAdditionsDeclinedReason": ledger_result.declined_addition_reason,
         # Task 12 — sections the KB-grounded pass above completed vs. sections
         # it could not (still truncated; see truncatedSectionsCount/Titles
         # further down, which is the post-repair T1 rescan and is the source
@@ -563,7 +578,8 @@ async def run_verify_scrub_only_scan(
     logger.info(
         "scan-rfp:report rfp_id=%s sections_scanned=%s verify_removed=%s "
         "verify_kept=%s ledger_added=%s ledger_added_titles=%s ledger_merged=%s "
-        "ledger_cut=%s truncation_repaired=%s truncation_repaired_titles=%s "
+        "ledger_cut=%s ledger_scored_advisory=%s ledger_additions_declined=%s "
+        "truncation_repaired=%s truncation_repaired_titles=%s "
         "truncation_still_truncated_ids=%s truncated_sections=%s truncated_titles=%s "
         "unverified_claims=%s",
         rfp_id,
@@ -574,6 +590,8 @@ async def run_verify_scrub_only_scan(
         report.get("ledgerAdditionsSectionTitles"),
         report.get("ledgerMergesApplied"),
         report.get("ledgerCutsApplied"),
+        report.get("ledgerScoredCriteriaAdvisoryCount"),
+        report.get("ledgerAdditionsDeclinedCount"),
         report.get("truncationRepairedCount"),
         report.get("truncationRepairedSectionTitles"),
         truncation_still_truncated_ids,

@@ -18,6 +18,19 @@ export interface ScanRfpFulfillReport {
   ledgerMergesSectionTitles?: string[];
   ledgerCutsApplied?: number;
   ledgerCutsSectionTitles?: string[];
+  /** Missing scored evaluation criteria — never auto-added (a scoring
+   * category name rarely lexically matches the requirement-phrased section
+   * that covers it); surfaced here so the banner can say a human should
+   * judge whether each one is genuinely uncovered. */
+  ledgerScoredCriteriaAdvisoryCount?: number;
+  ledgerScoredCriteriaAdvisoryTitles?: string[];
+  /** Set only when the blast-radius guard declined to apply otherwise-
+   * eligible additions this pass (too many sections / too much growth for
+   * one click) — surfaced so the banner says what it declined and why,
+   * instead of silently applying nothing. */
+  ledgerAdditionsDeclinedCount?: number;
+  ledgerAdditionsDeclinedTitles?: string[];
+  ledgerAdditionsDeclinedReason?: string | null;
   truncationRepairedCount?: number;
   truncationRepairedSectionTitles?: string[];
   truncatedSectionsCount?: number;
@@ -54,6 +67,26 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
       `Added ${added} missing required section(s)${namedList(
         report.ledgerAdditionsSectionTitles
       )}`
+    );
+  }
+
+  const declined = report.ledgerAdditionsDeclinedCount ?? 0;
+  if (declined > 0) {
+    clauses.push(
+      `declined to add ${declined} section(s) automatically${namedList(
+        report.ledgerAdditionsDeclinedTitles
+      )} (${report.ledgerAdditionsDeclinedReason ?? "over the safety guard"})`
+    );
+  }
+
+  const scoredAdvisory = report.ledgerScoredCriteriaAdvisoryCount ?? 0;
+  if (scoredAdvisory > 0) {
+    clauses.push(
+      `${scoredAdvisory} scored criteri${
+        scoredAdvisory === 1 ? "on" : "a"
+      } may not be covered${namedList(
+        report.ledgerScoredCriteriaAdvisoryTitles
+      )} — review manually`
     );
   }
 

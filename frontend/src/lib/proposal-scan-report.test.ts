@@ -137,6 +137,52 @@ describe("buildScanRfpBanner", () => {
     );
   });
 
+  it("reports missing scored criteria as advisory, never as an addition", () => {
+    // Live-incident regression: a scored evaluation criterion like "Cost and
+    // Overall Value" is a scoring category name, not a deliverable — it must
+    // never show up as "Added ... section(s)"; it must show up as advisory.
+    const banner = buildScanRfpBanner({
+      ledgerScoredCriteriaAdvisoryCount: 5,
+      ledgerScoredCriteriaAdvisoryTitles: [
+        "Relevant Experience",
+        "Strategic Approach and Methodology",
+        "Personnel and Project Management",
+        "Reporting and Performance Optimization",
+        "Cost and Overall Value",
+      ],
+    });
+    expect(banner).not.toContain("Added");
+    expect(banner).toBe(
+      '5 scored criteria may not be covered ("Relevant Experience", ' +
+        '"Strategic Approach and Methodology", "Personnel and Project Management", ' +
+        '"Reporting and Performance Optimization", "Cost and Overall Value") — ' +
+        "review manually."
+    );
+  });
+
+  it("reports declined additions from the blast-radius guard separately from applied ones", () => {
+    const banner = buildScanRfpBanner({
+      ledgerAdditionsApplied: 0,
+      ledgerAdditionsDeclinedCount: 8,
+      ledgerAdditionsDeclinedTitles: [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F",
+        "G",
+        "H",
+      ],
+      ledgerAdditionsDeclinedReason:
+        "would add 8 section(s) to a 10-section proposal in one pass — over the blast-radius guard",
+    });
+    expect(banner).toBe(
+      'Declined to add 8 section(s) automatically ("A", "B", "C", "D", "E", +3 more) ' +
+        "(would add 8 section(s) to a 10-section proposal in one pass — over the blast-radius guard)."
+    );
+  });
+
   it("appends the skip-reason clause alongside other real changes", () => {
     const banner = buildScanRfpBanner({
       verifyTagsRemoved: 3,

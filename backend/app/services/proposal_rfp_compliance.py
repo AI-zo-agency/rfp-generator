@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -277,6 +277,42 @@ def scan_uncovered_requirement_gaps(
 # implies (not just the ones that made a fresh edit this run), so it holds on
 # every re-run, not only the first.
 #
+# Post-incident correction: ADD used to apply to every missing() requirement
+# regardless of source. A live run on a real proposal proved that unsafe —
+# ledger.missing() flagged 21 of the RFP's evaluation *criteria* ("Relevant
+# Experience", "Strategic Approach and Methodology", "Personnel and Project
+# Management", "Reporting and Performance Optimization", "Cost and Overall
+# Value", ...) as uncovered even though the proposal already addressed every
+# one of them under requirement-phrased section titles (e.g. "Examples of
+# similar work performed within the past five (5) years" for "Relevant
+# Experience"). A scored_criterion is a scoring CATEGORY name, not a
+# deliverable — it is satisfied by whatever section addresses it, and
+# matching an abstract category name to requirement-phrased prose lexically
+# is not a problem the matcher can be tuned to solve reliably (5 of 5 misses
+# on the real RFP above). ADD now applies ONLY to source in
+# _ADD_ELIGIBLE_SOURCES (required_content, form) — the two ledger sources
+# that name an actual submittable deliverable, where "no section covers
+# this" really does mean "this is missing". A missing scored_criterion is
+# never auto-added; it is downgraded to an advisory line in the report so a
+# human can judge whether it is genuinely uncovered, exactly the judgment
+# call the matcher cannot safely make on its own. Do NOT try to fix this by
+# loosening the matcher instead — see test_outline_coverage.py /
+# test_section_aliases.py's false-positive battery for what that
+# reintroduces.
+#
+# Blast-radius guard: the same incident's ledger would have added 21 new
+# sections to a 23-section, 12-page-limit proposal even with source-filtering
+# applied to a smaller set — a reconciler bug that adds a handful of sections
+# is a nuisance; one that silently doubles a document is a different order of
+# danger, and the failure mode above shows the matcher can be systematically
+# wrong across an entire category, not just a one-off miss. If a single pass
+# would add more than _BLAST_RADIUS_MAX_ADDITIONS sections, or grow the
+# section count by more than _BLAST_RADIUS_MAX_GROWTH_FRACTION, none of that
+# pass's eligible additions are applied — they are reported instead so a
+# human decides. A reconciler that under-adds and says so is recoverable by
+# clicking Scan RFP again after review; one that silently balloons a
+# near-page-limit proposal is not.
+#
 # Pure and deterministic — zero LLM calls, never raises.
 # ---------------------------------------------------------------------------
 
@@ -301,6 +337,34 @@ _ADDED_SECTION_ID_TEMPLATE = "ledger-{requirement_id}"
 # Same generic-confirmation owner proposal_manual_flags.py uses for
 # non-bio, non-budget MANUAL FILL handoffs.
 _ADDED_SECTION_MANUAL_FILL_OWNER = "Sonja"
+
+# ADD is only safe for ledger sources that name an actual submittable
+# deliverable — see the module note above. "scored_criterion" (an evaluation
+# scoring category) and "eligibility" (a go/no-go gate, not a proposal
+# section) are deliberately excluded: len(satisfied_by) == 0 for those means
+# "the matcher didn't find a lexical match", not "this is missing".
+_ADD_ELIGIBLE_SOURCES = frozenset({"required_content", "form"})
+
+# Blast-radius guard (see module note above). Both are module-level named
+# constants, not magic numbers, because the threshold decision itself is the
+# safety mechanism and needs to be reviewable/tunable in one place.
+#   - _BLAST_RADIUS_MAX_ADDITIONS: an absolute cap. 5 mirrors namedList's
+#     MAX_NAMED_TITLES on the frontend (proposal-scan-report.ts) — a banner
+#     that names every addition individually stays readable up to about 5;
+#     past that a human should review a list, not a sentence. Always active,
+#     regardless of the existing draft's size.
+#   - _BLAST_RADIUS_MAX_GROWTH_FRACTION: a relative cap so a large proposal
+#     (60+ sections) isn't held to the same absolute-5 ceiling as a small
+#     one. 0.25 means a single Scan-RFP click can grow a document by at most
+#     a quarter — the incident this guards against would have grown a
+#     23-section proposal by 91% (21/23) in one click. Only checked once the
+#     draft already has at least _BLAST_RADIUS_MAX_ADDITIONS sections — on a
+#     near-empty draft (e.g. one legitimately missing section on a 1-section
+#     outline) a fraction is not a meaningful signal (100% "growth") and the
+#     absolute cap alone is the right guard.
+# Either threshold alone is enough to decline the pass.
+_BLAST_RADIUS_MAX_ADDITIONS = 5
+_BLAST_RADIUS_MAX_GROWTH_FRACTION = 0.25
 
 
 @dataclass(frozen=True)
@@ -349,6 +413,18 @@ class AppliedCutAction:
 
 
 @dataclass(frozen=True)
+class AdvisoryScoredCriterion:
+    """A scored evaluation criterion (source="scored_criterion") the matcher
+    found no section for — never auto-added (see module note above), only
+    surfaced so a human can judge whether it is genuinely uncovered or
+    already addressed under a differently-worded section title."""
+
+    requirement_id: str
+    requirement_text: str
+    points: float | None
+
+
+@dataclass(frozen=True)
 class LedgerReconcileResult:
     draft: ProposalDraft
     changed: bool
@@ -356,6 +432,16 @@ class LedgerReconcileResult:
     applied_merges: list[AppliedMergeAction]
     applied_cuts: list[AppliedCutAction]
     logs: list[str]
+    # Missing scored criteria — always populated when any exist, whether or
+    # not anything else in this pass changed. See AdvisoryScoredCriterion.
+    advisory_scored_criteria: list[AdvisoryScoredCriterion] = field(default_factory=list)
+    # Set only when the blast-radius guard declined to apply otherwise-
+    # eligible additions this pass (see _BLAST_RADIUS_MAX_ADDITIONS /
+    # _BLAST_RADIUS_MAX_GROWTH_FRACTION above). 0 / [] / None on every other
+    # path, including "nothing to add" and "additions applied normally".
+    declined_addition_count: int = 0
+    declined_addition_titles: list[str] = field(default_factory=list)
+    declined_addition_reason: str | None = None
     # Set only when research.requirement_ledger was missing/empty and this
     # call built one on demand (see _build_ledger_on_demand below) — the
     # caller persists it onto the research cache so the NEXT scan reads it
@@ -622,41 +708,108 @@ def reconcile_requirement_ledger(
     sections = list(draft.sections)
     changed = False
 
-    # ADD — applied. len(satisfied_by) == 0, the exact signal missing() used
+    # ADD — applied, but ONLY for sources in _ADD_ELIGIBLE_SOURCES (see module
+    # note above). len(satisfied_by) == 0 is the exact signal missing() used
     # when ADD was surfaced-only; scored requirements (points set) are added
-    # first so a partially-applied pass (e.g. a future size cap) favors the
+    # first among eligible ones so a partially-applied pass favors the
     # requirements that carry evaluation weight.
     applied_additions: list[AppliedRequirementAddition] = []
+    advisory_scored_criteria: list[AdvisoryScoredCriterion] = []
+    declined_addition_count = 0
+    declined_addition_titles: list[str] = []
+    declined_addition_reason: str | None = None
     existing_section_ids = {s.id for s in sections}
     missing_requirements = sorted(
         ledger.missing(),
         key=lambda r: (r.points is None, -(r.points or 0.0)),
     )
+
+    # A scored_criterion is a scoring CATEGORY, never a deliverable — see the
+    # module note. It is surfaced as advisory regardless of whether the
+    # blast-radius guard below trips, so the user always sees it even if
+    # eligible additions this pass get declined.
     for requirement in missing_requirements:
-        section_id = _ADDED_SECTION_ID_TEMPLATE.format(requirement_id=requirement.id)
-        if section_id in existing_section_ids:
-            continue  # idempotent: already added on a prior run
-        new_section = _build_added_requirement_section(requirement)
-        sections.append(new_section)
-        existing_section_ids.add(section_id)
-        changed = True
-        applied_additions.append(
-            AppliedRequirementAddition(
-                requirement_id=requirement.id,
-                requirement_text=requirement.text,
-                section_id=new_section.id,
-                section_title=new_section.title,
-                source=requirement.source,
-                points=requirement.points,
-                kb_queries=list(requirement.kb_queries),
+        if requirement.source == "scored_criterion":
+            advisory_scored_criteria.append(
+                AdvisoryScoredCriterion(
+                    requirement_id=requirement.id,
+                    requirement_text=requirement.text,
+                    points=requirement.points,
+                )
             )
+    if advisory_scored_criteria:
+        names = ", ".join(
+            f'"{a.requirement_text[:80]}"' for a in advisory_scored_criteria[:5]
         )
-    if applied_additions:
+        extra = len(advisory_scored_criteria) - min(5, len(advisory_scored_criteria))
+        if extra > 0:
+            names += f", +{extra} more"
         logs.append(
-            f"ledger:add — {len(applied_additions)} mandatory requirement(s) had no "
-            "matching section; added as new draft section(s) flagged [MANUAL FILL] "
-            "for KB search / human content."
+            f"ledger:add — {len(advisory_scored_criteria)} scored criteri"
+            f"{'on' if len(advisory_scored_criteria) == 1 else 'a'} may not be "
+            f"covered: {names} — a scoring category name rarely matches the "
+            "requirement-phrased section that actually covers it, so this is "
+            "never auto-added; review manually."
         )
+
+    eligible_missing = [
+        r for r in missing_requirements if r.source in _ADD_ELIGIBLE_SOURCES
+    ]
+    candidate_additions = [
+        r
+        for r in eligible_missing
+        if _ADDED_SECTION_ID_TEMPLATE.format(requirement_id=r.id)
+        not in existing_section_ids
+    ]
+
+    existing_section_count = len(sections)
+    # The fraction check only engages once the draft already has at least
+    # _BLAST_RADIUS_MAX_ADDITIONS sections — see the constant's comment
+    # above for why a tiny draft's "growth" isn't a meaningful signal.
+    growth_fraction = (
+        len(candidate_additions) / existing_section_count
+        if existing_section_count >= _BLAST_RADIUS_MAX_ADDITIONS
+        else 0.0
+    )
+    blast_radius_tripped = candidate_additions and (
+        len(candidate_additions) > _BLAST_RADIUS_MAX_ADDITIONS
+        or growth_fraction > _BLAST_RADIUS_MAX_GROWTH_FRACTION
+    )
+
+    if blast_radius_tripped:
+        declined_addition_count = len(candidate_additions)
+        declined_addition_titles = [r.text[:120] for r in candidate_additions]
+        declined_addition_reason = (
+            f"would add {len(candidate_additions)} section(s) to a "
+            f"{existing_section_count}-section proposal in one pass — over the "
+            f"blast-radius guard (max {_BLAST_RADIUS_MAX_ADDITIONS} per pass or "
+            f"{_BLAST_RADIUS_MAX_GROWTH_FRACTION:.0%} growth); declined "
+            "automatically, review and add manually."
+        )
+        logs.append(f"ledger:add — declined — {declined_addition_reason}")
+    else:
+        for requirement in candidate_additions:
+            new_section = _build_added_requirement_section(requirement)
+            sections.append(new_section)
+            existing_section_ids.add(new_section.id)
+            changed = True
+            applied_additions.append(
+                AppliedRequirementAddition(
+                    requirement_id=requirement.id,
+                    requirement_text=requirement.text,
+                    section_id=new_section.id,
+                    section_title=new_section.title,
+                    source=requirement.source,
+                    points=requirement.points,
+                    kb_queries=list(requirement.kb_queries),
+                )
+            )
+        if applied_additions:
+            logs.append(
+                f"ledger:add — {len(applied_additions)} mandatory requirement(s) had no "
+                "matching section; added as new draft section(s) flagged [MANUAL FILL] "
+                "for KB search / human content."
+            )
 
     section_index_by_id = {s.id: i for i, s in enumerate(sections)}
 
@@ -810,6 +963,10 @@ def reconcile_requirement_ledger(
             applied_merges=[],
             applied_cuts=[],
             logs=logs,
+            advisory_scored_criteria=advisory_scored_criteria,
+            declined_addition_count=declined_addition_count,
+            declined_addition_titles=declined_addition_titles,
+            declined_addition_reason=declined_addition_reason,
             built_ledger=built_ledger,
         )
 
@@ -822,6 +979,10 @@ def reconcile_requirement_ledger(
         applied_merges=applied_merges,
         applied_cuts=applied_cuts,
         logs=logs,
+        advisory_scored_criteria=advisory_scored_criteria,
+        declined_addition_count=declined_addition_count,
+        declined_addition_titles=declined_addition_titles,
+        declined_addition_reason=declined_addition_reason,
         built_ledger=built_ledger,
     )
 

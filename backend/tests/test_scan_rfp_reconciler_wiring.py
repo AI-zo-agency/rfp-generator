@@ -141,13 +141,18 @@ class _RealDbTestCase(unittest.IsolatedAsyncioTestCase):
         ]
         ledger = RequirementLedger(
             requirements=[
-                # Mandatory AND scored — matches the task-9 verification
-                # scenario ("missing a mandatory scored requirement"), and
-                # exercises the scored-first ADD ordering.
+                # Mandatory, required-content deliverable with no matching
+                # section — the case ADD is eligible for. (Originally seeded
+                # with source="scored_criterion" here; that was itself an
+                # instance of the live-incident bug this suite now guards
+                # against — a real deliverable mislabeled as a scoring
+                # category would never get auto-added. required_content is
+                # the correct source for an actual deliverable like a cover
+                # letter.)
                 _req(
                     "r-missing",
                     "A signed cover letter",
-                    source="scored_criterion",
+                    source="required_content",
                     points=5.0,
                     satisfiedBy=[],
                 ),
@@ -225,8 +230,8 @@ class RealVerifyScrubOnlyPathReachesReconcilerTests(_RealDbTestCase):
         self.assertEqual(report.get("mode"), "verify_scrub_only")
 
         # ADD: applied. A new [MANUAL FILL] stub section is created for the
-        # missing, mandatory, SCORED cover-letter requirement — it can no
-        # longer be silently dropped.
+        # missing, mandatory, required_content cover-letter requirement — it
+        # can no longer be silently dropped.
         self.assertEqual(
             len(draft_after.sections), 6, "ADD must create exactly one new section"
         )
