@@ -7,6 +7,7 @@ before returning hits to section writers.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app.models.proposal import EvidenceItem
@@ -45,6 +46,11 @@ def _hit_excerpt(hit: dict[str, Any], *, max_chars: int = 2000) -> str:
     return f"{text[:max_chars]}…"
 
 
+def _slugify_claim(text: str, *, max_len: int = 60) -> str:
+    tokens = re.findall(r"[a-z0-9]+", (text or "").casefold())
+    return "_".join(tokens)[:max_len].strip("_")
+
+
 def _infer_claim_from_entry(entry: RetrievalEntry) -> str:
     blob = " ".join(
         [
@@ -63,7 +69,21 @@ def _infer_claim_from_entry(entry: RetrievalEntry) -> str:
         return "brand"
     if any(t in blob for t in ("reference", "past performance", "case study", "experience")):
         return "experience"
-    return "experience"
+    # No keyword-ladder match: derive the claim from what the requirement
+    # actually asks for instead of defaulting every unmatched section to
+    # "experience". The blanket "experience" default let ANY case study
+    # satisfy ANY section — it never checked whether the retrieved evidence
+    # demonstrated the specific capability the section needed (the digital
+    # advertising RFP defect this fixes: brand-messaging and website-redesign
+    # case studies were accepted as "experience" proof for a digital-ad ask).
+    requirement_text = (
+        (entry.required_assets[0] if entry.required_assets else "")
+        or entry.why_needed
+        or (entry.queries[0] if entry.queries else "")
+        or ""
+    )
+    slug = _slugify_claim(requirement_text)
+    return slug or "experience"
 
 
 async def retrieve_for_section(
