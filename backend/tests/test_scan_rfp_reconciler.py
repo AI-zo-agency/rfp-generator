@@ -272,6 +272,49 @@ class DuplicatedRequirementIsMergedTests(unittest.TestCase):
             self.assertNotIn("$2M", added)
             self.assertNotIn("Acme Surety", added)
 
+    def test_cross_referenced_sections_are_not_reported_as_truncated_by_t1(
+        self,
+    ) -> None:
+        """Regression: _append_cross_reference used to close its note with a
+        bare markdown-italics `_`, which the T1 mid-sentence-cutoff check
+        (proposal_t1_validators._TERMINAL_PUNCT_RE) does not treat as
+        terminal punctuation. Every section a MERGE cross-referenced was then
+        misreported as truncated content needing review. A section that is
+        genuinely truncated must still be caught."""
+        from app.services.proposal_t1_validators import scan_truncation_artifacts
+
+        draft, research, _, _, _ = self._triplicated_draft_and_research()
+        result = reconcile_requirement_ledger(draft=draft, research=research, rfp=_rfp())
+
+        # A genuinely truncated section, mid-sentence with no terminal
+        # punctuation, added alongside the merged draft.
+        truncated_section = _section(
+            "sec-truncated",
+            "Staffing Plan",
+            "Our staffing plan includes five full-time engineers and one",
+        )
+        sections_with_truncation = list(result.draft.sections) + [truncated_section]
+        scan_draft = result.draft.model_copy(update={"sections": sections_with_truncation})
+
+        findings = scan_truncation_artifacts(scan_draft)
+        flagged_section_ids = {f["section_id"] for f in findings}
+
+        self.assertNotIn(
+            "sec-b",
+            flagged_section_ids,
+            "cross-referenced (non-owner) section wrongly reported as truncated",
+        )
+        self.assertNotIn(
+            "sec-c",
+            flagged_section_ids,
+            "cross-referenced (non-owner) section wrongly reported as truncated",
+        )
+        self.assertIn(
+            "sec-truncated",
+            flagged_section_ids,
+            "a genuinely truncated section must still be caught",
+        )
+
 
 class OverBudgetCutsLowestScoringContentTests(unittest.TestCase):
     """Over page budget -> lowest-scoring content is cut first; scored content

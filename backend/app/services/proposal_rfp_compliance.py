@@ -374,10 +374,16 @@ def _append_cross_reference(
     owner_title: str,
 ) -> str:
     marker = _cross_reference_marker(requirement_id)
+    # The closing `_` (markdown italics) must land *before* the final period,
+    # not after it — otherwise the note's last character is `_`, which the T1
+    # truncation gate's terminal-punctuation check (proposal_t1_validators.py,
+    # _TERMINAL_PUNCT_RE) does not recognize as a sentence end, and the
+    # cross-referenced section gets misreported as truncated content needing
+    # review.
     note = (
         f"\n\n{marker} _Cross-reference: “{requirement_text[:160].strip()}” is "
         f"fully addressed in “{owner_title}” — see that section; not "
-        "restated here to avoid duplication._"
+        "restated here to avoid duplication_."
     )
     return (content or "").rstrip() + note
 
