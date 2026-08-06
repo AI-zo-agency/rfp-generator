@@ -113,18 +113,34 @@ class ScoredSectionsSurviveFilteringTests(unittest.TestCase):
 # Summary/Summary of Approach) share zero (or only "boring") tokens and
 # cannot be bridged by any lexical overlap scoring. Task 8 added a curated,
 # conservative alias table (proposal_section_aliases.py) as an additional
-# match channel specifically for standard procurement synonyms like these,
-# raising the measured hit rate to 10/10 with the false-positive battery
-# below still at zero — see task-8-report.md and tests/test_section_aliases.py
-# for the alias-specific measurements and adversarial probes.
+# match channel specifically for standard procurement synonyms like these.
+#
+# Measured 8/10, with the false-positive battery below still at zero. TWO of
+# those four are deliberately left as documented MISSES rather than closed,
+# because closing them was measured to HIDE scored requirements:
+#
+#   Key Personnel / Staffing Plan — WHO is on the team vs HOW the team is
+#     assembled. Routinely scored as two SEPARATE criteria with separate
+#     weights; aliasing them let a 15-pt "Key Personnel" criterion be
+#     silently discharged by a "Staffing Plan" section and never reach
+#     missing().
+#   Executive Summary / Summary of Approach — "of" is a stopword, so
+#     "Summary of Approach" reduces to the same token set as "Approach
+#     Summary", an ordinary sub-heading inside a Technical Approach section.
+#     Aliasing them let a 20-pt criterion be absorbed by that subsection.
+#
+# A missed alias costs a human one dismissal in missing(); a wrong one hides
+# a scored requirement forever. See task-8-report.md and
+# tests/test_section_aliases.py for the alias-specific measurements, the
+# same-group cross-pair enumeration, and the adversarial probes.
 # ---------------------------------------------------------------------------
 
 _WORDING_VARIANT_PAIRS: list[tuple[str, str, bool]] = [
     ("Cover Letter", "Letter of Transmittal", True),
     ("Cost Proposal", "Pricing Proposal", True),
     ("Statement of Qualifications", "Qualifications", True),
-    ("Executive Summary", "Summary of Approach", True),
-    ("Key Personnel", "Staffing Plan", True),
+    ("Executive Summary", "Summary of Approach", False),  # deliberate miss, see above
+    ("Key Personnel", "Staffing Plan", False),  # deliberate miss, see above
     ("References", "Client References and Testimonials", True),
     ("Insurance Certificate", "Certificate of Insurance", True),
     ("Technical Approach", "Approach and Methodology", True),
@@ -161,7 +177,7 @@ class MatcherPrecisionMeasurementTests(unittest.TestCase):
             )
         # Documents the measured rate so a future matcher change has a baseline
         # to beat, and so this test fails loudly (not silently) if it regresses.
-        self.assertEqual(hits, 10, f"measured hit rate changed: {results}")
+        self.assertEqual(hits, 8, f"measured hit rate changed: {results}")
 
     def test_a_section_titled_summary_does_not_satisfy_an_insurance_requirement(self) -> None:
         self.assertFalse(
