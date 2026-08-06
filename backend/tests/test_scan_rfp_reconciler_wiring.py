@@ -25,8 +25,24 @@ button-shaped entry point — ``run_fulfill_rfp_gaps(rfp_id,
 mode="verify_scrub_only")`` — end to end against a local (non-Supabase)
 database reaches the same result. No mocking of the reconciler itself; the
 only thing stubbed out is the database backend (sqlite instead of Supabase)
-and the LLM (never configured in tests, and no draft section carries a
-[VERIFY] tag, so the optional-scrub LLM path never fires).
+and the LLM.
+
+LLM stubbing (Task 10): this docstring used to claim the LLM was "never
+configured in tests". That was never actually true — ``llm.is_configured()``
+reads the developer's real ``.env``, so it returns True in a normal local
+run. It was merely *harmless*, because every code path this file reached was
+zero-LLM by construction. Task 10 changed that: the ADD path now drafts the
+section it adds (``draft_added_requirement_sections``), so an unstubbed run
+of these tests made LIVE Supermemory + LLM calls — real latency, real spend,
+~67s for this file instead of ~1.5s.
+
+``asyncSetUp`` now patches ``llm.is_configured`` to False, which makes the
+original claim true rather than merely assumed. That pins these tests to the
+"LLM unavailable" branch, where ``draft_added_requirement_sections`` returns
+immediately and leaves the ``[MANUAL FILL]`` placeholder untouched — exactly
+the behaviour every assertion below was already written against. Not one
+assertion changed. The drafted-content behaviour has its own hermetic
+coverage in ``test_scan_rfp_ledger_add_drafting.py``.
 """
 
 from __future__ import annotations
@@ -94,6 +110,10 @@ class _RealDbTestCase(unittest.IsolatedAsyncioTestCase):
             patch.object(repo, "_use_supabase", return_value=False),
             patch("app.services.rfp_repository._use_supabase", return_value=False),
             patch("app.services.supabase_db.use_supabase_db", return_value=False),
+            # Keeps this file hermetic and zero-spend — see the module
+            # docstring. Without it the Task 10 ADD-drafting path makes live
+            # Supermemory + LLM calls here.
+            patch("app.services.llm.is_configured", return_value=False),
         ]
         for p in self._patchers:
             p.start()

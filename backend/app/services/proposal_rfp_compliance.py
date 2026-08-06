@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
 from app.models.requirement_ledger import RequirementLedger
@@ -697,6 +698,285 @@ def reconcile_requirement_ledger(
         applied_cuts=applied_cuts,
         logs=logs,
     )
+
+
+# ---------------------------------------------------------------------------
+# ADD content drafting (Task 10).
+#
+# reconcile_requirement_ledger above stays pure/synchronous/zero-LLM on
+# purpose — its own test suite (test_scan_rfp_reconciler.py,
+# test_scan_rfp_reconciler_wiring.py) exercises it with no LLM configured and
+# asserts the [MANUAL FILL] stub verbatim. draft_added_requirement_sections is
+# a separate, async, best-effort pass the caller runs immediately afterward,
+# scoped to exactly the sections THIS pass's applied_additions just created.
+# That scoping is what keeps ADD idempotent even with drafting wired in: a
+# second reconcile call finds those section ids already present, so
+# applied_additions is empty and this function is never even invoked again —
+# a drafted section is never redrafted, and a still-stub section from a prior
+# failed drafting attempt is not silently retried into a different content on
+# a later click (matches the deterministic-on-replay contract the ADD tests
+# already lock in).
+#
+# Reuses the real drafting stack instead of inventing a new one:
+#   - app.services.proposal_intelligence.jit_retrieval.retrieve_for_section
+#     (zero LLM calls — Supermemory search + Evidence Trust Gate)
+#   - app.services.proposal_section_editor.REFINE_QUERIES_PROMPT (query
+#     planning) and SECTION_REDRAFT_PROMPT (drafting) — the same prompts
+#     _redraft_rfp_section uses for an existing section, called here directly
+#     through llm.chat_json instead of the tool-calling agent wrapper so the
+#     call count per section is exactly bounded (agent tool loops are not).
+#   - app.services.proposal_brand_voice.{resolve_voice_context,
+#     format_brand_voice_block, classify_section_register} for the same
+#     dual-layer zö voice block every other section writer uses.
+#   - app.services.proposal_voice_enforcement.enforce_narrative_voice for the
+#     same post-write register fix-up as a normal redraft.
+#
+# LLM budget: at most one query-planning call + one drafting call per added
+# section (both node_name-routed — see llm_routing.py). Degrades to the
+# existing [MANUAL FILL] placeholder, never raises, on any failure: LLM not
+# configured, retrieval empty, planner returns no queries, or the drafted
+# content is too short to be substantial.
+# ---------------------------------------------------------------------------
+
+
+async def _draft_one_added_section(
+    *,
+    section: ProposalSection,
+    addition: AppliedRequirementAddition,
+    rfp: RfpRecord,
+    rfp_context: str,
+    brand_voice: dict[str, Any] | None,
+    kb_zo_voice: str,
+) -> ProposalSection | None:
+    """Draft real content for one newly-added [MANUAL FILL] stub section.
+
+    Returns the updated section on success, or None to signal "leave the
+    stub exactly as reconcile_requirement_ledger produced it" (caller keeps
+    the placeholder). Never raises.
+    """
+    from app.services import llm
+    from app.services.proposal_brand_voice import (
+        classify_section_register,
+        format_brand_voice_block,
+    )
+    from app.services.proposal_intelligence.jit_retrieval import retrieve_for_section
+    from app.services.proposal_intelligence.schemas import RetrievalEntry
+    from app.services.proposal_langchain_agents import content_from_agent_payload
+    from app.services.proposal_section_editor import (
+        REFINE_QUERIES_PROMPT,
+        SECTION_REDRAFT_PROMPT,
+        _format_evidence,
+    )
+    from app.services.proposal_section_quality import section_content_is_substantial
+    from app.services.proposal_voice_enforcement import enforce_narrative_voice
+
+    try:
+        query_raw, query_provider = await llm.chat_json_soft(
+            [
+                {"role": "system", "content": REFINE_QUERIES_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Client: {rfp.client}\n"
+                        f"Sector: {rfp.sector}\n"
+                        f"Section: {section.title}\n"
+                        f"Requirements: {[addition.requirement_text]}\n"
+                        "Retrieval focus: []\n"
+                        "Prior queries (DO NOT repeat):\n(none)\n\n"
+                        "User feedback:\nNo section in the draft addressed this mandatory "
+                        "RFP requirement yet. Plan queries to find zö agency evidence to "
+                        "draft it from scratch.\n\n"
+                        "Current draft (insufficient):\n(none — new section, write from scratch)"
+                    ),
+                },
+            ],
+            max_tokens=1024,
+            temperature=0.35,
+            node_name="ledger_add_query_planner",
+        )
+    except Exception:
+        logger.warning(
+            "ledger:add-draft — query planning raised for %s", addition.section_id,
+            exc_info=True,
+        )
+        return None
+
+    if query_provider == "failed":
+        return None
+
+    raw_queries = query_raw.get("queries") if isinstance(query_raw, dict) else None
+    queries = (
+        [str(q).strip()[:240] for q in raw_queries if str(q).strip()]
+        if isinstance(raw_queries, list)
+        else []
+    )
+    if not queries:
+        return None
+
+    try:
+        entry = RetrievalEntry(
+            sectionId=section.id,
+            requiredAssets=[addition.requirement_text[:200]],
+            queries=queries,
+        )
+        evidence = await retrieve_for_section(entry, rfp_client=rfp.client)
+    except Exception:
+        logger.warning(
+            "ledger:add-draft — retrieval raised for %s", addition.section_id,
+            exc_info=True,
+        )
+        return None
+
+    if not evidence:
+        return None
+
+    register = classify_section_register(
+        section_id=section.id, title=section.title, zo_mode=section.mode
+    )
+    voice_block = format_brand_voice_block(
+        brand_voice, kb_zo_voice=kb_zo_voice, rfp_client=rfp.client, register=register
+    )
+
+    user_block = (
+        f"BRAND VOICE (mandatory — maintain throughout):\n{voice_block}\n\n"
+        f"Client: {rfp.client}\n"
+        f"Sector: {rfp.sector}\n"
+        f"RFP: {rfp.title}\n"
+        f"Section: {section.title}\n"
+        f"Word target: {section.word_target}\n"
+        f"Requirements:\n- {addition.requirement_text}\n\n"
+        "User edit request:\nNo section in the draft addressed this mandatory RFP "
+        "requirement. Write the section from scratch using ONLY the evidence corpus "
+        "below. If one specific required fact is not in the evidence, insert a narrow "
+        "[VERIFY: that one field] for that fact only — never a whole-section stub, and "
+        "never invent the fact.\n\n"
+        "Previous draft:\n(none — write from scratch)\n\n"
+        f"RFP excerpt:\n{rfp_context[:4000]}\n\n"
+        f"Evidence corpus:\n{_format_evidence(evidence)}\n"
+    )
+
+    try:
+        draft_raw, draft_provider = await llm.chat_json_soft(
+            [
+                {"role": "system", "content": SECTION_REDRAFT_PROMPT},
+                {"role": "user", "content": user_block},
+            ],
+            max_tokens=6144,
+            temperature=0.3,
+            node_name="ledger_add_section_draft",
+        )
+    except Exception:
+        logger.warning(
+            "ledger:add-draft — drafting call raised for %s", addition.section_id,
+            exc_info=True,
+        )
+        return None
+
+    if draft_provider == "failed":
+        return None
+
+    content = enforce_narrative_voice(
+        content_from_agent_payload(draft_raw if isinstance(draft_raw, dict) else {}),
+        section_id=section.id,
+        title=section.title,
+        zo_mode=section.mode,
+    )
+    if not content.strip() or not section_content_is_substantial(section, content):
+        return None
+
+    return section.model_copy(update={"content": content, "status": "generated"})
+
+
+async def draft_added_requirement_sections(
+    *,
+    draft: ProposalDraft,
+    applied_additions: list[AppliedRequirementAddition],
+    research: ProposalResearchCache | None,
+    rfp: RfpRecord,
+    rfp_context: str,
+) -> tuple[ProposalDraft, list[str]]:
+    """Replace each freshly-added [MANUAL FILL] stub with drafted content.
+
+    Only touches sections named in applied_additions — the exact set
+    reconcile_requirement_ledger just added THIS pass. See the module note
+    above for why that scoping keeps ADD idempotent with drafting wired in.
+    Never raises: any per-section failure leaves that section's placeholder
+    untouched and logs why.
+    """
+    if not applied_additions:
+        return draft, []
+
+    from app.services import llm
+
+    if not llm.is_configured():
+        return draft, ["ledger:add-draft — LLM not configured, left [MANUAL FILL] placeholder(s)."]
+
+    brand_voice_dict: dict[str, Any] | None = None
+    kb_zo_voice = ""
+    try:
+        from app.services.proposal_brand_voice import resolve_voice_context
+
+        brand_voice_dict, kb_zo_voice = await resolve_voice_context(
+            rfp=rfp,
+            rfp_context=rfp_context,
+            brand_voice=(
+                research.brand_voice.model_dump(by_alias=True)
+                if research and research.brand_voice
+                else None
+            ),
+        )
+    except Exception:
+        logger.warning("ledger:add-draft — voice context resolution failed", exc_info=True)
+
+    sections = list(draft.sections)
+    by_id = {s.id: i for i, s in enumerate(sections)}
+    logs: list[str] = []
+    changed = False
+
+    for addition in applied_additions:
+        idx = by_id.get(addition.section_id)
+        if idx is None:
+            continue
+        section = sections[idx]
+        try:
+            drafted = await _draft_one_added_section(
+                section=section,
+                addition=addition,
+                rfp=rfp,
+                rfp_context=rfp_context,
+                brand_voice=brand_voice_dict,
+                kb_zo_voice=kb_zo_voice,
+            )
+        except Exception:
+            logger.exception(
+                "ledger:add-draft — unexpected failure for %s; keeping [MANUAL FILL] placeholder",
+                addition.section_id,
+            )
+            logs.append(
+                f"ledger:add-draft — {addition.section_id}: drafting failed unexpectedly, "
+                "kept [MANUAL FILL] placeholder."
+            )
+            continue
+
+        if drafted is None:
+            logs.append(
+                f"ledger:add-draft — {addition.section_id}: no KB evidence or LLM output "
+                "available, kept [MANUAL FILL] placeholder for human fill."
+            )
+            continue
+
+        sections[idx] = drafted
+        changed = True
+        logs.append(
+            f"ledger:add-draft — {addition.section_id}: drafted "
+            f"{len((drafted.content or '').split())} word(s) from KB evidence in zö voice."
+        )
+
+    if not changed:
+        return draft, logs
+
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 
 
 def scan_budget_revenue_gaps(

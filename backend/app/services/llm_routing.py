@@ -58,6 +58,9 @@ _MECHANICAL_EXACT = frozenset(
         "retrieval_planner",
         "dynamic_section",
         "section_strategy",
+        # Requirement-ledger ADD (Task 10) — plans KB queries for a
+        # newly-added section stub before drafting it.
+        "ledger_add_query_planner",
     }
 )
 
@@ -87,6 +90,9 @@ _QUALITY_EXACT = frozenset(
         # Picks the KB queries behind an excerpt revision — if it targets the
         # wrong facts, the rewriter has nothing true to say.
         "chat_selection_kb_plan",
+        # Requirement-ledger ADD (Task 10) — drafts client-facing prose for a
+        # section that had no draft content at all; a client reads this.
+        "ledger_add_section_draft",
     }
 )
 _QUALITY_PREFIXES = (

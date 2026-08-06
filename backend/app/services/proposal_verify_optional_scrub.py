@@ -324,7 +324,11 @@ async def run_verify_scrub_only_scan(
     # (len(satisfied_by) == 0) — the same signal that already gated the
     # surfaced-only report — so it cannot create a duplicate of a
     # requirement the matcher already recognized under a different title.
-    from app.services.proposal_rfp_compliance import reconcile_requirement_ledger
+    from app.services.proposal_rfp_compliance import (
+        MANUAL_FILL_MARKER,
+        draft_added_requirement_sections,
+        reconcile_requirement_ledger,
+    )
 
     ledger_result = reconcile_requirement_ledger(
         draft=draft, research=research, rfp=rfp, rfp_text=rfp_text
@@ -332,6 +336,24 @@ async def run_verify_scrub_only_scan(
     if ledger_result.changed:
         draft = ledger_result.draft
         await asave_proposal_draft(draft)
+
+    # Task 10: an ADD stub is a [MANUAL FILL] placeholder, not a clean
+    # proposal. Draft real content for exactly the sections THIS pass just
+    # added — scoped to applied_additions, so a second Scan-RFP click (whose
+    # applied_additions is empty because the section id already exists) never
+    # redrafts it. Best-effort: any KB/LLM failure leaves the placeholder
+    # exactly as reconcile_requirement_ledger produced it.
+    ledger_draft_logs: list[str] = []
+    if ledger_result.applied_additions:
+        draft, ledger_draft_logs = await draft_added_requirement_sections(
+            draft=draft,
+            applied_additions=ledger_result.applied_additions,
+            research=research,
+            rfp=rfp,
+            rfp_context=rfp_text,
+        )
+        if ledger_draft_logs:
+            await asave_proposal_draft(draft)
 
     verify_ids = {
         s.id for s in draft.sections if count_verify_tags(s.content or "") > 0
@@ -352,15 +374,23 @@ async def run_verify_scrub_only_scan(
         "ledgerAdditionsApplied": len(ledger_result.applied_additions),
     }
     report["logs"].extend(ledger_result.logs)
+    report["logs"].extend(ledger_draft_logs)
     if ledger_result.applied_additions:
-        preview = "; ".join(
-            a.requirement_text[:80] for a in ledger_result.applied_additions[:5]
-        )
-        report["humanDecisionGaps"].append(
-            f"ledger:add-needs-content — {len(ledger_result.applied_additions)} mandatory "
-            f"requirement(s) had no matching section; a new [MANUAL FILL] section was "
-            f"added for each and needs KB search / human content: {preview}"
-        )
+        added_by_id = {a.section_id: a for a in ledger_result.applied_additions}
+        still_stub = [
+            a
+            for s in draft.sections
+            if (a := added_by_id.get(s.id)) is not None
+            and MANUAL_FILL_MARKER in (s.content or "")
+        ]
+        if still_stub:
+            preview = "; ".join(a.requirement_text[:80] for a in still_stub[:5])
+            report["humanDecisionGaps"].append(
+                f"ledger:add-needs-content — {len(still_stub)} mandatory "
+                f"requirement(s) had no matching section and KB drafting could not "
+                f"fill them; a [MANUAL FILL] section remains and needs KB search / "
+                f"human content: {preview}"
+            )
 
     if not verify_ids:
         report["logs"].append("No [VERIFY] tags found in the manuscript.")
