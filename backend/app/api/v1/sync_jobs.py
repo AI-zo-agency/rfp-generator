@@ -1,12 +1,8 @@
 import asyncio
 import logging
-import os
 import re
-import shutil
-import subprocess
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -115,68 +111,37 @@ async def trigger_sync_job(payload: SyncJobTrigger) -> dict[str, object]:
     if sb.use_supabase_db():
         sb.create_sync_job(job_id)
 
-    root_dir = Path(__file__).resolve().parents[4]
-    frontend_dir = root_dir / "frontend"
-
     async def _run_playwright_sync():
         global _sync_running
-        failure: str | None = None
-
         try:
-            npx_bin = shutil.which("npx") or "/usr/local/bin/npx"
-            npx_dir = os.path.dirname(npx_bin) if os.path.isabs(npx_bin) else ""
-            env = os.environ.copy()
-            env["PATH"] = f"{npx_dir}:/usr/local/bin:/opt/homebrew/bin:{env.get('PATH', '')}"
-            # Headless by default so syncing does not steal focus with a browser
-            # window. Set JUSTWIN_HEADLESS=false to watch a run.
-            env["HEADLESS"] = os.environ.get("JUSTWIN_HEADLESS", "true")
+            from app.services.justwin_sync import run_justwin_sync
 
-            # "-" tells the script to accept every date.
-            date_arg = target_date or "-"
-            proc = await asyncio.create_subprocess_exec(
-                npx_bin,
-                "tsx",
-                "scripts/justwin-sync/index.ts",
-                job_id,
-                date_arg,
-                tab,
-                cwd=str(frontend_dir),
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-
-            if proc.returncode == 0:
-                logger.info(
-                    "JustWin sync %s completed: %s",
-                    job_id,
-                    stdout.decode("utf-8", errors="ignore")[-500:],
-                )
-            else:
-                failure = stderr.decode("utf-8", errors="ignore")[-500:]
-                logger.warning(
-                    "JustWin sync %s exited with code %s: %s",
-                    job_id,
-                    proc.returncode,
-                    failure,
-                )
+            await asyncio.to_thread(run_justwin_sync, job_id, target_date, tab)
         except Exception as exc:
-            failure = str(exc)
             logger.error("Failed to run JustWin Playwright sync: %s", exc)
+            # Runner usually marks the job failed; cover the case where it
+            # never got that far (e.g. import / browser binary missing).
+            if sb.use_supabase_db():
+                try:
+                    running = sb.get_running_sync_job()
+                    if running and running.get("id") == job_id:
+                        sb.finish_sync_job(
+                            job_id,
+                            status="failed",
+                            rfps_found=0,
+                            pdfs_downloaded=0,
+                            error=str(exc),
+                        )
+                except Exception:  # noqa: BLE001
+                    sb.finish_sync_job(
+                        job_id,
+                        status="failed",
+                        rfps_found=0,
+                        pdfs_downloaded=0,
+                        error=str(exc),
+                    )
         finally:
             _sync_running = False
-
-        # The script reports its own counts via PATCH /sync-jobs/{id} on success,
-        # so only close the job here when it never got that far.
-        if failure and sb.use_supabase_db():
-            sb.finish_sync_job(
-                job_id,
-                status="failed",
-                rfps_found=0,
-                pdfs_downloaded=0,
-                error=failure,
-            )
 
     asyncio.create_task(_run_playwright_sync())
 
@@ -193,10 +158,8 @@ async def trigger_sync_job(payload: SyncJobTrigger) -> dict[str, object]:
     }
 
 
-
 @router.post("", status_code=201)
 def create_sync_job(payload: SyncJobCreate) -> dict[str, str]:
     if sb.use_supabase_db():
         sb.create_sync_job(payload.id)
     return {"ok": "true", "id": payload.id}
-

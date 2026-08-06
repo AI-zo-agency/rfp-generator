@@ -2,20 +2,24 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies if any are needed (e.g. for pypdf)
+# System libs for Playwright Chromium + build tools for some Python wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first to leverage Docker cache
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && playwright install --with-deps chromium
 
-# Copy the rest of the application
 COPY . .
+
+# Persist JustWin login session on a Railway volume mounted at /data
+RUN mkdir -p /data
+ENV JUSTWIN_HEADLESS=true
+ENV JUSTWIN_SESSION_PATH=/data/justwin-session.json
 
 EXPOSE 8000
 
-# Command to run the application
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 75 --proxy-headers --forwarded-allow-ips='*'"]

@@ -107,6 +107,15 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     supabase_rfp_bucket: str = "rfp-pdfs"
 
+    # JustWin Playwright sync (read from backend/.env or Railway env)
+    justwin_email: str = ""
+    justwin_password: str = ""
+    justwin_base_url: str = "https://app.justwin.ai"
+    justwin_api_root: str = "https://api.justwin.ai"
+    justwin_session_path: str = ""
+    justwin_headless: bool = True
+    justwin_rfp_title_filter: str = "*"
+
     @field_validator("supermemory_container_tag")
     @classmethod
     def normalize_container_tag(cls, value: str) -> str:
@@ -114,6 +123,14 @@ class Settings(BaseSettings):
         if not tag:
             raise ValueError("SUPERMEMORY_CONTAINER_TAG cannot be empty")
         return tag
+
+    @field_validator("justwin_email", "justwin_password", "justwin_base_url", "justwin_api_root", "justwin_session_path")
+    @classmethod
+    def strip_justwin_str(cls, value: str) -> str:
+        text = (value or "").strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+            text = text[1:-1].strip()
+        return text
 
     @property
     def resolved_container_tag(self) -> str:
