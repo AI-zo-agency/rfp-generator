@@ -454,5 +454,51 @@ class BannerClauseTests(unittest.TestCase):
         self.assertNotIn("Added", clause)
 
 
+class StaleAdminStubRemovalTests(unittest.TestCase):
+    """Stale ledger ADD stubs from the pre-fail-closed classifier must be
+    deleted on the next Scan RFP — not left as [MANUAL FILL] proposal tabs."""
+
+    def test_removes_kvcc_incident_stub_sections(self) -> None:
+        stub_body = (
+            "[MANUAL FILL: Sonja — placeholder]\n\n"
+            "No section in the draft addressed this mandatory RFP requirement; "
+            "the requirement-ledger reconciler added this section as a "
+            "placeholder so it cannot silently ship missing. Search the KB for "
+            "supporting facts and replace the tag above before submission — "
+            "never invent the answer."
+        )
+        sections = [_section("sec-ok", "1.1 Who We Are", "zö agency delivers.")]
+        reqs: list[LedgerRequirement] = []
+        for i, text in enumerate(NON_ADDABLE_REQUIREMENTS[:3]):
+            rid = f"stale-{i}"
+            sections.append(
+                _section(f"ledger-{rid}", text[:120], stub_body)
+            )
+            reqs.append(
+                LedgerRequirement(
+                    id=rid,
+                    text=text,
+                    source="required_content",  # stale pre-fix label
+                    mandatory=True,
+                    satisfied_by=[],
+                )
+            )
+        result = reconcile_requirement_ledger(
+            draft=_draft(*sections),
+            research=_research(RequirementLedger(requirements=reqs)),
+            rfp=_rfp(),
+            rfp_text="KVCC marketing plan RFP text " * 20,
+        )
+        self.assertTrue(result.changed)
+        remaining_ids = {s.id for s in result.draft.sections}
+        self.assertIn("sec-ok", remaining_ids)
+        for i in range(3):
+            self.assertNotIn(f"ledger-stale-{i}", remaining_ids)
+        self.assertTrue(
+            any("remove-admin-stubs" in line for line in result.logs),
+            result.logs,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -384,6 +385,76 @@ _ADD_ELIGIBLE_SOURCES = frozenset({"required_content", "form"})
 _BLAST_RADIUS_MAX_ADDITIONS = 5
 _BLAST_RADIUS_MAX_GROWTH_FRACTION = 0.25
 
+# Soft headroom under the hard page cap — evaluators count cover/TOC; shipping
+# at 100% of the word budget is how proposals get disqualified on length.
+_PAGE_BUDGET_HEADROOM = 0.92
+
+# Titles that build evaluator trust — never drop the whole section for length.
+_TRUST_ANCHOR_TITLE_RE = re.compile(
+    r"(?i)\b(?:"
+    r"who\s+we\s+are|about\s+(?:the\s+)?(?:firm|agency|company)|organizational\s+structure|"
+    r"business\s+information|certification|insurance|cover\s+letter|"
+    r"authorized\s+signature|legal\s+obligation|budget|pricing|cost\s+of\s+base|"
+    r"past\s+performance|references?|personnel|r[ée]sum[ée]|bio|"
+    r"key\s+personnel|team\s+overview|case\s+stud|sample\s+work|portfolio|"
+    r"closing|offeror\s+commitment"
+    r")\b"
+)
+
+_PADDING_TITLE_RE = re.compile(
+    r"(?i)\b(?:"
+    r"additional\s+supporting\s+material|document\s+checklist|"
+    r"attachment\s+checklist|compliance\s+checklist|"
+    r"designer\s+note|internal\s+only"
+    r")\b"
+)
+
+
+def _is_trust_anchor_section(
+    section: ProposalSection,
+    ledger: RequirementLedger,
+    *,
+    protected_owner_ids: set[str],
+) -> bool:
+    sid = section.id or ""
+    if sid in protected_owner_ids:
+        return True
+    if sid.startswith(("section-1", "section-2", "section-3", "section-budget")):
+        return True
+    title = section.title or ""
+    if _TRUST_ANCHOR_TITLE_RE.search(title):
+        return True
+    if _section_evaluation_points(ledger, sid) > 0:
+        return True
+    for req in ledger.requirements:
+        if sid in (req.satisfied_by or []) and (
+            req.mandatory or (req.points or 0) > 0 or req.source == "required_content"
+        ):
+            return True
+    return False
+
+
+def _is_padding_only_section(section: ProposalSection) -> bool:
+    """Checklist / stub sections that inflate length without earning trust."""
+    title = section.title or ""
+    content = section.content or ""
+    if _PADDING_TITLE_RE.search(title):
+        return True
+    fill_count = content.upper().count("[MANUAL FILL")
+    words = _word_count(content)
+    if fill_count >= 4 and words < 500:
+        return True
+    if fill_count >= 1 and words < 80 and "never invent the answer" in content.casefold():
+        return True
+    try:
+        from app.services.proposal_voice_enforcement import is_duplicate_static_rfp_section
+
+        if is_duplicate_static_rfp_section(title):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
 
 @dataclass(frozen=True)
 class AppliedRequirementAddition:
@@ -599,6 +670,40 @@ def _trim_trailing_paragraphs(
     if removed <= 0:
         return content, 0
     return "\n\n".join(kept), removed
+
+
+_LEDGER_STUB_MARKER = "requirement-ledger reconciler added this section"
+
+
+def _is_stale_administrative_ledger_stub(section: ProposalSection) -> bool:
+    """True for a reconciler-added stub that is really a compliance instruction.
+
+    Live KVCC defect: font rules / FOAA / blanket statutory clauses were ADDed
+    as sections under an older classifier default. They must be removed on the
+    next Scan RFP, not left as [MANUAL FILL] tabs.
+    """
+    content = (section.content or "").casefold()
+    if _LEDGER_STUB_MARKER not in content:
+        return False
+    if MANUAL_FILL_MARKER.casefold() not in content and "[manual fill" not in content:
+        # Already filled with real prose — leave it (human may have rewritten).
+        # Stub marker alone without MANUAL FILL still means reconciler placeholder.
+        if "never invent the answer" not in content:
+            return False
+    try:
+        from app.services.proposal_intelligence.assembler import (
+            _classify_compliance_source,
+        )
+        from app.services.proposal_intelligence.schemas import ComplianceItem
+
+        probe = ComplianceItem(
+            id=section.id or "stub",
+            requirement=(section.title or "").strip(),
+            evidence_needed="",
+        )
+        return _classify_compliance_source(probe) == "submission_instruction"
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _build_added_requirement_section(requirement) -> ProposalSection:
@@ -938,6 +1043,45 @@ def reconcile_requirement_ledger(
             "drafted as a section; review and comply with each one manually."
         )
 
+    # Remove stale ledger stubs that an older classifier wrongly ADDed as
+    # required_content (font rules, FOAA exemptions, blanket statutory clauses).
+    # Also drop ledger-{id} sections for requirements that are now classified
+    # as submission_instruction / scored_criterion (never deliverables).
+    removed_admin_stubs: list[AppliedCutAction] = []
+    non_addable_ids = {
+        _ADDED_SECTION_ID_TEMPLATE.format(requirement_id=r.id)
+        for r in ledger.requirements
+        if r.source in {"submission_instruction", "scored_criterion"}
+    }
+    kept_sections: list[ProposalSection] = []
+    for section in sections:
+        drop = False
+        if section.id in non_addable_ids:
+            drop = True
+        elif _is_stale_administrative_ledger_stub(section):
+            drop = True
+        if drop:
+            removed_admin_stubs.append(
+                AppliedCutAction(
+                    section_id=section.id,
+                    section_title=section.title or section.id,
+                    words_removed=_word_count(section.content),
+                    had_evaluation_points=False,
+                )
+            )
+            changed = True
+            continue
+        kept_sections.append(section)
+    if removed_admin_stubs:
+        sections = kept_sections
+        existing_section_ids = {s.id for s in sections}
+        logs.append(
+            f"ledger:remove-admin-stubs — removed {len(removed_admin_stubs)} "
+            "non-deliverable instruction stub(s) that should never be proposal "
+            "sections: "
+            + ", ".join(f'"{c.section_title[:80]}"' for c in removed_admin_stubs[:5])
+        )
+
     eligible_missing = [
         r for r in missing_requirements if r.source in _ADD_ELIGIBLE_SOURCES
     ]
@@ -1061,70 +1205,163 @@ def reconcile_requirement_ledger(
     # evaluation points is never cut below its floor; a section this pass's
     # MERGE made the sole owner of a requirement's detail is never cut at
     # all in the same pass (see module note above).
-    applied_cuts: list[AppliedCutAction] = []
+    #
+    # Qualification guard: over-length proposals get disqualified. Prefer
+    # dropping padding / unneeded whole sections before trimming trust
+    # anchors. Keep bios, case studies, certifications, insurance, budget,
+    # closing, and scored requirement owners.
+    applied_cuts: list[AppliedCutAction] = list(removed_admin_stubs)
     page_limit = resolve_page_limit(getattr(rfp, "page_limit", None), rfp_text)
+
+    # Always strip padding-only sections (checklist dumps, static duplicates)
+    # even when no page limit is known — they dilute trust and burn pages.
+    padding_removed: list[AppliedCutAction] = []
+    kept_after_padding: list[ProposalSection] = []
+    for section in sections:
+        if _is_padding_only_section(section) and not _is_trust_anchor_section(
+            section, ledger, protected_owner_ids=protected_owner_ids
+        ):
+            padding_removed.append(
+                AppliedCutAction(
+                    section_id=section.id,
+                    section_title=section.title or section.id,
+                    words_removed=_word_count(section.content),
+                    had_evaluation_points=_section_evaluation_points(ledger, section.id) > 0,
+                )
+            )
+            changed = True
+            continue
+        kept_after_padding.append(section)
+    if padding_removed:
+        sections = kept_after_padding
+        applied_cuts.extend(padding_removed)
+        logs.append(
+            f"ledger:remove-padding — removed {len(padding_removed)} unneeded "
+            "checklist/duplicate section(s) so the proposal stays lean and "
+            "qualified: "
+            + ", ".join(f'"{c.section_title[:70]}"' for c in padding_removed[:6])
+        )
+
     if page_limit and page_limit > 0:
-        budget_words = page_limit * _WORDS_PER_PAGE
+        budget_words = int(page_limit * _WORDS_PER_PAGE * _PAGE_BUDGET_HEADROOM)
         current_words = sum(_word_count(s.content) for s in sections)
         overage = current_words - budget_words
         if overage > 0:
-            ordered_indexes = sorted(
+            # 1) Drop whole dispensable sections (never trust anchors).
+            # Sort: non-anchors first (0), then lowest evaluation points, then longest.
+            drop_order = sorted(
                 range(len(sections)),
                 key=lambda i: (
+                    1
+                    if _is_trust_anchor_section(
+                        sections[i], ledger, protected_owner_ids=protected_owner_ids
+                    )
+                    else 0,
                     _section_evaluation_points(ledger, sections[i].id),
                     -_word_count(sections[i].content),
                 ),
             )
             remaining = overage
-            for idx in ordered_indexes:
+            whole_drop_before = len(applied_cuts)
+            drop_ids: set[str] = set()
+            for idx in drop_order:
                 if remaining <= 0:
                     break
                 section = sections[idx]
-                if section.id in protected_owner_ids:
-                    logs.append(
-                        f"ledger:cut — declined to trim {section.title!r} "
-                        f"({section.id}): this pass's MERGE made it the sole "
-                        "bearer of a consolidated requirement's detail; "
-                        "protected from cutting in the same pass."
-                    )
+                if _is_trust_anchor_section(
+                    section, ledger, protected_owner_ids=protected_owner_ids
+                ):
                     continue
-                points = _section_evaluation_points(ledger, section.id)
-                floor = (
-                    _SCORED_SECTION_FLOOR_WORDS
-                    if points > 0
-                    else _UNSCORED_SECTION_FLOOR_WORDS
-                )
-                new_content, removed = _trim_trailing_paragraphs(
-                    section.content or "",
-                    max_words_to_remove=remaining,
-                    floor_words=floor,
-                )
-                if removed <= 0:
+                words = _word_count(section.content)
+                if words <= 0:
                     continue
-                sections[idx] = section.model_copy(update={"content": new_content})
-                remaining -= removed
+                drop_ids.add(section.id)
+                remaining -= words
                 changed = True
                 applied_cuts.append(
                     AppliedCutAction(
                         section_id=section.id,
-                        section_title=section.title,
-                        words_removed=removed,
-                        had_evaluation_points=points > 0,
+                        section_title=section.title or section.id,
+                        words_removed=words,
+                        had_evaluation_points=_section_evaluation_points(ledger, section.id)
+                        > 0,
                     )
                 )
-            if applied_cuts:
-                total_removed = sum(c.words_removed for c in applied_cuts)
+            if drop_ids:
+                sections = [s for s in sections if s.id not in drop_ids]
+                whole_drops = applied_cuts[whole_drop_before:]
                 logs.append(
-                    f"ledger:cut — removed {total_removed} word(s) across "
-                    f"{len(applied_cuts)} section(s) to fit the {page_limit}-page budget "
-                    f"({budget_words} words)."
+                    f"ledger:cut-sections — dropped {len(whole_drops)} unneeded "
+                    f"section(s) ({sum(c.words_removed for c in whole_drops)} words) "
+                    f"to stay within the {page_limit}-page qualification budget "
+                    f"({budget_words} words with headroom)."
                 )
-            if remaining > 0:
-                logs.append(
-                    f"ledger:cut — still {remaining} word(s) over budget after trimming "
-                    "to protected floors; no further content is safe to remove "
-                    "automatically."
+
+            # 2) Trim trailing paragraphs on remaining non-protected sections.
+            overage = sum(_word_count(s.content) for s in sections) - budget_words
+            if overage > 0:
+                ordered_indexes = sorted(
+                    range(len(sections)),
+                    key=lambda i: (
+                        _section_evaluation_points(ledger, sections[i].id),
+                        -_word_count(sections[i].content),
+                    ),
                 )
+                remaining = overage
+                page_cuts_before = len(applied_cuts)
+                for idx in ordered_indexes:
+                    if remaining <= 0:
+                        break
+                    section = sections[idx]
+                    if section.id in protected_owner_ids:
+                        logs.append(
+                            f"ledger:cut — declined to trim {section.title!r} "
+                            f"({section.id}): this pass's MERGE made it the sole "
+                            "bearer of a consolidated requirement's detail; "
+                            "protected from cutting in the same pass."
+                        )
+                        continue
+                    points = _section_evaluation_points(ledger, section.id)
+                    floor = (
+                        _SCORED_SECTION_FLOOR_WORDS
+                        if points > 0
+                        or _is_trust_anchor_section(
+                            section, ledger, protected_owner_ids=protected_owner_ids
+                        )
+                        else _UNSCORED_SECTION_FLOOR_WORDS
+                    )
+                    new_content, removed = _trim_trailing_paragraphs(
+                        section.content or "",
+                        max_words_to_remove=remaining,
+                        floor_words=floor,
+                    )
+                    if removed <= 0:
+                        continue
+                    sections[idx] = section.model_copy(update={"content": new_content})
+                    remaining -= removed
+                    changed = True
+                    applied_cuts.append(
+                        AppliedCutAction(
+                            section_id=section.id,
+                            section_title=section.title,
+                            words_removed=removed,
+                            had_evaluation_points=points > 0,
+                        )
+                    )
+                page_cuts = applied_cuts[page_cuts_before:]
+                if page_cuts:
+                    total_removed = sum(c.words_removed for c in page_cuts)
+                    logs.append(
+                        f"ledger:cut — removed {total_removed} word(s) across "
+                        f"{len(page_cuts)} section(s) to fit the {page_limit}-page budget "
+                        f"({budget_words} words with headroom)."
+                    )
+                if remaining > 0:
+                    logs.append(
+                        f"ledger:cut — still {remaining} word(s) over budget after "
+                        "protecting trust anchors (bios, case studies, certifications, "
+                        "insurance, budget, closing); review manually before submit."
+                    )
 
     added_titles = [a.section_title for a in applied_additions]
     merged_owner_titles = sorted({m.owner_section_title for m in applied_merges})
@@ -1452,6 +1689,53 @@ async def draft_added_requirement_sections(
 
     now = datetime.now(timezone.utc).isoformat()
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+
+
+async def apply_scan_ledger_pass(
+    *,
+    rfp_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    rfp: RfpRecord,
+    rfp_text: str,
+) -> tuple[ProposalDraft, ProposalResearchCache | None, LedgerReconcileResult, list[str]]:
+    """Shared Scan-RFP ledger pass: MERGE / CUT / ADD + draft new stubs.
+
+    Used by both mode=full and mode=verify_scrub_only so unrequested sections
+    are trimmed/merged and missing required narrative tabs are added.
+    """
+    from datetime import datetime, timezone
+
+    from app.services.proposal_repository import asave_proposal_draft, asave_research_cache
+
+    ledger_result = reconcile_requirement_ledger(
+        draft=draft, research=research, rfp=rfp, rfp_text=rfp_text
+    )
+    if ledger_result.built_ledger is not None:
+        research = (
+            research
+            or ProposalResearchCache(
+                rfpId=rfp_id, updatedAt=datetime.now(timezone.utc).isoformat()
+            )
+        ).model_copy(update={"requirement_ledger": ledger_result.built_ledger})
+        await asave_research_cache(research)
+    if ledger_result.changed:
+        draft = ledger_result.draft
+        await asave_proposal_draft(draft)
+
+    ledger_draft_logs: list[str] = []
+    if ledger_result.applied_additions:
+        draft, ledger_draft_logs = await draft_added_requirement_sections(
+            draft=draft,
+            applied_additions=ledger_result.applied_additions,
+            research=research,
+            rfp=rfp,
+            rfp_context=rfp_text,
+        )
+        if ledger_draft_logs:
+            await asave_proposal_draft(draft)
+
+    return draft, research, ledger_result, ledger_draft_logs
 
 
 def scan_budget_revenue_gaps(

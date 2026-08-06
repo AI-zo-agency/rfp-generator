@@ -327,52 +327,16 @@ async def run_verify_scrub_only_scan(
     # requirement the matcher already recognized under a different title.
     from app.services.proposal_rfp_compliance import (
         MANUAL_FILL_MARKER,
-        draft_added_requirement_sections,
-        reconcile_requirement_ledger,
+        apply_scan_ledger_pass,
     )
 
-    ledger_result = reconcile_requirement_ledger(
-        draft=draft, research=research, rfp=rfp, rfp_text=rfp_text
+    draft, research, ledger_result, ledger_draft_logs = await apply_scan_ledger_pass(
+        rfp_id=rfp_id,
+        draft=draft,
+        research=research,
+        rfp=rfp,
+        rfp_text=rfp_text,
     )
-    if ledger_result.built_ledger is not None:
-        # Bug fix: this proposal had no persisted research.requirement_ledger
-        # (every proposal generated before Task 1, or one whose ledger was
-        # wiped by a since-fixed regeneration bug) so reconcile_requirement_
-        # ledger built one on demand from research.proposal_execution_plan +
-        # research.rfp_sections — zero LLM calls, pure Python, same matcher
-        # Phase 2 uses. Persist it now so the NEXT Scan-RFP click reads it
-        # straight from research.requirement_ledger instead of rebuilding it
-        # every time. merge_research_preserve_audit_fields (proposal_repository.
-        # save_research_cache) keeps this value: an explicit non-null incoming
-        # requirement_ledger always wins over whatever (nothing) is stored.
-        research = (
-            research
-            or ProposalResearchCache(
-                rfpId=rfp_id, updatedAt=datetime.now(timezone.utc).isoformat()
-            )
-        ).model_copy(update={"requirement_ledger": ledger_result.built_ledger})
-        await asave_research_cache(research)
-    if ledger_result.changed:
-        draft = ledger_result.draft
-        await asave_proposal_draft(draft)
-
-    # Task 10: an ADD stub is a [MANUAL FILL] placeholder, not a clean
-    # proposal. Draft real content for exactly the sections THIS pass just
-    # added — scoped to applied_additions, so a second Scan-RFP click (whose
-    # applied_additions is empty because the section id already exists) never
-    # redrafts it. Best-effort: any KB/LLM failure leaves the placeholder
-    # exactly as reconcile_requirement_ledger produced it.
-    ledger_draft_logs: list[str] = []
-    if ledger_result.applied_additions:
-        draft, ledger_draft_logs = await draft_added_requirement_sections(
-            draft=draft,
-            applied_additions=ledger_result.applied_additions,
-            research=research,
-            rfp=rfp,
-            rfp_context=rfp_text,
-        )
-        if ledger_draft_logs:
-            await asave_proposal_draft(draft)
 
     # Task 17: the Scan-RFP button never touched the budget at all — this
     # module's own docstring above says so ("Does NOT add closing tabs,

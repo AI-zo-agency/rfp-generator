@@ -195,8 +195,13 @@ def detect_hallucinations(content: str, section_title: str = "") -> list[dict[st
     cert_matches = re.finditer(cert_pattern, scan_content, re.IGNORECASE)
     for match in cert_matches:
         cert_text = match.group(1).strip()
+        # Prose tails, not certification names (e.g. "are current and active")
+        if cert_text.casefold().startswith(
+            ("are ", "is ", "reflect ", "matter ", "that ", "the ", "and ", "both ")
+        ):
+            continue
         # Check if this cert is in our verified list
-        if not any(verified in cert_text for verified in VERIFIED_CERTIFICATIONS):
+        if not any(verified in cert_text.upper() for verified in VERIFIED_CERTIFICATIONS):
             # Also check if it's one of the known platform certs we flag
             is_flagged_platform = any(
                 pattern_text in cert_text.lower() 

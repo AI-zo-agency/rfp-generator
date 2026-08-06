@@ -293,11 +293,12 @@ async def run_fulfill_rfp_gaps(
     rfp_id: str,
     *,
     use_llm: bool = True,
-    mode: str = "verify_scrub_only",
+    mode: str = "full",
 ) -> tuple[PreSubmitReview, ProposalResearchCache, ProposalDraft, dict[str, Any]]:
-    """UI 'Scan RFP & add missing pieces' → VERIFY scrub only (default).
+    """UI 'Scan RFP & add missing pieces' → full RFP update (default).
 
-    mode='full' keeps the legacy multi-step fulfill (closing/structure/budget/KPI).
+    mode='full' runs closing/structure/budget/KPI/VERIFY/pre-submit.
+    mode='verify_scrub_only' keeps the lighter scrub + ledger/budget path.
     """
     from app.services.proposal_generation_cancel import (
         ProposalGenerationCancelled,
@@ -312,7 +313,7 @@ async def run_fulfill_rfp_gaps(
 
     token = bind_active_rfp(rfp_id)
     try:
-        if (mode or "verify_scrub_only").strip().lower() in {
+        if (mode or "full").strip().lower() in {
             "verify_scrub_only",
             "verify-scrub",
             "verify_scrub",
@@ -373,7 +374,9 @@ async def _run_fulfill_rfp_gaps_body(
     FULFILL_STEPS = (
         "Closing & submission tabs",
         "RFP structure (all scored sections)",
-        "Budget reconcile",
+        "Requirement ledger (merge / cut / add)",
+        "DQ & gov-policy gate (agentic loop)",
+        "Budget (regen if missing + thorough)",
         "Consistency repairs",
         "Contractor KPIs (Section 2.3)",
         "KB fact-check (Supermemory)",
@@ -404,6 +407,7 @@ async def _run_fulfill_rfp_gaps_body(
     await _ensure_not_stopped()
 
     report: dict[str, Any] = {
+        "mode": "full",
         "snapshotSavedAt": draft.snapshots[-1].saved_at if draft.snapshots else None,
         "rfpPdfPages": pdf_pages if pdf_exists else None,
         "rfpTextCharsUsedForScan": len(rfp_text.strip()),
@@ -592,15 +596,72 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
     try:
+        from app.services.proposal_scan_dq_orchestrator import (
+            merge_ledger_into_report,
+            run_scan_coverage_orchestrator,
+        )
+
+        await _scan_progress(
+            3,
+            "Scan RFP: coverage orchestrator",
+            "Ledger ADD/MERGE/CUT — add missing sections if needed; trim for length.",
+        )
+        await _ensure_not_stopped()
+        orch = await run_scan_coverage_orchestrator(
+            rfp_id=rfp_id,
+            draft=draft,
+            research=research,
+            rfp=rfp,
+            rfp_text=rfp_text,
+        )
+        draft = orch.draft
+        research = orch.research
+        report["logs"].extend(orch.logs)
+        report["orchestratorLoopPasses"] = orch.loop_passes
+        if orch.ledger_result is not None:
+            merge_ledger_into_report(report, orch.ledger_result, orch.ledger_draft_logs)
+
+        await _scan_progress(
+            4,
+            "Scan RFP: DQ & gov-policy gate",
+            "Go/No-Go risks, legal attestations, eligibility / form / page-limit disqualifiers.",
+        )
+        await _ensure_not_stopped()
+        if orch.dq is not None:
+            draft = orch.dq.draft
+            research = orch.dq.research
+            report["disqualificationRisks"] = orch.dq.disqualification_risks
+            report["disqualificationRiskCount"] = len(orch.dq.disqualification_risks)
+            report["humanDecisionGaps"].extend(orch.dq.human_decision_gaps)
+            report["logs"].extend(
+                line
+                for line in orch.dq.logs
+                if line not in report["logs"]
+            )
+            if orch.dq.changed:
+                await asave_proposal_draft(draft)
+        else:
+            report["disqualificationRisks"] = []
+            report["disqualificationRiskCount"] = 0
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Coverage orchestrator / DQ gate during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"Coverage orchestrator / DQ gate skipped: {exc}")
+
+    try:
         from app.services.proposal_fulfill_rfp_budget_kpi import (
             run_fulfill_budget_scan,
             run_fulfill_kpi_scan,
-            summarize_budget_kpi_findings,
         )
 
-        await _scan_progress(3, "Scan RFP: budget reconcile", "Fee tables vs RFP spend — not full-manuscript context.")
+        await _scan_progress(
+            5,
+            "Scan RFP: budget (thorough)",
+            "Regenerate if missing; reconcile math; grounding vs manuscript.",
+        )
         await _ensure_not_stopped()
-        draft, research, budget_logs = await run_fulfill_budget_scan(
+        draft, research, budget_logs, budget_meta = await run_fulfill_budget_scan(
             rfp_id=rfp_id,
             rfp=rfp,
             draft=draft,
@@ -611,7 +672,8 @@ async def _run_fulfill_rfp_gaps_body(
         )
         report["logs"].extend(budget_logs)
         report["budgetScan"] = budget_logs
-        if budget_logs:
+        report.update(budget_meta)
+        if budget_logs or budget_meta.get("budgetChanged"):
             await asave_proposal_draft(draft)
             if research:
                 await asave_research_cache(research)
@@ -624,7 +686,7 @@ async def _run_fulfill_rfp_gaps_body(
     try:
         from app.services.proposal_fulfill_rfp_repairs import run_manuscript_consistency_repairs
 
-        await _scan_progress(4, "Scan RFP: consistency repairs", "Roster, KPI wording, qualification stubs.")
+        await _scan_progress(6, "Scan RFP: consistency repairs", "Roster, KPI wording, qualification stubs.")
         await _ensure_not_stopped()
         draft, repair_logs, repair_human = await run_manuscript_consistency_repairs(
             draft,
@@ -665,7 +727,7 @@ async def _run_fulfill_rfp_gaps_body(
             from app.services.proposal_fulfill_rfp_budget_kpi import run_fulfill_kpi_scan
 
             await _scan_progress(
-                5,
+                7,
                 "Scan RFP: contractor KPIs + detail",
                 "Activity Measure tables & BMP linkages — rewrite, not label swap.",
             )
@@ -691,7 +753,7 @@ async def _run_fulfill_rfp_gaps_body(
         try:
             from app.services.proposal_fulfill_rfp_budget_kpi import run_fulfill_kpi_scan
 
-            await _scan_progress(5, "Scan RFP: contractor KPIs", "Deterministic KPI alignment (no LLM).")
+            await _scan_progress(7, "Scan RFP: contractor KPIs", "Deterministic KPI alignment (no LLM).")
             await _ensure_not_stopped()
             draft, kpi_logs, kpi_human = await run_fulfill_kpi_scan(
                 draft=draft,
@@ -738,7 +800,7 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
     await _scan_progress(
-        6,
+        8,
         "Scan RFP: KB fact-check",
         "Requirements → RFP excerpt → Supermemory per section (smart rewrite when needed).",
     )
@@ -750,7 +812,7 @@ async def _run_fulfill_rfp_gaps_body(
         if research is None:
             research = await aget_research_cache(rfp_id)
         logger.info(
-            "Scan RFP step 6/7 — KB fact-check starting for %s (%d sections)",
+            "Scan RFP step 8/10 — KB fact-check starting for %s (%d sections)",
             rfp_id,
             len(draft.sections),
         )
@@ -782,7 +844,7 @@ async def _run_fulfill_rfp_gaps_body(
 
     # Dedicated pass: every section with [VERIFY] → RFP scan → remove unless critical.
     await _scan_progress(
-        7,
+        9,
         "Scan RFP: remove optional [VERIFY]",
         "Read each VERIFY section vs full RFP — drop tags unless critically required; never invent.",
     )
@@ -797,11 +859,24 @@ async def _run_fulfill_rfp_gaps_body(
             s.id for s in draft.sections if count_verify_tags(s.content or "") > 0
         ]
         if verify_sections:
+            before_counts = {
+                s.id: count_verify_tags(s.content or "") for s in draft.sections
+            }
             scrubbed, scrub_logs = await scrub_draft_optional_verify_tags(
                 list(draft.sections),
                 rfp_text=rfp_text,
                 section_filter_ids=set(verify_sections),
             )
+            after_counts = {
+                s.id: count_verify_tags(s.content or "") for s in scrubbed
+            }
+            removed = sum(
+                max(0, before_counts.get(i, 0) - after_counts.get(i, 0))
+                for i in before_counts
+            )
+            kept = sum(after_counts.values())
+            report["verifyTagsRemoved"] = removed
+            report["verifyTagsKept"] = kept
             before_map = {s.id: (s.content or "") for s in draft.sections}
             changed = any(
                 before_map.get(s.id, "") != (s.content or "") for s in scrubbed
@@ -809,6 +884,8 @@ async def _run_fulfill_rfp_gaps_body(
             if scrub_logs:
                 report["verifyScrub"] = {
                     "sectionsScanned": len(verify_sections),
+                    "verifyTagsRemoved": removed,
+                    "verifyTagsKept": kept,
                     "logs": scrub_logs,
                 }
                 for line in scrub_logs[:25]:
@@ -827,6 +904,8 @@ async def _run_fulfill_rfp_gaps_body(
                     "no optional tags removed (kept only if RFP-critical)."
                 )
         else:
+            report["verifyTagsRemoved"] = 0
+            report["verifyTagsKept"] = 0
             report["logs"].append("VERIFY scrub: no [VERIFY] tags found.")
     except ProposalGenerationCancelled:
         raise
@@ -834,8 +913,25 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Optional VERIFY scrub during Scan RFP skipped: %s", exc)
         report["logs"].append(f"VERIFY scrub skipped: {exc}")
 
+    try:
+        from app.services.proposal_rfp_optional_claim_scrub import (
+            apply_optional_claim_scrub_to_draft,
+        )
+
+        draft, claim_logs = apply_optional_claim_scrub_to_draft(
+            draft, rfp_text=rfp_text
+        )
+        if claim_logs:
+            report["logs"].extend(f"optional-claim scrub: {line}" for line in claim_logs[:20])
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Optional claim scrub during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"Optional claim scrub skipped: {exc}")
+
     await _scan_progress(
-        8,
+        10,
         "Scan RFP: pre-submit refresh",
         "Checklist, manual flags, and ending report.",
     )

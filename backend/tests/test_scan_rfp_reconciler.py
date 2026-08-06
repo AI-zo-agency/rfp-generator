@@ -380,7 +380,7 @@ class OverBudgetCutsLowestScoringContentTests(unittest.TestCase):
     def test_unscored_content_absorbs_the_overage_before_scored_content_is_touched(
         self,
     ) -> None:
-        # unscored: 2 paragraphs x 50 words = 100 words, floor 50 -> max cut 50
+        # unscored: 2 paragraphs x 50 words = 100 words
         unscored_content = _para("filler", 50) + "\n\n" + _para("filler", 50)
         # scored: 6 paragraphs x 50 words = 300 words, points=30, floor 150
         scored_content = "\n\n".join(_para("technical", 50) for _ in range(6))
@@ -397,27 +397,29 @@ class OverBudgetCutsLowestScoringContentTests(unittest.TestCase):
             ]
         )
         draft = _draft(
-            _section("sec-unscored", "Company Overview", unscored_content),
+            _section("sec-unscored", "Optional Process Digression", unscored_content),
             _section("sec-scored", "Technical Approach", scored_content),
         )
         research = _research(ledger)
-        rfp = _rfp(pageLimit=1)  # 1 page * 350 words/page = 350-word budget
+        rfp = _rfp(pageLimit=1)  # 1 page * 350 * 0.92 headroom
 
         result = reconcile_requirement_ledger(draft=draft, research=research, rfp=rfp)
 
         self.assertTrue(result.changed)
-        self.assertEqual(len(result.applied_cuts), 1)
-        cut = result.applied_cuts[0]
-        self.assertIsInstance(cut, AppliedCutAction)
-        self.assertEqual(cut.section_id, "sec-unscored")
-        self.assertFalse(cut.had_evaluation_points)
+        self.assertTrue(result.applied_cuts)
+        cut_ids = {c.section_id for c in result.applied_cuts}
+        self.assertIn("sec-unscored", cut_ids)
+        self.assertNotIn("sec-scored", cut_ids)
 
         scored_after = next(s for s in result.draft.sections if s.id == "sec-scored")
         self.assertEqual(
             scored_after.content, scored_content, "scored section must not be touched"
         )
-        unscored_after = next(s for s in result.draft.sections if s.id == "sec-unscored")
-        self.assertEqual(len(unscored_after.content.split()), 50, "cut down to its floor")
+        # Qualification path prefers dropping the whole unneeded section.
+        self.assertFalse(
+            any(s.id == "sec-unscored" for s in result.draft.sections),
+            "unscored over-budget section should be dropped entirely",
+        )
 
         total_words_after = sum(
             len(s.content.split()) for s in result.draft.sections

@@ -1,9 +1,8 @@
 """Task 6 — the Scan-RFP fulfill guards must run during full generation too.
 
 Three guards existed and were reachable only from proposal_fulfill_rfp_gaps.py's
-mode="full" path (which the live Scan button never reaches, since the frontend
-hardcodes mode="verify_scrub_only" and the backend returns early). Every proposal
-produced by generate_full_proposal shipped without them:
+mode="full" path (historically the live Scan button used verify_scrub_only).
+Every proposal produced by generate_full_proposal shipped without them:
 
   - repair_truncated_manuscript_sections  (proposal_fulfill_truncation_repair.py)
   - repair_fabricated_qualifications      (proposal_fulfill_fabrication_guard.py)

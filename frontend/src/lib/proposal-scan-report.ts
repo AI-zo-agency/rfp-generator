@@ -75,8 +75,12 @@ export interface ScanRfpFulfillReport {
    * reads as "checked, no problems" rather than looking identical to "never
    * ran" — the same silent-pass ambiguity this project has already been
    * burned by twice. */
+  disqualificationRiskCount?: number;
+  disqualificationRisks?: string[];
+  orchestratorLoopPasses?: number;
   budgetStatus?: "none" | "ok" | "repaired" | "needs_human" | "repaired_needs_human";
   budgetChanged?: boolean;
+  budgetRegenerated?: boolean;
   budgetRepairedNotes?: string[];
   budgetEscalationNotes?: string[];
 }
@@ -104,6 +108,15 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
     clauses.push(
       `Added ${added} missing required section(s)${namedList(
         report.ledgerAdditionsSectionTitles
+      )}`
+    );
+  }
+
+  const dqCount = report.disqualificationRiskCount ?? report.disqualificationRisks?.length ?? 0;
+  if (dqCount > 0) {
+    clauses.push(
+      `${dqCount} disqualification / gov-policy risk(s)${namedList(
+        report.disqualificationRisks
       )}`
     );
   }
@@ -172,7 +185,11 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
 
   const cut = report.ledgerCutsApplied ?? 0;
   if (cut > 0) {
-    clauses.push(`trimmed ${cut} section(s) to the page limit`);
+    clauses.push(
+      `removed/trimmed ${cut} section(s) to stay within page limits and keep the proposal lean${namedList(
+        report.ledgerCutsSectionTitles
+      )}`
+    );
   }
 
   const removed = report.verifyTagsRemoved ?? 0;
@@ -217,8 +234,10 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
   const budgetStatus = report.budgetStatus;
   const repairedNotes = (report.budgetRepairedNotes ?? []).join("; ");
   const escalationNotes = (report.budgetEscalationNotes ?? []).join("; ");
-  if (budgetStatus === "ok") {
-    clauses.push("checked the budget — no problems found");
+  if (report.budgetRegenerated) {
+    clauses.push("regenerated the missing budget (Phase 3.5) and wrote it into the proposal");
+  } else if (budgetStatus === "ok") {
+    clauses.push("checked the budget thoroughly — no problems found");
   } else if (budgetStatus === "repaired") {
     clauses.push(
       `repaired the budget${repairedNotes ? ` (${repairedNotes})` : ""}`
@@ -235,6 +254,15 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
         `but it still needs a human review before submission${
           escalationNotes ? ` (${escalationNotes})` : ""
         }`
+    );
+  }
+
+  const verifyRemoved = report.verifyTagsRemoved ?? 0;
+  const verifyKept = report.verifyTagsKept ?? 0;
+  if (verifyRemoved > 0 || verifyKept > 0) {
+    clauses.push(
+      `VERIFY scrub removed ${verifyRemoved} optional tag(s)` +
+        (verifyKept > 0 ? `, kept ${verifyKept} RFP-critical tag(s)` : "")
     );
   }
 

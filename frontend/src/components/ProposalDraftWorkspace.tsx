@@ -1367,12 +1367,18 @@ function ProposalDraftWorkspaceInner({
 
   const handleFulfillRfpGaps = useCallback(async () => {
     const scanOk = await confirm({
-      title: "Scan RFP & scrub VERIFY tags?",
+      title: "Scan RFP & update proposal?",
       description:
-        "Reads every section with [VERIFY], checks the RFP, and removes tags that are not critically required.\n\n" +
-        "Also reconciles the RFP's requirement checklist: adds any missing required section (drafted from the knowledge base), merges duplicated coverage into a single owning section, trims content to the RFP's page limit, and runs the budget checks.\n\n" +
-        "Does NOT invent facts.\n\n" +
-        "A saved version is stored first.",
+        "Reads the full uploaded RFP and updates this proposal where needed:\n\n" +
+        "• Add missing closing / submission tabs\n" +
+        "• Align scored sections to the RFP TOC\n" +
+        "• Merge duplicates / cut unrequested, padding, or over-limit sections (stay qualified — keep trust anchors)\n" +
+        "• DQ & gov-policy gate (Go/No-Go, attestations, eligibility) — agentic recheck loop\n" +
+        "• Regenerate budget if missing; thorough reconcile + grounding if present\n" +
+        "• Consistency + KPI repairs\n" +
+        "• KB fact-check and remove optional [VERIFY] tags\n" +
+        "• Refresh pre-submit review\n\n" +
+        "Does NOT invent facts. A saved version is stored first.",
       confirmLabel: "Scan RFP",
       tone: "default",
     });
@@ -1394,15 +1400,12 @@ function ProposalDraftWorkspaceInner({
       const { review, research: updatedResearch, draft, fulfillReport } =
         await runFulfillRfpGaps(rfp.id, {
           signal: abort.signal,
-          mode: "verify_scrub_only",
+          mode: "full",
         });
       setPresubmitReview(review);
       setResearch(updatedResearch);
       applyOutlineFromServer(draft);
       await saveProposalDraft(rfp.id, draft);
-      // Task 11: the reconciler (ADD/MERGE/CUT) and the truncation/
-      // hallucination detectors already ran inside fulfillReport / review —
-      // report everything that happened, not just the VERIFY-tag counts.
       const scanBanner = buildScanRfpBanner(fulfillReport);
       setGapResolveNotice(`${scanBanner} Saved version available.`);
       setGenerateNotice(scanBanner);
@@ -1414,13 +1417,13 @@ function ProposalDraftWorkspaceInner({
         (error instanceof DOMException && error.name === "AbortError")
       ) {
         setGenerateNotice(
-          "VERIFY scrub stopped — partial changes may be saved; check Sections → saved version menu."
+          "Scan RFP stopped — partial changes may be saved; check Sections → saved version menu."
         );
         setGenerateError(null);
         return;
       }
       const message =
-        error instanceof Error ? error.message : "VERIFY scrub failed";
+        error instanceof Error ? error.message : "Scan RFP failed";
       setGapResolveError(message);
       setGenerateError(message);
     } finally {
@@ -2495,10 +2498,10 @@ function ProposalDraftWorkspaceInner({
                     !outline.sections.some((s) => s.content.trim())
                   }
                   className="zo-btn !py-2 !px-3 !text-sm disabled:opacity-40"
-                  title="Only removes [VERIFY] tags that are not critically required by the RFP — never invents, does not add sections"
+                  title="Scan full RFP: merge/cut sections, regenerate missing budget, fact-check, scrub optional VERIFY"
                 >
                   {isFulfillingRfpGaps
-                    ? "Scrubbing VERIFY…"
+                    ? "Scanning RFP…"
                     : "Scan RFP & add missing pieces"}
                 </button>
                 <button

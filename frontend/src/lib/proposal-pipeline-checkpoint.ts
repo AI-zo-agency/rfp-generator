@@ -134,9 +134,18 @@ function phase3SectionContentUsable(content: string | undefined | null): boolean
   return true;
 }
 
-/** UI chip labels for the Scan RFP button (VERIFY scrub only). */
+/** UI chip labels for the Scan RFP button (full RFP update). */
 export const FULFILL_SCAN_STEP_LABELS = [
-  "Remove optional [VERIFY]",
+  "Closing & submission tabs",
+  "RFP structure (all scored sections)",
+  "Requirement ledger (merge / cut / add)",
+  "DQ & gov-policy gate (agentic loop)",
+  "Budget (regen if missing + thorough)",
+  "Consistency repairs",
+  "Contractor KPIs (Section 2.3)",
+  "KB fact-check (Supermemory)",
+  "Remove optional [VERIFY] tags",
+  "Pre-submit refresh",
 ] as const;
 
 export const FULL_PROPOSAL_STEP_LABELS: { phase: PipelinePhase; label: string }[] = [
@@ -428,7 +437,7 @@ export function shouldRunPhase(
 }
 
 export function inProgressPhaseLabel(phase: PipelineInProgressPhase): string {
-  if (phase === FULFILL_SCAN_PHASE) return "Scan RFP — VERIFY scrub";
+  if (phase === FULFILL_SCAN_PHASE) return "Scan RFP — full update";
   return PIPELINE_PHASE_LABELS[phase];
 }
 

@@ -1518,7 +1518,7 @@ export async function runFulfillRfpGaps(
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({
       useLlm: options?.useLlm ?? true,
-      mode: options?.mode ?? "verify_scrub_only",
+      mode: options?.mode ?? "full",
     }),
   });
   const text = await res.text();

@@ -8,22 +8,22 @@ export async function POST(
 ) {
   const { id } = await params;
   let useLlm = true;
-  let mode = "verify_scrub_only";
+  let mode = "full";
   try {
     const text = await request.text();
     if (text.trim()) {
       const parsed = JSON.parse(text) as { useLlm?: boolean; mode?: string };
       useLlm = parsed.useLlm ?? true;
-      mode = parsed.mode ?? "verify_scrub_only";
+      mode = parsed.mode ?? "full";
     }
   } catch {
     useLlm = true;
-    mode = "verify_scrub_only";
+    mode = "full";
   }
   return proxyProposalPhasePost(
     id,
     "/proposal/fulfill-rfp-gaps",
-    "Scan RFP VERIFY scrub",
+    "Scan RFP — full update",
     {
       body: JSON.stringify({ useLlm, mode }),
       headers: {

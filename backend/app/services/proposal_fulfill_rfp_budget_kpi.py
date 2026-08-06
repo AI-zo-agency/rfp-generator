@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
+from typing import Any
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
 from app.models.rfp import RfpRecord
@@ -97,6 +98,40 @@ def patch_budget_section_for_rfp(
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 
 
+def manuscript_budget_is_missing(
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+) -> bool:
+    """True when Scan RFP should regenerate Phase 3.5 budget (not just reconcile)."""
+    budget = research.budget if research else None
+    if budget is None:
+        return True
+    line_items = list(getattr(budget, "line_items", None) or [])
+    lump = float(getattr(budget, "lump_sum_total", None) or 0)
+    revenue = float(getattr(budget, "agency_revenue_estimate", None) or 0)
+    if not line_items and lump <= 0 and revenue <= 0:
+        return True
+
+    idx = find_budget_section_index(draft.sections)
+    if idx is None:
+        # Pricing model exists — reconcile path can write the section; no full regen.
+        return False
+    content = (draft.sections[idx].content or "").strip()
+    if not content:
+        return False
+    upper = content.upper()
+    if "[MANUAL FILL" in upper and "$" not in content:
+        return True
+    return False
+
+
+async def _regen_budget_via_phase_3_5(rfp_id: str):
+    """Indirection so tests can mock Phase 3.5 without importing proposal_generator."""
+    from app.services.proposal_generator import run_phase3_5_budget
+
+    return await run_phase3_5_budget(rfp_id)
+
+
 async def run_fulfill_budget_scan(
     *,
     rfp_id: str,
@@ -106,20 +141,47 @@ async def run_fulfill_budget_scan(
     rfp_text: str,
     use_llm: bool,
     skip_section_ids: set[str],
-) -> tuple[ProposalDraft, ProposalResearchCache | None, list[str]]:
-    """Reconcile Stage 3 budget, refresh manuscript budget tab, RFP form + fee alignment."""
+) -> tuple[ProposalDraft, ProposalResearchCache | None, list[str], dict[str, Any]]:
+    """Thorough budget pass: regenerate if missing, else reconcile + grounding."""
     logs: list[str] = []
+    meta: dict[str, Any] = {
+        "budgetStatus": "none",
+        "budgetChanged": False,
+        "budgetRegenerated": False,
+        "budgetRepairedNotes": [],
+        "budgetEscalationNotes": [],
+    }
+
+    if manuscript_budget_is_missing(draft, research):
+        logs.append(
+            "Budget: pricing model / manuscript budget missing — regenerating via Phase 3.5."
+        )
+        try:
+            draft, research, _budget = await _regen_budget_via_phase_3_5(rfp_id)
+            meta["budgetRegenerated"] = True
+            meta["budgetChanged"] = True
+            meta["budgetStatus"] = "repaired"
+            meta["budgetRepairedNotes"] = ["regenerated Phase 3.5 budget into manuscript"]
+            logs.append(
+                "Budget: regenerated via Phase 3.5 and written into the proposal."
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Phase 3.5 budget regen during Scan RFP failed: %s", exc)
+            logs.append(f"Budget: regeneration failed ({exc}).")
+            meta["budgetStatus"] = "needs_human"
+            meta["budgetEscalationNotes"] = [f"regeneration failed: {exc}"]
+            return draft, research, logs, meta
+
     if not research or not research.budget:
         logs.append(
-            "Budget scan: no pricing model in research — generate Phase 3.5 budget first, then Scan RFP."
+            "Budget scan: still no pricing model after regen attempt — human must run Budget."
         )
-        return draft, research, logs
+        meta["budgetStatus"] = "needs_human"
+        meta["budgetEscalationNotes"] = ["no pricing model available"]
+        return draft, research, logs, meta
 
     # Reuse the rate card already persisted on the research cache so the Scan RFP
     # path gets the same 00_Guide_Pricing underbid floor check as Phase 3.5.
-    # Without this, a budget generated before the floor check existed and then
-    # re-scanned via the "Scan RFP" button would never be floor-checked.
-    # A missing / invalid card leaves rate_card None, which never halts.
     rate_card = None
     if research.pricing_rate_card:
         try:
@@ -141,14 +203,22 @@ async def run_fulfill_budget_scan(
     )
     research = research.model_copy(update={"budget": budget})
     logs.append("Budget: reconciled line items and canonical totals from RFP/pricing model.")
+    if not meta["budgetRegenerated"]:
+        meta["budgetStatus"] = "ok"
 
     content = render_budget_markdown(budget, rfp_text=rfp_text)
     sections = list(draft.sections)
     idx = find_budget_section_index(sections)
     if idx is not None:
+        before = sections[idx].content or ""
         sections[idx] = sections[idx].model_copy(
             update={"content": content, "status": "generated"}
         )
+        if before != content:
+            meta["budgetChanged"] = True
+            if meta["budgetStatus"] == "ok":
+                meta["budgetStatus"] = "repaired"
+                meta["budgetRepairedNotes"].append("refreshed Budget & Pricing manuscript table")
     else:
         sections.append(
             ProposalSection(
@@ -162,6 +232,9 @@ async def run_fulfill_budget_scan(
             )
         )
         logs.append("Budget: added Budget & Pricing section to manuscript.")
+        meta["budgetChanged"] = True
+        meta["budgetStatus"] = "repaired"
+        meta["budgetRepairedNotes"].append("added missing Budget & Pricing section")
     now = datetime.now(timezone.utc).isoformat()
     draft = draft.model_copy(update={"sections": sections, "updated_at": now})
 
@@ -170,11 +243,14 @@ async def run_fulfill_budget_scan(
         if reshaped is not None:
             draft = reshaped
             logs.append("Budget: aligned to RFP Pricing Proposal Form (hourly / monthly / annual).")
+            meta["budgetChanged"] = True
 
     excerpt = evaluation_and_kpi_excerpt(rfp_text)
     facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
     draft, patch_logs = patch_budget_section_for_rfp(draft, rfp_text=rfp_text, facts=facts)
     logs.extend(patch_logs)
+    if patch_logs:
+        meta["budgetChanged"] = True
 
     if use_llm:
         try:
@@ -196,11 +272,53 @@ async def run_fulfill_budget_scan(
                 logs.append(
                     "Budget: synced fee/pricing sentences in narrative sections to canonical budget."
                 )
+                meta["budgetChanged"] = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("Fee narrative sync during scan skipped: %s", exc)
             logs.append(f"Budget: fee narrative sync skipped ({exc}).")
 
-    return draft, research, logs
+        try:
+            from app.services.proposal_budget_sync import run_budget_grounding_check
+
+            mismatches = await run_budget_grounding_check(
+                rfp_id=rfp_id,
+                draft=draft,
+                budget=budget,
+            )
+            if mismatches:
+                from app.services.proposal_pricing_sync_repair import (
+                    run_pricing_sync_repair_or_handoff,
+                )
+
+                draft, research, budget, sync_report = await run_pricing_sync_repair_or_handoff(
+                    rfp_id=rfp_id,
+                    draft=draft,
+                    budget=budget,
+                    research=research,
+                    initial_mismatches=mismatches,
+                    rfp_text=rfp_text,
+                )
+                meta["budgetChanged"] = True
+                if getattr(sync_report, "handoff", False):
+                    meta["budgetStatus"] = "repaired_needs_human"
+                    meta["budgetEscalationNotes"].append(
+                        f"{len(mismatches)} pricing mismatch(es) need human review"
+                    )
+                else:
+                    meta["budgetStatus"] = "repaired"
+                    meta["budgetRepairedNotes"].append(
+                        f"grounding repair for {len(mismatches)} pricing mismatch(es)"
+                    )
+                logs.append(
+                    f"Budget: thorough grounding check handled {len(mismatches)} mismatch(es)."
+                )
+            else:
+                logs.append("Budget: thorough grounding check — no pricing mismatches.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Budget grounding during Scan RFP skipped: %s", exc)
+            logs.append(f"Budget: grounding check skipped ({exc}).")
+
+    return draft, research, logs, meta
 
 
 async def run_fulfill_kpi_scan(

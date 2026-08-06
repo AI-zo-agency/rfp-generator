@@ -48,6 +48,10 @@ _AUDITOR_ECHO_HINTS = (
     "possible wrong-client reference",
     "unresolved tag:",
     "adversarial repair loop",
+    # Hallucination-detector false positives on verified WBENC/WOSB prose
+    "certification not in verified list",
+    "deterministic.fabricated_fact",
+    "deterministic.unverified",
 )
 
 _RFP_PERCENT_TIME_RE = re.compile(

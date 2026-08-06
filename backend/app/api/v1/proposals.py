@@ -736,9 +736,7 @@ async def fulfill_rfp_gaps_endpoint(
     from app.services.proposal_fulfill_rfp_gaps import run_fulfill_rfp_gaps
 
     use_llm = body.use_llm if body else True
-    mode = (body.mode if body and getattr(body, "mode", None) else None) or (
-        "verify_scrub_only"
-    )
+    mode = (body.mode if body and getattr(body, "mode", None) else None) or "full"
     try:
         async with cancel_generation_on_disconnect(rfp_id, request):
             review, research, draft, fulfill_report = await run_fulfill_rfp_gaps(

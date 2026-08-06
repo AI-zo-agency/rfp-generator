@@ -771,7 +771,7 @@ class PreSubmitAutoFixRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     use_llm: bool = Field(default=True, alias="useLlm")
-    mode: str = Field(default="verify_scrub_only", alias="mode")
+    mode: str = Field(default="full", alias="mode")
 
 
 class ProposalFulfillGapsResponse(BaseModel):

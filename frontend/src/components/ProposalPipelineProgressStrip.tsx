@@ -5,6 +5,7 @@ import {
   FULFILL_SCAN_STEP_LABELS,
   FULL_PROPOSAL_STEP_LABELS,
   PIPELINE_PHASE_LABELS,
+  inProgressPhaseLabel,
   type PipelinePhase,
   type ProposalPipelineCheckpoint,
 } from "@/lib/proposal-pipeline-checkpoint";
@@ -46,7 +47,7 @@ export function ProposalPipelineProgressStrip({
     inProgress === "phase-3-6-self-edit";
 
   const phaseTitle = isFulfill
-    ? "Scan RFP — VERIFY scrub"
+    ? inProgressPhaseLabel(FULFILL_SCAN_PHASE)
     : phaseKey && phaseKey in PIPELINE_PHASE_LABELS
       ? PIPELINE_PHASE_LABELS[phaseKey as PipelinePhase]
       : phaseKey
