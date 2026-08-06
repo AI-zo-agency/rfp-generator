@@ -71,6 +71,15 @@ from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
 from app.services.proposal_self_edit_loop import run_self_edit_loop
 from app.services.proposal_sections_graph import run_sections_1_3_graph
 from app.services.rfp_repository import get_rfp
+from app.services.proposal_fulfill_truncation_repair import (
+    repair_truncated_manuscript_sections,
+)
+from app.services.proposal_fulfill_fabrication_guard import (
+    portfolio_client_names,
+    repair_fabricated_qualifications,
+)
+from app.services.evidence_trust.claim_validator import validate_and_flag_section
+from app.services.evidence_trust.load_client_list import load_client_list_registry
 from app.core.step_debug_logger import (
     pipeline_phase,
     pipeline_run,
@@ -1985,6 +1994,80 @@ async def _run_phase3_drafting_inner(
     draft, integrity_logs = apply_manuscript_integrity_guards(draft)
     for line in integrity_logs[:12]:
         logger.info("Phase 3 integrity: %s — %s", rfp_id, line)
+
+    # Manuscript-fulfill guards — previously reachable only from Scan-RFP's
+    # mode="full" path, which the live Scan button never reaches. Run them here
+    # so every proposal from the main pipeline gets the same protection.
+    # Order: truncation repair first (so claim validation sees complete
+    # sentences), then the fabrication guard, then claim validation.
+    try:
+        draft, trunc_logs = await repair_truncated_manuscript_sections(
+            draft=draft,
+            rfp=rfp,
+            skip_section_ids=set(),
+            use_llm=llm.is_configured(),
+        )
+        for line in trunc_logs[:12]:
+            logger.info("Phase 3 truncation repair: %s — %s", rfp_id, line)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3 truncation repair skipped for %s: %s", rfp_id, exc)
+
+    try:
+        draft, fab_logs, _fab_human = repair_fabricated_qualifications(draft, research)
+        for line in fab_logs[:12]:
+            logger.info("Phase 3 fabrication guard: %s — %s", rfp_id, line)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3 fabrication guard skipped for %s: %s", rfp_id, exc)
+
+    try:
+        registry = None
+        try:
+            registry = await load_client_list_registry()
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "Phase 3 claim validation: client list unavailable for %s: %s",
+                rfp_id,
+                exc,
+            )
+            registry = None
+        if registry and registry.entries:
+            portfolio = set(portfolio_client_names(draft)) or None
+            claim_logs: list[str] = []
+            new_sections = []
+            for section in draft.sections:
+                body = section.content or ""
+                if not body.strip():
+                    new_sections.append(section)
+                    continue
+                updated_body, claim_report = validate_and_flag_section(
+                    body,
+                    registry=registry,
+                    slot=section.title or section.id,
+                    allowed_client_names=portfolio,
+                )
+                if updated_body != body:
+                    new_sections.append(
+                        section.model_copy(update={"content": updated_body})
+                    )
+                    if claim_report.notes:
+                        claim_logs.append(
+                            f"{section.title or section.id}: "
+                            + "; ".join(claim_report.notes[:4])
+                        )
+                else:
+                    new_sections.append(section)
+            if claim_logs:
+                draft = draft.model_copy(
+                    update={
+                        "sections": new_sections,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                for line in claim_logs[:12]:
+                    logger.info("Phase 3 claim validation: %s — %s", rfp_id, line)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3 claim validation skipped for %s: %s", rfp_id, exc)
+
     await asave_proposal_draft(draft)
 
     updated_research = research.model_copy(
