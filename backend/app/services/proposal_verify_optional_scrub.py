@@ -314,6 +314,23 @@ async def run_verify_scrub_only_scan(
     draft = push_proposal_snapshot(draft, label="Before VERIFY scrub")
     await asave_proposal_draft(draft)
 
+    # Task 5's ledger reconciler runs inside THIS path — the real Scan-RFP
+    # button always calls mode="verify_scrub_only" (see
+    # proposal_fulfill_rfp_gaps.run_fulfill_rfp_gaps), so wiring the
+    # reconciler only into the legacy mode="full" body left it unreachable
+    # from the UI. It is safe to run unconditionally here: deterministic,
+    # zero-LLM, idempotent, and ADD is surfaced-only — never auto-applied —
+    # so it cannot create a duplicate section next to an existing one that
+    # the requirement matcher failed to recognize.
+    from app.services.proposal_rfp_compliance import reconcile_requirement_ledger
+
+    ledger_result = reconcile_requirement_ledger(
+        draft=draft, research=research, rfp=rfp, rfp_text=rfp_text
+    )
+    if ledger_result.changed:
+        draft = ledger_result.draft
+        await asave_proposal_draft(draft)
+
     verify_ids = {
         s.id for s in draft.sections if count_verify_tags(s.content or "") > 0
     }
@@ -328,7 +345,19 @@ async def run_verify_scrub_only_scan(
         "closingAddedSections": [],
         "humanDecisionGaps": [],
         "inPlaceFixCount": 0,
+        "ledgerMergesApplied": len(ledger_result.applied_merges),
+        "ledgerCutsApplied": len(ledger_result.applied_cuts),
+        "ledgerProposedAdditions": len(ledger_result.proposed_additions),
     }
+    report["logs"].extend(ledger_result.logs)
+    if ledger_result.proposed_additions:
+        preview = "; ".join(
+            a.requirement_text[:80] for a in ledger_result.proposed_additions[:5]
+        )
+        report["humanDecisionGaps"].append(
+            f"ledger:review-needed — {len(ledger_result.proposed_additions)} mandatory "
+            f"requirement(s) have no matching section (not auto-added): {preview}"
+        )
 
     if not verify_ids:
         report["logs"].append("No [VERIFY] tags found in the manuscript.")
