@@ -86,6 +86,42 @@ class TestVerifyOptionalScrubAsync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.tags_after, 0)
         self.assertNotIn("[VERIFY", result.content)
 
+    async def test_scrub_call_is_routed_with_its_registered_node_name(self) -> None:
+        """Regression: scrub_optional_verify_tags used to call llm.chat_json
+        without node_name, so the router (llm_routing.classify_node) fell back
+        to "unknown", defaulted to the quality tier, and logged a routing
+        warning on every call — even though "verify_optional_scrub" is
+        already registered in llm_routing.py."""
+        fake = {
+            "content": "Rewritten section body long enough to pass the guard.",
+            "keptRequiredCount": 0,
+            "note": "note",
+        }
+        mock_chat_json = AsyncMock(return_value=(fake, "test"))
+        with (
+            patch(
+                "app.services.proposal_verify_optional_scrub.llm.is_configured",
+                return_value=True,
+            ),
+            patch(
+                "app.services.proposal_verify_optional_scrub.llm.chat_json",
+                new=mock_chat_json,
+            ),
+            patch(
+                "app.services.kb_rag_retrieve.retrieve_for_question",
+                new=AsyncMock(return_value=("", [], [])),
+            ),
+        ):
+            await scrub_optional_verify_tags(
+                "Body with [VERIFY: subcontractor name] to scrub.",
+                section_title="Scope",
+                rfp_text="RFP text.",
+            )
+        self.assertEqual(
+            mock_chat_json.call_args.kwargs.get("node_name"),
+            "verify_optional_scrub",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

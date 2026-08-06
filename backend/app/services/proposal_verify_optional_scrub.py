@@ -193,6 +193,7 @@ async def scrub_optional_verify_tags(
             max_tokens=8_000,
             temperature=0.15,
             tier="light",
+            node_name="verify_optional_scrub",
         )
     except Exception:
         logger.exception("Optional VERIFY scrub LLM failed for %s", section_title)
