@@ -127,6 +127,25 @@ _LIMIT_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+# Per-attachment sub-limits are extremely common in real RFPs — "Resumes are
+# limited to 2 pages each", "The cover letter is limited to 1 page" — and are
+# NOT the whole-document page budget. A verb phrase alone ("is limited to N
+# pages") can't tell a sub-limit apart from the real submission-wide cap; the
+# regex has no notion of grammatical subject. So a match only counts toward
+# the returned limit when the clause it sits in names the submission as a
+# whole. Word list per the task ruling: proposal / quote / response /
+# submission / bid (+ "quotation" and plural forms as natural variants).
+_WHOLE_SUBMISSION_SUBJECT_RE = re.compile(
+    r"\b(?:proposals?|quotes?|quotations?|responses?|submissions?|bids?)\b",
+    re.IGNORECASE,
+)
+
+# A clause boundary — the subject search for a match must not cross into an
+# earlier, unrelated sentence (e.g. a document that mentions "the proposal"
+# two sentences before an unrelated "Resumes are limited to 2 pages" line
+# must not let that earlier mention qualify the resume sub-limit).
+_CLAUSE_BOUNDARY_RE = re.compile(r"[.;:\n]")
+
 
 def _match_to_number(match: re.Match[str]) -> int | None:
     digits = match.group("digits")
@@ -141,28 +160,67 @@ def _match_to_number(match: re.Match[str]) -> int | None:
     return None
 
 
+def _clause_before(text: str, start: int) -> str:
+    """Text of the current clause up to (not including) ``start`` — from the
+    nearest preceding clause boundary, or the start of the string."""
+    boundary_end = 0
+    for boundary in _CLAUSE_BOUNDARY_RE.finditer(text, 0, start):
+        boundary_end = boundary.end()
+    return text[boundary_end:start]
+
+
+def _binds_to_whole_submission(text: str, match_start: int) -> bool:
+    """True when the verb phrase at ``match_start`` sits in a clause that
+    names the submission as a whole, not a sub-part (resume, cover letter,
+    references, letters of support, ...)."""
+    return bool(_WHOLE_SUBMISSION_SUBJECT_RE.search(_clause_before(text, match_start)))
+
+
 def parse_page_limit(rfp_text: str | None) -> int | None:
     """Extract an explicit page cap from RFP solicitation text.
 
     Returns ``None`` whenever the result would be a guess: no match, a
-    number that isn't a plausible page count, or more than one distinct
-    limit stated in the text (e.g. a narrative cap and a submission-wide
-    cap that disagree — picking either would be fabricating certainty the
-    document doesn't have).
+    number that isn't a plausible page count, more than one distinct limit
+    stated in the text (e.g. a narrative cap and a submission-wide cap that
+    disagree — picking either would be fabricating certainty the document
+    doesn't have), or the only value(s) found are stated for a sub-part of
+    the submission (resumes, cover letter, references, an "elliptical"
+    second clause like "...limited to 10 pages and the cost volume to 5
+    pages") rather than the submission as a whole.
     """
     if not rfp_text or not rfp_text.strip():
         return None
 
-    found: set[int] = set()
+    all_values: set[int] = set()
+    qualified_values: set[int] = set()
     for match in _LIMIT_RE.finditer(rfp_text):
         value = _match_to_number(match)
         if value is None:
             continue
-        if _MIN_PLAUSIBLE_LIMIT <= value <= _MAX_PLAUSIBLE_LIMIT:
-            found.add(value)
+        if not (_MIN_PLAUSIBLE_LIMIT <= value <= _MAX_PLAUSIBLE_LIMIT):
+            continue
+        all_values.add(value)
+        if _binds_to_whole_submission(rfp_text, match.start()):
+            qualified_values.add(value)
 
-    if len(found) == 1:
-        return found.pop()
+    # More than one distinct number anywhere in the text is always treated
+    # as too uncertain to act on — unchanged from the original design; this
+    # branch doesn't need subject information because ANY disagreement
+    # (whole-document vs. whole-document, or whole-document vs. sub-part)
+    # is a reason to fail closed rather than guess which one governs.
+    if len(all_values) != 1:
+        return None
+
+    (value,) = all_values
+    # The single value in the text only counts if at least one of its
+    # mentions was bound to the whole submission. This also fixes a second,
+    # narrower defect for free: two DIFFERENT sub-limits that happen to
+    # share a number (e.g. "the appendix is limited to 10 pages" ... "the
+    # technical narrative is limited to 10 pages") no longer silently
+    # collapse into a false non-ambiguous 10 — neither mention qualifies,
+    # so this returns None instead.
+    if value in qualified_values:
+        return value
     return None
 
 

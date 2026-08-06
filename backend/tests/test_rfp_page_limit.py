@@ -133,6 +133,82 @@ class ParsePageLimitAmbiguousTests(unittest.TestCase):
         self.assertEqual(parse_page_limit(text), 12)
 
 
+class ParsePageLimitPerAttachmentSubLimitTests(unittest.TestCase):
+    """A per-attachment sub-limit is NOT the whole-document page limit.
+
+    Real symptom: ``resolve_page_limit`` returning a resume/cover-letter cap
+    (e.g. 2 pages) as the entire proposal's budget truncates the whole
+    document to ~595 words. Per-attachment caps are extremely common in real
+    RFPs — this must fail closed to None, never return the sub-limit.
+    """
+
+    def test_resumes_limited_to_2_pages_each_is_not_the_document_limit(self) -> None:
+        self.assertIsNone(
+            parse_page_limit("Resumes are limited to 2 pages each")
+        )
+
+    def test_cover_letter_limited_to_1_page_is_not_the_document_limit(self) -> None:
+        self.assertIsNone(
+            parse_page_limit("The cover letter is limited to 1 page")
+        )
+
+    def test_letters_of_support_limited_to_1_page_is_not_the_document_limit(
+        self,
+    ) -> None:
+        self.assertIsNone(
+            parse_page_limit("Letters of support are limited to 1 page")
+        )
+
+    def test_references_shall_not_exceed_one_page_each_is_not_the_document_limit(
+        self,
+    ) -> None:
+        self.assertIsNone(
+            parse_page_limit("References shall not exceed one page each")
+        )
+
+    def test_resumes_for_key_personnel_shall_not_exceed_two_pages(self) -> None:
+        self.assertIsNone(
+            parse_page_limit(
+                "Résumés for key personnel shall not exceed two (2) pages"
+            )
+        )
+
+    def test_elliptical_two_limit_sentence_does_not_collapse_to_the_first_number(
+        self,
+    ) -> None:
+        self.assertIsNone(
+            parse_page_limit(
+                "The technical volume is limited to 10 pages and the cost "
+                "volume to 5 pages"
+            )
+        )
+
+    def test_coincidental_equal_sub_limits_do_not_collapse_to_a_false_certainty(
+        self,
+    ) -> None:
+        text = (
+            "The appendix is limited to 10 pages. The technical narrative "
+            "is limited to 10 pages."
+        )
+        self.assertIsNone(parse_page_limit(text))
+
+    # Contrast cases: text that already correctly returns None today,
+    # proving the elliptical case above is a parsing gap, not a policy call.
+    def test_semicolon_joined_sub_limits_with_repeated_verb_already_none(self) -> None:
+        text = (
+            "The proposal shall not exceed 12 pages excluding attachments; "
+            "attachments shall not exceed 8 pages."
+        )
+        self.assertIsNone(parse_page_limit(text))
+
+    def test_fully_stated_two_clause_limit_already_none(self) -> None:
+        text = (
+            "The technical volume shall not exceed 10 pages; the cost "
+            "volume shall not exceed 5 pages."
+        )
+        self.assertIsNone(parse_page_limit(text))
+
+
 class ResolvePageLimitTests(unittest.TestCase):
     def test_manual_field_overrides_parsed_value_when_both_set(self) -> None:
         self.assertEqual(
