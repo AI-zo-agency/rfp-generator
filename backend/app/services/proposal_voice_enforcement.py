@@ -61,11 +61,19 @@ _STATIC_COVERED_TITLE_RES = (
     # "Qualifications and Experience of the Firm and Key Personnel".
     re.compile(r"^\s*(?:key\s+personnel|team\s+bios?)\s*$", re.IGNORECASE),
     re.compile(r"^\s*staff(?:ing)?\s+(?:bios|resumes|qualifications)\s*$", re.IGNORECASE),
-    # RFP tables of contents often restate a requirement as a whole SENTENCE
-    # rather than a label: "A brief description of the firm, including the year
-    # the firm was established, type of firm (partnership, corporation, etc.)".
-    # Label-only patterns miss those, so the tab was drafted alongside Sections
-    # 1.1/1.3 and repeated the firm history, founding date and entity type.
+)
+
+# RFP tables of contents often restate a requirement as a whole SENTENCE rather
+# than a label: "A brief description of the firm, including the year the firm
+# was established, type of firm (partnership, corporation, etc.)". These asks
+# were previously matched by _STATIC_COVERED_TITLE_RES and dropped on the
+# ASSUMPTION that static Section 1.3 answers them — but static sections are
+# generated before Phase 2, never see the RFP, and nothing verified the
+# delegation actually landed. They are kept separate here because, unlike the
+# label patterns above (a title that names a whole static section 1:1), these
+# ask a specific factual question that only the static section's own TEXT can
+# answer — see ``static_section_covers_requirement``.
+_UNVERIFIED_STATIC_DELEGATION_RES = (
     re.compile(
         r"\b(?:brief\s+)?description\s+of\s+(?:the\s+)?(?:firm|agency|company|"
         r"organi[sz]ation|proposer|vendor)\b",
@@ -89,6 +97,87 @@ _STATIC_COVERED_TITLE_RES = (
         re.IGNORECASE,
     ),
 )
+
+# Answer-shaped signal each unverified-delegation ask requires in the static
+# section's own text before it can be treated as covered. Order matches
+# _UNVERIFIED_STATIC_DELEGATION_RES; "description of the firm" has no fixed
+# answer shape, so it only requires the static text to carry real prose.
+_FIRM_TYPE_ANSWER_RE = re.compile(
+    r"\b(corporation|corp\.?|l\.?l\.?c\.?|partnership|sole\s+proprietorship|"
+    r"s-?corp(?:oration)?|c-?corp(?:oration)?|nonprofit|non-profit|"
+    r"limited\s+liability)\b",
+    re.IGNORECASE,
+)
+_FOUNDING_FACT_ANSWER_RE = re.compile(
+    r"\b(19|20)\d{2}\b|\b(established|founded|formed|incorporated|since)\b",
+    re.IGNORECASE,
+)
+_HAS_REAL_PROSE_RE = re.compile(r".{200,}", re.DOTALL)
+
+_DELEGATION_PROOF_CHECKS: tuple[tuple[re.Pattern[str], re.Pattern[str]], ...] = (
+    (
+        re.compile(
+            r"\b(?:brief\s+)?description\s+of\s+(?:the\s+)?(?:firm|agency|company|"
+            r"organi[sz]ation|proposer|vendor)\b",
+            re.IGNORECASE,
+        ),
+        _HAS_REAL_PROSE_RE,
+    ),
+    (
+        re.compile(
+            r"\byear\s+(?:the\s+)?(?:firm|agency|company|business)\s+was\s+"
+            r"(?:established|founded|formed|incorporated)\b",
+            re.IGNORECASE,
+        ),
+        _FOUNDING_FACT_ANSWER_RE,
+    ),
+    (
+        re.compile(
+            r"\bdate\s+(?:the\s+)?(?:firm|agency|company|business)\s+was\s+"
+            r"(?:established|founded|formed|incorporated)\b",
+            re.IGNORECASE,
+        ),
+        _FOUNDING_FACT_ANSWER_RE,
+    ),
+    (
+        re.compile(r"\btype\s+of\s+(?:firm|entity|organi[sz]ation)\b", re.IGNORECASE),
+        _FIRM_TYPE_ANSWER_RE,
+    ),
+    (
+        re.compile(r"\bform\s+of\s+(?:business|organi[sz]ation)\b", re.IGNORECASE),
+        _FIRM_TYPE_ANSWER_RE,
+    ),
+    (
+        re.compile(r"\blegal\s+(?:structure|entity|form|status)\b", re.IGNORECASE),
+        _FIRM_TYPE_ANSWER_RE,
+    ),
+    (
+        re.compile(
+            r"\byears?\s+in\s+business\b|\bhow\s+long\b.{0,40}\bin\s+business\b",
+            re.IGNORECASE,
+        ),
+        _FOUNDING_FACT_ANSWER_RE,
+    ),
+)
+
+
+def static_section_covers_requirement(requirement_text: str, static_section_text: str) -> bool:
+    """Real proof, not an assumption: true only when the static section's own
+    text names the specific fact the requirement asks for (entity type,
+    founding year, ...) rather than merely sharing a topic label with it.
+
+    Observed: "type of firm" was deleted from the outline whenever the RFP
+    text merely contained that phrase, with no check that static Section 1.3
+    ever stated whether zö is an LLC, corporation, etc.
+    """
+    text = (requirement_text or "").strip()
+    haystack = static_section_text or ""
+    if not text or not haystack.strip():
+        return False
+    for ask_re, answer_re in _DELEGATION_PROOF_CHECKS:
+        if ask_re.search(text):
+            return bool(answer_re.search(haystack))
+    return False
 
 
 def contains_vendor_language(content: str) -> bool:
@@ -212,8 +301,18 @@ def enforce_narrative_voice(
     return fix_narrative_register(content)
 
 
-def is_duplicate_static_rfp_section(title: str) -> bool:
-    """RFP-mapped sections that duplicate zö static Sections 1–3 (drafted separately)."""
+def is_duplicate_static_rfp_section(
+    title: str, *, static_section_text: str | None = None
+) -> bool:
+    """RFP-mapped sections that duplicate zö static Sections 1–3 (drafted separately).
+
+    ``static_section_text`` is the actual drafted content of static Sections
+    1–3, when available — pass it whenever it exists. Without it, a section
+    that only *asks a specific factual question* (type of firm, founding year,
+    ...) is never treated as covered; unlike the label patterns below, an
+    unverified factual ask stays in the outline / is reported missing by the
+    requirement ledger rather than being silently assumed satisfied.
+    """
     t = title.strip()
     if not t:
         return False
@@ -235,6 +334,11 @@ def is_duplicate_static_rfp_section(title: str) -> bool:
         ):
             return False
         return True
+    if any(pattern.search(t) for pattern in _UNVERIFIED_STATIC_DELEGATION_RES):
+        return bool(
+            static_section_text
+            and static_section_covers_requirement(t, static_section_text)
+        )
     hits = sum(1 for pattern in _STATIC_RFP_DUPLICATE_RES if pattern.search(t))
     if hits >= 2:
         return True
@@ -267,8 +371,23 @@ def should_skip_rfp_section_as_static_duplicate(
     *,
     title: str,
     duplicate_of_static_section: str | None = None,
+    evaluation_weight: float | None = None,
+    static_section_text: str | None = None,
 ) -> bool:
-    """True when intelligence/drafting must omit this tab (already covered by Sections 1–3)."""
+    """True when intelligence/drafting must omit this tab (already covered by Sections 1–3).
+
+    A section carrying evaluation points is never skipped here — Phase 2 named
+    it a scored criterion, and dropping it produced proposals missing
+    "Technical Approach" and similar scored asks. Static delegation is a
+    convenience for unscored identity boilerplate, not for what evaluators
+    score.
+    """
+    if evaluation_weight is not None:
+        try:
+            if float(evaluation_weight) > 0:
+                return False
+        except (TypeError, ValueError):
+            pass
     dup = (duplicate_of_static_section or "").strip().casefold()
     if dup in {"section-1", "section-2", "section-3", "1", "2", "3"}:
         if re.search(
@@ -277,6 +396,8 @@ def should_skip_rfp_section_as_static_duplicate(
             title or "",
             re.IGNORECASE,
         ):
-            return is_duplicate_static_rfp_section(title)
+            return is_duplicate_static_rfp_section(
+                title, static_section_text=static_section_text
+            )
         return True
-    return is_duplicate_static_rfp_section(title)
+    return is_duplicate_static_rfp_section(title, static_section_text=static_section_text)

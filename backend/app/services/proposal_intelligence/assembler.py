@@ -56,6 +56,56 @@ def _normalize(text: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
 
 
+_MATCH_STOPWORDS = {
+    "the", "and", "for", "with", "from", "section", "of", "to", "a", "an",
+    "or", "in", "on", "per", "rfp",
+}
+
+# Shared tokens this generic/boring on their own can NOT establish a match —
+# "Summary" is a substring of "Provide a summary of your insurance coverage"
+# and of a hundred unrelated asks; "Cost" is a substring of any pricing
+# sentence. Reused from proposal_outline_dedup's own judgment of which short
+# labels are too vague to stand alone (that module treats "qualifications" as
+# boring too, but here it is the deciding token behind a real 10-pair
+# measurement, so it stays out of this set — see task-2-report.md).
+_BORING_SHARED_TOKENS = {
+    "summary", "cost", "price", "pricing", "budget", "fee", "fees",
+}
+
+
+def _match_tokens(normalized_text: str) -> set[str]:
+    return {
+        t for t in normalized_text.split()
+        if len(t) >= 3 and t not in _MATCH_STOPWORDS
+    }
+
+
+def _scored_token_overlap_match(req_n: str, title_n: str, *, threshold: float = 0.5) -> bool:
+    """Wording-variant match: "Cover Letter" vs "Letter of Transmittal",
+    "Insurance Certificate" vs "Certificate of Insurance", etc.
+
+    Not a bare substring or Jaccard test — those are exactly what produced the
+    silent false positives this module used to have (a short generic title is
+    a substring of a huge fraction of requirement texts). Two extra guards:
+      1. every shared token must clear a coverage threshold against the
+         SHORTER side (half its meaningful tokens, not a token or two out of
+         a long sentence);
+      2. if every shared token is on the "boring" denylist above, reject —
+         "Executive Summary" and "insurance coverage summary" share only
+         "summary", which proves nothing about the topic.
+    Measured against 10 realistic RFP wording-variant pairs and 2 explicit
+    false-positive guards; see task-2-report.md for the before/after table.
+    """
+    ta, tb = _match_tokens(req_n), _match_tokens(title_n)
+    if not ta or not tb:
+        return False
+    inter = ta & tb
+    if not inter or inter <= _BORING_SHARED_TOKENS:
+        return False
+    shorter_len = min(len(ta), len(tb))
+    return (len(inter) / shorter_len) >= threshold
+
+
 def _match_outline_sections(
     *,
     requirement_text: str,
@@ -64,17 +114,18 @@ def _match_outline_sections(
 ) -> list[str]:
     """Deterministic (no LLM) requirement -> section matching.
 
-    Genuinely conservative: every branch is a whole-string comparison on
-    normalized text, never a substring test. A short generic title (Summary,
-    Cost, Team) is a substring of a large fraction of requirement texts, so the
-    old ``title in requirement`` branch produced silent false positives — and a
-    false "satisfied" hides the requirement from ``missing()``, which is the one
-    thing the ledger exists to catch.
+    Every branch is either a whole-string comparison on normalized text or a
+    guarded scored token overlap — never a bare substring test. A short
+    generic title (Summary, Cost, Team) is a substring of a large fraction of
+    requirement texts, so the old ``title in requirement`` branch produced
+    silent false positives — and a false "satisfied" hides the requirement
+    from ``missing()``, which is the one thing the ledger exists to catch.
 
-    Three ways a section can cover a requirement, in order of confidence:
+    Four ways a section can cover a requirement, in order of confidence:
       1. the item's own ``target_section`` hint equals the section title;
       2. one of the section's ``requirements`` bullets equals the requirement;
-      3. the section title equals the requirement text.
+      3. the section title equals the requirement text;
+      4. scored token overlap above threshold (wording variants — Task 2 Step 0).
     """
     req_n = _normalize(requirement_text)
     hint_n = _normalize(target_hint)
@@ -89,6 +140,9 @@ def _match_outline_sections(
             matches.append(section.id)
             continue
         if req_n and title_n and title_n == req_n:
+            matches.append(section.id)
+            continue
+        if req_n and title_n and _scored_token_overlap_match(req_n, title_n):
             matches.append(section.id)
     return matches
 
@@ -208,6 +262,50 @@ def build_requirement_ledger(
             continue
 
     return RequirementLedger(requirements=requirements)
+
+
+def amend_outline_for_missing_requirements(
+    ledger: RequirementLedger,
+    outline_sections: list[RfpSectionMap],
+) -> list[RfpSectionMap]:
+    """Append one section per missing mandatory requirement.
+
+    Task 2 Step 4's interface, implemented and unit-tested — but **not called
+    from derive_legacy_fields**. Task 1's review measured ``_match_outline_sections``
+    at 10/10 misses on realistic wording variants before Step 0's fix; Step 0
+    raises that to a measured partial hit rate (see task-2-report.md) but three
+    of the ten pairs (Key Personnel/Staffing Plan, Project Schedule/Timeline,
+    Company Overview/About Us) still miss because they share zero tokens — no
+    deterministic lexical matcher can bridge a pure synonym without a domain
+    dictionary this task was not asked to build. Amending the outline on a
+    signal that still misses real synonyms would add a duplicate section for a
+    requirement that is already covered — manufacturing the exact
+    insurance-x3 duplication this plan exists to remove.
+
+    The gate ships advisory-only for now: ``RequirementLedger.missing()`` is
+    already persisted on ``ProposalResearchCache.requirement_ledger`` (Task 1)
+    for the ending report / manual review to surface. Wire this function in
+    once matcher precision is validated against real RFPs.
+    """
+    existing_ids = {s.id for s in outline_sections}
+    amended = list(outline_sections)
+    for requirement in ledger.missing():
+        section_id = f"ledger-{requirement.id}"
+        if section_id in existing_ids:
+            continue
+        amended.append(
+            RfpSectionMap(
+                id=section_id,
+                title=requirement.text,
+                requirements=[requirement.text],
+                zoMode="write",
+                evaluationWeight=(
+                    int(requirement.points) if requirement.points is not None else None
+                ),
+            )
+        )
+        existing_ids.add(section_id)
+    return amended
 
 
 def derive_legacy_fields(plan: ProposalExecutionPlan) -> dict[str, Any]:

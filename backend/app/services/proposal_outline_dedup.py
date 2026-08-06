@@ -230,6 +230,44 @@ def is_important_or_closing_outline_title(title: str) -> bool:
     return bool(_IMPORTANT_OR_CLOSING_TITLE_RE.search(title or ""))
 
 
+def _section_evaluation_points(section: Any) -> float | None:
+    """Read evaluation points off a section regardless of its shape.
+
+    Some pipelines pass Pydantic ``OutlineSection`` objects (no points field
+    yet), others pass ``RfpSectionMap``-derived dicts carrying
+    ``evaluationWeight`` once Phase 2 has scored the section —
+    ``filter_lean_outline_sections`` runs on both.
+    """
+    for attr, key in (("evaluation_weight", "evaluationWeight"), ("points", "points")):
+        if hasattr(section, attr):
+            value = getattr(section, attr)
+            if value is not None:
+                return value
+        if isinstance(section, dict):
+            value = section.get(key)
+            if value is None:
+                value = section.get(attr)
+            if value is not None:
+                return value
+    return None
+
+
+def section_carries_evaluation_points(section: Any) -> bool:
+    """True when a section is tied to a scored RFP criterion.
+
+    Observed: an RFP named "Technical Approach" a 30-point scored criterion;
+    the outline planner's own prompt forbids inventing an "Approach" tab, and
+    _GENERIC_FILLER_TITLES matches ``our approach|methodology`` — so the
+    section was silently dropped. Anti-boilerplate rules exist for invented
+    marketing labels, never for a criterion an evaluator scores.
+    """
+    points = _section_evaluation_points(section)
+    try:
+        return points is not None and float(points) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def is_generic_filler_outline_title(title: str) -> bool:
     """Short/vague invented labels that should be enriched (or dropped if not in RFP)."""
     if is_important_or_closing_outline_title(title):
@@ -374,17 +412,23 @@ def filter_lean_outline_sections(
             dropped.append(f"{original_title} (knowledge-base filename, not a section)")
             continue
         title = enrich_outline_title_from_rfp(original_title, rfp_context)
-        if should_skip_rfp_section_as_static_duplicate(
-            title=title,
-            duplicate_of_static_section=_dup_static(section),
-        ) or is_duplicate_static_rfp_section(title):
+        # A section carrying evaluation points is never dropped as generic
+        # filler or a static duplicate — see section_carries_evaluation_points.
+        scored = section_carries_evaluation_points(section)
+        if not scored and (
+            should_skip_rfp_section_as_static_duplicate(
+                title=title,
+                duplicate_of_static_section=_dup_static(section),
+            )
+            or is_duplicate_static_rfp_section(title)
+        ):
             # Never drop closing / sample-work / agency-requirements via static rules.
             if is_important_or_closing_outline_title(title):
                 pass
             else:
                 dropped.append(original_title)
                 continue
-        if drop_generic_filler and is_generic_filler_outline_title(title):
+        if not scored and drop_generic_filler and is_generic_filler_outline_title(title):
             # A topic being MENTIONED in the RFP is not a request for a section
             # about it. Procedural clauses (addenda process, PERA retiree
             # notification, sex-offender registration) are standing obligations,

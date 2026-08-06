@@ -994,6 +994,9 @@ async def _persist_phase3_partial(
         {s.id: (s.content or "") for s in existing.sections} if existing else {}
     )
     drafted_ids = {section.id for section in drafted_rfp_sections}
+    from app.services.proposal_drafting_graph import _zo_sections_context
+
+    static_section_text = _zo_sections_context(static_sections)
     stubs: list[ProposalSection] = []
     for mapped in rfp_sections:
         if mapped.id in drafted_ids:
@@ -1001,6 +1004,8 @@ async def _persist_phase3_partial(
         if should_skip_rfp_section_as_static_duplicate(
             title=mapped.title or "",
             duplicate_of_static_section=mapped.duplicate_of_static_section,
+            evaluation_weight=mapped.evaluation_weight,
+            static_section_text=static_section_text,
         ):
             continue
         prior = prior_content_by_id.get(mapped.id, "")
@@ -1822,11 +1827,15 @@ async def _run_phase3_drafting_inner(
     existing_by_id = {
         section.id: section for section in (existing.sections if existing else [])
     }
-    from app.services.proposal_drafting_graph import partition_phase3_sections
+    from app.services.proposal_drafting_graph import (
+        _zo_sections_context,
+        partition_phase3_sections,
+    )
 
     sections_to_draft, already_filled = partition_phase3_sections(
         research.rfp_sections,
         existing_by_id,
+        static_section_text=_zo_sections_context(static_sections),
     )
 
     logger.info(

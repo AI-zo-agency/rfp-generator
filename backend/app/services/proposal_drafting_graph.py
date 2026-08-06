@@ -281,6 +281,8 @@ def _phase3_content_is_usable(content: str | None) -> bool:
 def partition_phase3_sections(
     rfp_sections: list[RfpSectionMap],
     existing_by_id: dict[str, ProposalSection],
+    *,
+    static_section_text: str = "",
 ) -> tuple[list[RfpSectionMap], list[ProposalSection]]:
     """Split mapped sections into ones still needing a draft vs already filled."""
     to_draft: list[RfpSectionMap] = []
@@ -289,6 +291,8 @@ def partition_phase3_sections(
         if should_skip_rfp_section_as_static_duplicate(
             title=mapped.title or "",
             duplicate_of_static_section=mapped.duplicate_of_static_section,
+            evaluation_weight=mapped.evaluation_weight,
+            static_section_text=static_section_text,
         ):
             continue
         existing = existing_by_id.get(mapped.id)
@@ -1186,28 +1190,24 @@ async def _draft_batch_once(
 
 async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
     sections = state.get("rfp_sections") or []
-    skipped = [
-        s
-        for s in sections
-        if should_skip_rfp_section_as_static_duplicate(
+    static_section_text = state.get("zo_sections_context") or ""
+
+    def _skip(s: dict[str, Any]) -> bool:
+        weight = s.get("evaluationWeight")
+        if weight is None:
+            weight = s.get("evaluation_weight")
+        return should_skip_rfp_section_as_static_duplicate(
             title=str(s.get("title") or ""),
             duplicate_of_static_section=(
                 str(s.get("duplicateOfStaticSection") or s.get("duplicate_of_static_section") or "")
                 or None
             ),
+            evaluation_weight=weight,
+            static_section_text=static_section_text,
         )
-    ]
-    sections = [
-        s
-        for s in sections
-        if not should_skip_rfp_section_as_static_duplicate(
-            title=str(s.get("title") or ""),
-            duplicate_of_static_section=(
-                str(s.get("duplicateOfStaticSection") or s.get("duplicate_of_static_section") or "")
-                or None
-            ),
-        )
-    ]
+
+    skipped = [s for s in sections if _skip(s)]
+    sections = [s for s in sections if not _skip(s)]
     sections = order_sections_for_phase3_draft(sections)
     if skipped:
         logger.info(
