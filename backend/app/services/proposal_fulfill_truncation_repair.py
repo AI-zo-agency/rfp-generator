@@ -10,7 +10,11 @@ from app.models.proposal import ProposalDraft, ProposalSection
 from app.models.rfp import RfpRecord
 from app.services import llm
 from app.services.proposal_drafting_graph import _looks_truncated_prose
-from app.services.proposal_fulfill_guard import fulfill_scan_preserves_section
+from app.services.proposal_fulfill_guard import (
+    fulfill_scan_preserves_section,
+    is_case_study_section,
+    is_team_bio_section,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -173,12 +177,13 @@ async def repair_truncated_manuscript_sections(
 #
 # LLM budget: exactly one llm.chat_json call per truncated section (routed
 # via node_name="scan_truncation_kb_repair" — see llm_routing.py). No query-
-# planning call: retrieve_for_section's own fallback query (built from the
-# section title + a tail slice of its existing content) is used instead of
-# spending an LLM call planning queries for content that already exists.
-# Never raises: any per-section failure leaves that section's content
-# untouched, and the caller's own post-repair T1 rescan reports it as still
-# truncated.
+# planning call: _truncation_repair_kb_query below builds the retrieval
+# query deterministically (doc-type hint + the section's own title, never
+# the RFP buyer name or the truncated tail's raw markdown — see its
+# docstring) instead of spending an LLM call planning queries for content
+# that already exists. Never raises: any per-section failure leaves that
+# section's content untouched, and the caller's own post-repair T1 rescan
+# reports it as still truncated.
 # ---------------------------------------------------------------------------
 
 
@@ -206,6 +211,77 @@ def _shared_word_prefix_ratio(original: str, updated: str) -> float:
 # at the cut-off point (e.g. re-closing a clause it is completing).
 _MIN_PREFIX_RATIO = 0.8
 
+# Strips an outline-numbering prefix ("2.1 — ", "3.2. ") off a section title,
+# leaving the actual topic — a person's name for a bio, a client/engagement
+# name for a case study.
+_SECTION_NUMBER_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)*\s*[—–:.\-]\s*")
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s*", re.MULTILINE)
+_MD_EMPHASIS_RE = re.compile(r"[*_`]{1,3}")
+_MD_LIST_MARKER_RE = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
+_MD_TABLE_PIPE_RE = re.compile(r"\|")
+
+
+def _strip_markdown_noise(text: str) -> str:
+    """Plain-text a markdown fragment for use as search-query material.
+
+    Headings, bold/italic/code markers, list bullets, table pipes, and link
+    syntax all read to a semantic search as noise, not signal — see the
+    module note on the "### Timi Oyewunmi\\n**Role on this engagement:**"
+    defect below.
+    """
+    stripped = _MD_LINK_RE.sub(r"\1", text or "")
+    stripped = _MD_HEADING_RE.sub("", stripped)
+    stripped = _MD_LIST_MARKER_RE.sub("", stripped)
+    stripped = _MD_EMPHASIS_RE.sub("", stripped)
+    stripped = _MD_TABLE_PIPE_RE.sub(" ", stripped)
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
+def _section_topic_anchor(section: ProposalSection) -> str:
+    """The section's own topic, stripped of markdown and outline numbering —
+    e.g. "2.1 — Timi Oyewunmi" -> "Timi Oyewunmi"."""
+    cleaned = _strip_markdown_noise(section.title or "")
+    anchor = _SECTION_NUMBER_PREFIX_RE.sub("", cleaned).strip()
+    return anchor or (section.id or "").strip()
+
+
+def _truncation_repair_kb_query(section: ProposalSection) -> str:
+    """Build a clean, deterministic Supermemory query for the KB-grounded
+    truncation completion. Zero LLM calls.
+
+    Fixes two bugs the previous
+    ``f"{rfp.client} {section.title} {tail}"`` query had:
+
+    1. It put the RFP BUYER'S name into a query against a knowledge base
+       that holds ONLY zö agency material — the KB has nothing about the
+       buyer, ever, so the buyer name is pure noise that displaces real
+       signal. Same anti-pattern as ``proposal_knowledge_base_tools.
+       normalize_zo_kb_query`` exists to strip elsewhere in this project.
+       This function never takes rfp.client/rfp.title as input at all, so
+       there is nothing for it to leak.
+    2. It fed RAW MARKDOWN from the truncated tail straight into a semantic
+       query — e.g. "### Timi Oyewunmi\\n**Role on this engagement:** Bi",
+       where "Bi" is a word the truncation itself cut off mid-way. A broken
+       word and stray heading/bold markers are signal-negative, not signal.
+       This function never reads the truncated tail at all — only the
+       section's own (already-complete) title.
+
+    Anchors on the section's topic (see _section_topic_anchor) plus a
+    doc-type hint in the same style ``proposal_section_editor.
+    REFINE_QUERIES_PROMPT`` already uses successfully: 04_Bio for a team
+    bio, 03_CS for a case study, 01_companyfacts otherwise. Bio/case-study
+    classification reuses ``is_team_bio_section`` / ``is_case_study_section``
+    — the same section-id patterns that already gate which sections this
+    whole KB-grounded repair path is safe to run on.
+    """
+    anchor = _section_topic_anchor(section)
+    if is_team_bio_section(section.id):
+        return f"zö agency 04_Bio {anchor} role experience biography"[:220]
+    if is_case_study_section(section.id):
+        return f"zö agency 03_CS {anchor} case study engagement results"[:220]
+    return f"zö agency 01_companyfacts {anchor}"[:220]
+
 
 async def _complete_one_truncated_section_from_kb(
     *,
@@ -222,12 +298,11 @@ async def _complete_one_truncated_section_from_kb(
     from app.services.proposal_intelligence.schemas import RetrievalEntry
     from app.services.proposal_section_editor import _format_evidence
 
-    tail = body[-600:]
     try:
         entry = RetrievalEntry(
             sectionId=section.id,
             requiredAssets=[section.title or section.id],
-            queries=[f"{rfp.client} {section.title} {tail}".strip()[:220]],
+            queries=[_truncation_repair_kb_query(section)],
         )
         evidence = await retrieve_for_section(entry, rfp_client=rfp.client)
     except Exception:
