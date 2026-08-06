@@ -334,6 +334,24 @@ async def run_verify_scrub_only_scan(
     ledger_result = reconcile_requirement_ledger(
         draft=draft, research=research, rfp=rfp, rfp_text=rfp_text
     )
+    if ledger_result.built_ledger is not None:
+        # Bug fix: this proposal had no persisted research.requirement_ledger
+        # (every proposal generated before Task 1, or one whose ledger was
+        # wiped by a since-fixed regeneration bug) so reconcile_requirement_
+        # ledger built one on demand from research.proposal_execution_plan +
+        # research.rfp_sections — zero LLM calls, pure Python, same matcher
+        # Phase 2 uses. Persist it now so the NEXT Scan-RFP click reads it
+        # straight from research.requirement_ledger instead of rebuilding it
+        # every time. merge_research_preserve_audit_fields (proposal_repository.
+        # save_research_cache) keeps this value: an explicit non-null incoming
+        # requirement_ledger always wins over whatever (nothing) is stored.
+        research = (
+            research
+            or ProposalResearchCache(
+                rfpId=rfp_id, updatedAt=datetime.now(timezone.utc).isoformat()
+            )
+        ).model_copy(update={"requirement_ledger": ledger_result.built_ledger})
+        await asave_research_cache(research)
     if ledger_result.changed:
         draft = ledger_result.draft
         await asave_proposal_draft(draft)
@@ -407,6 +425,11 @@ async def run_verify_scrub_only_scan(
             {m.owner_section_title for m in ledger_result.applied_merges}
         ),
         "ledgerCutsSectionTitles": [c.section_title for c in ledger_result.applied_cuts],
+        # Set only when the ledger reconcile never ran at all (no persisted
+        # ledger AND nothing to build one from) — surfaced so the banner can
+        # say WHY ledger_added/merged/cut are 0 instead of reading identically
+        # to "already compliant, nothing to fix". None on every other path.
+        "ledgerCheckSkippedReason": ledger_result.skipped_reason,
         # Task 12 — sections the KB-grounded pass above completed vs. sections
         # it could not (still truncated; see truncatedSectionsCount/Titles
         # further down, which is the post-repair T1 rescan and is the source
@@ -486,6 +509,42 @@ async def run_verify_scrub_only_scan(
     report["truncatedSectionTitles"] = [
         truncated_titles_by_id.get(sid, sid) for sid in truncated_section_ids
     ]
+
+    # Bug fix: truncation_repaired_ids above was accepted by
+    # repair_truncated_sections_from_kb's OWN success gate
+    # (looks_truncated_for_fulfill — checks only the section's trailing
+    # cutoff), which is not the same detector as the T1 scan just run
+    # (scan_truncation_artifacts via scan_all_t1, which also flags unbalanced
+    # parens/brackets and currency fragments ANYWHERE in the section, not
+    # just the tail). A section can pass the narrower repair-time check —
+    # its cut-off sentence is now complete — while an unrelated artifact
+    # elsewhere in the same content still trips the broader T1 rescan above.
+    # Left uncorrected, that section is reported as BOTH repaired and still
+    # truncated: the exact double-count a real user saw (8 repaired / 9
+    # truncated naming the same 5 sections), which reads as if nothing
+    # worked. truncated_section_ids (just computed, post-repair) is the
+    # authoritative source of truth here, so anything still in it is by
+    # definition not genuinely repaired — exclude it from the repaired
+    # count/titles so the two lists are disjoint by construction.
+    still_truncated_ids = set(truncated_section_ids)
+    genuinely_repaired_ids = [
+        sid for sid in truncation_repaired_ids if sid not in still_truncated_ids
+    ]
+    if len(genuinely_repaired_ids) != len(truncation_repaired_ids):
+        demoted = [sid for sid in truncation_repaired_ids if sid in still_truncated_ids]
+        report["logs"].append(
+            "truncation-repair:kb — "
+            f"{len(demoted)} section(s) passed the repair's own completion "
+            "check but still trip the full T1 truncation scan (e.g. an "
+            "unrelated unbalanced bracket/paren or currency fragment) — "
+            "not counted as repaired: "
+            + ", ".join(titles_before_repair.get(sid, sid) for sid in demoted)
+        )
+    report["truncationRepairedCount"] = len(genuinely_repaired_ids)
+    report["truncationRepairedSectionTitles"] = [
+        titles_before_repair.get(sid, sid) for sid in genuinely_repaired_ids
+    ]
+
     report["unverifiedClaimsCount"] = sum(
         1 for issue in review.issues
         if issue.category in ("fabricated_fact", "unverified_claim")

@@ -118,4 +118,33 @@ describe("buildScanRfpBanner", () => {
     });
     expect(banner).toBe("Removed 5 optional [VERIFY] tag(s).");
   });
+
+  it("says why required-section coverage could not be checked instead of reading as a silent no-op", () => {
+    // Bug 1 regression: ledger_added/merged/cut reading 0 used to be
+    // indistinguishable from "already compliant" even when the reconciler
+    // never actually ran (no persisted or buildable requirement ledger). The
+    // banner must say so instead of falling back to NOTHING_CHANGED_MESSAGE.
+    const banner = buildScanRfpBanner({
+      ledgerAdditionsApplied: 0,
+      ledgerMergesApplied: 0,
+      ledgerCutsApplied: 0,
+      ledgerCheckSkippedReason:
+        "no proposal execution plan persisted on this proposal's research cache",
+    });
+    expect(banner).toBe(
+      "Could not check required-section coverage against the RFP " +
+        "(no proposal execution plan persisted on this proposal's research cache)."
+    );
+  });
+
+  it("appends the skip-reason clause alongside other real changes", () => {
+    const banner = buildScanRfpBanner({
+      verifyTagsRemoved: 3,
+      ledgerCheckSkippedReason: "no research cache persisted for this proposal",
+    });
+    expect(banner).toBe(
+      "Removed 3 optional [VERIFY] tag(s); could not check required-section " +
+        "coverage against the RFP (no research cache persisted for this proposal)."
+    );
+  });
 });

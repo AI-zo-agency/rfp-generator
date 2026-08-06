@@ -510,5 +510,171 @@ class MergeAndTruncationRepairCombinedTests(_RealDbTestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Bug 2 regression: the reported symptom was truncation_repaired=8 /
+# truncated_sections=9 naming the SAME 5 sections in both lists — a working
+# repair reading as if nothing worked.
+#
+# Root cause: repair_truncated_sections_from_kb's own success gate
+# (looks_truncated_for_fulfill — checks only whether the section's trailing
+# cutoff now reads complete) is a NARROWER detector than the T1 rescan the
+# caller runs afterward (scan_truncation_artifacts via scan_all_t1, which
+# also flags an unbalanced paren/bracket or currency fragment ANYWHERE in the
+# section, not just the tail). A completion can close out the cut-off
+# sentence — passing the narrow gate, counted as "repaired" — while an
+# unrelated unclosed "(" earlier in the same bio still trips the broader
+# rescan, so the SAME section lands in both "repaired" and "still truncated".
+# ---------------------------------------------------------------------------
+
+# Contains an unclosed "(" that the KB completion (below) never closes — only
+# the trailing sentence gets completed, exactly like a real completion model
+# that finishes the cut-off clause without noticing an earlier stray paren.
+TRUNCATED_BIO_UNCLOSED_PAREN_CONTENT = (
+    "Renata Ibarra has managed capital improvement communications (over "
+    "twelve years and is a Certified Public Communicator accredited by"
+)
+# A pure append of the original — passes the word-prefix guard — that closes
+# the cut-off sentence with terminal punctuation (so it reads "repaired" by
+# looks_truncated_for_fulfill) but the "(" opened above is STILL never
+# closed, so the full-content T1 rescan (_unbalanced_parens) still flags it.
+REPAIRED_BIO_UNCLOSED_PAREN_CONTENT = (
+    TRUNCATED_BIO_UNCLOSED_PAREN_CONTENT
+    + " the National Association of Government Communicators."
+)
+
+TRUNCATED_CASE_STUDY_3_CONTENT = (
+    "Our team delivered a downtown streetscape improvement campaign for the "
+    "City of Meridian that increased pedestrian foot traffic by"
+)
+
+
+def _fake_chat_json_double_count(call_log: list[str]):
+    async def _fake(messages, *, max_tokens=None, temperature=0.2, tier=None, node_name=None):
+        call_log.append(node_name or "")
+        assert node_name == "scan_truncation_kb_repair"
+        user_msg = messages[-1]["content"]
+        if "Jordan Ellis" in user_msg:
+            return ({"content": REPAIRED_BIO_CONTENT}, "openrouter")
+        if "Renata Ibarra" in user_msg:
+            return ({"content": REPAIRED_BIO_UNCLOSED_PAREN_CONTENT}, "openrouter")
+        # Case study: no KB evidence, model responds with something that
+        # reads like a rewrite (fails the word-prefix guard) -> rejected.
+        return (
+            {"content": "Our firm regularly runs downtown revitalization campaigns."},
+            "openrouter",
+        )
+
+    return _fake
+
+
+async def _fake_retrieve_for_section_double_count(entry, *, rfp_client="", start_index=1, claim=None):
+    if entry.section_id == "section-2-bio-jordan":
+        return _fake_retrieve_for_section_with_evidence(entry, rfp_client=rfp_client)
+    if entry.section_id == "section-2-bio-renata":
+        return [
+            EvidenceItem(
+                id="E1",
+                source="Renata_Ibarra_Resume.pdf",
+                excerpt=(
+                    "Renata Ibarra is a Certified Public Communicator "
+                    "accredited by the National Association of Government "
+                    "Communicators."
+                ),
+                sectionIds=[entry.section_id],
+                chunkKey="renata-cpc",
+            )
+        ]
+    return []
+
+
+class TruncationRepairAndFinalRescanDisjointTests(_RealDbTestCase):
+    async def test_a_section_that_passes_repairs_own_check_but_still_trips_the_t1_rescan_is_not_double_counted(
+        self,
+    ) -> None:
+        """3 truncated sections: Jordan is genuinely fully repaired; Renata's
+        completion passes repair's own narrower check but still trips the
+        broader T1 rescan (unrelated unclosed paren); the case study is
+        rejected outright (reads like a rewrite). Must report repaired=1,
+        still-truncated=2, and no title in both lists — the exact disjointness
+        a real user's run violated (8 repaired / 9 truncated, same 5 names)."""
+        from app.services.proposal_fulfill_rfp_gaps import run_fulfill_rfp_gaps
+
+        rfp_id = "rfp-truncation-double-count"
+        from app.services.rfp_repository import upsert_rfp
+
+        upsert_rfp(_rfp(rfp_id))
+        draft = ProposalDraft(
+            rfpId=rfp_id,
+            sections=[
+                ProposalSection(
+                    id="section-2-bio-jordan", title="Jordan Ellis — Bio",
+                    content=TRUNCATED_BIO_CONTENT,
+                ),
+                ProposalSection(
+                    id="section-2-bio-renata", title="Renata Ibarra — Bio",
+                    content=TRUNCATED_BIO_UNCLOSED_PAREN_CONTENT,
+                ),
+                ProposalSection(
+                    id="section-3-work-meridian", title="Case Study — City of Meridian",
+                    content=TRUNCATED_CASE_STUDY_3_CONTENT,
+                ),
+            ],
+            updatedAt="2026-08-06T00:00:00Z",
+        )
+        await repo.asave_proposal_draft(draft)
+
+        call_log: list[str] = []
+        with (
+            patch("app.services.llm.is_configured", return_value=True),
+            patch(
+                "app.services.llm.chat_json",
+                new=_fake_chat_json_double_count(call_log),
+            ),
+            patch(
+                "app.services.proposal_intelligence.jit_retrieval.retrieve_for_section",
+                new=_fake_retrieve_for_section_double_count,
+            ),
+        ):
+            _review, _research, draft_after, report = await run_fulfill_rfp_gaps(
+                rfp_id, mode="verify_scrub_only"
+            )
+
+        print("\n=== Bug 2 — repaired vs. still-truncated must be disjoint ===")
+        print(f"truncationRepairedCount = {report.get('truncationRepairedCount')}")
+        print(f"truncationRepairedSectionTitles = {report.get('truncationRepairedSectionTitles')}")
+        print(f"truncatedSectionsCount = {report.get('truncatedSectionsCount')}")
+        print(f"truncatedSectionTitles = {report.get('truncatedSectionTitles')}")
+        for line in report.get("logs", []):
+            if "truncation" in line.casefold():
+                print(f"  log: {line}")
+
+        renata_after = next(
+            s for s in draft_after.sections if s.id == "section-2-bio-renata"
+        )
+        # The completion DID apply (word-prefix guard passed) — content is
+        # updated even though it still trips the broader rescan.
+        self.assertEqual(renata_after.content, REPAIRED_BIO_UNCLOSED_PAREN_CONTENT)
+
+        repaired_titles = report.get("truncationRepairedSectionTitles") or []
+        truncated_titles = report.get("truncatedSectionTitles") or []
+
+        self.assertEqual(report.get("truncationRepairedCount"), 1)
+        self.assertEqual(repaired_titles, ["Jordan Ellis — Bio"])
+        self.assertEqual(report.get("truncatedSectionsCount"), 2)
+        self.assertEqual(
+            sorted(truncated_titles),
+            sorted(["Renata Ibarra — Bio", "Case Study — City of Meridian"]),
+        )
+
+        # The disjointness contract itself: no title in both lists.
+        self.assertFalse(
+            set(repaired_titles) & set(truncated_titles),
+            f"repaired and still-truncated overlap: "
+            f"{set(repaired_titles) & set(truncated_titles)}",
+        )
+        self.assertNotIn("Renata Ibarra — Bio", repaired_titles)
+        self.assertIn("Renata Ibarra — Bio", truncated_titles)
+
+
 if __name__ == "__main__":
     unittest.main()

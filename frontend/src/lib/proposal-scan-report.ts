@@ -23,6 +23,11 @@ export interface ScanRfpFulfillReport {
   truncatedSectionsCount?: number;
   truncatedSectionTitles?: string[];
   unverifiedClaimsCount?: number;
+  /** Set only when the ledger check never ran at all (no persisted or
+   * buildable requirement ledger) — distinguishes "checked, nothing to fix"
+   * from "never checked" so ledger_added/merged/cut reading 0 doesn't look
+   * like a silent no-op. */
+  ledgerCheckSkippedReason?: string | null;
 }
 
 const NOTHING_CHANGED_MESSAGE =
@@ -95,6 +100,12 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
   const claims = report.unverifiedClaimsCount ?? 0;
   if (claims > 0) {
     clauses.push(`flagged ${claims} unverified/fabricated claim(s) for review`);
+  }
+
+  if (report.ledgerCheckSkippedReason) {
+    clauses.push(
+      `could not check required-section coverage against the RFP (${report.ledgerCheckSkippedReason})`
+    );
   }
 
   if (clauses.length === 0) {

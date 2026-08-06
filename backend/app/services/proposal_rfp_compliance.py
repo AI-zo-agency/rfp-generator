@@ -356,6 +356,18 @@ class LedgerReconcileResult:
     applied_merges: list[AppliedMergeAction]
     applied_cuts: list[AppliedCutAction]
     logs: list[str]
+    # Set only when research.requirement_ledger was missing/empty and this
+    # call built one on demand (see _build_ledger_on_demand below) — the
+    # caller persists it onto the research cache so the NEXT scan reads it
+    # back instead of rebuilding it every time. None on every other path,
+    # including "ledger present, nothing to reconcile".
+    built_ledger: RequirementLedger | None = None
+    # Set only when the reconcile could not run at all — no persisted ledger
+    # AND nothing to build one from. Distinguishes "checked and found nothing
+    # to fix" (skipped_reason is None) from "never checked" (skipped_reason
+    # explains why), so the caller can say so in the Scan-RFP banner instead
+    # of a silent no-op that reads identically to "already compliant".
+    skipped_reason: str | None = None
 
 
 def _word_count(text: str | None) -> int:
@@ -486,6 +498,79 @@ def _section_evaluation_points(ledger: RequirementLedger, section_id: str) -> fl
     )
 
 
+def _build_ledger_on_demand(
+    research: ProposalResearchCache | None,
+) -> tuple[RequirementLedger | None, str]:
+    """Rebuild the requirement ledger for a proposal that predates Task 1 (or
+    had its ledger wiped by a whitelist-rebuild bug fixed alongside it).
+
+    reconcile_requirement_ledger's normal path reads research.requirement_ledger
+    and no-ops when it is missing — which is EVERY proposal generated before
+    the ledger existed, i.e. every real proposal a live user opens. The ledger
+    only ever gets built in Phase 2 (build_requirement_ledger, called from
+    proposal_intelligence/assembler.py.derive_legacy_fields); this reuses that
+    exact function and matcher rather than a second implementation, sourcing
+    its three inputs from what Phase 2 already persisted:
+      - compliance_items / evaluation_criteria: research.proposal_execution_plan
+        .opportunity.compliance.items / .opportunity.evaluation.criteria — the
+        same ProposalExecutionPlan derive_legacy_fields itself reads from.
+      - outline_sections: research.rfp_sections — Phase 2's own output, always
+        persisted independently of the ledger.
+    Pure Python, zero LLM calls — same as build_requirement_ledger itself.
+
+    Returns (ledger, reason) when a genuine ledger was built, or (None, reason)
+    when it could not be — reason is always populated (never blank) so the
+    caller can log AND surface to the user why nothing happened, instead of a
+    silent no-op that reads identically to "already compliant".
+    """
+    if research is None:
+        return None, "no research cache persisted for this proposal"
+
+    plan = research.proposal_execution_plan
+    if isinstance(plan, dict):
+        try:
+            from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
+
+            plan = ProposalExecutionPlan.model_validate(plan)
+        except Exception:  # noqa: BLE001 — malformed legacy payload, treat as absent
+            plan = None
+
+    if plan is None or not hasattr(plan, "opportunity"):
+        return None, (
+            "no proposal execution plan persisted on this proposal's research "
+            "cache (pre-intelligence-layer proposal, or Phase 2 never "
+            "completed) — compliance items and evaluation criteria were never "
+            "captured, so a ledger cannot be built without a fresh Phase 2 run"
+        )
+
+    compliance_items = list(getattr(plan.opportunity.compliance, "items", None) or [])
+    evaluation_criteria = list(getattr(plan.opportunity.evaluation, "criteria", None) or [])
+    outline_sections = list(research.rfp_sections or [])
+
+    if not compliance_items and not evaluation_criteria:
+        return None, (
+            "research.proposal_execution_plan is persisted but has zero "
+            "compliance items and zero evaluation criteria — nothing to build "
+            "a ledger from"
+        )
+
+    from app.services.proposal_intelligence.assembler import build_requirement_ledger
+
+    built = build_requirement_ledger(compliance_items, evaluation_criteria, outline_sections)
+    if not built.requirements:
+        return None, (
+            f"built an on-demand ledger from {len(compliance_items)} compliance "
+            f"item(s) and {len(evaluation_criteria)} evaluation criterion(a), "
+            "but every one was empty/unusable — nothing to reconcile"
+        )
+    return built, (
+        f"built on demand from research.proposal_execution_plan "
+        f"({len(compliance_items)} compliance item(s), {len(evaluation_criteria)} "
+        f"evaluation criterion(a)) matched against {len(outline_sections)} "
+        "outline section(s) in research.rfp_sections"
+    )
+
+
 def reconcile_requirement_ledger(
     *,
     draft: ProposalDraft,
@@ -505,19 +590,33 @@ def reconcile_requirement_ledger(
     degrade to a no-op.
     """
     ledger = research.requirement_ledger if research else None
+    built_ledger: RequirementLedger | None = None
     if not ledger or not ledger.requirements:
+        on_demand_ledger, reason = _build_ledger_on_demand(research)
+        if on_demand_ledger is None:
+            logger.info(
+                "ledger:reconcile rfp_id=%s skipped — %s",
+                getattr(rfp, "id", None),
+                reason,
+            )
+            return LedgerReconcileResult(
+                draft=draft,
+                changed=False,
+                applied_additions=[],
+                applied_merges=[],
+                applied_cuts=[],
+                logs=[f"ledger: no requirement ledger present — {reason}"],
+                skipped_reason=reason,
+            )
         logger.info(
-            "ledger:reconcile rfp_id=%s skipped — no requirement ledger present",
+            "ledger:reconcile rfp_id=%s no persisted requirement ledger — %s "
+            "(%d requirement(s))",
             getattr(rfp, "id", None),
+            reason,
+            len(on_demand_ledger.requirements),
         )
-        return LedgerReconcileResult(
-            draft=draft,
-            changed=False,
-            applied_additions=[],
-            applied_merges=[],
-            applied_cuts=[],
-            logs=["ledger: no requirement ledger present — nothing to reconcile"],
-        )
+        ledger = on_demand_ledger
+        built_ledger = on_demand_ledger
 
     logs: list[str] = []
     sections = list(draft.sections)
@@ -711,6 +810,7 @@ def reconcile_requirement_ledger(
             applied_merges=[],
             applied_cuts=[],
             logs=logs,
+            built_ledger=built_ledger,
         )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -722,6 +822,7 @@ def reconcile_requirement_ledger(
         applied_merges=applied_merges,
         applied_cuts=applied_cuts,
         logs=logs,
+        built_ledger=built_ledger,
     )
 
 
