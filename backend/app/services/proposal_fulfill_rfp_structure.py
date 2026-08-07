@@ -217,6 +217,77 @@ def _match_section_for_spec(
     return best if best_score >= 2 else None
 
 
+def _slug_section_id(title: str) -> str:
+    raw = re.sub(r"[^a-z0-9]+", "-", (title or "").casefold()).strip("-")
+    return (raw or "section")[:48]
+
+
+def ensure_missing_scored_section_stubs(
+    draft: ProposalDraft,
+    specs: list[RfpSectionSpec],
+    *,
+    skip_section_ids: set[str] | None = None,
+) -> tuple[ProposalDraft, list[str]]:
+    """Append VERIFY stubs for RFP-scored tabs that have no manuscript section.
+
+    Structure Scan historically only reframed existing tabs — missing TOC/scored
+    sections never appeared. Stubs make the gap visible and draftable.
+    """
+    skip = skip_section_ids or set()
+    logs: list[str] = []
+    sections = list(draft.sections)
+    existing_ids = {s.id for s in sections}
+    changed = False
+
+    for spec in specs:
+        if _spec_is_rfp_title_noise(spec):
+            continue
+        if not spec.required_headings and not spec.instructions and not spec.evaluation_weight:
+            continue
+        working = draft.model_copy(update={"sections": sections})
+        if _match_section_for_spec(working, spec):
+            continue
+        sid = f"rfp-structure-{_slug_section_id(spec.rfp_title)}"
+        if sid in existing_ids or sid in skip:
+            n = 2
+            while f"{sid}-{n}" in existing_ids:
+                n += 1
+            sid = f"{sid}-{n}"
+        heading_lines = "\n".join(f"- {h}" for h in (spec.required_headings or [])[:12])
+        body_parts = [
+            f"## {spec.rfp_title}",
+            "",
+            f"[MANUAL FILL: Draft this RFP-required section — {spec.rfp_title}]",
+            "",
+        ]
+        if heading_lines:
+            body_parts.extend(["RFP-required outline:", heading_lines, ""])
+        if spec.instructions:
+            body_parts.extend([f"RFP instructions: {spec.instructions.strip()[:800]}", ""])
+        if spec.evaluation_weight:
+            body_parts.append(f"Evaluation weight: {spec.evaluation_weight}")
+        sections.append(
+            ProposalSection(
+                id=sid,
+                title=spec.rfp_title,
+                content="\n".join(body_parts).strip(),
+                status="generated",
+                source="generated",
+                mode="write",
+                required=True,
+                word_target=550,
+            )
+        )
+        existing_ids.add(sid)
+        logs.append(f"RFP structure: added missing scored section stub “{spec.rfp_title}”")
+        changed = True
+
+    if not changed:
+        return draft, logs
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+
+
 async def _reframe_section_to_rfp_spec(
     *,
     section: ProposalSection,
@@ -308,8 +379,14 @@ async def run_rfp_structure_alignment_pass(
     else:
         logs.append(f"RFP structure: {len(specs)} scored section spec(s) from RFP.")
 
+    # Recover tabs the outline lean-filter / Phase 3 skip dropped entirely.
+    draft, stub_logs = ensure_missing_scored_section_stubs(
+        draft, specs, skip_section_ids=skip_section_ids
+    )
+    logs.extend(stub_logs)
+
     sections = list(draft.sections)
-    changed = False
+    changed = bool(stub_logs)
     reframed_ids: set[str] = set()
 
     for spec in specs:

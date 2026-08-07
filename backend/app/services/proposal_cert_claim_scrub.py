@@ -67,6 +67,17 @@ _AGENCY_OVERCLAIM_RES: list[tuple[re.Pattern[str], str]] = [
         ),
         "meta_ads_agency_wide",
     ),
+    # SBA / status overclaim — WBENC/WOSB may be stated factually, but "confirms
+    # SBA status" / "SBA-certified" language is not on the verified agency list.
+    (
+        re.compile(
+            r"(?i)(?:SBA[- ]?certified|certified\s+by\s+the\s+SBA|"
+            r"SBA\s+(?:8\(a\)\s+)?certification|"
+            r"confirms?\s+(?:our\s+)?(?:SBA|WOSB|WBENC)\s+status|"
+            r"SBA\s+confirms?\s+(?:our\s+)?status)",
+        ),
+        "sba_status_overclaim",
+    ),
 ]
 
 # List / matrix cells that enumerate invented certs alongside real ones.
@@ -119,10 +130,16 @@ def scrub_section_cert_claims(section: ProposalSection) -> tuple[ProposalSection
     for pattern, code in _AGENCY_OVERCLAIM_RES:
         if not pattern.search(updated):
             continue
-        replacement = (
-            "Named team members hold individual platform certifications "
-            "(Google Ads / Meta) where listed in their bios"
-        )
+        if code == "sba_status_overclaim":
+            replacement = (
+                "zö agency holds verified WBENC and WOSB certifications "
+                "(agency-level — do not claim separate SBA status confirmation)"
+            )
+        else:
+            replacement = (
+                "Named team members hold individual platform certifications "
+                "(Google Ads / Meta) where listed in their bios"
+            )
         updated2, n = pattern.subn(replacement, updated, count=3)
         if n:
             updated = updated2

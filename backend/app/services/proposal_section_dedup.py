@@ -7,9 +7,10 @@ from typing import Any
 
 from app.services.proposal_section_quality import word_count
 
-ANTI_DUPLICATION_RULES = """## ANTI-DUPLICATION (mandatory — manuscript must feel tight)
+ANTI_DUPLICATION_RULES = """## ANTI-DUPLICATION (mandatory — ZERO repetition)
 
 Each section is INDEPENDENT and has ONE job. Do NOT re-explain material that belongs elsewhere.
+If the ALREADY COVERED digests below list a fact, do not restate it — even paraphrased.
 
 OWNED BY STATIC SECTIONS (mention once with a short pointer, never re-write):
 - Company identity / Who We Are / Our Promise → Section 1.1
@@ -23,6 +24,9 @@ OWNED BY RFP TABS (write only the part THIS tab scores):
 - Timeline / Schedule → phases and dates — NOT methodology paragraphs again
 - Budget / Fees → compensation model and transparency — NOT approach restatement
 - References → contacts only — NOT experience narratives
+- Cover letter / transmittal → short offer letter; if RFP requires a physically signed
+  attachment, include [DESIGNER NOTE: attach signed PDF] (do not invent signature dates
+  or claim it is attached unless it is)
 
 RULES:
 1. If a fact already appears in a prior section digests block below, do NOT paste it again.
@@ -31,7 +35,9 @@ RULES:
 4. Case study names: at most one short proof sentence outside Section 3 — NEVER paste Challenge /
    Solution / Results blocks, client quotes, or metric lists that already appear in Section 3.
 5. Past performance / references tabs: use a summary TABLE plus 2–3 sentences per project — NOT
-   full case-study rewrites. Point readers to Section 3 for narrative detail.
+   full case-study rewrites. Point readers to Section 3 for narrative detail. NEVER reuse the
+   same email (e.g. sonja@zo.agency) for three different references — distinct KB contacts only
+   or [VERIFY: reference contact].
 6. Each KB case study may appear IN FULL exactly once (its Section 3 tab only).
 7. Cut filler openers ("We are excited…", "As a full-service agency…") when Section 1 already covers identity.
 8. Stay within wordTarget — denser beats longer when facts would otherwise repeat.
@@ -39,6 +45,13 @@ RULES:
    Sections 1–3 or another scored tab. One section, one job, then stop.
 10. Evaluators skim — hit the scored asks, then stop. Prefer tables and short bullets over essay
     padding. Never invent length with filler when the RFP ask is already covered.
+11. ZERO REPETITION: never restate founding year, FEIN, ownership, certs, insurance limits,
+    team bios, or case narratives that another section already owns.
+12. Primary contact: use ONLY the locked primary from manuscript locks everywhere — never name
+    a second person (e.g. Haley Neff) as dedicated primary when Ron Comer is locked.
+13. Schedule must fit the RFP award→launch window; never invent dates, durations, or a
+    sequential multi-month plan that overruns a short award→launch window without stating
+    concurrent/post-launch work. If a figure is not in the RFP or KB, use [VERIFY] — never invent.
 """
 
 
@@ -46,7 +59,7 @@ def digest_section_for_dedup(
     title: str,
     content: str,
     *,
-    max_chars: int = 420,
+    max_chars: int = 900,
 ) -> str:
     """Compact digest of what a section already covers (for other section prompts)."""
     text = re.sub(r"\s+", " ", (content or "").strip())
@@ -67,12 +80,12 @@ def format_prior_sections_block(
     prior_sections: list[dict[str, Any]] | list[Any],
     *,
     exclude_ids: set[str] | None = None,
-    max_sections: int = 12,
-    max_chars_each: int = 420,
+    max_sections: int = 24,
+    max_chars_each: int = 900,
 ) -> str:
     """Build 'already covered' digests so the LLM does not rehash other tabs."""
     exclude = exclude_ids or set()
-    digests: list[str] = []
+    candidates: list[tuple[str, str, str]] = []
     for section in prior_sections:
         if hasattr(section, "model_dump"):
             data = section.model_dump(by_alias=True)
@@ -87,11 +100,17 @@ def format_prior_sections_block(
         content = str(data.get("content") or "").strip()
         if not content:
             continue
-        digests.append(
-            digest_section_for_dedup(title, content, max_chars=max_chars_each)
-        )
-        if len(digests) >= max_sections:
-            break
+        candidates.append((sid, title, content))
+
+    # Prefer the most recent / later outline sections when over the cap so
+    # Approach/Methodology digests aren't dropped while early stubs remain.
+    if len(candidates) > max_sections:
+        candidates = candidates[-max_sections:]
+
+    digests = [
+        digest_section_for_dedup(title, content, max_chars=max_chars_each)
+        for _sid, title, content in candidates
+    ]
     if not digests:
         return ""
     return (

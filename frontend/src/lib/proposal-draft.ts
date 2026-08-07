@@ -188,6 +188,7 @@ export function buildDefaultOutline(rfp: RfpRecord): ProposalOutline {
   return {
     sections,
     updatedAt: new Date().toISOString(),
+    selectedKeyPersonas: [],
   };
 }
 
@@ -294,6 +295,7 @@ export function rebuildOutlineFromResearch(
   return {
     sections: [...staticSections, ...rfpSections, ...customSections],
     updatedAt: new Date().toISOString(),
+    selectedKeyPersonas: existingDraft?.selectedKeyPersonas ?? [],
   };
 }
 

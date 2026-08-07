@@ -407,6 +407,18 @@ def should_skip_rfp_section_as_static_duplicate(
                 return False
         except (TypeError, ValueError):
             pass
+    # Cost / Fees / Budget tabs are never "static duplicate" — Phase 3.5 needs them.
+    if re.search(
+        r"\b("
+        r"cost\s+proposal|cost\s+of(?:\s+the)?\s+base|fee\s+schedule|"
+        r"price\s+proposal|pricing\s+proposal|compensation\s+schedule|"
+        r"budget\s*(?:&|and)\s*pricing|budget\s+and\s+fees|"
+        r"\bbudget\b|\bpricing\b|\bfees?\b"
+        r")\b",
+        title or "",
+        re.IGNORECASE,
+    ):
+        return False
     dup = (duplicate_of_static_section or "").strip().casefold()
     if dup in {"section-1", "section-2", "section-3", "1", "2", "3"}:
         if re.search(

@@ -15,6 +15,162 @@ from app.services.proposal_section_health import is_dead_section
 
 logger = logging.getLogger(__name__)
 
+# Asks that must never be auto-stripped (compliance / legal / identity).
+_KEEP_VERIFY_ASK_RE = re.compile(
+    r"(?i)"
+    r"\b("
+    r"fein|ein\b|tax\s*id|federal\s+employer|"
+    r"insurance|coi\b|certificate\s+of\s+insurance|liability\s+limit|"
+    r"e-?verify|perjury|attestation|affidavit|conflict\s+of\s+interest|"
+    r"staffing\s+hours|percent\s*time|gross-?receipts|"
+    r"sonja|operations\s+confirm|"
+    r"missing\s+from\s+outline|draft\s+content\s+for|"
+    r"reference\s+contact|manual\s+fill"
+    r")\b",
+)
+
+# Clearly optional niceties the RFP rarely mandates by name.
+_OPTIONAL_VERIFY_ASK_RE = re.compile(
+    r"(?i)"
+    r"("
+    r"backup\s+(?:mobile\s+)?(?:partner|vendor|firm|subcontractor)|"
+    r"subcontractor\s+name|"
+    r"mobile\s+app\s+partner|"
+    r"unnamed\s+partner|"
+    r"optional\s+(?:name|contact|partner)|"
+    r"sample\s+(?:dashboard|screenshot|report\s+graphic)|"
+    r"kpi\s+dashboard\s+screenshot|"
+    r"designer\s+(?:note|graphic|diagram)"
+    r")",
+)
+
+_STOP_ASK_TOKENS = frozenset(
+    {
+        "verify",
+        "provide",
+        "confirm",
+        "from",
+        "with",
+        "kb",
+        "rfp",
+        "field",
+        "specific",
+        "brief",
+        "note",
+        "name",
+        "names",
+        "title",
+        "details",
+        "information",
+        "needed",
+        "missing",
+        "unknown",
+        "insert",
+        "tbd",
+        "placeholder",
+    }
+)
+
+_PHONE_RE = re.compile(
+    r"(?<!\d)(?:\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}(?!\d)"
+)
+_EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
+_DOLLAR_RE = re.compile(r"\$\s*[\d,]+(?:\.\d{2})?")
+
+
+def strip_verify_tags_not_required_by_rfp(
+    content: str,
+    rfp_text: str,
+) -> tuple[str, int]:
+    """Remove [VERIFY] tags whose ask is not grounded in THIS RFP. Never invents.
+
+    Keeps locked legal tags and asks the RFP explicitly discusses. Strips optional
+    partner/name/dashboard placeholders when the RFP is silent on that topic.
+    """
+    body = content or ""
+    if not VERIFY_TAG_RE.search(body) and not re.search(r"\[VERIFY\]", body or "", re.I):
+        return body, 0
+
+    rfp_cf = (rfp_text or "").casefold()
+    removed = 0
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal removed
+        ask = (match.group(1) or "").strip()
+        if not ask:
+            removed += 1
+            return ""
+        try:
+            from app.services.evidence_trust.legal_attestation_gate import (
+                is_locked_legal_verify_tag,
+            )
+
+            if is_locked_legal_verify_tag(ask):
+                return match.group(0)
+        except Exception:  # noqa: BLE001
+            pass
+        if _KEEP_VERIFY_ASK_RE.search(ask):
+            # Contact/phone/email keep only when RFP asks for references/contacts.
+            if re.search(r"(?i)\b(phone|email|contact)\b", ask) and not re.search(
+                r"(?i)\b(reference|references|contact\s+information|phone|email)\b",
+                rfp_cf,
+            ):
+                removed += 1
+                return ""
+            return match.group(0)
+        if _OPTIONAL_VERIFY_ASK_RE.search(ask):
+            removed += 1
+            return ""
+        tokens = [
+            t
+            for t in re.split(r"\W+", ask.casefold())
+            if len(t) >= 4 and t not in _STOP_ASK_TOKENS
+        ]
+        if not tokens:
+            removed += 1
+            return ""
+        if not rfp_cf.strip():
+            # No RFP text → only strip obvious optional patterns (above); keep rest.
+            return match.group(0)
+        hits = sum(1 for t in tokens if t in rfp_cf)
+        # Topic never appears in RFP → not a required compliance gap.
+        if hits == 0:
+            removed += 1
+            return ""
+        return match.group(0)
+
+    out = VERIFY_TAG_RE.sub(_repl, body)
+    # Bare [VERIFY] with no ask is never actionable — drop.
+    bare_n = len(re.findall(r"\[VERIFY\]", out, flags=re.I))
+    if bare_n:
+        out = re.sub(r"\[VERIFY\]", "", out, flags=re.I)
+        removed += bare_n
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    out = re.sub(r"  +", " ", out)
+    return out.strip() if body.strip() else out, removed
+
+
+def scrub_result_introduces_fabrication(
+    original: str,
+    updated: str,
+    *,
+    rfp_text: str = "",
+    kb_text: str = "",
+) -> bool:
+    """True when scrub output invents phones/emails/dollars not in sources."""
+    allowed = f"{original or ''}\n{rfp_text or ''}\n{kb_text or ''}"
+
+    def _novel(pattern: re.Pattern[str]) -> bool:
+        for match in pattern.finditer(updated or ""):
+            token = match.group(0)
+            if token not in allowed and token.casefold() not in allowed.casefold():
+                return True
+        return False
+
+    return _novel(_PHONE_RE) or _novel(_EMAIL_RE) or _novel(_DOLLAR_RE)
+
+
 _SCRUB_VERIFY_ASK_RE = re.compile(
     r"(?is)"
     r"(?:"
@@ -116,18 +272,38 @@ async def scrub_optional_verify_tags(
             note="No [VERIFY] tags to scrub.",
         )
 
+    # Fast path: drop tags the RFP clearly does not require — no LLM, no invention.
+    body, det_removed = strip_verify_tags_not_required_by_rfp(body, rfp_text or "")
+    mid = count_verify_tags(body)
+    if mid <= 0:
+        return VerifyOptionalScrubResult(
+            content=body,
+            tags_before=before,
+            tags_after=0,
+            removed=max(det_removed, before),
+            kept_required=0,
+            changed=body.strip() != (content or "").strip(),
+            note=(
+                f"Removed {before} [VERIFY] tag(s) not required by this RFP "
+                "(deterministic scan)."
+            ),
+        )
+
     if not llm.is_configured():
         return VerifyOptionalScrubResult(
             content=body,
             tags_before=before,
-            tags_after=before,
-            removed=0,
-            kept_required=before,
-            changed=False,
-            note="LLM not configured — left [VERIFY] tags unchanged.",
+            tags_after=mid,
+            removed=max(0, before - mid),
+            kept_required=mid,
+            changed=body.strip() != (content or "").strip(),
+            note=(
+                f"Deterministic RFP scan removed {max(0, before - mid)}; "
+                "LLM not configured — left remaining tags."
+            ),
         )
 
-    rfp_excerpt = build_priority_rfp_excerpt(rfp_text or "", max_chars=18_000)
+    rfp_excerpt = build_priority_rfp_excerpt(rfp_text or "", max_chars=12_000)
 
     # Before giving up on a tag, check whether the KB actually has the real answer —
     # a genuine KB-sourced fact beats both a bracket placeholder AND a vague generic
@@ -190,7 +366,7 @@ async def scrub_optional_verify_tags(
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            max_tokens=8_000,
+            max_tokens=6_000,
             temperature=0.15,
             tier="light",
             node_name="verify_optional_scrub",
@@ -200,11 +376,11 @@ async def scrub_optional_verify_tags(
         return VerifyOptionalScrubResult(
             content=body,
             tags_before=before,
-            tags_after=before,
-            removed=0,
-            kept_required=before,
-            changed=False,
-            note="Scrub failed — left [VERIFY] tags unchanged.",
+            tags_after=mid,
+            removed=max(0, before - mid),
+            kept_required=mid,
+            changed=body.strip() != (content or "").strip(),
+            note="Scrub failed — kept deterministic removals only.",
         )
 
     updated, note, kept_n = _extract_json_content(raw)
@@ -212,27 +388,46 @@ async def scrub_optional_verify_tags(
         return VerifyOptionalScrubResult(
             content=body,
             tags_before=before,
-            tags_after=before,
-            removed=0,
-            kept_required=before,
-            changed=False,
-            note="Scrub returned empty content — left original.",
+            tags_after=mid,
+            removed=max(0, before - mid),
+            kept_required=mid,
+            changed=body.strip() != (content or "").strip(),
+            note="Scrub returned empty content — kept deterministic removals only.",
         )
 
-    # Guard: do not accept a near-empty wipe. Applies at every length — the old
-    # `len(body) > 400` precondition meant short bodies had no guard at all, so a
-    # ~60-character failure stub could be scrubbed away entirely, leaving an empty
-    # section and destroying the marker chat needs to rebuild it.
+    # Guard: do not accept a near-empty wipe.
     if len(updated) < max(24, int(len(body) * 0.25)):
         return VerifyOptionalScrubResult(
             content=body,
             tags_before=before,
-            tags_after=before,
-            removed=0,
-            kept_required=before,
-            changed=False,
+            tags_after=mid,
+            removed=max(0, before - mid),
+            kept_required=mid,
+            changed=body.strip() != (content or "").strip(),
             note="Scrub rejected — rewrite looked truncated.",
         )
+
+    # Never accept invented phones / emails / dollars from the scrub LLM.
+    if scrub_result_introduces_fabrication(
+        body,
+        updated,
+        rfp_text=rfp_excerpt or rfp_text or "",
+        kb_text=kb_context or "",
+    ):
+        return VerifyOptionalScrubResult(
+            content=body,
+            tags_before=before,
+            tags_after=mid,
+            removed=max(0, before - mid),
+            kept_required=mid,
+            changed=body.strip() != (content or "").strip(),
+            note="Scrub rejected — rewrite invented contact/money facts.",
+        )
+
+    # Second deterministic pass after LLM (in case it left optional tags).
+    updated, extra_removed = strip_verify_tags_not_required_by_rfp(
+        updated, rfp_text or ""
+    )
 
     after = count_verify_tags(updated)
     removed = max(0, before - after)
@@ -242,11 +437,12 @@ async def scrub_optional_verify_tags(
         tags_after=after,
         removed=removed,
         kept_required=kept_n if kept_n else after,
-        changed=updated.strip() != body.strip(),
+        changed=updated.strip() != (content or "").strip(),
         note=note
         or (
-            f"Removed {removed} optional [VERIFY] tag(s); "
-            f"kept {after} required."
+            f"Removed {removed} optional [VERIFY] tag(s)"
+            + (f" (+{extra_removed} deterministic)" if extra_removed else "")
+            + f"; kept {after} required."
         ),
     )
 
@@ -406,6 +602,25 @@ async def run_verify_scrub_only_scan(
 
     outstanding_checklist = outstanding_submission_checklist_for_scan(rfp_text, draft)
 
+    # Same consistency + signed-PDF designer note as mode=full Scan — existing draft
+    # only; never invents signature dates or figures.
+    try:
+        from app.services.proposal_consistency_enforcement import (
+            apply_consistency_enforcement,
+        )
+
+        draft, consistency_logs = apply_consistency_enforcement(
+            draft,
+            research=research,
+            attachment_labels=list(outstanding_checklist.needs_attachment),
+            rfp_text=rfp_text,
+        )
+        if consistency_logs:
+            await asave_proposal_draft(draft)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("verify_scrub consistency enforcement skipped: %s", exc)
+        consistency_logs = []
+
     verify_ids = {
         s.id for s in draft.sections if count_verify_tags(s.content or "") > 0
     }
@@ -414,11 +629,12 @@ async def run_verify_scrub_only_scan(
         "sectionsScanned": len(verify_ids),
         "verifyTagsRemoved": 0,
         "verifyTagsKept": 0,
-        "logs": [],
+        "logs": list(consistency_logs) if consistency_logs else [],
         "closingDetected": [],
         "closingAdded": [],
         "closingAddedSections": [],
         "humanDecisionGaps": [],
+        "consistencyFixesApplied": len(consistency_logs) if consistency_logs else 0,
         # Task 15 — the two categories the user must see kept visibly
         # distinct: a narrative section the pipeline can draft from the KB
         # vs a signed/scanned physical document a human must attach. Never
@@ -704,15 +920,18 @@ async def scrub_draft_optional_verify_tags(
     if not targets:
         return out, []
 
-    results = await asyncio.gather(
-        *(
-            scrub_optional_verify_tags(
+    sem = asyncio.Semaphore(3)
+
+    async def _scrub_one(section: Any, title: str) -> Any:
+        async with sem:
+            return await scrub_optional_verify_tags(
                 getattr(section, "content", "") or "",
                 section_title=title,
                 rfp_text=rfp_text,
             )
-            for _idx, section, title in targets
-        )
+
+    results = await asyncio.gather(
+        *(_scrub_one(section, title) for _idx, section, title in targets)
     )
 
     logs: list[str] = []

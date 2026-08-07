@@ -120,6 +120,30 @@ class TestCaseStudyFidelity(unittest.TestCase):
         ok, _ = case_study_fidelity_ok(source, written)
         self.assertTrue(ok)
 
+    def test_focused_write_from_all_case_studies_dump_passes(self) -> None:
+        """Master 03_CS_AllCaseStudies dumps many projects; a focused Medford card
+        must not be stubbed just because Idaho / Bend names are absent."""
+        source = (
+            "CITY OF MEDFORD Community-Centered Development. Working with Parks & "
+            "Recreation we developed the brand identity for Rogue X around "
+            "Community Thrives Here for Medford residents.\n\n"
+            "UNIVERSITY OF IDAHO Tourism campaign across Oregon and Northern "
+            "California visitor markets.\n\n"
+            "CITY OF BEND From Chaos to Consistency brand system across departments.\n\n"
+            "DESCHUTES COUNTY One County One Brand logo modernization."
+        )
+        written = (
+            "### City of Medford\n\n"
+            "**Challenge**\n\n"
+            "Medford needed a community-centered brand for Rogue X.\n\n"
+            "**Solution / Our Approach**\n\n"
+            "We developed the complete brand identity around Community Thrives Here "
+            "with city staff and Parks & Recreation.\n\n"
+            "Client Voice: [VERIFY: no client quote found in source material]"
+        )
+        ok, reason = case_study_fidelity_ok(source, written)
+        self.assertTrue(ok, reason)
+
 
 class TestCaseStudyOverbuildScrub(unittest.TestCase):
     def test_strips_strategy_goals_kpis_and_why_matters(self) -> None:
@@ -207,6 +231,29 @@ class TestCaseStudyOverbuildScrub(unittest.TestCase):
         is_dump, _ = case_study_looks_like_source_dump(body)
         self.assertFalse(is_dump)
         self.assertTrue(case_study_has_required_structure(body))
+
+    def test_detects_multi_client_all_case_studies_catalog(self) -> None:
+        catalog = (
+            "RELEVANT CASE STUDIES\n"
+            "CITY OF MEDFORD\n"
+            "Community-Centered Development\n"
+            "Working with Parks & Recreation on Rogue X.\n\n"
+            "DESCHUTES COUNTY\n"
+            "One County, One Brand\n"
+            "We modernized an 80-year-old logo.\n\n"
+            "CITY OF BEND\n"
+            "From Chaos to Consistency\n"
+            "Brand system across departments.\n\n"
+            "OREGON EMPLOYMENT DEPARTMENT\n"
+            "Precision Targeting Excellence\n"
+            "Geofencing for unemployed audiences.\n"
+        )
+        is_dump, reason = case_study_looks_like_source_dump(catalog)
+        self.assertTrue(is_dump)
+        self.assertTrue(
+            "catalog" in reason.casefold() or "relevant" in reason.casefold(),
+            reason,
+        )
 
     def test_prefer_03_cs_over_06_won_blocks(self) -> None:
         pack = (

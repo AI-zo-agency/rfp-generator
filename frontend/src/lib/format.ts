@@ -74,6 +74,37 @@ export function computeOverallGoScore(
   return computeGoScore(fitScore, worthScore);
 }
 
+/**
+ * Scores ≥ 3.0 cannot display as No-Go (pipeline go threshold).
+ * Fixes stale analyses that stored recommendation=no_go beside Overall 3.8.
+ */
+export function alignGoNoGoRecommendation(
+  recommendation: "go" | "no_go" | "review" | null | undefined,
+  overallScore: number | null | undefined
+): "go" | "no_go" | "review" | null {
+  if (!recommendation) return null;
+  if (
+    recommendation === "no_go" &&
+    overallScore !== null &&
+    overallScore !== undefined &&
+    overallScore >= 3
+  ) {
+    return "review";
+  }
+  return recommendation;
+}
+
+/** Rewrite a stale "NO-GO — …" summary lead when the badge was aligned to conditions. */
+export function alignGoNoGoSummary(
+  summary: string | null | undefined,
+  recommendation: "go" | "no_go" | "review" | null | undefined
+): string {
+  const text = (summary || "").trim();
+  if (!text) return "";
+  if (recommendation !== "review" && recommendation !== "go") return text;
+  return text.replace(/^\s*NO[\s-]?GO\s*[—\-–:]?\s*/i, "GO WITH CONDITIONS — ");
+}
+
 export function formatOverallGoScore(
   fitScore: number | null | undefined,
   worthScore: number | null | undefined,

@@ -763,10 +763,32 @@ def derive_legacy_fields(plan: ProposalExecutionPlan) -> dict[str, Any]:
             requirements = [f"Address {section.title} per RFP"]
 
         weight = None
-        if brief and brief.evaluation_criteria:
+        if hasattr(section, "evaluation_weight") and section.evaluation_weight is not None:
+            try:
+                weight = float(section.evaluation_weight)
+            except (TypeError, ValueError):
+                weight = None
+        if weight is None and brief and brief.evaluation_criteria:
             for crit in plan.opportunity.evaluation.criteria:
                 if crit.name in brief.evaluation_criteria and crit.weight is not None:
-                    weight = int(crit.weight)
+                    weight = float(crit.weight)
+                    break
+        if weight is None:
+            # Fallback: match criterion name ↔ section title (briefs often omit links).
+            title_cf = (section.title or "").casefold()
+            title_tokens = {
+                t for t in re.split(r"\W+", title_cf) if len(t) >= 4
+            }
+            for crit in plan.opportunity.evaluation.criteria:
+                if crit.weight is None:
+                    continue
+                name_cf = (crit.name or "").casefold()
+                if name_cf in title_cf or title_cf in name_cf:
+                    weight = float(crit.weight)
+                    break
+                name_tokens = {t for t in re.split(r"\W+", name_cf) if len(t) >= 4}
+                if title_tokens and len(title_tokens & name_tokens) >= 1:
+                    weight = float(crit.weight)
                     break
 
         focus: list[str] = []

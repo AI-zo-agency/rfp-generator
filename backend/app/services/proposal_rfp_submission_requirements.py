@@ -620,6 +620,14 @@ class SubmissionChecklistItem:
 
 _SUBMISSION_CHECKLIST_PATTERNS: tuple[SubmissionChecklistItem, ...] = (
     SubmissionChecklistItem(
+        "Physically signed cover letter / letter of transmittal (attachment)",
+        "attachment",
+        r"(?:physically\s+)?signed\s+cover\s+letter|"
+        r"cover\s+letter\s+(?:must\s+be\s+)?signed|"
+        r"signed\s+letter\s+of\s+transmittal|"
+        r"original\s+signature\s+on\s+(?:the\s+)?cover\s+letter",
+    ),
+    SubmissionChecklistItem(
         "Acknowledgement of Addenda (return with proposal)",
         "attachment",
         r"acknowledg(?:e|ement|ment)s?\s+of\s+addenda|addenda\s+acknowledg|receipt\s+of\s+addenda",
@@ -691,6 +699,23 @@ _SUBMISSION_CHECKLIST_PATTERNS: tuple[SubmissionChecklistItem, ...] = (
         "Named exhibits / appendices / attachments",
         "attachment",
         r"\bexhibit\s+[A-Z0-9]+\b|\bappendix\s+[A-Z0-9]+\b|\battachment\s+\d+\b",
+    ),
+    SubmissionChecklistItem(
+        "E-Verify affidavit / enrollment",
+        "attachment",
+        r"e-?verify(?:\s+(?:affidavit|enrollment|certification|compliance))?",
+    ),
+    SubmissionChecklistItem(
+        "Bid / performance / payment bond",
+        "attachment",
+        r"(?:bid|performance|payment)\s+bond|bonding\s+required|surety\s+bond",
+    ),
+    SubmissionChecklistItem(
+        "Sealed package / original signature",
+        "attachment",
+        r"sealed\s+(?:envelope|bid|package)|original\s+signature|wet[\s-]?ink|"
+        r"separate\s+(?:sealed\s+)?(?:technical|cost|price)\s+(?:and|&)\s+"
+        r"(?:cost|price|technical)",
     ),
 )
 

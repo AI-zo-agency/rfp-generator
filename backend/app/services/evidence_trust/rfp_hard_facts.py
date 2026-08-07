@@ -35,9 +35,10 @@ _ELIGIBILITY_DOLLAR_CONTEXT_RE = re.compile(
 )
 _EVAL_ANCHOR_RE = re.compile(
     r"(?:points?\s+will\s+be\s+awarded|evaluation\s+criteria|"
-    r"scoring\s+(?:criteria|factors|matrix)|maximum\s+points|"
-    r"point\s+allocation|weighted\s+as\s+follows|"
-    r"criteria\s+and\s+points|total\s+(?:of\s+)?100\s+points)",
+    r"selection\s+criteria|scoring\s+(?:criteria|factors|matrix)|"
+    r"maximum\s+points|point\s+allocation|weighted\s+as\s+follows|"
+    r"weighted\s+criteria|criteria\s+and\s+points|"
+    r"total\s+(?:of\s+)?100\s+points)",
     re.IGNORECASE,
 )
 # Require the literal word points/pts after the number — never bare "3" from "3 years".
@@ -68,6 +69,18 @@ _EVAL_POINTS_LINE_RE = re.compile(
     r"\s*[:\-|–—]\s*"
     r"(?P<pts>\d{1,3})\s*(?:points?|pts\.?)\b",
     re.IGNORECASE,
+)
+# Percent-weighted tables (e.g. NYCEDC V.B: four criteria at 25% each).
+_EVAL_PERCENT_LINE_RE = re.compile(
+    r"(?P<label>[A-Za-z][A-Za-z0-9/ &'’\-,\.]{3,100}?)"
+    r"\s*(?:[:\-–—]|\()\s*"
+    r"(?P<pct>\d{1,3})\s*%\s*\)?",
+    re.IGNORECASE,
+)
+_EVAL_PERCENT_SKIP_LABEL = re.compile(
+    r"(?i)\b(?:mwbe|mbe|wbe|dbes?|participation|gross\s+receipts|"
+    r"workforce|fte|time\s+allocation|of\s+their\s+time|"
+    r"discount|contingency|retainage|overhead)\b"
 )
 
 
@@ -102,7 +115,11 @@ def _normalize_eval_label(label: str) -> str:
     return re.sub(r"\s+", " ", label).strip(" .-:").casefold()
 
 
-def _dedupe_evaluation_rows(rows: list[tuple[str, int]]) -> list[str]:
+def _dedupe_evaluation_rows(
+    rows: list[tuple[str, int]],
+    *,
+    unit: str = "points",
+) -> list[str]:
     """Keep unique labels; drop conflicting duplicates (fabrication / bad extract signal)."""
     by_label: dict[str, int] = {}
     order: list[str] = []
@@ -117,22 +134,31 @@ def _dedupe_evaluation_rows(rows: list[tuple[str, int]]) -> list[str]:
         if key not in by_label:
             order.append(label)
             by_label[key] = pts
+    suffix = "%" if unit == "percent" else " points"
     lines: list[str] = []
     for label in order:
         key = _normalize_eval_label(label)
         if key in conflicts:
             continue
-        lines.append(f"{label}: {by_label[key]} points")
+        lines.append(f"{label}: {by_label[key]}{suffix}")
     return lines
 
 
+def _parse_eval_weight(line: str) -> int | None:
+    try:
+        token = line.rsplit(":", 1)[1].strip().split()[0]
+        return int(token.rstrip("%"))
+    except (IndexError, ValueError):
+        return None
+
+
 def evaluation_table_is_reliable(facts: dict[str, Any]) -> bool:
-    """True only when extracted rows look like a real published point table."""
+    """True when extracted rows look like a published point or percent table."""
     lines = facts.get("evaluation_lines") or []
     if len(lines) < 3:
         return False
     total = int(facts.get("evaluation_total") or 0)
-    # Published public-sector tables are usually ~50–100+; tiny totals are false hits.
+    # Point tables are usually ~50–100+; percent tables sum near 100.
     if total < 40:
         return False
     labels = [_normalize_eval_label(line.split(":", 1)[0]) for line in lines]
@@ -194,7 +220,8 @@ def extract_rfp_hard_facts(text: str) -> dict[str, Any]:
     other_dollars = [d for d in dict.fromkeys(other_dollars) if d][:12]
     eligibility_dollars = list(dict.fromkeys(eligibility_dollars))[:8]
 
-    collected: list[tuple[str, int]] = []
+    collected_points: list[tuple[str, int]] = []
+    collected_percent: list[tuple[str, int]] = []
 
     # Only search inside windows anchored to real scoring-language — never whole-doc freestyle.
     for m in _EVAL_ANCHOR_RE.finditer(body):
@@ -205,7 +232,7 @@ def extract_rfp_hard_facts(text: str) -> dict[str, Any]:
             # Allow 1000-point RFP scales (e.g. Price 350 of 1000) — not only ≤100.
             if pts <= 0 or pts > 2000:
                 continue
-            collected.append((label, pts))
+            collected_points.append((label, pts))
         for row_m in _EVAL_POINTS_LINE_RE.finditer(window):
             label = re.sub(r"\s+", " ", row_m.group("label")).strip(" .-:")
             pts = int(row_m.group("pts"))
@@ -213,15 +240,30 @@ def extract_rfp_hard_facts(text: str) -> dict[str, Any]:
                 continue
             if len(label) < 4 or label.casefold() in {"section", "page", "item", "group"}:
                 continue
-            collected.append((label, pts))
+            collected_points.append((label, pts))
+        for row_m in _EVAL_PERCENT_LINE_RE.finditer(window):
+            label = re.sub(r"\s+", " ", row_m.group("label")).strip(" .-:()")
+            pct = int(row_m.group("pct"))
+            if pct <= 0 or pct > 100:
+                continue
+            if len(label) < 4 or label.casefold() in {"section", "page", "item", "group"}:
+                continue
+            if _EVAL_PERCENT_SKIP_LABEL.search(label):
+                continue
+            collected_percent.append((label, pct))
 
-    evaluation_lines = _dedupe_evaluation_rows(collected)[:16]
+    # Prefer an explicit point table; fall back to percent-weighted selection criteria.
+    if collected_points:
+        evaluation_lines = _dedupe_evaluation_rows(collected_points, unit="points")[:16]
+    else:
+        evaluation_lines = _dedupe_evaluation_rows(
+            collected_percent, unit="percent"
+        )[:16]
     total_pts = 0
     for line in evaluation_lines:
-        try:
-            total_pts += int(line.rsplit(":", 1)[1].strip().split()[0])
-        except (IndexError, ValueError):
-            continue
+        weight = _parse_eval_weight(line)
+        if weight is not None:
+            total_pts += weight
 
     from app.services.go_no_go_opportunity import classify_opportunity
 
@@ -273,15 +315,19 @@ def format_hard_facts_block(facts: dict[str, Any]) -> str:
         pass
     evals = facts.get("evaluation_lines") or []
     if evals:
-        lines.append("### Evaluation criteria (points)")
+        lines.append("### Evaluation criteria (points or % weights)")
         lines.extend(f"- {e}" for e in evals)
         total = facts.get("evaluation_total")
         if total:
-            lines.append(f"- Extracted point sum (may overlap): {total}")
-    else:
-        lines.append("### Evaluation criteria (points)")
+            lines.append(f"- Extracted weight sum (may overlap): {total}")
         lines.append(
-            "- No disclosed point-weight table found. Do NOT invent Category/Max Points "
+            "- These weights ARE disclosed in the RFP — cite them for Win Probability; "
+            "do NOT claim the evaluation table is undisclosed."
+        )
+    else:
+        lines.append("### Evaluation criteria (points or % weights)")
+        lines.append(
+            "- No disclosed point/percent-weight table found. Do NOT invent Category/Max Points "
             "or percentages. Describe pass/fail + scored question groups only."
         )
     eligibility = facts.get("eligibility_dollar_lines") or []

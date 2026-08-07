@@ -2143,6 +2143,8 @@ async def _select_evidence(state: SectionsGraphState) -> dict[str, Any]:
         rfp_context=state["rfp_context"],
         rfp_client=state["rfp_client"],
         candidates=candidates,
+        rfp_sector=state.get("rfp_sector") or "",
+        rfp_title=state.get("rfp_title") or "",
     )
 
     return {
@@ -2153,30 +2155,9 @@ async def _select_evidence(state: SectionsGraphState) -> dict[str, Any]:
 
 def _case_study_display_title(index: int, study: str) -> str:
     """Human title for Section 3 cards — never raw PDF filenames in the UI chip."""
-    name = (study or "").strip()
-    for suffix in (".pdf", ".docx", ".doc", ".PDF", ".DOCX"):
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
-            break
-    lower = name.casefold()
-    for prefix in ("03_cs_", "02_cs_", "01_cs_", "cs_", "03_", "02_", "01_"):
-        if lower.startswith(prefix):
-            name = name[len(prefix) :]
-            lower = name.casefold()
-            break
-    name = name.replace("_", " ").replace("-", " ").strip()
-    # OregonEmployment → Oregon Employment
-    spaced: list[str] = []
-    for i, ch in enumerate(name):
-        if i and ch.isupper() and name[i - 1].islower():
-            spaced.append(" ")
-        spaced.append(ch)
-    name = "".join(spaced).strip()
-    if name and (name == name.upper() or name.islower()):
-        name = name.title()
-    if not name:
-        name = (study or "").strip() or f"Case study {index}"
-    return f"3.{index} — {name}"
+    from app.services.proposal_blocker_prevention import clean_case_study_label
+
+    return clean_case_study_label(study, index=index)
 
 
 async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
@@ -2191,6 +2172,19 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
     evidence = EvidenceSelectionResult.model_validate(selection_raw)
     selected_studies = evidence.selected_studies
     if not selected_studies:
+        return {}
+
+    from app.services.proposal_case_study_eligibility import (
+        is_eligible_section3_case_study_title,
+    )
+
+    selected_studies = [
+        s for s in selected_studies if is_eligible_section3_case_study_title(s)
+    ]
+    if not selected_studies:
+        logger.warning(
+            "Section 3: all evidence selections were ineligible dumps/templates"
+        )
         return {}
 
     merged_state = await _ensure_brand_voice(state)
@@ -2704,7 +2698,7 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
 
 
 async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
-    """Evidence-ranked case study selection + JIT retrieval per study."""
+    """RFP-capability fit selection + JIT retrieval per study (legacy S1–3 path)."""
     if state.get("skip_section_3"):
         logger.info("Section 3 already complete — skipping regeneration")
         return {}
@@ -2723,49 +2717,108 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
         )
 
     context_block = state.get("proposal_context") or {}
-    try:
-        selection, _ = await llm.chat_json(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are the Evidence Selection Agent for zö agency Section 3.\n"
-                        "Score and select the strongest 3–5 past case studies for THIS RFP.\n"
-                        "Compact JSON only — no markdown fences.\n\n"
-                        "Scoring weights: Industry 35%, Service 30%, Evaluation alignment 20%, "
-                        "Proof strength 10%, Recency 5%.\n\n"
-                        "STRICT RULES:\n"
-                        f"- Do NOT select work for '{rfp_client}' — that is the CURRENT client.\n"
-                        "- ONLY titles explicitly present in the case study corpus below.\n"
-                        "- Return 3–5 studies maximum. Never return more than 5.\n"
-                        "- Omit weak or irrelevant examples.\n"
-                        'Return JSON: {"selectedStudies": ["Exact Title 1", "Exact Title 2"], '
-                        '"scores": [{"title": "...", "score": 0.0, "rationale": "..."}]}'
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Proposal context:\n{context_block}\n\n"
-                        f"RFP requirements summary:\n{state['rfp_context'][:15000]}\n\n"
-                        f"Case study corpus (ONLY use titles listed here):\n{case_corpus}"
-                    )
-                }
-            ],
-            max_tokens=1536,
-            temperature=0.0,
-            tier="light",
-        )
-    except LlmError as exc:
-        logger.warning(
-            "Legacy evidence selection failed (%s); empty studies (no retry)",
-            str(exc)[:160],
-        )
-        selection = {}
-    selected_studies = selection.get("selectedStudies") or selection.get("selected_studies") or []
-    # DO NOT fallback to generic names — if nothing found, leave empty so no hallucination.
-    selected_studies = [s for s in selected_studies if s.strip()]
-    selected_studies = list(dict.fromkeys(selected_studies))[:5]
+    services_requested: list[str] = []
+    if isinstance(context_block, dict):
+        raw_services = context_block.get("servicesRequested") or context_block.get("services_requested") or []
+        if isinstance(raw_services, list):
+            services_requested = [str(s).strip() for s in raw_services if str(s).strip()]
+
+    # Prefer capability-fit ranking so Section 3 proves what the RFP asks for —
+    # not whichever titles look "strong" in a generic corpus.
+    from app.services.proposal_case_study_fit import (
+        assess_case_study_fit,
+        capabilities_for_case_study_fit,
+        select_best_case_study_titles,
+    )
+
+    capabilities = capabilities_for_case_study_fit(
+        services_requested=services_requested,
+        rfp_context=state.get("rfp_context") or "",
+        rfp_sector=state.get("rfp_sector") or "",
+    )
+    selected_studies: list[str] = []
+    if capabilities:
+        try:
+            fit_report = await assess_case_study_fit(
+                capabilities,
+                rfp_client=rfp_client,
+                rfp_sector=state.get("rfp_sector") or "",
+                rfp_title=state.get("rfp_title") or "",
+                rfp_id=state.get("rfp_id"),
+            )
+            selected_studies = select_best_case_study_titles(
+                fit_report, min_count=2, max_count=5
+            )
+            if selected_studies:
+                logger.info(
+                    "Section 3 fit-ranked %d strong case studies for %s",
+                    len(selected_studies),
+                    capabilities[:4],
+                )
+        except Exception as exc:  # noqa: BLE001 - fit failure falls through to LLM
+            logger.warning("Section 3 fit ranking failed (%s); LLM fallback", str(exc)[:160])
+
+    if not selected_studies:
+        capability_hint = ", ".join(capabilities[:5]) if capabilities else "RFP-required services"
+        try:
+            selection, _ = await llm.chat_json(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are the Evidence Selection Agent for zö agency Section 3.\n"
+                            "Select ONLY case studies that BEST prove the RFP's required capabilities.\n"
+                            "Compact JSON only — no markdown fences.\n\n"
+                            "Scoring weights: Capability match 50%, Service 25%, Industry 15%, "
+                            "Proof strength 10%.\n\n"
+                            "STRICT RULES:\n"
+                            f"- Do NOT select work for '{rfp_client}' — that is the CURRENT client.\n"
+                            "- ONLY titles explicitly present in the case study corpus below.\n"
+                            f"- Prefer studies that demonstrate: {capability_hint}.\n"
+                            "- NEVER pick a brand/website/tourism case study just because it is "
+                            "strong writing if the RFP asks for a different capability "
+                            "(e.g. digital ads / geofencing / paid media).\n"
+                            "- Return up to 5 studies. Prefer quality over quantity — do NOT pad "
+                            "with off-capability examples to hit a count.\n"
+                            "- Omit weak or irrelevant examples.\n"
+                            'Return JSON: {"selectedStudies": ["Exact Title 1", "Exact Title 2"], '
+                            '"scores": [{"title": "...", "score": 0.0, "rationale": "..."}]}'
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Proposal context:\n{context_block}\n\n"
+                            f"RFP capabilities to prove: {capability_hint}\n\n"
+                            f"RFP requirements summary:\n{state['rfp_context'][:15000]}\n\n"
+                            f"Case study corpus (ONLY use titles listed here):\n{case_corpus}"
+                        )
+                    }
+                ],
+                max_tokens=1536,
+                temperature=0.0,
+                tier="light",
+            )
+        except LlmError as exc:
+            logger.warning(
+                "Legacy evidence selection failed (%s); empty studies (no retry)",
+                str(exc)[:160],
+            )
+            selection = {}
+        selected_studies = selection.get("selectedStudies") or selection.get("selected_studies") or []
+        # DO NOT fallback to generic names — if nothing found, leave empty so no hallucination.
+        selected_studies = [s for s in selected_studies if s.strip()]
+        selected_studies = list(dict.fromkeys(selected_studies))[:5]
+    else:
+        selected_studies = list(dict.fromkeys(s.strip() for s in selected_studies if s.strip()))[:5]
+
+    from app.services.proposal_case_study_eligibility import (
+        is_eligible_section3_case_study_title,
+    )
+
+    selected_studies = [
+        s for s in selected_studies if is_eligible_section3_case_study_title(s)
+    ][:5]
 
     new_sections: list[dict[str, Any]] = []
     kb_sources = case_sources

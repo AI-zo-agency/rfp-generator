@@ -83,6 +83,17 @@ export interface ScanRfpFulfillReport {
   budgetRegenerated?: boolean;
   budgetRepairedNotes?: string[];
   budgetEscalationNotes?: string[];
+  /** Deterministic consistency fixes on the existing draft (primary contact,
+   * duplicate refs, schedule compress, signed-cover DESIGNER NOTE). */
+  consistencyFixesApplied?: number;
+  consistencyFixSummaries?: string[];
+  /** LLM manuscript-vs-RFP contradictions (not Go/No-Go capability gaps). */
+  rfpContradictionCount?: number;
+  rfpContradictionTitles?: string[];
+  rfpContradictionRewrites?: number;
+  rfpContradictionVerifyTags?: number;
+  rfpContradictionUnresolved?: number;
+  rfpContradictionSummary?: string;
 }
 
 const NOTHING_CHANGED_MESSAGE =
@@ -174,6 +185,35 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
     clauses.push(
       `${needsDrafting} narrative submission item(s) still need drafting${namedList(
         report.submissionNeedsDraftingTitles
+      )}`
+    );
+  }
+
+  const consistency = report.consistencyFixesApplied ?? 0;
+  if (consistency > 0) {
+    clauses.push(
+      `applied ${consistency} consistency fix(es)${namedList(
+        report.consistencyFixSummaries
+      )}`
+    );
+  }
+
+  const contradictions = report.rfpContradictionCount ?? 0;
+  const rewrites = report.rfpContradictionRewrites ?? 0;
+  const unresolved = report.rfpContradictionUnresolved ?? 0;
+  if (rewrites > 0) {
+    clauses.push(`fixed ${rewrites} manuscript-vs-RFP contradiction(s) by rewrite`);
+  }
+  if (unresolved > 0) {
+    clauses.push(
+      `${unresolved} contradiction(s) still need human input${namedList(
+        report.rfpContradictionTitles
+      )}`
+    );
+  } else if (contradictions > 0 && rewrites === 0) {
+    clauses.push(
+      `found ${contradictions} manuscript-vs-RFP contradiction(s)${namedList(
+        report.rfpContradictionTitles
       )}`
     );
   }

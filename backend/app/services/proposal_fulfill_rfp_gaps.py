@@ -380,6 +380,7 @@ async def _run_fulfill_rfp_gaps_body(
         "Consistency repairs",
         "Contractor KPIs (Section 2.3)",
         "KB fact-check (Supermemory)",
+        "RFP contradiction check (LLM)",
         "Remove optional [VERIFY] tags",
         "Pre-submit refresh",
     )
@@ -643,6 +644,41 @@ async def _run_fulfill_rfp_gaps_body(
         else:
             report["disqualificationRisks"] = []
             report["disqualificationRiskCount"] = 0
+
+        # Physical-form checklist on the UI Scan path (mode=full) — previously
+        # only ran on verify_scrub_only. Stubs do not clear these.
+        from app.services.proposal_rfp_submission_requirements import (
+            outstanding_submission_checklist_for_scan,
+        )
+
+        outstanding = outstanding_submission_checklist_for_scan(rfp_text, draft)
+        report["submissionNeedsDraftingCount"] = len(outstanding.needs_drafting)
+        report["submissionNeedsDraftingTitles"] = outstanding.needs_drafting
+        report["submissionNeedsAttachmentCount"] = len(outstanding.needs_attachment)
+        report["submissionNeedsAttachmentTitles"] = outstanding.needs_attachment
+        if outstanding.needs_attachment:
+            # Physical PDFs cannot be invented — surface as attachment handoff,
+            # NOT as manuscript "disqualification risks" (designer notes fix the
+            # drafting side; human still attaches the file).
+            report["humanDecisionGaps"].append(
+                "attachment:needs-human — "
+                f"{len(outstanding.needs_attachment)} physical document(s) required "
+                "by this RFP — designer notes added; attach signed originals before submit: "
+                + "; ".join(outstanding.needs_attachment[:8])
+            )
+            report["logs"].append(
+                "submission-checklist:attachment — "
+                f"{len(outstanding.needs_attachment)} physical document(s) still open "
+                "(handoff via DESIGNER NOTE — not counted as manuscript DQ)."
+            )
+        # Strip stale attachment lines from DQ list if any earlier path added them
+        report["disqualificationRisks"] = [
+            risk
+            for risk in (report.get("disqualificationRisks") or [])
+            if "missing required attachment" not in risk.casefold()
+            and "physical document" not in risk.casefold()
+        ]
+        report["disqualificationRiskCount"] = len(report["disqualificationRisks"])
     except ProposalGenerationCancelled:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -684,9 +720,21 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].append(f"Budget scan skipped: {exc}")
 
     try:
+        from app.services.proposal_cert_claim_scrub import apply_cert_claim_scrub_to_draft
+        from app.services.proposal_consistency_enforcement import (
+            apply_consistency_enforcement,
+        )
         from app.services.proposal_fulfill_rfp_repairs import run_manuscript_consistency_repairs
+        from app.services.proposal_rfp_submission_requirements import (
+            outstanding_submission_checklist_for_scan,
+        )
 
-        await _scan_progress(6, "Scan RFP: consistency repairs", "Roster, KPI wording, qualification stubs.")
+        await _scan_progress(
+            6,
+            "Scan RFP: consistency repairs",
+            "Primary contact, references, schedule vs approach, cert claims, "
+            "signed-PDF designer notes — existing draft only (no full regen).",
+        )
         await _ensure_not_stopped()
         draft, repair_logs, repair_human = await run_manuscript_consistency_repairs(
             draft,
@@ -694,7 +742,27 @@ async def _run_fulfill_rfp_gaps_body(
         )
         report["logs"].extend(repair_logs)
         report["humanDecisionGaps"].extend(repair_human)
-        if repair_logs:
+
+        outstanding_for_notes = outstanding_submission_checklist_for_scan(
+            rfp_text, draft
+        )
+        draft, consistency_logs = apply_consistency_enforcement(
+            draft,
+            research=research,
+            attachment_labels=list(outstanding_for_notes.needs_attachment),
+            rfp_text=rfp_text,
+        )
+        report["logs"].extend(consistency_logs)
+        report["consistencyFixesApplied"] = len(consistency_logs)
+        if consistency_logs:
+            report["consistencyFixSummaries"] = consistency_logs[:12]
+
+        draft, cert_logs = apply_cert_claim_scrub_to_draft(
+            draft, skip_section_ids=preserved_ids
+        )
+        report["logs"].extend(cert_logs)
+
+        if repair_logs or consistency_logs or cert_logs:
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
@@ -836,15 +904,93 @@ async def _run_fulfill_rfp_gaps_body(
             for line in fc_report.logs[:20]:
                 report["logs"].append(f"KB fact-check: {line}")
             await asave_proposal_draft(draft)
+        elif fc_report.sections_checked:
+            await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("KB fact-check during Scan RFP skipped: %s", exc)
         report["logs"].append(f"KB fact-check skipped: {exc}")
 
-    # Dedicated pass: every section with [VERIFY] → RFP scan → remove unless critical.
+    # Fact-check can rewrite Approach/Schedule — run the SAME blocker suite
+    # Generate-from-scratch uses (titles, consistency, certs, signed PDF note,
+    # LLM manuscript-vs-RFP contradictions).
     await _scan_progress(
         9,
+        "Scan RFP: RFP contradiction check",
+        "Blocker suite + LLM manuscript vs RFP — same guards as Generate-from-scratch.",
+    )
+    await _ensure_not_stopped()
+    try:
+        from app.services.proposal_blocker_prevention import (
+            apply_feedback_blocker_suite,
+        )
+
+        suite = await apply_feedback_blocker_suite(
+            draft,
+            rfp=rfp,
+            research=research,
+            rfp_text=rfp_text,
+            use_llm_contradiction=use_llm,
+            skip_section_ids=preserved_ids,
+        )
+        draft = suite.draft
+        report["logs"].extend(suite.logs)
+        report["consistencyFixesApplied"] = len(
+            [
+                line
+                for line in suite.logs
+                if not line.startswith("RFP contradiction")
+                and "skipped" not in line.casefold()
+            ]
+        )
+        report["consistencyFixSummaries"] = suite.logs[:12]
+        report["rfpContradictionCount"] = suite.contradiction_count
+        report["rfpContradictionRewrites"] = suite.contradiction_rewrites
+        report["rfpContradictionUnresolved"] = suite.contradiction_unresolved
+        report["rfpContradictionTitles"] = suite.contradiction_unresolved_titles or [
+            line for line in suite.logs if "FIXED contradiction" in line
+        ][:8]
+        # Only UNRESOLVED contradictions stay as DQ — fixed ones are done
+        if suite.contradiction_unresolved_titles:
+            report["disqualificationRisks"] = [
+                risk
+                for risk in (report.get("disqualificationRisks") or [])
+                if "manuscript contradicts rfp" not in risk.casefold()
+            ] + [
+                f"Unresolved RFP contradiction — {line}"
+                for line in suite.contradiction_unresolved_titles[:6]
+            ]
+            seen_r: set[str] = set()
+            uniq_r: list[str] = []
+            for risk in report["disqualificationRisks"]:
+                key = risk.casefold()
+                if key in seen_r:
+                    continue
+                seen_r.add(key)
+                uniq_r.append(risk)
+            report["disqualificationRisks"] = uniq_r
+            report["disqualificationRiskCount"] = len(uniq_r)
+        else:
+            # Clear prior manuscript-contradiction DQ noise after successful fixes
+            report["disqualificationRisks"] = [
+                risk
+                for risk in (report.get("disqualificationRisks") or [])
+                if "manuscript contradicts rfp" not in risk.casefold()
+                and "missing required attachment" not in risk.casefold()
+            ]
+            report["disqualificationRiskCount"] = len(report["disqualificationRisks"])
+        if suite.logs:
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("RFP blocker suite / contradiction scan skipped: %s", exc)
+        report["logs"].append(f"RFP blocker suite skipped: {exc}")
+
+    # Dedicated pass: every section with [VERIFY] → RFP scan → remove unless critical.
+    await _scan_progress(
+        10,
         "Scan RFP: remove optional [VERIFY]",
         "Read each VERIFY section vs full RFP — drop tags unless critically required; never invent.",
     )
@@ -931,7 +1077,7 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].append(f"Optional claim scrub skipped: {exc}")
 
     await _scan_progress(
-        10,
+        11,
         "Scan RFP: pre-submit refresh",
         "Checklist, manual flags, and ending report.",
     )

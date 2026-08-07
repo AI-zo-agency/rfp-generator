@@ -60,6 +60,7 @@ Rules:
   (forms may be checklist + [MANUAL FILL]).
 - Do NOT copy another client's outline. Do NOT write section prose.
 - Mark required=true only for mandatory submission items; use conditionalReason for optional ones.
+- When an evaluation criterion clearly matches a section, set evaluationWeight to that criterion's points.
 
 Return JSON only:
 {
@@ -72,7 +73,8 @@ Return JSON only:
       "conditionalReason": "",
       "parentId": null,
       "children": [],
-      "dependencies": []
+      "dependencies": [],
+      "evaluationWeight": null
     }
   ],
   "confidence": 0.0
@@ -141,6 +143,13 @@ async def run_dynamic_section_planner(
     from app.services.proposal_outline_dedup import (
         filter_lean_outline_sections,
         merge_closing_components_into_outline,
+        stamp_outline_evaluation_weights,
+    )
+
+    # Stamp eval weights BEFORE lean filter so scored carve-outs actually fire.
+    stamp_outline_evaluation_weights(
+        list(outline.sections),
+        list(plan.opportunity.evaluation.criteria),
     )
 
     kept, dropped = filter_lean_outline_sections(

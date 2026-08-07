@@ -39,6 +39,18 @@ class CertClaimScrubTests(unittest.TestCase):
         self.assertNotRegex(scrubbed.content or "", r"Our certified team holds Google Ads")
         self.assertIn("individual platform certifications", scrubbed.content or "")
 
+    def test_rewrites_sba_status_overclaim(self) -> None:
+        section = ProposalSection(
+            id="certs",
+            title="1.4 Certifications",
+            content="WOSB certification confirms SBA status for federal set-asides.",
+            status="generated",
+        )
+        scrubbed, logs = scrub_section_cert_claims(section)
+        self.assertTrue(logs)
+        self.assertNotIn("confirms SBA status", scrubbed.content or "")
+        self.assertIn("WBENC and WOSB", scrubbed.content or "")
+
     def test_draft_apply(self) -> None:
         draft = ProposalDraft(
             rfpId="r1",

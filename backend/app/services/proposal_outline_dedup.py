@@ -268,6 +268,120 @@ def section_carries_evaluation_points(section: Any) -> bool:
         return False
 
 
+_TOC_HEADING_LINE_RE = re.compile(
+    r"^(?:"
+    r"\d+(?:\.\d+)*[.)\s]+|"  # 1. / 4.2 /
+    r"[A-Z][.)]\s+|"  # A. /
+    r"[IVXLC]+\.\s+|"  # IV.
+    r"[-•*]\s+"
+    r")?"
+    r"(.{3,140})$"
+)
+
+
+def rfp_lists_section_heading(rfp_text: str, title: str) -> bool:
+    """True when the RFP TOC / proposal-contents list names this heading.
+
+    Unlike ``rfp_requires_topic``, this does NOT need nearby "shall submit"
+    verbs — bare TOC labels ("2. Technical Approach") are RFP-demanded tabs.
+    """
+    core = normalize_outline_title(title)
+    if not core or not (rfp_text or "").strip():
+        return False
+    core_tokens = {t for t in outline_title_tokens(title) if len(t) >= 4}
+    for raw_line in (rfp_text or "").splitlines():
+        line = raw_line.strip().strip("•*-–—")
+        if len(line) < 3 or len(line) > 160:
+            continue
+        m = _TOC_HEADING_LINE_RE.match(line)
+        if not m:
+            continue
+        heading = m.group(1).strip()
+        # Skip long prose sentences posing as headings
+        if heading.count(" ") > 16 or heading.endswith((".", ";", ",")):
+            # Allow short title-case endings without period requirement
+            if heading.endswith((".", ";", ",")) and len(heading.split()) > 8:
+                continue
+        norm = normalize_outline_title(heading)
+        if not norm:
+            continue
+        if core == norm or core in norm or norm in core:
+            return True
+        if core_tokens:
+            line_tokens = {t for t in outline_title_tokens(heading) if len(t) >= 4}
+            if len(core_tokens & line_tokens) >= max(1, min(2, len(core_tokens))):
+                # Prefer real TOC-ish lines (numbered / short)
+                numbered = bool(re.match(r"^\d+(?:\.\d+)*[.)\s]+", line))
+                short = len(line_tokens) <= 10
+                if numbered or short:
+                    return True
+    return False
+
+
+def _set_section_evaluation_weight(section: Any, weight: float) -> None:
+    if hasattr(section, "evaluation_weight"):
+        section.evaluation_weight = weight
+    elif isinstance(section, dict):
+        section["evaluationWeight"] = weight
+
+
+def stamp_outline_evaluation_weights(
+    sections: list[Any],
+    criteria: list[Any],
+) -> list[Any]:
+    """Copy evaluation criterion points onto matching outline sections.
+
+    Must run BEFORE ``filter_lean_outline_sections`` so scored carve-outs work
+    on live planner output (OutlineSection historically had no weight field).
+    """
+    crit_rows: list[tuple[str, float]] = []
+    for crit in criteria or []:
+        if hasattr(crit, "name"):
+            name = str(crit.name or "").strip()
+            weight = crit.weight
+        elif isinstance(crit, dict):
+            name = str(crit.get("name") or "").strip()
+            weight = crit.get("weight")
+        else:
+            continue
+        if not name or weight is None:
+            continue
+        try:
+            pts = float(weight)
+        except (TypeError, ValueError):
+            continue
+        if pts <= 0:
+            continue
+        crit_rows.append((name, pts))
+
+    for section in sections:
+        if section_carries_evaluation_points(section):
+            continue
+        title = ""
+        if hasattr(section, "title"):
+            title = str(section.title or "")
+        elif isinstance(section, dict):
+            title = str(section.get("title") or "")
+        title_cf = title.casefold()
+        title_tokens = {t for t in outline_title_tokens(title) if len(t) >= 4}
+        best: float | None = None
+        best_score = 0
+        for name, pts in crit_rows:
+            name_cf = name.casefold()
+            if name_cf == title_cf or name_cf in title_cf or title_cf in name_cf:
+                best = pts
+                best_score = 100
+                break
+            name_tokens = {t for t in outline_title_tokens(name) if len(t) >= 4}
+            overlap = len(title_tokens & name_tokens)
+            if overlap >= 1 and overlap > best_score:
+                best = pts
+                best_score = overlap
+        if best is not None and best_score >= 1:
+            _set_section_evaluation_weight(section, best)
+    return sections
+
+
 def is_generic_filler_outline_title(title: str) -> bool:
     """Short/vague invented labels that should be enriched (or dropped if not in RFP)."""
     if is_important_or_closing_outline_title(title):
@@ -442,9 +556,12 @@ def filter_lean_outline_sections(
             ]
             # With no RFP text we cannot know what was requested — keep the
             # section rather than silently emptying the outline.
+            # TOC / proposal-contents headings count as demanded even without
+            # nearby "shall submit" verbs (those verbs often sit on a parent
+            # sentence several lines above the numbered list).
             requested = (not (rfp_context or "").strip()) or rfp_requires_topic(
                 rfp_context, terms
-            )
+            ) or rfp_lists_section_heading(rfp_context, title)
             if not requested and not is_important_or_closing_outline_title(title):
                 mentioned = bool(core and core in rfp_blob)
                 reason = (
@@ -454,12 +571,24 @@ def filter_lean_outline_sections(
                 continue
         if any(outline_titles_near_duplicate(title, _title(prev)) for prev in kept):
             # Prefer the longer / more specific title when near-dup.
+            # Never drop a scored tab in favor of an unscored near-dup.
             prev_idx = next(
                 i
                 for i, prev in enumerate(kept)
                 if outline_titles_near_duplicate(title, _title(prev))
             )
-            prev_title = _title(kept[prev_idx])
+            prev = kept[prev_idx]
+            prev_scored = section_carries_evaluation_points(prev)
+            if scored and not prev_scored:
+                dropped.append(f"{_title(prev)} (near-duplicate → kept scored tab)")
+                kept[prev_idx] = section
+                if title != original_title:
+                    _set_title(section, title)
+                continue
+            if prev_scored and not scored:
+                dropped.append(f"{original_title} (near-duplicate of scored tab)")
+                continue
+            prev_title = _title(prev)
             if len(normalize_outline_title(title)) > len(normalize_outline_title(prev_title)):
                 _set_title(kept[prev_idx], title)
                 dropped.append(f"{prev_title} (near-duplicate → kept fuller title)")

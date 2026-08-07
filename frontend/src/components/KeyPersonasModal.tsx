@@ -59,9 +59,10 @@ export function KeyPersonasModal({
       if (data.personas && data.personas.length > 0) {
         setPersonas(data.personas);
       }
+      // Sync local modal checkboxes from server — do NOT push into parent on
+      // load (that was re-saving stale picks). Parent owns selection via draft.
       if (Array.isArray(data.selectedPersonaIds) && !userModifiedRef.current) {
         setSelectedIds(data.selectedPersonaIds);
-        onSelectionChange?.(data.selectedPersonaIds);
       }
     } catch {
       // Keep existing list

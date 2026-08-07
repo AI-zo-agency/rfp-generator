@@ -29,6 +29,16 @@ Technical Proposal approach required. Experience: 3 years minimum. References: t
 Cost Proposal Worksheet. Oral Presentation for top three finalists.
 """
 
+NYCEDC_PERCENT_SNIPPET = """
+Section V.B Selection Criteria. Proposals will be evaluated on the following
+weighted criteria:
+
+Respondent/team experience and personnel commitment — 25%
+Proposal quality and understanding of scope — 25%
+Proposed fee and cost schedule — 25%
+Management quality, reputation, references, and City/NYCEDC history — 25%
+"""
+
 
 class GoNoGoHardFactsTests(unittest.TestCase):
     def test_extracts_ceiling_and_year_budgets(self) -> None:
@@ -74,6 +84,28 @@ class GoNoGoHardFactsTests(unittest.TestCase):
         facts = _extract_rfp_hard_facts(GSU_ELIGIBILITY_SNIPPET)
         self.assertEqual(facts["evaluation_lines"], [])
         self.assertIsNone(facts["evaluation_total"])
+
+    def test_extracts_percent_weighted_selection_criteria(self) -> None:
+        """NYCEDC-style 25%/25%/25%/25% tables must count as disclosed criteria.
+
+        Without this, evaluation_points_found stays False and the scrubber
+        overwrites Win Probability notes with 'table not disclosed' even when
+        Section V.B lists explicit weights.
+        """
+        from app.services.evidence_trust.rfp_hard_facts import (
+            evaluation_table_is_reliable,
+        )
+
+        facts = _extract_rfp_hard_facts(NYCEDC_PERCENT_SNIPPET)
+        blob = " | ".join(facts["evaluation_lines"]).casefold()
+        self.assertIn("experience", blob)
+        self.assertIn("fee", blob)
+        self.assertIn("25", blob)
+        self.assertTrue(
+            evaluation_table_is_reliable(facts),
+            facts,
+        )
+        self.assertEqual(facts["evaluation_total"], 100)
 
 
 if __name__ == "__main__":

@@ -144,6 +144,7 @@ export const FULFILL_SCAN_STEP_LABELS = [
   "Consistency repairs",
   "Contractor KPIs (Section 2.3)",
   "KB fact-check (Supermemory)",
+  "RFP contradiction check (LLM)",
   "Remove optional [VERIFY] tags",
   "Pre-submit refresh",
 ] as const;

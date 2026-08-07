@@ -52,7 +52,7 @@ export function GoNoGoBadge({
   const labels = {
     go: "Go",
     no_go: "No-Go",
-    review: "Review",
+    review: "Go w/ Conditions",
   };
 
   return (

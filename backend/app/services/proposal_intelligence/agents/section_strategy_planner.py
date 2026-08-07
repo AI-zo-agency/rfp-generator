@@ -15,8 +15,9 @@ _SYSTEM = """Section Strategy Planner. For each outline section, define the writ
 
 HARD RULES:
 - Each section has ONE distinct job — purpose must NOT overlap another section's purpose.
-- Be concise: prefer wordBudget 350–700 for most tabs; only go higher when the RFP scores
-  that tab heavily or demands forms/tables.
+- Be concise: prefer wordBudget 250–500 for most tabs; only go higher when the RFP scores
+  that tab heavily or demands forms/tables AND the page limit still has room.
+  wordBudget is a HARD CEILING. Never plan volume "for the designer to cut later."
 - Agency Requirements / capability matrix tabs: instruct the writer to cover ALL G.# / Section
   III A service lines in ONE matrix (not a separate narrative per service).
 - writerInstructions MUST say: do not rehash other tabs; add only NEW RFP-specific detail;

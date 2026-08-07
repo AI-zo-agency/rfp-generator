@@ -57,6 +57,34 @@ _SUFFIXES = (
 _TERM_COVERAGE_THRESHOLD = 0.6
 _SHORT_REQUIREMENT_TERMS = 2
 
+# Domain synonyms so Maricopa-style "Television / Broadcast / TV / video"
+# evidences RFP language like "broadcast production and multimedia editing"
+# without loosening unrelated term matches (coverage still requires most terms).
+_SYNONYM_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset(
+        {
+            "broadcast",
+            "television",
+            "tv",
+            "radio",
+            "video",
+            "cinema",
+            "multimedia",
+            "media",
+        }
+    ),
+    frozenset({"edit", "produce", "production", "produc"}),
+    # "Plan and buy traditional media" evidences "media buying / negotiation".
+    frozenset({"buy", "buying", "purchase", "purchas", "placement", "negoti"}),
+)
+
+
+def _synonym_aliases(token: str) -> set[str]:
+    for group in _SYNONYM_GROUPS:
+        if token in group:
+            return set(group)
+    return {token}
+
 
 def _stem(token: str) -> str:
     """Crude suffix stripper so websites/website and developer/development match."""
@@ -181,7 +209,11 @@ def _source_supports(requirement: str, source_text: str) -> bool:
     if not terms:
         return False
     haystack = _affirmative_tokens(source_text)
-    coverage = len(terms & haystack) / len(terms)
+    matched = 0
+    for term in terms:
+        if _synonym_aliases(term) & haystack:
+            matched += 1
+    coverage = matched / len(terms)
     if len(terms) <= _SHORT_REQUIREMENT_TERMS:
         return coverage >= 1.0
     return coverage >= _TERM_COVERAGE_THRESHOLD

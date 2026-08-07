@@ -41,18 +41,21 @@ def _draft(*sections: ProposalSection) -> ProposalDraft:
 
 
 class GoNoGoDqRiskTests(unittest.TestCase):
-    def test_no_go_and_critical_gaps_surface(self) -> None:
+    def test_no_go_and_deadline_surface_not_raw_critical_gaps(self) -> None:
         rfp = _rfp(
             goNoGo="no_go",
             goNoGoAnalysis={
                 "recommendation": "no_go",
-                "criticalGaps": ["Missing required WBE certification."],
+                "criticalGaps": [
+                    "Unverified capability claim — talent attraction campaigns",
+                    "Missing required WBE certification.",
+                ],
                 "compliance": {
                     "flags": [
                         {
                             "severity": "critical",
-                            "category": "certification",
-                            "message": "WBENC required but not evidenced",
+                            "category": "eligibility",
+                            "message": "WBENC / WBE certification required for set-aside",
                         }
                     ]
                 },
@@ -66,8 +69,10 @@ class GoNoGoDqRiskTests(unittest.TestCase):
         risks = collect_go_no_go_dq_risks(rfp)
         joined = " ".join(risks).casefold()
         self.assertIn("no-go", joined)
-        self.assertIn("wbe", joined)
         self.assertIn("deadline passed", joined)
+        self.assertIn("wbe", joined)
+        # Capability noise stays out of the DQ banner
+        self.assertNotIn("talent attraction", joined)
 
 
 class RfpTextDqRiskTests(unittest.TestCase):
@@ -126,6 +131,15 @@ class DqGatePassTests(unittest.TestCase):
             goNoGoAnalysis={
                 "recommendation": "review",
                 "criticalGaps": ["Confirm registration on SAM.gov"],
+                "compliance": {
+                    "flags": [
+                        {
+                            "severity": "critical",
+                            "category": "eligibility",
+                            "message": "Must be registered to do business in-state",
+                        }
+                    ]
+                },
             },
         )
 
@@ -162,7 +176,12 @@ class DqGatePassTests(unittest.TestCase):
             )
         self.assertTrue(result.changed)
         self.assertTrue(result.disqualification_risks)
+        self.assertTrue(any("registered" in r.casefold() for r in result.disqualification_risks))
         self.assertTrue(any("legal-attestation" in g for g in result.human_decision_gaps))
+        self.assertTrue(any("go-no-go-review" in g for g in result.human_decision_gaps))
+        self.assertFalse(
+            any("sam.gov" in r.casefold() for r in result.disqualification_risks)
+        )
 
 
 class OrchestratorLoopTests(unittest.TestCase):

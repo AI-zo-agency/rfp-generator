@@ -282,7 +282,12 @@ def upsert_proposal(rfp_id: str, draft: ProposalDraft) -> dict[str, object]:
                     ),
                 )
 
-    if existing and existing.selected_key_personas and not draft.selected_key_personas:
+    # None = unset (preserve). Explicit [] clears. Non-empty keeps.
+    if (
+        existing
+        and existing.selected_key_personas
+        and draft.selected_key_personas is None
+    ):
         draft.selected_key_personas = existing.selected_key_personas
 
     draft = merge_snapshots_for_save(draft, existing)
@@ -1042,7 +1047,7 @@ async def save_proposal_key_personas(
     response: dict[str, object] = {
         "ok": True,
         "rfpId": rfp_id,
-        "selectedPersonaIds": draft.selected_key_personas,
+        "selectedPersonaIds": draft.selected_key_personas or [],
     }
 
     if rebuild_bios:

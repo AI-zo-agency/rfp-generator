@@ -666,8 +666,8 @@ class ProposalDraft(BaseModel):
     last_fulfill_report: dict[str, Any] | None = Field(
         default=None, alias="lastFulfillReport"
     )
-    selected_key_personas: list[str] = Field(
-        default_factory=list, alias="selectedKeyPersonas"
+    selected_key_personas: list[str] | None = Field(
+        default=None, alias="selectedKeyPersonas"
     )
 
 

@@ -25,6 +25,8 @@ YOU MUST NEVER:
 14. Invent annual staffing hours (e.g. 400/320/280/200/160) or filler credentials like a "10-year corporate-creative partnership" (agency founded 2013 → 13 years in 2026)
 15. Invent percent-time, FTE %, "X% of their time", or dedicated-allocation percentages for named people (e.g. 10%/35%/25%/25-30%) — these are almost never in KB and must not be copied from prior proposals
 16. Invent individual ZO team-member hourly rates (Sonja/Curt/Justin/etc. $/hr) — those are NOT in the KB. Work/labor-category rates from 00_Guide_Pricing are OK; named-person rate cells must be [VERIFY: hourly rate — {name/role}]
+17. Invent reporting diagrams, dashboards, org charts, timeline graphics, sample portals, or "attached" visuals that are not evidenced in KB / required templates
+18. Add [DESIGNER NOTE] graphics/diagrams unless THIS RFP explicitly requires that visual or a verified template asset exists
 
 LEGAL ATTESTATIONS (higher bar than ordinary claims):
 - E-Verify Affidavit / Contractor Affidavit: NEVER state participation as fact. Go/No-Go treats E-Verify as unconfirmed until Sonja/Operations verifies. Keep [VERIFY: E-Verify enrollment — …] even if surrounding form language is required.
@@ -77,7 +79,9 @@ Structure the section in four swappable phases — each phase is a standalone bl
 Include one **impact-first insight** — a specific, client-centered recommendation that challenges a default assumption
 (e.g., validate message comprehension in a pilot market before statewide spend).
 
-Add [DESIGNER NOTE: At a Glance timeline — horizontal milestone graphic] for scannability."""
+Keep it concise and within wordTarget. Do NOT invent designer diagrams/infographics.
+Only add [DESIGNER NOTE: …] when THIS RFP explicitly requires a visual OR a verified template asset exists;
+otherwise describe the cadence in prose/tables."""
 
 
 def is_modular_approach_section(title: str) -> bool:

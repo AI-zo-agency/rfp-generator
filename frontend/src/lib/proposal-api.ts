@@ -112,6 +112,9 @@ export function outlineToApiDraft(
     googleDocExportedAt: outline.googleDocExportedAt ?? null,
     snapshots: slimSnapshotsForSave(outline.snapshots),
     lastFulfillReport: outline.lastFulfillReport ?? undefined,
+    // Always send explicit list so Clear/Reset ([] ) is not treated as "omit"
+    // and re-filled from a prior selection on the server.
+    selectedKeyPersonas: outline.selectedKeyPersonas ?? [],
     sections: outline.sections.map((s) => ({
       ...s,
       source:

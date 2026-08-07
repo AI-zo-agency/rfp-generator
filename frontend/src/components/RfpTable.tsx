@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { motion } from "motion/react";
-import { computeOverallGoScore, daysUntil, formatDate } from "@/lib/format";
+import { alignGoNoGoRecommendation, computeOverallGoScore, daysUntil, formatDate } from "@/lib/format";
 import { expoOutEase } from "@/lib/motion";
 import {
   getWorkflowStepDisplay,
@@ -58,6 +58,7 @@ function RfpRowMeta({ rfp }: { rfp: RfpRecord }) {
     rfp.goNoGoAnalysis?.decisionMatrix,
   );
   const scale5 = goScore !== null && goScore <= 5;
+  const displayGoNoGo = alignGoNoGoRecommendation(rfp.goNoGo, goScore);
 
   return (
     <>
@@ -92,7 +93,11 @@ function RfpRowMeta({ rfp }: { rfp: RfpRecord }) {
         </span>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 lg:hidden">
-        {rfp.goNoGo === "go" ? <GoSign /> : <GoNoGoBadge recommendation={rfp.goNoGo} />}
+        {displayGoNoGo === "go" ? (
+          <GoSign />
+        ) : (
+          <GoNoGoBadge recommendation={displayGoNoGo} />
+        )}
         {goScore !== null ? (
           <span className="text-xs font-semibold text-zo-text-secondary">
             Score {scale5 ? `${goScore}/5` : goScore}
@@ -224,6 +229,10 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                   rfp.goNoGoAnalysis?.decisionMatrix,
                 );
                 const scale5 = goScore !== null && goScore <= 5;
+                const displayGoNoGo = alignGoNoGoRecommendation(
+                  rfp.goNoGo,
+                  goScore,
+                );
                 return (
                   <motion.tr
                     key={rfp.id}
@@ -294,10 +303,10 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                       )}
                     </td>
                     <td className="px-4 py-5 align-top">
-                      {rfp.goNoGo === "go" ? (
+                      {displayGoNoGo === "go" ? (
                         <GoSign />
                       ) : (
-                        <GoNoGoBadge recommendation={rfp.goNoGo} />
+                        <GoNoGoBadge recommendation={displayGoNoGo} />
                       )}
                     </td>
                     <td className="px-4 py-5 align-top">

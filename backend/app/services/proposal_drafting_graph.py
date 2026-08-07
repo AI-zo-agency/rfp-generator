@@ -38,11 +38,12 @@ from app.services.proposal_draft_llm import (
     chat_json_with_repair,
 )
 from app.services.proposal_langchain import _provider_name
+from app.services.proposal_ralph import inject_ralph_into_system_prompt
 
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 1
-DEFAULT_WORD_TARGET = 800
+DEFAULT_WORD_TARGET = 550
 # Cap concurrent LLM calls within a single RFP's drafting run — created per
 # invocation in run_drafting_graph so unrelated RFPs never wait on each other.
 LLM_CONCURRENCY = 1
@@ -76,7 +77,11 @@ VERIFIED FACTS ONLY (from evidence corpus):
 - Percent-time / FTE: NOT a verified KB fact for pursuit staffing — never invent; omit or [VERIFY]
 
 IF YOU CANNOT VERIFY A COMPANY FACT IN EVIDENCE:
-- Use [VERIFY: specific field needed] instead of inventing
+- Use [VERIFY: specific field needed] instead of inventing — BUT only when THIS RFP
+  explicitly requires that exact fact (forms, scored compliance, named contacts).
+- If the RFP does NOT require the missing detail, OMIT it — do not sprinkle optional
+  [VERIFY] tags for partners, backups, dashboards, or nice-to-have names.
+- Never invent phones, emails, rates, clients, wins, or certs to "fill" a gap.
 - Never use "approximately," "around," "over X years" without evidence citation
 - Do not embellish or extrapolate from partial information
 
@@ -98,7 +103,7 @@ Rules (strict):
 9. Apply WRITING AVOIDANCES from lost bids/debriefs when provided — do not repeat patterns that caused past losses.
 10. Lead narrative sections with PROOF POINTS — specific case studies tied to requirements ("why we win").
 11. For approach/marketing plan sections, use the MODULAR APPROACH block (Discover → Strategize → Create → Activate).
-12. Highest evaluationWeight sections need the most depth, proof, and word count — match wordTarget.
+12. Highest evaluationWeight sections need the most depth and proof — still stay at or under wordTarget (hard ceiling).
 13. For non-Budget narrative sections: do NOT invent pricing tiers, agency fee tables, or lump-sum totals — those belong in Fees/Budget / Phase 3.5. You may still mention the RFP's stated media budget if it appears in requirements/plan (e.g. $200,000 annual).
 14. When RFP requires portfolio, writing samples, or reference contacts, use evidence excerpts with [E#] citations — do not leave passive VERIFY placeholders if evidence contains samples or contacts.
 15. NEVER defer required submission data to unnamed attachments or "upon request" — include reference phones, workforce %, hours tables, or PSA acknowledgments in the proposal body.
@@ -118,17 +123,22 @@ Rules (strict):
 29. Plan-driven narrative sections (Understanding / Methodology / Timeline / Budget overview) MUST be drafted even when evidence is thin or empty. Use RFP requirements, Opportunity Understanding, Section Strategy, Winning Pattern, and Proposal Memory. Cite [E#] only when evidence exists; do not refuse to write the whole section. Use [VERIFY: specific field] only for discrete missing facts, never as the entire section body.
 30. Understanding sections should restate the client's goals, constraints, audiences, success measures, and risks in zö voice before pitching solution — show we read the RFP carefully.
 31. When the section title is Budget / Pricing / Fees / Cost: you MUST write full narrative covering (a) transparent compensation philosophy, (b) pass-through / no hidden media markup commitment, (c) how media spend is allocated across RFP priorities with rationale, (d) that detailed agency fee tables follow in the pricing build. Ground compensation language in 00_Guide_Pricing evidence when present. Use RFP-stated spend amounts from requirements/plan. Leave only discrete unknown agency rate cells as [VERIFY: …], never blank the whole section. If the RFP forbids altering the official Quotation/Pricing Proposal Form, do NOT restructure the form into Section A/B/C/D — mirror the buyer's field labels only and put all rationale in a separate "Supporting Budget Rationale" section.
-32. References sections: restate the RFP's required reference count and institution type when the RFP specifies them. Never claim the RFP is silent on references if requirements list three customers, two-year public, or NJ public-college reference tables. If zö lacks a qualifying reference, state the gap honestly and use [MANUAL FILL: leadership decision] — do not deny the requirement exists.
-33. KPI scope: When the RFP distinguishes agency-wide/strategic-plan KPIs from CONTRACTOR-scored KPIs, commit ONLY to the contractor set (with numeric targets from Section 2 / monitoring). Never substitute the buyer's four agency KPIs for the three contractor KPIs.
-34. Cost scoring: If the RFP uses inverse cost scoring (lowest responsive price gets maximum cost points), never claim that bidding at the published ceiling earns the highest cost rating — state the tradeoff honestly.
-35. Never invent an RFP "ceiling/allocation/cap" equal to your own proposed bid total. Only cite spend ceilings that appear in RFP requirements / HARD FACTS money constraints. If the bid exceeds a stated RFP envelope, say so plainly or leave a [VERIFY] for Sonja — do not relabel the bid as the buyer's ceiling.
-35. Cost weight: Use the RFP's stated criteria points for cost/price (sum Criteria #4 + #5 when both exist) — do not round to a generic "10%". When cost/price is ≥25% of total points, narrative must not claim Average tier — Low tier is required by the Pricing Guide Decision Guide.
-36. Budget container: When the RFP requires Attachment 01 / Excel budget worksheet, the narrative budget section must point to that file — not replace it with a PDF cost-category table.
-37. ANTI-DUPLICATION: Each section has ONE job. Do not re-write Who We Are, full bios, full case studies, FEIN/address/certs, or brand story that belongs in Sections 1–3 or another RFP tab. Do not paraphrase another RFP tab (Approach≠Methodology rewrite; Past Performance≠Sample Work dump). One brief cross-reference is OK — then add NEW RFP-specific detail only. Prefer concise, concrete prose within wordTarget — no generic agency marketing filler.
-38. HOURLY RATES: Never invent individual ZO member $/hr. If a staff-hours table is required, use labor-category / work rates from 00_Guide_Pricing evidence, or [VERIFY: hourly rate — {role}]. namedPerson is a staffing note only.
-38. PERCENT-TIME / FTE: Never invent percent-time columns or reuse static % grids from other proposals. If the RFP does not require percent-time/FTE, omit that column entirely (Role | Name | experience only). If the RFP requires it, every cell is [VERIFY: percent time] — never invent 10%/35%/25%/25-30%.
-39. LENGTH: Hit the scored RFP asks, then stop. Do not pad to wordTarget with filler when the requirement is already met. Evaluators skim — dense and short beats long and repetitive.
-40. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Cover Challenge and Solution only, facts staying faithful to evidence [E#]. If the evidence contains a client quote, include it verbatim as Client Voice (quotation marks, speaker name/title if given) — never paraphrase or invent one. Do not add a Results/KPI/metrics list or a separate "Why Relevant" section.
+32. Do NOT invent dashboards, reporting diagrams, org charts, timeline graphics, or "see attached" visuals. Describe reporting cadence in prose unless KB evidence / RFP-required template exists.
+33. ANTI-DUPLICATION: Each section has ONE job. Do not re-write Who We Are, full bios, full case studies, FEIN/address/certs, or brand story that belongs in Sections 1–3 or another RFP tab. Do not paraphrase another RFP tab (Approach≠Methodology rewrite; Past Performance≠Sample Work dump). One brief cross-reference is OK — then add NEW RFP-specific detail only. Prefer concise, concrete prose within wordTarget — no generic agency marketing filler.
+34. LENGTH (Ralph): wordTarget is a HARD CEILING. Hit the scored RFP asks, then stop. Never write extra pages "for the designer to cut later." Dense and short beats long and repetitive.
+35. References sections: restate the RFP's required reference count and institution type when the RFP specifies them. Never claim the RFP is silent on references if requirements list three customers, two-year public, or NJ public-college reference tables. If zö lacks a qualifying reference, state the gap honestly and use [MANUAL FILL: leadership decision] — do not deny the requirement exists.
+36. KPI scope: When the RFP distinguishes agency-wide/strategic-plan KPIs from CONTRACTOR-scored KPIs, commit ONLY to the contractor set (with numeric targets from Section 2 / monitoring). Never substitute the buyer's four agency KPIs for the three contractor KPIs.
+37. Cost scoring: If the RFP uses inverse cost scoring (lowest responsive price gets maximum cost points), never claim that bidding at the published ceiling earns the highest cost rating — state the tradeoff honestly.
+38. Never invent an RFP "ceiling/allocation/cap" equal to your own proposed bid total. Only cite spend ceilings that appear in RFP requirements / HARD FACTS money constraints. If the bid exceeds a stated RFP envelope, say so plainly or leave a [VERIFY] for Sonja — do not relabel the bid as the buyer's ceiling.
+39. Cost weight: Use the RFP's stated criteria points for cost/price (sum Criteria #4 + #5 when both exist) — do not round to a generic "10%". When cost/price is ≥25% of total points, narrative must not claim Average tier — Low tier is required by the Pricing Guide Decision Guide.
+40. Budget container: When the RFP requires Attachment 01 / Excel budget worksheet, the narrative budget section must point to that file — not replace it with a PDF cost-category table.
+41. HOURLY RATES: Never invent individual ZO member $/hr. If a staff-hours table is required, use labor-category / work rates from 00_Guide_Pricing evidence, or [VERIFY: hourly rate — {role}]. namedPerson is a staffing note only.
+42. PERCENT-TIME / FTE: Never invent percent-time columns or reuse static % grids from other proposals. If the RFP does not require percent-time/FTE, omit that column entirely (Role | Name | experience only). If the RFP requires it, every cell is [VERIFY: percent time] — never invent 10%/35%/25%/25-30%.
+43. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Cover Challenge and Solution only, facts staying faithful to evidence [E#]. If the evidence contains a client quote, include it verbatim as Client Voice (quotation marks, speaker name/title if given) — never paraphrase or invent one. Do not add a Results/KPI/metrics list or a separate "Why Relevant" section.
+44. FIRST-PASS COMPLETENESS (one attempt must be submission-ready prose): Address EVERY scored/required ask listed for THIS section in requirements / Requirement Ledger / Section Strategy — do not leave "we'll cover later" gaps. Prefer dense, complete answers over thin stubs. If a discrete fact is missing from KB/RFP, use one [VERIFY: …] for that field only — never invent numbers, $, %, dates, signature IDs, or client claims.
+45. SCHEDULE / TIMELINE: Use ONLY award→launch / contract dates and windows stated in the RFP (or Delivery Timeline Plan grounded in RFP). Never invent a multi-month sequential plan that overruns the RFP window. Dates and milestones only — methodology lives in Approach. Missing dates → [VERIFY: week/dates within RFP window], never fabricate a calendar.
+46. COVER LETTER / TRANSMITTAL: If the RFP requires a physically signed cover letter or letter of transmittal, write the short offer letter AND set designerNote (or an inline [DESIGNER NOTE: …]) to attach the signed PDF separately. Do not claim the signed file is attached. Do not invent signature dates, notary numbers, or stamp IDs.
+47. Concise ≠ incomplete: hit every RFP ask for the section, then STOP. No filler, no duplicated Sections 1–3, no Approach essay pasted into Schedule.
 
 Return ONLY JSON:
 {
@@ -142,6 +152,9 @@ Return ONLY JSON:
   ]
 }"""
 
+# Append Ralph fidelity block once at module load.
+DRAFT_BATCH_PROMPT = inject_ralph_into_system_prompt(DRAFT_BATCH_PROMPT)
+
 
 class DraftingGraphState(TypedDict, total=False):
     rfp_id: str
@@ -150,6 +163,7 @@ class DraftingGraphState(TypedDict, total=False):
     rfp_sector: str
     rfp_location: str | None
     rfp_context: str
+    rfp_due_date: str | None
     rfp_sections: list[dict[str, Any]]
     evidence_corpus: list[dict[str, Any]]
     execution_plan: dict[str, Any] | None
@@ -362,12 +376,36 @@ def partition_phase3_sections(
     to_draft: list[RfpSectionMap] = []
     already: list[ProposalSection] = []
     for mapped in rfp_sections:
+        # Never omit Cost/Fees/Budget or scored tabs — RFP-demanded coverage.
         if should_skip_rfp_section_as_static_duplicate(
             title=mapped.title or "",
             duplicate_of_static_section=mapped.duplicate_of_static_section,
             evaluation_weight=mapped.evaluation_weight,
             static_section_text=static_section_text,
         ):
+            # Still leave a short pointer stub so the tab is not missing from
+            # the manuscript when Phase 2 tagged it as static-covered.
+            if mapped.id not in existing_by_id:
+                already.append(
+                    ProposalSection(
+                        id=mapped.id,
+                        title=mapped.title,
+                        content=(
+                            f"## {mapped.title}\n\n"
+                            "Covered in Sections 1–3 (company / team / experience). "
+                            "See those sections for the full response; this tab is "
+                            "retained so the RFP outline remains complete."
+                        ),
+                        status="generated",
+                        source="generated",
+                        mode="write",
+                        required=True,
+                    )
+                )
+            elif existing_by_id.get(mapped.id) and _phase3_content_is_usable(
+                existing_by_id[mapped.id].content
+            ):
+                already.append(existing_by_id[mapped.id])
             continue
         existing = existing_by_id.get(mapped.id)
         if existing and _phase3_content_is_usable(existing.content):
@@ -387,8 +425,8 @@ def _evidence_for_section(
         if section_id in (item.get("sectionIds") or item.get("section_ids") or [])
     ]
     if tagged:
-        return tagged[:20]
-    return corpus[:12]
+        return tagged[:12]
+    return corpus[:10]
 
 
 def _format_evidence_block(items: list[dict[str, Any]]) -> str:
@@ -396,7 +434,7 @@ def _format_evidence_block(items: list[dict[str, Any]]) -> str:
     for item in items:
         eid = item.get("id", "?")
         source = item.get("source", "document")
-        excerpt = str(item.get("excerpt", ""))[:1800]
+        excerpt = str(item.get("excerpt", ""))[:1000]
         lines.append(f"[{eid}] {source}\n{excerpt}")
     return "\n\n".join(lines) if lines else "(No evidence items tagged for this section.)"
 
@@ -556,6 +594,18 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
         lines.append("Opportunity Understanding (restate in zö voice; do not invent facts):")
         lines.append(json.dumps(understanding, indent=2)[:3000])
     brief = _plan_section_brief(state, section_id)
+    section_title = ""
+    for mapped in state.get("rfp_sections") or []:
+        mid = getattr(mapped, "id", None) or (
+            mapped.get("id") if isinstance(mapped, dict) else None
+        )
+        if str(mid or "") == str(section_id):
+            section_title = str(
+                getattr(mapped, "title", None)
+                or (mapped.get("title") if isinstance(mapped, dict) else "")
+                or ""
+            )
+            break
     if brief:
         lines.append("Section Strategy (explain the plan — do not invent methodology/budget):")
         lines.append(
@@ -591,6 +641,13 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
             "Delivery Methodology Plan (explain this structure in zö voice — do not invent phases):"
         )
         lines.append(json.dumps(methodology, indent=2)[:3000])
+    timeline = (plan.get("delivery") or {}).get("timeline") or {}
+    if isinstance(timeline, dict) and any(timeline.values()):
+        lines.append(
+            "Delivery Timeline Plan (use for Schedule tabs — dates/milestones only; "
+            "do not restate Approach methodology paragraphs):"
+        )
+        lines.append(json.dumps(timeline, indent=2)[:2500])
     budget_plan = (plan.get("delivery") or {}).get("budget") or {}
     if isinstance(budget_plan, dict) and any(budget_plan.values()):
         lines.append(
@@ -598,6 +655,22 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
             "do not invent role-hour fee tables):"
         )
         lines.append(json.dumps(budget_plan, indent=2)[:3000])
+
+    try:
+        from app.services.proposal_consistency_enforcement import (
+            format_rfp_calendar_constraint,
+        )
+
+        cal = format_rfp_calendar_constraint(
+            rfp_due_date=str(state.get("rfp_due_date") or "") or None,
+            rfp_context_excerpt=str(state.get("rfp_context") or "")[:12000],
+            section_title=section_title or str(section_id),
+        )
+        if cal:
+            lines.append(cal)
+    except Exception:
+        pass
+
     return "\n\n".join(lines)
 
 
@@ -955,7 +1028,7 @@ async def _draft_batch_once(
             "on what THIS section uniquely requires. Only re-state a fact when "
             "the RFP explicitly demands it inside your section (a required form "
             "field or a numbered submission item).\n\n"
-            f"{zo_ctx[:8000]}\n\n"
+            f"{zo_ctx[:6000]}\n\n"
         )
 
     from app.services.proposal_section_dedup import (
@@ -1125,6 +1198,56 @@ async def _draft_batch_once(
                     "allocation rationale using RFP spend figures from requirements/plan. "
                     "Do not invent agency fee line-item tables. Do not return empty content.\n\n"
                 )
+            if any(
+                k in title_lower
+                for k in (
+                    "schedule",
+                    "timeline",
+                    "delivery schedule",
+                    "project schedule",
+                    "work schedule",
+                )
+            ):
+                user_content += (
+                    f"SCHEDULE / TIMELINE SECTION {payload.get('sectionId')}: "
+                    "Dates, milestones, and owners ONLY — do not restate Approach phases. "
+                    "Fit entirely inside the RFP award→launch / contract window from RFP "
+                    "context / Delivery Timeline Plan. Never invent a longer sequential "
+                    "plan than the RFP allows. Missing dates → [VERIFY: …], never fabricate.\n\n"
+                )
+            if any(
+                k in title_lower
+                for k in (
+                    "cover letter",
+                    "letter of transmittal",
+                    "transmittal letter",
+                )
+            ):
+                user_content += (
+                    f"COVER LETTER SECTION {payload.get('sectionId')}: "
+                    "Write a complete short offer letter addressing RFP submission asks. "
+                    "If the RFP requires a physically signed cover letter / transmittal, "
+                    "include designerNote instructing attachment of the signed PDF — "
+                    "do not invent signature dates, notary numbers, or claim the PDF is attached.\n\n"
+                )
+            if any(
+                k in title_lower
+                for k in (
+                    "approach",
+                    "methodology",
+                    "work plan",
+                    "technical approach",
+                    "understanding",
+                    "scope of work",
+                )
+            ):
+                user_content += (
+                    f"SCORED NARRATIVE {payload.get('sectionId')}: "
+                    "First-pass must thoroughly cover every requirement listed for this "
+                    "section (requirements array / Section Strategy / ledger). Dense and "
+                    "complete — no thin outline, no 'details to follow'. Stay under "
+                    "wordTarget; do not invent facts absent from RFP/KB.\n\n"
+                )
 
     user_content += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
 
@@ -1283,16 +1406,46 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
     skipped = [s for s in sections if _skip(s)]
     sections = [s for s in sections if not _skip(s)]
     sections = order_sections_for_phase3_draft(sections)
+    # Retain outline completeness: static-covered tabs get a short pointer stub
+    # instead of vanishing from the manuscript.
+    stub_drafted: list[dict[str, Any]] = []
+    for s in skipped:
+        title = str(s.get("title") or s.get("id") or "Section")
+        sid = str(s.get("id") or "")
+        if not sid:
+            continue
+        stub_drafted.append(
+            {
+                "id": sid,
+                "title": title,
+                "content": (
+                    f"## {title}\n\n"
+                    "Covered in Sections 1–3 (company / team / experience). "
+                    "See those sections for the full response; this tab is "
+                    "retained so the RFP outline remains complete."
+                ),
+                "status": "generated",
+                "source": "generated",
+                "mode": "write",
+                "required": True,
+            }
+        )
     if skipped:
         logger.info(
-            "Phase 3 skipping %d RFP sections (duplicate of static Sections 1–3): %s",
+            "Phase 3 stubbing %d RFP sections (duplicate of static Sections 1–3): %s",
             len(skipped),
             [s.get("title") for s in skipped[:5]],
         )
-    if not sections:
+    if not sections and not stub_drafted:
         return {"error": "No RFP sections to draft. Run Phase 2 first."}
 
-    all_drafted: list[dict[str, Any]] = []
+    all_drafted: list[dict[str, Any]] = list(stub_drafted)
+    # Keep static / already-filled digests for every batch (anti-repetition).
+    seed_prior: list[dict[str, Any]] = [
+        s
+        for s in (state.get("drafted_sections") or [])
+        if isinstance(s, dict) and str(s.get("content") or "").strip()
+    ]
     provider = state.get("provider") or _provider_name()
 
     batches = _chunk_sections(sections, BATCH_SIZE)
@@ -1322,10 +1475,10 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
                 step_total=len(batches),
             )
         try:
-            # Pass already-drafted sections so each batch avoids repeating them
+            # Seed + already-drafted so each batch avoids repeating them
             batch_state = {
                 **state,
-                "drafted_sections": all_drafted,
+                "drafted_sections": [*seed_prior, *all_drafted],
             }
             batch_results, batch_provider = await _draft_batch(batch, batch_state)
             all_drafted.extend(batch_results)
@@ -1434,19 +1587,17 @@ def _build_graph() -> Any:
 _DRAFTING_GRAPH = _build_graph()
 
 
-def _zo_sections_context(sections: list[ProposalSection]) -> str:
+def _zo_sections_context(sections: list[ProposalSection], *, max_chars_each: int = 1100) -> str:
     """Everything already written in Sections 1-3, so Phase 3 does not repeat it.
 
-    ``sections[:3]`` used to truncate here, but "Sections 1-3" is 8 subsections
-    (1.1-1.5 company, 2.1 bios, 3.1-3.2 case studies). The drafter therefore
-    never saw certifications, insurance, team bios or case studies, and
-    re-drafted them in RFP tabs.
+    Keep every subsection title in view (bios + case studies), with shorter
+    excerpts so the prompt budget is not eaten by Who We Are alone.
     """
     blocks: list[str] = []
     for section in sections:
-        if not section.content.strip():
+        if not (section.content or "").strip():
             continue
-        blocks.append(f"### {section.title}\n{section.content[:2500]}")
+        blocks.append(f"### {section.title}\n{(section.content or '')[:max_chars_each]}")
     return "\n\n".join(blocks)
 
 
@@ -1471,7 +1622,9 @@ async def run_drafting_graph(
     evidence_allocation: dict[str, Any] | None = None,
     requirement_ledger: dict[str, Any] | None = None,
     doc_word_budget: int | None = None,
+    prior_drafted_sections: list[ProposalSection] | None = None,
     on_sections_drafted: SectionDraftedCallback | None = None,
+    rfp_due_date: str | None = None,
 ) -> tuple[list[ProposalSection], str, list[EvidenceItem]]:
     if not llm.is_configured():
         raise LlmError(
@@ -1550,6 +1703,7 @@ async def run_drafting_graph(
         "rfp_sector": rfp_sector,
         "rfp_location": rfp_location,
         "rfp_context": rfp_context,
+        "rfp_due_date": (rfp_due_date or "").strip() or None,
         "rfp_sections": section_dicts,
         "evidence_corpus": [e.model_dump(by_alias=True) for e in evidence_corpus],
         "execution_plan": plan_dict if isinstance(plan_dict, dict) else None,
@@ -1566,7 +1720,12 @@ async def run_drafting_graph(
         "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
         "fact_ledger": ledger_dict if isinstance(ledger_dict, dict) else None,
         "evidence_allocation": alloc_dict if isinstance(alloc_dict, dict) else None,
-        "drafted_sections": [],
+        # Seed already-filled RFP tabs so each new draft sees ALREADY COVERED digests.
+        "drafted_sections": [
+            s.model_dump(by_alias=True)
+            for s in (prior_drafted_sections or [])
+            if (s.content or "").strip()
+        ],
         "llm_semaphore": asyncio.Semaphore(LLM_CONCURRENCY),
     }
 
@@ -1618,6 +1777,7 @@ async def draft_single_rfp_section_phase3(
     execution_plan: dict[str, Any] | None = None,
     evidence_allocation: dict[str, Any] | None = None,
     rewrite_brief: str = "",
+    prior_drafted_sections: list[ProposalSection] | None = None,
 ) -> tuple[ProposalSection, str, list[EvidenceItem]]:
     """Phase 3 drafting path for exactly one RFP-mapped section (Senior Editor tickets)."""
     if not llm.is_configured():
@@ -1645,6 +1805,13 @@ async def draft_single_rfp_section_phase3(
         extra.append(f"Senior Editor rewrite brief: {rewrite_brief.strip()}")
         section_dump["uncoveredRequirements"] = extra
 
+    # Sibling digests so Senior Editor redrafts do not rehash other tabs.
+    prior = [
+        s.model_dump(by_alias=True)
+        for s in (prior_drafted_sections or [])
+        if (s.content or "").strip() and s.id != section.id
+    ]
+
     state: DraftingGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
@@ -1668,7 +1835,7 @@ async def draft_single_rfp_section_phase3(
         "manuscript_locks": locks_dict if isinstance(locks_dict, dict) else None,
         "fact_ledger": None,
         "evidence_allocation": alloc_dict if isinstance(alloc_dict, dict) else None,
-        "drafted_sections": [],
+        "drafted_sections": prior,
         "llm_semaphore": asyncio.Semaphore(LLM_CONCURRENCY),
     }
 

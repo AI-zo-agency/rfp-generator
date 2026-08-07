@@ -27,7 +27,13 @@ _ELIGIBILITY_DQ_RE = re.compile(
     r"license[d]?|licensure|registered\s+to\s+do\s+business|"
     r"mandatory\s+pre[\s-]?bid|prime\s+contractor\s+must|"
     r"in[\s-]?state\s+(?:office|presence)|physical\s+presence\s+required|"
-    r"late\s+submissions?\s+(?:will\s+not|shall\s+not|not)\s+be\s+accepted"
+    r"late\s+submissions?\s+(?:will\s+not|shall\s+not|not)\s+be\s+accepted|"
+    r"e-?verify|"
+    r"sealed\s+(?:envelope|bid|package)|"
+    r"separate\s+(?:technical|cost|price)\s+(?:and|&|\/)\s+(?:cost|price|technical)|"
+    r"do\s+not\s+include\s+pricing\s+in\s+(?:the\s+)?technical|"
+    r"pricing\s+(?:must|shall)\s+not\s+appear\s+in\s+(?:the\s+)?technical|"
+    r"non[\s-]?responsive|instant(?:ly)?\s+reject"
     r")\b"
 )
 
@@ -79,7 +85,12 @@ def _flag_messages(flags: Any, *, severities: set[str]) -> list[str]:
 
 
 def collect_go_no_go_dq_risks(rfp: RfpRecord) -> list[str]:
-    """Map persisted go/no-go analysis into Scan-RFP disqualification risks."""
+    """Map persisted go/no-go into Scan risks — true DQ only, not capability gaps.
+
+    Unverified capability / thin KB proof belongs in Go/No-Go review, not the
+    Scan "disqualification" banner (those flooded Oshkosh-style scans with
+    Brittany Frazier / pricing-guide evidence noise).
+    """
     risks: list[str] = []
     analysis = _analysis_dict(rfp)
     recommendation = (
@@ -93,17 +104,6 @@ def collect_go_no_go_dq_risks(rfp: RfpRecord) -> list[str]:
             "submission-ready until leadership clears the blockers."
         )
 
-    for gap in analysis.get("criticalGaps") or []:
-        if isinstance(gap, str) and gap.strip():
-            risks.append(gap.strip())
-
-    compliance = analysis.get("compliance") if isinstance(analysis.get("compliance"), dict) else {}
-    scope = analysis.get("scopeMatch") if isinstance(analysis.get("scopeMatch"), dict) else {}
-    risks.extend(
-        _flag_messages(compliance.get("flags"), severities={"critical", "warning"})
-    )
-    risks.extend(_flag_messages(scope.get("flags"), severities={"critical"}))
-
     deadline = analysis.get("deadline") if isinstance(analysis.get("deadline"), dict) else {}
     if deadline.get("isPast") and deadline.get("lateSubmissionDisqualifies"):
         due = deadline.get("dueDate") or "see RFP"
@@ -112,7 +112,50 @@ def collect_go_no_go_dq_risks(rfp: RfpRecord) -> list[str]:
             "disqualifier per the RFP."
         )
 
-    # De-dupe while preserving order
+    compliance = analysis.get("compliance") if isinstance(analysis.get("compliance"), dict) else {}
+    # Only hard eligibility / submission / disqualification compliance flags.
+    _DQ_CATEGORIES = {
+        "eligibility",
+        "disqualification",
+        "deadline",
+        "submission",
+        "bonding",
+        "licensing",
+        "set_aside",
+        "set-aside",
+    }
+    if isinstance(compliance.get("flags"), list):
+        for flag in compliance["flags"]:
+            if not isinstance(flag, dict):
+                continue
+            sev = str(flag.get("severity") or "").casefold()
+            if sev not in {"critical", "warning"}:
+                continue
+            cat = str(flag.get("category") or "").strip().casefold().replace(" ", "_")
+            msg = str(flag.get("message") or flag.get("text") or flag.get("detail") or "").strip()
+            if not msg:
+                continue
+            # Skip capability / evidence adjudication noise
+            if msg.casefold().startswith("unverified capability"):
+                continue
+            if cat and cat not in _DQ_CATEGORIES and sev != "critical":
+                continue
+            if cat in _DQ_CATEGORIES or (
+                sev == "critical"
+                and any(
+                    k in msg.casefold()
+                    for k in (
+                        "disqualif",
+                        "set-aside",
+                        "set aside",
+                        "must be certified",
+                        "late submission",
+                        "bonding required",
+                    )
+                )
+            ):
+                risks.append(f"{cat}: {msg}" if cat else msg)
+
     seen: set[str] = set()
     unique: list[str] = []
     for risk in risks:
@@ -121,6 +164,26 @@ def collect_go_no_go_dq_risks(rfp: RfpRecord) -> list[str]:
             continue
         seen.add(key)
         unique.append(risk)
+    return unique
+
+
+def collect_go_no_go_review_gaps(rfp: RfpRecord) -> list[str]:
+    """Capability / criticalGaps for human Go/No-Go review — not DQ banner."""
+    analysis = _analysis_dict(rfp)
+    gaps: list[str] = []
+    for gap in analysis.get("criticalGaps") or []:
+        if isinstance(gap, str) and gap.strip():
+            gaps.append(gap.strip())
+    scope = analysis.get("scopeMatch") if isinstance(analysis.get("scopeMatch"), dict) else {}
+    gaps.extend(_flag_messages(scope.get("flags"), severities={"critical", "warning"}))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for gap in gaps:
+        key = gap.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(gap)
     return unique
 
 
@@ -140,6 +203,31 @@ def collect_rfp_text_dq_risks(
         risks.append(
             "RFP disqualifies altered quotation/pricing forms — fill the buyer's "
             "official form only; do not invent Section A–D substitutes."
+        )
+
+    text_cf = (rfp_text or "").casefold()
+    if re.search(
+        r"sealed\s+(?:envelope|bid|package)|original\s+signature|wet[\s-]?ink",
+        text_cf,
+    ):
+        risks.append(
+            "RFP requires sealed package and/or original wet-ink signature — "
+            "confirm physical submission package before upload (disqualification if missing)."
+        )
+    if re.search(
+        r"separate\s+(?:technical|cost|price).{0,40}(?:cost|price|technical)|"
+        r"do\s+not\s+include\s+pricing\s+in\s+(?:the\s+)?technical|"
+        r"pricing\s+(?:must|shall)\s+not\s+appear\s+in\s+(?:the\s+)?technical",
+        text_cf,
+    ):
+        risks.append(
+            "RFP requires separate technical/cost volumes (or forbids pricing in "
+            "technical) — keep fee tables out of the technical manuscript."
+        )
+    if re.search(r"\be-?verify\b", text_cf):
+        risks.append(
+            "RFP references E-Verify — do not assert enrollment unless verified; "
+            "attach required affidavit / enrollment proof with the package."
         )
 
     page_limit = resolve_page_limit(getattr(rfp, "page_limit", None), rfp_text)
@@ -236,6 +324,18 @@ def run_scan_dq_gate_pass(
             continue
         seen.add(key)
         unique_risks.append(risk)
+
+    review_gaps = collect_go_no_go_review_gaps(rfp)
+    if review_gaps:
+        human.append(
+            f"go-no-go-review — {len(review_gaps)} capability / fit gap(s) from "
+            "Go/No-Go (not automatic disqualifiers): "
+            + "; ".join(review_gaps[:5])
+        )
+        logs.append(
+            f"dq-gate — {len(review_gaps)} Go/No-Go review gap(s) kept separate "
+            "from disqualification risks."
+        )
 
     if unique_risks:
         logs.append(
@@ -394,6 +494,7 @@ __all__ = [
     "ScanDqGateResult",
     "ScanOrchestratorResult",
     "collect_go_no_go_dq_risks",
+    "collect_go_no_go_review_gaps",
     "collect_rfp_text_dq_risks",
     "run_scan_dq_gate_pass",
     "run_scan_coverage_orchestrator",

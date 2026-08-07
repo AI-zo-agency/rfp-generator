@@ -113,9 +113,9 @@ class TestVerifyOptionalScrubAsync(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             await scrub_optional_verify_tags(
-                "Body with [VERIFY: subcontractor name] to scrub.",
-                section_title="Scope",
-                rfp_text="RFP text.",
+                "Legal entity FEIN: [VERIFY: FEIN / federal tax ID from Sonja].",
+                section_title="Business Information",
+                rfp_text="Offeror shall provide FEIN and federal employer identification number.",
             )
         self.assertEqual(
             mock_chat_json.call_args.kwargs.get("node_name"),

@@ -14,7 +14,15 @@ interface SyncJustWinModalProps {
 type SyncMode = "today" | "specific" | "all";
 type TabFilter = "all" | "hot" | "warm" | "review";
 
-const getTodayIso = (): string => new Date().toISOString().slice(0, 10);
+const getTodayIso = (): string => {
+  // Local calendar date — matches how JustWin renders the "Posted" column in
+  // the browser. toISOString() is UTC and skipped same-day leads for IST/US users.
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
 
 const getPastDateIso = (daysAgo: number): string => {
   const d = new Date();

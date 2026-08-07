@@ -388,6 +388,8 @@ class OutlineSection(BaseModel):
     parent_id: str | None = Field(default=None, alias="parentId")
     children: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
+    # Stamped from evaluation criteria before lean filter so scored tabs survive.
+    evaluation_weight: float | None = Field(default=None, alias="evaluationWeight")
 
 
 class ProposalOutline(BaseModel):

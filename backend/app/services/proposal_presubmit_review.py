@@ -34,7 +34,6 @@ from app.services.proposal_fulfill_rfp_accuracy import (
 )
 from app.services.proposal_rfp_submission_requirements import (
     detect_narrative_submission_gaps,
-    list_submission_checklist_from_rfp,
 )
 from app.services.proposal_manuscript_cleanup import (
     GRAMMAR_GLITCH_RE,
@@ -81,7 +80,15 @@ _REF_DENIAL_RE = re.compile(
     r"(?:reference|number of references|institution type)",
     re.I | re.S,
 )
-_QUOTATION_FORM_REWRITE_RE = re.compile(r"\bsection\s+[a-d]\b", re.I)
+_QUOTATION_FORM_REWRITE_RE = re.compile(
+    r"(?i)"
+    r"(?:"
+    r"\bsection\s+[a-d]\b|"
+    r"\bpart\s+[ivx]+\b.{0,40}(?:fee|rate|pricing)|"
+    r"invented\s+(?:fee|rate)\s+table|"
+    r"custom\s+(?:pricing|quotation)\s+(?:schedule|form)"
+    r")",
+)
 
 
 def _scan_rfp_contradictions(
@@ -196,18 +203,28 @@ def _scan_submission_document_gaps(
     *,
     draft: ProposalDraft,
     rfp: RfpRecord,
+    rfp_text: str | None = None,
 ) -> list[PreSubmitIssue]:
+    """Flag missing RFP-required narrative + unresolved physical attachments.
+
+    Physical forms / signatures with only ``[MANUAL FILL]`` stubs are critical
+    disqualification risks — a stub is not a signed W-9 / COI / affidavit.
+    """
     issues: list[PreSubmitIssue] = []
-    try:
-        _, _, rfp_text = load_rfp_for_proposal(rfp.id)
-    except Exception:  # noqa: BLE001
+    text = (rfp_text or "").strip()
+    if not text:
+        try:
+            _, _, text = load_rfp_for_proposal(rfp.id)
+        except Exception:  # noqa: BLE001
+            return issues
+    if not text.strip():
         return issues
 
     manuscript = "\n\n".join(
         f"{s.title}\n{s.content}" for s in draft.sections if s.content.strip()
     ).casefold()
 
-    if re.search(r"acknowledgement\s+of\s+addenda|acknowledgment\s+of\s+addenda", rfp_text, re.I):
+    if re.search(r"acknowledgement\s+of\s+addenda|acknowledgment\s+of\s+addenda", text, re.I):
         if not any(
             k in manuscript
             for k in (
@@ -230,7 +247,7 @@ def _scan_submission_document_gaps(
                 )
             )
 
-    for item in detect_narrative_submission_gaps(draft, rfp_text):
+    for item in detect_narrative_submission_gaps(draft, text):
         issues.append(
             PreSubmitIssue(
                 severity="critical",
@@ -241,11 +258,65 @@ def _scan_submission_document_gaps(
             )
         )
 
-    for label in list_submission_checklist_from_rfp(rfp_text):
-        if "signed" in label.casefold() or "notarized" in label.casefold():
-            continue  # physical forms — closing checklist handles
-        if "narrative" in label.casefold():
-            continue  # covered by detect_narrative_submission_gaps
+    # Fail closed on physical docs the RFP demands — stubs do not clear DQ.
+    from app.services.proposal_rfp_submission_requirements import (
+        outstanding_submission_checklist_for_scan,
+    )
+
+    outstanding = outstanding_submission_checklist_for_scan(text, draft)
+    # Broad catalog rows are advisory — specific forms (W-9, COI, bonds, etc.)
+    # are hard disqualification risks.
+    _BROAD_ATTACHMENT = {
+        "named exhibits / appendices / attachments",
+        "required attachments checklist",
+    }
+    for label in outstanding.needs_attachment[:12]:
+        if label.casefold() in _BROAD_ATTACHMENT:
+            issues.append(
+                PreSubmitIssue(
+                    severity="warning",
+                    category="compliance",
+                    message=(
+                        f"RFP attachment checklist still open: “{label}” — confirm each "
+                        "named exhibit is attached before submit."
+                    ),
+                    sectionId=None,
+                    sectionTitle=label,
+                )
+            )
+            continue
+        issues.append(
+            PreSubmitIssue(
+                severity="critical",
+                category="compliance",
+                message=(
+                    f"DISQUALIFICATION RISK: RFP requires physical/signed attachment "
+                    f"“{label}” — manuscript still has only a stub or is missing it. "
+                    "Attach the official buyer form / signed original before submit."
+                ),
+                sectionId=None,
+                sectionTitle=label,
+            )
+        )
+    for label in outstanding.needs_drafting[:8]:
+        # Skip compulsory close if already handled elsewhere as soft — still critical
+        # when truly missing from body.
+        if "closing statement" in label.casefold() and any(
+            "closing" in (s.title or "").casefold() and (s.content or "").strip()
+            for s in draft.sections
+        ):
+            continue
+        issues.append(
+            PreSubmitIssue(
+                severity="critical",
+                category="compliance",
+                message=(
+                    f"RFP requires submission item “{label}” — not resolved in manuscript."
+                ),
+                sectionId=None,
+                sectionTitle=label,
+            )
+        )
 
     return issues
 
@@ -616,6 +687,7 @@ def _compliance_checklist(
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
     rfp: RfpRecord,
+    rfp_text: str | None = None,
 ) -> list[ComplianceCheckItem]:
     items: list[ComplianceCheckItem] = []
     section_titles = {s.title.strip().casefold() for s in draft.sections}
@@ -634,11 +706,24 @@ def _compliance_checklist(
                     sig in req_lower
                     for sig in ("signature", "signed", "notary", "original", "sealed")
                 ):
+                    # Fail closed: signature/sealed asks are not cleared by prose stubs.
+                    stub_open = bool(
+                        draft_match
+                        and (
+                            "[MANUAL FILL" in (draft_match.content or "").upper()
+                            or "[VERIFY:" in (draft_match.content or "").upper()
+                        )
+                    )
                     items.append(
                         ComplianceCheckItem(
                             item=req[:120],
-                            status="manual",
-                            notes="Confirm signed/original in submission package",
+                            status="fail" if (not has_content or stub_open) else "manual",
+                            notes=(
+                                "Unsigned / stub only — attach wet-ink or buyer form "
+                                "before submit (disqualification risk)"
+                                if (not has_content or stub_open)
+                                else "Confirm signed/original in submission package"
+                            ),
                         )
                     )
                 elif has_content:
@@ -694,15 +779,18 @@ def _compliance_checklist(
                 )
             )
 
-    if rfp.page_limit:
+    from app.services.rfp_page_limit import resolve_page_limit
+
+    page_limit = resolve_page_limit(rfp.page_limit, rfp_text)
+    if page_limit and page_limit > 0:
         total_words = sum(
             len(s.content.split()) for s in draft.sections if s.content.strip()
         )
         est_pages = max(1, total_words // 350)
-        if est_pages > rfp.page_limit:
+        if est_pages > page_limit:
             items.append(
                 ComplianceCheckItem(
-                    item=f"Page limit ({rfp.page_limit} pages)",
+                    item=f"Page limit ({page_limit} pages)",
                     status="fail",
                     notes=f"Manuscript ~{est_pages} pages ({total_words} words)",
                 )
@@ -710,7 +798,7 @@ def _compliance_checklist(
         else:
             items.append(
                 ComplianceCheckItem(
-                    item=f"Page limit ({rfp.page_limit} pages)",
+                    item=f"Page limit ({page_limit} pages)",
                     status="pass",
                     notes=f"Manuscript ~{est_pages} pages",
                 )
@@ -882,9 +970,17 @@ def run_presubmit_review(
     extra_issues: list[PreSubmitIssue] | None = None,
 ) -> PreSubmitReview:
     issues: list[PreSubmitIssue] = []
+    rfp_text = ""
+    try:
+        _, _, rfp_text = load_rfp_for_proposal(rfp.id)
+    except Exception:  # noqa: BLE001
+        rfp_text = ""
+
     issues.extend(_scan_copy_paste(draft=draft, rfp=rfp))
     issues.extend(_scan_rfp_contradictions(draft=draft, rfp=rfp))
-    issues.extend(_scan_submission_document_gaps(draft=draft, rfp=rfp))
+    issues.extend(
+        _scan_submission_document_gaps(draft=draft, rfp=rfp, rfp_text=rfp_text or None)
+    )
     issues.extend(_scan_voice(draft=draft))
     issues.extend(_scan_grammar(draft=draft))
     issues.extend(_scan_subcontractor_narrative(draft=draft, research=research))
@@ -919,18 +1015,27 @@ def run_presubmit_review(
             )
         )
 
-    checklist = _compliance_checklist(draft=draft, research=research, rfp=rfp)
+    checklist = _compliance_checklist(
+        draft=draft,
+        research=research,
+        rfp=rfp,
+        rfp_text=rfp_text or None,
+    )
     critical_count = sum(1 for i in issues if i.severity == "critical")
     fail_count = sum(1 for c in checklist if c.status == "fail")
 
     ready = critical_count == 0 and fail_count == 0
 
     if ready:
-        summary = "No critical blockers found. Complete manual signature/compliance items before eVP upload."
+        summary = (
+            "No critical blockers found. Still confirm wet signatures / sealed package "
+            "per RFP before eVP upload."
+        )
     else:
         summary = (
             f"{critical_count} critical issue(s), {fail_count} compliance fail(s), "
-            f"{len(issues)} total findings — resolve before submission."
+            f"{len(issues)} total findings — resolve before submission "
+            "(gov / buyer disqualification risks)."
         )
 
     return PreSubmitReview(

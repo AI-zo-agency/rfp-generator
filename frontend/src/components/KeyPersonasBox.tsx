@@ -21,10 +21,10 @@ export function KeyPersonasBox({
   const [isOpen, setIsOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>(initialSelectedIds);
 
+  // Keep badge in sync with parent — including Clear / Reset to [].
   useEffect(() => {
-    if (!isOpen && initialSelectedIds && initialSelectedIds.length > 0) {
-      setSelectedIds(initialSelectedIds);
-    }
+    if (isOpen) return;
+    setSelectedIds(initialSelectedIds || []);
   }, [initialSelectedIds, isOpen]);
 
   const handleSelectionChange = (ids: string[]) => {
@@ -32,12 +32,19 @@ export function KeyPersonasBox({
     onSelectionChange?.(ids);
   };
 
+  const count = selectedIds.length;
+
   return (
     <div className={`inline-flex items-center gap-2 ${className}`}>
       <button
         type="button"
         onClick={() => setIsOpen(true)}
         className="zo-btn secondary flex items-center gap-2 px-3.5 py-2 text-xs font-semibold shadow-xs transition-smooth hover:border-[#ef5018] hover:text-[#ef5018]"
+        title={
+          count === 0
+            ? "No key personas selected yet — pick them when you Generate Proposal"
+            : `${count} key persona${count === 1 ? "" : "s"} selected for this proposal`
+        }
       >
         <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#ef5018]/12 text-[#ef5018]">
           <svg
@@ -55,8 +62,14 @@ export function KeyPersonasBox({
           </svg>
         </span>
         <span>Key Personas</span>
-        <span className="rounded-full bg-[#ef5018] px-2 py-0.5 text-[10px] font-bold text-white">
-          {selectedIds.length}
+        <span
+          className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+            count === 0
+              ? "bg-[#e5e7eb] text-[#6b7280]"
+              : "bg-[#ef5018] text-white"
+          }`}
+        >
+          {count}
         </span>
       </button>
 

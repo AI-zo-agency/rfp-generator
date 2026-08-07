@@ -103,11 +103,11 @@ async def retrieve_for_section(
     queries = list(entry.queries) or [
         f"zö agency {rfp_client} {' '.join(entry.required_assets)}".strip()
     ]
-    for query in queries[:5]:
+    for query in queries[:3]:
         try:
             hits = await supermemory.search_documents(
                 query=query[:220],
-                limit=6,
+                limit=5,
                 include_full_docs=True,
                 filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
             )
@@ -131,7 +131,7 @@ async def retrieve_for_section(
             enriched["excerpt"] = excerpt
             enriched["content"] = excerpt
             raw_hits.append(enriched)
-            if len(raw_hits) >= 18:
+            if len(raw_hits) >= 12:
                 break
         if len(raw_hits) >= 18:
             break

@@ -239,6 +239,107 @@ class EnforceCapabilityEvidenceTests(unittest.TestCase):
         self.assertEqual(out.capability_matrix[0].status, "verified")
         self.assertEqual(out.recommendation, "go")
 
+    def test_partial_core_gaps_with_strong_composite_are_conditions_not_no_go(
+        self,
+    ) -> None:
+        """Score ~3.8 must not print NO-GO solely because a minority of cores gap.
+
+        Live NYCEDC-class bug: fit/worth and matrix average stayed high while
+        any core gap forced recommendation=no_go and the summary lead with
+        'NO-GO — N of M …'. Pipeline threshold logic treats ≥3.0 as go/conditions.
+        """
+        from app.models.go_no_go import GoNoGoDecisionMatrixRow
+        from app.services.go_no_go_service import (
+            _enforce_capability_evidence,
+            compute_overall_go_score,
+        )
+
+        analysis = self._analysis().model_copy(
+            update={
+                "capability_matrix": [
+                    _row("Brand strategy", "verified", "x"),
+                    _row("Media planning", "verified", "x"),
+                    _row("Creative production", "verified", "x"),
+                    _row("Public education campaigns", "verified", "x"),
+                    _adjudicated_gap(
+                        "NYC PASSPort registration", "no KB source cited"
+                    ),
+                ],
+                "decision_matrix": [
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Technical Capability Match",
+                        score=4,
+                        notes="strong",
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Resource Availability", score=4, notes=""
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Financial Viability", score=4, notes=""
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Strategic Value", score=4, notes=""
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Win Probability", score=4, notes=""
+                    ),
+                ],
+            }
+        )
+
+        out = _enforce_capability_evidence(analysis, KB_HITS)
+        overall = compute_overall_go_score(out)
+
+        self.assertGreaterEqual(overall or 0, 3.0)
+        self.assertEqual(out.recommendation, "review")
+        self.assertTrue(
+            out.summary.startswith("GO WITH CONDITIONS"),
+            out.summary,
+        )
+        self.assertNotIn("NO-GO —", out.summary[:80])
+
+    def test_high_score_never_keeps_stale_no_go_label(self) -> None:
+        """Safety net: overall ≥3.0 cannot wear a No-Go badge (NYCEDC live bug)."""
+        from app.models.go_no_go import GoNoGoDecisionMatrixRow
+        from app.services.go_no_go_service import align_recommendation_with_score
+
+        analysis = self._analysis().model_copy(
+            update={
+                "recommendation": "no_go",
+                "summary": (
+                    "NO-GO — 5 of 24 required capabilities lack verifiable "
+                    "knowledge-base evidence. Overall Go Score 3.8/5."
+                ),
+                "stage_one_report": "## FINAL RECOMMENDATION\nNO-GO\n",
+                "capability_matrix": [
+                    _row("Brand strategy", "verified", "x"),
+                ],
+                "decision_matrix": [
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Technical Capability Match", score=4, notes=""
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Resource Availability", score=4, notes=""
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Financial Viability", score=4, notes=""
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Strategic Value", score=4, notes=""
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Win Probability", score=3, notes=""
+                    ),
+                ],
+            }
+        )
+
+        out = align_recommendation_with_score(analysis)
+
+        self.assertEqual(out.recommendation, "review")
+        self.assertTrue(out.summary.startswith("GO WITH CONDITIONS"), out.summary)
+        self.assertNotIn("NO-GO", out.stage_one_report)
+
     def test_missing_matrix_fails_closed_not_open(self) -> None:
         """An omitted matrix must not silently bypass validation.
 
@@ -346,6 +447,25 @@ class NarrativeReconciliationTests(unittest.TestCase):
         self.assertEqual(reconcile_narrative("", recommendation="no_go",
                                              overall_score=1.0), "")
 
+
+
+class BroadcastEvidenceSynonymTests(unittest.TestCase):
+    """Maricopa-style TV/broadcast KB text must evidence multimedia requirements."""
+
+    def test_broadcast_aliases_match_television_kb(self) -> None:
+        from app.services.go_no_go_capability import _source_supports
+
+        src = (
+            "Maricopa County contract explicitly lists Television advertisement "
+            "production, Broadcast (TV/Radio) campaign management, and Produce "
+            "broadcast-quality video for TV/cinema."
+        )
+        self.assertTrue(
+            _source_supports(
+                "broadcast production and multimedia editing",
+                src,
+            )
+        )
 
 
 class DisclaimedSkillTests(unittest.TestCase):

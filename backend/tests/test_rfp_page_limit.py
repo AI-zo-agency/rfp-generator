@@ -273,7 +273,9 @@ class RemainingWordBudgetFlowsFromParsedTextTests(unittest.TestCase):
         # Sanity: bounded by the parsed 12-page cap, not runaway, and not
         # thrown off by the "Font size 12" / "pages 40-45" decoys.
         self.assertLessEqual(after, 12 * WORDS_PER_PAGE)
-        self.assertEqual(after, 3570)  # 12 * 350 words/page * (1 - 0.15 reserve)
+        # Short RFPs (≤15 pages) hold a larger Ralph reserve (0.22) so budget /
+        # closing don't push Todd past the page cap.
+        self.assertEqual(after, 3276)  # 12 * 350 * (1 - 0.22)
 
     def test_manual_field_overrides_parsed_text(self) -> None:
         rfp = _rfp(pageLimit=5)

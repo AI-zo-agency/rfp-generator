@@ -47,6 +47,11 @@ def _builder_system_prompt(*, study_title: str, rfp_client: str, strict: bool) -
         f"{strict_extra}"
         "CRITICAL RULES:\n"
         f"- Do NOT write about '{rfp_client}' — that is the CURRENT client.\n"
+        "- Write EXACTLY ONE case study for ONE past client/engagement.\n"
+        "- NEVER paste a 'RELEVANT CASE STUDIES' catalog or stack Medford + Bend + "
+        "Deschutes + Oregon Employment (or any other multi-client list) into this card.\n"
+        "- If the retrieved document contains multiple projects, pick the SINGLE best "
+        "match for this study title and ignore the rest.\n"
         "- ONLY use verified facts from the retrieved case study document below.\n"
         "- Keep the REAL project name and what the engagement actually was "
         "(festival, ticket sales, VIP, launch window, etc.). "
@@ -229,17 +234,30 @@ async def run_case_study_builder_agent(
         )
 
     if reject_reason is not None:
-        # Source dumps / fidelity failures must not ship. Missing headings alone can
-        # still be usable prose (retry already attempted); keep rather than blanking.
-        if reject_reason.startswith("source dump") or reject_reason.startswith(
-            "fidelity failed"
-        ) or reject_reason == "empty":
+        # Source dumps / empty output must not ship. Fidelity failures against a
+        # multi-project master dump used to wipe good focused write-ups — if the
+        # card still has Challenge/Solution structure, keep it rather than blanking.
+        if reject_reason == "empty" or reject_reason.startswith("source dump"):
             content = _case_study_stub(study_title, reject_reason)
             logger.warning(
                 "Case study builder stubbing %s after retries: %s",
                 study_title,
                 reject_reason,
             )
+        elif reject_reason.startswith("fidelity failed"):
+            if case_study_has_required_structure(content):
+                logger.warning(
+                    "Case study builder keeping structured output for %s despite %s",
+                    study_title,
+                    reject_reason,
+                )
+            else:
+                content = _case_study_stub(study_title, reject_reason)
+                logger.warning(
+                    "Case study builder stubbing %s after retries: %s",
+                    study_title,
+                    reject_reason,
+                )
         else:
             logger.warning(
                 "Case study builder keeping non-dump output for %s after retries: %s",

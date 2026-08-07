@@ -871,6 +871,20 @@ function ProposalDraftWorkspaceInner({
           setBudget(null);
           setPresubmitReview(null);
         }
+        // Keep Key Personas badge honest with the server (Clear / Reset / other tab).
+        if (snap.draft) {
+          const serverIds = snap.draft.selectedKeyPersonas ?? [];
+          setOutline((prev) => {
+            const localIds = prev.selectedKeyPersonas ?? [];
+            if (
+              serverIds.length === localIds.length &&
+              serverIds.every((id, i) => id === localIds[i])
+            ) {
+              return prev;
+            }
+            return { ...prev, selectedKeyPersonas: serverIds };
+          });
+        }
       });
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -1369,16 +1383,17 @@ function ProposalDraftWorkspaceInner({
     const scanOk = await confirm({
       title: "Scan RFP & update proposal?",
       description:
-        "Reads the full uploaded RFP and updates this proposal where needed:\n\n" +
+        "Improves this existing proposal in place (does not wipe and regenerate from scratch):\n\n" +
         "• Add missing closing / submission tabs\n" +
         "• Align scored sections to the RFP TOC\n" +
         "• Merge duplicates / cut unrequested, padding, or over-limit sections (stay qualified — keep trust anchors)\n" +
-        "• DQ & gov-policy gate (Go/No-Go, attestations, eligibility) — agentic recheck loop\n" +
+        "• DQ & gov-policy gate (true disqualifiers only — not Go/No-Go capability noise)\n" +
         "• Regenerate budget if missing; thorough reconcile + grounding if present\n" +
-        "• Consistency + KPI repairs\n" +
-        "• KB fact-check and remove optional [VERIFY] tags\n" +
+        "• Full blocker suite (same as Generate): primary contact, refs, schedule/calendar, certs, case-study titles\n" +
+        "• LLM manuscript-vs-RFP contradiction check + signed-cover PDF designer note\n" +
+        "• KPI repairs, KB fact-check, optional [VERIFY] scrub\n" +
         "• Refresh pre-submit review\n\n" +
-        "Does NOT invent facts. A saved version is stored first.",
+        "Does NOT invent facts, figures, or signature details. A saved version is stored first.",
       confirmLabel: "Scan RFP",
       tone: "default",
     });
@@ -1496,8 +1511,13 @@ function ProposalDraftWorkspaceInner({
 
     // Fresh start: clear the editor immediately so old manuscript cannot flash
     // while the server soft-regenerates Sections 1–3 in place (no DB wipe).
+    // Keep Key Persona picks — buildDefaultOutline() starts at [] and must not
+    // erase the selection the generate-gate just confirmed.
     if (forceRestart) {
-      const defaults = buildDefaultOutline(rfp);
+      const defaults = {
+        ...buildDefaultOutline(rfp),
+        selectedKeyPersonas: outline.selectedKeyPersonas ?? [],
+      };
       saveGenerationRef.current += 1;
       skipNextSaveRef.current = true;
       liveContentFingerprintRef.current = new Map();
@@ -2498,7 +2518,7 @@ function ProposalDraftWorkspaceInner({
                     !outline.sections.some((s) => s.content.trim())
                   }
                   className="zo-btn !py-2 !px-3 !text-sm disabled:opacity-40"
-                  title="Scan full RFP: merge/cut sections, regenerate missing budget, fact-check, scrub optional VERIFY"
+                  title="Scan full RFP on this draft (no full regen): missing pieces, consistency, signed-PDF designer notes, budget, fact-check"
                 >
                   {isFulfillingRfpGaps
                     ? "Scanning RFP…"

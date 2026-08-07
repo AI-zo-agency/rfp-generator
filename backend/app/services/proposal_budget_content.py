@@ -172,6 +172,36 @@ def render_pricing_proposal_form_markdown(
     return "\n".join(lines)
 
 
+_DEDICATED_BUDGET_TITLE_RE = re.compile(
+    r"\b("
+    r"cost\s+of(?:\s+the)?\s+base(?:\s+bid)?|"
+    r"cost\s+proposal|"
+    r"fee\s+schedule|"
+    r"price\s+proposal|"
+    r"pricing\s+proposal|"
+    r"compensation\s+schedule|"
+    r"budget\s*(?:&|and)\s*pricing|"
+    r"budget\s+and\s+fees|"
+    r"fees?\s*(?:&|and)\s*budget|"
+    r"proposed\s+(?:fees?|pricing|budget)"
+    r")\b",
+    re.I,
+)
+
+# "Budgets" listed among SOW/timeline/reporting topics — not the Cost Proposal tab.
+_INCIDENTAL_BUDGET_LIST_RE = re.compile(
+    r"\bbudgets?\b.{0,40}\b("
+    r"timeline|timelines|schedule|schedules|reporting|report|methodology|"
+    r"approach|deliverable|kpi|kpis"
+    r")\b|"
+    r"\b("
+    r"timeline|timelines|schedule|schedules|reporting|report|methodology|"
+    r"approach|deliverable|kpi|kpis"
+    r")\b.{0,40}\bbudgets?\b",
+    re.I,
+)
+
+
 def budget_section_score(title: str) -> int:
     t = title.lower()
     # Sections that merely list "budgets" among SOW/compliance topics are NOT
@@ -182,15 +212,14 @@ def budget_section_score(title: str) -> int:
         r"acknowledgements?|cover\s+letter|case\s+stud|references?"
         r")\b",
         t,
-    ) and not re.search(
-        r"\b("
-        r"cost\s+of(?:\s+the)?\s+base|cost\s+proposal|fee\s+schedule|"
-        r"price\s+proposal|pricing\s+proposal|compensation\s+schedule"
-        r")\b",
-        t,
-    ):
+    ) and not _DEDICATED_BUDGET_TITLE_RE.search(t):
         return 0
+    if _INCIDENTAL_BUDGET_LIST_RE.search(t) and not _DEDICATED_BUDGET_TITLE_RE.search(t):
+        return 0
+
     score = 0
+    if _DEDICATED_BUDGET_TITLE_RE.search(t):
+        score += 8
     if "budget" in t:
         score += 4
     if "pricing" in t or "price proposal" in t:

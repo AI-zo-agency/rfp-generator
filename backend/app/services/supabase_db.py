@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.models.go_no_go import GoNoGoAnalysis
@@ -597,7 +597,59 @@ def finish_sync_job(
     ).eq("id", job_id).execute()
 
 
+# uvicorn --reload kills in-flight Playwright tasks but leaves sync_jobs.status=
+# "running", so the modal spins forever. Expire zombies on read/trigger.
+_STALE_SYNC_JOB_MINUTES = 8
+
+
+def expire_stale_running_sync_jobs(
+    *,
+    max_age_minutes: int = _STALE_SYNC_JOB_MINUTES,
+) -> list[str]:
+    """Mark long-running sync jobs failed. Returns expired job ids."""
+    client = _get_client()
+    result = (
+        client.table("sync_jobs")
+        .select("id,started_at")
+        .eq("status", "running")
+        .execute()
+    )
+    rows = _handle_response(result.data, context="expire_stale_running_sync_jobs")
+    if not rows:
+        return []
+
+    now = datetime.now(timezone.utc)
+    expired: list[str] = []
+    for row in rows:
+        started_raw = row.get("started_at") or ""
+        try:
+            started = datetime.fromisoformat(str(started_raw).replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+        except ValueError:
+            started = now - timedelta(minutes=max_age_minutes + 1)
+        age_min = (now - started).total_seconds() / 60.0
+        if age_min < max_age_minutes:
+            continue
+        job_id = str(row.get("id") or "")
+        if not job_id:
+            continue
+        finish_sync_job(
+            job_id,
+            status="failed",
+            rfps_found=0,
+            pdfs_downloaded=0,
+            error=(
+                f"Sync timed out after {int(age_min)} minutes "
+                "(often caused by server reload killing Playwright). Retry sync."
+            ),
+        )
+        expired.append(job_id)
+    return expired
+
+
 def get_latest_sync_job() -> dict[str, Any] | None:
+    expire_stale_running_sync_jobs()
     client = _get_client()
     result = (
         client.table("sync_jobs")
@@ -611,6 +663,7 @@ def get_latest_sync_job() -> dict[str, Any] | None:
 
 
 def get_running_sync_job() -> dict[str, Any] | None:
+    expire_stale_running_sync_jobs()
     client = _get_client()
     result = (
         client.table("sync_jobs")

@@ -11,7 +11,7 @@ from app.services.rfp_repository import get_rfp
 
 logger = logging.getLogger(__name__)
 
-SEARCH_CHARACTER_LIMIT = 60_000
+SEARCH_CHARACTER_LIMIT = 24_000
 PROPOSAL_KB_SEARCH_LIMIT = 50
 
 # Per-document ceiling applied before the bucket total. Without it a single large
@@ -815,7 +815,17 @@ async def gather_proposal_kb_for_sections(
 
 def _is_case_study_source(file_name: str) -> bool:
     lowered = file_name.strip().casefold()
-    return lowered.startswith("03_cs") or "03_cs_" in lowered or "case study" in lowered
+    if not (
+        lowered.startswith("03_cs")
+        or "03_cs_" in lowered
+        or "case study" in lowered
+    ):
+        return False
+    from app.services.proposal_case_study_eligibility import (
+        is_eligible_section3_case_study_title,
+    )
+
+    return is_eligible_section3_case_study_title(file_name)
 
 
 _CASE_THEME_PATTERNS: list[tuple[re.Pattern[str], str]] = [

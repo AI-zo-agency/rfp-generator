@@ -8,7 +8,7 @@ import { GoSign } from "@/components/GoSign";
 import { MarkGoButton } from "@/components/MarkGoButton";
 import { RunGoNoGoButton } from "@/components/RunGoNoGoButton";
 import { PriorityBadge, StatusBadge } from "@/components/StatusBadge";
-import { formatOverallGoScore } from "@/lib/format";
+import { formatOverallGoScore, alignGoNoGoRecommendation, computeOverallGoScore, alignGoNoGoSummary } from "@/lib/format";
 import type { GoNoGoAnalysis, RfpPriority, RfpStatus } from "@/types/rfp";
 
 interface RfpGoNoGoControlsProps {
@@ -50,8 +50,15 @@ export function RfpGoNoGoControls({
   const showAnalysis = Boolean(goNoGoAnalysis) && !analyzing;
   const displayFit = analyzing ? null : fitScore;
   const displayWorth = analyzing ? null : worthScore;
-  const displayGoNoGo = analyzing ? null : goNoGo;
-  const displayNote = analyzing ? null : lastActivityNote;
+  const overallForAlign = analyzing
+    ? null
+    : computeOverallGoScore(fitScore, worthScore, goNoGoAnalysis?.decisionMatrix);
+  const displayGoNoGo = analyzing
+    ? null
+    : alignGoNoGoRecommendation(goNoGo, overallForAlign);
+  const displayNote = analyzing
+    ? null
+    : alignGoNoGoSummary(lastActivityNote, displayGoNoGo);
   const isGoRfp = displayGoNoGo === "go";
 
   return (

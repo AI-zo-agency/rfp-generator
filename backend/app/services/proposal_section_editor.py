@@ -4459,6 +4459,7 @@ async def improve_proposal_section(
             rfp=rfp,
             rfp_context=rfp_context,
             research=research,
+            user_message=raw_user_message,
         )
         provider = _provider_name()
         if research is None:
@@ -4695,15 +4696,41 @@ async def improve_proposal_section(
                     return offer_form_fill
 
         if chat_intent == "multi_patch":
-            updated, research, fix_reply, fixed = await run_manuscript_wide_fixes(
+            from app.services.proposal_chat_content_repair import (
+                user_asks_content_risk_repair,
+                run_content_risk_repair,
+            )
+
+            fix_reply = ""
+            updated = draft
+            fixed = False
+            if user_asks_content_risk_repair(raw_user_message):
+                repaired = await run_content_risk_repair(
+                    draft=updated,
+                    rfp=rfp,
+                    rfp_context=rfp_context,
+                    research=research,
+                    user_message=raw_user_message,
+                )
+                updated = repaired.draft
+                fix_reply = repaired.reply
+                fixed = bool(repaired.sections_changed or repaired.logs)
+
+            ms_updated, research, ms_reply, ms_fixed = await run_manuscript_wide_fixes(
                 rfp_id=rfp_id,
-                draft=draft,
+                draft=updated,
                 rfp=rfp,
                 rfp_context=rfp_context,
                 research=research,
                 user_message=user_message,
                 conversation_history=conversation_history,
             )
+            updated = ms_updated
+            fixed = fixed or ms_fixed
+            if ms_reply:
+                fix_reply = (
+                    f"{fix_reply}\n\n{ms_reply}".strip() if fix_reply else ms_reply
+                )
             provider = _provider_name()
             if research is None:
                 research = ProposalResearchCache(

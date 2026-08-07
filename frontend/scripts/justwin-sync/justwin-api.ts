@@ -37,15 +37,79 @@ interface LeadPage {
 }
 
 /**
- * The lead list is rendered from `created`, which JustWin's UI formats in UTC.
- * Matching on the UTC date keeps "Posted Aug 4" in the dashboard equal to
- * picking Aug 4 in the sync modal.
+ * UTC calendar date of `created` (stored on the RFP). Matching for sync filters
+ * must also consider local/US zones — see leadMatchesPostedDate in the Python
+ * sync (JustWin UI "Posted" is timezone-local, not always UTC).
  */
 export function postedDateOf(lead: RawLead): string {
   if (!lead.created) return "";
   const parsed = new Date(lead.created);
   if (Number.isNaN(parsed.getTime())) return "";
   return parsed.toISOString().slice(0, 10);
+}
+
+/** Match JustWin "Posted" across UTC + common display timezones. */
+export function leadMatchesPostedDate(lead: RawLead, targetDate: string): boolean {
+  if (!targetDate) return true;
+  if (!lead.created) return false;
+  const parsed = new Date(lead.created);
+  if (Number.isNaN(parsed.getTime())) return false;
+  const zones = [
+    "UTC",
+    "America/New_York",
+    "America/Los_Angeles",
+    "America/Chicago",
+    "Asia/Kolkata",
+  ];
+  for (const zone of zones) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: zone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).formatToParts(parsed);
+      const y = parts.find((p) => p.type === "year")?.value;
+      const m = parts.find((p) => p.type === "month")?.value;
+      const d = parts.find((p) => p.type === "day")?.value;
+      if (y && m && d && `${y}-${m}-${d}` === targetDate) return true;
+    } catch {
+      /* ignore bad tz */
+    }
+  }
+  return false;
+}
+
+function leadIsOlderThanTarget(lead: RawLead, targetDate: string): boolean {
+  if (!lead.created) return false;
+  const parsed = new Date(lead.created);
+  if (Number.isNaN(parsed.getTime())) return false;
+  const zones = [
+    "UTC",
+    "America/New_York",
+    "America/Los_Angeles",
+    "America/Chicago",
+    "Asia/Kolkata",
+  ];
+  let newest = "";
+  for (const zone of zones) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: zone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).formatToParts(parsed);
+      const y = parts.find((p) => p.type === "year")?.value;
+      const m = parts.find((p) => p.type === "month")?.value;
+      const d = parts.find((p) => p.type === "day")?.value;
+      const iso = y && m && d ? `${y}-${m}-${d}` : "";
+      if (iso > newest) newest = iso;
+    } catch {
+      /* ignore */
+    }
+  }
+  return Boolean(newest) && newest < targetDate;
 }
 
 export async function createApiClient(page: Page): Promise<JustWinApiClient> {
@@ -116,13 +180,12 @@ export async function fetchLeadsForTab(
 
     let olderThanTarget = false;
     for (const raw of body.results ?? []) {
-      const posted = postedDateOf(raw);
       if (targetDate) {
-        if (posted && posted < targetDate) {
+        if (leadIsOlderThanTarget(raw, targetDate)) {
           olderThanTarget = true;
           continue;
         }
-        if (posted !== targetDate) continue;
+        if (!leadMatchesPostedDate(raw, targetDate)) continue;
       }
       leads.push(toLead(raw, tab));
     }

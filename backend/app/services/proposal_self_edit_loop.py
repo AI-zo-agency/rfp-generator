@@ -172,7 +172,7 @@ def _locks_brief_for_repair(research: ProposalResearchCache | None) -> str:
     return format_manuscript_locks_block(research.manuscript_locks)
 
 
-def _manuscript_digest_for_senior_editor(draft: ProposalDraft, *, max_chars: int = 55_000) -> str:
+def _manuscript_digest_for_senior_editor(draft: ProposalDraft, *, max_chars: int = 35_000) -> str:
     parts: list[str] = []
     used = 0
     for section in draft.sections:
@@ -180,8 +180,8 @@ def _manuscript_digest_for_senior_editor(draft: ProposalDraft, *, max_chars: int
         if not body:
             chunk = f"### {section.id} — {section.title}\n(empty)\n"
         else:
-            # Keep head of each section so cover letter + who-we-are stay visible.
-            excerpt = body[:2200]
+            # Head of each section is enough for coverage/dedupe tickets.
+            excerpt = body[:1200]
             chunk = f"### {section.id} — {section.title}\n{excerpt}\n"
         if used + len(chunk) > max_chars:
             break
@@ -265,7 +265,12 @@ async def _redraft_section_via_phase3_isolated(
     from app.services.proposal_common import load_rfp_for_proposal
 
     _, _, rfp_context = load_rfp_for_proposal(rfp_id)
-    static = [s for s in draft.sections if s.source == "template"][:6]
+    static = [s for s in draft.sections if s.source == "template"]
+    siblings = [
+        s
+        for s in draft.sections
+        if s.id != section_id and (s.content or "").strip()
+    ]
     try:
         drafted, _provider, jit = await draft_single_rfp_section_phase3(
             rfp_id=rfp_id,
@@ -293,6 +298,7 @@ async def _redraft_section_via_phase3_isolated(
             ),
             evidence_allocation=research.evidence_allocation if research else None,
             rewrite_brief=rewrite_brief,
+            prior_drafted_sections=siblings,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Phase 3 single-section failed for %s: %s", section_id, exc)
@@ -361,7 +367,7 @@ async def _apply_senior_editor_tickets(
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
     report: SelfEditReport,
-    max_tickets: int = 8,
+    max_tickets: int = 5,
 ) -> tuple[ProposalDraft, ProposalResearchCache | None]:
     """Dispatch Phase 3 single-section redrafts for already-emitted Senior Editor tickets."""
     from app.services.proposal_budget_content import find_budget_section_index
@@ -373,13 +379,13 @@ async def _apply_senior_editor_tickets(
     budget_idx = find_budget_section_index(draft.sections)
     budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
 
-    # Dedupe first (remove bloat), then coverage, then gov compliance.
+    # Coverage + compliance first (accuracy); dedupe last (cheapest quality risk).
     coverage = list(tickets.get("coverageTickets") or [])
     dedupe = list(tickets.get("dedupeTickets") or [])
     compliance = list(tickets.get("complianceTickets") or [])
     ordered: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for raw in [*dedupe, *coverage, *compliance]:
+    for raw in [*coverage, *compliance, *dedupe]:
         if not isinstance(raw, dict):
             continue
         sid = str(raw.get("sectionId") or "").strip()
@@ -417,6 +423,35 @@ async def _apply_senior_editor_tickets(
     for ticket in ordered:
         sid = str(ticket.get("sectionId") or "")
         brief = _ticket_rewrite_brief(ticket)
+        # Pure dedupe: Section Repair (cheaper) instead of full Phase-3 regenerate.
+        is_dedupe = ticket in dedupe and ticket not in coverage and ticket not in compliance
+        if is_dedupe:
+            _sid, improved, detail = await _repair_one_section(
+                rfp_id,
+                sid,
+                use_senior_editor=False,
+                rfp=rfp,
+                rfp_client=rfp.client,
+                rfp_title=rfp.title,
+                budget=research.budget if research else None,
+                repair_message=(
+                    brief
+                    or "Trim duplicated company/bio/case-study content; keep this "
+                    "section's unique job and one short cross-reference."
+                ),
+            )
+            draft = await aget_proposal_draft(rfp_id) or draft
+            research = await aget_research_cache(rfp_id) or research
+            report.sections_targeted += 1
+            if improved:
+                report.sections_improved += 1
+            else:
+                report.sections_unchanged += 1
+            report.section_logs.append(
+                {"sectionId": sid, "detail": detail, "ticket": "dedupe"}
+            )
+            continue
+
         draft, research, improved, detail = await _redraft_section_via_phase3_isolated(
             rfp_id=rfp_id,
             section_id=sid,
@@ -430,13 +465,7 @@ async def _apply_senior_editor_tickets(
             report.sections_improved += 1
         else:
             report.sections_unchanged += 1
-        kind = (
-            "dedupe"
-            if ticket in dedupe
-            else "compliance"
-            if ticket in compliance
-            else "coverage"
-        )
+        kind = "compliance" if ticket in compliance else "coverage"
         report.section_logs.append(
             {
                 "sectionId": sid,
@@ -785,10 +814,27 @@ async def run_self_edit_loop(
         for line in integrity_logs[:12]:
             logger.info("Self-edit integrity preflight %s: %s", rfp_id, line)
 
+    from app.services.proposal_blocker_prevention import (
+        apply_feedback_blocker_suite,
+    )
+
     try:
         rfp, _, rfp_context = await aload_rfp_for_proposal(rfp_id)
     except ProposalError:
         raise ProposalError("RFP not found for self-edit.", status_code=404) from None
+
+    suite = await apply_feedback_blocker_suite(
+        draft,
+        rfp=rfp,
+        research=research,
+        rfp_text=rfp_context or "",
+        use_llm_contradiction=False,  # full LLM contradiction runs at Generate final + Scan
+    )
+    draft = suite.draft
+    if suite.logs:
+        await asave_proposal_draft(draft)
+        for line in suite.logs[:12]:
+            logger.info("Self-edit blocker suite %s: %s", rfp_id, line)
 
     from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
     from app.services.proposal_section_dedup import compress_duplicate_case_study_sections
@@ -852,11 +898,12 @@ async def run_self_edit_loop(
     budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
     skip_budget = {budget_section_id} if budget_section_id else set()
     verify_before = sum(count_verify_tags(s.content or "") for s in draft.sections)
+    # Merge summary first, then override verify_tag_count — summarize_sections
+    # already includes that key; passing both as separate kwargs crashed Phase 3.6.
     step_trace(
         "senior_editor_start",
         rfp_id=rfp_id,
-        verify_tag_count=verify_before,
-        **summarize_sections(draft.sections),
+        **{**summarize_sections(draft.sections), "verify_tag_count": verify_before},
     )
 
     draft, claim_logs = apply_optional_claim_scrub_to_draft(
@@ -911,19 +958,24 @@ async def run_self_edit_loop(
     }
     verify_mid = sum(count_verify_tags(s.content or "") for s in draft.sections)
 
-    tickets, (scrubbed_sections, scrub_logs) = await asyncio.gather(
-        senior_editor_emit_tickets(
-            rfp_client=rfp.client,
-            rfp_title=rfp.title,
-            manuscript_digest=_manuscript_digest_for_senior_editor(draft),
-            requirements_by_section=_requirements_by_section_id(research),
-        ),
-        scrub_draft_optional_verify_tags(
-            list(draft.sections),
-            rfp_text=rfp_context,
-            section_filter_ids=verify_ids,
-        ),
+    ticket_coro = senior_editor_emit_tickets(
+        rfp_client=rfp.client,
+        rfp_title=rfp.title,
+        manuscript_digest=_manuscript_digest_for_senior_editor(draft),
+        requirements_by_section=_requirements_by_section_id(research),
     )
+    if verify_ids:
+        tickets, (scrubbed_sections, scrub_logs) = await asyncio.gather(
+            ticket_coro,
+            scrub_draft_optional_verify_tags(
+                list(draft.sections),
+                rfp_text=rfp_context,
+                section_filter_ids=verify_ids,
+            ),
+        )
+    else:
+        tickets = await ticket_coro
+        scrubbed_sections, scrub_logs = list(draft.sections), []
 
     if scrub_logs:
         draft = draft.model_copy(
@@ -986,7 +1038,7 @@ async def run_self_edit_loop(
         draft=draft,
         research=research,
         report=report,
-        max_tickets=8,
+        max_tickets=5,
     )
     draft = await aget_proposal_draft(rfp_id) or draft
     research = await aget_research_cache(rfp_id) or research
@@ -1088,16 +1140,18 @@ async def run_self_edit_loop(
     step_trace(
         "senior_editor_complete",
         rfp_id=rfp_id,
-        verify_before=verify_before,
-        verify_after=verify_after,
-        verify_removed=max(0, verify_before - verify_after),
-        optional_claim_scrubs=len(claim_logs or []),
-        cert_scrubs=len(cert_logs or []),
-        verify_scrub_logs=len(scrub_logs or []),
-        tickets_applied=len(ticket_results),
-        sections_improved=report.sections_improved,
-        log_count=len(report.section_logs),
-        **summarize_sections(draft.sections),
+        **{
+            **summarize_sections(draft.sections),
+            "verify_before": verify_before,
+            "verify_after": verify_after,
+            "verify_removed": max(0, verify_before - verify_after),
+            "optional_claim_scrubs": len(claim_logs or []),
+            "cert_scrubs": len(cert_logs or []),
+            "verify_scrub_logs": len(scrub_logs or []),
+            "tickets_applied": len(ticket_results),
+            "sections_improved": report.sections_improved,
+            "log_count": len(report.section_logs),
+        },
     )
     logger.info(
         "Self-edit for %s: verify %s→%s, claim_scrubs=%s cert_scrubs=%s "

@@ -77,12 +77,32 @@ async def _request(
                 json=json_body,
             )
 
-    response = await run_with_generation_cancel(_do_request)
+    try:
+        response = await run_with_generation_cancel(_do_request)
+    except SupermemoryError:
+        raise
+    except Exception as exc:
+        from app.services.proposal_generation_cancel import ProposalGenerationCancelled
+
+        if isinstance(exc, ProposalGenerationCancelled):
+            raise
+        # httpx timeouts / connect errors must become SupermemoryError so callers
+        # can soft-fail a single query instead of 502-ing Stage 1.
+        raise SupermemoryError(
+            f"Supermemory transport error: {exc}",
+            status_code=502,
+        ) from exc
 
     if response.status_code in (allow_status or set()):
         if not response.content:
             return {}
-        return response.json()
+        try:
+            return response.json()
+        except Exception as exc:
+            raise SupermemoryError(
+                f"Supermemory returned non-JSON ({response.status_code}): {exc}",
+                status_code=response.status_code,
+            ) from exc
 
     if response.status_code >= 400:
         detail = response.text.strip() or response.reason_phrase
@@ -93,7 +113,13 @@ async def _request(
 
     if not response.content:
         return {}
-    return response.json()
+    try:
+        return response.json()
+    except Exception as exc:
+        raise SupermemoryError(
+            f"Supermemory returned non-JSON ({response.status_code}): {exc}",
+            status_code=response.status_code,
+        ) from exc
 
 
 def is_fetchable_document_key(key: str) -> bool:

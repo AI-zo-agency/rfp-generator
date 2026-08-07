@@ -34,6 +34,7 @@ ChatOpKind = Literal[
     "remove_duplicates",
     "remove_fabricated",
     "trust_audit",
+    "fix_content_risks",
 ]
 
 
@@ -98,6 +99,10 @@ def classify_chat_op(user_message: str) -> ChatOpKind:
     text = (user_message or "").strip()
     if not text:
         return "none"
+    from app.services.proposal_chat_content_repair import user_asks_content_risk_repair
+
+    if user_asks_content_risk_repair(text):
+        return "fix_content_risks"
     if _FAB_REMOVE_RE.search(text) or (
         re.search(r"\bfabricat", text, re.I)
         and re.search(r"\b(remove|clean|strip|purge|fix)\b", text, re.I)
@@ -608,6 +613,7 @@ async def run_chat_ops(
     rfp: RfpRecord,
     rfp_context: str,
     research: ProposalResearchCache | None,
+    user_message: str = "",
 ) -> tuple[ProposalDraft, ChatOpsReport]:
     report = ChatOpsReport(kind=kind)
     if kind == "none":
@@ -661,5 +667,20 @@ async def run_chat_ops(
                 )
             report.reply = fab_reply
         return draft, report
+
+    if kind == "fix_content_risks":
+        from app.services.proposal_chat_content_repair import run_content_risk_repair
+
+        repaired = await run_content_risk_repair(
+            draft=draft,
+            rfp=rfp,
+            rfp_context=rfp_context,
+            research=research,
+            user_message=user_message or "content issues",
+        )
+        report.logs.extend(repaired.logs)
+        report.sections_changed = list(dict.fromkeys(repaired.sections_changed))
+        report.reply = repaired.reply
+        return repaired.draft, report
 
     return draft, report

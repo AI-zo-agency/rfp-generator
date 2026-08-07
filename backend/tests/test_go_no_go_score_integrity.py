@@ -91,6 +91,31 @@ class ScrubberScoreIntegrityTests(unittest.TestCase):
             [r["score"] for r in before],
         )
 
+    def test_disclosed_percent_criteria_do_not_get_undisclosed_notes(self) -> None:
+        """NYCEDC 25%×4 must not rewrite Win Probability as 'not disclosed'."""
+        raw = {
+            "summary": "Scored against disclosed 25% selection criteria.",
+            "stageOneReport": "Win Probability reflects fee/experience at 25% each.",
+            "fitScore": 3,
+            "worthScore": 3,
+            "recommendation": "review",
+            "criticalGaps": [],
+            "decisionMatrix": [
+                {
+                    "dimension": "Win Probability",
+                    "score": 2,
+                    "notes": "Against disclosed 25%/25%/25%/25% criteria.",
+                },
+            ],
+        }
+
+        _scrub_invented_eval_and_people(raw, evaluation_points_found=True)
+
+        self.assertNotIn(
+            "not disclosed",
+            raw["decisionMatrix"][0]["notes"].casefold(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

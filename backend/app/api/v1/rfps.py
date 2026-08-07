@@ -173,8 +173,10 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
     try:
         analysis = await analyze_rfp(rfp)
     except GoNoGoError as exc:
+        logger.error("Go/No-Go failed for %s: %s", rfp_id, exc)
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Go/No-Go unexpected failure for %s", rfp_id)
         raise HTTPException(
             status_code=502,
             detail=f"Go/No-Go analysis failed: {exc}",

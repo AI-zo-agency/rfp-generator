@@ -447,3 +447,124 @@ async def assess_case_study_fit(
         )
 
     return CaseStudyFitReport(results=results, provider=provider, llm_call_count=1)
+
+
+def select_best_case_study_titles(
+    report: CaseStudyFitReport,
+    *,
+    min_count: int = 2,
+    max_count: int = 5,
+    allowed_titles: Sequence[str] | None = None,
+) -> list[str]:
+    """Pick distinct strong-fit case studies for Section 3 — never pad with weak filler.
+
+    Across capabilities, take the highest-scoring strong_fit sources first so each
+    RFP need is represented when possible. Weak fits are never used to hit
+    ``min_count``: an honest short list beats irrelevant portfolio padding.
+    """
+    allowed: set[str] | None = None
+    if allowed_titles is not None:
+        allowed = {t.strip().casefold() for t in allowed_titles if str(t).strip()}
+
+    # (score, capability_index, source) — prefer higher score, then earlier capability
+    ranked: list[tuple[float, int, str]] = []
+    for cap_idx, result in enumerate(report.results or []):
+        for cand in result.candidates or []:
+            source = (cand.source or "").strip()
+            if not source:
+                continue
+            if allowed is not None and source.casefold() not in allowed:
+                # Also allow substring match against catalog titles without path/prefix noise
+                if not any(
+                    source.casefold() in a or a in source.casefold() for a in allowed
+                ):
+                    continue
+            label = (cand.fit_label or "").casefold()
+            score = float(cand.fit_score or 0.0)
+            if label != "strong_fit" and score < STRONG_FIT_THRESHOLD:
+                continue
+            ranked.append((score, cap_idx, source))
+
+    ranked.sort(key=lambda row: (-row[0], row[1], row[2].casefold()))
+    selected: list[str] = []
+    seen: set[str] = set()
+    # First pass: one best strong fit per capability (covers RFP needs)
+    per_cap_seen: set[int] = set()
+    from app.services.proposal_case_study_eligibility import (
+        is_eligible_section3_case_study_title,
+    )
+
+    for score, cap_idx, source in ranked:
+        if not is_eligible_section3_case_study_title(source):
+            continue
+        key = source.casefold()
+        if key in seen:
+            continue
+        if cap_idx in per_cap_seen:
+            continue
+        selected.append(source)
+        seen.add(key)
+        per_cap_seen.add(cap_idx)
+        if len(selected) >= max_count:
+            return selected[:max_count]
+
+    # Second pass: fill remaining slots with next-best strong fits (still never weak)
+    for score, cap_idx, source in ranked:
+        if not is_eligible_section3_case_study_title(source):
+            continue
+        key = source.casefold()
+        if key in seen:
+            continue
+        selected.append(source)
+        seen.add(key)
+        if len(selected) >= max_count:
+            break
+
+    # Do not pad with weak fits to satisfy min_count — caller may show a gap.
+    _ = min_count  # documented contract; intentional no-op pad
+    return selected[:max_count]
+
+
+def capabilities_for_case_study_fit(
+    *,
+    services_requested: Sequence[str] | None = None,
+    rfp_context: str = "",
+    rfp_sector: str = "",
+    max_capabilities: int = 5,
+) -> list[str]:
+    """Build the capability list the fit ranker should score against."""
+    from app.services.proposal_knowledge_base_tools import extract_case_study_search_themes
+
+    caps: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str) -> None:
+        text = (value or "").strip()
+        if not text:
+            return
+        key = text.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        caps.append(text)
+
+    for service in services_requested or []:
+        _add(str(service))
+        if len(caps) >= max_capabilities:
+            return caps[:max_capabilities]
+
+    for theme in extract_case_study_search_themes(
+        rfp_sector=rfp_sector,
+        rfp_context=rfp_context,
+        services_requested=list(services_requested or []),
+        max_themes=max_capabilities,
+    ):
+        # Skip generic sector filler themes — they dilute fit toward "any case study"
+        low = theme.casefold()
+        if "case study project outcomes" in low or "municipal digital campaign results" in low:
+            continue
+        _add(theme)
+        if len(caps) >= max_capabilities:
+            break
+
+    return caps[:max_capabilities]

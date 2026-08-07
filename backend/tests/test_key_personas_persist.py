@@ -20,25 +20,36 @@ from app.services import proposal_repository as repo
 
 
 def _draft(personas=None) -> ProposalDraft:
-    return ProposalDraft(
-        rfpId="rfp-1",
-        sections=[],
-        updatedAt="2026-01-01T00:00:00Z",
-        generatedAt="2026-01-01T00:00:00Z",
-        **({"selectedKeyPersonas": personas} if personas is not None else {}),
-    )
+    kwargs = {
+        "rfpId": "rfp-1",
+        "sections": [],
+        "updatedAt": "2026-01-01T00:00:00Z",
+        "generatedAt": "2026-01-01T00:00:00Z",
+    }
+    if personas is not None:
+        kwargs["selectedKeyPersonas"] = personas
+    return ProposalDraft(**kwargs)
 
 
 class PreserveKeyPersonasTests(unittest.TestCase):
     def test_rebuild_without_personas_keeps_existing(self) -> None:
         existing = _draft(["p1", "p2", "p3"])
-        rebuilt = _draft()  # what generation constructs
-        self.assertEqual(rebuilt.selected_key_personas, [])
+        rebuilt = _draft()  # generation omits field → None
+        self.assertIsNone(rebuilt.selected_key_personas)
 
         with mock.patch.object(repo, "get_proposal_draft", return_value=existing):
             repo._preserve_selected_key_personas(rebuilt)
 
         self.assertEqual(rebuilt.selected_key_personas, ["p1", "p2", "p3"])
+
+    def test_explicit_empty_clear_is_not_restored(self) -> None:
+        existing = _draft(["p1", "p2", "p3"])
+        cleared = _draft([])  # user Clear / Reset
+
+        with mock.patch.object(repo, "get_proposal_draft", return_value=existing):
+            repo._preserve_selected_key_personas(cleared)
+
+        self.assertEqual(cleared.selected_key_personas, [])
 
     def test_explicit_selection_is_not_overwritten(self) -> None:
         existing = _draft(["old"])
@@ -50,22 +61,36 @@ class PreserveKeyPersonasTests(unittest.TestCase):
         self.assertEqual(incoming.selected_key_personas, ["new1", "new2"])
 
     def test_no_existing_draft_is_safe(self) -> None:
-        incoming = _draft()
+        incoming = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
+        self.assertIsNone(incoming.selected_key_personas)
         with mock.patch.object(repo, "get_proposal_draft", return_value=None):
             repo._preserve_selected_key_personas(incoming)
-        self.assertEqual(incoming.selected_key_personas, [])
+        self.assertIsNone(incoming.selected_key_personas)
 
     def test_lookup_failure_never_blocks_a_save(self) -> None:
-        incoming = _draft()
+        incoming = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
         with mock.patch.object(
             repo, "get_proposal_draft", side_effect=RuntimeError("db down")
         ):
             repo._preserve_selected_key_personas(incoming)  # must not raise
-        self.assertEqual(incoming.selected_key_personas, [])
+        self.assertIsNone(incoming.selected_key_personas)
 
     def test_save_path_applies_the_guard(self) -> None:
         existing = _draft(["p1", "p2", "p3"])
-        rebuilt = _draft()
+        rebuilt = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[],
+            updatedAt="2026-01-01T00:00:00Z",
+            generatedAt="2026-01-01T00:00:00Z",
+        )
 
         with mock.patch.object(repo, "get_proposal_draft", return_value=existing), \
              mock.patch.object(repo, "_use_supabase", return_value=True), \

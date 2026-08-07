@@ -44,6 +44,10 @@ _ROSTER_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bTed brings\b"), "Todd brings"),
     (re.compile(r"\bBen Edwards\b"), "[REMOVE: verify roster — not on approved team]"),
     (re.compile(r"\bErica Schultz\b"), "[REMOVE: verify roster — not on approved team]"),
+    (re.compile(r"\bBrittany Frazier\b"), "[REMOVE: verify roster — not on approved team]"),
+    (re.compile(r"\bDrew Stone\b"), "[REMOVE: verify roster — not on approved team]"),
+    (re.compile(r"\bMorgan Nivan\b"), "[REMOVE: verify roster — not on approved team]"),
+    (re.compile(r"\bMarcelle Benevides\b"), "[REMOVE: verify roster — not on approved team]"),
 )
 
 _OCEANIA_NO_OFFICE = re.compile(

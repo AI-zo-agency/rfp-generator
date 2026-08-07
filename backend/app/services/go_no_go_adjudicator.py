@@ -29,6 +29,7 @@ from typing import Any
 
 from app.models.go_no_go import GoNoGoCapabilityRow
 from app.services.go_no_go_capability import _tokens, build_source_index
+from app.services.evidence_trust.personnel_grounding import personnel_claim_failure
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,11 @@ migration; print/brand design is not web development; branding for a city is not
 building that city a website; a pricing guide is not proof of delivery
 capability. Sector matters — private-sector website work does not evidence
 "government website experience", though it does evidence "website redesign".
+
+NEVER invent or confirm staff names that are not verbatim in the cited excerpt.
+Known fabrications include Brittany Frazier, Drew Stone, Ben Edwards, Erica
+Schultz, Morgan Nivan — if a requirement or your reason names them, status=gap.
+The real Creative Director in zö materials is Curt Schultz when the roster says so.
 
 If a document DISCLAIMS the skill ("Web Design/Development (Not Programming)"),
 that is a gap for the disclaimed part.
@@ -254,16 +260,24 @@ def rows_from_assessments(
         elif not quote_is_grounded(quote, source_text):
             failure = f"quoted evidence does not appear in '{kb_source}'"
         else:
-            rows.append(
-                GoNoGoCapabilityRow(
-                    requirement=name,
-                    status=status,
-                    kbSource=kb_source,
-                    evidence=quote[:400],
-                    isCore=is_core,
-                )
+            personnel_fail = personnel_claim_failure(
+                requirement=name,
+                quote=quote,
+                source_text=source_text,
             )
-            continue
+            if personnel_fail:
+                failure = personnel_fail
+            else:
+                rows.append(
+                    GoNoGoCapabilityRow(
+                        requirement=name,
+                        status=status,
+                        kbSource=kb_source,
+                        evidence=quote[:400],
+                        isCore=is_core,
+                    )
+                )
+                continue
 
         rejected.append(f"{name}: {failure}")
         rows.append(

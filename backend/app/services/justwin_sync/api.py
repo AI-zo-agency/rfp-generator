@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from playwright.sync_api import Page
@@ -43,19 +44,75 @@ class JustWinApiClient:
 
 
 def posted_date_of(lead: dict[str, Any]) -> str:
+    """Primary posted date for storage — UTC calendar date of ``created``."""
+    created = _parse_created(lead)
+    if created is None:
+        return ""
+    return created.astimezone(timezone.utc).date().isoformat()
+
+
+def _parse_created(lead: dict[str, Any]) -> datetime | None:
     created = lead.get("created")
     if not created:
-        return ""
+        return None
     try:
-        from datetime import datetime, timezone
-
         raw = str(created).replace("Z", "+00:00")
         parsed = datetime.fromisoformat(raw)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc).date().isoformat()
+        return parsed
     except ValueError:
-        return ""
+        return None
+
+
+# JustWin's "Posted" column is rendered in the viewer's local timezone (and many
+# US users see Eastern/Pacific). Sync "Today" used to filter on UTC-only, so a
+# lead created 2026-08-06T20:00Z showed as Aug 7 in IST/US evening but was
+# skipped when syncing 2026-08-07 → 0 leads found.
+_POSTED_MATCH_ZONES: tuple[str, ...] = (
+    "UTC",
+    "America/New_York",
+    "America/Los_Angeles",
+    "America/Chicago",
+    "Asia/Kolkata",
+)
+
+
+def _calendar_dates_for_created(created: datetime) -> set[str]:
+    dates: set[str] = set()
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:  # pragma: no cover
+        dates.add(created.astimezone(timezone.utc).date().isoformat())
+        return dates
+    for name in _POSTED_MATCH_ZONES:
+        try:
+            dates.add(created.astimezone(ZoneInfo(name)).date().isoformat())
+        except Exception:  # noqa: BLE001 — unknown tz on older hosts
+            continue
+    if not dates:
+        dates.add(created.astimezone(timezone.utc).date().isoformat())
+    return dates
+
+
+def lead_matches_posted_date(lead: dict[str, Any], target_date: str) -> bool:
+    """True when JustWin would show this lead as posted on ``target_date``."""
+    target = (target_date or "").strip()
+    if not target:
+        return True
+    created = _parse_created(lead)
+    if created is None:
+        return False
+    return target in _calendar_dates_for_created(created)
+
+
+def _lead_is_older_than_target(lead: dict[str, Any], target_date: str) -> bool:
+    """Safe pagination stop: every display-zone calendar date is before target."""
+    created = _parse_created(lead)
+    if created is None:
+        return False
+    dates = _calendar_dates_for_created(created)
+    return bool(dates) and max(dates) < target_date
 
 
 def create_api_client(page: Page) -> JustWinApiClient:
@@ -115,13 +172,28 @@ def fetch_leads_for_tab(
         body = res.json()
         pages += 1
         older_than_target = False
-        for raw in body.get("results") or []:
-            posted = posted_date_of(raw)
+        page_results = body.get("results") or []
+        if target_date and pages == 1 and page_results:
+            samples: list[str] = []
+            for raw in page_results[:5]:
+                created = _parse_created(raw)
+                if created is None:
+                    samples.append("no-created")
+                    continue
+                zones = ",".join(sorted(_calendar_dates_for_created(created)))
+                samples.append(f"utc={posted_date_of(raw)} zones={zones}")
+            logger.info(
+                "[justwin-sync] %s first-page count=%s created dates: %s",
+                tab,
+                len(page_results),
+                samples,
+            )
+        for raw in page_results:
             if target_date:
-                if posted and posted < target_date:
+                if _lead_is_older_than_target(raw, target_date):
                     older_than_target = True
                     continue
-                if posted != target_date:
+                if not lead_matches_posted_date(raw, target_date):
                     continue
             leads.append(_to_lead(raw, tab))
 

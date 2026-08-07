@@ -612,6 +612,10 @@ def _merge_kb_hits_round_robin(
 KB_SEARCH_LIMIT = 8
 KB_CONTEXT_MAX_CHARS = 45_000
 RFP_PROMPT_MAX_CHARS = 50_000
+# Hard cap on parallel Supermemory searches — unbounded fan-out caused long
+# runs and one flaky query could 502 the entire Go/No-Go analyze.
+MAX_KB_QUERIES = 24
+MAX_KB_CONCURRENCY = 6
 
 MIN_SUBSTANTIVE_CHARS = 400
 
@@ -1083,23 +1087,26 @@ async def _gather_knowledge_context(
     )
     scope_query = _build_scope_search_query(rfp, content)
 
-    queries: list[str] = []
-    queries.append(sector_query)
-    if location_query:
-        queries.append(location_query)
-    queries.append(scope_query)
-    if rfp.client.strip():
-        queries.append(f"zö agency {rfp.client} case study proposal references")
-
+    # Priority order: requirement-linked queries first (accuracy), then roles,
+    # then broad sector/scope. Cap fan-out so one analyze can't fire 50+ searches.
+    priority_queries: list[str] = []
+    priority_queries.extend(planned)
     rfp_sample = combine_rfp_text(content.description, content.pdf_text)[:20_000]
+    priority_queries.extend(role_evidence_queries(rfp_sample))
+    priority_queries.append(sector_query)
+    if location_query:
+        priority_queries.append(location_query)
+    priority_queries.append(scope_query)
+    if rfp.client.strip():
+        priority_queries.append(f"zö agency {rfp.client} case study proposal references")
     if re.search(r"WCAG|Section 508|accessibility|VPAT|EPub", rfp_sample, re.IGNORECASE):
-        queries.append("zö agency WCAG accessibility Section 508 VPAT compliance")
+        priority_queries.append("zö agency WCAG accessibility Section 508 VPAT compliance")
     if re.search(
         r"FTC Safeguard|data retention|data security|backup.{0,20}recovery",
         rfp_sample,
         re.IGNORECASE,
     ):
-        queries.append(
+        priority_queries.append(
             "zö agency data security FTC safeguard data retention backup recovery policy"
         )
     if re.search(
@@ -1107,37 +1114,60 @@ async def _gather_knowledge_context(
         rfp_sample,
         re.IGNORECASE,
     ):
-        queries.append(
+        priority_queries.append(
             "zö agency higher education university college case studies references"
         )
     if re.search(r"housing authority|HUD|public housing", rfp_sample, re.IGNORECASE):
-        queries.append("zö agency housing authority HUD public housing case study")
-    queries.extend(_deterministic_evidence_queries(rfp, content))
-    # Search for the disciplines the RFP actually names, so a required role is
-    # answered by whoever in the KB does that job — not by whichever bios rank
-    # on topical similarity to the sector.
-    queries.extend(role_evidence_queries(rfp_sample))
-    queries.extend(planned)
+        priority_queries.append("zö agency housing authority HUD public housing case study")
+    priority_queries.extend(_deterministic_evidence_queries(rfp, content))
 
     seen_queries: set[str] = set()
     unique_queries: list[str] = []
-    for query in queries:
+    for query in priority_queries:
         key = query.strip().lower()
         if not key or key in seen_queries:
             continue
         seen_queries.add(key)
         unique_queries.append(query.strip())
+        if len(unique_queries) >= MAX_KB_QUERIES:
+            break
+
+    if len(priority_queries) > len(unique_queries):
+        logger.info(
+            "Go/No-Go KB query fan-out capped for %s: kept %d of %d unique candidates",
+            rfp.id,
+            len(unique_queries),
+            len({q.strip().lower() for q in priority_queries if q.strip()}),
+        )
+
+    sem = asyncio.Semaphore(MAX_KB_CONCURRENCY)
 
     async def run_query(query: str) -> list[dict[str, Any]]:
-        try:
-            hits = await supermemory.search_documents(
-                query=query,
-                limit=KB_SEARCH_LIMIT,
-                filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
-            )
-            return [hit for hit in hits if supermemory.is_knowledge_base_hit(hit)]
-        except supermemory.SupermemoryError:
-            return []
+        async with sem:
+            try:
+                hits = await supermemory.search_documents(
+                    query=query,
+                    limit=KB_SEARCH_LIMIT,
+                    filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
+                )
+                return [hit for hit in hits if supermemory.is_knowledge_base_hit(hit)]
+            except supermemory.SupermemoryError as exc:
+                logger.warning(
+                    "Supermemory search failed for %s query=%r: %s",
+                    rfp.id,
+                    query[:80],
+                    str(exc)[:160],
+                )
+                return []
+            except Exception as exc:
+                # Transport / JSON / cancel noise must never 502 Stage 1.
+                logger.warning(
+                    "Supermemory transport error for %s query=%r: %s",
+                    rfp.id,
+                    query[:80],
+                    str(exc)[:160],
+                )
+                return []
 
     results = await asyncio.gather(*(run_query(query) for query in unique_queries))
     by_query = dict(zip(unique_queries, results))
@@ -1422,7 +1452,20 @@ _INVENTED_EVAL_WEIGHT_RE = re.compile(
     r"combined,?\s*requiring\s+competitive\s+pricing)",
     re.IGNORECASE,
 )
-_INVENTED_PERSON_RE = re.compile(r"\bDrew\s+Stone\b", re.IGNORECASE)
+_INVENTED_PERSON_RE = None  # set below from shared fabricated-personnel list
+
+
+def _invented_person_re() -> re.Pattern[str]:
+    global _INVENTED_PERSON_RE
+    if _INVENTED_PERSON_RE is None:
+        from app.services.evidence_trust.personnel_grounding import (
+            fabricated_personnel_regex,
+        )
+
+        _INVENTED_PERSON_RE = fabricated_personnel_regex()
+    return _INVENTED_PERSON_RE
+
+
 _NAME_SPELLING_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bElla\s+Lindeau\b", re.IGNORECASE), "Ella Lindau"),
     (re.compile(r"\bLindeau\b", re.IGNORECASE), "Lindau"),
@@ -1553,7 +1596,7 @@ def _scrub_invented_eval_and_people(
             )
         )
     )
-    invented_person = bool(_INVENTED_PERSON_RE.search(blob))
+    invented_person = bool(_invented_person_re().search(blob))
     misattributed_contract = bool(_MISATTRIBUTED_CONTRACT_VALUE_RE.search(blob))
 
     if invented_weights:
@@ -1630,23 +1673,39 @@ def _scrub_invented_eval_and_people(
             gaps.append(msg)
 
     if invented_person:
-        msg = (
-            "[VERIFY: 'Drew Stone' is not a documented zö team member — "
-            "remove from staffing claims; FLAG SONJA to assign Project Lead]"
+        from app.services.evidence_trust.personnel_grounding import (
+            find_known_fabricated_names,
         )
-        if not any(isinstance(g, str) and "Drew Stone" in g for g in gaps):
+
+        person_re = _invented_person_re()
+        found = find_known_fabricated_names(blob)
+        who = found[0] if found else "unverified name"
+        msg = (
+            f"[VERIFY: '{who}' is not a documented zö team member — "
+            "remove from staffing claims; FLAG SONJA to assign the real roster person "
+            "(e.g. Curt Schultz for Creative Director)]"
+        )
+        if not any(
+            isinstance(g, str) and who in g for g in gaps
+        ) and not any(
+            isinstance(g, str) and "not a documented zö team member" in g for g in gaps
+        ):
             gaps.append(msg)
-        report = _INVENTED_PERSON_RE.sub(
-            "[FLAG FOR SONJA: assign Project Lead — unverified name removed]",
+        report = person_re.sub(
+            "[FLAG FOR SONJA: assign documented roster person — unverified name removed]",
             report,
+        )
+        summary = person_re.sub(
+            "[FLAG FOR SONJA: assign documented roster person — unverified name removed]",
+            summary,
         )
         matrix = raw.get("decisionMatrix")
         if isinstance(matrix, list):
             for row in matrix:
-                if isinstance(row, dict) and _INVENTED_PERSON_RE.search(
+                if isinstance(row, dict) and person_re.search(
                     str(row.get("notes") or "")
                 ):
-                    row["notes"] = _INVENTED_PERSON_RE.sub(
+                    row["notes"] = person_re.sub(
                         "[unverified name removed — assign via Sonja]",
                         str(row.get("notes") or ""),
                     )
@@ -1840,6 +1899,73 @@ def compute_overall_go_score(analysis: GoNoGoAnalysis) -> float | None:
     return float(fit if fit is not None else worth)
 
 
+# Overall ≥ this never wears a hard No-Go badge (unless a true deadline DQ).
+_SCORE_BLOCKS_NO_GO = 3.0
+_LEADING_NO_GO_RE = re.compile(r"(?i)^\s*NO[\s-]?GO\s*[—\-–:]?\s*")
+
+
+def _deadline_is_disqualifying(analysis: GoNoGoAnalysis) -> bool:
+    deadline = analysis.deadline
+    if deadline is None:
+        return False
+    if isinstance(deadline, dict):
+        return bool(deadline.get("passed") and deadline.get("disqualifying"))
+    return bool(
+        getattr(deadline, "passed", False)
+        and getattr(deadline, "disqualifying", False)
+    )
+
+
+def align_recommendation_with_score(analysis: GoNoGoAnalysis) -> GoNoGoAnalysis:
+    """Hard consistency: high overall scores cannot display as No-Go.
+
+    Who used to decide otherwise: ``_enforce_capability_evidence`` forced
+    ``no_go`` whenever *any* core KB gap existed, even when the matrix still
+    averaged 3.8/5. That produced the live contradiction (Worth 4, Overall 3.8,
+    red No-Go badge). Scores are the pipeline's stated go threshold — the label
+    must follow them unless a true deadline disqualifier applies.
+    """
+    if analysis.insufficient_data or analysis.recommendation is None:
+        return analysis
+
+    overall = compute_overall_go_score(analysis)
+    if overall is None:
+        return analysis
+
+    if (
+        analysis.recommendation == "no_go"
+        and overall >= _SCORE_BLOCKS_NO_GO
+        and not _deadline_is_disqualifying(analysis)
+    ):
+        summary = str(analysis.summary or "").strip()
+        if _LEADING_NO_GO_RE.search(summary):
+            summary = _LEADING_NO_GO_RE.sub("GO WITH CONDITIONS — ", summary, count=1)
+        elif not summary.upper().startswith("GO WITH CONDITIONS"):
+            summary = (
+                f"GO WITH CONDITIONS — overall {overall}/5 is above the No-Go "
+                f"threshold. {summary}"
+            ).strip()
+        report = reconcile_narrative(
+            analysis.stage_one_report or "",
+            recommendation="review",
+            overall_score=overall,
+        )
+        logger.info(
+            "go_no_go aligned no_go→review: overall=%s ≥ %s (score/label consistency)",
+            overall,
+            _SCORE_BLOCKS_NO_GO,
+        )
+        return analysis.model_copy(
+            update={
+                "recommendation": "review",
+                "summary": summary,
+                "stage_one_report": report,
+            }
+        )
+
+    return analysis
+
+
 async def _adjudicate_capabilities(
     rfp: RfpRecord,
     requirements: list[RfpRequirement],
@@ -1911,8 +2037,9 @@ def _enforce_capability_evidence(
 
     Nothing here trusts the model's own "Verified" label. A claim survives only
     when the cited KB document was retrieved for this RFP and its text supports
-    the requirement; otherwise the row is downgraded, listed as a critical gap,
-    and the recommendation is forced to no_go when a core requirement fails.
+    the requirement; otherwise the row is downgraded and listed as a critical
+    gap. Hard NO-GO is reserved for capability collapse (derived technical ≤1);
+    partial core gaps with a still-viable composite become GO WITH CONDITIONS.
     """
     if analysis.insufficient_data:
         # Thin-RFP path already suppresses scores and recommendation.
@@ -1953,6 +2080,39 @@ def _enforce_capability_evidence(
     # second check has nothing left to catch and only destroys good evidence.
     del kb_hits  # rows arrive validated; nothing left to cross-check them against
     validated = list(analysis.capability_matrix)
+    # Defense in depth: known fabricated names must never survive as Verified
+    # (Drew Stone scrub historically fired while Brittany Frazier on the next
+    # row stayed Verified — same table, inconsistent filter).
+    from app.services.evidence_trust.personnel_grounding import (
+        find_known_fabricated_names,
+    )
+
+    scrubbed_rows: list[GoNoGoCapabilityRow] = []
+    for row in validated:
+        if row.status not in {"verified", "partial"}:
+            scrubbed_rows.append(row)
+            continue
+        fabricated = find_known_fabricated_names(
+            f"{row.requirement}\n{row.evidence}"
+        )
+        if fabricated:
+            who = fabricated[0]
+            scrubbed_rows.append(
+                row.model_copy(
+                    update={
+                        "status": "gap",
+                        "kb_source": "",
+                        "evidence": "",
+                        "downgrade_reason": (
+                            f"fabricated personnel '{who}' is not a documented "
+                            "zö team member — FLAG SONJA; do not mark Verified"
+                        ),
+                    }
+                )
+            )
+        else:
+            scrubbed_rows.append(row)
+    validated = scrubbed_rows
     downgrades = [
         f"{row.requirement}: {row.downgrade_reason}"
         for row in validated
@@ -1996,7 +2156,19 @@ def _enforce_capability_evidence(
         updates["decision_matrix"] = matrix
 
     if core_gaps:
-        updates["recommendation"] = "no_go"
+        # Any core gap blocks a clean "go", but absolute NO-GO is reserved for
+        # capability collapse (technical ≤1). Partial gaps with a still-healthy
+        # composite (e.g. 3.8/5) are GO WITH CONDITIONS — the live label bug was
+        # forcing NO-GO while scores stayed high.
+        provisional = analysis.model_copy(
+            update={**updates, "decision_matrix": matrix}
+        )
+        overall = compute_overall_go_score(provisional)
+        hard_capability_fail = derived is not None and derived <= 1
+        if hard_capability_fail:
+            updates["recommendation"] = "no_go"
+        else:
+            updates["recommendation"] = "review"
         summary_gap = (
             "Core RFP requirements with no verifiable KB evidence: "
             + ", ".join(core_gaps[:6])
@@ -2004,9 +2176,13 @@ def _enforce_capability_evidence(
         if summary_gap not in gaps:
             gaps.append(summary_gap)
         logger.info(
-            "go_no_go forced no_go for %s: %d unverified core requirement(s)",
+            "go_no_go capability gaps for %s: %d unverified core requirement(s); "
+            "derived_tech=%s overall=%s → recommendation=%s",
             analysis.__dict__.get("rfp_id", "?"),
             len(core_gaps),
+            derived,
+            overall,
+            updates["recommendation"],
         )
 
     updates["critical_gaps"] = gaps
@@ -2037,14 +2213,22 @@ def _enforce_capability_evidence(
         # Substitution cannot fix a claim that is not phrased as a verdict —
         # the live summary simply asserted "strong technical capability match"
         # with no verdict word to replace. Lead with the finding instead.
-        verdict = (
-            f"NO-GO — {len(core_gaps)} of {len(validated)} required "
-            "capabilities lack verifiable knowledge-base evidence."
-        )
-        if not summary.startswith("NO-GO"):
-            summary = f"{verdict} {summary}".strip()
+        if reconciled.recommendation == "no_go":
+            verdict = (
+                f"NO-GO — {len(core_gaps)} of {len(validated)} required "
+                "capabilities lack verifiable knowledge-base evidence."
+            )
+            if not summary.startswith("NO-GO"):
+                summary = f"{verdict} {summary}".strip()
+        else:
+            verdict = (
+                f"GO WITH CONDITIONS — {len(core_gaps)} of {len(validated)} "
+                "required capabilities lack verifiable knowledge-base evidence."
+            )
+            if not summary.startswith("GO WITH CONDITIONS"):
+                summary = f"{verdict} {summary}".strip()
     updates["summary"] = summary
-    return analysis.model_copy(update=updates)
+    return align_recommendation_with_score(analysis.model_copy(update=updates))
 
 
 async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
@@ -2151,21 +2335,32 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
     for attempt in range(2):
         try:
             raw, provider = await llm.chat_json(messages, max_tokens=12_000, temperature=0.25)
-            normalized = _apply_hard_rules(
-                raw,
-                deadline=deadline_info,
-                evaluation_points_found=evaluation_points_found,
-                hard_facts=hard_facts,
-            )
+            try:
+                normalized = _apply_hard_rules(
+                    raw,
+                    deadline=deadline_info,
+                    evaluation_points_found=evaluation_points_found,
+                    hard_facts=hard_facts,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Go/No-Go hard-rules post-process failed for %s: %s — continuing with coerce",
+                    rfp.id,
+                    str(exc)[:160],
+                )
+                normalized = raw if isinstance(raw, dict) else {}
             normalized = _coerce_go_no_go_raw(normalized)
             analysis = GoNoGoAnalysis.model_validate({**normalized, "provider": provider})
             break
         except ValidationError as exc:
             logger.error(
-                "Go/No-Go validation failed for rfp %s: %s",
+                "Go/No-Go validation failed for rfp %s (attempt %d/2): %s",
                 rfp.id,
+                attempt + 1,
                 exc.errors()[:8],
             )
+            if attempt == 0:
+                continue
             raise GoNoGoError(
                 f"Go/No-Go analysis validation failed: {exc.errors()[0].get('msg', exc)}",
                 status_code=502,
@@ -2190,15 +2385,24 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
     # Build the matrix from RFP requirements and each one's own evidence. The
     # model no longer authors it, so it cannot omit a requirement it lacks
     # evidence for nor assert one the KB does not support.
-    if rfp_requirements:
-        analysis = analysis.model_copy(
-            update={
-                "capability_matrix": await _adjudicate_capabilities(
-                    rfp, rfp_requirements, hits_by_requirement, kb_hits
-                )
-            }
+    try:
+        if rfp_requirements:
+            analysis = analysis.model_copy(
+                update={
+                    "capability_matrix": await _adjudicate_capabilities(
+                        rfp, rfp_requirements, hits_by_requirement, kb_hits
+                    )
+                }
+            )
+        analysis = _enforce_capability_evidence(analysis, kb_hits)
+    except Exception as exc:
+        logger.warning(
+            "Go/No-Go capability enforce failed for %s: %s — returning LLM analysis",
+            rfp.id,
+            str(exc)[:200],
         )
-    analysis = _enforce_capability_evidence(analysis, kb_hits)
+
+    analysis = align_recommendation_with_score(analysis)
 
     logger.info(
         "Go/No-Go analysis complete for rfp_id=%s provider=%s recommendation=%s "

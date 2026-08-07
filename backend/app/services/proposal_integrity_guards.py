@@ -399,6 +399,7 @@ def case_study_looks_like_source_dump(content: str) -> tuple[bool, str]:
     Detect LLM regurgitation of proposal/OCR blobs instead of a case-study rewrite.
 
     Used after Case Study Builder so Umatilla-style TOC/cover-letter dumps are rejected.
+    Also rejects "RELEVANT CASE STUDIES" catalogs that paste 3–4 projects into one card.
     """
     body = content or ""
     if not body.strip():
@@ -422,8 +423,45 @@ def case_study_looks_like_source_dump(content: str) -> tuple[bool, str]:
         signals.append("proposal submitter line")
     if re.search(r"(?i)\bTable of Contents\b|\bPage\s+\d+\b.*\bPage\s+\d+\b", body):
         signals.append("TOC/page index")
+    if re.search(r"(?i)\brelevant\s+case\s+studies\b", body):
+        signals.append("relevant case studies catalog")
 
-    strong = {"proposal TOC", "cover letter salutation", "photo OCR placeholder"}
+    # Multiple distinct "CITY OF X" / "COUNTY" project banners in one card =
+    # All Case Studies dump pasted instead of a single engagement.
+    project_banners = re.findall(
+        r"(?im)^(?:#{1,6}\s*)?(?:CITY|COUNTY|TOWN|UNIVERSITY|DEPARTMENT)\s+OF\s+[A-Z][A-Z\s&'-]{2,40}\s*$",
+        body,
+    )
+    # Also catch ALL-CAPS client lines like "CITY OF MEDFORD" / "DESCHUTES COUNTY"
+    # without "OF" (common in the All Case Studies master).
+    allcaps_clients = re.findall(
+        r"(?m)^([A-Z][A-Z0-9 &'-]{6,60})$",
+        body,
+    )
+    allcaps_clients = [
+        c
+        for c in allcaps_clients
+        if re.search(r"(?i)\b(city|county|department|university|town)\b", c)
+        or re.search(r"(?i)\b(medford|bend|deschutes|oregon|hampton)\b", c)
+    ]
+    distinct_projects = list(dict.fromkeys([*project_banners, *allcaps_clients]))
+    if len(distinct_projects) >= 3:
+        signals.append(f"multi-project catalog ({len(distinct_projects)} clients)")
+
+    strong = {
+        "proposal TOC",
+        "cover letter salutation",
+        "photo OCR placeholder",
+        "relevant case studies catalog",
+        "multi-project catalog (3 clients)",
+        "multi-project catalog (4 clients)",
+        "multi-project catalog (5 clients)",
+    }
+    # Any multi-project catalog with 3+ clients is a hard reject.
+    if any(s.startswith("multi-project catalog") for s in signals):
+        return True, ", ".join(signals[:5])
+    if "relevant case studies catalog" in signals:
+        return True, ", ".join(signals[:5])
     if any(s in strong for s in signals) or len(signals) >= 2:
         return True, ", ".join(signals[:5])
     return False, ""
@@ -484,7 +522,13 @@ def scrub_case_study_overbuild(content: str) -> tuple[str, list[str]]:
 
 
 def case_study_fidelity_ok(source_text: str, written: str) -> tuple[bool, str]:
-    """Heuristic: distinctive source proper nouns should survive in the write-up."""
+    """Heuristic: write-up must keep real project identity from the source.
+
+    A focused card drawn from a multi-project master dump (All Case Studies)
+    is OK when it faithfully covers at least one source project. Fail only when
+    the write-up looks genericized — almost none of the distinctive source
+    names survive.
+    """
     src = source_text or ""
     out = written or ""
     if len(src) < 80 or len(out) < 40:
@@ -527,22 +571,35 @@ def case_study_fidelity_ok(source_text: str, written: str) -> tuple[bool, str]:
     if not distinctive:
         return True, ""
 
-    missing = []
-    for d in distinctive:
+    out_cf = out.casefold()
+
+    def _phrase_coverage(phrase: str) -> tuple[float, list[str]]:
         tokens = [
             t
-            for t in re.findall(r"[A-Za-z]{3,}", d)
+            for t in re.findall(r"[A-Za-z]{3,}", phrase)
             if t.casefold()
-            not in {"the", "and", "for", "digital", "campaign", "case", "study"}
+            not in {"the", "and", "for", "digital", "campaign", "case", "study", "city", "of"}
         ]
         if not tokens:
-            continue
-        hit = sum(1 for t in tokens if t.casefold() in out.casefold())
-        if hit < max(1, (len(tokens) + 1) // 2):
+            return 1.0, []
+        hits = [t for t in tokens if t.casefold() in out_cf]
+        return len(hits) / len(tokens), tokens
+
+    covered = 0
+    missing: list[str] = []
+    for d in distinctive:
+        ratio, _tokens = _phrase_coverage(d)
+        if ratio >= 0.5:
+            covered += 1
+        else:
             missing.append(d)
 
-    # Also catch when core tokens like "Locks" vanish from a festival source.
-    core_tokens = []
+    # At least one real source project survived → not a generic rewrite.
+    if covered >= 1:
+        return True, ""
+
+    # Also catch when core tokens like "Locks" vanish from a single-project source.
+    core_tokens: list[str] = []
     for d in distinctive:
         for tok in re.findall(r"[A-Za-z]{4,}", d):
             if tok.casefold() in {
@@ -556,11 +613,12 @@ def case_study_fidelity_ok(source_text: str, written: str) -> tuple[bool, str]:
                 continue
             core_tokens.append(tok)
     core_missing = [
-        t for t in dict.fromkeys(core_tokens) if t.casefold() not in out.casefold()
+        t for t in dict.fromkeys(core_tokens) if t.casefold() not in out_cf
     ]
 
-    if len(missing) >= max(1, (len(distinctive) + 1) // 2) or (
-        len(core_missing) >= 2 and len(missing) >= 1
+    if covered == 0 and (
+        len(missing) >= max(1, (len(distinctive) + 1) // 2)
+        or (len(core_missing) >= 2 and len(missing) >= 1)
     ):
         return False, (
             "Case study write-up dropped source project names "

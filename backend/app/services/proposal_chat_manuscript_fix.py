@@ -81,6 +81,10 @@ async def _classify_chat_edit_intent_once(
                         '- "none" — unrelated / cannot act.\n'
                         "If the user lists problems and says to apply/fix/patch them → "
                         "multi_patch. Never single_edit for that.\n"
+                        "If the user pastes a multi-item CONTENT ISSUES / content-risk audit "
+                        "(references incomplete, unsubstantiated claims, fabricated tagline, "
+                        "exec summary criteria restatement, thin case studies) and asks to "
+                        "fix/change/solve/address it → multi_patch (never advisory-only).\n"
                         "Never choose single_edit merely because a tab is open/focused when "
                         "the ask is about the whole proposal, missing sections, or gaps.\n"
                         "For multi_patch and whole-proposal advisory, primarySectionId may "

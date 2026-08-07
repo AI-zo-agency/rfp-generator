@@ -1,5 +1,7 @@
 import type { GoNoGoAnalysis } from "@/types/rfp";
 import {
+  alignGoNoGoRecommendation,
+  alignGoNoGoSummary,
   computeOverallGoScore,
   isMissingScore,
 } from "@/lib/format";
@@ -330,12 +332,20 @@ export function GoNoGoAnalysisPanel({
     worthScore,
     analysis.decisionMatrix
   );
+  const displayRecommendation = alignGoNoGoRecommendation(
+    recommendation,
+    overallGoScore
+  );
+  const displaySummary = alignGoNoGoSummary(
+    analysis.summary,
+    displayRecommendation
+  );
   const scoresPending = needsInput || overallGoScore === null;
   const hasMatrix = (analysis.decisionMatrix?.length ?? 0) > 0;
   const actionFlags = analysis.actionFlags ?? [];
   const leanNoGoReasons = buildLeanNoGoReasons(analysis, overallGoScore);
   const conditionsTitle =
-    recommendation === "no_go"
+    displayRecommendation === "no_go"
       ? "No-Go Notes & Override Conditions"
       : "Go With Conditions";
 
@@ -387,8 +397,8 @@ export function GoNoGoAnalysisPanel({
               </p>
             )}
           </div>
-          {!needsInput && recommendation && (
-            <GoNoGoBadge recommendation={recommendation} />
+          {!needsInput && displayRecommendation && (
+            <GoNoGoBadge recommendation={displayRecommendation} />
           )}
         </div>
       </div>
@@ -398,7 +408,7 @@ export function GoNoGoAnalysisPanel({
       )}
 
       <p className="text-sm leading-relaxed text-zo-text-secondary">
-        {analysis.summary}
+        {displaySummary}
       </p>
 
       {!needsInput && actionFlags.length > 0 && (

@@ -172,17 +172,12 @@ def _preserve_selected_key_personas(draft: ProposalDraft) -> None:
     """Carry the user's Key Persona picks across draft rebuilds.
 
     Generation rebuilds ProposalDraft from scratch at several points
-    (sections 1-3, phase 3 partials, budget merge) and none of those
-    constructors pass selectedKeyPersonas, so it defaulted to [] and the
-    selection was silently wiped on the first save. The visible symptoms were a
-    "Key Personas 0" badge after generating and a Section 2 containing one bio
-    instead of the three chosen — with the picks gone, team selection fell
-    through to the LLM roster-matching agent.
-
-    An explicit selection is only ever cleared through the personas API, which
-    does its own preservation check.
+    (sections 1-3, phase 3 partials, budget merge) and those constructors
+    omit selectedKeyPersonas (None). An explicit ``[]`` means the user cleared
+    the selection (or Reset) and must NOT be overwritten with the previous pick.
     """
-    if getattr(draft, "selected_key_personas", None):
+    # None = unset (generation rebuild) → preserve. [] / [ids] = explicit → keep.
+    if getattr(draft, "selected_key_personas", None) is not None:
         return
     try:
         existing = get_proposal_draft(draft.rfp_id)

@@ -407,7 +407,7 @@ async def senior_editor_emit_tickets(
         f"Client: {rfp_client}\nRFP: {rfp_title}\n\n"
         f"Mapped requirements by section:\n"
         + ("\n".join(req_lines) if req_lines else "(none mapped)")
-        + f"\n\nProposal manuscript digest:\n{manuscript_digest[:60_000]}"
+        + f"\n\nProposal manuscript digest:\n{manuscript_digest[:40_000]}"
     )
     try:
         raw, _ = await run_json_agent(AgentRole.SENIOR_EDITOR, user_content)

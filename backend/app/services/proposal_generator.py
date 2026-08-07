@@ -265,15 +265,30 @@ def static_sections_1_3_have_content(draft: ProposalDraft | None) -> bool:
         and (s.content or "").strip()
         for s in draft.sections
     )
-    has_section3 = any(
-        (
-            (s.id.startswith("section-3-work-") and s.id != "section-3-work-placeholder")
-            or s.id == "section-3-our-work"
-        )
-        and (s.content or "").strip()
-        for s in draft.sections
-    )
+    has_section3 = any(_section3_card_is_usable(s) for s in draft.sections)
     return has_section1 and has_section2 and has_section3
+
+
+def _section3_card_is_usable(section: ProposalSection) -> bool:
+    """True when a Section 3 card is a real single-project case study with content.
+
+    Master dumps (All Case Studies) and org-structure templates used to satisfy
+    has_section3 and skip regeneration forever — leaving broken tabs in place.
+    """
+    sid = section.id or ""
+    if sid == "section-3-our-work":
+        return bool((section.content or "").strip())
+    if not (sid.startswith("section-3-work-") and sid != "section-3-work-placeholder"):
+        return False
+    if not (section.content or "").strip():
+        return False
+    from app.services.proposal_case_study_eligibility import (
+        is_eligible_section3_case_study_title,
+    )
+
+    return is_eligible_section3_case_study_title(
+        section.title
+    ) and is_eligible_section3_case_study_title(sid)
 
 
 
@@ -283,8 +298,8 @@ from app.services.proposal_common import ProposalError, can_start_proposal, load
 # Share of the page limit held back for content written outside the drafting
 # graph — budget/cost tables, closing forms, signature blocks. Without a reserve
 # the drafting graph spends the whole allowance and those sections push the
-# manuscript back over the limit.
-_NON_DRAFT_RESERVE = 0.15
+# manuscript back over the limit. Short RFPs (≤15 pages) hold more back (Ralph).
+from app.services.proposal_ralph import ralph_non_draft_reserve_fraction
 
 
 def _remaining_word_budget(
@@ -315,7 +330,7 @@ def _remaining_word_budget(
         for section in already_written
         if (section.content or "").strip()
     )
-    reserve = int(total * _NON_DRAFT_RESERVE)
+    reserve = int(total * ralph_non_draft_reserve_fraction(page_limit))
     remaining = total - spent - reserve
 
     floor = MIN_SECTION_WORDS * drafting_count
@@ -1373,11 +1388,33 @@ async def _generate_sections_1_3_inner(
             for s in existing_sections_1_3
         )
         has_section3 = any(
-            s.id.startswith("section-3-work-")
-            and s.id != "section-3-work-placeholder"
-            and s.content.strip()
-            for s in existing_sections_1_3
+            _section3_card_is_usable(s) for s in existing_sections_1_3
         )
+
+        # Drop dump/template Section 3 cards so the graph rebuilds real studies.
+        if existing_draft and not has_section3:
+            cleaned = [
+                s
+                for s in existing_draft.sections
+                if not (
+                    s.id.startswith("section-3-work-")
+                    and s.id != "section-3-work-placeholder"
+                    and not _section3_card_is_usable(s)
+                )
+            ]
+            if len(cleaned) != len(existing_draft.sections):
+                existing_draft = existing_draft.model_copy(update={"sections": cleaned})
+                await asave_proposal_draft(existing_draft)
+                existing_sections_1_3 = [
+                    s
+                    for s in existing_draft.sections
+                    if s.id.startswith(("section-1-", "section-2-", "section-3-"))
+                ]
+                logger.info(
+                    "Stripped ineligible Section 3 dump/template cards for %s "
+                    "so case studies can regenerate",
+                    rfp_id,
+                )
 
         if has_section1 and has_section2 and has_section3:
             logger.info(
@@ -1953,6 +1990,7 @@ async def _run_phase3_drafting_inner(
             rfp_sector=rfp.sector,
             rfp_location=rfp.location or None,
             rfp_context=rfp_context,
+            rfp_due_date=getattr(rfp, "due_date", None) or None,
             rfp_sections=sections_to_draft,
             evidence_corpus=research.evidence_corpus,
             brand_voice=research.brand_voice,
@@ -1978,6 +2016,7 @@ async def _run_phase3_drafting_inner(
                 else None
             ),
             doc_word_budget=doc_word_budget,
+            prior_drafted_sections=[*static_sections, *already_filled],
             on_sections_drafted=_on_phase3_batch,
         )
 
@@ -2018,6 +2057,38 @@ async def _run_phase3_drafting_inner(
     draft, integrity_logs = apply_manuscript_integrity_guards(draft)
     for line in integrity_logs[:12]:
         logger.info("Phase 3 integrity: %s — %s", rfp_id, line)
+
+    try:
+        from app.services.proposal_blocker_prevention import (
+            apply_feedback_blocker_suite,
+        )
+
+        suite = await apply_feedback_blocker_suite(
+            draft,
+            rfp=rfp,
+            research=research,
+            rfp_text=rfp_source_text or "",
+            use_llm_contradiction=True,
+        )
+        draft = suite.draft
+        for line in suite.logs[:16]:
+            logger.info("Phase 3 blocker suite: %s — %s", rfp_id, line)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3 blocker suite skipped for %s: %s", rfp_id, exc)
+
+    # Ralph: strip invented diagram/designer promises + enforce page budget ceilings.
+    try:
+        from app.services.proposal_ralph import apply_ralph_to_draft
+
+        draft, ralph_logs = apply_ralph_to_draft(
+            draft,
+            page_limit=rfp.page_limit,
+            rfp_text=rfp_source_text,
+        )
+        for line in ralph_logs[:16]:
+            logger.info("Phase 3 Ralph: %s — %s", rfp_id, line)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3 Ralph skipped for %s: %s", rfp_id, exc)
 
     # Manuscript-fulfill guards — previously reachable only from Scan-RFP's
     # mode="full" path, which the live Scan button never reaches. Run them here
@@ -2801,16 +2872,27 @@ async def generate_full_proposal(
                 "Full proposal budget-before-drafting enabled for %s",
                 rfp_id,
             )
-            draft, research, _budget = await run_phase3_5_budget(rfp_id)
+            draft, research, budget = await run_phase3_5_budget(rfp_id)
             draft, research = await run_phase3_drafting(rfp_id)
-            # Re-render money slots after drafting against canonical budget.
+            # Phase 3 may have overwritten/stubbed the Cost tab — re-land canonical
+            # fee tables, then resolve money slots in narrative sections.
             if research and research.budget:
+                from app.services.proposal_budget_content import (
+                    incorporate_budget_into_draft,
+                )
                 from app.services.proposal_budget_slots import render_draft_budget_slots
 
+                rfp_ctx = load_rfp_for_proposal(rfp_id)[2]
+                draft = (
+                    await incorporate_budget_into_draft(
+                        rfp_id, research.budget, rfp_text=rfp_ctx
+                    )
+                    or draft
+                )
                 draft, _unresolved = render_draft_budget_slots(draft, research.budget)
                 await asave_proposal_draft(draft)
                 step_trace(
-                    "money_slots_rerender_after_draft",
+                    "budget_reincorporate_after_draft",
                     rfp_id=rfp_id,
                     unresolved=len(_unresolved or []),
                     **summarize_budget(research.budget),
@@ -2910,10 +2992,73 @@ async def generate_full_proposal(
                     )
 
                 await _assert_proposal_not_reset(rfp_id)
+                try:
+                    from app.services.proposal_blocker_prevention import (
+                        apply_feedback_blocker_suite,
+                    )
+
+                    suite = await apply_feedback_blocker_suite(
+                        draft,
+                        rfp=rfp,
+                        research=research,
+                        rfp_text=full_rfp_text,
+                        use_llm_contradiction=True,
+                    )
+                    draft = suite.draft
+                    for line in suite.logs[:10]:
+                        logger.info(
+                            "Full proposal post-closing blocker suite: %s — %s",
+                            rfp_id,
+                            line,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Full proposal post-closing blocker suite skipped for %s: %s",
+                        rfp_id,
+                        exc,
+                    )
                 await asave_proposal_draft(draft)
                 await asave_research_cache(research)
 
         draft, research, edit_report = await run_phase3_6_self_edit(rfp_id)
+
+        # Final blocker suite AFTER senior editor — Generate-from-scratch must
+        # not ship the same feedback defects Scan is expected to catch.
+        try:
+            from app.services.proposal_blocker_prevention import (
+                apply_feedback_blocker_suite,
+            )
+            from app.services.rfp_content import combine_rfp_text, load_local_rfp_text
+
+            rfp_final = get_rfp(rfp_id) or rfp
+            _d, pdf_t, *_rest = load_local_rfp_text(rfp_final, max_chars=250_000)
+            final_rfp_text = combine_rfp_text(
+                _d or (rfp_final.description or ""), pdf_t, max_chars=250_000
+            )
+            if len(final_rfp_text.strip()) < 200:
+                final_rfp_text = load_rfp_for_proposal(rfp_id)[2]
+            suite = await apply_feedback_blocker_suite(
+                draft,
+                rfp=rfp_final,
+                research=research,
+                rfp_text=final_rfp_text,
+                use_llm_contradiction=True,
+            )
+            draft = suite.draft
+            await asave_proposal_draft(draft)
+            for line in suite.logs[:12]:
+                logger.info("Full proposal final blocker suite: %s — %s", rfp_id, line)
+            step_trace(
+                "feedback_blocker_suite_final",
+                rfp_id=rfp_id,
+                log_count=len(suite.logs),
+                contradictions=suite.contradiction_count,
+                rewrites=suite.contradiction_rewrites,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Full proposal final blocker suite skipped for %s: %s", rfp_id, exc
+            )
 
         if brand_voice and not research.brand_voice:
             research = research.model_copy(update={"brand_voice": brand_voice})

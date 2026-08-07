@@ -434,8 +434,8 @@ async def _repair_bio_subsection_block(
     query = _kb_query_for_bio_subsection(member, heading)
     kb_context, _, _ = await retrieve_for_question(
         query,
-        limit=6,
-        max_chars=28_000,
+        limit=5,
+        max_chars=12_000,
         threshold=0.32,
     )
     if kb_context.startswith("(No matching"):
@@ -623,8 +623,8 @@ async def _gather_kb_context(
         async with sem:
             context, sources, _ = await retrieve_for_question(
                 query,
-                limit=6,
-                max_chars=18_000,
+                limit=4,
+                max_chars=12_000,
                 threshold=0.32,
             )
             return query, context, sources
@@ -718,14 +718,14 @@ async def _run_requirement_aligned_fact_check_agent(
         f"Mapped requirements:\n{req_block}\n\n"
         f"Retrieval focus:\n{focus_block}\n\n"
         f"RFP excerpt (authoritative for structure, checklists, evaluation):\n"
-        f"{rfp_excerpt[:45000]}\n\n"
-        f"Knowledge base:\n{kb_context[:45000]}\n\n"
-        f"Current draft:\n{(section.content or '')[:14000]}"
+        f"{rfp_excerpt[:24_000]}\n\n"
+        f"Knowledge base:\n{kb_context[:18_000]}\n\n"
+        f"Current draft:\n{(section.content or '')[:12_000]}"
     )
     try:
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=8192,
+            max_tokens=6144,
             temperature=0.0,
         )
         content = str((raw or {}).get("content") or "").strip()
@@ -826,8 +826,8 @@ async def _kb_blob_for_section(
     query = _kb_query_for_section(section, rfp, mapped=mapped)
     context, sources, _ = await retrieve_for_question(
         query,
-        limit=8,
-        max_chars=45_000,
+        limit=6,
+        max_chars=18_000,
         threshold=0.32,
     )
     if context.startswith("(No matching"):
