@@ -376,12 +376,15 @@ async def _run_fulfill_rfp_gaps_body(
         "RFP structure (all scored sections)",
         "Requirement ledger (merge / cut / add)",
         "DQ & gov-policy gate (agentic loop)",
+        "Remove duplicate sections",
         "Budget (regen if missing + thorough)",
         "Consistency repairs",
         "Contractor KPIs (Section 2.3)",
         "KB fact-check (Supermemory)",
         "RFP contradiction check (LLM)",
         "Remove optional [VERIFY] tags",
+        "Compact manuscript (remove duplicates)",
+        "Page limit & anti-invention (Ralph)",
         "Pre-submit refresh",
     )
 
@@ -686,13 +689,56 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].append(f"Coverage orchestrator / DQ gate skipped: {exc}")
 
     try:
+        from app.services.proposal_section_dedup import dedupe_manuscript_for_scan
+
+        await _scan_progress(
+            5,
+            "Scan RFP: Removing duplicates",
+            "Delete clones, remove mega sections that restate sibling tabs.",
+        )
+        await _ensure_not_stopped()
+        sections, dedupe_logs = dedupe_manuscript_for_scan(list(draft.sections))
+        if dedupe_logs:
+            draft = draft.model_copy(
+                update={
+                    "sections": sections,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            await asave_proposal_draft(draft)
+            deleted = [
+                log
+                for log in dedupe_logs
+                if "near-duplicate" in log
+                or "content overlap" in log
+                or "contained restatement" in log
+                or "removed —" in log
+                or "heavy overlap" in log
+                or "content clone" in log
+                or "report twin" in log
+            ]
+            report["duplicateSectionsRemoved"] = len(deleted)
+            report["duplicateSectionsRemovedTitles"] = [
+                p.split(" (", 1)[0] for p in deleted[:12]
+            ]
+            report["logs"].append(
+                f"Dedupe: {len(dedupe_logs)} compact action(s): "
+                + "; ".join(dedupe_logs[:10])
+            )
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Scan RFP dedupe prune skipped: %s", exc)
+        report["logs"].append(f"Dedupe prune skipped: {exc}")
+
+    try:
         from app.services.proposal_fulfill_rfp_budget_kpi import (
             run_fulfill_budget_scan,
             run_fulfill_kpi_scan,
         )
 
         await _scan_progress(
-            5,
+            6,
             "Scan RFP: budget (thorough)",
             "Regenerate if missing; reconcile math; grounding vs manuscript.",
         )
@@ -730,7 +776,7 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
         await _scan_progress(
-            6,
+            7,
             "Scan RFP: consistency repairs",
             "Primary contact, references, schedule vs approach, cert claims, "
             "signed-PDF designer notes — existing draft only (no full regen).",
@@ -795,7 +841,7 @@ async def _run_fulfill_rfp_gaps_body(
             from app.services.proposal_fulfill_rfp_budget_kpi import run_fulfill_kpi_scan
 
             await _scan_progress(
-                7,
+                8,
                 "Scan RFP: contractor KPIs + detail",
                 "Activity Measure tables & BMP linkages — rewrite, not label swap.",
             )
@@ -821,7 +867,7 @@ async def _run_fulfill_rfp_gaps_body(
         try:
             from app.services.proposal_fulfill_rfp_budget_kpi import run_fulfill_kpi_scan
 
-            await _scan_progress(7, "Scan RFP: contractor KPIs", "Deterministic KPI alignment (no LLM).")
+            await _scan_progress(8, "Scan RFP: contractor KPIs", "Deterministic KPI alignment (no LLM).")
             await _ensure_not_stopped()
             draft, kpi_logs, kpi_human = await run_fulfill_kpi_scan(
                 draft=draft,
@@ -868,7 +914,7 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
     await _scan_progress(
-        8,
+        9,
         "Scan RFP: KB fact-check",
         "Requirements → RFP excerpt → Supermemory per section (smart rewrite when needed).",
     )
@@ -916,7 +962,7 @@ async def _run_fulfill_rfp_gaps_body(
     # Generate-from-scratch uses (titles, consistency, certs, signed PDF note,
     # LLM manuscript-vs-RFP contradictions).
     await _scan_progress(
-        9,
+        10,
         "Scan RFP: RFP contradiction check",
         "Blocker suite + LLM manuscript vs RFP — same guards as Generate-from-scratch.",
     )
@@ -990,7 +1036,7 @@ async def _run_fulfill_rfp_gaps_body(
 
     # Dedicated pass: every section with [VERIFY] → RFP scan → remove unless critical.
     await _scan_progress(
-        10,
+        11,
         "Scan RFP: remove optional [VERIFY]",
         "Read each VERIFY section vs full RFP — drop tags unless critically required; never invent.",
     )
@@ -1076,8 +1122,80 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Optional claim scrub during Scan RFP skipped: %s", exc)
         report["logs"].append(f"Optional claim scrub skipped: {exc}")
 
+    try:
+        from app.services.proposal_section_dedup import dedupe_manuscript_for_scan
+
+        await _scan_progress(
+            12,
+            "Scan RFP: Compact manuscript",
+            "Final pass — remove leftover duplicate/restated tabs after adds/rewrites.",
+        )
+        await _ensure_not_stopped()
+        sections, final_logs = dedupe_manuscript_for_scan(list(draft.sections))
+        if final_logs:
+            draft = draft.model_copy(
+                update={
+                    "sections": sections,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            await asave_proposal_draft(draft)
+            deleted = [
+                log
+                for log in final_logs
+                if "near-duplicate" in log
+                or "content overlap" in log
+                or "contained restatement" in log
+                or "removed —" in log
+                or "heavy overlap" in log
+                or "content clone" in log
+                or "report twin" in log
+            ]
+            prev = int(report.get("duplicateSectionsRemoved") or 0)
+            report["duplicateSectionsRemoved"] = prev + len(deleted)
+            titles = list(report.get("duplicateSectionsRemovedTitles") or [])
+            titles.extend(p.split(" (", 1)[0] for p in deleted[:12])
+            report["duplicateSectionsRemovedTitles"] = titles[:20]
+            report["logs"].append(
+                f"Final compact: {len(final_logs)} action(s): "
+                + "; ".join(final_logs[:10])
+            )
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Scan RFP final compact skipped: %s", exc)
+        report["logs"].append(f"Final compact skipped: {exc}")
+
+    try:
+        from app.services.proposal_ralph import apply_ralph_to_draft
+
+        await _scan_progress(
+            13,
+            "Scan RFP: Page limit & anti-invention",
+            "If THIS RFP states a page limit, hard-fit without cutting identity/budget/scored floors; scrub invented diagrams.",
+        )
+        await _ensure_not_stopped()
+        draft, ralph_logs = apply_ralph_to_draft(
+            draft,
+            page_limit=rfp.page_limit,
+            rfp_text=rfp_text,
+        )
+        if ralph_logs:
+            await asave_proposal_draft(draft)
+            report["ralphActions"] = len(ralph_logs)
+            report["logs"].extend(ralph_logs[:20])
+            hard_fit = [x for x in ralph_logs if "page-hard-fit" in x or "page-limit:" in x]
+            if hard_fit:
+                report["pageLimitEnforced"] = True
+                report["pageLimitNotes"] = hard_fit[:6]
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Scan RFP Ralph skipped: %s", exc)
+        report["logs"].append(f"Ralph page-fit skipped: {exc}")
+
     await _scan_progress(
-        11,
+        14,
         "Scan RFP: pre-submit refresh",
         "Checklist, manual flags, and ending report.",
     )

@@ -1330,14 +1330,29 @@ async def plan_chat_structure_action(
             node_name="chat_structure_plan",
         )
     except LlmError as exc:
-        logger.warning("Structure plan LLM failed: %s — defaulting to edit", exc)
-        return StructurePlan(action="edit", editSectionId=focus_section_id)
+        # Do not silently rewrite the open tab — that is how add/rename asks
+        # corrupt Budget (or whatever is focused) when the planner is down.
+        logger.warning("Structure plan LLM failed: %s — asking clarify", exc)
+        return StructurePlan(
+            action="clarify",
+            clarifyQuestion=(
+                "I couldn't decide whether to edit the open tab or change the "
+                "outline. Should I edit the current section, add new sidebar "
+                "sections, or delete something?"
+            ),
+        )
 
     try:
         plan = StructurePlan.model_validate(raw)
     except Exception:
-        logger.warning("Structure plan invalid JSON shape — defaulting to edit")
-        return StructurePlan(action="edit", editSectionId=focus_section_id)
+        logger.warning("Structure plan invalid JSON shape — asking clarify")
+        return StructurePlan(
+            action="clarify",
+            clarifyQuestion=(
+                "I couldn't parse how to change the outline. Should I edit the "
+                "current section, add new sidebar sections, or delete something?"
+            ),
+        )
 
     plan = _coerce_add_case_study_plan(plan, user_message, draft)
     plan = _coerce_add_bio_plan(plan, user_message, draft)

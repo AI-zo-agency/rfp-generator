@@ -71,11 +71,11 @@ const DEFAULT_SECTIONS: (Omit<
   "content" | "status"
 >)[] = [
   // Section 1 — Company Overview subsections
-  {
+    {
     id: "section-1-who-we-are",
     title: "1.1 — Who We Are",
     pageLimit: 1,
-    wordTarget: 600,
+    wordTarget: 200,
     required: true,
     custom: false,
     source: "template",
@@ -95,7 +95,7 @@ const DEFAULT_SECTIONS: (Omit<
     id: "section-1-business-info",
     title: "1.3 — Business Information",
     pageLimit: 1,
-    wordTarget: 400,
+    wordTarget: 200,
     required: true,
     custom: false,
     source: "template",
@@ -105,7 +105,7 @@ const DEFAULT_SECTIONS: (Omit<
     id: "section-1-certifications",
     title: "1.4 — Certifications",
     pageLimit: 1,
-    wordTarget: 400,
+    wordTarget: 150,
     required: true,
     custom: false,
     source: "template",
@@ -115,7 +115,7 @@ const DEFAULT_SECTIONS: (Omit<
     id: "section-1-insurance",
     title: "1.5 — Insurance Information",
     pageLimit: 1,
-    wordTarget: 400,
+    wordTarget: 100,
     required: true,
     custom: false,
     source: "template",

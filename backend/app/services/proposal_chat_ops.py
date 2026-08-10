@@ -79,20 +79,78 @@ _FAB_REMOVE_RE = re.compile(
     r")",
     re.I | re.S,
 )
+# Bare "check rfp" used to match and run a proposal-wide fabrication purge when
+# the user only meant "cross-check the RFP for what to add in this section".
 _TRUST_AUDIT_RE = re.compile(
     r"\b("
-    r"trust\s+audit|evidence\s+gate|clientlist|client\s+list|"
-    r"check\s+(?:against\s+)?(?:kb|rfp|fabricat)|"
-    r"verify\s+(?:facts|claims|against)"
+    r"trust\s+audit|evidence\s+(?:gate|trust)\s+audit|"
+    r"clientlist\s+audit|client\s+list\s+audit|"
+    r"check\s+against\s+(?:the\s+)?(?:kb|rfp|client\s*list|fabricat\w*)|"
+    r"verify\s+(?:all\s+)?(?:facts|claims)\s+against|"
+    r"walk\s+every\s+section|"
+    r"(?:purge|remove)\s+(?:all\s+)?fabricat\w*"
     r")\b",
     re.I,
 )
 
-_PARA_SPLIT_RE = re.compile(r"\n\s*\n+")
-_SENTENCE_OPENER_RE = re.compile(
-    r"^((?:In|Across|Throughout|For|As)\s+(?:today'?s|the)\s+[^.!?]{20,120})",
-    re.I,
+# Section-scoped asks must never fan out into global chat ops.
+_SECTION_LOCAL_CHAT_ASK_RE = re.compile(
+    r"(?is)(?:"
+    r"\bin\s+that\b|\bthis\s+section\b|\bthis\s+tab\b|\bthat\s+section\b|"
+    r"\bthis\s+part\b|\bthat\s+part\b|\bthis\s+one\b|\bonly\s+this\b|"
+    r"\bjust\s+this\b|\bjust\s+that\b|"
+    r"\bwhat\s+to\s+add\b|\banything\s+left\s+to\s+add\b|\bleft\s+to\s+add\b|"
+    r"\bdesigner\s+note\b|\besigner\s+note\b|"
+    r"\badd\s+(?:a\s+)?(?:short\s+)?note\s+if\s+needed\b|"
+    r"\b(?:revise|rewrite|patch|fix|update|improve|edit|tighten|polish|shorten)\b"
+    r".{0,50}\b(?:this|that|it|here)\b|"
+    r"\b(?:this|that)\b.{0,30}\b(?:section|tab|part|paragraph|patch|excerpt)\b"
+    r")"
 )
+_GLOBAL_CHAT_OP_FORCE_RE = re.compile(
+    r"(?is)\b("
+    r"every\s+section|all\s+sections|whole\s+proposal|entire\s+(?:draft|proposal)|"
+    r"proposal[- ]wide|across\s+(?:the\s+)?(?:proposal|draft|manuscript)|"
+    r"patch[- ]wise|manuscript[- ]wide|"
+    r"trust\s+audit|check\s+duplicates|remove\s+duplicates|"
+    r"remove\s+fabricat|purge\s+fabricat|walk\s+every\s+section|"
+    r"apply\s+(?:these|those)\s+fixes|apply\s+all\s+(?:the\s+)?fixes|"
+    r"fix\s+all\s+(?:of\s+)?(?:these|those)|"
+    r"several\s+sections|multiple\s+sections"
+    r")\b"
+)
+
+
+def chat_ask_is_section_scoped(user_message: str) -> bool:
+    """True when the ask clearly targets one tab / 'this' / 'that' patch."""
+    return bool(_SECTION_LOCAL_CHAT_ASK_RE.search(user_message or ""))
+
+
+def chat_ask_is_proposal_wide(user_message: str) -> bool:
+    """True when the ask explicitly spans the whole manuscript."""
+    return bool(_GLOBAL_CHAT_OP_FORCE_RE.search(user_message or ""))
+
+
+def coerce_chat_intent_for_scope(
+    chat_intent: str,
+    user_message: str,
+) -> tuple[str, str]:
+    """Downgrade multi_patch → single_edit when the ask is section-scoped.
+
+    The LLM classifier often returns multi_patch for any 'fix/patch/revise'
+    wording. That must not rewrite Oregon Employment when the user asked about
+    PDF submission.
+    """
+    intent = (chat_intent or "none").strip() or "none"
+    if intent != "multi_patch":
+        return intent, "unchanged"
+    if chat_ask_is_proposal_wide(user_message):
+        return intent, "unchanged"
+    if chat_ask_is_section_scoped(user_message):
+        return "single_edit", "section_scoped_downgrade"
+    # Default: ambiguous 'patch/fix' without whole-proposal language stays
+    # on the focused tab — never fan out.
+    return "single_edit", "ambiguous_patch_stays_single"
 
 
 def classify_chat_op(user_message: str) -> ChatOpKind:
@@ -100,6 +158,10 @@ def classify_chat_op(user_message: str) -> ChatOpKind:
     if not text:
         return "none"
     from app.services.proposal_chat_content_repair import user_asks_content_risk_repair
+
+    # "check rfp what to add in that" / "revise this section" — single-tab only.
+    if chat_ask_is_section_scoped(text) and not chat_ask_is_proposal_wide(text):
+        return "none"
 
     if user_asks_content_risk_repair(text):
         return "fix_content_risks"
@@ -120,6 +182,13 @@ def classify_chat_op(user_message: str) -> ChatOpKind:
     if _TRUST_AUDIT_RE.search(text):
         return "trust_audit"
     return "none"
+
+
+_PARA_SPLIT_RE = re.compile(r"\n\s*\n+")
+_SENTENCE_OPENER_RE = re.compile(
+    r"^((?:In|Across|Throughout|For|As)\s+(?:today'?s|the)\s+[^.!?]{20,120})",
+    re.I,
+)
 
 
 def _norm_para(text: str) -> str:

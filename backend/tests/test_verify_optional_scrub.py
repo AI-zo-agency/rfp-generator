@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, patch
 from app.services.proposal_verify_optional_scrub import (
     count_verify_tags,
     scrub_optional_verify_tags,
+    strip_inline_evidence_tags,
     user_asks_scrub_optional_verify,
+    user_asks_strip_inline_evidence_tags,
 )
 
 
@@ -25,6 +27,30 @@ class TestVerifyOptionalScrubIntent(unittest.TestCase):
                 "clean verify tags if not needed for the RFP"
             )
         )
+
+    def test_strip_evidence_trust_verify_and_flag(self) -> None:
+        self.assertTrue(
+            user_asks_strip_inline_evidence_tags(
+                "Remove VERIFY and FLAG tags from this section."
+            )
+        )
+        self.assertTrue(
+            user_asks_strip_inline_evidence_tags(
+                "get rid of these red VERIFY flags on Oregon Employment"
+            )
+        )
+        body = (
+            "[VERIFY: 3.2 — Oregon Employment — Oregon Employment Department "
+            "named but not in gated evidence set for this draft]\n"
+            "[FLAG: claim 'website_build' not supported for Oregon Employment "
+            "Department — ClientList work type is 'Precision geofencing']\n\n"
+            "### Challenge\nReach unemployed individuals.\n"
+        )
+        cleaned, n = strip_inline_evidence_tags(body)
+        self.assertEqual(n, 2)
+        self.assertNotIn("[VERIFY:", cleaned)
+        self.assertNotIn("[FLAG:", cleaned)
+        self.assertIn("Challenge", cleaned)
 
     def test_fill_is_not_scrub(self) -> None:
         self.assertFalse(

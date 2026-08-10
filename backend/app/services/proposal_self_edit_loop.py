@@ -371,6 +371,38 @@ async def _apply_senior_editor_tickets(
 ) -> tuple[ProposalDraft, ProposalResearchCache | None]:
     """Dispatch Phase 3 single-section redrafts for already-emitted Senior Editor tickets."""
     from app.services.proposal_budget_content import find_budget_section_index
+    from app.services.proposal_section_dedup import _is_static_cq_section_id
+
+    # Apply hard deletes first — no point repairing a tab we are about to remove.
+    delete_tickets = [
+        t for t in (tickets.get("deleteSectionTickets") or []) if isinstance(t, dict)
+    ]
+    drop_ids: set[str] = set()
+    for raw in delete_tickets:
+        sid = str(raw.get("sectionId") or "").strip()
+        keep = str(raw.get("keepSectionId") or "").strip()
+        if not sid or _is_static_cq_section_id(sid):
+            continue
+        if keep and not any(s.id == keep for s in draft.sections):
+            continue
+        if not any(s.id == sid for s in draft.sections):
+            continue
+        drop_ids.add(sid)
+    if drop_ids:
+        kept = [s for s in draft.sections if s.id not in drop_ids]
+        draft = draft.model_copy(
+            update={
+                "sections": kept,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        await asave_proposal_draft(draft)
+        report.section_logs.append(
+            {
+                "section": "senior-editor",
+                "detail": f"Deleted {len(drop_ids)} duplicate section tab(s) via tickets",
+            }
+        )
 
     # The Budget/Pricing section is deterministically rendered (render_budget_markdown)
     # and must never go through a generic Phase 3 section redraft, which would freely
@@ -389,7 +421,7 @@ async def _apply_senior_editor_tickets(
         if not isinstance(raw, dict):
             continue
         sid = str(raw.get("sectionId") or "").strip()
-        if not sid or sid in seen:
+        if not sid or sid in seen or sid in drop_ids:
             continue
         if sid == budget_section_id:
             continue
@@ -404,21 +436,25 @@ async def _apply_senior_editor_tickets(
         if len(ordered) >= max_tickets:
             break
 
-    if not ordered:
+    if not ordered and not drop_ids:
         report.section_logs.append(
             {"section": "senior-editor", "detail": "no tickets emitted"}
         )
         return draft, research
 
-    report.section_logs.append(
-        {
-            "section": "senior-editor",
-            "detail": (
-                f"{len(dedupe)} dedupe / {len(coverage)} coverage / "
-                f"{len(compliance)} compliance ticket(s); applying {len(ordered)}"
-            ),
-        }
-    )
+    if ordered:
+        report.section_logs.append(
+            {
+                "section": "senior-editor",
+                "detail": (
+                    f"{len(delete_tickets)} delete / {len(dedupe)} dedupe / "
+                    f"{len(coverage)} coverage / {len(compliance)} compliance "
+                    f"ticket(s); applying {len(ordered)} rewrite(s)"
+                ),
+            }
+        )
+    elif not drop_ids:
+        return draft, research
 
     for ticket in ordered:
         sid = str(ticket.get("sectionId") or "")
@@ -729,7 +765,7 @@ async def _fallback_improve_section(
         f"{reason}. Preserve last good draft facts; fix only the listed gaps.\n\n"
     )
     try:
-        _section, updated_draft, updated_research, provider, detail, _ = await improve_proposal_section(
+        _section, updated_draft, updated_research, provider, detail, _, _ = await improve_proposal_section(
             rfp_id,
             section_id,
             failure_prefix + message,
@@ -837,14 +873,14 @@ async def run_self_edit_loop(
             logger.info("Self-edit blocker suite %s: %s", rfp_id, line)
 
     from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
-    from app.services.proposal_section_dedup import compress_duplicate_case_study_sections
+    from app.services.proposal_section_dedup import dedupe_manuscript_for_scan
 
     report = SelfEditReport(iterations_run=1)
 
-    # Deterministic cross-section case-study compression — fast, no LLM call, so it
-    # runs before the concurrent scans below and they see already-deduped content.
-    sections, cross_dupes = compress_duplicate_case_study_sections(list(draft.sections))
-    if cross_dupes:
+    # Deterministic manuscript compact — fast, no LLM call, so it runs before the
+    # concurrent scans below and they see already-deduped / trimmed content.
+    sections, dedupe_logs = dedupe_manuscript_for_scan(list(draft.sections))
+    if dedupe_logs:
         draft = draft.model_copy(
             update={
                 "sections": sections,
@@ -855,8 +891,16 @@ async def run_self_edit_loop(
         report.section_logs.append(
             {
                 "section": "dedupe",
-                "detail": f"Compressed {cross_dupes} duplicate case-study rewrite(s)",
+                "detail": "; ".join(dedupe_logs[:12]),
             }
+        )
+        await record_pipeline_activity(
+            rfp_id,
+            label="Senior editor: Compact manuscript",
+            detail=f"{len(dedupe_logs)} compact action(s)",
+            step_index=0,
+            step_total=1,
+            in_progress_phase="phase-3-6-self-edit",
         )
 
     # One consolidated Senior Editor pass. The two scans below are independent reads
@@ -867,10 +911,10 @@ async def run_self_edit_loop(
     # cost since it no longer needs a second manual pass afterward).
     await record_pipeline_activity(
         rfp_id,
-        label="Senior editor: coverage, compliance & optional-claim scrub",
+        label="Senior editor: Removing duplicates + coverage & compliance",
         detail=(
-            "Scanning manuscript vs. RFP requirements; removing DESIGNER NOTE / "
-            "auditor-echo MANUAL FILL and [VERIFY] tags the RFP doesn't require"
+            "Deleting near-duplicate tabs; trimming rehash; scanning manuscript vs. "
+            "RFP; scrubbing optional VERIFY / MANUAL FILL noise"
         ),
         step_index=1,
         step_total=1,
@@ -1007,11 +1051,13 @@ async def run_self_edit_loop(
         )
 
     dedupe_n = len(tickets.get("dedupeTickets") or [])
+    delete_n = len(tickets.get("deleteSectionTickets") or [])
     coverage_n = len(tickets.get("coverageTickets") or [])
     compliance_n = len(tickets.get("complianceTickets") or [])
     step_trace(
         "senior_editor_tickets_emitted",
         rfp_id=rfp_id,
+        delete=delete_n,
         dedupe=dedupe_n,
         coverage=coverage_n,
         compliance=compliance_n,
@@ -1019,9 +1065,12 @@ async def run_self_edit_loop(
             {
                 "sectionId": str(t.get("sectionId") or ""),
                 "kind": kind,
-                "brief": str(t.get("rewriteBrief") or "")[:160],
+                "brief": str(
+                    t.get("rewriteBrief") or t.get("reason") or t.get("trimGuidance") or ""
+                )[:160],
             }
             for kind, bucket in (
+                ("delete", tickets.get("deleteSectionTickets") or []),
                 ("dedupe", tickets.get("dedupeTickets") or []),
                 ("coverage", tickets.get("coverageTickets") or []),
                 ("compliance", tickets.get("complianceTickets") or []),

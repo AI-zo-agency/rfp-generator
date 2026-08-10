@@ -29,7 +29,7 @@ SECTION_SPECS: tuple[tuple[str, str, str], ...] = (
         "NO staff names, titles, channels, CRM, dashboards, or report cadences. "
         "Client bridge max 1–2 feeling sentences. Never inline headings. No whole-paragraph bold. "
         "Lead with zö brand essence (zö = family/kindred/clan; strongest advocate). "
-        "HARD MAX 250 words (prefer ~200). "
+        "HARD MAX 200 words (prefer ~150). Submission-length — designer must not need to cut. "
         "Use canonical agency years from CompanyTruth / tenure block — never invent a different year count. "
         "No certifications or insurance. Address ONLY the RFP client named in the prompt.",
     ),

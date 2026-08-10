@@ -234,13 +234,20 @@ def evidence_policy_prompt_stanza(
     *,
     section_id: str = "",
 ) -> str:
-    """One-line / short block injected into drafting and chat rewrite prompts."""
+    """One-line / short block injected into drafting and chat rewrite prompts.
+
+    Wording deliberately avoids chat intent trigger tokens (edit verbs like
+    "replace"/"remove", and the literal "[MANUAL FILL]" marker). Those used to
+    live in this stanza and hijacked routing when the augmented string was
+    classified as if the user had typed them.
+    """
     sid = section_id or "section"
     if decision.action == EvidenceDecision.WRITE_FROM_PLAN:
         return (
-            f"Evidence policy for {sid}: write_from_plan — draft from RFP + execution "
-            "plan only. Do not invent company facts, certifications, client metrics, "
-            "or portfolio scopes. Prefer field-level [VERIFY] over whole-section stubs."
+            f"Evidence policy for {sid}: write_from_plan — compose from RFP + "
+            "execution plan only. Do not invent company facts, certifications, "
+            "client metrics, or portfolio scopes. Prefer field-level VERIFY marks "
+            "over whole-section stubs."
         )
     if decision.action == EvidenceDecision.WRITE_FROM_CANONICAL_BUDGET:
         return (
@@ -250,21 +257,21 @@ def evidence_policy_prompt_stanza(
     if decision.action == EvidenceDecision.RETRIEVE_THEN_WRITE:
         return (
             f"Evidence policy for {sid}: retrieve_then_write — use only retrieved "
-            "evidence snippets for company facts; if missing, narrow [VERIFY] / "
-            "[MANUAL FILL], do not fabricate."
+            "evidence snippets for company facts; if missing, narrow field-level "
+            "VERIFY / owner-gap marks, do not fabricate."
         )
     if decision.action == EvidenceDecision.MANUAL_FILL:
         return (
             f"Evidence policy for {sid}: manual_fill — do not invent; emit "
-            "[MANUAL FILL: owner — field] for legal/protected gaps."
+            "owner-gap marks for legal/protected gaps."
         )
     if decision.action == EvidenceDecision.VERIFY_FIELD:
         return (
-            f"Evidence policy for {sid}: verify_field — keep discrete [VERIFY] tags; "
-            "do not replace the whole section with a stub."
+            f"Evidence policy for {sid}: verify_field — keep discrete VERIFY marks; "
+            "do not overwrite the whole section with a stub."
         )
     return (
-        f"Evidence policy for {sid}: deterministic_cleanup — remove truncation / "
+        f"Evidence policy for {sid}: deterministic_cleanup — strip truncation / "
         "note leaks without inventing new facts."
     )
 

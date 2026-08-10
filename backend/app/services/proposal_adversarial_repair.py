@@ -505,7 +505,7 @@ async def repair_section_for_finding(
         failure_reason or "none",
         use_strong_model or repair_plan.needs_strong_model,
     )
-    section, draft, research, provider, _detail, _changed = await improve_proposal_section(
+    section, draft, research, provider, _detail, _changed, _ = await improve_proposal_section(
         rfp_id,
         section_id,
         repair_message,

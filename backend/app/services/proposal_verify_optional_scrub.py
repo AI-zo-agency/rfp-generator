@@ -231,6 +231,52 @@ def user_asks_scrub_optional_verify(user_message: str) -> bool:
     return False
 
 
+# Evidence-trust / claim-validator markers — including bare [FLAG: …] that the
+# optional-VERIFY scrub never touched, which left Oregon Employment looking
+# "broken" after a bad trust audit.
+_INLINE_EVIDENCE_TAG_RE = re.compile(
+    r"\[(?:VERIFY|FLAG)\s*:[^\]]*\]",
+    re.I,
+)
+_STRIP_EVIDENCE_TAG_ASK_RE = re.compile(
+    r"(?is)"
+    r"(?:"
+    r"(?:remove|delete|strip|scrub|drop|purge|clear|get\s+rid\s+of|take\s+out)"
+    r".{0,80}"
+    r"(?:\[?\s*VERIFY|\[?\s*FLAG|verify\s+tags?|flag\s+tags?|"
+    r"evidence\s+(?:tags?|flags?|markers?)|red\s+(?:flags?|tags?)|"
+    r"green\s+(?:flags?|tags?))"
+    r"|"
+    r"(?:\[?\s*VERIFY|\[?\s*FLAG|verify\s+tags?|flag\s+tags?).{0,40}"
+    r"(?:from\s+(?:this\s+)?(?:section|tab|draft)|out\s+of\s+(?:the\s+)?(?:section|draft))"
+    r")",
+)
+
+
+def user_asks_strip_inline_evidence_tags(user_message: str) -> bool:
+    """True when the user wants [VERIFY]/[FLAG] markers removed from the draft."""
+    raw = (user_message or "").strip()
+    if not raw:
+        return False
+    return bool(_STRIP_EVIDENCE_TAG_ASK_RE.search(raw))
+
+
+def count_inline_evidence_tags(text: str) -> int:
+    return len(_INLINE_EVIDENCE_TAG_RE.findall(text or ""))
+
+
+def strip_inline_evidence_tags(content: str) -> tuple[str, int]:
+    """Deterministically delete [VERIFY: …] and [FLAG: …] markers. Never invents."""
+    body = content or ""
+    found = _INLINE_EVIDENCE_TAG_RE.findall(body)
+    if not found:
+        return body, 0
+    out = _INLINE_EVIDENCE_TAG_RE.sub("", body)
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip() + ("\n" if body.endswith("\n") else ""), len(found)
+
+
 def _extract_json_content(raw: dict | list | str | None) -> tuple[str, str, int]:
     if not isinstance(raw, dict):
         return "", "", 0

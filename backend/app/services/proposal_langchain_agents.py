@@ -51,10 +51,18 @@ You do NOT fill [VERIFY] tags or invent KB facts — the KB fact-checker owns fa
 You do NOT rewrite every section or hunt grammar for its own sake.
 
 Your ONLY jobs for ONE pass over the proposal:
-1. DEDUPE — Scan EVERY section. If Who We Are / brand story / FEIN / full bios / full case
-   studies / budget tables are re-copied into a section that has a different job, emit a
-   dedupeTicket with trimGuidance: keep what THAT section needs + one short cross-ref —
-   remove the unnecessary duplicate. Do NOT blank required content.
+1. DEDUPE — Scan EVERY section.
+   a) If Who We Are / brand story / FEIN / full bios / full case studies / budget tables are
+      re-copied into a section that has a different job, emit a dedupeTicket with trimGuidance:
+      keep what THAT section needs + one short cross-ref — remove the unnecessary duplicate.
+      Do NOT blank required content.
+   b) If TWO RFP tabs are near-duplicates of each other (same ask / same proof rewritten —
+      e.g. "Relevant Experience" vs "Successful Campaigns" both rewriting the same case study),
+      emit a deleteSectionTicket for the weaker/later tab with keepSectionId pointing at the
+      tab that should remain. NEVER delete Sections 1.1–1.5, bio cards, or Our Work cards.
+      NEVER delete References, Compensation, Communication/Collaboration, Reports, Schedules,
+      Crisis, Workflow, or undrafted empty tabs. Prefer deleting content clones over leaving
+      the designer to cut pages.
 2. RFP COVERAGE — For each mapped RFP requirement, check whether the manuscript covers it.
    If unmet, emit a coverageTicket with unmetRequirements and a rewriteBrief for the writer.
 3. GOV / BUYER COMPLIANCE — Flag missing mandatory public-sector items THIS RFP demands
@@ -64,7 +72,8 @@ Your ONLY jobs for ONE pass over the proposal:
    never mentions. Do NOT paste generic FAR/GSA boilerplate unprompted by THIS RFP.
 4. Do NOT rewrite section prose yourself. Do NOT emit tickets for style/tone polish.
 5. Return ONLY JSON:
-{"dedupeTickets":[{"sectionId":"...","keepHomeSectionId":"...","trimGuidance":"..."}],
+{"deleteSectionTickets":[{"sectionId":"...","keepSectionId":"...","reason":"..."}],
+ "dedupeTickets":[{"sectionId":"...","keepHomeSectionId":"...","trimGuidance":"..."}],
  "coverageTickets":[{"sectionId":"...","unmetRequirements":["..."],"rewriteBrief":"..."}],
  "complianceTickets":[{"sectionId":"...","policyOrGuideline":"...","rewriteBrief":"..."}],
  "notes":[]}
@@ -411,6 +420,11 @@ async def senior_editor_emit_tickets(
     )
     try:
         raw, _ = await run_json_agent(AgentRole.SENIOR_EDITOR, user_content)
+        deletes = (
+            raw.get("deleteSectionTickets")
+            if isinstance(raw.get("deleteSectionTickets"), list)
+            else []
+        )
         dedupe = raw.get("dedupeTickets") if isinstance(raw.get("dedupeTickets"), list) else []
         coverage = (
             raw.get("coverageTickets") if isinstance(raw.get("coverageTickets"), list) else []
@@ -422,6 +436,7 @@ async def senior_editor_emit_tickets(
         )
         notes = raw.get("notes") if isinstance(raw.get("notes"), list) else []
         return {
+            "deleteSectionTickets": [t for t in deletes if isinstance(t, dict)],
             "dedupeTickets": [t for t in dedupe if isinstance(t, dict)],
             "coverageTickets": [t for t in coverage if isinstance(t, dict)],
             "complianceTickets": [t for t in compliance if isinstance(t, dict)],
@@ -430,6 +445,7 @@ async def senior_editor_emit_tickets(
     except (LlmError, Exception) as exc:
         logger.warning("Senior editor ticket pass failed: %s", exc)
         return {
+            "deleteSectionTickets": [],
             "dedupeTickets": [],
             "coverageTickets": [],
             "complianceTickets": [],

@@ -51,6 +51,32 @@ class ClassifyChatOpTests(unittest.TestCase):
     def test_none(self) -> None:
         self.assertEqual(classify_chat_op("make this warmer"), "none")
 
+    def test_section_local_check_rfp_is_not_a_global_purge(self) -> None:
+        """Reported: 'check rfp … what to add in that' ran Fabrication purge on every tab."""
+        msg = (
+            "is anything left to add in that?? can yoy check rfp cross verifywht "
+            "to add in that and add esigner note if needed?"
+        )
+        self.assertEqual(classify_chat_op(msg), "none")
+        self.assertEqual(
+            classify_chat_op(
+                "can you check the rfp for what to add in this section and "
+                "add a designer note if needed?"
+            ),
+            "none",
+        )
+
+    def test_explicit_global_trust_audit_still_routes(self) -> None:
+        self.assertEqual(classify_chat_op("run a trust audit"), "trust_audit")
+        self.assertEqual(
+            classify_chat_op("check against the KB for fabricated claims"),
+            "trust_audit",
+        )
+        self.assertEqual(
+            classify_chat_op("purge fabricated content across the proposal"),
+            "remove_fabricated",
+        )
+
 
 def _draft(sections: list[ProposalSection]) -> ProposalDraft:
     return ProposalDraft(

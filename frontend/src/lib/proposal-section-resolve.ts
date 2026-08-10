@@ -350,6 +350,69 @@ export function isOurWorkSection(section: OutlineSection | null | undefined): bo
   );
 }
 
+/** User is asking a question / for an explanation — not requesting a rewrite. */
+export function messageLooksChatQuestion(message: string): boolean {
+  const text = (message || "").trim();
+  if (!text) return false;
+  // Explicit mutate verbs win unless the sentence is a clear question opener.
+  const hasEditVerb =
+    /\b(?:change|fix|update|rewrite|revise|edit|improve|shorten|lengthen|remove|replace|fill|patch|insert|delete|correct|tighten|trim|reword|rephrase|polish|expand|condense)\b/i.test(
+      text
+    );
+  const questionOpener =
+    /^(?:what|whats|what's|who|why|when|where|how|explain|summarize|describe|tell\s+me|is|are|does|do|can\s+you\s+(?:tell|explain|confirm|verify|check))\b/i.test(
+      text
+    );
+  if (hasEditVerb && !questionOpener) return false;
+  return (
+    questionOpener ||
+    /\bwhat\s+(?:is|are|'s|does|this|the|about)\b/i.test(text) ||
+    /\b(?:this\s+)?section\s+about\b/i.test(text) ||
+    /\b(?:verify|confirm|cross[\s-]?check|cross[\s-]?verify|fact[\s-]?check|fabricat)/i.test(
+      text
+    ) ||
+    /\?\s*$/.test(text)
+  );
+}
+
+/**
+ * Status copy while a chat turn is in flight. Questions must never say
+ * "Improving…" just because a section pin is active.
+ */
+export function chatBusyStatusLabel(
+  message: string,
+  sectionTitle: string,
+  options?: {
+    proposalWide?: boolean;
+    referenceMode?: "selection" | "section" | null;
+    sameSectionPinned?: boolean;
+  }
+): string {
+  const title = sectionTitle.trim() || "section";
+  const trimmed = message.trim();
+  if (options?.proposalWide) return "Reviewing the full proposal…";
+  if (/apply these fixes|patch-wise across|across the proposal/i.test(trimmed)) {
+    return "Applying patch-wise fixes across the proposal…";
+  }
+  if (messageLooksChatQuestion(trimmed)) {
+    return `Answering about ${title}…`;
+  }
+  if (options?.sameSectionPinned && options.referenceMode === "selection") {
+    return `Editing excerpt in ${title}…`;
+  }
+  if (options?.sameSectionPinned && options.referenceMode === "section") {
+    return `Improving ${title}…`;
+  }
+  if (
+    messageLooksOutlineStructure(trimmed) ||
+    messageLooksStructural(trimmed) ||
+    messageTargetsBios(trimmed)
+  ) {
+    return "Updating proposal outline…";
+  }
+  return `Working on ${title}…`;
+}
+
 /** User is asking about the whole draft — not the open tab alone. */
 export function messageLooksProposalWide(message: string): boolean {
   const text = message.trim();
@@ -659,17 +722,8 @@ export function resolveChatTarget(
     };
   }
 
-  // "Improve this section" / pin — use the pinned tab; do NOT inherit prior §21 from history.
-  if (pinned && messagePointsAtOpenSection(text) && !messageLooksOutlineStructure(text)) {
-    return {
-      kind: "resolved",
-      section: pinned,
-      confidence: "high",
-      reason: "pinned",
-    };
-  }
-
   // Unique "References" / "Pricing" tab — only when intentionally targeted.
+  // Before pin so "fix References" isn't trapped on a stale Improve pin.
   const byTopic = resolveSectionByUniqueTopic(sections, text);
   if (byTopic) {
     return {
@@ -680,13 +734,38 @@ export function resolveChatTarget(
     };
   }
 
-  // Short follow-up only ("apply these") → prior chat named the section.
+  // Active Improve / Revise pin — before chat history. A prior Client References
+  // thread must not steal after the user pinned Monthly Schedules (or any tab).
+  if (pinned && !messageLooksOutlineStructure(text)) {
+    return {
+      kind: "resolved",
+      section: pinned,
+      confidence: "high",
+      reason: "pinned",
+    };
+  }
+
+  // Short follow-up ("apply these") → prior chat named the section — but never
+  // when the user said "this" while a different tab is open in the editor.
   const looksLikeShortFollowUp =
     text.length <= 120 ||
     /^(?:apply|do\s+it|yes|ok|please|go\s+ahead)\b/i.test(text);
   const latestNamesSection =
     /(?:§|sec(?:tion)?\.?)\s*\d+\b/i.test(text) ||
     /\b(?:umatilla|rock\s+the\s+locks|case\s+stud|references?)\b/i.test(text);
+  const thisMeansOpenTab =
+    Boolean(viewing) &&
+    /\b(?:is\s+this|this\s+(?:accurate|correct|right|complete|enough)|cross[\s-]?verify\s+(?:this|it))\b/i.test(
+      text
+    );
+  if (thisMeansOpenTab && viewing) {
+    return {
+      kind: "resolved",
+      section: viewing,
+      confidence: "high",
+      reason: "viewing-this",
+    };
+  }
   const fromHistory =
     looksLikeShortFollowUp &&
     !latestNamesSection &&
@@ -702,16 +781,6 @@ export function resolveChatTarget(
       section: fromHistory,
       confidence: "high",
       reason: "chat-history",
-    };
-  }
-
-  // Explicit pin only when the message did not name another section.
-  if (pinned && !messageLooksOutlineStructure(text)) {
-    return {
-      kind: "resolved",
-      section: pinned,
-      confidence: "high",
-      reason: "pinned",
     };
   }
 
@@ -785,16 +854,6 @@ export function resolveChatTarget(
         question: formatClarifyQuestion(text, hits),
       };
     }
-  }
-
-  // Explicit pin only when the message did not name another section.
-  if (pinned && !messageLooksOutlineStructure(text)) {
-    return {
-      kind: "resolved",
-      section: pinned,
-      confidence: "high",
-      reason: "pinned",
-    };
   }
 
   // Add/create/delete sidebar sections (no specific name above): proposal-wide.

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  chatBusyStatusLabel,
+  messageLooksChatQuestion,
   messageLooksOutlineStructure,
   messageLooksStructural,
   messageNeedsCaseStudyClarify,
@@ -22,6 +24,31 @@ function sec(id: string, title: string): OutlineSection {
     source: "template",
   };
 }
+
+describe("chatBusyStatusLabel", () => {
+  it("says Answering for questions even when a section is pinned", () => {
+    expect(
+      chatBusyStatusLabel("what this section about?", "PDF format proposal submission", {
+        referenceMode: "section",
+        sameSectionPinned: true,
+      })
+    ).toBe("Answering about PDF format proposal submission…");
+  });
+
+  it("still says Improving for explicit improve asks with a pin", () => {
+    expect(
+      chatBusyStatusLabel("Improve this section for the RFP.", "Who We Are", {
+        referenceMode: "section",
+        sameSectionPinned: true,
+      })
+    ).toBe("Improving Who We Are…");
+  });
+
+  it("detects question-shaped messages", () => {
+    expect(messageLooksChatQuestion("what this section about?")).toBe(true);
+    expect(messageLooksChatQuestion("rewrite this to be shorter")).toBe(false);
+  });
+});
 
 describe("resolveSectionFromMention", () => {
   const sections = [
@@ -398,6 +425,66 @@ describe("resolveChatTarget", () => {
     if (result?.kind === "resolved") {
       expect(result.section.id).toBe("section-3-work-umatilla");
       expect(result.reason).toBe("pinned");
+    }
+  });
+
+  it("pin beats history for is-this-accurate follow-ups", () => {
+    const withRefs = [
+      ...sections,
+      sec("rfp-ref", "Client References"),
+      sec("schedules", "18. Monthly Social Media Posting Schedules"),
+    ];
+    const schedules = withRefs.find((s) => s.id === "schedules")!;
+    const result = resolveChatTarget(
+      withRefs,
+      "is this all accurate information cross verify from brain!",
+      {
+        viewingSectionId: schedules.id,
+        pinnedSection: schedules,
+        conversationHistory: [
+          {
+            role: "user",
+            content: "remove those verify tags in Client references",
+          },
+          {
+            role: "assistant",
+            content: "Removed VERIFY tags from Client References.",
+          },
+        ],
+      }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("schedules");
+      expect(result.reason).toBe("pinned");
+    }
+  });
+
+  it("viewing tab beats history when asking is this accurate without a pin", () => {
+    const withRefs = [
+      ...sections,
+      sec("rfp-ref", "Client References"),
+      sec("schedules", "18. Monthly Social Media Posting Schedules"),
+    ];
+    const schedules = withRefs.find((s) => s.id === "schedules")!;
+    const result = resolveChatTarget(
+      withRefs,
+      "is this all accurate information cross verify from brain!",
+      {
+        viewingSectionId: schedules.id,
+        pinnedSection: null,
+        conversationHistory: [
+          {
+            role: "user",
+            content: "remove those verify tags in Client references",
+          },
+        ],
+      }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("schedules");
+      expect(result.reason).toBe("viewing-this");
     }
   });
 

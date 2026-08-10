@@ -1,0 +1,310 @@
+/* Compact-by-default Scan results — keeps manuscript review tall. */
+
+.proposal-scan-v2 {
+  --scan-title: 0.9375rem;
+  --scan-blurb: 0.75rem;
+  --scan-tab: 0.75rem;
+  --scan-body: 0.875rem;
+  --scan-note: 0.75rem;
+  --scan-bar-pad: 0.45rem 0.75rem;
+  border-top: 1px solid var(--zo-border, rgba(17, 24, 39, 0.12));
+  background: var(--zo-cream-light, #ffffff);
+  color: var(--zo-text, #0a0f1a);
+}
+
+.proposal-scan-v2--sm {
+  --scan-title: 0.8125rem;
+  --scan-blurb: 0.6875rem;
+  --scan-tab: 0.6875rem;
+  --scan-body: 0.8125rem;
+  --scan-note: 0.6875rem;
+}
+
+.proposal-scan-v2--lg {
+  --scan-title: 1.05rem;
+  --scan-blurb: 0.875rem;
+  --scan-tab: 0.875rem;
+  --scan-body: 1rem;
+  --scan-note: 0.875rem;
+}
+
+.proposal-scan-v2__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: var(--scan-bar-pad);
+  min-height: 2.5rem;
+}
+
+.proposal-scan-v2__bar-main {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 0.15rem 0;
+}
+
+.proposal-scan-v2__bar-main:focus-visible {
+  outline: 2px solid var(--zo-orange, #ef5018);
+  outline-offset: 2px;
+  border-radius: 0.25rem;
+}
+
+.proposal-scan-v2__bar-mark {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: #57534e;
+  flex-shrink: 0;
+}
+
+.proposal-scan-v2__bar-mark--action {
+  background: #c2410c;
+}
+
+.proposal-scan-v2__bar-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.65rem;
+  min-width: 0;
+}
+
+.proposal-scan-v2__bar-title {
+  font-size: var(--scan-title);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+
+.proposal-scan-v2__bar-meta {
+  font-size: var(--scan-blurb);
+  color: var(--zo-text-secondary, rgba(10, 15, 26, 0.82));
+  line-height: 1.2;
+}
+
+.proposal-scan-v2__bar-toggle {
+  flex-shrink: 0;
+  font-size: 0.6875rem;
+  font-weight: 650;
+  color: var(--zo-orange, #ef5018);
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--zo-orange, #ef5018) 10%, transparent);
+}
+
+.proposal-scan-v2__tools {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.proposal-scan-v2__type {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 0.1rem;
+  padding: 0.1rem;
+  border: 1px solid var(--zo-border, rgba(17, 24, 39, 0.12));
+  border-radius: 0.35rem;
+  background: var(--zo-surface, rgba(17, 24, 39, 0.04));
+}
+
+.proposal-scan-v2__type-btn {
+  border: 0;
+  background: transparent;
+  color: var(--zo-text-muted, rgba(10, 15, 26, 0.58));
+  border-radius: 0.25rem;
+  cursor: pointer;
+  line-height: 1;
+  font-weight: 700;
+  padding: 0.22rem 0.35rem;
+}
+
+.proposal-scan-v2__type-btn--sm {
+  font-size: 0.65rem;
+}
+
+.proposal-scan-v2__type-btn--md {
+  font-size: 0.78rem;
+}
+
+.proposal-scan-v2__type-btn--lg {
+  font-size: 0.95rem;
+}
+
+.proposal-scan-v2__type-btn.is-active {
+  background: var(--zo-white, #ffffff);
+  color: var(--zo-text, #0a0f1a);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.proposal-scan-v2__type-btn:focus-visible,
+.proposal-scan-v2__tab:focus-visible,
+.proposal-scan-v2__close:focus-visible {
+  outline: 2px solid var(--zo-orange, #ef5018);
+  outline-offset: 2px;
+}
+
+.proposal-scan-v2__close {
+  border: 1px solid var(--zo-border, rgba(17, 24, 39, 0.12));
+  background: var(--zo-white, #ffffff);
+  color: var(--zo-text, #0a0f1a);
+  border-radius: 0.3rem;
+  padding: 0.28rem 0.45rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.proposal-scan-v2__close:hover {
+  background: var(--zo-hover-bg, rgba(17, 24, 39, 0.04));
+}
+
+/* Expanded details: capped height so review pane stays usable */
+.proposal-scan-v2__body {
+  border-top: 1px solid var(--zo-border, rgba(17, 24, 39, 0.12));
+  padding: 0.55rem 0.75rem 0.65rem;
+  max-height: min(28vh, 14rem);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.proposal-scan-v2__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.45rem;
+}
+
+.proposal-scan-v2__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--zo-border, rgba(17, 24, 39, 0.12));
+  background: var(--zo-white, #ffffff);
+  color: var(--zo-text-secondary, rgba(10, 15, 26, 0.82));
+  border-radius: 999px;
+  padding: 0.3rem 0.55rem;
+  font-size: var(--scan-tab);
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.proposal-scan-v2__tab:hover {
+  background: var(--zo-hover-bg, rgba(17, 24, 39, 0.04));
+}
+
+.proposal-scan-v2__tab.is-active {
+  color: var(--zo-text, #0a0f1a);
+  border-color: color-mix(
+    in srgb,
+    var(--zo-orange, #ef5018) 45%,
+    var(--zo-border, rgba(17, 24, 39, 0.12))
+  );
+  background: color-mix(in srgb, var(--zo-orange, #ef5018) 10%, #ffffff);
+  transform: translateY(-1px);
+}
+
+.proposal-scan-v2__tab--action.is-active {
+  border-color: color-mix(
+    in srgb,
+    #c2410c 40%,
+    var(--zo-border, rgba(17, 24, 39, 0.12))
+  );
+  background: color-mix(in srgb, #fff7ed 80%, #ffffff);
+}
+
+.proposal-scan-v2__tab--done.is-active {
+  border-color: color-mix(
+    in srgb,
+    #15803d 35%,
+    var(--zo-border, rgba(17, 24, 39, 0.12))
+  );
+  background: color-mix(in srgb, #f0fdf4 75%, #ffffff);
+}
+
+.proposal-scan-v2__tab-count {
+  display: inline-flex;
+  min-width: 1.15rem;
+  justify-content: center;
+  padding: 0.05rem 0.3rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--zo-text, #0a0f1a) 8%, transparent);
+  font-size: 0.75em;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.proposal-scan-v2__panel-hint {
+  margin: 0 0 0.4rem;
+  font-size: var(--scan-note);
+  line-height: 1.4;
+  color: var(--zo-text-secondary, rgba(10, 15, 26, 0.82));
+}
+
+.proposal-scan-v2__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.proposal-scan-v2__row-title {
+  margin: 0;
+  font-size: var(--scan-body);
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--zo-text, #0a0f1a);
+}
+
+.proposal-scan-v2__panel--action .proposal-scan-v2__row-title {
+  font-size: calc(var(--scan-body) + 0.04rem);
+}
+
+.proposal-scan-v2__row-note {
+  margin: 0.15rem 0 0;
+  font-size: var(--scan-note);
+  line-height: 1.4;
+  color: var(--zo-text-secondary, rgba(10, 15, 26, 0.82));
+}
+
+.proposal-scan-v2__bullets {
+  margin: 0.25rem 0 0;
+  padding-left: 1rem;
+  font-size: var(--scan-note);
+  line-height: 1.4;
+  color: var(--zo-text-secondary, rgba(10, 15, 26, 0.82));
+}
+
+.proposal-scan-v2__bullets li + li {
+  margin-top: 0.15rem;
+}
+
+@media (max-width: 640px) {
+  .proposal-scan-v2__bar {
+    flex-wrap: wrap;
+  }
+
+  .proposal-scan-v2__body {
+    max-height: min(34vh, 12rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .proposal-scan-v2__tab {
+    transition: none;
+  }
+}

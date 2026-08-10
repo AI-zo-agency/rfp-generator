@@ -627,17 +627,20 @@ async def improve_section_endpoint(
 ) -> ProposalSectionImproveResponse:
     """Re-query KB with new detailed queries and re-draft one section from user feedback."""
     try:
-        section, draft, research, _provider, assistant_message, draft_changed = await improve_proposal_section(
-            rfp_id,
-            section_id,
-            body.message,
-            selection_start=body.selection_start,
-            selection_end=body.selection_end,
-            selection_text=body.selection_text,
-            conversation_history=[
-                {"role": t.role, "content": t.content} for t in body.conversation_history
-            ],
-            proposal_wide=body.proposal_wide,
+        section, draft, research, _provider, assistant_message, draft_changed, suggested_fix = (
+            await improve_proposal_section(
+                rfp_id,
+                section_id,
+                body.message,
+                selection_start=body.selection_start,
+                selection_end=body.selection_end,
+                selection_text=body.selection_text,
+                conversation_history=[
+                    {"role": t.role, "content": t.content} for t in body.conversation_history
+                ],
+                proposal_wide=body.proposal_wide,
+                apply_fix=body.apply_fix,
+            )
         )
     except ProposalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -647,12 +650,24 @@ async def improve_section_endpoint(
             detail=f"Section improve failed: {exc}",
         ) from exc
 
+    suggested_payload = None
+    if suggested_fix is not None:
+        from app.models.proposal import ProposalSuggestedFix
+
+        suggested_payload = ProposalSuggestedFix(
+            sectionId=suggested_fix.section_id,
+            instruction=suggested_fix.instruction,
+            summary=suggested_fix.summary,
+            sectionTitle=suggested_fix.section_title,
+        )
+
     return ProposalSectionImproveResponse(
         section=section,
         draft=draft,
         research=_slim_research(research) or research,
         assistantMessage=assistant_message,
         draftChanged=draft_changed,
+        suggestedFix=suggested_payload,
     )
 
 

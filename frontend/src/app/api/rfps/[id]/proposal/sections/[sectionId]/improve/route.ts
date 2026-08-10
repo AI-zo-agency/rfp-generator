@@ -21,6 +21,7 @@ export async function POST(
     selectionText?: string;
     conversationHistory?: { role: string; content: string }[];
     proposalWide?: boolean;
+    applyFix?: boolean;
   };
   try {
     body = await request.json();
@@ -44,6 +45,7 @@ export async function POST(
           selectionText: body.selectionText,
           conversationHistory: body.conversationHistory,
           proposalWide: body.proposalWide === true,
+          applyFix: body.applyFix === true,
         }),
         timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS,
       }

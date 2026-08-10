@@ -4,9 +4,37 @@ from __future__ import annotations
 
 import unittest
 
+from app.models.proposal import ProposalSection
 from app.services.proposal_section_dedup import (
     ANTI_DUPLICATION_RULES,
+    dedupe_manuscript_for_scan,
     format_prior_sections_block,
+    prune_near_duplicate_sections,
+    remove_aggregate_restatement_sections,
+)
+
+
+def _sec(sid: str, title: str, content: str, *, weight: float | None = None) -> ProposalSection:
+    kwargs: dict = {
+        "id": sid,
+        "title": title,
+        "content": content,
+        "wordTarget": 400,
+        "status": "generated",
+    }
+    if weight is not None:
+        kwargs["evaluationWeight"] = weight
+    return ProposalSection(**kwargs)
+
+
+_UMATILLA_BODY = (
+    "We managed comprehensive social media promotion for the City of Umatilla "
+    "Rock the Lock Music Festival delivering coordinated campaigns across Facebook "
+    "Instagram email and paid digital advertising with tight timeline constraints. "
+    "Our approach focused on driving VIP sales and general admission purchases through "
+    "targeted content and strategic platform optimization for overnight visitation. "
+    "Digital campaigns outperformed prior benchmarks establishing the festival as a "
+    "regional destination draw and accelerating ticket sales through tourism marketing."
 )
 
 
@@ -39,6 +67,135 @@ class SectionDedupTests(unittest.TestCase):
         block = format_prior_sections_block(prior, exclude_ids={"a"})
         self.assertIn("Timeline", block)
         self.assertNotIn("Approach", block)
+
+    def test_prune_deletes_content_overlap_campaign_tabs(self) -> None:
+        sections = [
+            _sec("section-1-who-we-are", "1.1 — Who We Are", "We are zö agency brand essence."),
+            _sec(
+                "section-3-work-01-umatilla",
+                "3.1 — City of Umatilla Digital Campaign",
+                _UMATILLA_BODY,
+            ),
+            _sec(
+                "rfp-tourism-accounts",
+                "Examples of Tourism or Destination Marketing Social Media Accounts Managed",
+                _UMATILLA_BODY
+                + " Meta Business Suite expertise supports destination marketing conversion.",
+            ),
+            _sec(
+                "rfp-successful-campaigns",
+                "Examples of Successful Campaigns",
+                _UMATILLA_BODY
+                + " Seasonal destination marketing campaigns extend visitor engagement.",
+            ),
+            _sec(
+                "rfp-references",
+                "Client References",
+                "San Francisco Travel Contact phone email for tourism reference verification "
+                "and municipal collaboration outcomes across multi year renewals.",
+            ),
+        ]
+        kept, dropped = prune_near_duplicate_sections(sections)
+        kept_ids = {s.id for s in kept}
+        self.assertIn("section-3-work-01-umatilla", kept_ids)
+        self.assertIn("rfp-references", kept_ids)
+        # One of the overlapping campaign tabs must go.
+        campaign_kept = sum(
+            1 for sid in kept_ids if sid in {"rfp-tourism-accounts", "rfp-successful-campaigns"}
+        )
+        self.assertEqual(campaign_kept, 1)
+        self.assertTrue(dropped)
+
+    def test_prune_deletes_overlapping_collab_tabs(self) -> None:
+        body = (
+            "We coordinate with the Tourism Program Manager weekly for content calendar "
+            "approval monthly strategic planning and quarterly performance reviews with "
+            "multi-contractor collaboration protocols for government tourism programs. "
+            "Shared editorial calendars cross-contractor review and unified messaging "
+            "guidelines keep brand consistency across photographers PR and digital teams "
+            "while Ron Comer remains the dedicated primary liaison for day-to-day decisions."
+        )
+        sections = [
+            _sec("section-1-who-we-are", "1.1 — Who We Are", "Brand promise and essence paragraphs."),
+            _sec("rfp-collab-a", "Description of Communication and Collaboration Processes", body),
+            _sec(
+                "rfp-collab-b",
+                "Workflow for Coordinating with Multiple Contractors While Maintaining Consistent Publishing",
+                body + " Additional contractor integration detail for board reporting cycles.",
+            ),
+            _sec(
+                "rfp-comp",
+                "Proposed Compensation Structure (Monthly Retainer)",
+                "Fixed monthly retainer of four thousand dollars all inclusive with travel "
+                "software subscriptions reporting and coordination covered under the fee.",
+            ),
+        ]
+        kept, dropped = prune_near_duplicate_sections(sections)
+        kept_ids = {s.id for s in kept}
+        self.assertIn("section-1-who-we-are", kept_ids)
+        self.assertIn("rfp-comp", kept_ids)
+        self.assertEqual(sum(1 for sid in kept_ids if sid.startswith("rfp-collab")), 1)
+        self.assertTrue(dropped)
+
+    def test_prune_report_content_twins(self) -> None:
+        body = (
+            "Our monthly performance dashboard tracks website traffic newsletter "
+            "subscriptions itinerary downloads and conversion paths from social "
+            "platforms with strategic recommendations for tourism ROI optimization "
+            "across seasonal campaigns and geographic visitor dispersion metrics. "
+            "We report cost per qualified visitor audience targeting effectiveness "
+            "and budget optimization recommendations tied to overnight visitation goals."
+        )
+        sections = [
+            _sec("rfp-reports-a", "Monthly Performance Reports with Strategic Recommendations", body),
+            _sec("rfp-reports-b", "Sample Performance Reports or Dashboards", body + " Extra."),
+        ]
+        kept, dropped = prune_near_duplicate_sections(sections)
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(dropped)
+
+    def test_remove_mega_section_that_restates_siblings(self) -> None:
+        filler = " ".join(["detail"] * 80)
+        approach = (
+            "Approach to Services / Deliverables\n\n"
+            "Monthly Social Media Posting Schedules Developed from the Tourism Program's "
+            f"Approved Editorial Calendar\n{filler}\n\n"
+            f"Platform-Specific Publishing Strategies\n{filler}\n\n"
+            f"Community Engagement and Social Listening Approach\n{filler}\n\n"
+            f"Paid Advertising Management and Optimization\n{filler}\n\n"
+            f"Crisis Communication and Issue Escalation Procedures\n{filler}\n"
+        )
+        sections = [
+            _sec(
+                "rfp-posting",
+                "Monthly Social Media Posting Schedules Developed from the Tourism Program's Approved Editorial Calendar",
+                "Short posting plan with seasonal calendar mapping.",
+            ),
+            _sec("rfp-platform", "Platform-Specific Publishing Strategies", "Short platform plan."),
+            _sec("rfp-engage", "Community Engagement and Social Listening Approach", "Short engage plan."),
+            _sec("rfp-paid", "Paid Advertising Management and Optimization", "Short paid plan."),
+            _sec("rfp-crisis", "Crisis Communication and Issue Escalation Procedures", "Short crisis plan."),
+            _sec("rfp-approach", "Approach to Services / Deliverables", approach),
+        ]
+        kept, logs = remove_aggregate_restatement_sections(sections)
+        kept_ids = {s.id for s in kept}
+        self.assertNotIn("rfp-approach", kept_ids)
+        self.assertIn("rfp-posting", kept_ids)
+        self.assertTrue(any("removed" in log for log in logs))
+
+    def test_dedupe_manuscript_for_scan_runs_pipeline(self) -> None:
+        sections = [
+            _sec("section-1-who-we-are", "1.1 — Who We Are", "We are zö agency."),
+            _sec("rfp-a", "Examples of Successful Campaigns", _UMATILLA_BODY),
+            _sec(
+                "rfp-b",
+                "Examples of Tourism Destination Campaigns Portfolio",
+                _UMATILLA_BODY + " more destination conversion detail for overnight stays.",
+            ),
+        ]
+        kept, logs = dedupe_manuscript_for_scan(sections)
+        self.assertTrue(logs)
+        self.assertLessEqual(len(kept), 3)
 
 
 if __name__ == "__main__":

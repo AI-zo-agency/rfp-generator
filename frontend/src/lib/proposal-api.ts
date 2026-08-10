@@ -1718,6 +1718,7 @@ export async function improveProposalSection(
     selection?: { start: number; end: number; text: string };
     conversationHistory?: { role: "user" | "assistant"; content: string }[];
     proposalWide?: boolean;
+    applyFix?: boolean;
   }
 ): Promise<{
   section: OutlineSection;
@@ -1725,6 +1726,12 @@ export async function improveProposalSection(
   research: ProposalResearch | null;
   assistantMessage: string;
   draftChanged: boolean;
+  suggestedFix: {
+    sectionId: string;
+    instruction: string;
+    summary: string;
+    sectionTitle?: string;
+  } | null;
 }> {
   const res = await fetch(
     `/api/rfps/${rfpId}/proposal/sections/${sectionId}/improve`,
@@ -1754,6 +1761,7 @@ export async function improveProposalSection(
             }
           : {}),
         ...(options?.proposalWide ? { proposalWide: true } : {}),
+        ...(options?.applyFix ? { applyFix: true } : {}),
       }),
     }
   );
@@ -1765,6 +1773,12 @@ export async function improveProposalSection(
     research?: ProposalResearch;
     assistantMessage?: string;
     draftChanged?: boolean;
+    suggestedFix?: {
+      sectionId?: string;
+      instruction?: string;
+      summary?: string;
+      sectionTitle?: string;
+    } | null;
   };
   try {
     data = text.trim() ? JSON.parse(text) : {};
@@ -1777,6 +1791,20 @@ export async function improveProposalSection(
   if (!data.section || !data.draft) {
     throw new Error("No section data returned from server");
   }
+  const rawFix = data.suggestedFix;
+  const suggestedFix =
+    rawFix &&
+    typeof rawFix.sectionId === "string" &&
+    rawFix.sectionId &&
+    typeof rawFix.instruction === "string" &&
+    rawFix.instruction.trim()
+      ? {
+          sectionId: rawFix.sectionId,
+          instruction: rawFix.instruction.trim(),
+          summary: (rawFix.summary || rawFix.instruction).trim(),
+          sectionTitle: rawFix.sectionTitle,
+        }
+      : null;
   return {
     section: data.section,
     draft: apiDraftToOutline(data.draft),
@@ -1785,6 +1813,7 @@ export async function improveProposalSection(
       data.assistantMessage ??
       `Updated ${data.section.title}. Review the draft above.`,
     draftChanged: data.draftChanged !== false,
+    suggestedFix,
   };
 }
 

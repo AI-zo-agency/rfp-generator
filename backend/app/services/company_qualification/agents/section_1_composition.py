@@ -27,7 +27,8 @@ SECTION_SPECS: tuple[tuple[str, str, str], ...] = (
         "then '## Our Promise' on its own line as a warm vow (no names/titles/channels/ops). "
         "Never inline headings. No whole-paragraph bold. "
         "Lead with primary capabilities only as brand essence — not a media plan. "
-        "HARD MAX 250 words. Tiny client bridge only. No certifications or insurance.",
+        "HARD MAX 200 words (prefer ~150). Submission-length — designer must not need to cut. "
+        "Tiny client bridge only. No certifications or insurance.",
     ),
     (
         "section-1-org-structure",
@@ -102,7 +103,7 @@ async def run_section_1_composition_agent(
                     '    "section-1-who-we-are": {\n'
                     '      "includedCapabilities": ["..."],\n'
                     '      "omittedCapabilities": ["..."],\n'
-                    '      "targetWords": {"min": 180, "max": 250}\n'
+                    '      "targetWords": {"min": 120, "max": 200}\n'
                     "    }\n"
                     "  },\n"
                     '  "generatedSections": [\n'

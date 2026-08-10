@@ -1,0 +1,117 @@
+.proposal-section-chat-draft-badge {
+  margin: 0 0 0.45rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+.proposal-section-chat-apply {
+  margin-top: 0.65rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid rgba(17, 24, 39, 0.08);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+  width: 100%;
+}
+
+.proposal-section-chat-apply-panel {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid rgba(17, 24, 39, 0.12);
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.proposal-section-chat-apply-panel-kicker {
+  margin: 0;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+.proposal-section-chat-apply-label {
+  margin: 0.15rem 0 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--zo-text, #111827);
+}
+
+.proposal-section-chat-apply-optional {
+  font-weight: 500;
+  color: #9ca3af;
+}
+
+.proposal-section-chat-apply-extras {
+  width: 100%;
+  resize: vertical;
+  min-height: 2.6rem;
+  max-height: 8rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid rgba(17, 24, 39, 0.14);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--zo-text, #111827);
+  background: #fff;
+}
+
+.proposal-section-chat-apply-extras:focus {
+  outline: 2px solid rgba(234, 88, 12, 0.35);
+  outline-offset: 1px;
+}
+
+.proposal-section-chat-apply-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  justify-content: flex-end;
+  width: 100%;
+  margin-top: 0.1rem;
+}
+
+.proposal-section-chat-apply-btn {
+  appearance: none;
+  border: 1px solid rgba(17, 24, 39, 0.14);
+  background: #111827;
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.35rem 0.7rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.proposal-section-chat-apply-btn:hover:not(:disabled) {
+  background: #000;
+}
+
+.proposal-section-chat-apply-btn--ghost {
+  background: #fff;
+  color: #374151;
+}
+
+.proposal-section-chat-apply-btn--ghost:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+
+.proposal-section-chat-apply-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.proposal-section-chat-apply-summary {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: #6b7280;
+}

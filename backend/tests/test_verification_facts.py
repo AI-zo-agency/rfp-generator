@@ -76,6 +76,116 @@ class VerificationFactsBlockTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(block.count("Organization legal name"), 1)
 
 
+class VerificationQueryBuildingTests(unittest.TestCase):
+    """Reported: Umatilla fact-check said 'not in KB' while 03_CS_ + 06_WON_ exist.
+
+    Cause: queries were `zö agency 3.1 — City of Umatilla… for section 3.1…`
+    (section chrome + the full user question), which return 0 hybrid hits.
+    """
+
+    def test_strips_section_number_and_chat_chrome(self) -> None:
+        from app.models.proposal import ProposalSection
+
+        section = ProposalSection(
+            id="section-3-work-umatilla",
+            title="3.1 — City of Umatilla Digital Campaign 2006",
+            content=(
+                "Rock the Lock Music Festival\n\n"
+                "SOLUTION / OUR APPROACH\n"
+                "We delivered the campaign in two weeks.\n"
+            ),
+            mode="write",
+            word_target=350,
+        )
+        queries = editor._build_verification_kb_queries(
+            section=section,
+            user_message=(
+                "for section 3.1 City of Umatilla can you just cross verify if "
+                "everything is truth or any fabiracted values?? there?"
+            ),
+            excerpt="",
+            rfp_client="Island County",
+            rfp_sector="tourism",
+            rfp_title="Social Media Management",
+        )
+        blob = " | ".join(queries).casefold()
+        self.assertTrue(queries)
+        self.assertIn("umatilla", blob)
+        self.assertTrue(
+            "rock the lock" in blob or "rock the locks" in blob,
+            queries,
+        )
+        for q in queries:
+            self.assertNotRegex(q, r"\b3\.1\b")
+            self.assertNotIn("cross verify", q.casefold())
+            self.assertNotIn("fabiracted", q.casefold())
+
+    def test_verify_and_fabrication_asks_match(self) -> None:
+        self.assertTrue(
+            editor._is_verification_only_ask(
+                "cross verify if everything is truth or any fabiracted values?"
+            )
+        )
+        self.assertTrue(
+            editor._is_verification_only_ask(
+                "are there any fabricated numbers in this case study?"
+            )
+        )
+        self.assertFalse(
+            editor._is_verification_only_ask("remove fabricated content from the draft")
+        )
+
+
+class VerificationChunkFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_uses_chunk_when_memory_empty(self) -> None:
+        """Case-study PDF hits often have empty `memory` but full `chunk`/`content`."""
+
+        async def fake_search(**kwargs):
+            return [
+                {
+                    "memory": "",
+                    "chunk": "# City of Umatilla Rock The Locks\n\nAgency of record.",
+                    "similarity": 0.81,
+                    "metadata": {
+                        "fileName": "03_CS_City of Umatilla_Digital Campaign_2006.pdf"
+                    },
+                }
+            ]
+
+        with patch.object(editor.supermemory, "search_hybrid", side_effect=fake_search):
+            block = await editor._verification_facts_block(
+                ["zö agency City of Umatilla case study"],
+                prefer_needles=["City of Umatilla", "Rock the Lock"],
+            )
+        self.assertIn("Umatilla", block)
+        self.assertIn("03_CS_City of Umatilla", block)
+
+    async def test_prefers_needle_matching_hits_over_noise(self) -> None:
+        async def fake_search(**kwargs):
+            return [
+                {
+                    "memory": "City of Lake Oswego accepted proposal from zö agency.",
+                    "similarity": 0.90,
+                    "metadata": {"fileName": "07_FIN_CityofLakeOswego_Proposal_2026.pdf"},
+                },
+                {
+                    "memory": "",
+                    "chunk": "zö agency is the agency of record for the Rock the Locks festival.",
+                    "similarity": 0.88,
+                    "metadata": {"fileName": "06_WON_CityofUmatilla_Proposal_2026.pdf"},
+                },
+            ]
+
+        with patch.object(editor.supermemory, "search_hybrid", side_effect=fake_search):
+            block = await editor._verification_facts_block(
+                ["zö agency City of Umatilla"],
+                prefer_needles=["Umatilla", "Rock the Locks"],
+            )
+        self.assertIn("Rock the Locks", block)
+        self.assertIn("Umatilla", block)
+        self.assertLess(block.index("Rock the Locks"), block.index("Lake Oswego"))
+
+
 class AdvisoryUsesVerifiedFactsTests(unittest.IsolatedAsyncioTestCase):
     """The verified-facts block must reach the prompt, and a KB outage must be
     stated as an outage rather than reported as "no documents exist"."""
@@ -90,7 +200,7 @@ class AdvisoryUsesVerifiedFactsTests(unittest.IsolatedAsyncioTestCase):
             captured["user"] = messages[-1]["content"]
             return {"reply": "ok"}, "stub"
 
-        async def fake_facts(queries):
+        async def fake_facts(queries, **kwargs):
             if facts == "RAISE":
                 raise RuntimeError("down")
             return facts

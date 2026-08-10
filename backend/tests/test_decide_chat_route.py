@@ -47,7 +47,10 @@ class DecideChatRouteTests(unittest.TestCase):
         """
         r = route(intent="none", message="what is this?", selection=True)
         self.assertTrue(r.advisory)
-        self.assertEqual(r.reason, "selection_question")
+        self.assertIn(
+            r.reason,
+            {"selection_question", "selection_informational_ask"},
+        )
 
     def test_selection_respects_a_classifier_that_said_advisory(self) -> None:
         r = route(intent="advisory", message="what is this?", selection=True)
@@ -64,6 +67,26 @@ class DecideChatRouteTests(unittest.TestCase):
         r = route(intent="advisory", message="rewrite this section")
         self.assertTrue(r.advisory)
         self.assertEqual(r.reason, "classifier_advisory")
+
+    def test_informational_ask_overrides_classifier_single_edit(self) -> None:
+        r = route(
+            intent="single_edit",
+            message="what this section about?",
+        )
+        self.assertTrue(r.advisory)
+        self.assertEqual(r.reason, "informational_ask")
+
+    def test_verify_ask_overrides_classifier_single_edit(self) -> None:
+        """Fact-check must never rewrite — even when the classifier guesses edit."""
+        r = route(
+            intent="single_edit",
+            message=(
+                "for section 3.1 City of Umatilla can you just cross verify if "
+                "everything is truth or any fabiracted values??"
+            ),
+        )
+        self.assertTrue(r.advisory)
+        self.assertEqual(r.reason, "verify_ask")
 
     def test_classifier_single_edit_beats_advisory_keywords(self) -> None:
         r = route(intent="single_edit", message="does this meet the RFP?")

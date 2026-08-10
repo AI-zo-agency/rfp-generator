@@ -687,6 +687,17 @@ class ProposalPhase2Response(BaseModel):
     research: ProposalResearchCache
 
 
+class ProposalSuggestedFix(BaseModel):
+    """Optional one-click apply payload after an advisory (draft-unchanged) turn."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    instruction: str
+    summary: str = ""
+    section_title: str = Field(default="", alias="sectionTitle")
+
+
 class ProposalSectionImproveResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -696,6 +707,9 @@ class ProposalSectionImproveResponse(BaseModel):
     research: ProposalResearchCache
     assistant_message: str = Field(alias="assistantMessage")
     draft_changed: bool = Field(default=True, alias="draftChanged")
+    suggested_fix: ProposalSuggestedFix | None = Field(
+        default=None, alias="suggestedFix"
+    )
 
 
 class SectionChatTurn(BaseModel):
@@ -721,6 +735,11 @@ class SectionImproveRequest(BaseModel):
         default_factory=list, alias="conversationHistory"
     )
     proposal_wide: bool = Field(default=False, alias="proposalWide")
+    apply_fix: bool = Field(
+        default=False,
+        alias="applyFix",
+        description="Force a single-section edit from a prior suggestedFix instruction.",
+    )
 
     @field_validator("conversation_history", mode="before")
     @classmethod

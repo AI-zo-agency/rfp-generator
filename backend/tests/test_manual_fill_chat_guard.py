@@ -241,7 +241,7 @@ class ManualFillGuardTests(unittest.IsolatedAsyncioTestCase):
             section_id="section-1-who",
             chat_json=fake_chat_json,
         ):
-            section, _updated, _research, _provider, _msg, changed = await improve_proposal_section(
+            section, _updated, _research, _provider, _msg, changed, _ = await improve_proposal_section(
                 "rfp-mfill",
                 "section-1-who",
                 "tighten this paragraph",
@@ -272,7 +272,7 @@ class ManualFillGuardTests(unittest.IsolatedAsyncioTestCase):
                     "MANUAL FILL fill must not run brand-voice enforcement"
                 ),
             ):
-                section, _updated, _r, provider, msg, changed = await improve_proposal_section(
+                section, _updated, _r, provider, msg, changed, _ = await improve_proposal_section(
                     "rfp-mfill",
                     "section-budget",
                     "fill [MANUAL FILL: Title] with Director of Marketing",
@@ -300,7 +300,7 @@ class ManualFillGuardTests(unittest.IsolatedAsyncioTestCase):
             section_id="section-budget",
             chat_json=AssertionError("LLM must not invent fill"),
         ):
-            section, _updated, _r, _p, msg, changed = await improve_proposal_section(
+            section, _updated, _r, _p, msg, changed, _ = await improve_proposal_section(
                 "rfp-mfill",
                 "section-budget",
                 "fill all MANUAL FILL tags from KB",

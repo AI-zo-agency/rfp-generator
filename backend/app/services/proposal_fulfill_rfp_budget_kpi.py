@@ -181,10 +181,10 @@ def manuscript_budget_is_missing(
 
     idx = find_budget_section_index(draft.sections)
     if idx is None:
-        # Pricing model has fees — reconcile path can write the section; no full regen
-        # unless the model itself is hollow (already handled above).
+        # Pricing model has fees — reconcile path appends Budget & Pricing.
         return False
     content = draft.sections[idx].content or ""
+    # Empty "Proposed Compensation…" / Cost tabs must not stay undrafted.
     if manuscript_cost_section_is_hollow(content):
         return True
     return False

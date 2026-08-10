@@ -1,4 +1,4 @@
-"""Ralph — RFP fidelity (draft-time page budget + anti-invention; no hard chops)."""
+"""Ralph — RFP fidelity (page limit when stated + anti-invention)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import unittest
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.services.proposal_ralph import (
+    WORDS_PER_PAGE,
     apply_ralph_to_draft,
     ralph_document_word_budget,
     ralph_non_draft_reserve_fraction,
@@ -13,13 +14,24 @@ from app.services.proposal_ralph import (
 )
 
 
-def _section(sid: str, content: str, *, word_target: int | None = None) -> ProposalSection:
-    return ProposalSection(
-        id=sid,
-        title=sid,
-        content=content,
-        wordTarget=word_target,
-    )
+def _section(
+    sid: str,
+    content: str,
+    *,
+    word_target: int | None = None,
+    title: str | None = None,
+    weight: float | None = None,
+) -> ProposalSection:
+    kwargs: dict = {
+        "id": sid,
+        "title": title or sid,
+        "content": content,
+    }
+    if word_target is not None:
+        kwargs["wordTarget"] = word_target
+    if weight is not None:
+        kwargs["evaluationWeight"] = weight
+    return ProposalSection(**kwargs)
 
 
 class RalphFidelityTests(unittest.TestCase):
@@ -32,7 +44,7 @@ class RalphFidelityTests(unittest.TestCase):
     def test_twelve_page_budget_is_under_hard_cap(self) -> None:
         budget = ralph_document_word_budget(12)
         assert budget is not None
-        self.assertLessEqual(budget, int(12 * 350 * 0.92))
+        self.assertLessEqual(budget, int(12 * WORDS_PER_PAGE * 0.92))
         self.assertGreater(budget, 2000)
 
     def test_strips_invented_designer_diagram_notes(self) -> None:
@@ -52,10 +64,8 @@ class RalphFidelityTests(unittest.TestCase):
         self.assertIn("[VERIFY:", cleaned)
         self.assertTrue(logs)
 
-    def test_apply_ralph_does_not_hard_chop_whole_manuscript_to_page_budget(self) -> None:
-        # Even if total words exceed a 12-page advisory budget, Ralph must NOT
-        # proportionally chop the whole doc — page fit is draft-time allocation.
-        fat = "word " * 400  # under wordTarget×1.25 when wt=400
+    def test_no_page_limit_does_not_hard_fit(self) -> None:
+        fat = "word " * 400
         draft = ProposalDraft(
             rfpId="rfp-ralph",
             sections=[_section(f"s-{i}", fat, word_target=400) for i in range(10)],
@@ -64,25 +74,95 @@ class RalphFidelityTests(unittest.TestCase):
         before = sum(len((s.content or "").split()) for s in draft.sections)
         updated, logs = apply_ralph_to_draft(
             draft,
-            page_limit=12,
-            rfp_text="The proposal is limited to twelve (12) pages.",
+            page_limit=None,
+            rfp_text="This solicitation has no page restriction mentioned.",
         )
         after = sum(len((s.content or "").split()) for s in updated.sections)
         self.assertEqual(after, before)
-        self.assertFalse(any("page-budget" in x for x in logs))
+        self.assertFalse(any("page-hard-fit" in x for x in logs))
+
+    def test_stated_page_limit_hard_fits_unprotected_first(self) -> None:
+        # 5 pages → budget ~1365 words with short-RFP reserve.
+        identity = "We are zö agency with thirteen years of destination marketing experience. " * 8
+        scored = (
+            "Scored methodology covering Meta Business Suite targeting overnight visitation "
+            "conversion and monthly reporting. "
+        ) * 40
+        fluff = ("Padding narrative about generic social engagement and brand voice. " * 50) + (
+            "\n\nMore fluff paragraph about trends.\n\nEven more fluff about algorithms."
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-ralph",
+            sections=[
+                _section("section-1-who-we-are", identity, title="Who We Are", word_target=200),
+                _section(
+                    "rfp-method",
+                    scored,
+                    title="Methodology",
+                    word_target=300,
+                    weight=25.0,
+                ),
+                _section("rfp-fluff-a", fluff, title="Extra Narrative A", word_target=200),
+                _section("rfp-fluff-b", fluff, title="Extra Narrative B", word_target=200),
+            ],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
+        budget = ralph_document_word_budget(5)
+        assert budget is not None
+        updated, logs = apply_ralph_to_draft(
+            draft,
+            page_limit=None,
+            rfp_text="The proposal is limited to five (5) pages.",
+        )
+        after = sum(len((s.content or "").split()) for s in updated.sections)
+        self.assertLessEqual(after, budget)
+        self.assertTrue(any("page-hard-fit" in x or "page-limit:" in x for x in logs))
+        who = next(s for s in updated.sections if s.id == "section-1-who-we-are")
+        method = next(s for s in updated.sections if s.id == "rfp-method")
+        # Identity untouched; scored kept meaningful.
+        self.assertEqual(
+            len((who.content or "").split()),
+            len(identity.split()),
+        )
+        self.assertGreaterEqual(len((method.content or "").split()), 120)
 
     def test_apply_ralph_trims_section_that_overshoots_word_target(self) -> None:
-        # 800 words vs wordTarget 400 → soft ceiling 500 (×1.25)
         overshoot = "word " * 800
         draft = ProposalDraft(
             rfpId="rfp-ralph",
             sections=[_section("approach", overshoot, word_target=400)],
             updatedAt="2026-01-01T00:00:00Z",
         )
-        updated, logs = apply_ralph_to_draft(draft, page_limit=12)
+        updated, logs = apply_ralph_to_draft(draft, page_limit=None)
         after = len((updated.sections[0].content or "").split())
         self.assertLessEqual(after, 500)
         self.assertTrue(any("trim-overshoot" in x for x in logs))
+
+    def test_budget_fee_table_survives_hard_fit(self) -> None:
+        fee_table = (
+            "## Fee Detail by Phase\n\n"
+            "| Role | Hours | Rate | Total |\n|---|---|---|---|\n"
+            + "\n".join(f"| Strategist | {i} | $150 | ${i * 150} |" for i in range(1, 40))
+        )
+        body = ("Transparency and pass-through media. " * 20) + "\n\n" + fee_table
+        fluff = ("Generic padding sentence about social media. " * 80) + (
+            "\n\nMore.\n\nMore again."
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-budget-ralph",
+            sections=[
+                _section("budget", body, title="Budget & Pricing", word_target=80),
+                _section("fluff", fluff, title="Extra Padding", word_target=200),
+            ],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
+        updated, _logs = apply_ralph_to_draft(
+            draft,
+            page_limit=3,
+            rfp_text="The proposal shall not exceed three (3) pages.",
+        )
+        budget_sec = next(s for s in updated.sections if s.id == "budget")
+        self.assertIn("Fee Detail by Phase", budget_sec.content or "")
 
 
 if __name__ == "__main__":

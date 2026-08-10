@@ -20,8 +20,9 @@ DEFAULT_BUDGETS: list[SubsectionBudget] = [
         sectionId="section-1-who-we-are",
         title="1.1 — Who We Are",
         format="narrative",
-        wordMin=180,
-        wordMax=250,
+        wordMin=120,
+        wordMax=200,
+        notes="Designer-ready — short brand + Our Promise only",
     ),
     SubsectionBudget(
         sectionId="section-1-org-structure",
@@ -114,7 +115,7 @@ async def run_content_budget_agent(
                         "Use EXACT sectionId values below. Keep notes ≤6 words or null.\n"
                         "Compact JSON only — no markdown fences.\n"
                         "Defaults (tweak only if RFP clearly needs it):\n"
-                        "- section-1-who-we-are: narrative 180-250\n"
+                        "- section-1-who-we-are: narrative 120-200 (designer-ready, no padding)\n"
                         "- section-1-org-structure: list 400-900\n"
                         "- section-1-business-info: table, wordMin/wordMax null\n"
                         "- section-1-certifications: list 75-150\n"

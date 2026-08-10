@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScanRfpBanner } from "./proposal-scan-report";
+import { buildScanRfpBanner, buildScanRfpSummary } from "./proposal-scan-report";
 
 describe("buildScanRfpBanner", () => {
   it("names what changed when the reconciler added, merged, trimmed and scrubbed", () => {
@@ -14,7 +14,7 @@ describe("buildScanRfpBanner", () => {
     });
     expect(banner).toBe(
       'Added 2 missing required section(s) ("A signed cover letter", "Certificate of insurance"); ' +
-        "merged 1 duplicated requirement(s); trimmed 3 section(s) to the page limit; " +
+        "merged 1 duplicated requirement(s); removed/trimmed 3 section(s) to stay within page limits and keep the proposal lean; " +
         "removed 14 optional [VERIFY] tag(s); " +
         "kept 1 [VERIFY] tag(s) only because the RFP critically requires them."
     );
@@ -271,7 +271,7 @@ describe("buildScanRfpBanner", () => {
   describe("budget outcome clause", () => {
     it("says the budget was checked with no problems when status is ok", () => {
       const banner = buildScanRfpBanner({ budgetStatus: "ok" });
-      expect(banner).toBe("Checked the budget — no problems found.");
+      expect(banner).toBe("Checked the budget thoroughly — no problems found.");
     });
 
     it("names what was repaired when status is repaired", () => {
@@ -330,5 +330,50 @@ describe("buildScanRfpBanner", () => {
           "(agency revenue estimate corrected ($3500 → $0))."
       );
     });
+  });
+});
+
+describe("buildScanRfpSummary", () => {
+  it("splits action / done / fyi so the UI is not one run-on sentence", () => {
+    const summary = buildScanRfpSummary({
+      ledgerSubmissionInstructionsCount: 4,
+      ledgerSubmissionInstructionsTitles: [
+        "Submit response electronically in PDF format",
+        "Email response to l.mozes@islandcountywa.gov",
+      ],
+      ledgerScoredCriteriaAdvisoryCount: 6,
+      ledgerScoredCriteriaAdvisoryTitles: ["Demonstrated strategic thinking"],
+      duplicateSectionsRemoved: 10,
+      duplicateSectionsRemovedTitles: ["Community Engagement and Social Listening Approach"],
+      budgetStatus: "repaired",
+      verifyTagsKept: 2,
+      consistencyFixesApplied: 3,
+      consistencyFixSummaries: ["section-budget-pricing: FIXED contradiction"],
+      rfpContradictionRewrites: 2,
+    });
+    const tones = summary.groups.map((g) => g.tone);
+    expect(tones).toEqual(["action", "done", "fyi"]);
+    expect(summary.groups.find((g) => g.tone === "action")?.title).toBe("Do next");
+    expect(summary.groups.find((g) => g.tone === "done")?.title).toBe("Already fixed");
+    expect(summary.groups.find((g) => g.tone === "fyi")?.title).toBe("Good to know");
+    expect(summary.headline).toMatch(/finish/i);
+    expect(summary.groups.find((g) => g.tone === "action")?.rows.some((r) => /VERIFY/i.test(r.label))).toBe(
+      true
+    );
+    expect(summary.groups.find((g) => g.tone === "done")?.rows.some((r) => /duplicate/i.test(r.label))).toBe(
+      true
+    );
+    expect(summary.groups.find((g) => g.tone === "fyi")?.rows.some((r) => /submit-day/i.test(r.label))).toBe(
+      true
+    );
+    expect(summary.groups.find((g) => g.tone === "fyi")?.rows.some((r) => /spot-check/i.test(r.label))).toBe(
+      true
+    );
+  });
+
+  it("returns empty groups with a calm headline when nothing happened", () => {
+    const summary = buildScanRfpSummary({});
+    expect(summary.empty).toBe(true);
+    expect(summary.groups).toEqual([]);
   });
 });

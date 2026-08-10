@@ -238,3 +238,309 @@ def compress_duplicate_case_study_sections(
             out.append(section)
 
     return out, compressed
+
+
+_CONTENT_STOPWORDS = {
+    "that",
+    "this",
+    "with",
+    "from",
+    "have",
+    "been",
+    "were",
+    "their",
+    "about",
+    "which",
+    "would",
+    "could",
+    "should",
+    "agency",
+    "marketing",
+    "social",
+    "media",
+    "through",
+    "across",
+    "client",
+    "clients",
+    "our",
+    "and",
+    "the",
+    "for",
+}
+
+
+def _is_static_cq_section_id(section_id: str) -> bool:
+    sid = section_id or ""
+    if sid.startswith("section-1-"):
+        return True
+    if sid.startswith("section-2-bio-") and sid != "section-2-bio-placeholder":
+        return True
+    if sid.startswith("section-3-work-") and not sid.endswith("placeholder"):
+        return True
+    return False
+
+
+def _content_token_set(content: str) -> set[str]:
+    tokens = re.findall(r"[a-z]{4,}", (content or "").casefold())
+    return {t for t in tokens if t not in _CONTENT_STOPWORDS}
+
+
+def _content_jaccard(a: str, b: str) -> float:
+    ta, tb = _content_token_set(a), _content_token_set(b)
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    return inter / union if union else 0.0
+
+
+def _content_coverage(needle: str, haystack: str) -> float:
+    """Fraction of needle tokens that also appear in haystack (0–1)."""
+    tn, th = _content_token_set(needle), _content_token_set(haystack)
+    if not tn or not th:
+        return 0.0
+    return len(tn & th) / len(tn)
+
+
+def _section_eval_points(section: Any) -> float:
+    for attr, key in (("evaluation_weight", "evaluationWeight"), ("points", "points")):
+        if hasattr(section, attr):
+            value = getattr(section, attr)
+        elif isinstance(section, dict):
+            value = section.get(key)
+            if value is None:
+                value = section.get(attr)
+        else:
+            value = None
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _section_title(section: Any) -> str:
+    if hasattr(section, "title"):
+        return str(section.title or "")
+    if isinstance(section, dict):
+        return str(section.get("title") or "")
+    return ""
+
+
+def _section_id(section: Any) -> str:
+    if hasattr(section, "id"):
+        return str(section.id or "")
+    if isinstance(section, dict):
+        return str(section.get("id") or "")
+    return ""
+
+
+def _section_content(section: Any) -> str:
+    if hasattr(section, "content"):
+        return str(section.content or "")
+    if isinstance(section, dict):
+        return str(section.get("content") or "")
+    return ""
+
+
+def _prefer_drop_b(
+    *,
+    pts_a: float,
+    pts_b: float,
+    idx_a: int,
+    idx_b: int,
+    wc_a: int,
+    wc_b: int,
+) -> bool:
+    """True → drop B. Prefer scored tab, then shorter (dedicated), then earlier."""
+    if pts_b > pts_a:
+        return False
+    if pts_a > pts_b:
+        return True
+    # Same score: keep the shorter dedicated answer when one is a mega restate.
+    if wc_a != wc_b and max(wc_a, wc_b) >= 250 and min(wc_a, wc_b) > 0:
+        if wc_b > wc_a * 1.35:
+            return True
+        if wc_a > wc_b * 1.35:
+            return False
+    return idx_b >= idx_a
+
+
+def prune_near_duplicate_sections(
+    sections: list[Any],
+    *,
+    content_jaccard_threshold: float = 0.42,
+    containment_threshold: float = 0.72,
+) -> tuple[list[Any], list[str]]:
+    """Delete near-duplicate tabs discovered from the manuscript itself.
+
+    Detection is algorithmic only:
+    - outline title similarity
+    - content Jaccard overlap
+    - one body largely containing another (restated child inside a longer parent)
+
+    Never deletes Section 1–3 CQ cards. No keyword allow/deny lists.
+    """
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+    from app.services.proposal_section_quality import word_count
+
+    drop_ids: set[str] = set()
+    dropped_labels: list[str] = []
+    candidates: list[tuple[int, Any]] = []
+    for idx, section in enumerate(sections):
+        sid = _section_id(section)
+        body = _section_content(section).strip()
+        if not sid or _is_static_cq_section_id(sid):
+            continue
+        if not body:
+            continue
+        if word_count(body) < 40:
+            continue
+        candidates.append((idx, section))
+
+    for i, (idx_a, sec_a) in enumerate(candidates):
+        sid_a = _section_id(sec_a)
+        if sid_a in drop_ids:
+            continue
+        title_a = _section_title(sec_a)
+        body_a = _section_content(sec_a)
+        pts_a = _section_eval_points(sec_a)
+        wc_a = word_count(body_a)
+        for idx_b, sec_b in candidates[i + 1 :]:
+            sid_b = _section_id(sec_b)
+            if sid_b in drop_ids:
+                continue
+            title_b = _section_title(sec_b)
+            body_b = _section_content(sec_b)
+            pts_b = _section_eval_points(sec_b)
+            wc_b = word_count(body_b)
+
+            title_dup = outline_titles_near_duplicate(title_a, title_b, threshold=0.55)
+            jaccard = _content_jaccard(body_a, body_b)
+            content_dup = jaccard >= content_jaccard_threshold
+            # Shorter section is mostly restated inside the longer one.
+            cover_a_in_b = _content_coverage(body_a, body_b)
+            cover_b_in_a = _content_coverage(body_b, body_a)
+            containment = (
+                (wc_a >= 60 and wc_b >= 60)
+                and (
+                    (cover_a_in_b >= containment_threshold and wc_b >= wc_a)
+                    or (cover_b_in_a >= containment_threshold and wc_a >= wc_b)
+                )
+            )
+            if not title_dup and not content_dup and not containment:
+                continue
+
+            drop_b = _prefer_drop_b(
+                pts_a=pts_a,
+                pts_b=pts_b,
+                idx_a=idx_a,
+                idx_b=idx_b,
+                wc_a=wc_a,
+                wc_b=wc_b,
+            )
+            if drop_b:
+                drop_ids.add(sid_b)
+                reason = (
+                    "title near-duplicate"
+                    if title_dup
+                    else ("content overlap" if content_dup else "contained restatement")
+                )
+                dropped_labels.append(f"{title_b} ({reason} of {title_a})")
+            else:
+                drop_ids.add(sid_a)
+                reason = (
+                    "title near-duplicate"
+                    if title_dup
+                    else ("content overlap" if content_dup else "contained restatement")
+                )
+                dropped_labels.append(f"{title_a} ({reason} of {title_b})")
+                break
+
+    if not drop_ids:
+        return sections, []
+
+    kept = [s for s in sections if _section_id(s) not in drop_ids]
+    return kept, dropped_labels
+
+
+def _sibling_titles_embedded(parent_body: str, sibling_titles: list[str]) -> list[str]:
+    """Return sibling titles that are restated as headings / long phrases in parent."""
+    from app.services.proposal_outline_dedup import normalize_outline_title, outline_title_tokens
+
+    body_cf = (parent_body or "").casefold()
+    hits: list[str] = []
+    for title in sibling_titles:
+        core = normalize_outline_title(title)
+        if len(core) < 10:
+            continue
+        if core in body_cf or core[:48] in body_cf:
+            hits.append(title)
+            continue
+        tokens = [t for t in outline_title_tokens(title) if len(t) >= 5][:6]
+        if len(tokens) >= 2 and sum(1 for t in tokens if t in body_cf) >= max(2, len(tokens) - 1):
+            hits.append(title)
+    return hits
+
+
+def remove_aggregate_restatement_sections(
+    sections: list[Any],
+    *,
+    min_sibling_hits: int = 3,
+    min_words: int = 300,
+) -> tuple[list[Any], list[str]]:
+    """Delete tabs that restate ≥N other live section titles inside one body.
+
+    Discovered from the current outline + content — no fixed parent-title list.
+    Prefer deleting the mega restate and keeping the dedicated sibling tabs.
+    """
+    from app.services.proposal_section_quality import word_count
+
+    titles = [_section_title(s) for s in sections]
+    drop_ids: set[str] = set()
+    logs: list[str] = []
+
+    for section in sections:
+        sid = _section_id(section)
+        title = _section_title(section)
+        body = _section_content(section)
+        if not sid or _is_static_cq_section_id(sid) or not body.strip():
+            continue
+        if word_count(body) < min_words:
+            continue
+
+        siblings = [t for t in titles if t and t != title]
+        hits = _sibling_titles_embedded(body, siblings)
+        if len(hits) < min_sibling_hits:
+            continue
+
+        drop_ids.add(sid)
+        logs.append(
+            f"{title} (removed — restates {len(hits)} other sections: "
+            + ", ".join(hits[:5])
+            + ("…" if len(hits) > 5 else "")
+            + ")"
+        )
+
+    if not drop_ids:
+        return sections, []
+    kept = [s for s in sections if _section_id(s) not in drop_ids]
+    return kept, logs
+
+
+def dedupe_manuscript_for_scan(
+    sections: list[Any],
+) -> tuple[list[Any], list[str]]:
+    """Scan-RFP dedupe: compress case studies → prune clones → drop mega restates."""
+    logs: list[str] = []
+    sections, n = compress_duplicate_case_study_sections(list(sections))
+    if n:
+        logs.append(f"Compressed {n} case-study rewrite(s)")
+    # Mega parents first so pairwise prune sees the dedicated siblings cleanly.
+    sections, removed = remove_aggregate_restatement_sections(sections)
+    logs.extend(removed)
+    sections, pruned = prune_near_duplicate_sections(sections)
+    logs.extend(pruned)
+    return sections, logs

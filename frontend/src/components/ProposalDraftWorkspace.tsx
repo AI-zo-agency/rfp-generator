@@ -16,7 +16,8 @@ import {
 } from "@/lib/proposal-draft";
 import { getManuscriptSections, normalizeOutlineSectionOrder, resolveManuscriptJumpTarget, buildManuscriptIndexMap } from "@/lib/proposal-outline-tree";
 import { isSectionDrafted } from "@/lib/proposal-section-health";
-import { buildScanRfpBanner } from "@/lib/proposal-scan-report";
+import { buildScanRfpSummary, type ScanRfpFulfillReport, type ScanRfpSummary } from "@/lib/proposal-scan-report";
+import { ScanRfpSummaryBanner } from "@/components/ScanRfpSummaryBanner";
 import {
   buildPipelineStatus,
   fetchProposalDraft,
@@ -263,6 +264,8 @@ function ProposalDraftWorkspaceInner({
   const [docxDownloaded, setDocxDownloaded] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
+  const [scanSummary, setScanSummary] = useState<ScanRfpSummary | null>(null);
+  const [scanSummaryExpanded, setScanSummaryExpanded] = useState(false);
   const [provider, setProvider] = useState<string | null>(null);
   const [pipelineStatus, setPipelineStatus] =
     useState<ProposalPipelineStatus | null>(null);
@@ -530,6 +533,11 @@ function ProposalDraftWorkspaceInner({
     setActiveSubmissionFlag((current) =>
       current && current.sectionId !== id ? null : current
     );
+    // Drop a stale Improve/Revise pin from another tab so chat follows the
+    // section the user just opened (not leftover Client References).
+    setSectionChatReference((current) =>
+      current && current.sectionId !== id ? null : current
+    );
     // Always land in the editor for the clicked section — including empty ones.
     setActiveTab("outline");
   }, []);
@@ -742,6 +750,14 @@ function ProposalDraftWorkspaceInner({
         setOutline(prepared);
         setSelectedSectionId(prepared.sections[0]?.id ?? null);
         setActiveTab("content");
+        const lastScan =
+          prepared.lastFulfillReport ?? draft.lastFulfillReport ?? null;
+        if (lastScan && typeof lastScan === "object") {
+          setScanSummary(
+            buildScanRfpSummary(lastScan as ScanRfpFulfillReport)
+          );
+          setScanSummaryExpanded(false);
+        }
       } else if (researchReady && research && isLikelyWipedOutline(draft ?? buildDefaultOutline(rfp), research)) {
         const rebuilt = prepareOutline(
           rebuildOutlineFromResearch(rfp, research, draft)
@@ -1403,6 +1419,8 @@ function ProposalDraftWorkspaceInner({
     setIsFulfillingRfpGaps(true);
     setGapResolveError(null);
     setGapResolveNotice(null);
+    setScanSummary(null);
+    setScanSummaryExpanded(false);
     fulfillAbortRef.current?.abort();
     const abort = new AbortController();
     fulfillAbortRef.current = abort;
@@ -1419,18 +1437,37 @@ function ProposalDraftWorkspaceInner({
         });
       setPresubmitReview(review);
       setResearch(updatedResearch);
-      applyOutlineFromServer(draft);
-      await saveProposalDraft(rfp.id, draft);
-      const scanBanner = buildScanRfpBanner(fulfillReport);
-      setGapResolveNotice(`${scanBanner} Saved version available.`);
-      setGenerateNotice(scanBanner);
+      applyOutlineFromServer({
+        ...draft,
+        lastFulfillReport:
+          (fulfillReport as Record<string, unknown>) ??
+          draft.lastFulfillReport,
+      });
+      await saveProposalDraft(rfp.id, {
+        ...draft,
+        lastFulfillReport:
+          (fulfillReport as Record<string, unknown>) ??
+          draft.lastFulfillReport,
+      });
+      const summary = buildScanRfpSummary(fulfillReport);
+      setScanSummary(summary);
+      setScanSummaryExpanded(false);
+      setGapResolveNotice("Saved version available (Before Scan RFP).");
+      setGenerateNotice(null);
       setGenerateError(null);
       setActiveTab("content");
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector(".proposal-scan-v2")
+          ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
     } catch (error) {
       if (
         abort.signal.aborted ||
         (error instanceof DOMException && error.name === "AbortError")
       ) {
+        setScanSummary(null);
+        setScanSummaryExpanded(false);
         setGenerateNotice(
           "Scan RFP stopped — partial changes may be saved; check Sections → saved version menu."
         );
@@ -1439,6 +1476,8 @@ function ProposalDraftWorkspaceInner({
       }
       const message =
         error instanceof Error ? error.message : "Scan RFP failed";
+      setScanSummary(null);
+      setScanSummaryExpanded(false);
       setGapResolveError(message);
       setGenerateError(message);
     } finally {
@@ -2155,15 +2194,34 @@ function ProposalDraftWorkspaceInner({
           </div>
         ) : null}
 
-        {(generateNotice || generateError) && (
-          <div
-            className={`border-t px-3 py-1.5 text-xs md:px-4 ${
-              generateNotice
-                ? "border-amber-200/80 bg-amber-50 text-amber-950"
-                : "border-red-200/80 bg-red-50 text-zo-error"
-            }`}
-          >
-            {generateNotice ?? generateError}
+        {(scanSummary || generateNotice || generateError) && (
+          <div>
+            {scanSummary ? (
+              <ScanRfpSummaryBanner
+                summary={scanSummary}
+                defaultExpanded={scanSummaryExpanded}
+                onDismiss={() => {
+                  setScanSummary(null);
+                  setScanSummaryExpanded(false);
+                }}
+              />
+            ) : null}
+            {(generateNotice || generateError) && !scanSummary ? (
+              <div
+                className={`border-t px-3 py-1.5 text-xs md:px-4 ${
+                  generateNotice
+                    ? "border-amber-200/80 bg-amber-50 text-amber-950"
+                    : "border-red-200/80 bg-red-50 text-zo-error"
+                }`}
+              >
+                {generateNotice ?? generateError}
+              </div>
+            ) : null}
+            {generateError && scanSummary ? (
+              <div className="border-t border-red-200/80 bg-red-50 px-3 py-1.5 text-xs text-zo-error md:px-4">
+                {generateError}
+              </div>
+            ) : null}
           </div>
         )}
 
@@ -2518,12 +2576,34 @@ function ProposalDraftWorkspaceInner({
                     !outline.sections.some((s) => s.content.trim())
                   }
                   className="zo-btn !py-2 !px-3 !text-sm disabled:opacity-40"
-                  title="Scan full RFP on this draft (no full regen): missing pieces, consistency, signed-PDF designer notes, budget, fact-check"
+                  title="Scan this draft (no full regen): detect duplicate/restated tabs from content and remove them; add missing pieces; regen budget if hollow"
                 >
                   {isFulfillingRfpGaps
                     ? "Scanning RFP…"
                     : "Scan RFP & add missing pieces"}
                 </button>
+                {outline.lastFulfillReport ? (
+                  <button
+                    type="button"
+                    className="zo-btn secondary !py-2 !px-3 !text-sm"
+                    title="Re-open the last Scan RFP results panel"
+                    onClick={() => {
+                      setScanSummary(
+                        buildScanRfpSummary(
+                          outline.lastFulfillReport as ScanRfpFulfillReport
+                        )
+                      );
+                      setScanSummaryExpanded(true);
+                      window.requestAnimationFrame(() => {
+                        document
+                          .querySelector(".proposal-scan-v2")
+                          ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                      });
+                    }}
+                  >
+                    {scanSummary ? "Scan results" : "Last scan results"}
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => setShowManualFlags((open) => !open)}

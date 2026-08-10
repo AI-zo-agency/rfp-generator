@@ -43,6 +43,7 @@ from app.services.company_qualification.agents.proposal_context import run_propo
 from app.services.company_qualification.agents.section_1_agent import run_section_1_agent
 from app.services.company_qualification.agents.section_1_builder import run_section_1_builder_agent
 from app.services.company_qualification.agents.team_selection import (
+    MAX_TEAM_SIZE,
     normalize_selected_members,
     run_team_selection_agent,
 )
@@ -450,9 +451,9 @@ def _sections_to_state(existing: list[ProposalSection]) -> list[dict[str, Any]]:
 
 
 SECTION_1_STUB_SPECS: tuple[tuple[str, str, int], ...] = (
-    ("section-1-who-we-are", "1.1 — Who We Are", 250),
+    ("section-1-who-we-are", "1.1 — Who We Are", 200),
     ("section-1-org-structure", "1.2 — Organizational Structure", 800),
-    ("section-1-business-info", "1.3 — Business Information", 400),
+    ("section-1-business-info", "1.3 — Business Information", 200),
     ("section-1-certifications", "1.4 — Certifications", 150),
     ("section-1-insurance", "1.5 — Insurance Information", 100),
 )
@@ -1745,9 +1746,9 @@ def _section_kb_user_content(state: SectionsGraphState, sec_id: str) -> str:
 
 
 _SECTION1_PAGE_RATIOS: dict[str, tuple[float, int]] = {
-    "section-1-who-we-are": (0.03, 250),
+    "section-1-who-we-are": (0.03, 200),
     "section-1-org-structure": (0.08, 800),
-    "section-1-business-info": (0.03, 400),
+    "section-1-business-info": (0.03, 200),
     "section-1-certifications": (0.03, 150),
     "section-1-insurance": (0.03, 100),
 }
@@ -1768,7 +1769,7 @@ def _composition_to_section_payloads(
             content = enforce_agency_tenure(content)
         if generated.id == "section-1-who-we-are":
             content = _normalize_who_we_are_markdown(content)
-            content = _trim_to_max_words(content, 250)
+            content = _trim_to_max_words(content, 200)
             content = _normalize_who_we_are_markdown(content)
         payloads.append(
             _section_payload(
@@ -1934,6 +1935,12 @@ async def _build_section_1_cq(state: SectionsGraphState) -> dict[str, Any]:
     return {"sections": new_sections, "provider": provider}
 
 
+def _persona_name_from_id(persona_id: str) -> str:
+    """Best-effort display name when a saved Key Persona id is missing from KB."""
+    cleaned = re.sub(r"[-_]+", " ", (persona_id or "").strip())
+    return " ".join(part.capitalize() for part in cleaned.split()) if cleaned else persona_id
+
+
 async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, Any]]:
     """User-selected Key Personas for this RFP, if any were chosen in the UI."""
     if not rfp_id:
@@ -1943,7 +1950,12 @@ async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, A
     except Exception:
         logger.warning("Could not load proposal draft %s to check selected Key Personas", rfp_id)
         return []
-    selected_ids = set(getattr(draft, "selected_key_personas", None) or [])
+    # Preserve save order — never convert to set (silent reordering / harder diffs).
+    selected_ids = [
+        str(pid).strip()
+        for pid in (getattr(draft, "selected_key_personas", None) or [])
+        if str(pid).strip()
+    ]
     if not selected_ids:
         return []
     try:
@@ -1952,7 +1964,34 @@ async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, A
         logger.warning("Could not load Key Personas roster for rfp %s", rfp_id)
         return []
     by_id = {p["id"]: p for p in all_personas}
-    return [by_id[pid] for pid in selected_ids if pid in by_id]
+    resolved: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for pid in selected_ids:
+        persona = by_id.get(pid)
+        if persona:
+            resolved.append(persona)
+            continue
+        # Never silently drop a user pick — stub so Section 2 still gets a bio card.
+        missing.append(pid)
+        resolved.append(
+            {
+                "id": pid,
+                "name": _persona_name_from_id(pid),
+                "title": "Team Specialist",
+                "hasResume": False,
+                "sourceFile": "",
+                "bioSnippet": "Selected Key Persona — resume lookup missed this id.",
+            }
+        )
+    if missing:
+        logger.warning(
+            "Key Personas for %s: %d selected, %d unresolved in KB (%s) — stubbing missing",
+            rfp_id,
+            len(selected_ids),
+            len(missing),
+            ", ".join(missing),
+        )
+    return resolved
 
 
 def _team_selection_from_personas(personas: list[dict[str, Any]]) -> TeamSelectionResult:
@@ -1965,6 +2004,7 @@ def _team_selection_from_personas(personas: list[dict[str, Any]]) -> TeamSelecti
             rationale="Selected by the user as a Key Persona for this proposal.",
         )
         for p in personas
+        if str(p.get("name") or "").strip()
     ]
     return TeamSelectionResult(members=members)
 
@@ -2036,13 +2076,33 @@ async def _build_bios(state: SectionsGraphState) -> dict[str, Any]:
     )
 
     team = TeamSelectionResult.model_validate(selection_raw)
-    members = normalize_selected_members([m.name for m in team.members])
+    # User Key Persona picks must not be collapsed by last-name dedupe or the
+    # skill-based 5-person cap — honor every selected name (full-name dedupe only).
+    user_picked = any(
+        "key persona" in (m.rationale or "").casefold() for m in team.members
+    )
+    members = normalize_selected_members(
+        [m.name for m in team.members],
+        max_members=max(MAX_TEAM_SIZE, len(team.members)),
+        dedupe_by_last_name=not user_picked,
+    )
     if not members:
         return {}
 
+    if user_picked and len(members) < len(team.members):
+        logger.warning(
+            "Bio builder: user selected %d Key Personas but only %d unique names after normalize",
+            len(team.members),
+            len(members),
+        )
+
     role_by_name: dict[str, str] = {}
     for m in team.members:
-        norm = normalize_selected_members([m.name])
+        norm = normalize_selected_members(
+            [m.name],
+            max_members=1,
+            dedupe_by_last_name=False,
+        )
         if norm:
             role_by_name[norm[0]] = (m.role or "").strip()
 
@@ -2527,7 +2587,7 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
             content = enforce_agency_tenure(content)
         if sec_id == "section-1-who-we-are":
             content = _normalize_who_we_are_markdown(content)
-            content = _trim_to_max_words(content, 250)
+            content = _trim_to_max_words(content, 200)
             content = _normalize_who_we_are_markdown(content)
             if not content.strip():
                 logger.warning("Who We Are empty after one call — VERIFY stub (no retry)")
@@ -2586,50 +2646,63 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
     else:
         roster_sources = state.get("kb_master_roster_sources") or []
 
-    context_block = state.get("proposal_context") or {}
-    try:
-        selection, _ = await llm.chat_json(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are the Team Selection Agent for zö agency Section 2.\n"
-                        "Determine required roles from the RFP, then select EXACTLY 5 team members "
-                        "from the Master Team Roster whose skills match this solicitation.\n"
-                        "Compact JSON only — no markdown fences.\n\n"
-                        "STRICT RULES:\n"
-                        "- Skill-based selection only — NO mandatory names.\n"
-                        "- ONLY select people named in the Master Team Roster.\n"
-                        "- Maximum 5 people. Each must have a DISTINCT role.\n"
-                        "- Do NOT select the same person twice under different spellings.\n"
-                        'Return JSON: {"members": ["Name 1", "Name 2", "Name 3", "Name 4", "Name 5"], '
-                        '"requiredRoles": ["role 1", "role 2"]}'
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Proposal context:\n{context_block}\n\n"
-                        f"RFP context:\n{state['rfp_context'][:15000]}\n\n"
-                        f"Master Team Roster ({proposal_knowledge_base_tools.MASTER_TEAM_ROSTER_DOC}):\n"
-                        f"{roster_text}"
-                    )
-                }
-            ],
-            max_tokens=1536,
-            temperature=0.0,
-            tier="light",
+    # Honor explicit Key Persona picks even on the legacy (non-CQ) path.
+    selected_personas = await _selected_key_personas_for_rfp(state.get("rfp_id"))
+    if selected_personas:
+        members = normalize_selected_members(
+            [str(p.get("name") or "") for p in selected_personas],
+            max_members=max(MAX_TEAM_SIZE, len(selected_personas)),
+            dedupe_by_last_name=False,
         )
-    except LlmError as exc:
-        logger.warning(
-            "Legacy team selection failed (%s); empty members (no retry)",
-            str(exc)[:160],
+        logger.info(
+            "Legacy Section 2: using %d user-selected Key Personas (skipping LLM roster pick)",
+            len(members),
         )
-        selection = {}
-    raw_members = selection.get("members")
-    members = _normalize_selected_bio_members(
-        raw_members if isinstance(raw_members, list) else []
-    )
+    else:
+        context_block = state.get("proposal_context") or {}
+        try:
+            selection, _ = await llm.chat_json(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are the Team Selection Agent for zö agency Section 2.\n"
+                            "Determine required roles from the RFP, then select EXACTLY 5 team members "
+                            "from the Master Team Roster whose skills match this solicitation.\n"
+                            "Compact JSON only — no markdown fences.\n\n"
+                            "STRICT RULES:\n"
+                            "- Skill-based selection only — NO mandatory names.\n"
+                            "- ONLY select people named in the Master Team Roster.\n"
+                            "- Maximum 5 people. Each must have a DISTINCT role.\n"
+                            "- Do NOT select the same person twice under different spellings.\n"
+                            'Return JSON: {"members": ["Name 1", "Name 2", "Name 3", "Name 4", "Name 5"], '
+                            '"requiredRoles": ["role 1", "role 2"]}'
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Proposal context:\n{context_block}\n\n"
+                            f"RFP context:\n{state['rfp_context'][:15000]}\n\n"
+                            f"Master Team Roster ({proposal_knowledge_base_tools.MASTER_TEAM_ROSTER_DOC}):\n"
+                            f"{roster_text}"
+                        )
+                    }
+                ],
+                max_tokens=1536,
+                temperature=0.0,
+                tier="light",
+            )
+        except LlmError as exc:
+            logger.warning(
+                "Legacy team selection failed (%s); empty members (no retry)",
+                str(exc)[:160],
+            )
+            selection = {}
+        raw_members = selection.get("members")
+        members = _normalize_selected_bio_members(
+            raw_members if isinstance(raw_members, list) else []
+        )
 
 
     new_sections: list[dict[str, Any]] = []

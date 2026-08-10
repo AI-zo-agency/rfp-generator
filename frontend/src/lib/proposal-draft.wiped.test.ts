@@ -12,7 +12,7 @@ function emptyOutline(
         id: "section-1-who-we-are",
         title: "1.1 — Who We Are",
         pageLimit: 1,
-        wordTarget: 600,
+        wordTarget: 200,
         required: true,
         custom: false,
         content: "",

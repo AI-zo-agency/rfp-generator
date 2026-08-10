@@ -145,18 +145,31 @@ def build_roster_profiles(roster_text: str) -> list[dict[str, Any]]:
     return found
 
 
-def normalize_selected_members(raw_members: list[Any], *, max_members: int = MAX_TEAM_SIZE) -> list[str]:
-    """Skill-based list only — dedupe by last name, cap at max_members."""
+def normalize_selected_members(
+    raw_members: list[Any],
+    *,
+    max_members: int = MAX_TEAM_SIZE,
+    dedupe_by_last_name: bool = True,
+) -> list[str]:
+    """Normalize member names, optionally dedupe by last name, cap at max_members.
+
+    Skill-based LLM picks use last-name dedupe (``Ron Comer`` / ``Ron Corner``).
+    Explicit Key Persona UI picks must pass ``dedupe_by_last_name=False`` so two
+    different people are never collapsed just because they share a surname.
+    """
     ordered: list[str] = []
-    seen_last_names: set[str] = set()
+    seen_keys: set[str] = set()
     for raw in raw_members:
         name = _canonicalize_verified_name(str(raw).strip())
         if not name:
             continue
-        last_name = name.casefold().split()[-1] if name.split() else name.casefold()
-        if last_name in seen_last_names:
+        if dedupe_by_last_name:
+            key = name.casefold().split()[-1] if name.split() else name.casefold()
+        else:
+            key = name.casefold()
+        if key in seen_keys:
             continue
-        seen_last_names.add(last_name)
+        seen_keys.add(key)
         ordered.append(name)
         if len(ordered) >= max_members:
             break

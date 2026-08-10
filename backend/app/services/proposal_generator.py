@@ -142,8 +142,8 @@ ZO_SECTIONS: list[dict[str, object]] = [
         "title": "1.1 — Who We Are",
         "mode": "pull",
         "source": "template",
-        "word_target": 250,
-        "designer_note": "Section 1 subsection: 1.1 — Who We Are (max 250 words).",
+        "word_target": 200,
+        "designer_note": "Section 1.1 Who We Are — max 200 words, designer-ready.",
     },
     {
         "id": "section-1-org-structure",
@@ -1732,7 +1732,7 @@ async def _generate_sections_1_3_inner(
                 if not section:
                     continue
                 try:
-                    improved, _, _, _, _, _ = await improve_proposal_section(
+                    improved, _, _, _, _, _, _ = await improve_proposal_section(
                         rfp_id,
                         sid,
                         "Generate the full section from the knowledge base. "

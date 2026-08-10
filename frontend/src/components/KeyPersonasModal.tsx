@@ -33,14 +33,23 @@ export function KeyPersonasModal({
   const [searchQuery, setSearchQuery] = useState("");
 
   const userModifiedRef = useRef(false);
+  // Latest selection — toggle/save must not use a stale React closure when the
+  // user clicks several checkboxes quickly (that was dropping the 4th pick).
+  const selectedIdsRef = useRef<string[]>(initialSelectedIds);
+  const saveSeqRef = useRef(0);
+
+  const applySelectedIds = useCallback((next: string[]) => {
+    selectedIdsRef.current = next;
+    setSelectedIds(next);
+  }, []);
 
   // Sync initial selected IDs ONLY when modal opens
   useEffect(() => {
     if (isOpen) {
       userModifiedRef.current = false;
-      setSelectedIds(initialSelectedIds || []);
+      applySelectedIds(initialSelectedIds || []);
     }
-  }, [isOpen]);
+  }, [isOpen, applySelectedIds]);
 
   // ESC key handler
   useEffect(() => {
@@ -62,14 +71,14 @@ export function KeyPersonasModal({
       // Sync local modal checkboxes from server — do NOT push into parent on
       // load (that was re-saving stale picks). Parent owns selection via draft.
       if (Array.isArray(data.selectedPersonaIds) && !userModifiedRef.current) {
-        setSelectedIds(data.selectedPersonaIds);
+        applySelectedIds(data.selectedPersonaIds);
       }
     } catch {
       // Keep existing list
     } finally {
       setLoading(false);
     }
-  }, [rfpId, onSelectionChange]);
+  }, [rfpId, applySelectedIds]);
 
   useEffect(() => {
     if (isOpen) {
@@ -80,14 +89,18 @@ export function KeyPersonasModal({
   const persistSelection = useCallback(
     async (nextSelected: string[]) => {
       userModifiedRef.current = true;
-      setSelectedIds(nextSelected);
+      applySelectedIds(nextSelected);
       onSelectionChange?.(nextSelected);
       if (!rfpId) return;
 
+      const seq = ++saveSeqRef.current;
       setSaving(true);
       setSaveSuccess(false);
       try {
         const result = await saveProposalKeyPersonas(rfpId, nextSelected);
+        // Ignore outdated responses so an earlier toggle cannot overwrite a
+        // newer 4-person save with a 3-person payload.
+        if (seq !== saveSeqRef.current) return;
         if (result.ok) {
           setSaveSuccess(true);
           window.setTimeout(() => setSaveSuccess(false), 2000);
@@ -98,21 +111,24 @@ export function KeyPersonasModal({
       } catch {
         // silent fallback
       } finally {
-        setSaving(false);
+        if (seq === saveSeqRef.current) {
+          setSaving(false);
+        }
       }
     },
-    [rfpId, onSelectionChange, onBioRebuildStarted]
+    [rfpId, onSelectionChange, onBioRebuildStarted, applySelectedIds]
   );
 
   const togglePersona = useCallback(
     (id: string) => {
-      const exists = selectedIds.includes(id);
+      const current = selectedIdsRef.current;
+      const exists = current.includes(id);
       const next = exists
-        ? selectedIds.filter((item) => item !== id)
-        : [...selectedIds, id];
+        ? current.filter((item) => item !== id)
+        : [...current, id];
       void persistSelection(next);
     },
-    [selectedIds, persistSelection]
+    [persistSelection]
   );
 
   const selectAll = useCallback(() => {

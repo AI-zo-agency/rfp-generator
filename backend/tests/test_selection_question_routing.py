@@ -204,7 +204,7 @@ class AdvisoryKnowledgeBaseTests(unittest.IsolatedAsyncioTestCase):
             patch.object(editor, "chat_json_with_repair", side_effect=fake_chat),
             patch.object(editor, "_fetch_kb_blob_for_selection", side_effect=boom),
         ):
-            reply = await editor._section_chat_advisory_reply(
+            reply, _suggested = await editor._section_chat_advisory_reply(
                 section=_section(),
                 rfp=_rfp(),
                 rfp_context="",
@@ -244,7 +244,7 @@ class SelectionQuestionEndToEndTests(unittest.IsolatedAsyncioTestCase):
 
         async def advisory(**kwargs):
             self.seen_message = kwargs["user_message"]
-            return "**Correct** — 01_companyfacts gives Z'Onion Creative Group LLC."
+            return ("**Correct** — 01_companyfacts gives Z'Onion Creative Group LLC.", None)
 
         async def boom(*args, **kwargs):
             raise AssertionError("a question must not run the excerpt rewriter")
@@ -283,7 +283,7 @@ class SelectionQuestionEndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Evidence policy", self.seen_message)
 
     async def test_reported_case_answers_and_leaves_the_draft_alone(self) -> None:
-        section, _draft, _research, _provider, reply, changed = await self._run(
+        section, _draft, _research, _provider, reply, changed, _fix = await self._run(
             "can you verify if it is Z'Onion?"
         )
         self.assertFalse(changed, "the draft was modified by a question")
