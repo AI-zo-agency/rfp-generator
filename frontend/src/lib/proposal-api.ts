@@ -859,7 +859,12 @@ export async function generateFullProposalStaged(
       draft = await withLiveDraftPolling(
         rfpId,
         options?.onDraftUpdate,
-        () => generateProposalSections1to3(rfpId, signal),
+        () =>
+          generateProposalSections1to3(rfpId, signal, {
+            // Full restart must rebuild 1–3. Case-studies / resume keep complete
+            // Company + Bios and only fill missing Our Work.
+            forceRegenerate: Boolean(options?.forceRestart),
+          }),
         options?.onResearchUpdate
       );
       ({ draft, research, pipelineStatus } = await refreshProposalSnapshot(rfpId));
@@ -1246,14 +1251,50 @@ export async function restartProposalFromIntelligence(
   return apiDraftToOutline(data.draft);
 }
 
+/**
+ * Keep Company + Team Bios; strip Our Work case studies + Intelligence onward
+ * so the next generate re-runs case-study extraction with current fit rules.
+ */
+export async function restartProposalFromCaseStudies(
+  rfpId: string
+): Promise<ProposalOutline> {
+  const res = await fetch(
+    `/api/rfps/${rfpId}/proposal/restart-from-case-studies`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    }
+  );
+  const text = await res.text();
+  let data: { detail?: string; draft?: ApiProposalDraft } = {};
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from restart-from-case-studies.");
+  }
+  if (!res.ok) {
+    throw new Error(data.detail ?? "Failed to clear case studies for restart");
+  }
+  if (!data.draft) {
+    throw new Error("No draft returned after clearing case studies");
+  }
+  return apiDraftToOutline(data.draft);
+}
+
 export async function generateProposalSections1to3(
   rfpId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { forceRegenerate?: boolean }
 ): Promise<ProposalOutline> {
+  const forceRegenerate = options?.forceRegenerate !== false;
+  const qs = new URLSearchParams({
+    force_regenerate: forceRegenerate ? "true" : "false",
+  });
   const result = await runProposalPhaseAsync(
     rfpId,
     "sections-1-3",
-    `/api/rfps/${rfpId}/proposal/generate/sections-1-3`,
+    `/api/rfps/${rfpId}/proposal/generate/sections-1-3?${qs.toString()}`,
     signal
   );
   if (!result.draft) {

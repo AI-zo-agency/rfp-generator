@@ -17,6 +17,8 @@ MAX_TOOL_ROUNDS = 4
 
 
 def _use_fireworks_primary() -> bool:
+    if settings.llm_disable_fireworks:
+        return False
     return bool(settings.llm_prefer_fireworks and _fireworks_key())
 
 
@@ -29,6 +31,8 @@ def _prefer_fireworks_for_node(node_name: str | None) -> bool:
     Fireworks — but we say so, because a silent downgrade here means the agent
     judging the proposal is weaker than the one that wrote it.
     """
+    if settings.llm_disable_fireworks:
+        return False
     if not _use_fireworks_primary():
         return False
     if not is_quality_critical_node(node_name):
@@ -59,7 +63,12 @@ def get_chat_model(
     node_name: str | None = None,
 ) -> ChatOpenAI:
     """LangChain chat model — respects LLM_PREFER_FIREWORKS like chat_json."""
-    if force_fireworks or _prefer_fireworks_for_node(node_name):
+    if settings.llm_disable_fireworks and force_fireworks:
+        raise LlmError(
+            "Fireworks is disabled (LLM_DISABLE_FIREWORKS). Use OpenRouter or Gemini.",
+            status_code=503,
+        )
+    if (force_fireworks or _prefer_fireworks_for_node(node_name)) and not settings.llm_disable_fireworks:
         if not _fireworks_key():
             raise LlmError(
                 "FIREWORKS_API_KEY required when LLM_PREFER_FIREWORKS is set.",
@@ -80,9 +89,10 @@ def get_chat_model(
             temperature=temperature,
             max_tokens=max_tokens,
         )
-    if not _fireworks_key():
+    if settings.llm_disable_fireworks or not _fireworks_key():
         raise LlmError(
-            "No LLM API key configured. Set OPENROUTER_API_KEY or FIREWORKS_API_KEY.",
+            "No LLM API key configured. Set OPENROUTER_API_KEY"
+            + ("." if settings.llm_disable_fireworks else " or FIREWORKS_API_KEY."),
             status_code=503,
         )
     return ChatOpenAI(
@@ -124,7 +134,11 @@ async def run_tool_agent_loop(
         )
     except Exception as exc:
         # Only worth retrying on Fireworks if the first attempt was not already there.
-        if _fireworks_key() and not used_fireworks_first:
+        if (
+            not settings.llm_disable_fireworks
+            and _fireworks_key()
+            and not used_fireworks_first
+        ):
             logger.warning(
                 "%s agent primary LLM failed (%s) — retrying via Fireworks",
                 agent_label,

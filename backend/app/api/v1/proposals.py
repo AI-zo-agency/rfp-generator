@@ -435,6 +435,11 @@ async def restart_from_intelligence_endpoint(rfp_id: str) -> dict[str, object]:
         generatedAt=current.generated_at if current else None,
         provider=current.provider if current else None,
         snapshots=current.snapshots if current else [],
+        selectedKeyPersonas=(
+            list(current.selected_key_personas)
+            if current and current.selected_key_personas is not None
+            else None
+        ),
     )
     await asave_proposal_draft(stripped)
 
@@ -451,6 +456,99 @@ async def restart_from_intelligence_endpoint(rfp_id: str) -> dict[str, object]:
         "message": (
             "Cleared Intelligence, RFP tabs, budget, and review. "
             "Sections 1–3 kept. Ready to rebuild from Phase 2."
+        ),
+    }
+
+
+@router.post("/{rfp_id}/proposal/restart-from-case-studies")
+async def restart_from_case_studies_endpoint(rfp_id: str) -> dict[str, object]:
+    """Keep Company + Team Bios; strip Our Work + Intelligence so case-study extraction re-runs."""
+    if not rfp_exists(rfp_id):
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    from datetime import datetime, timezone
+
+    from app.services.proposal_draft_archives import (
+        REASON_BEFORE_RESET,
+        archive_filled_draft,
+    )
+    from app.services.proposal_generator import _default_sections
+    from app.services.proposal_generation_cancel import clear_generation_cancel
+    from app.services.proposal_repository import (
+        aget_proposal_draft,
+        asave_proposal_draft,
+    )
+    from app.models.proposal import ProposalDraft
+
+    current = await aget_proposal_draft(rfp_id)
+    try:
+        await archive_filled_draft(
+            current,
+            reason=REASON_BEFORE_RESET,
+            label="Before Start from Case Studies",
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "Failed to archive draft before restart-from-case-studies for %s", rfp_id
+        )
+
+    page_limit = None
+    if current and current.sections:
+        page_limit = next(
+            (s.page_limit for s in current.sections if s.page_limit),
+            None,
+        )
+
+    kept: list = []
+    if current and current.sections:
+        for section in current.sections:
+            sid = section.id
+            if sid.startswith("section-1-"):
+                kept.append(section)
+            elif sid.startswith("section-2-bio-") and sid != "section-2-bio-placeholder":
+                kept.append(section)
+
+    # Ensure Section 3 placeholder so the UI/sidebar still shows Our Work while
+    # extraction rewrites the cards.
+    defaults = _default_sections(page_limit)
+    placeholder = next(
+        (s for s in defaults if s.id == "section-3-work-placeholder"),
+        None,
+    )
+    if placeholder is not None:
+        kept.append(placeholder)
+
+    now = datetime.now(timezone.utc).isoformat()
+    stripped = ProposalDraft(
+        rfpId=rfp_id,
+        sections=kept,
+        updatedAt=now,
+        generatedAt=current.generated_at if current else None,
+        provider=current.provider if current else None,
+        snapshots=current.snapshots if current else [],
+        selectedKeyPersonas=(
+            list(current.selected_key_personas)
+            if current and current.selected_key_personas is not None
+            else None
+        ),
+    )
+    await asave_proposal_draft(stripped)
+
+    try:
+        await adelete_research_cache(rfp_id)
+    except Exception:
+        pass
+    await clear_pipeline_checkpoint(rfp_id)
+    clear_generation_cancel(rfp_id)
+
+    return {
+        "ok": True,
+        "draft": slim_draft_for_api(stripped),
+        "message": (
+            "Cleared Our Work case studies, Intelligence, RFP tabs, budget, and review. "
+            "Company + Team Bios kept. Ready to re-run case-study extraction."
         ),
     }
 
@@ -527,11 +625,25 @@ async def generate_full_proposal_endpoint(rfp_id: str) -> ProposalGenerateRespon
 @router.post(
     "/{rfp_id}/proposal/generate/sections-1-3",
 )
-async def generate_sections_1_3_endpoint(rfp_id: str) -> JSONResponse:
-    """Start static Sections 1–3 in the background; poll GET /proposal for completion."""
+async def generate_sections_1_3_endpoint(
+    rfp_id: str,
+    force_regenerate: bool = Query(
+        True,
+        description=(
+            "true = rebuild all Sections 1–3; false = preserve complete "
+            "Company/Bios and only fill missing groups (e.g. Our Work)."
+        ),
+    ),
+) -> JSONResponse:
+    """Start static Sections 1–3 in the background; poll GET /proposal for completion.
+
+    force_regenerate=true (default): rebuild all of Sections 1–3.
+    force_regenerate=false: keep complete Section 1/2/3 cards; only fill missing
+    groups (used by Start from Case Studies after stripping Our Work only).
+    """
 
     async def work() -> None:
-        await generate_sections_1_3(rfp_id, force_regenerate=True)
+        await generate_sections_1_3(rfp_id, force_regenerate=force_regenerate)
 
     return await _enqueue_pipeline_phase(rfp_id, "sections-1-3", work)
 

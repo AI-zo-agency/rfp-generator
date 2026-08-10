@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
     # When true, skip OpenRouter and Gemini - use Fireworks directly as primary.
     llm_prefer_fireworks: bool = False
+    # Master kill switch: never call Fireworks (primary, prefer, or fallback).
+    llm_disable_fireworks: bool = True
     # When true, skip Gemini - use OpenRouter as primary (before Fireworks).
     llm_prefer_openrouter: bool = False
     # Master switch for OpenRouter usability. A key can be present but unfunded;

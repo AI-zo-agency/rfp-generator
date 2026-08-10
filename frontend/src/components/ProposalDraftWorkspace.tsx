@@ -28,6 +28,7 @@ import {
   recoverProposalDraftIfSaved,
   resetProposal,
   restartProposalFromIntelligence,
+  restartProposalFromCaseStudies,
   runPhase3Drafting,
   runPhase3_5BudgetWithRecovery,
   runPhase3_6SelfEditWithRecovery,
@@ -1489,20 +1490,38 @@ function ProposalDraftWorkspaceInner({
     }
   }, [confirm, rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll]);
 
-  const handleGenerateFullProposal = useCallback(async (options?: { startAfterSections1to3?: boolean }) => {
+  const handleGenerateFullProposal = useCallback(async (options?: {
+    startAfterSections1to3?: boolean;
+    startFromCaseStudies?: boolean;
+  }) => {
     // Continue = resume from checkpoint (e.g. budget failure).
     // Fresh / regenerate-from-done = forceRestart from Sections 1–3.
     // startAfterSections1to3 = Start from Intelligence (keep 1–3, re-run Phase 2+).
+    // startFromCaseStudies = keep Company + Bios, re-extract Our Work, then Phase 2+.
     const startAfterSections1to3 = Boolean(options?.startAfterSections1to3);
+    const startFromCaseStudies = Boolean(options?.startFromCaseStudies);
     const hasManuscriptContent = countSectionsWithContent(outline) > 0;
     // Never "resume" an empty outline — that is always a forceRestart generate.
     const shouldResume =
       !startAfterSections1to3 &&
+      !startFromCaseStudies &&
       canResumePipeline &&
       hasManuscriptContent &&
       Boolean(pipelineStatus);
 
-    if (startAfterSections1to3) {
+    if (startFromCaseStudies) {
+      const caseOk = await confirm({
+        title: "Start from Case Studies?",
+        description:
+          "This DELETES existing Our Work case studies, Intelligence, RFP tabs, Budget, and Review — then re-runs case-study extraction and rebuilds from there.\n\n" +
+          "Company overview + Team Bios are kept.",
+        confirmLabel: "Start from Case Studies",
+        tone: "danger",
+      });
+      if (!caseOk) {
+        return;
+      }
+    } else if (startAfterSections1to3) {
       const intelligenceOk = await confirm({
         title: "Start from Intelligence?",
         description:
@@ -1541,7 +1560,7 @@ function ProposalDraftWorkspaceInner({
     const abort = new AbortController();
     fullProposalAbortRef.current = abort;
 
-    const forceRestart = !(shouldResume || startAfterSections1to3);
+    const forceRestart = !(shouldResume || startAfterSections1to3 || startFromCaseStudies);
 
     setIsFullProposalRunning(true);
     setFullProposalProgress(null);
@@ -1571,6 +1590,40 @@ function ProposalDraftWorkspaceInner({
       setLiveLatestSectionTitle(null);
       setSelectedSectionId(defaults.sections[0]?.id ?? null);
       setActiveTab("content");
+    } else if (startFromCaseStudies) {
+      try {
+        try {
+          await stopProposalGeneration(rfp.id);
+        } catch {
+          // Best-effort: nothing may be running.
+        }
+        const stripped = await restartProposalFromCaseStudies(rfp.id);
+        saveGenerationRef.current += 1;
+        skipNextSaveRef.current = true;
+        liveContentFingerprintRef.current = new Map();
+        applyOutlineFromServer(stripped);
+        setResearch(null);
+        setBudget(null);
+        setPresubmitReview(null);
+        setPipelineStatus(null);
+        setSectionRevisions({});
+        persistStoredRevisions(rfp.id, {});
+        setLiveGeneratedCount(countSectionsWithContent(stripped));
+        setLiveLatestSectionTitle(null);
+        setSelectedSectionId(stripped.sections[0]?.id ?? null);
+        setActiveTab("content");
+        setGenerateNotice(
+          "Cleared Our Work + Intelligence. Re-running case-study extraction…"
+        );
+      } catch (error) {
+        setIsFullProposalRunning(false);
+        setGenerateError(
+          error instanceof Error
+            ? error.message
+            : "Failed to clear case studies before restart."
+        );
+        return;
+      }
     } else if (startAfterSections1to3) {
       // Wipe stale Intelligence / RFP tabs before Phase 2 rebuilds a lean outline.
       try {
@@ -1616,8 +1669,12 @@ function ProposalDraftWorkspaceInner({
         await generateFullProposalStaged(rfp.id, setFullProposalProgress, {
           forceRestart,
           // Continue trusts backend resumeFromPhase — do not pass a client override.
-          startFrom: startAfterSections1to3 ? "phase-2" : undefined,
-          forceRerunFromStart: startAfterSections1to3,
+          startFrom: startAfterSections1to3
+            ? "phase-2"
+            : startFromCaseStudies
+              ? "sections-1-3"
+              : undefined,
+          forceRerunFromStart: startAfterSections1to3 || startFromCaseStudies,
           signal: abort.signal,
           onDraftUpdate: handleLiveDraftUpdate,
           onResearchUpdate: handleResearchPoll,
@@ -2346,6 +2403,19 @@ function ProposalDraftWorkspaceInner({
                 Stop
               </button>
             ) : null}
+            <button
+              type="button"
+              onClick={() =>
+                requireKeyPersonas(() =>
+                  void handleGenerateFullProposal({ startFromCaseStudies: true })
+                )
+              }
+              disabled={anyPipelineRunning}
+              className="proposal-toolbar-btn disabled:opacity-60"
+              title="Keeps Company + Team Bios; re-extracts relevant short case studies, then rebuilds Intelligence onward"
+            >
+              Start from Case Studies
+            </button>
             <button
               type="button"
               onClick={() =>

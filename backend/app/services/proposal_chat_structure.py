@@ -1797,6 +1797,8 @@ async def _build_case_study_section(
                             f"{ANTI_HALLUCINATION_RULES}\n"
                             "Structure — exactly these three sections, nothing else: "
                             "Challenge, Solution / Our Approach, Client Voice.\n"
+                            "HARD LENGTH CAPS: Challenge ≤40 words; Solution ≤50 words; "
+                            "no marketing essays or economic-impact digressions.\n"
                             "Client Voice: a short client quote copied VERBATIM from the "
                             "knowledge base, in quotation marks, with the speaker's name/title "
                             "if given. Never paraphrase, embellish, or invent a quote. If the "
@@ -1804,7 +1806,7 @@ async def _build_case_study_section(
                             "[VERIFY: no client quote found in source material]\n"
                             "Do NOT include a client overview, a Results or KPI/metrics list, "
                             "or a 'Why Relevant' section.\n"
-                            "Keep concise (about 300–500 words). First person we/our.\n"
+                            "Keep SHORT (under ~120 words body). First person we/our.\n"
                             'Return JSON: {"content": "markdown", "kbRefs": ["..."]}'
                         ),
                     },
@@ -1814,12 +1816,13 @@ async def _build_case_study_section(
                             f"Case study client/project: {name}\n"
                             f"Current RFP client (NOT the case study): {rfp_client}\n"
                             f"Hint: {(draft_hint or '').strip()}\n\n"
-                            f"RFP context (for relevance only):\n{rfp_context[:6000]}\n\n"
-                            f"Knowledge base:\n{kb_text[:35000]}"
+                            f"RFP context (for relevance only — do NOT write about this client):\n"
+                            f"{rfp_context[:6000]}\n\n"
+                            f"Knowledge base:\n{kb_text[:8000]}"
                         ),
                     },
                 ],
-                max_tokens=4096,
+                max_tokens=900,
                 temperature=0.15,
             )
             content = str((raw or {}).get("content") or "").strip()

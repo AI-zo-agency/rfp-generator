@@ -212,6 +212,26 @@ class SchemaDriftTests(unittest.TestCase):
         analysis = GoNoGoAnalysis.model_validate(_coerce_go_no_go_raw(raw))
         self.assertEqual(analysis.capability_matrix, [])
 
+    def test_null_decision_matrix_scores_are_filled_not_retried(self) -> None:
+        """Truncated Sonnet output left score=null and used to force a full re-run."""
+        from app.models.go_no_go import GoNoGoAnalysis
+        from app.services.go_no_go_service import _coerce_go_no_go_raw
+
+        raw = self._raw([])
+        raw["fitScore"] = 4
+        raw["worthScore"] = 3
+        raw["recommendation"] = "review"
+        raw["decisionMatrix"] = [
+            {"dimension": "Technical Capability Match", "score": None, "notes": ""},
+            {"dimension": "Resource Availability", "score": None, "notes": ""},
+            {"dimension": "Financial Viability", "score": None, "notes": ""},
+            {"dimension": "Strategic Value", "score": None, "notes": ""},
+            {"dimension": "Win Probability", "score": None, "notes": ""},
+        ]
+        analysis = GoNoGoAnalysis.model_validate(_coerce_go_no_go_raw(raw))
+        self.assertEqual(len(analysis.decision_matrix), 5)
+        self.assertTrue(all(isinstance(row.score, int) for row in analysis.decision_matrix))
+        self.assertEqual(analysis.decision_matrix[0].score, 4)
 
 
 class ScoreCoherenceTests(unittest.TestCase):

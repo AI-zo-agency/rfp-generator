@@ -110,6 +110,20 @@ class QualityCriticalPreferFireworksTests(unittest.TestCase):
         self.assertTrue(decision.skip_prefer_fireworks)
         self.assertFalse(decision.allow_fireworks)
 
+    def test_disable_fireworks_blocks_all_use(self) -> None:
+        decision = resolve_fireworks_eligibility(
+            requested_max_tokens=4096,
+            prefer_fireworks=True,
+            node_name="plan_section_1",
+            openrouter_available=True,
+            gemini_available=True,
+            disable_fireworks=True,
+        )
+        self.assertFalse(decision.allow_fireworks)
+        self.assertTrue(decision.skip_prefer_fireworks)
+        self.assertFalse(decision.must_raise)
+        self.assertIn("disabled", (decision.block_reason or "").lower())
+
 
 if __name__ == "__main__":
     unittest.main()

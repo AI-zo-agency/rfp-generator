@@ -73,6 +73,7 @@ def _provider_routing(
         node_name=resolved_node,
         openrouter_available=openrouter_available,
         gemini_available=gemini_available,
+        disable_fireworks=settings.llm_disable_fireworks,
     )
     if decision.must_raise:
         raise LlmError(

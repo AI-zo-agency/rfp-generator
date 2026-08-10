@@ -2281,7 +2281,7 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
             section_id=sec_id,
             title=sec_title,
             mode="select",
-            word_target=350,
+            word_target=120,
             page_limit=merged_state.get("page_limit"),
             page_ratio=0.03,
             designer_note_default=f"Our Work example: {study}.",
@@ -2908,7 +2908,7 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                         "role": "system",
                         "content": (
                             f"{_section_system_preamble(state)}\n"
-                            f"Write a detailed 'Our Work' case study for: '{study}'.\n\n"
+                            f"Write a SHORT 'Our Work' case study card for: '{study}'.\n\n"
                             "CRITICAL RULES:\n"
                             f"- Do NOT write about '{rfp_client}' — that is the CURRENT client this proposal is for, NOT a past case study.\n"
                             "- ONLY pull verified facts, client names, and outcomes directly from the case studies knowledge base.\n"
@@ -2916,6 +2916,10 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                             "- Do NOT include Source:, filename, .pdf, .docx, or knowledge-base citations in the prose.\n"
                             "- NEVER append 'Creative Examples:' catalogs or word-count labels.\n"
                             "- Return ONE complete JSON object — no markdown fences.\n\n"
+                            "HARD LENGTH CAPS:\n"
+                            "- Challenge: MAX 40 words. Solution / Our Approach: MAX 50 words.\n"
+                            "- No economic-impact essays, hotel-tax digressions, or marketing filler.\n"
+                            "- Prefer 2 short sentences per section.\n\n"
                             "Format and Content:\n"
                             "- Write from zö's perspective (we/our/us).\n"
                             "- Structure as exactly these three sections, nothing else: "
@@ -2935,11 +2939,11 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                         "role": "user",
                         "content": (
                             f"Voice:\n{voice}\n\n"
-                            f"Case studies knowledge base:\n{case_corpus}"
+                            f"Case studies knowledge base:\n{case_corpus[:8000]}"
                         ),
                     },
                 ],
-                max_tokens=3072,
+                max_tokens=900,
                 temperature=0.0,  # Zero temp for strict factual extraction
             )
         except LlmError as exc:
@@ -2960,7 +2964,7 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
             section_id=sec_id,
             title=sec_title,
             mode="select",
-            word_target=350,
+            word_target=120,
             page_limit=state.get("page_limit"),
             page_ratio=0.03,
             designer_note_default=f"Our Work example: {study}.",

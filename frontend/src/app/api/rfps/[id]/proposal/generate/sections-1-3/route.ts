@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 export const maxDuration = 3600;
 
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -13,11 +13,16 @@ export async function POST(
     process.env.NEXT_PUBLIC_BACKEND_URL ||
     process.env.BACKEND_URL ||
     "http://localhost:8001";
+  const incoming = new URL(request.url);
+  const qs = incoming.searchParams.toString();
+  const backendPath = qs
+    ? `${backendUrl}/api/v1/rfps/${id}/proposal/generate/sections-1-3?${qs}`
+    : `${backendUrl}/api/v1/rfps/${id}/proposal/generate/sections-1-3`;
   try {
-    const res = await longRunningFetch(
-      `${backendUrl}/api/v1/rfps/${id}/proposal/generate/sections-1-3`,
-      { method: "POST", timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS }
-    );
+    const res = await longRunningFetch(backendPath, {
+      method: "POST",
+      timeoutMs: PROPOSAL_STAGE_TIMEOUT_MS,
+    });
     const text = await res.text();
     if (!text.trim()) {
       return NextResponse.json(

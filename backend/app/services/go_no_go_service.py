@@ -202,9 +202,13 @@ Compare the RFP against ONLY the provided knowledge-base excerpts. Never invent 
 team members, insurance, case studies, or past work. Flag gaps explicitly with [VERIFY] when human follow-up is needed.
 
 PROCESS:
-1. Answer every evaluation question in "evaluations".
-2. Write a comprehensive "stageOneReport" in Markdown (see structure below).
-3. Set fitScore, worthScore, recommendation, dimensions, criticalGaps, and conditions.
+1. Emit scores FIRST in the JSON (fitScore, worthScore, recommendation, decisionMatrix with all 5 integer scores).
+2. Answer every evaluation question in "evaluations".
+3. Write a concise "stageOneReport" in Markdown LAST (see structure below) — keep it short so the JSON never truncates.
+
+CRITICAL OUTPUT ORDER (truncation protection):
+- decisionMatrix scores MUST be concrete integers 0–5 (never null). Emit the full decisionMatrix
+  before stageOneReport. If you must cut length, shorten the report — never omit scores.
 
 INSUFFICIENT RFP CONTENT:
 If scope, deliverables, budget, compliance, or team requirements are missing:
@@ -268,7 +272,9 @@ DEADLINE CHECK (required — use today's date provided in the user prompt):
 - Still complete the full analysis (capability, compliance, scoring) and add conditions for leadership override if re-solicit is possible.
 - Populate the "deadline" object and mention deadline status in summary.
 
-stageOneReport — comprehensive Markdown matching a senior analyst brief. Be exhaustive and RFP-specific:
+stageOneReport — concise Markdown matching a senior analyst brief. Prefer short bullets and
+compact tables over essays. Cap the whole report at ~800–1000 words. Completeness of scores/
+recommendation matters more than prose length — never truncate mid-JSON. RFP-specific:
 
 ## EXECUTIVE SUMMARY
 Open with deadline status vs today's date when relevant. Client, project, solicitation number, deadline (with timezone if stated),
@@ -320,14 +326,13 @@ Also populate "actionFlags" array with every [FLAG...] line from the report (ful
 
 Flag severity must be exactly one of: info, warning, critical (never high/medium/low).
 
-Return ONLY valid JSON.
+Return ONLY valid JSON. Emit decision fields BEFORE stageOneReport so scores survive if output is truncated.
 {
   "insufficientData": false,
   "fitScore": 0,
   "worthScore": 0,
   "recommendation": "go",
   "summary": "2-3 sentence executive summary for the dashboard (mention Worth It + Overall; never say AI Fit Score)",
-  "stageOneReport": "## EXECUTIVE SUMMARY\\n...",
   "decisionMatrix": [
     {"dimension": "Technical Capability Match", "score": 0, "notes": "RFP-specific rationale citing scope and KB"},
     {"dimension": "Resource Availability", "score": 0, "notes": "RFP-specific rationale"},
@@ -352,7 +357,8 @@ Return ONLY valid JSON.
     "lateSubmissionDisqualifies": false,
     "note": "Deadline assessment narrative"
   },
-  "clarifyingQuestions": []
+  "clarifyingQuestions": [],
+  "stageOneReport": "## EXECUTIVE SUMMARY\\n..."
 }"""
 
 KB_QUERY_PLANNER_PROMPT = """You plan targeted Supermemory knowledge-base searches for zö agency Go/No-Go analysis.
@@ -614,8 +620,8 @@ KB_CONTEXT_MAX_CHARS = 45_000
 RFP_PROMPT_MAX_CHARS = 50_000
 # Hard cap on parallel Supermemory searches — unbounded fan-out caused long
 # runs and one flaky query could 502 the entire Go/No-Go analyze.
-MAX_KB_QUERIES = 24
-MAX_KB_CONCURRENCY = 6
+MAX_KB_QUERIES = 16
+MAX_KB_CONCURRENCY = 8
 
 MIN_SUBSTANTIVE_CHARS = 400
 
@@ -1379,6 +1385,17 @@ def _coerce_go_no_go_raw(raw: dict[str, Any]) -> dict[str, Any]:
         elif raw.get("insufficientData"):
             raw[key] = None
 
+    # Always emit a complete 5-row matrix with integer scores. Truncated LLM
+    # JSON often leaves score=null — that must not trigger a full re-run.
+    if raw.get("insufficientData"):
+        raw["decisionMatrix"] = []
+    else:
+        fallback = _matrix_fallback_score(raw)
+        raw["decisionMatrix"] = _normalize_decision_matrix(
+            raw.get("decisionMatrix"),
+            fallback_score=fallback,
+        )
+
     raw["scopeMatch"] = _coerce_dimension(
         raw.get("scopeMatch"), fallback_summary="Scope match assessment."
     )
@@ -1793,13 +1810,19 @@ def _apply_hard_rules(
         if coerced is not None:
             raw[key] = coerced
 
-    raw["decisionMatrix"] = _normalize_decision_matrix(raw.get("decisionMatrix"))
+    raw["decisionMatrix"] = _normalize_decision_matrix(
+        raw.get("decisionMatrix"),
+        fallback_score=_matrix_fallback_score(raw),
+    )
     _normalize_dimension_flags(raw)
     _scrub_invented_eval_and_people(
         raw, evaluation_points_found=evaluation_points_found
     )
     # Re-normalize matrix after possible score bumps in scrubber.
-    raw["decisionMatrix"] = _normalize_decision_matrix(raw.get("decisionMatrix"))
+    raw["decisionMatrix"] = _normalize_decision_matrix(
+        raw.get("decisionMatrix"),
+        fallback_score=_matrix_fallback_score(raw),
+    )
 
     facts = hard_facts or {}
     opp_class = facts.get("opportunity_class")
@@ -1811,7 +1834,10 @@ def _apply_hard_rules(
             compensation_signal=compensation,
             contract_value_lines=list(facts.get("contract_value_lines") or []),
         )
-        raw["decisionMatrix"] = _normalize_decision_matrix(raw.get("decisionMatrix"))
+        raw["decisionMatrix"] = _normalize_decision_matrix(
+            raw.get("decisionMatrix"),
+            fallback_score=_matrix_fallback_score(raw),
+        )
 
     if deadline is not None:
         raw["deadline"] = deadline
@@ -1838,48 +1864,77 @@ def _apply_hard_rules(
     return raw
 
 
-def _normalize_decision_matrix(raw_matrix: object) -> list[dict[str, object]]:
-    if not isinstance(raw_matrix, list):
-        return []
+def _matrix_fallback_score(raw: dict[str, Any]) -> int:
+    """Best integer to fill omitted decisionMatrix scores (avoids full LLM retry)."""
+    for key in ("fitScore", "worthScore"):
+        coerced = _coerce_score(raw.get(key))
+        if coerced is not None:
+            return coerced
+    recommendation = _normalize_recommendation(raw.get("recommendation"))
+    if recommendation == "go":
+        return 4
+    if recommendation == "no_go":
+        return 1
+    return 3
 
+
+def _normalize_decision_matrix(
+    raw_matrix: object,
+    *,
+    fallback_score: int = 3,
+) -> list[dict[str, object]]:
+    """Return exactly 5 rows with integer scores. Null/missing scores use fallback."""
+    fallback = max(0, min(5, int(fallback_score)))
     by_dimension: dict[str, dict[str, object]] = {}
-    for item in raw_matrix:
-        if not isinstance(item, dict):
-            continue
-        dimension = str(item.get("dimension") or "").strip()
-        if not dimension:
-            continue
-        score = item.get("score")
-        if score is None:
-            continue
-        by_dimension[dimension.casefold()] = {
-            "dimension": dimension,
-            "score": max(0, min(5, int(score))),
-            "notes": str(item.get("notes") or "").strip(),
-        }
+    if isinstance(raw_matrix, list):
+        for item in raw_matrix:
+            if not isinstance(item, dict):
+                continue
+            dimension = str(item.get("dimension") or "").strip()
+            if not dimension:
+                continue
+            coerced = _coerce_score(item.get("score"))
+            by_dimension[dimension.casefold()] = {
+                "dimension": dimension,
+                "score": coerced if coerced is not None else fallback,
+                "notes": str(item.get("notes") or "").strip(),
+                "score_was_null": coerced is None,
+            }
 
     normalized: list[dict[str, object]] = []
+    used_keys: set[str] = set()
     for canonical in DECISION_MATRIX_DIMENSIONS:
         match = by_dimension.get(canonical.casefold())
+        if not match:
+            for key, row in by_dimension.items():
+                if key in used_keys:
+                    continue
+                if canonical.split()[0].lower() in key:
+                    match = row
+                    used_keys.add(key)
+                    break
+        else:
+            used_keys.add(canonical.casefold())
+
         if match:
+            notes = str(match.get("notes") or "").strip()
+            if match.get("score_was_null") and not notes:
+                notes = "[VERIFY] Score inferred after truncated model output."
             normalized.append(
                 {
                     "dimension": canonical,
                     "score": match["score"],
-                    "notes": match["notes"],
+                    "notes": notes,
                 }
             )
-            continue
-        for key, row in by_dimension.items():
-            if canonical.split()[0].lower() in key:
-                normalized.append(
-                    {
-                        "dimension": canonical,
-                        "score": row["score"],
-                        "notes": row["notes"],
-                    }
-                )
-                break
+        else:
+            normalized.append(
+                {
+                    "dimension": canonical,
+                    "score": fallback,
+                    "notes": "[VERIFY] Score inferred — model omitted this dimension.",
+                }
+            )
 
     return normalized
 
@@ -1993,8 +2048,9 @@ async def _adjudicate_capabilities(
                 {"role": "system", "content": ADJUDICATOR_PROMPT},
                 {"role": "user", "content": body[:60_000]},
             ],
-            max_tokens=6000,
+            max_tokens=3500,
             temperature=0.0,
+            tier="light",
             node_name="capability_adjudicator",
             rfp_id=rfp.id,
         )
@@ -2287,7 +2343,10 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
 ## Scoring factors / HARD FACTS for THIS RFP (extracted from full solicitation text)
 {_build_scoring_factors(rfp, content)}
 
-Write a detailed stageOneReport in Markdown following the required section structure (compliance snapshot with mandatory documents, capability yes/gap lists, evaluation criteria, competitive context, flags).
+Write a CONCISE stageOneReport (~800–1000 words max) LAST in the JSON — short bullets and
+compact tables, not essays. Emit fitScore, worthScore, recommendation, and decisionMatrix
+(all 5 scores as integers 0–5, never null) BEFORE stageOneReport.
+JSON MUST be complete and valid within the output budget — never truncate mid-object.
 Populate decisionMatrix with all 5 dimensions — derive each score dynamically from THIS RFP's budget, geography,
 evaluation criteria weights (ONLY if listed in HARD FACTS), compliance risks, KB evidence, and competitive position.
 No default or template scores. Do not invent pessimistic point tables to justify low scores.
@@ -2334,7 +2393,14 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
     analysis: GoNoGoAnalysis | None = None
     for attempt in range(2):
         try:
-            raw, provider = await llm.chat_json(messages, max_tokens=12_000, temperature=0.25)
+            # Bounded output + scores-first prompt; coerce fills null matrix scores
+            # so truncation does not force a second ~2min Sonnet call.
+            raw, provider = await llm.chat_json(
+                messages,
+                max_tokens=5500,
+                temperature=0.25,
+                node_name="go_no_go_analysis",
+            )
             try:
                 normalized = _apply_hard_rules(
                     raw,

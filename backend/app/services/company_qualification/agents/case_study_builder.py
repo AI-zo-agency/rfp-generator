@@ -43,7 +43,7 @@ def _builder_system_prompt(*, study_title: str, rfp_client: str, strict: bool) -
         )
     return (
         "You are the Case Study Builder for zö agency Section 3.\n"
-        f"Write a concise case study for: '{study_title}'.\n\n"
+        f"Write a SHORT case study card for: '{study_title}'.\n\n"
         f"{strict_extra}"
         "CRITICAL RULES:\n"
         f"- Do NOT write about '{rfp_client}' — that is the CURRENT client.\n"
@@ -59,7 +59,7 @@ def _builder_system_prompt(*, study_title: str, rfp_client: str, strict: bool) -
         "outreach' story the source does not support — that is fabrication.\n"
         "- Challenge, Solution, and Client Voice must all stay faithful to the "
         "source document.\n"
-        "- If facts are missing, use [VERIFY] — do NOT invent.\n"
+        "- If facts are missing, use [VERIFY] — do NOT invent, pad, or write marketing essays.\n"
         "- Do NOT include Source:, filename, .pdf, .docx, or knowledge-base citations "
         "in the client-facing prose. Sources stay in metadata only.\n"
         "- NEVER write meta notes like 'the requested file was not present', "
@@ -70,8 +70,16 @@ def _builder_system_prompt(*, study_title: str, rfp_client: str, strict: bool) -
         "- This case study appears ONCE in the proposal (Section 3 only). "
         "Do not repeat company overview, team roster, or other case studies.\n"
         "- Return ONE complete JSON object — no markdown fences.\n\n"
+        "HARD LENGTH CAPS (non-negotiable — reviewers reject long cards):\n"
+        "- Challenge: MAX 40 words (2 short sentences). Situation only — no history essays, "
+        "no economic-impact paragraphs, no hotel-tax / infrastructure digressions.\n"
+        "- Solution / Our Approach: MAX 50 words (2–3 short sentences). What zö did, concrete.\n"
+        "- Client Voice: one verbatim quote OR the exact VERIFY line — nothing else.\n"
+        "- Total body under ~120 words excluding headings.\n"
+        "- Prefer bullets or short sentences. No filler adjectives (vibrant, fearless, "
+        "untapped potential, comprehensive strategy spanning…).\n\n"
         "Template — exactly these three sections, nothing else:\n"
-        "- Challenge (the problem or situation the client faced)\n"
+        "- Challenge\n"
         "- Solution / Our Approach\n"
         "- Client Voice — a short client quote copied VERBATIM from the source "
         "document, in quotation marks, with the speaker's name/title if the "
@@ -82,7 +90,7 @@ def _builder_system_prompt(*, study_title: str, rfp_client: str, strict: bool) -
         "Do NOT include a company/client overview, a results or KPI/metrics "
         "list, or a 'Why Relevant' section — Challenge, Solution, and Client "
         "Voice only.\n\n"
-        "Keep concise — one page max. ASCII only.\n"
+        "ASCII only.\n"
         'Return JSON: {"content": "markdown case study", "kbRefs": ["source file names"]}'
     )
 
@@ -119,12 +127,13 @@ async def _invoke_case_study_llm(
                     )
                     + f"proposalType: {proposal_context.proposal_type}\n"
                     f"industry: {proposal_context.industry}\n\n"
-                    f"Retrieved case study document:\n{case_study_text[:60000]}\n\n"
+                    f"Retrieved case study document (use only facts that support THIS title):\n"
+                    f"{case_study_text[:8000]}\n\n"
                     f"Known sources: {kb_sources}"
                 ),
             },
         ],
-        max_tokens=3072,
+        max_tokens=900,
         temperature=0.0,
         tier="heavy",
     )

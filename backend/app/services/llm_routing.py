@@ -166,11 +166,27 @@ def resolve_fireworks_eligibility(
     node_name: str | None,
     openrouter_available: bool,
     gemini_available: bool,
+    disable_fireworks: bool = False,
 ) -> FireworksEligibility:
     """Decide whether Fireworks may serve this call without silent under-serve."""
     requested = int(requested_max_tokens or DEFAULT_REQUESTED_MAX_TOKENS)
     if requested < 1:
         requested = DEFAULT_REQUESTED_MAX_TOKENS
+
+    if disable_fireworks:
+        logger.info(
+            "fireworks_routing disabled node=%s requested=%s",
+            node_name or "unknown",
+            requested,
+        )
+        return FireworksEligibility(
+            allow_fireworks=False,
+            skip_prefer_fireworks=True,
+            must_raise=False,
+            effective_cap_if_fireworks=FIREWORKS_OUTPUT_TOKEN_CAP,
+            requested_max_tokens=requested,
+            block_reason="Fireworks disabled via LLM_DISABLE_FIREWORKS",
+        )
 
     quality_critical = is_quality_critical_node(node_name)
     skip_prefer = quality_critical and prefer_fireworks

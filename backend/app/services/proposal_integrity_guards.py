@@ -320,7 +320,10 @@ _ALLOWED_CASE_STUDY_HEADINGS = frozenset(
 
 def _case_study_heading_key(line: str) -> str:
     key = re.sub(r"^#+\s*", "", (line or "").strip()).strip().rstrip(":").casefold()
-    key = re.sub(r"\s+", " ", key)
+    # **Challenge** / *Solution* — strip markdown emphasis wrappers.
+    key = re.sub(r"\*+", "", key)
+    key = re.sub(r"^_+|_+$", "", key)
+    key = re.sub(r"\s+", " ", key).strip()
     return key
 
 
@@ -332,12 +335,26 @@ def _looks_like_case_study_heading(line: str) -> bool:
         return True
     if s.endswith(".") or s.endswith("?") or s.endswith("!"):
         return False
-    if len(s) > 56:
+    # Normalize markdown bold/italic so **Challenge** still counts as a heading.
+    plain = re.sub(r"[*_`]", "", s).strip().rstrip(":")
+    if len(plain) > 56:
         return False
-    if not re.match(r"^[A-Za-z][\w\s/&'’\-]+$", s):
+    if not re.match(r"^[A-Za-z][\w\s/&'’\-]+$", plain):
         return False
-    words = s.split()
-    return 1 <= len(words) <= 8
+    words = plain.split()
+    if not (1 <= len(words) <= 8):
+        return False
+    key = plain.casefold()
+    if key in _ALLOWED_CASE_STUDY_HEADINGS or key in _FORBIDDEN_CASE_STUDY_HEADINGS:
+        return True
+    if key.startswith("why this matters") or key.startswith("why matters"):
+        return True
+    if key.startswith("challenge") or key.startswith("solution") or key.startswith(
+        "client voice"
+    ):
+        return True
+    # Title-case short labels (Strategy, Goals, KPIs, …)
+    return plain[:1].isupper() and len(words) <= 4
 
 
 def prefer_case_study_kb_text(case_study_text: str) -> tuple[str, list[str]]:
@@ -467,13 +484,83 @@ def case_study_looks_like_source_dump(content: str) -> tuple[bool, str]:
     return False, ""
 
 
+_MAX_CHALLENGE_WORDS = 40
+_MAX_SOLUTION_WORDS = 50
+
+
+def _cap_prose_words(text: str, max_words: int) -> str:
+    words = (text or "").split()
+    if len(words) <= max_words:
+        return (text or "").strip()
+    clipped = " ".join(words[:max_words]).rstrip(",;:.—-")
+    return f"{clipped}."
+
+
+def _cap_case_study_section_lengths(content: str) -> tuple[str, list[str]]:
+    """Hard-cap Challenge / Solution prose so cards stay scannable."""
+    text = content or ""
+    if not text.strip():
+        return text, []
+
+    logs: list[str] = []
+    lines = text.splitlines()
+    out: list[str] = []
+    section: str | None = None
+    buf: list[str] = []
+
+    def _flush() -> None:
+        nonlocal buf, section
+        if section is None:
+            return
+        body = "\n".join(buf).strip()
+        if section == "challenge":
+            capped = _cap_prose_words(body, _MAX_CHALLENGE_WORDS)
+            if body and capped != body:
+                logs.append(f"Challenge capped to {_MAX_CHALLENGE_WORDS} words")
+            out.append(capped)
+        elif section == "solution":
+            capped = _cap_prose_words(body, _MAX_SOLUTION_WORDS)
+            if body and capped != body:
+                logs.append(f"Solution capped to {_MAX_SOLUTION_WORDS} words")
+            out.append(capped)
+        else:
+            out.append(body)
+        buf = []
+        section = None
+
+    for line in lines:
+        if _looks_like_case_study_heading(line):
+            _flush()
+            key = _case_study_heading_key(line)
+            out.append(line)
+            if key.startswith("challenge"):
+                section = "challenge"
+            elif key.startswith("solution") or key == "our approach":
+                section = "solution"
+            elif key.startswith("client voice"):
+                section = "client_voice"
+            else:
+                section = None
+            continue
+        if section in {"challenge", "solution", "client_voice"}:
+            buf.append(line)
+        else:
+            out.append(line)
+    _flush()
+
+    cleaned = "\n".join(out)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, logs
+
+
 def scrub_case_study_overbuild(content: str) -> tuple[str, list[str]]:
     """
     Enforce Challenge → Solution → Client Voice shape.
 
     Strips KB-template dump sections (Strategy/Goals/KPIs/Creative Deliverables)
     and invented RFP bridges ("Why this matters for …") that prompts forbid but
-    models still emit when copying master case-study docs.
+    models still emit when copying master case-study docs. Also hard-caps
+    Challenge/Solution word counts so Section 3 cards stay short.
     """
     text = content or ""
     if not text.strip():
@@ -518,6 +605,9 @@ def scrub_case_study_overbuild(content: str) -> tuple[str, list[str]]:
             "Stripped case-study overbuild sections: " + ", ".join(removed[:8])
         )
         logger.info("case_study_overbuild_scrub removed=%s", removed[:8])
+
+    cleaned, cap_logs = _cap_case_study_section_lengths(cleaned)
+    logs.extend(cap_logs)
     return cleaned, logs
 
 

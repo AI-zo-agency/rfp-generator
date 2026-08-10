@@ -177,6 +177,24 @@ class TestCaseStudyOverbuildScrub(unittest.TestCase):
         self.assertNotIn("KPIs", cleaned)
         self.assertNotIn("Creative Deliverables", cleaned)
         self.assertNotIn("Why this matters for MSU Denver", cleaned)
+
+    def test_caps_long_challenge_and_solution(self) -> None:
+        long_challenge = " ".join(["Carbondale needed brand clarity"] * 25)
+        long_solution = " ".join(["We delivered a destination strategy"] * 30)
+        raw = (
+            "### City of Carbondale\n\n"
+            "**Challenge**\n\n"
+            f"{long_challenge}\n\n"
+            "**Solution / Our Approach**\n\n"
+            f"{long_solution}\n\n"
+            "Client Voice: [VERIFY: no client quote found in source material]"
+        )
+        cleaned, logs = scrub_case_study_overbuild(raw)
+        challenge_body = cleaned.split("**Challenge**")[1].split("**Solution")[0]
+        solution_body = cleaned.split("**Solution / Our Approach**")[1].split("Client Voice")[0]
+        self.assertLessEqual(len(challenge_body.split()), 45)
+        self.assertLessEqual(len(solution_body.split()), 55)
+        self.assertTrue(any("capped" in log.lower() for log in logs))
         self.assertNotIn("higher education client", cleaned)
         self.assertTrue(logs)
 

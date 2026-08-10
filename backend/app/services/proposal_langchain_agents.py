@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.core.config import settings
 from app.services.llm import LlmError, LlmTier, _fireworks_key, chat_json
 from app.services.proposal_langchain import (
     _provider_name,
@@ -355,7 +356,11 @@ async def run_json_agent(
     try:
         parsed = await _invoke(fireworks=force_fireworks)
     except Exception as exc:
-        if _fireworks_key() and not force_fireworks:
+        if (
+            not settings.llm_disable_fireworks
+            and _fireworks_key()
+            and not force_fireworks
+        ):
             logger.warning("%s JSON agent failed (%s) — retrying Fireworks", profile.label, exc)
             parsed = await _invoke(fireworks=True)
             return parsed, "fireworks"

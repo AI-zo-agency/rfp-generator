@@ -53,13 +53,15 @@ NODE_NAME = "case_select"
 # Below this token-overlap ratio a candidate does not count as demonstrating
 # the capability — it may still be shown (transparency), but only as a weak
 # fit, and it can never clear a capability's gap on its own.
-STRONG_FIT_THRESHOLD = 0.3
+STRONG_FIT_THRESHOLD = 0.42
 
 MAX_QUERIES_PER_CAPABILITY = 5
 MAX_RAW_HITS_PER_CAPABILITY = 15
 MAX_CANDIDATES_RETURNED = 6
 SEARCH_LIMIT_PER_QUERY = 6
 PLANNER_MAX_TOKENS = 1536
+# Section 3: few strong matches beat a long gallery of weak/adjacent work.
+DEFAULT_MAX_CASE_STUDIES = 3
 
 _STOPWORDS = frozenset(
     {
@@ -452,8 +454,8 @@ async def assess_case_study_fit(
 def select_best_case_study_titles(
     report: CaseStudyFitReport,
     *,
-    min_count: int = 2,
-    max_count: int = 5,
+    min_count: int = 1,
+    max_count: int = DEFAULT_MAX_CASE_STUDIES,
     allowed_titles: Sequence[str] | None = None,
 ) -> list[str]:
     """Pick distinct strong-fit case studies for Section 3 — never pad with weak filler.

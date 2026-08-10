@@ -192,7 +192,7 @@ async def _fit_rank_case_studies(
     except Exception as exc:  # noqa: BLE001 - fit is advisory; never block Section 3
         logger.warning("Case study fit ranking skipped: %s", str(exc)[:180])
         return [], None
-    titles = select_best_case_study_titles(report, min_count=2, max_count=5)
+    titles = select_best_case_study_titles(report, min_count=1, max_count=3)
     if titles:
         logger.info(
             "Case study fit ranked %d strong studies for capabilities=%s",
