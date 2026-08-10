@@ -1,8 +1,11 @@
+import asyncio
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 
 from app.models.rfp import DashboardResponse, ManualRfpCreate, RfpRecord
+from app.services import supabase_db as sb
 from app.services.go_no_go_service import GoNoGoError, analyze_rfp
 from app.services.rfp_repository import (
     TERMINAL_STATUSES,
@@ -23,6 +26,10 @@ from app.services.rfp_repository import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/rfps", tags=["rfps"])
+
+# In-flight Go/No-Go jobs — request returns immediately; client polls status.
+_analyze_jobs: dict[str, dict[str, object]] = {}
+_analyze_lock = asyncio.Lock()
 
 
 def _optional_form_int(value: object | None) -> int | None:
@@ -162,35 +169,124 @@ def mark_go(rfp_id: str) -> dict[str, str]:
 
 @router.post("/{rfp_id}/analyze")
 async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
+    """Start Go/No-Go in the background and return immediately.
+
+    Long LLM calls (60–120s+) used to hold the Next.js proxy open until the
+    connection died ("Could not reach" / "Invalid JSON"). Clients poll
+    GET /{id}/analyze/status instead.
+    """
     rfp = get_rfp(rfp_id)
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
-    # Drop stale Stage 1 results immediately so re-runs never show the prior GO panel.
+    async with _analyze_lock:
+        existing = _analyze_jobs.get(rfp_id)
+        if existing and existing.get("status") == "running":
+            return {
+                "ok": True,
+                "status": "running",
+                "rfpId": rfp_id,
+                "message": "Go/No-Go analysis already running",
+            }
+        _analyze_jobs[rfp_id] = {
+            "status": "running",
+            "error": None,
+            "startedAt": datetime.now(timezone.utc).isoformat(),
+        }
+
+    # Drop stale Stage 1 results so re-runs never show the prior GO panel.
     clear_go_no_go_analysis(rfp_id)
-    rfp = get_rfp(rfp_id) or rfp
 
-    try:
-        analysis = await analyze_rfp(rfp)
-    except GoNoGoError as exc:
-        logger.error("Go/No-Go failed for %s: %s", rfp_id, exc)
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Go/No-Go unexpected failure for %s", rfp_id)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Go/No-Go analysis failed: {exc}",
-        ) from exc
+    async def _run() -> None:
+        try:
+            current = get_rfp(rfp_id)
+            if not current:
+                raise GoNoGoError("RFP not found", status_code=404)
+            analysis = await analyze_rfp(current)
+            updated = save_go_no_go_analysis(rfp_id, analysis)
+            if not updated:
+                raise GoNoGoError("RFP not found after save", status_code=404)
+            _analyze_jobs[rfp_id] = {
+                "status": "completed",
+                "error": None,
+                "finishedAt": datetime.now(timezone.utc).isoformat(),
+            }
+            logger.info("Go/No-Go background job completed for %s", rfp_id)
+        except GoNoGoError as exc:
+            logger.error("Go/No-Go failed for %s: %s", rfp_id, exc)
+            _mark_analyze_failed(rfp_id, str(exc))
+        except Exception as exc:
+            logger.exception("Go/No-Go unexpected failure for %s", rfp_id)
+            _mark_analyze_failed(rfp_id, f"Go/No-Go analysis failed: {exc}")
 
-    updated = save_go_no_go_analysis(rfp_id, analysis)
-    if not updated:
-        raise HTTPException(status_code=404, detail="RFP not found")
-
+    asyncio.create_task(_run())
     return {
         "ok": True,
-        "rfp": updated.model_dump(by_alias=True),
-        "analysis": analysis.model_dump(by_alias=True),
+        "status": "running",
+        "rfpId": rfp_id,
+        "message": "Go/No-Go analysis started",
     }
+
+
+@router.get("/{rfp_id}/analyze/status")
+def analyze_go_no_go_status(rfp_id: str) -> dict[str, object]:
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    job = _analyze_jobs.get(rfp_id)
+    if job and job.get("status") == "running":
+        return {
+            "status": "running",
+            "rfpId": rfp_id,
+            "startedAt": job.get("startedAt"),
+        }
+    if job and job.get("status") == "failed":
+        return {
+            "status": "failed",
+            "rfpId": rfp_id,
+            "error": job.get("error") or "Go/No-Go analysis failed",
+        }
+    if rfp.go_no_go_analysis:
+        return {
+            "status": "completed",
+            "rfpId": rfp_id,
+            "recommendation": rfp.go_no_go,
+        }
+    if job and job.get("status") == "completed":
+        return {"status": "completed", "rfpId": rfp_id}
+
+    note = (rfp.last_activity_note or "").lower()
+    if "go/no-go analysis failed" in note:
+        return {
+            "status": "failed",
+            "rfpId": rfp_id,
+            "error": rfp.last_activity_note,
+        }
+    if "re-run in progress" in note or "analysis in progress" in note:
+        return {"status": "running", "rfpId": rfp_id}
+
+    return {"status": "idle", "rfpId": rfp_id}
+
+
+def _mark_analyze_failed(rfp_id: str, error: str) -> None:
+    _analyze_jobs[rfp_id] = {
+        "status": "failed",
+        "error": error,
+        "finishedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        if sb.use_supabase_db():
+            now = datetime.now(timezone.utc).isoformat()
+            client = sb._get_client()  # noqa: SLF001 — shared Supabase client
+            client.table("rfps").update(
+                {
+                    "last_activity": now,
+                    "last_activity_note": error[:500],
+                }
+            ).or_(f"id.eq.{rfp_id},external_id.eq.{rfp_id}").execute()
+    except Exception:  # noqa: BLE001 — status already recorded in memory
+        logger.warning("Could not persist Go/No-Go failure note for %s", rfp_id)
 
 
 @router.post("/{rfp_id}/pdf")

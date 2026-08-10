@@ -10,6 +10,19 @@ interface RunGoNoGoButtonProps {
   onLoadingChange?: (loading: boolean) => void;
 }
 
+type AnalyzeStatus = {
+  status?: string;
+  error?: string;
+  detail?: string;
+};
+
+const POLL_MS = 2500;
+const MAX_WAIT_MS = 15 * 60 * 1000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function RunGoNoGoButton({
   rfpId,
   hasPdf,
@@ -27,19 +40,45 @@ export function RunGoNoGoButton({
     onLoadingChange?.(next);
   }
 
+  async function pollUntilDone(): Promise<AnalyzeStatus> {
+    const started = Date.now();
+    while (Date.now() - started < MAX_WAIT_MS) {
+      await sleep(POLL_MS);
+      const res = await fetch(`/api/rfps/${rfpId}/analyze/status`, {
+        cache: "no-store",
+      });
+      const data = (await res.json()) as AnalyzeStatus;
+      if (!res.ok) {
+        throw new Error(data.detail ?? data.error ?? "Status check failed");
+      }
+      if (data.status === "completed") return data;
+      if (data.status === "failed") {
+        throw new Error(data.error ?? data.detail ?? "Analysis failed");
+      }
+      // running | idle (briefly after start) — keep polling
+    }
+    throw new Error("Go/No-Go timed out after 15 minutes");
+  }
+
   async function handleAnalyze() {
     setAnalyzing(true);
     setError(null);
     try {
       const res = await fetch(`/api/rfps/${rfpId}/analyze`, { method: "POST" });
-      const data = (await res.json()) as { detail?: string; error?: string };
+      const data = (await res.json()) as AnalyzeStatus & {
+        message?: string;
+      };
       if (!res.ok) {
         setError(data.detail ?? data.error ?? "Analysis failed");
         return;
       }
+
+      await pollUntilDone();
       router.refresh();
-    } catch {
-      setError("Could not reach the analysis service.");
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Could not reach the analysis service.";
+      setError(message);
     } finally {
       setAnalyzing(false);
     }
@@ -58,7 +97,7 @@ export function RunGoNoGoButton({
             : "Upload an RFP PDF or add a description first"
         }
       >
-        {loading ? "Analyzing…" : "Run Go/No-Go Analysis"}
+        {loading ? "Analyzing… (this can take a few minutes)" : "Run Go/No-Go Analysis"}
       </button>
       {!canAnalyze && (
         <p className="text-xs text-zo-text-muted">

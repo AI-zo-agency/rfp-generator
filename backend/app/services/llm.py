@@ -630,6 +630,8 @@ async def chat_json(
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
+            # Parse before recording success — HTTP 200 can still be invalid JSON.
+            parsed = _parse_json_response(raw)
             _record_successful_call(
                 model=openrouter_model,
                 tier=tier,
@@ -640,7 +642,7 @@ async def chat_json(
                 rfp_id=rfp_id,
                 run_id=run_id,
             )
-            return _parse_json_response(raw), "openrouter"
+            return parsed, "openrouter"
         except LlmError as exc:
             errors.append(str(exc))
             logger.info("OpenRouter failed: %s", str(exc)[:200])

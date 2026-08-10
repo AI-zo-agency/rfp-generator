@@ -5,22 +5,25 @@ const BACKEND_URL =
   process.env.BACKEND_URL ||
   "http://localhost:8001";
 
-export const maxDuration = 60;
+export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-/** Start Go/No-Go in the background — returns immediately (status: running). */
-export async function POST(
+/** Poll Go/No-Go job status (running | completed | failed | idle). */
+export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const response = await fetch(`${BACKEND_URL}/api/v1/rfps/${id}/analyze`, {
-      method: "POST",
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    });
+    const response = await fetch(
+      `${BACKEND_URL}/api/v1/rfps/${id}/analyze/status`,
+      {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      }
+    );
 
     const text = await response.text();
     if (!text.trim()) {
