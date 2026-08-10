@@ -442,7 +442,8 @@ def format_rfp_calendar_constraint(
     ):
         m = re.search(pat, blob)
         if m:
-            lines.append(f"- RFP {label}: {re.sub(r'\\s+', ' ', m.group(0)).strip()[:120]}")
+            cue = re.sub(r"\s+", " ", m.group(0)).strip()[:120]
+            lines.append(f"- RFP {label}: {cue}")
     return "\n".join(lines)
 
 

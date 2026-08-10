@@ -1794,9 +1794,10 @@ def _message_explicitly_targets_remote_section(
                 r"\b(?:in\s+this|this)\s+case\s+stud", message, re.I
             ):
                 return True
+            needle_pat = needle.replace(" ", r"\s+")
             if re.search(
                 rf"\b(?:rewrite|replace|edit|fix|update|revise|patch|improve|delete|remove)"
-                rf"\s+(?:the\s+)?(?:{needle.replace(' ', r'\s+')}|case\s+study)\b",
+                rf"\s+(?:the\s+)?(?:{needle_pat}|case\s+study)\b",
                 message,
                 re.I,
             ):
