@@ -410,6 +410,21 @@ def scan_manuscript_lock_issues(
         content = section.content or ""
         if not content.strip():
             continue
+        # Pricing / budget forms often name authorized signers — that is not a
+        # primary-contact claim and must not paint the fee tab "needs input".
+        title_cf = (section.title or "").casefold()
+        if any(
+            marker in title_cf
+            for marker in (
+                "pricing",
+                "budget",
+                "fee schedule",
+                "cost proposal",
+                "quotation",
+                "investment",
+            )
+        ):
+            continue
         names = _people_claimed_as_primary(content, candidates)
         if names:
             claimed_by_section.append((section, names))

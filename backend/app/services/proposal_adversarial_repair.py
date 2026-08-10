@@ -265,16 +265,59 @@ def _resolve_escalation_section_id(
     draft: ProposalDraft,
     *,
     section_id: str | None,
+    finding_code: str | None = None,
 ) -> tuple[ProposalDraft, str]:
-    """Pick a real section for MANUAL FILL when the finding has no sectionId."""
-    if section_id and any(section.id == section_id for section in draft.sections):
-        return draft, section_id
+    """Pick a real section for MANUAL FILL when the finding has no sectionId.
 
-    budget_idx = find_budget_section_index(draft.sections)
-    if budget_idx is not None:
-        return draft, draft.sections[budget_idx].id
+    Never dump non-pricing handoffs onto Budget / Pricing tabs — that marks a
+    healthy fee form as "needs input" and looks like Complete & Clean broke it.
+    """
+    code = (finding_code or "").casefold()
+    pricing_finding = "pricing" in code or "budget" in code or "grounding" in code
+
+    if section_id and any(section.id == section_id for section in draft.sections):
+        target = next(s for s in draft.sections if s.id == section_id)
+        title_cf = (target.title or "").casefold()
+        budgetish = (
+            "pricing" in title_cf
+            or "budget" in title_cf
+            or "fee" in title_cf
+            or "cost proposal" in title_cf
+        )
+        if budgetish and not pricing_finding and "manuscript_locks" in code:
+            section_id = None  # fall through to a non-budget home
+        else:
+            return draft, section_id
+
+    if pricing_finding:
+        budget_idx = find_budget_section_index(draft.sections)
+        if budget_idx is not None:
+            return draft, draft.sections[budget_idx].id
+
+    # Prefer cover / LOI / company identity for contact locks and misc handoffs.
+    preferred = (
+        "letter of interest",
+        "cover letter",
+        "transmittal",
+        "who we are",
+        "company profile",
+        "offeror",
+        "authorized",
+    )
+    for section in draft.sections:
+        title_cf = (section.title or "").casefold()
+        if any(p in title_cf for p in preferred) and (section.content or "").strip():
+            return draft, section.id
 
     for section in draft.sections:
+        title_cf = (section.title or "").casefold()
+        if (
+            "pricing" in title_cf
+            or "budget" in title_cf
+            or "fee" in title_cf
+            or "cost proposal" in title_cf
+        ):
+            continue
         if (section.content or "").strip():
             return draft, section.id
 
@@ -289,7 +332,9 @@ def _append_manual_fill(
     finding_code: str | None = None,
 ) -> tuple[ProposalDraft, str | None]:
     """Append a Sonja handoff tag. Prefer stable finding codes over truncated prose."""
-    draft, target_id = _resolve_escalation_section_id(draft, section_id=section_id)
+    draft, target_id = _resolve_escalation_section_id(
+        draft, section_id=section_id, finding_code=finding_code
+    )
     sections = []
     appended: str | None = None
     owner = _owner_for_field(issue)

@@ -78,6 +78,39 @@ def test_scan_primary_contact_conflict() -> None:
     assert any("Mississippi Outdoors Media" in (i.message or "") for i in issues)
 
 
+def test_pricing_form_does_not_trigger_primary_contact_lock() -> None:
+    """Authorized signer on a pricing form must not mark the fee tab needs-input."""
+    locks = ManuscriptLocks(
+        primaryContactName="Ron Comer",
+        primaryContactTitle="Senior Account Manager",
+        requiredKpis=[],
+        updatedAt="2026-07-20T00:00:00Z",
+    )
+    draft = ProposalDraft(
+        rfpId="rfp-1",
+        sections=[
+            ProposalSection(
+                id="rfp-pricing",
+                title="14. Request for Qualifications Pricing Form",
+                content=(
+                    "## Pricing Proposal Form\n\n"
+                    "| Item | Ext |\n| --- | ---: |\n| Services | $150,000 |\n\n"
+                    "Authorized representative / primary contact for this form: "
+                    "Sonja Anderson, Agency Director."
+                ),
+            ),
+        ],
+        updatedAt="2026-07-20T00:00:00Z",
+    )
+    research = ProposalResearchCache(
+        rfpId="rfp-1",
+        manuscriptLocks=locks,
+        updatedAt="2026-07-20T00:00:00Z",
+    )
+    issues = scan_manuscript_lock_issues(draft=draft, research=research)
+    assert not any("Primary contact lock" in (i.message or "") for i in issues)
+
+
 def test_locks_block_mentions_primary() -> None:
     locks = ManuscriptLocks(
         primaryContactName="Ron Comer",

@@ -216,5 +216,170 @@ class BudgetRegenWiringTests(unittest.TestCase):
         )
 
 
+class HealthyBudgetLeftAloneTests(unittest.TestCase):
+    def test_complete_and_clean_does_not_wipe_healthy_pricing_form(self) -> None:
+        """Reconcile-only scan must not re-render a filled Pricing Form."""
+        rfp_id = "rfp-healthy-budget"
+        healthy = (
+            "## Pricing Proposal Form\n\n"
+            "| Description | UOM | QTY | Price | Extended |\n"
+            "| --- | --- | ---: | ---: | ---: |\n"
+            "| Communications and Marketing Services | MO | 12 | $12,500 | $150,000 |\n"
+            "| **GRAND TOTAL** | | | | **$150,000** |\n\n"
+            "GRAND TOTAL (in words): One Hundred Fifty Thousand Dollars\n\n"
+            "### Investment Summary\n\n"
+            "Monthly rate covers strategy, creative, and account service.\n"
+        )
+        budget = ProposalBudget(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            lineItems=[
+                BudgetLineItem(
+                    id="L1",
+                    description="Communications and Marketing Services",
+                    category="Labor",
+                    quantity=12,
+                    unit="month",
+                    rate=12_500,
+                    extended=150_000,
+                    lineItemType="agency_fee",
+                )
+            ],
+            lumpSumTotal=150_000,
+            agencyRevenueEstimate=150_000,
+            agencyFeeSubtotal=150_000,
+            totalClientInvoicing=150_000,
+        )
+        draft = ProposalDraft(
+            rfpId=rfp_id,
+            sections=[
+                ProposalSection(
+                    id="rfp-pricing",
+                    title="Request for Qualifications Pricing Form",
+                    content=healthy,
+                    status="generated",
+                )
+            ],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=budget,
+        )
+        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
+        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
+
+        with patch.object(
+            scan_mod,
+            "run_budget_editor_pass",
+            side_effect=lambda b, **_kw: b,
+        ), patch.object(
+            scan_mod,
+            "extract_rfp_scoring_facts_llm",
+            new=AsyncMock(return_value=RfpScoringFacts()),
+        ):
+            out_draft, _research, logs, meta = asyncio.run(
+                run_fulfill_budget_scan(
+                    rfp_id=rfp_id,
+                    rfp=_rfp(rfp_id),
+                    draft=draft,
+                    research=research,
+                    rfp_text="Submit the Pricing Proposal Form with the proposal.",
+                    use_llm=False,
+                    skip_section_ids=set(),
+                )
+            )
+
+        self.assertFalse(meta.get("budgetChanged"))
+        self.assertEqual(out_draft.sections[0].content, healthy)
+        self.assertTrue(
+            any("left Pricing/Budget tab unchanged" in line for line in logs)
+        )
+
+    def test_second_scan_restores_pricing_polluted_by_contact_lock_tag(self) -> None:
+        from app.services.proposal_fulfill_rfp_budget_kpi import (
+            budget_manuscript_needs_restore,
+        )
+
+        polluted = (
+            "## Pricing Proposal Form\n\n"
+            "| Description | Extended |\n| --- | ---: |\n| Services | $150,000 |\n\n"
+            "[MANUAL FILL: SONJA — DETERMINISTIC.MANUSCRIPT_LOCKS.PRIMARY_CONTACT_LOCK_"
+            "IS_RON_COMER_BUT_THIS_SECTION_NAMES_SONJA | Primary contact lock is Ron "
+            "Comer, but this section names Sonja Anderson as…]"
+        )
+        budget = ProposalBudget(
+            rfpId="rfp-polluted",
+            updatedAt="2026-08-05T00:00:00+00:00",
+            lineItems=[
+                BudgetLineItem(
+                    id="L1",
+                    description="Services",
+                    category="Labor",
+                    extended=150_000,
+                    lineItemType="agency_fee",
+                )
+            ],
+            lumpSumTotal=150_000,
+            totalClientInvoicing=150_000,
+        )
+        self.assertTrue(budget_manuscript_needs_restore(polluted, budget))
+
+        draft = ProposalDraft(
+            rfpId="rfp-polluted",
+            sections=[
+                ProposalSection(
+                    id="rfp-pricing",
+                    title="Request for Qualifications Pricing Form",
+                    content=polluted,
+                    status="generated",
+                )
+            ],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        research = ProposalResearchCache(
+            rfpId="rfp-polluted",
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=budget,
+        )
+        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
+        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
+
+        with patch.object(
+            scan_mod,
+            "run_budget_editor_pass",
+            side_effect=lambda b, **_kw: b,
+        ), patch.object(
+            scan_mod,
+            "extract_rfp_scoring_facts_llm",
+            new=AsyncMock(return_value=RfpScoringFacts()),
+        ), patch.object(
+            scan_mod,
+            "render_budget_markdown",
+            return_value="## Proposed Investment\n\n**Total proposed investment: $150,000**\n",
+        ):
+            out_draft, _r, logs, meta = asyncio.run(
+                run_fulfill_budget_scan(
+                    rfp_id="rfp-polluted",
+                    rfp=_rfp("rfp-polluted"),
+                    draft=draft,
+                    research=research,
+                    rfp_text="Pricing Proposal Form required.",
+                    use_llm=False,
+                    skip_section_ids=set(),
+                )
+            )
+
+        self.assertTrue(meta.get("budgetChanged"))
+        body = out_draft.sections[0].content or ""
+        self.assertNotIn("MANUSCRIPT_LOCKS", body)
+        self.assertIn("$150,000", body)
+        self.assertTrue(
+            any("restored polluted pricing tab" in n for n in meta.get("budgetRepairedNotes") or [])
+            or any("refreshed" in line.casefold() for line in logs)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

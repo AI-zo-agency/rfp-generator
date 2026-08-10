@@ -165,6 +165,43 @@ class AdversarialRepairLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(_manuscript_manual_fills(updated))
         self.assertIn("[MANUAL FILL:", "\n".join(s.content or "" for s in updated.sections))
 
+    def test_manuscript_lock_handoff_skips_pricing_tab(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-lock",
+            sections=[
+                ProposalSection(
+                    id="letter",
+                    title="1. Letter of Interest",
+                    content="We are pleased to submit this proposal.",
+                    status="generated",
+                ),
+                ProposalSection(
+                    id="pricing",
+                    title="14. Request for Qualifications Pricing Form",
+                    content="## Pricing\n\n**Total: $150,000**",
+                    status="generated",
+                ),
+            ],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        updated, tag = _append_manual_fill(
+            draft,
+            section_id="pricing",
+            issue=(
+                "Primary contact lock is Ron Comer, but this section names "
+                "Sonja Anderson as primary/liaison."
+            ),
+            finding_code=(
+                "deterministic.manuscript_locks.primary_contact_lock_is_ron_comer_"
+                "but_this_section_names_sonja"
+            ),
+        )
+        self.assertIsNotNone(tag)
+        pricing = next(s for s in updated.sections if s.id == "pricing")
+        letter = next(s for s in updated.sections if s.id == "letter")
+        self.assertNotIn("MANUAL FILL", pricing.content or "")
+        self.assertIn("MANUAL FILL", letter.content or "")
+
     def test_dedupe_collapses_integrity_and_audit_siblings(self) -> None:
         findings = [
             AdversarialAuditFinding(

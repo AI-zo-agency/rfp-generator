@@ -99,6 +99,9 @@ Rules:
    - Our Work / case studies → kind "case_study", caseStudyName required.
    - "Add X in/to case studies / Our Work" → ALWAYS add_sections kind case_study. NEVER delete
      Previous Experience, References, forms, or other RFP tabs to "make room".
+   - "Add a / one / another case study related to this RFP" (no client named) → action=clarify
+     asking which KB client/project to add. List case studies already in the outline so they
+     are not duplicated. Do NOT rewrite the open tab. Do NOT invent a client name.
    - Split / move content into its own section (e.g. "Create a new H2/section titled Project
      Staff Planning; move staff content out of Evaluation Metrics") → action=add_sections,
      kind "rfp" (or "custom"), short title only, insertAfterSectionId = source section id,

@@ -576,6 +576,23 @@ def _sync_narrative_total(
     return out
 
 
+# Sentence strip must allow cents inside money tokens. A naive [^.]*\. stops at
+# $154,026. and leaves orphan remnants like "32 ($150,526.32 in professional fees…)".
+_MONEY_TOKEN = r"\$[\d,]+(?:\.\d{2})?"
+# Match through the real sentence-ending period (not a cents decimal).
+_INVESTMENT_SENTENCE_RE = re.compile(
+    r"(?i)\b(?:total\s+proposed\s+investment|total\s+estimated\s+investment|"
+    r"total\s+professional\s+fees|estimated\s+reimbursable\s+travel|"
+    r"professional\s+fees)\s*:"
+    rf"(?:[^.\$]|{_MONEY_TOKEN})*\."
+)
+# Orphan cents left after a prior botched strip (one or many, any position).
+_ORPHAN_CENTS_REMNANT_RE = re.compile(
+    rf"(?i)\s*\d{{1,3}}\s*\({_MONEY_TOKEN}\s+in\s+"
+    rf"(?:professional\s+fees|direct\s+travel|client\s+media)[^)]*\)\s*\.?"
+)
+
+
 def _rewrite_investment_sentence(
     scope: str,
     fees: float,
@@ -587,16 +604,25 @@ def _rewrite_investment_sentence(
     """Ensure scope states fees + travel correctly (not 'total including $total travel')."""
     text = (scope or "").strip()
     # Drop prior investment / fee total sentences — they drift and get truncated.
+    text = _INVESTMENT_SENTENCE_RE.sub("", text)
     text = re.sub(
-        r"(?i)\b(?:total\s+proposed\s+investment|total\s+estimated\s+investment|"
-        r"total\s+professional\s+fees|estimated\s+reimbursable\s+travel|"
-        r"professional\s+fees)\s*:[^.]*\.",
+        rf"(?i)\bestimated\s+reimbursable\s+travel\s*:?(?:[^.\$]|{_MONEY_TOKEN})*\.",
         "",
         text,
     )
-    text = re.sub(r"(?i)\bestimated\s+reimbursable\s+travel[^.]*\.", "", text)
-    # Strip trailing garbage from botched dollar rewrites (e.g. "43 ($116,368.")
-    text = re.sub(r"\s+\d{1,3}\s*\(\$[\d,]+(?:\.\d+)?\.?\s*$", "", text)
+    # Also drop investment lines that never got a closing period (mid-rewrite garbage).
+    text = re.sub(
+        rf"(?i)\b(?:total\s+proposed\s+investment|total\s+estimated\s+investment|"
+        rf"total\s+professional\s+fees|professional\s+fees)\s*:"
+        rf"\s*{_MONEY_TOKEN}(?:\s*\([^)]*\))?",
+        "",
+        text,
+    )
+    # Strip orphan cents remnants from older botched rewrites
+    # (e.g. "32 ($150,526.32 in professional fees plus $3,500 in direct travel expenses)").
+    text = _ORPHAN_CENTS_REMNANT_RE.sub("", text)
+    # Strip trailing garbage from incomplete dollar rewrites (e.g. "43 ($116,368.")
+    text = re.sub(rf"\s+\d{{1,3}}\s*\({_MONEY_TOKEN}\.?\s*$", "", text)
     text = re.sub(r"\s{2,}", " ", text).strip(" .\n")
     parts: list[str] = []
     if fees > 0:

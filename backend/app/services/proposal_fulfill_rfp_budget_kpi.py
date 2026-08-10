@@ -16,6 +16,7 @@ from app.services.proposal_budget_content import (
     rfp_wants_blended_pricing_form,
 )
 from app.services.proposal_budget_editor import run_budget_editor_pass
+from app.services.proposal_budget_sync import collect_prose_arithmetic_violations
 from app.services.proposal_fulfill_rfp_accuracy import (
     RfpScoringFacts,
     _EXCEL_ATTACHMENT_RE,
@@ -170,6 +171,56 @@ def manuscript_cost_section_is_hollow(content: str) -> bool:
     return False
 
 
+_NON_BUDGET_HANDOFF_ON_PRICING_RE = re.compile(
+    r"(?is)\[MANUAL\s+FILL:[^\]]*(?:"
+    r"manuscript_locks|primary\s+contact\s+lock|"
+    r"deterministic\.manuscript_locks|"
+    r"names?\s+sonja|sonja\s+anderson\s+as\s+primary"
+    r")[^\]]*\]"
+)
+
+
+def budget_manuscript_needs_restore(
+    content: str,
+    budget: object | None,
+) -> bool:
+    """True when Complete & Clean should re-sync Pricing/Budget from the pricing model.
+
+    Covers the DuPage failure mode: a healthy fee form was overwritten / painted with
+    a primary-contact MANUAL FILL so the tab shows "needs input" even though dollars
+    still look populated.
+    """
+    text = (content or "").strip()
+    if not text:
+        return True
+    if _NON_BUDGET_HANDOFF_ON_PRICING_RE.search(text):
+        return True
+    # Botched cents rewrite remnants: "32 ($150,526.32 in professional fees…"
+    if re.search(
+        r"(?<![\d.])\d{1,3}\s*\(\$[\d,]+(?:\.\d{2})?\s+in\s+professional\s+fees",
+        text,
+    ):
+        return True
+    if budget is None:
+        return False
+    canon = 0.0
+    for attr in ("total_client_invoicing", "lump_sum_total", "agency_revenue_estimate"):
+        raw = getattr(budget, attr, None)
+        if raw is not None and float(raw) > 0:
+            canon = float(raw)
+            break
+    if canon <= 0:
+        return False
+    # Canon total missing from a supposedly complete pricing tab → restore.
+    money_tokens = re.findall(r"\$\s*([\d,]+(?:\.\d{2})?)", text)
+    if not money_tokens:
+        return True
+    amounts = [_parse_money(tok) for tok in money_tokens]
+    if not any(abs(a - canon) <= max(1.0, canon * 0.02) for a in amounts if a > 0):
+        return True
+    return False
+
+
 def manuscript_budget_is_missing(
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
@@ -261,50 +312,80 @@ async def run_fulfill_budget_scan(
             )
             rate_card = None
 
+    prior_budget = research.budget
     budget = run_budget_editor_pass(
-        research.budget,
+        prior_budget,
         rfp_sections=research.rfp_sections,
         rfp_context=rfp_text[:80_000],
         rate_card=rate_card,
     )
+    # Ignore updatedAt churn — only real money/line changes force a rewrite.
+    object_changed = prior_budget.model_dump(
+        exclude={"updated_at", "updatedAt"}, by_alias=True
+    ) != budget.model_dump(exclude={"updated_at", "updatedAt"}, by_alias=True)
     research = research.model_copy(update={"budget": budget})
     logs.append("Budget: reconciled line items and canonical totals from RFP/pricing model.")
     if not meta["budgetRegenerated"]:
         meta["budgetStatus"] = "ok"
 
-    content = render_budget_markdown(budget, rfp_text=rfp_text)
     sections = list(draft.sections)
     idx = find_budget_section_index(sections)
-    if idx is not None:
-        before = sections[idx].content or ""
-        sections[idx] = sections[idx].model_copy(
-            update={"content": content, "status": "generated"}
-        )
-        if before != content:
-            meta["budgetChanged"] = True
-            if meta["budgetStatus"] == "ok":
-                meta["budgetStatus"] = "repaired"
-                meta["budgetRepairedNotes"].append("refreshed Budget & Pricing manuscript table")
-    else:
-        sections.append(
-            ProposalSection(
-                id="section-budget-pricing",
-                title="Budget & Pricing",
-                content=content,
-                status="generated",
-                source="generated",
-                mode="write",
-                required=True,
-            )
-        )
-        logs.append("Budget: added Budget & Pricing section to manuscript.")
-        meta["budgetChanged"] = True
-        meta["budgetStatus"] = "repaired"
-        meta["budgetRepairedNotes"].append("added missing Budget & Pricing section")
-    now = datetime.now(timezone.utc).isoformat()
-    draft = draft.model_copy(update={"sections": sections, "updated_at": now})
+    before = sections[idx].content if idx is not None else ""
+    prose_broken = bool(
+        idx is not None and collect_prose_arithmetic_violations(before or "")
+    )
+    hollow = idx is None or manuscript_cost_section_is_hollow(before or "")
+    polluted = idx is not None and budget_manuscript_needs_restore(before or "", budget)
+    # Complete & Clean must NOT wipe a healthy Pricing / Budget tab just to
+    # re-render from canon. Refresh when object changed, prose math is broken,
+    # section is missing/hollow, or the tab was polluted (e.g. contact-lock
+    # MANUAL FILL dumped onto the fee form — second scan restores from model).
+    needs_manuscript_refresh = (
+        object_changed
+        or prose_broken
+        or hollow
+        or polluted
+        or meta["budgetRegenerated"]
+    )
 
-    if rfp_wants_blended_pricing_form(rfp_text):
+    if needs_manuscript_refresh:
+        content = render_budget_markdown(budget, rfp_text=rfp_text)
+        if idx is not None:
+            sections[idx] = sections[idx].model_copy(
+                update={"content": content, "status": "generated"}
+            )
+            if before != content:
+                meta["budgetChanged"] = True
+                if meta["budgetStatus"] == "ok":
+                    meta["budgetStatus"] = "repaired"
+                    meta["budgetRepairedNotes"].append(
+                        "refreshed Budget & Pricing manuscript table"
+                        + (" (restored polluted pricing tab)" if polluted else "")
+                    )
+        else:
+            sections.append(
+                ProposalSection(
+                    id="section-budget-pricing",
+                    title="Budget & Pricing",
+                    content=content,
+                    status="generated",
+                    source="generated",
+                    mode="write",
+                    required=True,
+                )
+            )
+            logs.append("Budget: added Budget & Pricing section to manuscript.")
+            meta["budgetChanged"] = True
+            meta["budgetStatus"] = "repaired"
+            meta["budgetRepairedNotes"].append("added missing Budget & Pricing section")
+        now = datetime.now(timezone.utc).isoformat()
+        draft = draft.model_copy(update={"sections": sections, "updated_at": now})
+    else:
+        logs.append(
+            "Budget: manuscript already matches reconciled totals — left Pricing/Budget tab unchanged."
+        )
+
+    if needs_manuscript_refresh and rfp_wants_blended_pricing_form(rfp_text):
         reshaped = reshape_budget_for_rfp_form(draft, budget, rfp_text=rfp_text)
         if reshaped is not None:
             draft = reshaped
@@ -318,7 +399,7 @@ async def run_fulfill_budget_scan(
     if patch_logs:
         meta["budgetChanged"] = True
 
-    if use_llm:
+    if use_llm and needs_manuscript_refresh:
         try:
             from app.services.proposal_budget_sync import align_fee_narrative_with_budget
 
