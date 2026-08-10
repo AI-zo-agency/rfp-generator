@@ -536,12 +536,12 @@ def filter_lean_outline_sections(
             )
             or is_duplicate_static_rfp_section(title)
         ):
-            # Never drop closing / sample-work / agency-requirements via static rules.
-            if is_important_or_closing_outline_title(title):
-                pass
-            else:
-                dropped.append(original_title)
-                continue
+            # Phase 2 owns this: tabs already covered by Sections 1–3 never
+            # reach Phase 3 drafting. Sample-work / agency-requirements / scored
+            # tabs are excluded inside is_duplicate_static_rfp_section itself —
+            # do not re-protect them here via "important/closing" title lists.
+            dropped.append(f"{original_title} (owned by Sections 1–3)")
+            continue
         if not scored and drop_generic_filler and is_generic_filler_outline_title(title):
             # A topic being MENTIONED in the RFP is not a request for a section
             # about it. Procedural clauses (addenda process, PERA retiree
@@ -655,6 +655,12 @@ def merge_closing_components_into_outline(
         ):
             continue
         title = enrich_outline_title_from_rfp(component.title, rfp_context)
+        # Closing package must not re-add a near-dup of an outline tab that
+        # already covers the same ask under a fuller RFP-phrased title.
+        from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+        if any(outline_titles_near_duplicate(title, prev) for prev in titles):
+            continue
         section = OutlineSection(
             id=component.section_id,
             title=title,

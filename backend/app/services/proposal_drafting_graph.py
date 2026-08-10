@@ -107,11 +107,11 @@ Rules (strict):
 13. For non-Budget narrative sections: do NOT invent pricing tiers, agency fee tables, or lump-sum totals — those belong in Fees/Budget / Phase 3.5. You may still mention the RFP's stated media budget if it appears in requirements/plan (e.g. $200,000 annual).
 14. When RFP requires portfolio, writing samples, or reference contacts, use evidence excerpts with [E#] citations — do not leave passive VERIFY placeholders if evidence contains samples or contacts.
 15. NEVER defer required submission data to unnamed attachments or "upon request" — include reference phones, workforce %, hours tables, or PSA acknowledgments in the proposal body.
-16. References: when RFP requires contact names and phone numbers, include them inline (from KB) or [VERIFY: specific contact field].
+16. References: when RFP requires contact names and phone numbers, include ONLY clients whose name, title, organization, phone, AND email are present in KB evidence. If any of those fields are missing, OMIT that reference entirely — never invent an org shell with [VERIFY: contact/phone/email] rows.
 17. Personnel: when RFP requires workforce diversity data, state headcount and minority/female percentages (from KB) or [VERIFY].
 18. Budget section: when RFP requires staff hours per task, add hours table OR commission-model explanation with transparency estimates.
 19. PSA/contract items in the RFP (insurance, living wage, MacBride, Title VI, audit rights, etc.) need brief acknowledgment sentences in the proposal.
-20. References: NEVER "contact on request", "upon request", "available upon request", or "through the Bureau" — include name, title, organization, phone, and email from KB or [VERIFY: specific contact fields]. Never claim references were "pre-cleared" or "agreed to respond" unless KB evidence says so.
+20. References: NEVER "contact on request", "upon request", "available upon request", or "through the Bureau". NEVER invent Travel Oregon / Visit Bend / generic tourism refs. Prefer fewer complete KB references over incomplete VERIFY shells. If KB has fewer contacts than the RFP asks, list the complete ones you have and add one [MANUAL FILL: Sonja — remaining references from ClientList] — do not pad with VERIFY rows. Never claim references were "pre-cleared" or "agreed to respond" unless KB evidence says so.
 21. Workforce: MWBE/diversity and Project Personnel sections must use identical headcount and % female/minority — one precise figure from HR/KB.
 22. Budget SUMMARY line-item fee tables (agency fees by role/hour) are built in Phase 3.5. Do NOT invent those tables or $0 placeholders. NEVER refuse to write the Budget section itself.
 23. Insurance RFPs: include a limits table (RFP requires | current policy | gap | bind-before-execution action) with ACORD fields when specified.
@@ -126,7 +126,7 @@ Rules (strict):
 32. Do NOT invent dashboards, reporting diagrams, org charts, timeline graphics, or "see attached" visuals. Describe reporting cadence in prose unless KB evidence / RFP-required template exists.
 33. ANTI-DUPLICATION: Each section has ONE job. Do not re-write Who We Are, full bios, full case studies, FEIN/address/certs, or brand story that belongs in Sections 1–3 or another RFP tab. Do not paraphrase another RFP tab (Approach≠Methodology rewrite; Past Performance≠Sample Work dump). One brief cross-reference is OK — then add NEW RFP-specific detail only. Prefer concise, concrete prose within wordTarget — no generic agency marketing filler.
 34. LENGTH (Ralph): wordTarget is a HARD CEILING. Hit the scored RFP asks, then stop. Never write extra pages "for the designer to cut later." Dense and short beats long and repetitive.
-35. References sections: restate the RFP's required reference count and institution type when the RFP specifies them. Never claim the RFP is silent on references if requirements list three customers, two-year public, or NJ public-college reference tables. If zö lacks a qualifying reference, state the gap honestly and use [MANUAL FILL: leadership decision] — do not deny the requirement exists.
+35. References sections: restate the RFP's required reference count and institution type when the RFP specifies them. Never claim the RFP is silent on references if requirements list three customers, two-year public, or NJ public-college reference tables. Include ONLY references with full KB contact fields. If zö lacks enough qualifying references, state the gap honestly with [MANUAL FILL: leadership decision] — do not invent orgs and do not pad with [VERIFY: phone/email] shells.
 36. KPI scope: When the RFP distinguishes agency-wide/strategic-plan KPIs from CONTRACTOR-scored KPIs, commit ONLY to the contractor set (with numeric targets from Section 2 / monitoring). Never substitute the buyer's four agency KPIs for the three contractor KPIs.
 37. Cost scoring: If the RFP uses inverse cost scoring (lowest responsive price gets maximum cost points), never claim that bidding at the published ceiling earns the highest cost rating — state the tradeoff honestly.
 38. Never invent an RFP "ceiling/allocation/cap" equal to your own proposed bid total. Only cite spend ceilings that appear in RFP requirements / HARD FACTS money constraints. If the bid exceeds a stated RFP envelope, say so plainly or leave a [VERIFY] for Sonja — do not relabel the bid as the buyer's ceiling.
@@ -366,6 +366,31 @@ def _phase3_content_is_usable(content: str | None) -> bool:
     return True
 
 
+def _static_coverage_stub(title: str) -> str:
+    """Short pointer when an RFP tab is owned by Sections 1–3."""
+    title_cf = (title or "").casefold()
+    if re.search(
+        r"certificate(?:s)?\s+of\s+insurance|proof\s+of\s+insurance|"
+        r"insurance\s+certificate|\binsurance\b|\bcoi\b",
+        title_cf,
+    ):
+        return (
+            f"## {title}\n\n"
+            "Coverage types, carriers, and limits are stated in "
+            "**Section 1.5 — Insurance Information**. "
+            "Upon contract award we will deliver the certificate of insurance "
+            "(additional insured / endorsements as the RFP requires) as a "
+            "separate PDF attachment — [MANUAL FILL: attach COI PDF]. "
+            "This tab does not restate policy narrative."
+        )
+    return (
+        f"## {title}\n\n"
+        "Covered in Sections 1–3 (company / team / experience). "
+        "See those sections for the full response; this tab is "
+        "retained so the RFP outline remains complete."
+    )
+
+
 def partition_phase3_sections(
     rfp_sections: list[RfpSectionMap],
     existing_by_id: dict[str, ProposalSection],
@@ -373,8 +398,16 @@ def partition_phase3_sections(
     static_section_text: str = "",
 ) -> tuple[list[RfpSectionMap], list[ProposalSection]]:
     """Split mapped sections into ones still needing a draft vs already filled."""
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
     to_draft: list[RfpSectionMap] = []
     already: list[ProposalSection] = []
+    filled_by_title: list[ProposalSection] = [
+        section
+        for section in existing_by_id.values()
+        if _phase3_content_is_usable(section.content)
+    ]
+
     for mapped in rfp_sections:
         # Never omit Cost/Fees/Budget or scored tabs — RFP-demanded coverage.
         if should_skip_rfp_section_as_static_duplicate(
@@ -390,12 +423,7 @@ def partition_phase3_sections(
                     ProposalSection(
                         id=mapped.id,
                         title=mapped.title,
-                        content=(
-                            f"## {mapped.title}\n\n"
-                            "Covered in Sections 1–3 (company / team / experience). "
-                            "See those sections for the full response; this tab is "
-                            "retained so the RFP outline remains complete."
-                        ),
+                        content=_static_coverage_stub(mapped.title or ""),
                         status="generated",
                         source="generated",
                         mode="write",
@@ -407,10 +435,32 @@ def partition_phase3_sections(
             ):
                 already.append(existing_by_id[mapped.id])
             continue
+
         existing = existing_by_id.get(mapped.id)
         if existing and _phase3_content_is_usable(existing.content):
             already.append(existing)
             continue
+
+        # Different id, same ask — do not draft a second Letter of Interest /
+        # Qualifications twin when a filled near-dup already exists.
+        twin = next(
+            (
+                section
+                for section in filled_by_title
+                if outline_titles_near_duplicate(mapped.title or "", section.title or "")
+            ),
+            None,
+        )
+        if twin is not None:
+            if twin.id not in {s.id for s in already}:
+                already.append(twin)
+            logger.info(
+                "Phase 3 skipping near-dup tab %r (covered by filled %r)",
+                mapped.title,
+                twin.title,
+            )
+            continue
+
         to_draft.append(mapped)
     return to_draft, already
 
@@ -1418,12 +1468,7 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
             {
                 "id": sid,
                 "title": title,
-                "content": (
-                    f"## {title}\n\n"
-                    "Covered in Sections 1–3 (company / team / experience). "
-                    "See those sections for the full response; this tab is "
-                    "retained so the RFP outline remains complete."
-                ),
+                "content": _static_coverage_stub(title),
                 "status": "generated",
                 "source": "generated",
                 "mode": "write",

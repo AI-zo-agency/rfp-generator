@@ -30,7 +30,11 @@ Rules:
   the same proof already covered by Sections 1–3 or another RFP tab.
 - NEVER outline tabs that only restate static Sections 1–3 identity blocks already written
   before RFP tabs (Who We Are, Company History + Client Roster, Organizational Structure,
-  Team Overview bios as a block). DO keep scored RFP-specific asks even when related:
+  Team Overview bios as a block, Insurance Information / Certificate of Insurance coverage
+  narrative — limits, carriers, GL/E&O/workers/cyber). Coverage facts live in Section 1.5;
+  if the RFP only needs a returned COI PDF, use a short attachments checklist / MANUAL FILL
+  for the file — do NOT add a second insurance essay tab.
+- DO keep scored RFP-specific asks even when related:
   Sample Work Portfolio, Agency Requirements matrices, Qualifications/Experience when the
   RFP TOC names that heading as an evaluation tab, References forms, Pricing forms, Addenda.
 - Prefer a LEAN outline evaluators can finish reading — merge overlapping asks into one tab
@@ -50,8 +54,10 @@ Rules:
 - IMPORTANT scored tabs from evaluation criteria + TOC MUST be included when the RFP names them.
 - CLOSING / compliance package items MUST be included when the RFP names them (even if forms):
   References, Acknowledgement of Addenda, Non-Collusion / Ownership Disclosure, Pricing
-  Proposal Form, Authorized Signature, COI / W-9 attachments, Exemplar Agreement
-  acknowledgment, and a proper Offeror Commitment & Closing Statement.
+  Proposal Form, Authorized Signature, Exemplar Agreement acknowledgment, Offeror Commitment
+  & Closing Statement, and attachment CHECKLISTS (W-9 / signed forms / "attach COI PDF").
+  Do NOT add a narrative "Certificate of Insurance" / insurance-coverage essay — Section 1.5
+  already owns coverage; attachment items are file-return checklists only.
 - For References: capture exact count, institution type, and contact fields from the RFP.
 - For Pricing/Quotation forms: include as a section when the RFP supplies a form; do NOT
   replace it with a custom Section A/B/C/D narrative structure in the outline.

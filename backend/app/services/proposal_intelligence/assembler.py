@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ from app.services.proposal_intelligence.schemas import (
 )
 from app.services.proposal_rfp_compliance import _ADD_ELIGIBLE_SOURCES
 from app.services.proposal_section_aliases import PROPOSAL_SECTION_ALIAS_GROUPS
+
+logger = logging.getLogger(__name__)
 
 
 def refresh_proposal_memory(plan: ProposalExecutionPlan) -> ProposalExecutionPlan:
@@ -712,7 +715,10 @@ def amend_outline_for_missing_requirements(
     instead — see test_outline_coverage.py / test_section_aliases.py's
     false-positive battery for what that reintroduces.
     """
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
     existing_ids = {s.id for s in outline_sections}
+    existing_titles = [s.title for s in outline_sections]
     amended = list(outline_sections)
     for requirement in ledger.missing():
         if requirement.source not in _ADD_ELIGIBLE_SOURCES:
@@ -720,10 +726,17 @@ def amend_outline_for_missing_requirements(
         section_id = f"ledger-{requirement.id}"
         if section_id in existing_ids:
             continue
+        req_title = (requirement.text or "").strip()
+        # Never manufacture a second Letter of Interest / Qualifications twin
+        # when the outline already has a near-duplicate title under another id.
+        if req_title and any(
+            outline_titles_near_duplicate(req_title, prev) for prev in existing_titles
+        ):
+            continue
         amended.append(
             RfpSectionMap(
                 id=section_id,
-                title=requirement.text,
+                title=req_title or requirement.text,
                 requirements=[requirement.text],
                 zoMode="write",
                 # Stays a float: an RFP can weight a criterion at 12.5 pts and
@@ -732,6 +745,7 @@ def amend_outline_for_missing_requirements(
             )
         )
         existing_ids.add(section_id)
+        existing_titles.append(req_title or requirement.text)
     return amended
 
 
@@ -856,6 +870,20 @@ def derive_legacy_fields(plan: ProposalExecutionPlan) -> dict[str, Any]:
             list(plan.opportunity.compliance.items),
             list(plan.opportunity.evaluation.criteria),
             rfp_sections,
+        )
+
+    # Ledger amend can reintroduce near-dup titles (e.g. "Letter of Interest"
+    # beside "Letter of Interest — brief overview…"). Collapse before Phase 3.
+    rfp_sections, post_amend_dropped = filter_lean_outline_sections(
+        rfp_sections,
+        rfp_context="",
+        drop_generic_filler=False,
+    )
+    if post_amend_dropped:
+        logger.info(
+            "derive_legacy_fields post-amend lean-outline dropped %d tab(s): %s",
+            len(post_amend_dropped),
+            post_amend_dropped[:12],
         )
 
     return {

@@ -72,5 +72,27 @@ class StaticDuplicateSectionTests(unittest.TestCase):
         )
 
 
+    def test_certificate_of_insurance_is_static_duplicate(self) -> None:
+        self.assertTrue(is_duplicate_static_rfp_section("Certificate of Insurance"))
+        self.assertTrue(
+            should_skip_rfp_section_as_static_duplicate(
+                title="Certificate of Insurance upon contract execution",
+            )
+        )
+        # Must not be kept just because insurance is an "important" closing topic.
+        from app.services.proposal_outline_dedup import filter_lean_outline_sections
+
+        kept, dropped = filter_lean_outline_sections(
+            [
+                {"id": "coi", "title": "Certificate of Insurance", "required": True},
+                {"id": "approach", "title": "Proposed Approach", "required": True},
+            ],
+            rfp_context="certificate of insurance proposed approach",
+        )
+        titles = [s["title"] for s in kept]
+        self.assertNotIn("Certificate of Insurance", titles)
+        self.assertTrue(any("owned by Sections 1" in d for d in dropped))
+
+
 if __name__ == "__main__":
     unittest.main()

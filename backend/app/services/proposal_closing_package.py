@@ -51,6 +51,10 @@ _CLOSING_CATALOG: list[tuple[str, str, str, str, tuple[str, ...], str]] = [
         (
             "Provide the references package THIS RFP asks for (count, institution type, "
             "contact fields). Use verified KB clients only — never invent phones/emails. "
+            "Include a reference ONLY when name, title, org, phone, AND email are all in KB. "
+            "If a contact field is missing, OMIT that reference entirely — do not write "
+            "[VERIFY: phone/email] shells. If KB has fewer complete contacts than required, "
+            "list what you have and one [MANUAL FILL: Sonja — remaining from ClientList]."
             "If a required institution type (e.g. two-year public) is missing from KB, "
             "state the gap plainly with [MANUAL FILL] rather than substituting a weaker analog."
         ),

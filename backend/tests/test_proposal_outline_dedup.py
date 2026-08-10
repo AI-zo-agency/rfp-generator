@@ -169,6 +169,64 @@ class OutlineDedupTests(unittest.TestCase):
         self.assertTrue(any("merged into Agency Requirements" in d for d in dropped))
         self.assertTrue(any("Sample Work" in t for t in titles))
 
+    def test_letter_of_interest_near_duplicate(self) -> None:
+        self.assertTrue(
+            outline_titles_near_duplicate(
+                "Letter of Interest - brief overview of contractor's interest in the project",
+                "Letter of Interest",
+            )
+        )
+        kept, dropped = filter_lean_outline_sections(
+            [
+                {
+                    "id": "10",
+                    "title": (
+                        "Letter of Interest - brief overview of contractor's "
+                        "interest in the project"
+                    ),
+                    "required": True,
+                },
+                {"id": "16", "title": "Letter of Interest", "required": True},
+                {
+                    "id": "12",
+                    "title": "Qualifications and Experience - detailed summary",
+                    "required": True,
+                },
+                {"id": "18", "title": "Qualifications and Experience", "required": True},
+            ],
+            rfp_context="letter of interest qualifications experience",
+        )
+        titles = [s["title"] for s in kept]
+        self.assertEqual(len([t for t in titles if "Letter of Interest" in t]), 1)
+        self.assertEqual(len([t for t in titles if "Qualifications" in t]), 1)
+        self.assertTrue(any("near-duplicate" in d for d in dropped))
+
+    def test_merge_closing_does_not_readd_near_dup_letter(self) -> None:
+        sections = [
+            {
+                "id": "rfp-sec-loi",
+                "title": (
+                    "Letter of Interest - brief overview of contractor's "
+                    "interest in the project"
+                ),
+                "required": True,
+            },
+        ]
+        # Force a closing component path via cover-letter-ish RFP language if any;
+        # at minimum near-dup guard must not explode with existing titles.
+        merged, _added = merge_closing_components_into_outline(
+            sections,
+            rfp_context="Submit a Letter of Interest with three references.",
+        )
+        titles = [
+            (s.title if hasattr(s, "title") else s.get("title")) for s in merged
+        ]
+        self.assertEqual(
+            len([t for t in titles if t and "letter of interest" in t.casefold()]),
+            1,
+            msg=titles,
+        )
+
     def test_merge_closing_adds_only_what_the_rfp_requires(self) -> None:
         """Deliberate change: no unrequested commitment/closing section.
 

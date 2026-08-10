@@ -11,6 +11,7 @@ from app.services.proposal_integrity_guards import (
     case_study_fidelity_ok,
     case_study_has_required_structure,
     case_study_looks_like_source_dump,
+    drop_incomplete_reference_entries,
     enforce_pricing_tier_for_cost_weight,
     infer_cost_weight_pct,
     prefer_case_study_kb_text,
@@ -50,9 +51,41 @@ class TestReferenceIntegrity(unittest.TestCase):
         )
         updated, logs = apply_manuscript_integrity_guards(draft)
         body = updated.sections[0].content
-        self.assertIn("[VERIFY:", body)
+        # Incomplete / upon-request packages are omitted — not left as VERIFY shells.
+        self.assertIn("MANUAL FILL", body)
         self.assertNotIn("upon request", body.casefold())
+        self.assertNotIn("[VERIFY: contact name", body.casefold())
         self.assertTrue(logs)
+
+    def test_drops_verify_shell_reference_rows(self) -> None:
+        body = (
+            "We provide the following client references.\n\n"
+            "Reference 1: Oregon Employment Department\n"
+            "Contact: Jordan Lee, Communications Director\n"
+            "Organization: Oregon Employment Department\n"
+            "Phone: 503-555-0100\n"
+            "Email: jordan.lee@oregon.gov\n"
+            "Project: Workforce campaign\n\n"
+            "Reference 2: Travel San Francisco\n"
+            "Contact: [VERIFY: contact name and title]\n"
+            "Organization: Travel San Francisco\n"
+            "Phone: [VERIFY: phone number]\n"
+            "Email: [VERIFY: email address]\n"
+            "Project: Tourism marketing\n\n"
+            "Reference 3: City of Bend\n"
+            "Contact: [VERIFY: contact name and title]\n"
+            "Organization: City of Bend\n"
+            "Phone: [VERIFY: phone number]\n"
+            "Email: [VERIFY: email address]\n"
+        )
+        out, logs = drop_incomplete_reference_entries(body)
+        self.assertIn("Oregon Employment Department", out)
+        self.assertIn("jordan.lee@oregon.gov", out)
+        self.assertNotIn("Travel San Francisco", out)
+        self.assertNotIn("City of Bend", out)
+        self.assertIn("MANUAL FILL", out)
+        self.assertIn("Reference 1:", out)
+        self.assertTrue(any("Dropped" in line for line in logs))
 
 
 class TestPricingTierGuard(unittest.TestCase):

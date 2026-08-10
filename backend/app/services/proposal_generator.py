@@ -1028,12 +1028,19 @@ async def _persist_phase3_partial(
         {s.id: (s.content or "") for s in existing.sections} if existing else {}
     )
     drafted_ids = {section.id for section in drafted_rfp_sections}
+    drafted_titles = [section.title for section in drafted_rfp_sections]
     from app.services.proposal_drafting_graph import _zo_sections_context
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
 
     static_section_text = _zo_sections_context(static_sections)
     stubs: list[ProposalSection] = []
     for mapped in rfp_sections:
         if mapped.id in drafted_ids:
+            continue
+        if any(
+            outline_titles_near_duplicate(mapped.title or "", prev)
+            for prev in drafted_titles
+        ):
             continue
         if should_skip_rfp_section_as_static_duplicate(
             title=mapped.title or "",
@@ -1057,6 +1064,7 @@ async def _persist_phase3_partial(
                 status="generated" if prior.strip() else "outline",
             )
         )
+        drafted_titles.append(mapped.title)
 
     merged_sections = _merge_static_with_rfp_sections(
         static_sections,
@@ -1891,6 +1899,26 @@ async def _run_phase3_drafting_inner(
             "No RFP sections mapped. Re-run Phase 2.",
             status_code=400,
         )
+
+    # Final outline hygiene before any LLM drafting — collapse near-dup tabs
+    # (Letter of Interest twins, Qualifications twins) that Phase 2 ledger /
+    # closing merge may have reintroduced after the first lean pass.
+    from app.services.proposal_outline_dedup import filter_lean_outline_sections
+
+    lean_maps, lean_dropped = filter_lean_outline_sections(
+        list(research.rfp_sections),
+        rfp_context=rfp_context or rfp_source_text or "",
+        drop_generic_filler=False,
+    )
+    if lean_dropped:
+        logger.info(
+            "Phase 3 pre-draft lean-outline dropped %d tab(s) for %s: %s",
+            len(lean_dropped),
+            rfp_id,
+            lean_dropped[:12],
+        )
+        research = research.model_copy(update={"rfp_sections": lean_maps})
+        await asave_research_cache(research)
 
     existing = await aget_proposal_draft(rfp_id)
     static_sections = _static_sections_from_draft(existing, rfp.page_limit)

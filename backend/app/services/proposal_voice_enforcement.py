@@ -44,6 +44,15 @@ _STATIC_COVERED_TITLE_RES = (
     re.compile(r"\bbusiness\s+information\b", re.IGNORECASE),
     re.compile(r"\bcertifications?\b", re.IGNORECASE),
     re.compile(r"\binsurance\s+information\b", re.IGNORECASE),
+    # Coverage narrative / COI delivery is owned by Section 1.5 — do not draft a
+    # second essay under "Certificate of Insurance" in Phase 3.
+    re.compile(r"\bcertificate(?:s)?\s+of\s+insurance\b", re.IGNORECASE),
+    re.compile(r"\bproof\s+of\s+insurance\b", re.IGNORECASE),
+    re.compile(r"\binsurance\s+certificate(?:s)?\b", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:coi|insurance\s+coverage|liability\s+insurance)\s*$",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bcompany\s+overview\b", re.IGNORECASE),
     # Section 2 owns full bios — including RFP TOC titles that restate Team Overview
     # with Contract Manager / POC / Personnel Bios/Resumes.

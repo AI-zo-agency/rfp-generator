@@ -40,6 +40,36 @@ _VERIFY_CONTACT = (
     "[VERIFY: reference contact — name, title, organization, phone, email from KB]"
 )
 
+_INCOMPLETE_REF_VERIFY_RE = re.compile(
+    r"\[VERIFY:\s*(?:"
+    r"contact|"
+    r"phone|"
+    r"email|"
+    r"distinct\s+reference\s+contact|"
+    r"reference\s+contact|"
+    r"client-side\s+reference"
+    r")[^\]]*\]",
+    re.I,
+)
+
+_REFERENCE_BLOCK_SPLIT_RE = re.compile(
+    r"(?=(?:^|\n)\s*(?:#{1,3}\s*)?(?:Reference\s+\d+\s*[:.—–-]|"
+    r"\*\*Reference\s+\d+|"
+    r"Reference\s+\d+\b))",
+    re.I,
+)
+
+_REAL_EMAIL_RE = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+    re.I,
+)
+_REAL_PHONE_RE = re.compile(
+    r"(?<!\[VERIFY:)(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b"
+)
+_AGENCY_PLACEHOLDER_EMAIL_RE = re.compile(
+    r"(?i)\b(?:sonja|ella|info|hello)@zo\.agency\b"
+)
+
 _WE_EXPERTLY_MANAGES_RE = re.compile(
     r"\bWe\s+expertly\s+manages\b",
     re.I,
@@ -78,6 +108,124 @@ def scrub_reference_withholding(content: str) -> tuple[str, list[str]]:
     return text, logs
 
 
+def _reference_entry_is_kb_complete(block: str) -> bool:
+    """True only when the entry has real contact fields from KB (no VERIFY gaps)."""
+    text = block or ""
+    if not text.strip():
+        return False
+    if _INCOMPLETE_REF_VERIFY_RE.search(text):
+        return False
+    emails = [
+        m.group(0)
+        for m in _REAL_EMAIL_RE.finditer(text)
+        if not _AGENCY_PLACEHOLDER_EMAIL_RE.search(m.group(0))
+    ]
+    phones = _REAL_PHONE_RE.findall(text)
+    has_contact_line = bool(
+        re.search(r"(?i)\bcontact\s*:", text)
+        and not re.search(r"(?i)contact\s*:\s*\[VERIFY:", text)
+    )
+    if emails and (phones or has_contact_line):
+        return True
+    if phones and has_contact_line:
+        return True
+    return False
+
+
+def drop_incomplete_reference_entries(content: str) -> tuple[str, list[str]]:
+    """Omit reference rows that lack KB contact fields — never ship VERIFY shells.
+
+    Product rule: if name/phone/email are not in the knowledge base, do not include
+    that reference in the proposal at all. Keep only complete, verifiable entries.
+    """
+    text = content or ""
+    logs: list[str] = []
+    if not text.strip():
+        return text, logs
+
+    if not re.search(r"(?i)\breference\s+\d+\b", text) and not _INCOMPLETE_REF_VERIFY_RE.search(
+        text
+    ):
+        return text, logs
+
+    parts = [p for p in _REFERENCE_BLOCK_SPLIT_RE.split(text) if p is not None]
+    if len(parts) <= 1:
+        if _INCOMPLETE_REF_VERIFY_RE.search(text) or not _reference_entry_is_kb_complete(text):
+            logs.append(
+                "Dropped incomplete reference package (missing KB contact fields)"
+            )
+            return (
+                "[MANUAL FILL: Sonja — supply verified client references from "
+                "ClientList / KB only (name, title, org, phone, email). Do not invent.]\n",
+                logs,
+            )
+        return text, logs
+
+    preamble = ""
+    kept: list[str] = []
+    dropped = 0
+    for i, part in enumerate(parts):
+        chunk = part.strip("\n")
+        if not chunk.strip():
+            continue
+        looks_like_entry = bool(
+            re.match(
+                r"(?i)^\s*(?:#{1,3}\s*)?(?:\*\*)?Reference\s+\d+",
+                chunk,
+            )
+        )
+        if i == 0 and not looks_like_entry:
+            preamble = chunk.strip()
+            continue
+        if not looks_like_entry:
+            if kept:
+                kept.append(chunk.strip())
+            elif preamble:
+                preamble = f"{preamble}\n\n{chunk.strip()}"
+            else:
+                preamble = chunk.strip()
+            continue
+        if _reference_entry_is_kb_complete(chunk):
+            kept.append(chunk.strip())
+        else:
+            dropped += 1
+
+    if dropped == 0:
+        return text, logs
+
+    logs.append(
+        f"Dropped {dropped} incomplete reference entr"
+        f"{'y' if dropped == 1 else 'ies'} (no KB contact fields — omit, do not VERIFY-shell)"
+    )
+    gap = (
+        "[MANUAL FILL: Sonja — remaining references must come from verified "
+        "ClientList / KB contacts only (name, title, org, phone, email). "
+        "Do not invent or leave [VERIFY] shells.]\n"
+    )
+    if not kept:
+        body = gap
+        if preamble:
+            body = f"{preamble}\n\n{gap}"
+        return body, logs
+
+    renumbered: list[str] = []
+    for idx, entry in enumerate(kept, start=1):
+        renumbered.append(
+            re.sub(
+                r"(?i)(Reference)\s+\d+",
+                rf"\1 {idx}",
+                entry,
+                count=1,
+            )
+        )
+    pieces: list[str] = []
+    if preamble:
+        pieces.append(preamble)
+    pieces.extend(renumbered)
+    pieces.append(gap)
+    return "\n\n".join(pieces).strip() + "\n", logs
+
+
 def fix_known_bio_typos(content: str) -> tuple[str, list[str]]:
     """Deterministic template typos that recur across proposals."""
     text = content or ""
@@ -103,11 +251,19 @@ def apply_manuscript_integrity_guards(draft: ProposalDraft) -> tuple[ProposalDra
         if "reference" in title_cf or "reference" in sid.casefold():
             new, ref_logs = scrub_reference_withholding(new)
             section_logs.extend(ref_logs)
+            new, drop_logs = drop_incomplete_reference_entries(new)
+            section_logs.extend(drop_logs)
         else:
             # Still strip upon-request deferrals anywhere (RFP often forbids withholding).
             scrubbed, ref_logs = scrub_reference_withholding(new)
             if ref_logs:
                 new, section_logs = scrubbed, list(ref_logs)
+            # Non-title reference packages (e.g. buried under Qualifications)
+            if re.search(r"(?i)\breference\s+\d+\b", new) and _INCOMPLETE_REF_VERIFY_RE.search(
+                new
+            ):
+                new, drop_logs = drop_incomplete_reference_entries(new)
+                section_logs.extend(drop_logs)
 
         if sid.startswith("section-2-") or "bio" in title_cf:
             new, bio_logs = fix_known_bio_typos(new)

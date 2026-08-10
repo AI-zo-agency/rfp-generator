@@ -270,11 +270,17 @@ def _merge_closing_into_research_map(
     if not research or not added:
         return research
     from app.models.proposal import RfpSectionMap
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
 
     existing = list(research.rfp_sections or [])
     existing_ids = {s.id for s in existing}
+    existing_titles = [s.title for s in existing]
     for comp in added:
         if comp.section_id in existing_ids:
+            continue
+        if any(
+            outline_titles_near_duplicate(comp.title, prev) for prev in existing_titles
+        ):
             continue
         existing.append(
             RfpSectionMap(
@@ -286,6 +292,7 @@ def _merge_closing_into_research_map(
             )
         )
         existing_ids.add(comp.section_id)
+        existing_titles.append(comp.title)
     return research.model_copy(update={"rfp_sections": existing})
 
 
