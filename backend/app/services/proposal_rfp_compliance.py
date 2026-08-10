@@ -1555,8 +1555,14 @@ async def _draft_one_added_section(
         f"Sector: {rfp.sector}\n"
         f"RFP: {rfp.title}\n"
         f"Section: {section.title}\n"
-        f"Word target: {section.word_target}\n"
+        f"Word target: {section.word_target} (stay at or under — be concise)\n"
         f"Requirements:\n- {addition.requirement_text}\n\n"
+        "FORMAT (mandatory):\n"
+        "- Prefer short paragraphs, markdown bullets, and markdown tables for process/"
+        "phases/roles/cadence.\n"
+        "- Do not write a long essay. Hit the requirement tightly.\n"
+        "- When a table/timeline/swimlane would help evaluators, set designerNote and/or "
+        "insert [DESIGNER NOTE: concrete layout hint].\n\n"
         "User edit request:\nNo section in the draft addressed this mandatory RFP "
         "requirement. Write the section from scratch using ONLY the evidence corpus "
         "below. If one specific required fact is not in the evidence, insert a narrow "
@@ -1566,6 +1572,13 @@ async def _draft_one_added_section(
         f"RFP excerpt:\n{rfp_context[:4000]}\n\n"
         f"Evidence corpus:\n{_format_evidence(evidence)}\n"
     )
+    from app.services.proposal_drafting_prompts import (
+        MODULAR_APPROACH_BLOCK,
+        is_modular_approach_section,
+    )
+
+    if is_modular_approach_section(section.title or ""):
+        user_block = f"{MODULAR_APPROACH_BLOCK}\n\n{user_block}"
 
     try:
         draft_raw, draft_provider = await llm.chat_json_soft(
@@ -1596,7 +1609,29 @@ async def _draft_one_added_section(
     if not content.strip() or not section_content_is_substantial(section, content):
         return None
 
-    return section.model_copy(update={"content": content, "status": "generated"})
+    designer_note = None
+    if isinstance(draft_raw, dict):
+        designer_note = (
+            draft_raw.get("designerNote") or draft_raw.get("designer_note") or None
+        )
+        if isinstance(designer_note, str):
+            designer_note = designer_note.strip() or None
+        else:
+            designer_note = None
+        if (
+            designer_note
+            and content
+            and "[DESIGNER NOTE:" not in content.upper()
+        ):
+            content = f"{content.rstrip()}\n\n[DESIGNER NOTE: {designer_note}]"
+
+    return section.model_copy(
+        update={
+            "content": content,
+            "status": "generated",
+            "designer_note": designer_note,
+        }
+    )
 
 
 async def draft_added_requirement_sections(

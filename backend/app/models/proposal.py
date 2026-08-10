@@ -740,6 +740,11 @@ class SectionImproveRequest(BaseModel):
         alias="applyFix",
         description="Force a single-section edit from a prior suggestedFix instruction.",
     )
+    improve_section_pinned: bool = Field(
+        default=False,
+        alias="improveSectionPinned",
+        description="User pinned Improve full section on this tab — never outline clarify.",
+    )
 
     @field_validator("conversation_history", mode="before")
     @classmethod

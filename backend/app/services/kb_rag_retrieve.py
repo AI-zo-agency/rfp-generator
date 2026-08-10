@@ -57,6 +57,95 @@ def expand_kb_queries(question: str, *, max_queries: int = 3) -> list[str]:
     return [q][:max_queries]
 
 
+def build_retrieval_question_from_entry(
+    *,
+    section_id: str = "",
+    section_title: str = "",
+    required_assets: list[str] | None = None,
+    planner_queries: list[str] | None = None,
+    why_needed: str = "",
+    rfp_client: str = "",
+) -> str:
+    """Natural-language KB question (same shape as kb_qa_loop / section chat pack).
+
+    Phase 2 retrieval plans often emit keyword fragments; Supermemory works best
+    with one clear question like the manual KB QA loop uses.
+    """
+    parts = [
+        "Find zö agency knowledge-base facts, case studies, and KPIs for a proposal section.",
+    ]
+    title = (section_title or "").strip()
+    if title:
+        parts.append(f'Section: "{title}".')
+    client = (rfp_client or "").strip()
+    if client:
+        parts.append(f"RFP client context: {client}.")
+    why = (why_needed or "").strip()
+    if why:
+        parts.append(f"Why needed: {why[:400]}.")
+    assets = [str(a).strip() for a in (required_assets or []) if str(a).strip()][:8]
+    if assets:
+        parts.append("Required proof/assets: " + "; ".join(assets) + ".")
+    queries = [str(q).strip() for q in (planner_queries or []) if str(q).strip()]
+    if queries:
+        # Prefer the planner's first query when it reads like a full question.
+        focus = queries[0]
+        if len(focus) >= 24 and " " in focus:
+            parts.append(f"Search focus: {focus[:400]}.")
+        else:
+            parts.append(f"Topics: {', '.join(queries[:3])}.")
+    if section_id:
+        parts.append(f"(section id {section_id})")
+    parts.append(
+        "Prefer 03_CS case studies and won proposal excerpts (06_WON/07_FIN Proposal). "
+        "Include strategy, deliverables, and measurable results/KPIs when present. "
+        "Do not invent clients, numbers, or certifications."
+    )
+    return " ".join(parts)[:1200]
+
+
+def context_blocks_to_hits(context: str, sources: list[str] | None = None) -> list[dict[str, Any]]:
+    """Split packed RAG context (### filename blocks) into pseudo-hits for JIT corpus."""
+    text = (context or "").strip()
+    if not text or text.startswith("(No matching"):
+        return []
+    hits: list[dict[str, Any]] = []
+    chunks = re.split(r"(?m)^### ", text)
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        lines = chunk.split("\n", 1)
+        label = lines[0].strip()
+        body = lines[1].strip() if len(lines) > 1 else ""
+        if not label or not body:
+            continue
+        hits.append(
+            {
+                "title": label,
+                "metadata": {"fileName": label},
+                "customId": label,
+                "content": body,
+                "excerpt": body,
+                "source": label,
+            }
+        )
+    if hits:
+        return hits
+    # Single blob without headers — attach first source label if we have one.
+    label = (sources or ["knowledge_base"])[0]
+    return [
+        {
+            "title": label,
+            "metadata": {"fileName": label},
+            "customId": label,
+            "content": text,
+            "excerpt": text,
+            "source": label,
+        }
+    ]
+
+
 def is_source_rfp_filename(name: str) -> bool:
     """True for client solicitation PDFs stored alongside won proposals."""
     n = (name or "").casefold()

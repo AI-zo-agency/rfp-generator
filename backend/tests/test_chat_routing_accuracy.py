@@ -1,15 +1,11 @@
 """Routing accuracy over a labelled corpus of realistic chat asks.
 
-Measured before this suite existed:
-    _wants_section_edit       24/29 (82%)
-    _is_outline_structure_ask 27/29 (93%)
-
-Roughly one in five edit requests was answered with advice instead of being
-executed. This file turns routing accuracy into a number a test enforces, so it
-is not something a human has to check by typing into the chat.
+The keyword gate (_wants_section_edit) is only a fallback when the LLM classifier
+abstains (``degraded``). Structure routing (add/delete sidebar tabs) is LLM-only
+via ``structure`` intent — not regex.
 
 When a real message routes wrongly, add it to
-tests/fixtures/chat_routing_cases.json rather than patching a regex blind.
+tests/fixtures/chat_routing_cases.json and fix the LLM classifier or structure planner.
 """
 
 from __future__ import annotations
@@ -30,7 +26,6 @@ if "langchain_openai" not in sys.modules:
     sys.modules["langchain_openai"] = stub
 
 from app.services.proposal_section_editor import (  # noqa: E402
-    _is_outline_structure_ask,
     _wants_section_edit,
 )
 
@@ -41,7 +36,6 @@ CASES = json.loads(FIXTURE.read_text())["cases"]
 class RoutingAccuracyTests(unittest.TestCase):
     def test_every_case_routes_correctly(self) -> None:
         edit_failures: list[str] = []
-        structure_failures: list[str] = []
 
         for case in CASES:
             message = case["message"]
@@ -50,23 +44,13 @@ class RoutingAccuracyTests(unittest.TestCase):
                     f"  [{case['category']}] {message!r} "
                     f"— wants_edit={not case['edit']}, expected {case['edit']}"
                 )
-            if _is_outline_structure_ask(message) != case["structure"]:
-                structure_failures.append(
-                    f"  [{case['category']}] {message!r} "
-                    f"— is_structure={not case['structure']}, expected {case['structure']}"
-                )
 
         total = len(CASES)
-        report = (
-            f"\n_wants_section_edit      : {total - len(edit_failures)}/{total}"
-            f"\n_is_outline_structure_ask: {total - len(structure_failures)}/{total}"
-        )
+        report = f"\n_wants_section_edit (keyword fallback): {total - len(edit_failures)}/{total}"
         if edit_failures:
             report += "\n\nedit-intent misroutes:\n" + "\n".join(edit_failures)
-        if structure_failures:
-            report += "\n\nstructure misroutes:\n" + "\n".join(structure_failures)
 
-        self.assertEqual([], edit_failures + structure_failures, report)
+        self.assertEqual([], edit_failures, report)
 
     def test_advisory_asks_never_mutate(self) -> None:
         """The costly direction: never rewrite a draft when asked a question."""
@@ -78,12 +62,12 @@ class RoutingAccuracyTests(unittest.TestCase):
                 )
 
     def test_structure_asks_are_also_edit_intent(self) -> None:
-        """Adding a section is a mutation; it must never fall to advisory."""
+        """Adding a section is a mutation; keyword fallback must not treat it as advisory."""
         for case in CASES:
             if case["structure"]:
                 self.assertTrue(
                     _wants_section_edit(case["message"]),
-                    f"structure ask routed to advisory: {case['message']!r}",
+                    f"structure ask routed to advisory via keyword gate: {case['message']!r}",
                 )
 
     def test_corpus_covers_both_directions(self) -> None:

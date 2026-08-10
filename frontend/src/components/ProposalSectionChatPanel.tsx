@@ -257,6 +257,9 @@ export function ProposalSectionChatPanel({
           conversationHistory: history,
           // Always send whole-proposal context unless editing a pinned excerpt.
           proposalWide: true,
+          improveSectionPinned:
+            activeReference?.mode === "section" &&
+            activeReference.sectionId === targetSection.id,
         });
 
         onMessagesChange([
@@ -335,7 +338,13 @@ export function ProposalSectionChatPanel({
   const applySuggestedFix = useCallback(
     async (messageId: string, fix: SectionChatSuggestedFix, extras: string) => {
       if (isRunning || disabled) return;
+      const viewing =
+        viewingSectionId != null
+          ? sections.find((s) => s.id === viewingSectionId) ?? null
+          : null;
+      // Apply always runs on the tab the user had open when they got the audit.
       const target =
+        viewing ??
         sections.find((s) => s.id === fix.sectionId) ??
         sections.find((s) => {
           const wanted = fix.sectionTitle?.trim().toLowerCase();

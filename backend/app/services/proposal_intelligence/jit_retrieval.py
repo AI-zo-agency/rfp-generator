@@ -1,5 +1,8 @@
 """Phase 3 just-in-time retrieval from the Phase 2 retrievalPlan.
 
+Uses the same ``retrieve_for_question`` path as ``kb_qa_loop`` (hybrid + document
+search, agency proposal ranking, full-doc packing) — not bare ``search_documents``.
+
 Applies Evidence Trust Gate (ClientList Public/Confirm, work-type, provenance)
 before returning hits to section writers.
 """
@@ -14,9 +17,17 @@ from app.models.proposal import EvidenceItem
 from app.services import supermemory
 from app.services.evidence_trust.gate import ClaimIntent, GateDecision, filter_evidence_hits
 from app.services.evidence_trust.load_client_list import load_client_list_registry
+from app.services.kb_rag_retrieve import (
+    build_retrieval_question_from_entry,
+    context_blocks_to_hits,
+    retrieve_for_question,
+)
 from app.services.proposal_intelligence.schemas import RetrievalEntry
 
 logger = logging.getLogger(__name__)
+
+# Richer excerpts than legacy JIT (2k) — packed RAG already curated windows.
+_JIT_EXCERPT_MAX = 6000
 
 
 def _hit_label(hit: dict[str, Any]) -> str:
@@ -31,13 +42,14 @@ def _hit_label(hit: dict[str, Any]) -> str:
     )
 
 
-def _hit_excerpt(hit: dict[str, Any], *, max_chars: int = 2000) -> str:
+def _hit_excerpt(hit: dict[str, Any], *, max_chars: int = _JIT_EXCERPT_MAX) -> str:
     content = (
         hit.get("content")
         or hit.get("memory")
         or hit.get("chunk")
         or hit.get("text")
         or hit.get("summary")
+        or hit.get("excerpt")
         or ""
     )
     text = str(content).strip()
@@ -69,13 +81,6 @@ def _infer_claim_from_entry(entry: RetrievalEntry) -> str:
         return "brand"
     if any(t in blob for t in ("reference", "past performance", "case study", "experience")):
         return "experience"
-    # No keyword-ladder match: derive the claim from what the requirement
-    # actually asks for instead of defaulting every unmatched section to
-    # "experience". The blanket "experience" default let ANY case study
-    # satisfy ANY section — it never checked whether the retrieved evidence
-    # demonstrated the specific capability the section needed (the digital
-    # advertising RFP defect this fixes: brand-messaging and website-redesign
-    # case studies were accepted as "experience" proof for a digital-ad ask).
     requirement_text = (
         (entry.required_assets[0] if entry.required_assets else "")
         or entry.why_needed
@@ -92,49 +97,49 @@ async def retrieve_for_section(
     rfp_client: str = "",
     start_index: int = 1,
     claim: str | None = None,
+    section_title: str = "",
 ) -> list[EvidenceItem]:
-    """Retrieve writing assets for one section using the planned queries."""
+    """Retrieve writing assets for one section using kb_qa_loop-quality RAG."""
     if not supermemory.is_configured():
         return []
 
-    raw_hits: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    question = build_retrieval_question_from_entry(
+        section_id=entry.section_id or "",
+        section_title=section_title,
+        required_assets=list(entry.required_assets or []),
+        planner_queries=list(entry.queries or []),
+        why_needed=entry.why_needed or "",
+        rfp_client=rfp_client,
+    )
+    logger.info(
+        "JIT RAG retrieve section=%s question=%r",
+        entry.section_id,
+        question[:120],
+    )
 
-    queries = list(entry.queries) or [
-        f"zö agency {rfp_client} {' '.join(entry.required_assets)}".strip()
-    ]
-    for query in queries[:3]:
-        try:
-            hits = await supermemory.search_documents(
-                query=query[:220],
-                limit=5,
-                include_full_docs=True,
-                filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
-            )
-        except supermemory.SupermemoryError as exc:
-            logger.warning("JIT retrieval failed for %s: %s", entry.section_id, exc)
-            continue
+    try:
+        context, sources, queries_used = await retrieve_for_question(
+            question,
+            limit=8,
+            max_chars=20_000,
+            threshold=0.15,
+            fallback_threshold=0.12,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "JIT RAG retrieve_for_question failed section=%s: %s",
+            entry.section_id,
+            exc,
+        )
+        context, sources, queries_used = "", [], []
 
-        for hit in hits:
-            if not supermemory.is_knowledge_base_hit(hit):
-                continue
-            label = _hit_label(hit)
-            key = str(hit.get("id") or hit.get("customId") or label)
-            if key in seen:
-                continue
-            seen.add(key)
-            excerpt = _hit_excerpt(hit)
-            if not excerpt:
-                continue
-            enriched = dict(hit)
-            enriched["source"] = label
-            enriched["excerpt"] = excerpt
-            enriched["content"] = excerpt
-            raw_hits.append(enriched)
-            if len(raw_hits) >= 12:
-                break
-        if len(raw_hits) >= 18:
-            break
+    raw_hits = context_blocks_to_hits(context, sources)
+    if not raw_hits:
+        logger.info(
+            "JIT RAG no hits section=%s queries=%s",
+            entry.section_id,
+            queries_used,
+        )
 
     intent = ClaimIntent(
         slot=entry.section_id or "experience",
@@ -189,7 +194,6 @@ async def retrieve_for_section(
         )
         counter += 1
 
-    # Empty after best-effort: surface explicit VERIFY/FLAG as evidence so writers cannot invent.
     if not items and gap_tag:
         items.append(
             EvidenceItem(

@@ -27,7 +27,7 @@ const TITLE_STOPWORDS = new Set([
 
 /** True when the user explicitly scopes to the open/pinned tab. */
 export function messagePointsAtOpenSection(message: string): boolean {
-  return /\b(here|this\s+section|this\s+tab|this\s+part|open\s+(?:section|tab)|in\s+this\s+(?:section|tab|part)|for\s+this\s+(?:section|tab)|improve\s+this\s+section)\b/i.test(
+  return /\b(here|this\s+section|this\s+tab|this\s+part|open\s+(?:section|tab)|in\s+this(?:\s+(?:section|tab|part))?|for\s+this\s+(?:section|tab)|improve\s+this\s+section)\b/i.test(
     message || ""
   );
 }
@@ -350,6 +350,128 @@ export function isOurWorkSection(section: OutlineSection | null | undefined): bo
   );
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True when the user clearly wants to work on `remote`, not the tab they have open.
+ * Incidental mentions (Umatilla cited in an RFP examples section, cross-refs like
+ * "See 3.1") must NOT hijack away from the open tab.
+ */
+export function messageExplicitlyTargetsRemoteSection(
+  message: string,
+  remote: OutlineSection,
+  viewing: OutlineSection | null | undefined
+): boolean {
+  if (!viewing || remote.id === viewing.id) return true;
+  const text = (message || "").trim();
+  if (!text) return false;
+
+  const title = remote.title || "";
+  if (messageMentionsSectionTitle(text, title)) return true;
+
+  const markNum = title.match(/^(\d+)\s*[.:—–\-)]/);
+  if (markNum) {
+    const n = markNum[1];
+    if (new RegExp(`(?:§|sec(?:tion)?\\.?)\\s*${n}\\b`, "i").test(text)) return true;
+    if (
+      new RegExp(
+        `\\b(?:fix|edit|rewrite|update|patch|improve)\\s+(?:§\\s*)?${n}\\b`,
+        "i"
+      ).test(text)
+    ) {
+      return true;
+    }
+  }
+
+  const dotted = title.match(/^(\d+\.\d+)/);
+  if (dotted) {
+    const num = escapeRegExp(dotted[1]);
+    if (
+      new RegExp(
+        `\\b(?:rewrite|replace|edit|fix|update|revise|patch|improve|delete|remove)\\b[^.]{0,100}\\b${num}\\b`,
+        "i"
+      ).test(text)
+    ) {
+      return true;
+    }
+    if (new RegExp(`\\bsection\\s+${num}\\b`, "i").test(text)) return true;
+  }
+
+  const name = sectionPersonName(title);
+  if (name.length >= 4) {
+    const first = name.split(/\s+/)[0] || name;
+    const namePat = escapeRegExp(name);
+    const firstPat = escapeRegExp(first);
+    if (
+      new RegExp(
+        `\\b(?:rewrite|replace|edit|fix|update|revise|patch|improve|delete|remove|swap\\s+out|instead\\s+of)\\s+(?:the\\s+)?(?:${namePat}|${firstPat})`,
+        "i"
+      ).test(text)
+    ) {
+      return true;
+    }
+    if (new RegExp(`\\b${namePat}\\s+(?:bio|resume|case\\s*study)\\b`, "i").test(text)) {
+      return true;
+    }
+  }
+
+  const core = sectionTitleCore(title).toLowerCase();
+  if (isOurWorkSection(remote)) {
+    if (/\b(?:our\s+work|case\s+study\s+tab)\b/i.test(text)) return true;
+    const lower = text.toLowerCase();
+    for (const needle of [
+      "umatilla",
+      "rock the locks",
+      "carbondale",
+      "maricopa",
+      "deschutes",
+    ]) {
+      if (!core.includes(needle) && !name.toLowerCase().includes(needle)) continue;
+      if (!lower.includes(needle)) continue;
+      if (/\b(?:needs|need)\s+(?:a\s+)?rewrite\b/i.test(text)) return true;
+      if (
+        /\b(?:misrepresent|addressed|hasn't been addressed|flagged)\b/i.test(text)
+      ) {
+        return true;
+      }
+      if (
+        /\bcase\s+stud/i.test(text) &&
+        !/\b(?:in\s+this|this)\s+case\s+stud/i.test(text)
+      ) {
+        return true;
+      }
+      if (
+        new RegExp(
+          `\\b(?:rewrite|replace|edit|fix|update|revise|patch|improve|delete|remove)\\s+(?:the\\s+)?(?:${needle.replace(/\s+/g, "\\s+")}|case\\s+study)`,
+          "i"
+        ).test(text)
+      ) {
+        return true;
+      }
+    }
+  }
+
+  if (isBioSection(remote) && messageTargetsBios(text)) {
+    if (/\b(?:team\s+bio|bio\s+tab|resume)\b/i.test(text)) return true;
+  }
+
+  return false;
+}
+
+function mayRouteToRemoteSection(
+  message: string,
+  remote: OutlineSection,
+  viewing: OutlineSection | null
+): boolean {
+  return (
+    !viewing ||
+    remote.id === viewing.id ||
+    messageExplicitlyTargetsRemoteSection(message, remote, viewing)
+  );
+}
+
 /** User is asking a question / for an explanation — not requesting a rewrite. */
 export function messageLooksChatQuestion(message: string): boolean {
   const text = (message || "").trim();
@@ -463,12 +585,20 @@ export function messageTargetsBios(message: string): boolean {
  */
 export function messageNeedsCaseStudyClarify(message: string): boolean {
   if (messageLooksOutlineStructure(message)) return false;
+  const text = (message || "").trim();
+  // Discussing an example in the open section — not picking an Our Work tab.
+  if (
+    /\b(?:in\s+this|this)\s+case\s+stud/i.test(text) ||
+    /\b(?:best\s+(?:suited|fit)|well[- ]suited|for\s+this\s+rfp)\b/i.test(text)
+  ) {
+    return false;
+  }
   return (
-    /\bcase\s*stud(?:y|ies)\b/i.test(message) ||
+    /\bcase\s*stud(?:y|ies)\b/i.test(text) ||
     /\breplace\b.{0,80}\b(existing|current|these|those)\b.{0,40}\b(case|work|stud)/i.test(
-      message
+      text
     ) ||
-    /\b(existing|current|these|those)\s+\d*\s*case\s*stud/i.test(message)
+    /\b(existing|current|these|those)\s+\d*\s*case\s*stud/i.test(text)
   );
 }
 
@@ -682,7 +812,7 @@ export function resolveChatTarget(
   }
 
   // Client / case-study name (Umatilla, Rock the Locks) BEFORE unique-topic —
-  // incidental "before the References fix" must not steal the case study.
+  // only when explicitly targeted — incidental mentions stay on the open tab.
   const clientNeedles = [
     ...new Set([
       ...(lower.match(
@@ -701,7 +831,10 @@ export function resolveChatTarget(
       return clientNeedles.some((n) => blob.includes(n));
     });
     const uniqueClient = [...new Map(clientHits.map((s) => [s.id, s])).values()];
-    if (uniqueClient.length === 1) {
+    if (
+      uniqueClient.length === 1 &&
+      mayRouteToRemoteSection(text, uniqueClient[0], viewing)
+    ) {
       return {
         kind: "resolved",
         section: uniqueClient[0],
@@ -734,9 +867,8 @@ export function resolveChatTarget(
     };
   }
 
-  // Active Improve / Revise pin — before chat history. A prior Client References
-  // thread must not steal after the user pinned Monthly Schedules (or any tab).
-  if (pinned && !messageLooksOutlineStructure(text)) {
+  // Active Improve / Revise pin — before client-name hijacks and case-study clarify.
+  if (pinned && !messageLooksOutlineStructure(text) && !messageLooksProposalWide(text)) {
     return {
       kind: "resolved",
       section: pinned,
@@ -789,7 +921,10 @@ export function resolveChatTarget(
     const name = sectionPersonName(section.title || "");
     return name.length >= 4 && lower.includes(name.toLowerCase());
   });
-  if (namedHits.length === 1) {
+  if (
+    namedHits.length === 1 &&
+    mayRouteToRemoteSection(text, namedHits[0], viewing)
+  ) {
     return {
       kind: "resolved",
       section: namedHits[0],
@@ -839,7 +974,7 @@ export function resolveChatTarget(
         t.startsWith(num)
       );
     });
-    if (hits.length === 1) {
+    if (hits.length === 1 && mayRouteToRemoteSection(text, hits[0], viewing)) {
       return {
         kind: "resolved",
         section: hits[0],
@@ -942,7 +1077,7 @@ export function resolveChatTarget(
     }
   }
 
-  // Explicit "this section" / "here" → open tab. Random browsing does NOT count.
+  // Explicit "this section" / "here" → open tab.
   if (viewing && messagePointsAtOpenSection(text)) {
     return {
       kind: "resolved",
@@ -952,7 +1087,17 @@ export function resolveChatTarget(
     };
   }
 
-  // No name, no pin, no "this section" → ask. Do not silently bind the open tab.
+  // Open tab in the editor is the default scope — user is literally viewing it.
+  if (viewing) {
+    return {
+      kind: "resolved",
+      section: viewing,
+      confidence: "medium",
+      reason: "viewing-default",
+    };
+  }
+
+  // No viewing context → ask which section.
   const top = sections.filter((s) => s.content?.trim()).slice(0, 6);
   const candidates = top.length > 0 ? top : sections.slice(0, 6);
   return {

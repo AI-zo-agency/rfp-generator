@@ -15,6 +15,11 @@ from app.services.proposal_verify_optional_scrub import (
 
 
 class TestVerifyOptionalScrubIntent(unittest.TestCase):
+    def test_remove_verify_fill_or_remove(self) -> None:
+        msg = "remove verify tags fill them or remvoe them"
+        self.assertTrue(user_asks_scrub_optional_verify(msg))
+        self.assertTrue(user_asks_strip_inline_evidence_tags(msg))
+
     def test_remove_verify_tags(self) -> None:
         self.assertTrue(
             user_asks_scrub_optional_verify("remove verify tags from this section")

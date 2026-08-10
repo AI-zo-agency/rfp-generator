@@ -1719,6 +1719,7 @@ export async function improveProposalSection(
     conversationHistory?: { role: "user" | "assistant"; content: string }[];
     proposalWide?: boolean;
     applyFix?: boolean;
+    improveSectionPinned?: boolean;
   }
 ): Promise<{
   section: OutlineSection;
@@ -1762,6 +1763,7 @@ export async function improveProposalSection(
           : {}),
         ...(options?.proposalWide ? { proposalWide: true } : {}),
         ...(options?.applyFix ? { applyFix: true } : {}),
+        ...(options?.improveSectionPinned ? { improveSectionPinned: true } : {}),
       }),
     }
   );

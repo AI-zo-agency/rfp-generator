@@ -310,11 +310,17 @@ async def _reframe_section_to_rfp_spec(
         "- If evidence is missing, use [VERIFY: …] — never fabricate named engagements.\n"
         "- Fold timeline/phases INTO this section when the RFP expects schedule here (e.g. BMP).\n"
         "- Do NOT rewrite team bios (Section 2.x) or static company tabs.\n"
-        'Return JSON: {"content": "full markdown section"}'
+        "- Stay CONCISE: prefer short paragraphs, markdown bullets, and markdown tables over long essays. "
+        "Respect the Word target when provided — never pad.\n"
+        "- When a table/timeline/swimlane would help evaluators, add "
+        "[DESIGNER NOTE: concrete layout hint] near that block.\n"
+        'Return JSON: {"content": "full markdown section", "designerNote": "hint or null"}'
     )
+    word_target = getattr(section, "word_target", None) or 550
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\n"
         f"Section: {section.title}\n"
+        f"Word target: {word_target} (stay at or under)\n"
         f"RFP expects: {spec.rfp_title}\n"
         f"Required headings still missing or weak: {', '.join(missing_headings) or spec.required_headings}\n"
         f"Alignment instructions: {spec.instructions}\n"
@@ -329,6 +335,9 @@ async def _reframe_section_to_rfp_spec(
             temperature=0.25,
         )
         content = str((raw or {}).get("content") or "").strip()
+        note = str((raw or {}).get("designerNote") or (raw or {}).get("designer_note") or "").strip()
+        if content and note and "[DESIGNER NOTE:" not in content.upper():
+            content = f"{content.rstrip()}\n\n[DESIGNER NOTE: {note}]"
         return content or stub
     except Exception as exc:  # noqa: BLE001
         logger.warning("RFP structure reframe failed for %s: %s", section.id, exc)

@@ -87,19 +87,15 @@ describe("resolveSectionFromMention", () => {
     expect(hit?.id).toBe("section-3-work-oregon");
   });
 
-  it("does not bind random open tab without Improve-full-section pin", () => {
-    const hit = resolveSectionFromMention(
-      sections,
-      "make this tighter",
-      "section-1-insurance"
-    );
-    // No pin + no "this section" → clarify path returns a candidate, not silent insurance bind
-    // resolveSectionFromMention collapses clarify to first candidate — prefer explicit resolveChatTarget
+  it("binds open tab by default when user is viewing a section", () => {
     const result = resolveChatTarget(sections, "make this tighter", {
       viewingSectionId: "section-1-insurance",
     });
-    expect(result?.kind).toBe("clarify");
-    void hit;
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("section-1-insurance");
+      expect(result.reason).toBe("viewing-default");
+    }
   });
 
   it("uses open tab only when user says this section", () => {
@@ -214,6 +210,17 @@ describe("resolveChatTarget", () => {
     }
   });
 
+  it("uses open tab when user says here / in this", () => {
+    const result = resolveChatTarget(sections, "here add client voice in this", {
+      viewingSectionId: "section-3-work-san-leandro",
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("section-3-work-san-leandro");
+      expect(result.reason).toBe("viewing-explicit");
+    }
+  });
+
   it("uses explicit pin with high confidence", () => {
     const pin = sections[0];
     const result = resolveChatTarget(sections, "make this tighter", {
@@ -278,6 +285,19 @@ describe("resolveChatTarget", () => {
     const result = resolveChatTarget(sections, msg, {
       viewingSectionId: "section-1-who-we-are",
       pinnedSection: sections[0],
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.reason).toBe("outline-structure");
+    }
+  });
+
+  it("add one whole new section is outline structure not open-tab bind", () => {
+    const msg = "add one whole new section for staff planning";
+    expect(messageLooksOutlineStructure(msg)).toBe(true);
+    const result = resolveChatTarget(sections, msg, {
+      viewingSectionId: "section-3-work-umatilla",
+      pinnedSection: sections.find((s) => s.id === "section-3-work-umatilla") ?? null,
     });
     expect(result?.kind).toBe("resolved");
     if (result?.kind === "resolved") {
@@ -398,6 +418,46 @@ describe("resolveChatTarget", () => {
     if (result?.kind === "resolved") {
       expect(result.section.id).toBe("section-3-work-umatilla");
       expect(result.reason).toBe("client-name");
+    }
+  });
+
+  it("rfp fit eval on tourism tab stays open — Umatilla name does not hijack", () => {
+    const withRefs = [
+      ...sections,
+      sec(
+        "rfp-tourism-sm",
+        "Examples of Tourism or Destination Marketing Social Media Accounts Managed"
+      ),
+    ];
+    const umatilla = withRefs.find((s) => s.id === "section-3-work-umatilla")!;
+    const tourism = withRefs.find((s) => s.id === "rfp-tourism-sm")!;
+    const ask =
+      "in this case study is Umatilla best suited for this rfp case?";
+    const result = resolveChatTarget(withRefs, ask, {
+      viewingSectionId: tourism.id,
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("rfp-tourism-sm");
+      expect(result.reason).toBe("viewing-explicit");
+      expect(result.section.id).not.toBe(umatilla.id);
+    }
+  });
+
+  it("generic question on open tab stays there even when client is mentioned", () => {
+    const withRefs = [
+      ...sections,
+      sec("rfp-tourism-sm", "Tourism Social Media Examples"),
+    ];
+    const tourism = withRefs.find((s) => s.id === "rfp-tourism-sm")!;
+    const result = resolveChatTarget(
+      withRefs,
+      "fetch KPIs for San Francisco Travel and fill the empty block here",
+      { viewingSectionId: tourism.id }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("rfp-tourism-sm");
     }
   });
 

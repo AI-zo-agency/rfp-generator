@@ -142,6 +142,8 @@ def coerce_chat_intent_for_scope(
     PDF submission.
     """
     intent = (chat_intent or "none").strip() or "none"
+    if intent in {"structure", "advisory", "none"}:
+        return intent, "unchanged"
     if intent != "multi_patch":
         return intent, "unchanged"
     if chat_ask_is_proposal_wide(user_message):

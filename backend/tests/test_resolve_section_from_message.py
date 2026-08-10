@@ -116,6 +116,50 @@ class ResolveSectionFromMessageTests(unittest.TestCase):
         assert hit is not None
         self.assertEqual(hit.id, "compliance")
 
+    def test_rfp_fit_eval_stays_on_open_tab_not_umatilla_our_work(self) -> None:
+        """Tourism examples tab: 'is Umatilla best for this RFP?' must not jump to 3.1."""
+        self.draft.sections = [
+            _sec(
+                "section-3-work-umatilla",
+                "3.1 — City of Umatilla Digital Campaign",
+            ),
+            _sec(
+                "rfp-tourism-sm",
+                "Examples of Tourism or Destination Marketing Social Media Accounts Managed",
+            ),
+        ]
+        ask = "in this case study is Umatilla best suited for this rfp case?"
+        hit = _resolve_section_from_message(self.draft, ask, "rfp-tourism-sm")
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(hit.id, "rfp-tourism-sm")
+
+    def test_explicit_rewrite_still_targets_umatilla_our_work(self) -> None:
+        self.draft.sections = [
+            _sec(
+                "section-3-work-umatilla",
+                "3.1 — City of Umatilla Digital Campaign",
+            ),
+            _sec("rfp-tourism-sm", "Tourism Social Media Examples"),
+        ]
+        ask = "rewrite the Umatilla case study with KB evidence"
+        hit = _resolve_section_from_message(self.draft, ask, "rfp-tourism-sm")
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(hit.id, "section-3-work-umatilla")
+
+    def test_generic_edit_stays_on_open_tab(self) -> None:
+        self.draft.sections = [
+            _sec("section-3-work-umatilla", "3.1 — City of Umatilla Digital Campaign"),
+            _sec("rfp-tourism-sm", "Tourism Social Media Examples"),
+        ]
+        hit = _resolve_section_from_message(
+            self.draft, "make this tighter and more RFP-aligned", "rfp-tourism-sm"
+        )
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(hit.id, "rfp-tourism-sm")
+
     def test_compliance_with_budgets_word_is_not_cost_section(self) -> None:
         from app.services.proposal_budget_playbook import section_is_budget_related
         from app.models.proposal import ProposalSection

@@ -107,8 +107,9 @@ Rules:
    - Never invent dollar amounts. Use [VERIFY: …] when guide/RFP lacks a figure. Never put a phone number in a Fee column.
 11. MWBE and Personnel must use the same workforce percentages — align to one HR-verified figure.
 12. ANTI-DUPLICATION: This section has ONE job. Do not re-paste company bio, full bios, or full case studies owned by other sections. One short cross-reference is OK — then add NEW detail only. Prefer concise prose.
-13. When done researching, respond with ONLY JSON:
-{"content":"full section prose","kbRefs":["E1"],"designerNote":null}"""
+13. LENGTH & FORMAT: Stay at or under the Word target. Prefer short paragraphs, markdown bullets, and markdown tables for phases/process/cadence. Set designerNote (or inline [DESIGNER NOTE: …]) when a table/timeline/swimlane would help evaluators.
+14. When done researching, respond with ONLY JSON:
+{"content":"full section prose","kbRefs":["E1"],"designerNote":"layout hint or null"}"""
 
 USER_REVISE_SYSTEM = """You are zö agency's User Revise agent (editor chat / Revise content flow).
 The user gave explicit feedback. Search tools only as needed, then update ONE section.
@@ -133,7 +134,8 @@ Rules:
 7. Reference edits: full contact block (name, title, phone, email) — never defer to "on request".
    Clean/filter references with search_case_studies + RFP reference rules — not by searching the buyer's name in KB.
 8. NEVER put citation markers like [E1], [E14], or **[E3]** in the prose — client-facing text only.
-9. Return ONLY JSON: {"content":"...","kbRefs":[],"designerNote":null}"""
+9. LENGTH & FORMAT: Stay at or under Word target when provided. Prefer bullets and markdown tables for process/phases. Add designerNote / [DESIGNER NOTE: …] when layout helps.
+10. Return ONLY JSON: {"content":"...","kbRefs":[],"designerNote":"layout hint or null"}"""
 
 SURGICAL_FIX_SYSTEM = """You are zö agency's Surgical Fix agent (pre-submit review auto-fix).
 Patch ONE section to clear listed review issues — minimal diff, preserve strong prose.

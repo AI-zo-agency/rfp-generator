@@ -210,12 +210,13 @@ def user_asks_budget_rebuild(text: str) -> bool:
 
 
 def user_points_at_open_section(text: str) -> bool:
-    """True when the ask is scoped to the open tab ('here', 'this section', 'this part')."""
+    """True when the ask is scoped to the open tab ('here', 'this section', 'in this')."""
     return bool(
         re.search(
             r"(?i)\b("
             r"here|this\s+section|this\s+tab|this\s+part|open\s+(?:section|tab)|"
-            r"in\s+this\s+(?:section|tab|part)|for\s+this\s+(?:section|tab)"
+            r"in\s+this(?:\s+(?:section|tab|part))?|for\s+this\s+(?:section|tab)|"
+            r"improve\s+this\s+section"
             r")\b",
             text or "",
         )

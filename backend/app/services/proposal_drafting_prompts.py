@@ -79,9 +79,10 @@ Structure the section in four swappable phases — each phase is a standalone bl
 Include one **impact-first insight** — a specific, client-centered recommendation that challenges a default assumption
 (e.g., validate message comprehension in a pilot market before statewide spend).
 
-Keep it concise and within wordTarget. Do NOT invent designer diagrams/infographics.
-Only add [DESIGNER NOTE: …] when THIS RFP explicitly requires a visual OR a verified template asset exists;
-otherwise describe the cadence in prose/tables."""
+Keep it concise and within wordTarget. Prefer markdown bullets and tables for phases/cadence.
+Only add [DESIGNER NOTE: …] when THIS RFP explicitly requires a visual OR a verified template asset
+exists OR a table/timeline/swimlane would clearly help evaluators; otherwise describe cadence in
+prose/tables without inventing diagrams."""
 
 
 def is_modular_approach_section(title: str) -> bool:

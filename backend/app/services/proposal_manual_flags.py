@@ -17,6 +17,27 @@ logger = logging.getLogger(__name__)
 # Word boundary after FILL so [MANUAL FILLING:…] is not matched.
 # See docs/architecture/t2_5_manual_fill_reachability.md (T2.5).
 MANUAL_FILL_TAG_RE = re.compile(r"\[MANUAL\s+FILL\b[^\]]*\]", re.I)
+
+# Structure stubs from ensure_missing_scored_section_stubs — meant to be drafted,
+# not preserved as protected tags during Improve / full redraft.
+_SECTION_DRAFT_STUB_MFILL_RE = re.compile(
+    r"(?is)\[MANUAL\s+FILL:\s*Draft this RFP-required section[^\]]*\]\s*",
+)
+
+
+def is_section_draft_stub_manual_fill(tag: str) -> bool:
+    """True for whole-section draft stubs (replace on Improve), not fact placeholders."""
+    return bool(
+        re.search(
+            r"(?is)\[MANUAL\s+FILL:\s*Draft this RFP-required section",
+            tag or "",
+        )
+    )
+
+
+def strip_section_draft_stub_manual_fills(text: str) -> str:
+    """Remove draft-this-section stubs so Improve can write real prose."""
+    return _SECTION_DRAFT_STUB_MFILL_RE.sub("", text or "")
 VERIFY_TAG_RE = re.compile(r"\[VERIFY:\s*([^\]]+)\]", re.I)
 PLACEHOLDER_TAG_RE = re.compile(r"\[(?:PLACEHOLDER|INSERT|TBD)[^\]]+\]", re.I)
 GENERIC_VERIFY_RE = re.compile(r"\[VERIFY\]", re.I)

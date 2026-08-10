@@ -24,7 +24,7 @@ from app.services.proposal_chat_structure import (
 
 logger = logging.getLogger(__name__)
 
-ChatIntent = Literal["advisory", "single_edit", "multi_patch", "none"]
+ChatIntent = Literal["advisory", "single_edit", "multi_patch", "structure", "none"]
 
 
 def _format_recent_chat(
@@ -80,7 +80,14 @@ async def _classify_chat_edit_intent_once(
                         '- "multi_patch" — user wants you to APPLY fixes now across several '
                         "sections (or the whole proposal), including 'apply these fixes', "
                         "'patch-wise', 'rebuild cost and clean leftovers', etc.\n"
+                        '- "structure" — user wants to ADD, DELETE, or RENAME sidebar '
+                        "sections/tabs (new H2, new bio tab, new case study tab, split content "
+                        "into its own section, delete a tab). Any phrasing counts — e.g. "
+                        "'add section new name Planning and methodology', 'create a case study "
+                        "for Bend', 'add another team bio', 'remove section 2.1'.\n"
                         '- "none" — unrelated / cannot act.\n'
+                        "CRITICAL: add/create/delete sidebar section/tab/H2/bio/case study → "
+                        "structure (never single_edit on the open tab).\n"
                         "CRITICAL: revise/patch/fix/improve THIS or THAT section/tab/part/"
                         "paragraph → ALWAYS single_edit (never multi_patch). multi_patch ONLY "
                         "when they clearly ask to change multiple sections or the whole "
@@ -96,7 +103,7 @@ async def _classify_chat_edit_intent_once(
                         "For multi_patch and whole-proposal advisory, primarySectionId may "
                         "be null.\n\n"
                         "Return JSON:\n"
-                        '{"intent":"advisory|single_edit|multi_patch|none",'
+                        '{"intent":"advisory|single_edit|multi_patch|structure|none",'
                         '"primarySectionId":"id or null","reason":"short"}'
                     ),
                 },
@@ -119,7 +126,13 @@ async def _classify_chat_edit_intent_once(
         if not isinstance(raw, dict):
             return {"intent": "none", "reason": "bad classifier payload"}
         intent = str(raw.get("intent") or "none").strip()
-        if intent not in {"advisory", "single_edit", "multi_patch", "none"}:
+        if intent not in {
+            "advisory",
+            "single_edit",
+            "multi_patch",
+            "structure",
+            "none",
+        }:
             intent = "none"
         return {
             "intent": intent,

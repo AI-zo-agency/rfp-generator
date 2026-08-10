@@ -14,6 +14,44 @@ from app.services.kb_rag_retrieve import (
 )
 
 
+class BuildRetrievalQuestionTests(unittest.TestCase):
+    def test_build_retrieval_question_from_tourism_section(self) -> None:
+        from app.services.kb_rag_retrieve import build_retrieval_question_from_entry
+
+        q = build_retrieval_question_from_entry(
+            section_id="rfp-sec-3",
+            section_title="Examples of Tourism or Destination Marketing Social Media Accounts Managed",
+            required_assets=[
+                "tourism destination social media accounts managed",
+                "measurable overnight visitation increases",
+            ],
+            planner_queries=[
+                "Find zö agency case studies for tourism destination social media with KPIs",
+            ],
+            why_needed="RFP requires destination account management with conversion metrics",
+            rfp_client="Island County Tourism",
+        )
+        self.assertIn("tourism", q.casefold())
+        self.assertIn("case stud", q.casefold())
+        self.assertIn("03_CS", q)
+        self.assertIn("Island County", q)
+
+
+class ContextBlocksTests(unittest.TestCase):
+    def test_context_blocks_to_hits(self) -> None:
+        from app.services.kb_rag_retrieve import context_blocks_to_hits
+
+        ctx = (
+            "### 03_CS_AllCaseStudies.pdf\n"
+            "San Francisco Travel Summer of Love KPIs\n\n"
+            "### 06_WON_Umatilla.pdf\n"
+            "More content"
+        )
+        hits = context_blocks_to_hits(ctx)
+        self.assertEqual(len(hits), 2)
+        self.assertIn("San Francisco Travel", hits[0]["content"])
+
+
 class ExpandKbQueriesTests(unittest.TestCase):
     def test_uses_question_as_is_no_static_topic_pack(self) -> None:
         queries = expand_kb_queries("what were KPIs for TORRENT LABORATORY")

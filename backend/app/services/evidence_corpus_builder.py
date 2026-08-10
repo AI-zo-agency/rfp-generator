@@ -24,6 +24,11 @@ async def build_shared_evidence_corpus(
     a shared base; JIT remains a miss-path behind ``jit_retrieval_on_miss``.
     """
     entries = list(plan.writing.retrieval_plan.entries)[:max_sections]
+    title_by_id = {
+        p.section_id: p.title
+        for p in (plan.writing.section_plans.plans or [])
+        if p.section_id
+    }
     by_key: dict[str, EvidenceItem] = {}
     start_index = 1
 
@@ -33,6 +38,7 @@ async def build_shared_evidence_corpus(
                 entry,
                 rfp_client=rfp_client,
                 start_index=start_index,
+                section_title=title_by_id.get(entry.section_id, ""),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(

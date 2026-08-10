@@ -68,6 +68,39 @@ class ChatStructureTests(unittest.IsolatedAsyncioTestCase):
         assert name is not None
         self.assertIn("San Leandro", name)
 
+    def test_sync_case_study_cross_references_updates_stale_pointers(self) -> None:
+        from app.services.proposal_chat_structure import sync_case_study_cross_references
+
+        old_work = _sec(
+            "section-3-work-01",
+            "3.1 — City of Umatilla Digital Campaign 2006",
+            "Umatilla body",
+        )
+        new_work = old_work.model_copy(
+            update={
+                "title": "3.1 — San Francisco Travel: Summer of Love",
+                "content": "SF Travel body",
+            }
+        )
+        tourism = _sec(
+            "rfp-tourism",
+            "Examples of Tourism Social Media",
+            (
+                "CITY OF UMATILLA ROCK THE LOCK MUSIC FESTIVAL\n\n"
+                "See 3.1, City of Umatilla Rock the Lock Music Festival in Our Work "
+                "for the full case narrative.\n"
+            ),
+        )
+        sections, n = sync_case_study_cross_references(
+            [new_work, tourism],
+            changed=new_work,
+            old_title=old_work.title,
+        )
+        self.assertEqual(n, 1)
+        updated = next(s for s in sections if s.id == "rfp-tourism")
+        self.assertIn("San Francisco Travel", updated.content or "")
+        self.assertNotIn("Umatilla Rock the Lock", updated.content or "")
+
     def test_placeholder_detection(self) -> None:
         self.assertTrue(_is_placeholder_member_name(None))
         self.assertTrue(_is_placeholder_member_name("[VERIFY: team member 2]"))
@@ -512,7 +545,7 @@ class AddBioHeuristicTests(unittest.TestCase):
         self.assertEqual(plan.edit_section_id, "section-2-bio-ron")
 
 
-class AddGenericSectionTests(unittest.TestCase):
+class AddGenericSectionTests(unittest.IsolatedAsyncioTestCase):
     def test_is_add_section_intent_for_custom_tab(self) -> None:
         from app.services.proposal_chat_structure import is_add_section_intent
 
@@ -522,6 +555,52 @@ class AddGenericSectionTests(unittest.TestCase):
             )
         )
         self.assertFalse(is_add_section_intent("Fill [VERIFY] tags from KB only."))
+
+    def test_custom_title_not_rejected_when_member_case_null(self) -> None:
+        """Regression: null memberName/caseStudyName used to trip _is_bogus_structure_title(None)."""
+        from app.services.proposal_chat_structure import _is_bogus_structure_title
+
+        self.assertFalse(_is_bogus_structure_title("Planning and Methodology"))
+        self.assertTrue(_is_bogus_structure_title(None))
+        self.assertTrue(_is_bogus_structure_title(""))
+
+    async def test_plan_keeps_custom_add_with_null_member_case_names(self) -> None:
+        """Island County bug: LLM returned add_sections + title, then guard dropped it."""
+        from app.services.proposal_chat_structure import plan_chat_structure_action
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[_sec("section-1-who-we-are", "1.1 — Who We Are", "who we are")],
+            updatedAt="2026-08-10T00:00:00+00:00",
+        )
+        llm_plan = StructurePlan(
+            action="add_sections",
+            additions=[
+                StructureAddition(
+                    kind="custom",
+                    title="Planning and Methodology",
+                    insertAfterSectionId="section-1-who-we-are",
+                    draftHint="Draft planning and methodology for this RFP.",
+                )
+            ],
+            assistantNote="Adding Planning and Methodology as a new sidebar tab.",
+        )
+        with patch(
+            "app.services.proposal_chat_structure._structure_plan_llm_once",
+            new=AsyncMock(return_value=llm_plan),
+        ):
+            plan = await plan_chat_structure_action(
+                draft=draft,
+                user_message="Add section new name Planning and methodology",
+                focus_section_id="section-1-who-we-are",
+                rfp_title="Island County Tourism",
+                rfp_client="Island County",
+                rfp_context="",
+                chat_intent="structure",
+            )
+        self.assertEqual(plan.action, "add_sections")
+        self.assertEqual(len(plan.additions), 1)
+        self.assertEqual(plan.additions[0].title, "Planning and Methodology")
 
     def test_generic_add_creates_new_custom_tab(self) -> None:
         from app.services.proposal_chat_structure import _heuristic_add_generic_section_plan
@@ -566,6 +645,36 @@ class AddGenericSectionTests(unittest.TestCase):
         self.assertEqual(coerced.action, "add_sections")
         self.assertEqual(coerced.additions[0].title, "Staffing Plan")
         self.assertEqual(coerced.deletions, [])
+
+    def test_section_name_phrasing_extracts_title(self) -> None:
+        from app.services.proposal_chat_structure import (
+            _extract_generic_section_title_from_add_message,
+            _heuristic_add_generic_section_plan,
+        )
+
+        for msg in (
+            "add new section name Planning and methodology",
+            "Add section new name Planning and methodology",
+        ):
+            with self.subTest(msg=msg):
+                self.assertEqual(
+                    _extract_generic_section_title_from_add_message(msg),
+                    "Planning and methodology",
+                )
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[_sec("s1", "1.1 — Who We Are")],
+            updatedAt="2026-07-22T00:00:00+00:00",
+        )
+        plan = _heuristic_add_generic_section_plan(
+            "Add section new name Planning and methodology",
+            draft,
+            focus_section_id="s1",
+        )
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.action, "add_sections")
+        self.assertEqual(plan.additions[0].title, "Planning and methodology")
 
 
 class AttestationInPlaceTests(unittest.TestCase):
@@ -698,6 +807,18 @@ class SplitSectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Ron leads staffing", source.content or "")
         self.assertEqual(len(updated.sections), 2)
         self.assertIn("Moved", message)
+
+    def test_in_place_kb_fetch_on_named_case_study_in_open_tab(self) -> None:
+        from app.services.proposal_chat_structure import _is_in_place_kb_or_verify_edit
+
+        msg = "here San Francisco Travel case study is empty fetch that"
+        self.assertTrue(_is_in_place_kb_or_verify_edit(msg))
+
+    def test_replace_case_study_still_not_in_place(self) -> None:
+        from app.services.proposal_chat_structure import _is_in_place_kb_or_verify_edit
+
+        msg = "replace Hampton Lumber case study with Bend from KB"
+        self.assertFalse(_is_in_place_kb_or_verify_edit(msg))
 
 
 if __name__ == "__main__":

@@ -640,6 +640,7 @@ async def improve_section_endpoint(
                 ],
                 proposal_wide=body.proposal_wide,
                 apply_fix=body.apply_fix,
+                improve_section_pinned=body.improve_section_pinned,
             )
         )
     except ProposalError as exc:

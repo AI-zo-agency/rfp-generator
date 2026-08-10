@@ -179,3 +179,51 @@ def test_resolve_prefers_model_instruction_when_present():
     )
     assert fix is not None
     assert "Rich Rosenthal phone" in fix.instruction
+
+
+_RFP_FIT_AUDIT = """
+**Not the best fit for this RFP**
+
+The City of Umatilla Rock the Lock Music Festival case study is not well-suited for this RFP.
+
+What the RFP asks for:
+- Examples of tourism or destination marketing social media accounts managed (ongoing account management)
+- Demonstrated experience with overnight visitation increases
+
+What this case study shows:
+- A compressed two-week festival launch campaign (not ongoing social media management)
+
+**Recommendation:**
+Replace this case study with an example that shows ongoing social media account management
+for a tourism destination. If no qualifying example exists, flag this section for Sonja review.
+"""
+
+
+def test_resolve_rfp_fit_fallback_uses_replace_not_contact_scrub():
+    draft = ProposalDraft(
+        rfpId="r1",
+        updatedAt="2026-08-10T00:00:00Z",
+        sections=[
+            ProposalSection(
+                id="rfp-tourism-sm",
+                title="Examples of Tourism or Destination Marketing Social Media Accounts Managed",
+                content="Umatilla…",
+            ),
+            ProposalSection(
+                id="section-3-work-umatilla",
+                title="3.1 — City of Umatilla Digital Campaign",
+                content="Rock the Lock…",
+            ),
+        ],
+    )
+    fix = resolve_advisory_suggested_fix(
+        {"reply": _RFP_FIT_AUDIT, "hasFix": False},
+        fallback_section_id="rfp-tourism-sm",
+        section_title="Examples of Tourism or Destination Marketing Social Media Accounts Managed",
+        draft=draft,
+    )
+    assert fix is not None
+    assert fix.section_id == "rfp-tourism-sm"
+    assert "Replace weak example" in fix.summary
+    assert "KB-backed tourism" in fix.instruction
+    assert "invented contacts" not in fix.instruction.casefold()

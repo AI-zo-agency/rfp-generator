@@ -79,6 +79,38 @@ class MaskUnmaskEdgeCases(unittest.TestCase):
         self.assertEqual(len(originals), 2)
         self.assertEqual(unmask_manual_fill_tags(masked, originals), text)
 
+    def test_section_draft_stub_is_not_protected_on_rewrite(self) -> None:
+        from app.services.proposal_manual_flags import (
+            is_section_draft_stub_manual_fill,
+            strip_section_draft_stub_manual_fills,
+        )
+        from app.services.proposal_section_editor import _mask_manual_fill_for_rewrite
+
+        stub = (
+            "[MANUAL FILL: Draft this RFP-required section — "
+            "Understanding of Island County and Tourism Context]"
+        )
+        self.assertTrue(is_section_draft_stub_manual_fill(stub))
+        body = (
+            f"## Understanding of Island County and Tourism Context\n\n{stub}\n\n"
+            "RFP-required outline:\n- Whidbey Island\n"
+        )
+        cleaned = strip_section_draft_stub_manual_fills(body)
+        self.assertNotIn("MANUAL FILL", cleaned)
+        self.assertIn("Whidbey Island", cleaned)
+
+        masked, originals = _mask_manual_fill_for_rewrite(body)
+        self.assertEqual(originals, [])
+        self.assertNotIn("«MFILL_", masked)
+        self.assertNotIn("Draft this RFP-required section", masked)
+
+        # Real fact placeholders still protected.
+        mixed = body + "\nAddress: [MANUAL FILL: street]\n"
+        masked2, originals2 = _mask_manual_fill_for_rewrite(mixed)
+        self.assertEqual(originals2, ["[MANUAL FILL: street]"])
+        self.assertIn("«MFILL_0»", masked2)
+        self.assertNotIn("Draft this RFP-required section", masked2)
+
     def test_tags_inside_table_cells(self) -> None:
         text = (
             "| Field | Value |\n"

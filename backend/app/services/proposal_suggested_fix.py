@@ -121,6 +121,45 @@ def reply_offers_actionable_fixes(reply: str) -> bool:
     return bool(_RECOMMENDATION_REPLY_RE.search(text))
 
 
+_RFP_FIT_AUDIT_RE = re.compile(
+    r"(?is)\b("
+    r"not\s+(?:the\s+)?best\s+fit|not\s+well[- ]suited|"
+    r"replace\s+this\s+case\s+study|weak\s+fit|"
+    r"does\s+not\s+(?:meet|match)\s+(?:the\s+)?rfp|"
+    r"one-time\s+(?:event|festival)\b.{0,40}\bcampaign|"
+    r"ongoing\s+(?:social\s+media|destination)\b.{0,40}\bmanagement"
+    r")\b"
+)
+
+
+def reply_recommends_rfp_fit_replacement(reply: str) -> bool:
+    """True when audit says an example is a weak RFP fit and should be swapped."""
+    return bool(_RFP_FIT_AUDIT_RE.search(reply or ""))
+
+
+def build_rfp_fit_replace_instruction(
+    *,
+    section_title: str,
+    reply: str,
+) -> str:
+    """Replace weak tourism/event examples on the open RFP section from KB evidence."""
+    title = (section_title or "this section").strip() or "this section"
+    audit = re.sub(r"\s+", " ", (reply or "").strip())[:1800]
+    return (
+        f"Edit ONLY the sidebar section titled “{title}”. "
+        "The audit says at least one example here is a weak fit for the RFP. "
+        "Using PACKED KB EVIDENCE from this turn:\n"
+        "1) Replace or rewrite weak event/festival examples with a better-matching "
+        "KB-backed tourism or destination case study (strategy + KPIs from evidence).\n"
+        "2) Remove cross-refs to misfit Our Work pieces when this section should "
+        "stand on its own.\n"
+        "3) Keep [VERIFY] only for fields truly missing from KB.\n"
+        "4) Do NOT invent overnight visitation, conversion, or visitor-spending metrics.\n"
+        "5) Preserve entries the audit marked as correct or well-evidenced.\n\n"
+        f"Audit to follow:\n{audit}"
+    )
+
+
 def build_safe_scrub_instruction(
     *,
     section_title: str,
@@ -173,10 +212,19 @@ def resolve_advisory_suggested_fix(
         hit = next((s for s in draft.sections if s.id == fallback_section_id), None)
         title = (hit.title if hit else "") or ""
 
+    if reply_recommends_rfp_fit_replacement(reply):
+        instruction = build_rfp_fit_replace_instruction(
+            section_title=title, reply=reply
+        )
+        summary = "Replace weak example with KB-backed tourism case study"
+    else:
+        instruction = build_safe_scrub_instruction(section_title=title, reply=reply)
+        summary = "Apply safe scrub from audit (no invented contacts)"
+
     synthesized = SuggestedFix(
         section_id=fallback_section_id,
-        instruction=build_safe_scrub_instruction(section_title=title, reply=reply),
-        summary="Apply safe scrub from audit (no invented contacts)",
+        instruction=instruction,
+        summary=summary,
         section_title=title,
     )
     return validate_suggested_fix_section(synthesized, draft)

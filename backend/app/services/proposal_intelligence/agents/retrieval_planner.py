@@ -13,17 +13,26 @@ AGENT = "retrieval_planner"
 
 _SYSTEM = """Retrieval Planner. Plan what each section must retrieve in Phase 3.
 Do NOT fetch documents. Do NOT include evidence excerpts or content fields.
+
+Each entry's ``queries`` must be ONE natural-language question per section — the same
+style a human would type into the KB QA loop. Good examples:
+- "Find zö agency tourism destination social media case studies with KPIs and results"
+- "San Francisco Travel Summer of Love campaign strategy and measurable results"
+- "03_CS case studies for destination marketing and visitor conversion metrics"
+
+Bad (too fragmentary): "social media KPIs", "tourism accounts", "zö agency experience"
+
 Return JSON only:
 {
   "entries": [
     {
       "sectionId": "rfp-sec-1",
-      "requiredAssets": ["municipal website case study"],
-      "queries": ["municipality website redesign accessibility"],
+      "requiredAssets": ["tourism destination social media accounts managed"],
+      "queries": ["Find zö agency case studies for tourism destination social media accounts with before/after engagement KPIs"],
       "priority": "required|high|medium",
       "constraints": ["no marketing fluff"],
       "expectedSources": ["case_studies", "methodology"],
-      "whyNeeded": "string"
+      "whyNeeded": "RFP requires examples with measurable visitation/conversion metrics"
     }
   ],
   "confidence": 0.0
@@ -66,13 +75,22 @@ async def run_retrieval_planner(
         logger.warning("%s validation failed: %s", AGENT, exc)
         retrieval = RetrievalPlan(confidence=0.2)
     if not retrieval.entries and plan.writing.section_plans.plans:
+        from app.services.kb_rag_retrieve import build_retrieval_question_from_entry
+
         retrieval = RetrievalPlan(
             entries=[
                 {
                     "sectionId": p.section_id,
                     "requiredAssets": list(p.evidence_needed) or [p.retrieval_goal or p.title],
                     "queries": [
-                        f"zö agency {p.title} {plan.opportunity.understanding.client}"[:200]
+                        build_retrieval_question_from_entry(
+                            section_id=p.section_id,
+                            section_title=p.title,
+                            required_assets=list(p.evidence_needed) or [p.retrieval_goal or p.title],
+                            planner_queries=[],
+                            why_needed=p.retrieval_goal or p.purpose or "",
+                            rfp_client=plan.opportunity.understanding.client or "",
+                        )
                     ],
                     "priority": "required",
                     "expectedSources": ["company_facts", "case_studies"],
