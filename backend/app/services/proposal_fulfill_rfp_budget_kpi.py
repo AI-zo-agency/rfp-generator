@@ -11,9 +11,11 @@ from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSe
 from app.models.rfp import RfpRecord
 from app.services.proposal_budget_content import (
     find_budget_section_index,
+    official_pricing_form_is_filled,
     render_budget_markdown,
     reshape_budget_for_rfp_form,
     rfp_wants_blended_pricing_form,
+    section_looks_like_official_pricing_form,
 )
 from app.services.proposal_budget_editor import run_budget_editor_pass
 from app.services.proposal_budget_sync import collect_prose_arithmetic_violations
@@ -176,8 +178,40 @@ _NON_BUDGET_HANDOFF_ON_PRICING_RE = re.compile(
     r"manuscript_locks|primary\s+contact\s+lock|"
     r"deterministic\.manuscript_locks|"
     r"names?\s+sonja|sonja\s+anderson\s+as\s+primary"
-    r")[^\]]*\]"
+    r")[^\]]*\]\s*"
 )
+
+_CONTACT_NAME_PLACEHOLDER_RE = re.compile(
+    r"\[(?:Contact\s+Name|CONTACT\s+PERSON|Insert\s+Contact\s+Name)\]",
+    re.I,
+)
+_CONTACT_EMAIL_PLACEHOLDER_RE = re.compile(
+    r"\[(?:Contact\s+Email|CONTACT\s+EMAIL|Insert\s+Contact\s+Email)\]",
+    re.I,
+)
+
+
+def strip_non_budget_handoffs_from_pricing(content: str) -> str:
+    """Remove contact-lock MANUAL FILL tags that were wrongly stamped on fee forms."""
+    text = _NON_BUDGET_HANDOFF_ON_PRICING_RE.sub("", content or "")
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def fill_pricing_form_contact_placeholders(
+    content: str,
+    *,
+    contact_name: str = "",
+    contact_email: str = "",
+) -> str:
+    """Fill buyer-form [Contact Name] / [Contact Email] without rewriting the form."""
+    text = content or ""
+    name = (contact_name or "").strip()
+    email = (contact_email or "").strip()
+    if name:
+        text = _CONTACT_NAME_PLACEHOLDER_RE.sub(name, text)
+    if email:
+        text = _CONTACT_EMAIL_PLACEHOLDER_RE.sub(email, text)
+    return text
 
 
 def budget_manuscript_needs_restore(
@@ -331,6 +365,60 @@ async def run_fulfill_budget_scan(
     sections = list(draft.sections)
     idx = find_budget_section_index(sections)
     before = sections[idx].content if idx is not None else ""
+    target = sections[idx] if idx is not None else None
+    is_filled_official_form = bool(
+        target is not None
+        and section_looks_like_official_pricing_form(target)
+        and official_pricing_form_is_filled(before or "")
+    )
+
+    # Official RFQ pricing forms: never wipe with render_budget_markdown. Only
+    # strip wrongful contact-lock tags and fill [Contact Name]/[Contact Email].
+    if is_filled_official_form and idx is not None:
+        cleaned = strip_non_budget_handoffs_from_pricing(before or "")
+        locks = research.manuscript_locks if research else None
+        contact_name = (locks.primary_contact_name if locks else "") or ""
+        contact_email = ""
+        cleaned = fill_pricing_form_contact_placeholders(
+            cleaned, contact_name=contact_name, contact_email=contact_email
+        )
+        if cleaned != (before or "").strip():
+            sections[idx] = sections[idx].model_copy(
+                update={"content": cleaned, "status": "generated"}
+            )
+            draft = draft.model_copy(
+                update={
+                    "sections": sections,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            meta["budgetChanged"] = True
+            logs.append(
+                "Budget: preserved official Pricing Form — cleaned handoff tags / "
+                "filled contact placeholders (no re-render)."
+            )
+        else:
+            logs.append(
+                "Budget: official Pricing Form already filled — left unchanged."
+            )
+        # Still allow attachment / inverse-cost notes on a separate narrative
+        # budget tab if one exists; never patch notes onto the official form body
+        # via find_budget_section_index when it still points at the form.
+        excerpt = evaluation_and_kpi_excerpt(rfp_text)
+        facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
+        # Only patch when find_budget points at a non-form narrative section.
+        idx2 = find_budget_section_index(draft.sections)
+        if idx2 is not None and not section_looks_like_official_pricing_form(
+            draft.sections[idx2]
+        ):
+            draft, patch_logs = patch_budget_section_for_rfp(
+                draft, rfp_text=rfp_text, facts=facts
+            )
+            logs.extend(patch_logs)
+            if patch_logs:
+                meta["budgetChanged"] = True
+        return draft, research, logs, meta
+
     prose_broken = bool(
         idx is not None and collect_prose_arithmetic_violations(before or "")
     )

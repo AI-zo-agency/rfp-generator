@@ -505,6 +505,9 @@ def draft_already_covers_component(
             "cost proposal form",
             "schedule of fees",
             "pricing form",
+            "request for qualifications pricing",
+            "rfq pricing",
+            "quotation form",
         ),
         "exemplar_agreement": (
             "exemplar",

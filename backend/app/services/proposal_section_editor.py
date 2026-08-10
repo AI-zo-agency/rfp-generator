@@ -5699,10 +5699,13 @@ async def improve_proposal_section(
             chat_intent, scope_reason = coerce_chat_intent_for_scope(
                 chat_intent, raw_user_message
             )
-            # Improve pin = edit THIS tab. Only keep outline routing when the
-            # user clearly asked to add a sidebar section.
-            if chat_intent == "structure" and is_add_section_intent(raw_user_message):
+            # Improve pin = edit THIS tab — unless the user clearly wants a NEW
+            # sidebar section/tab (including "add one more section for case studies").
+            if chat_intent == "structure" or is_add_section_intent(raw_user_message):
+                if chat_intent != "structure":
+                    chat_intent = "structure"
                 intent_degraded = bool(intent_info.get("degraded"))
+                scope_reason = "add_section_overrides_improve_pin"
             else:
                 chat_intent = "single_edit"
                 intent_info = {

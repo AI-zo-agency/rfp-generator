@@ -209,7 +209,7 @@ def budget_section_score(title: str) -> int:
     if re.search(
         r"\b("
         r"compliance|general\s+requirements|records?\s+retention|"
-        r"acknowledgements?|cover\s+letter|case\s+stud|references?"
+        r"acknowledgements?|cover\s+letter|case\s*stud|references?"
         r")\b",
         t,
     ) and not _DEDICATED_BUDGET_TITLE_RE.search(t):
@@ -235,15 +235,71 @@ def budget_section_score(title: str) -> int:
     return score
 
 
+_OFFICIAL_PRICING_FORM_TITLE_RE = re.compile(
+    r"(?i)\b("
+    r"pricing\s+proposal\s+form|quotation\s+(?:\/\s*)?pricing|"
+    r"request\s+for\s+qualifications\s+pricing|rfq\s+pricing|"
+    r"cost\s+proposal\s+form|schedule\s+of\s+fees"
+    r")\b"
+)
+_OFFICIAL_PRICING_FORM_BODY_RE = re.compile(
+    r"(?is)section\s+i[:\s].{0,40}contact|"
+    r"grand\s+total\s*\(\s*in\s+words\s*\)|"
+    r"contact\s+person\s*:|"
+    r"rfq\s+number\s*:"
+)
+
+
+def section_looks_like_official_pricing_form(section: ProposalSection) -> bool:
+    """Buyer RFQ / quotation form tab — must not be wiped by Budget & Pricing render."""
+    title = section.title or ""
+    content = section.content or ""
+    if _OFFICIAL_PRICING_FORM_TITLE_RE.search(title):
+        return True
+    if _OFFICIAL_PRICING_FORM_BODY_RE.search(content):
+        return True
+    return False
+
+
+def official_pricing_form_is_filled(content: str) -> bool:
+    """True when the form already has dollars (do not LLM-redraft or re-render over it)."""
+    text = (content or "").strip()
+    if len(text) < 120:
+        return False
+    return bool(re.search(r"\$\s*[\d,]+", text))
+
+
 def find_budget_section_index(sections: list[ProposalSection]) -> int | None:
+    """Prefer narrative Budget & Pricing over a filled official RFQ pricing form.
+
+    Complete & Clean used to treat "Request for Qualifications Pricing Form" as the
+    budget tab and overwrite a finished buyer form with generic Proposed Investment
+    markdown (or trigger restore/reshape). Prefer a dedicated Budget section when
+    both exist; never score a filled official form as the sole write target when a
+    narrative budget sibling is present.
+    """
     best_idx: int | None = None
     best_score = 0
+    filled_form_idx: int | None = None
     for i, section in enumerate(sections):
         score = budget_section_score(section.title)
+        if score <= 0:
+            continue
+        if section_looks_like_official_pricing_form(section) and official_pricing_form_is_filled(
+            section.content or ""
+        ):
+            # Keep as fallback only — prefer non-form budget tabs.
+            if filled_form_idx is None or score > budget_section_score(
+                sections[filled_form_idx].title
+            ):
+                filled_form_idx = i
+            continue
         if score > best_score:
             best_score = score
             best_idx = i
-    return best_idx if best_score > 0 else None
+    if best_idx is not None:
+        return best_idx
+    return filled_form_idx
 
 
 
@@ -1323,11 +1379,20 @@ def reshape_budget_for_rfp_form(
     *,
     rfp_text: str,
 ) -> ProposalDraft | None:
-    """If THIS RFP wants a 3-rate form, rewrite Budget to lead with that form."""
+    """If THIS RFP wants a 3-rate form, rewrite Budget to lead with that form.
+
+    Never overwrite an already-filled official RFQ / Quotation pricing form tab —
+    that is how Complete & Clean wiped DuPage contact fields into [Contact Name].
+    """
     if not budget or not rfp_wants_blended_pricing_form(rfp_text):
         return None
     idx = find_budget_section_index(draft.sections)
     if idx is None:
+        return None
+    target = draft.sections[idx]
+    if section_looks_like_official_pricing_form(target) and official_pricing_form_is_filled(
+        target.content or ""
+    ):
         return None
     updated_budget = budget.model_copy(update={"budget_format": "blended_rate_form"})
     content = render_budget_markdown(updated_budget, rfp_text=rfp_text)
@@ -1339,6 +1404,10 @@ def reshape_budget_for_rfp_form(
     for i, section in enumerate(sections):
         title = (section.title or "").casefold()
         if section.id == "rfp-closing-pricing-form" or "pricing proposal form" in title:
+            if section_looks_like_official_pricing_form(section) and official_pricing_form_is_filled(
+                section.content or ""
+            ):
+                continue
             sections[i] = section.model_copy(
                 update={"content": form_md, "status": "generated"}
             )
@@ -1353,7 +1422,12 @@ async def incorporate_budget_into_draft(
     *,
     rfp_text: str = "",
 ) -> ProposalDraft | None:
-    """Write generated budget into the best-matching proposal section (or append one)."""
+    """Write generated budget into the best-matching proposal section (or append one).
+
+    Never overwrite a filled official RFQ / Quotation Pricing Form — Phase 3.5 /
+    Continue Proposal was wiping DuPage contact fields by treating that tab as
+    the Budget & Pricing write target.
+    """
     draft = await aget_proposal_draft(rfp_id)
     if not draft:
         return None
@@ -1364,9 +1438,41 @@ async def incorporate_budget_into_draft(
     idx = find_budget_section_index(sections)
 
     if idx is not None:
-        sections[idx] = sections[idx].model_copy(
-            update={"content": content, "status": "generated"}
-        )
+        target = sections[idx]
+        if section_looks_like_official_pricing_form(target) and official_pricing_form_is_filled(
+            target.content or ""
+        ):
+            # Keep the buyer form; write narrative into Budget & Pricing sibling.
+            narrative_idx = next(
+                (
+                    i
+                    for i, s in enumerate(sections)
+                    if not section_looks_like_official_pricing_form(s)
+                    and budget_section_score(s.title or "") >= 4
+                ),
+                None,
+            )
+            if narrative_idx is not None:
+                sections[narrative_idx] = sections[narrative_idx].model_copy(
+                    update={"content": content, "status": "generated"}
+                )
+            else:
+                sections.append(
+                    ProposalSection(
+                        id="section-budget-pricing",
+                        title="Budget & Pricing",
+                        content=content,
+                        status="generated",
+                        source="generated",
+                        mode="write",
+                        word_target=900,
+                        required=True,
+                    )
+                )
+        else:
+            sections[idx] = sections[idx].model_copy(
+                update={"content": content, "status": "generated"}
+            )
     else:
         sections.append(
             ProposalSection(

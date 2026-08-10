@@ -965,8 +965,8 @@ def is_add_section_intent(text: str) -> bool:
         ):
             return False
     generic_patterns = (
-        r"(?is)\b(?:add|create|insert|make|include)\s+"
-        r"(?:a\s+)?(?:new\s+)?(?:another\s+)?(?:more\s+)?"
+        # "add one more section for case studies" / "add a new sidebar tab"
+        r"(?is)\b(?:add|create|insert|make|include)\b.{0,50}\b"
         r"(?:sidebar\s+)?(?:section|tab|h2)\b",
         r"(?is)\b(?:add|create|insert)\s+(?:a\s+)?(?:new\s+)?"
         r"(?:section\s+)?(?:for|titled|called|named|name)\b",
@@ -1507,6 +1507,33 @@ async def plan_chat_structure_action(
     LLM-only: no regex pre-routing or regex fallbacks. Retries once on failure.
     Post-plan safety coerce (VERIFY / MANUAL FILL / bogus titles) remains.
     """
+    # Unnamed "add another case study" — ask which KB client before an LLM call
+    # that often times out mid-reload / during Continue Proposal.
+    msg_cf = user_message.casefold()
+    if (
+        "case stud" in msg_cf
+        and any(w in msg_cf for w in ("add", "create", "another", "more", "include"))
+        and not _extract_case_study_name_from_add_message(user_message)
+    ):
+        existing = [
+            (s.title or "").strip()
+            for s in draft.sections
+            if (s.id or "").startswith("section-3-")
+            or "case" in (s.title or "").casefold()
+        ]
+        already = (
+            f" Already in the draft: {', '.join(existing[:6])}." if existing else ""
+        )
+        return StructurePlan(
+            action="clarify",
+            clarifyQuestion=(
+                "I can add another Our Work case study from the KB."
+                f"{already} "
+                "Which client/project should I add "
+                "(e.g. Recovery Network of Oregon, Deschutes Brewery)?"
+            ),
+        )
+
     focus = next((s for s in draft.sections if s.id == focus_section_id), None)
     plan_user_message = user_message.strip()
     if outline_hint:
@@ -1551,6 +1578,31 @@ async def plan_chat_structure_action(
             if attempt == 0:
                 await asyncio.sleep(1.0)
                 continue
+            # Useful fallback — never strand "add a case study" on a generic error.
+            msg_cf = user_message.casefold()
+            if "case stud" in msg_cf and any(
+                w in msg_cf for w in ("add", "create", "another", "more", "include")
+            ):
+                existing = [
+                    (s.title or "").strip()
+                    for s in draft.sections
+                    if "3." in (s.title or "") or "case" in (s.title or "").casefold()
+                    or (s.id or "").startswith("section-3-")
+                ]
+                already = (
+                    f" Already in the draft: {', '.join(existing[:6])}."
+                    if existing
+                    else ""
+                )
+                return StructurePlan(
+                    action="clarify",
+                    clarifyQuestion=(
+                        "I can add another Our Work case study from the KB."
+                        f"{already} "
+                        "Which client/project should I add "
+                        "(e.g. Recovery Network of Oregon, Deschutes Brewery)?"
+                    ),
+                )
             return StructurePlan(
                 action="clarify",
                 clarifyQuestion=(

@@ -99,6 +99,17 @@ async def _repair_misstated_closing_sections(
             and any(k in title_cf for k in ("pricing", "quotation", "cost proposal", "fee"))
             and _FORM_REWRITE_RE.search(content)
         ):
+            from app.services.proposal_budget_content import (
+                official_pricing_form_is_filled,
+                section_looks_like_official_pricing_form,
+            )
+
+            # Never LLM-redraft a filled buyer RFQ / Quotation form — that wiped
+            # DuPage contact fields into [Contact Name] / [Contact Email].
+            if section_looks_like_official_pricing_form(section) and official_pricing_form_is_filled(
+                content
+            ):
+                continue
             comp = components.get("pricing_form")
             if comp:
                 new_content = await _draft_closing_section(
