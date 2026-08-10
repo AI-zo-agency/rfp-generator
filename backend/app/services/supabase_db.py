@@ -434,6 +434,63 @@ def list_google_doc_urls() -> dict[str, str]:
     return out
 
 
+def list_proposal_draft_summaries() -> list[dict[str, Any]]:
+    """Lightweight draft rows for dashboard current-proposals / latest draft."""
+    client = _get_client()
+    result = (
+        client.table("proposal_drafts")
+        .select("rfp_id,updated_at,payload")
+        .order("updated_at", desc=True)
+        .execute()
+    )
+    rows = _handle_response(result.data, context="list_proposal_draft_summaries")
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        sections = payload.get("sections") or []
+        if not isinstance(sections, list):
+            sections = []
+        filled = sum(
+            1
+            for s in sections
+            if isinstance(s, dict) and str(s.get("content") or "").strip()
+        )
+        updated = row.get("updated_at") or payload.get("updatedAt") or payload.get("updated_at") or ""
+        rfp_id = row.get("rfp_id")
+        if not rfp_id:
+            continue
+        out.append(
+            {
+                "rfp_id": str(rfp_id),
+                "updated_at": str(updated or ""),
+                "filled_count": filled,
+                "section_count": len(sections),
+            }
+        )
+    return out
+
+
+def touch_rfp_proposal_activity(
+    rfp_id: str, *, note: str, at: str | None = None
+) -> None:
+    """Bump RFP last_activity when a proposal draft is saved."""
+    now = at or datetime.now(timezone.utc).isoformat()
+    client = _get_client()
+    client.table("rfps").update(
+        {
+            "last_activity": now,
+            "last_activity_note": (note or "Proposal draft updated")[:250],
+        }
+    ).or_(f"id.eq.{rfp_id},external_id.eq.{rfp_id}").execute()
+
+
 def get_proposal_draft(rfp_id: str) -> ProposalDraft | None:
     client = _get_client()
     result = (
@@ -461,6 +518,19 @@ def save_proposal_draft(draft: ProposalDraft) -> None:
         {"rfp_id": draft.rfp_id, "payload": payload, "updated_at": now},
         on_conflict="rfp_id",
     ).execute()
+    sections = draft.sections or []
+    filled = sum(1 for s in sections if (s.content or "").strip())
+    if filled > 0:
+        try:
+            touch_rfp_proposal_activity(
+                draft.rfp_id,
+                note=f"Proposal draft updated — {filled}/{len(sections)} sections filled",
+                at=now,
+            )
+        except Exception as exc:
+            logger.warning(
+                "touch_rfp_proposal_activity failed for %s: %s", draft.rfp_id, exc
+            )
 
 
 def delete_proposal_draft(rfp_id: str) -> None:

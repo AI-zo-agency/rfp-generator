@@ -2485,30 +2485,19 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 
 
 def analysis_activity_note(analysis: GoNoGoAnalysis) -> str:
+    """Short pipeline note for dashboards — never dump the full summary."""
     if analysis.insufficient_data:
-        return (
-            "Go/No-Go analysis paused — add full RFP scope (PDF or description) and re-run. "
-            f"{analysis.summary}"
-        )[:500]
+        return "Go/No-Go paused — add RFP scope and re-run"
 
     label = {
         "go": "Go",
         "no_go": "No-Go",
-        "review": "Review (Go With Conditions)",
+        "review": "Review",
     }[analysis.recommendation or "review"]
     overall = compute_overall_go_score(analysis)
-    worth = analysis.worth_score
-    score_bits: list[str] = []
-    if worth is not None:
-        score_bits.append(f"Worth {worth}/5")
     if overall is not None:
-        score_bits.append(f"Overall {overall}/5")
-    score_label = ", ".join(score_bits) if score_bits else "—"
-    return (
-        f"Go/No-Go analysis complete — {label}. "
-        f"{score_label}. "
-        f"{analysis.summary}"
-    )[:500]
+        return f"Go/No-Go complete — {label} · {overall}/5"
+    return f"Go/No-Go complete — {label}"
 
 
 def _composite_go_score_for_note(analysis: GoNoGoAnalysis) -> float | None:

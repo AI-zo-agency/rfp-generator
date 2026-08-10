@@ -215,6 +215,18 @@ def save_proposal_draft(draft: ProposalDraft) -> None:
             """,
             (draft.rfp_id, draft.model_dump_json(by_alias=True), now),
         )
+        sections = draft.sections or []
+        filled = sum(1 for s in sections if (s.content or "").strip())
+        if filled > 0:
+            note = f"Proposal draft updated — {filled}/{len(sections)} sections filled"
+            conn.execute(
+                """
+                UPDATE rfps
+                SET last_activity = ?, last_activity_note = ?
+                WHERE id = ? OR external_id = ?
+                """,
+                (now, note[:250], draft.rfp_id, draft.rfp_id),
+            )
 
 
 async def aget_research_cache(rfp_id: str) -> ProposalResearchCache | None:
@@ -252,6 +264,45 @@ def list_google_doc_urls() -> dict[str, str]:
         url = payload.get("googleDocUrl") or payload.get("google_doc_url")
         if isinstance(url, str) and url.strip():
             out[str(row["rfp_id"])] = url.strip()
+    return out
+
+
+def list_proposal_draft_summaries() -> list[dict]:
+    """Return draft summaries sorted newest-first for the dashboard."""
+    if _use_supabase():
+        return _with_supabase_retry(
+            "list_proposal_draft_summaries",
+            lambda: sb.list_proposal_draft_summaries(),
+            retries=_SUPABASE_READ_RETRIES,
+        )
+    out: list[dict] = []
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT rfp_id, updated_at, payload FROM proposal_drafts ORDER BY updated_at DESC"
+        ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        sections = payload.get("sections") or []
+        if not isinstance(sections, list):
+            sections = []
+        filled = sum(
+            1
+            for s in sections
+            if isinstance(s, dict) and str(s.get("content") or "").strip()
+        )
+        out.append(
+            {
+                "rfp_id": str(row["rfp_id"]),
+                "updated_at": str(row["updated_at"] or ""),
+                "filled_count": filled,
+                "section_count": len(sections),
+            }
+        )
     return out
 
 

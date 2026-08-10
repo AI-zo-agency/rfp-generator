@@ -438,7 +438,7 @@ export function shouldRunPhase(
 }
 
 export function inProgressPhaseLabel(phase: PipelineInProgressPhase): string {
-  if (phase === FULFILL_SCAN_PHASE) return "Scan RFP — full update";
+  if (phase === FULFILL_SCAN_PHASE) return "Complete & clean draft";
   return PIPELINE_PHASE_LABELS[phase];
 }
 

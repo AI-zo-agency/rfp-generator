@@ -1398,7 +1398,7 @@ function ProposalDraftWorkspaceInner({
 
   const handleFulfillRfpGaps = useCallback(async () => {
     const scanOk = await confirm({
-      title: "Scan RFP & update proposal?",
+      title: "Complete & clean this draft?",
       description:
         "Improves this existing proposal in place (does not wipe and regenerate from scratch):\n\n" +
         "• Add missing closing / submission tabs\n" +
@@ -1411,7 +1411,7 @@ function ProposalDraftWorkspaceInner({
         "• KPI repairs, KB fact-check, optional [VERIFY] scrub\n" +
         "• Refresh pre-submit review\n\n" +
         "Does NOT invent facts, figures, or signature details. A saved version is stored first.",
-      confirmLabel: "Scan RFP",
+      confirmLabel: "Complete & clean",
       tone: "default",
     });
     if (!scanOk) {
@@ -1453,7 +1453,8 @@ function ProposalDraftWorkspaceInner({
       const summary = buildScanRfpSummary(fulfillReport);
       setScanSummary(summary);
       setScanSummaryExpanded(false);
-      setGapResolveNotice("Saved version available (Before Scan RFP).");
+      setGapResolveNotice("Saved version available (Before complete & clean).");
+
       setGenerateNotice(null);
       setGenerateError(null);
       setActiveTab("content");
@@ -1470,13 +1471,13 @@ function ProposalDraftWorkspaceInner({
         setScanSummary(null);
         setScanSummaryExpanded(false);
         setGenerateNotice(
-          "Scan RFP stopped — partial changes may be saved; check Sections → saved version menu."
+          "Complete & clean stopped — partial changes may be saved; check Sections → saved version menu."
         );
         setGenerateError(null);
         return;
       }
       const message =
-        error instanceof Error ? error.message : "Scan RFP failed";
+        error instanceof Error ? error.message : "Complete & clean failed";
       setScanSummary(null);
       setScanSummaryExpanded(false);
       setGapResolveError(message);
@@ -1985,7 +1986,7 @@ function ProposalDraftWorkspaceInner({
       if (activity) {
         return activity.length > 40 ? `${activity.slice(0, 39)}…` : activity;
       }
-      return "Scan RFP…";
+      return "Completing draft…";
     }
     if (canResumePipeline) return "Continue proposal";
     return "Generate proposal";
@@ -2351,7 +2352,7 @@ function ProposalDraftWorkspaceInner({
                   title={
                     (outline.snapshots?.length ?? 0) > 0
                       ? "Select a checkpoint to restore it as the live draft (confirm first). Compare updates after restore."
-                      : "Versions appear after chat improve, Scan RFP, or when a draft checkpoint is saved."
+                      : "Versions appear after chat improve, Complete & clean, or when a draft checkpoint is saved."
                   }
                 >
                   {(outline.snapshots?.length ?? 0) === 0 ? (
@@ -2646,17 +2647,17 @@ function ProposalDraftWorkspaceInner({
                     !outline.sections.some((s) => s.content.trim())
                   }
                   className="zo-btn !py-2 !px-3 !text-sm disabled:opacity-40"
-                  title="Scan this draft (no full regen): detect duplicate/restated tabs from content and remove them; add missing pieces; regen budget if hollow"
+                  title="Improve this draft in place: remove duplicate/restated tabs, add missing RFP pieces, regenerate budget if hollow"
                 >
                   {isFulfillingRfpGaps
-                    ? "Scanning RFP…"
-                    : "Scan RFP & add missing pieces"}
+                    ? "Completing draft…"
+                    : "Complete & clean draft"}
                 </button>
                 {outline.lastFulfillReport ? (
                   <button
                     type="button"
                     className="zo-btn secondary !py-2 !px-3 !text-sm"
-                    title="Re-open the last Scan RFP results panel"
+                    title="Re-open the last Complete & clean results panel"
                     onClick={() => {
                       setScanSummary(
                         buildScanRfpSummary(
@@ -2671,7 +2672,7 @@ function ProposalDraftWorkspaceInner({
                       });
                     }}
                   >
-                    {scanSummary ? "Scan results" : "Last scan results"}
+                    {scanSummary ? "Results" : "Last results"}
                   </button>
                 ) : null}
                 <button

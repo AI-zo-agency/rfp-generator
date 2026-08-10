@@ -2,14 +2,17 @@
 
 import { useMemo, useState } from "react";
 import type {
+  ActivityItem,
+  CurrentProposalItem,
   DashboardStats,
   RfpRecord,
 } from "@/types/rfp";
+import { ActivityFeed } from "./ActivityFeed";
+import { CurrentProposalsPanel } from "./CurrentProposalsPanel";
 import { HeroBanner } from "./HeroBanner";
 import { RecentRfpsTable } from "./RecentRfpsTable";
 import { RfpTable } from "./RfpTable";
 import { SummaryCards } from "./SummaryCards";
-import { KnowledgeBasePreview } from "./KnowledgeBasePreview";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
 import { FadeIn } from "./ui/FadeIn";
 
@@ -17,6 +20,9 @@ interface DashboardContentProps {
   rfps: RfpRecord[];
   allRfps: RfpRecord[];
   stats: DashboardStats;
+  recentActivity?: ActivityItem[];
+  currentProposals?: CurrentProposalItem[];
+  latestProposal?: CurrentProposalItem | null;
 }
 
 const sectionTabs = [
@@ -28,6 +34,9 @@ export function DashboardContent({
   rfps,
   allRfps,
   stats,
+  recentActivity = [],
+  currentProposals = [],
+  latestProposal = null,
 }: DashboardContentProps) {
   const [activeTab, setActiveTab] = useState("recent");
 
@@ -64,8 +73,14 @@ export function DashboardContent({
         subconsultant={subconsultant}
       />
 
-      <FadeIn delay={0.08}>
-        <KnowledgeBasePreview />
+      <FadeIn delay={0.06}>
+        <div className="grid gap-5 lg:grid-cols-2 lg:items-start">
+          <CurrentProposalsPanel
+            latest={latestProposal}
+            proposals={currentProposals}
+          />
+          <ActivityFeed items={recentActivity} />
+        </div>
       </FadeIn>
 
       <FadeIn delay={0.1}>

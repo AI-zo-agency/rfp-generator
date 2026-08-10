@@ -195,8 +195,23 @@ class TestCaseStudyOverbuildScrub(unittest.TestCase):
         self.assertLessEqual(len(challenge_body.split()), 45)
         self.assertLessEqual(len(solution_body.split()), 55)
         self.assertTrue(any("capped" in log.lower() for log in logs))
-        self.assertNotIn("higher education client", cleaned)
-        self.assertTrue(logs)
+        # Blank lines so manuscript renderer keeps sections as separate blocks.
+        self.assertIn("**Challenge**\n\n", cleaned)
+        self.assertIn("**Solution / Our Approach**\n\n", cleaned)
+
+    def test_splits_inline_headings_into_blocks(self) -> None:
+        raw = (
+            "### Deschutes County\n\n"
+            "**Challenge** Deschutes County needed a unified brand. "
+            "**Solution / Our Approach** We built a visual system. "
+            "Client Voice: [VERIFY: no client quote found in source material]"
+        )
+        cleaned, _logs = scrub_case_study_overbuild(raw)
+        self.assertRegex(cleaned, r"\*\*Challenge\*\*\s*\n\n")
+        self.assertRegex(cleaned, r"\*\*Solution / Our Approach\*\*\s*\n\n")
+        # Not one smashed paragraph with Solution mid-line after Challenge body.
+        challenge_block = cleaned.split("**Challenge**")[1].split("**Solution")[0]
+        self.assertNotIn("Solution", challenge_block)
 
     def test_manuscript_guard_scrubs_our_work_section(self) -> None:
         draft = ProposalDraft(

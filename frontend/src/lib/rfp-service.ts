@@ -1,13 +1,21 @@
 import { cache } from "react";
 import { backendJson } from "@/lib/backend-api";
 import { withDashboardPdfUrl } from "@/lib/rfp-pdf";
-import { computeStats, mockRfps } from "@/lib/mock-rfps";
-import type { DashboardStats, RfpRecord } from "@/types/rfp";
+import { computeStats, mockActivity, mockRfps } from "@/lib/mock-rfps";
+import type {
+  ActivityItem,
+  CurrentProposalItem,
+  DashboardStats,
+  RfpRecord,
+} from "@/types/rfp";
 
 interface DashboardResponse {
   rfps: RfpRecord[];
   allRfps: RfpRecord[];
   stats: DashboardStats;
+  recentActivity?: ActivityItem[];
+  currentProposals?: CurrentProposalItem[];
+  latestProposal?: CurrentProposalItem | null;
 }
 
 /**
@@ -37,17 +45,48 @@ export const getRfpById = cache(async (id: string): Promise<RfpRecord | null> =>
   return null;
 });
 
+function mockCurrentProposals(allRfps: RfpRecord[]): CurrentProposalItem[] {
+  return allRfps
+    .filter(
+      (r) =>
+        !["won", "lost", "passed", "submitted"].includes(r.status) &&
+        /proposal|section|case stud|draft/i.test(r.lastActivityNote || "")
+    )
+    .sort(
+      (a, b) =>
+        new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime()
+    )
+    .slice(0, 6)
+    .map((r) => ({
+      rfpId: r.id,
+      rfpTitle: r.title,
+      client: r.client,
+      updatedAt: r.lastActivity,
+      filledCount: 1,
+      sectionCount: 1,
+      stage: r.stage,
+      lastActivityNote: r.lastActivityNote,
+    }));
+}
+
 export const getDashboardData = cache(async (): Promise<{
   rfps: RfpRecord[];
   allRfps: RfpRecord[];
   stats: DashboardStats;
+  recentActivity: ActivityItem[];
+  currentProposals: CurrentProposalItem[];
+  latestProposal: CurrentProposalItem | null;
 }> => {
   const { data, error } = await backendJson<DashboardResponse>("/rfps/dashboard");
   if (data) {
+    const currentProposals = data.currentProposals ?? [];
     return {
       rfps: data.rfps.map(withDashboardPdfUrl),
       allRfps: data.allRfps.map(withDashboardPdfUrl),
       stats: data.stats,
+      recentActivity: data.recentActivity ?? [],
+      currentProposals,
+      latestProposal: data.latestProposal ?? currentProposals[0] ?? null,
     };
   }
 
@@ -56,7 +95,15 @@ export const getDashboardData = cache(async (): Promise<{
     const rfps = allRfps.filter(
       (r) => !["won", "lost", "passed", "submitted"].includes(r.status)
     );
-    return { rfps, allRfps, stats: computeStats(allRfps) };
+    const currentProposals = mockCurrentProposals(allRfps);
+    return {
+      rfps,
+      allRfps,
+      stats: computeStats(allRfps),
+      recentActivity: mockActivity,
+      currentProposals,
+      latestProposal: currentProposals[0] ?? null,
+    };
   }
 
   if (error) {
@@ -67,5 +114,8 @@ export const getDashboardData = cache(async (): Promise<{
     rfps: [],
     allRfps: [],
     stats: computeStats([]),
+    recentActivity: [],
+    currentProposals: [],
+    latestProposal: null,
   };
 });

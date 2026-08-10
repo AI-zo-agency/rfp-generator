@@ -23,7 +23,7 @@ export async function POST(
   return proxyProposalPhasePost(
     id,
     "/proposal/fulfill-rfp-gaps",
-    "Scan RFP — full update",
+    "Complete & clean — full update",
     {
       body: JSON.stringify({ useLlm, mode }),
       headers: {

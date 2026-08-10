@@ -12,10 +12,11 @@ interface RecentRfpsTableProps {
 
 export function RecentRfpsTable({ rfps, limit = 6 }: RecentRfpsTableProps) {
   const recent = [...rfps]
-    .sort(
-      (a, b) =>
-        new Date(b.receivedDate).getTime() - new Date(a.receivedDate).getTime()
-    )
+    .sort((a, b) => {
+      const aTs = new Date(a.lastActivity || a.receivedDate).getTime();
+      const bTs = new Date(b.lastActivity || b.receivedDate).getTime();
+      return bTs - aTs;
+    })
     .slice(0, limit);
 
   return (
@@ -67,8 +68,12 @@ export function RecentRfpsTable({ rfps, limit = 6 }: RecentRfpsTableProps) {
                       >
                         {rfp.title}
                       </Link>
-                      <p className="mt-1 text-xs font-medium uppercase tracking-wide text-zo-text-muted">
-                        Created {formatDate(rfp.receivedDate)}
+                      <p className="mt-1 text-xs text-zo-text-muted">
+                        {rfp.lastActivityNote
+                          ? rfp.lastActivityNote.length > 72
+                            ? `${rfp.lastActivityNote.slice(0, 71)}…`
+                            : rfp.lastActivityNote
+                          : `Created ${formatDate(rfp.receivedDate)}`}
                       </p>
                       {rfp.pdfUrl && (
                         <a

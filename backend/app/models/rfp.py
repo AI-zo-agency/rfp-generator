@@ -98,10 +98,47 @@ class DashboardStats(BaseModel):
     avg_fit_score: int = Field(alias="avgFitScore")
 
 
+class ActivityItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    id: str
+    rfp_id: str = Field(alias="rfpId")
+    rfp_title: str = Field(alias="rfpTitle")
+    action: str
+    actor: str = "System"
+    timestamp: str
+
+
+class CurrentProposalItem(BaseModel):
+    """Active proposal draft summary for the RFP dashboard."""
+
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    rfp_id: str = Field(alias="rfpId")
+    rfp_title: str = Field(alias="rfpTitle")
+    client: str = ""
+    updated_at: str = Field(alias="updatedAt")
+    filled_count: int = Field(alias="filledCount")
+    section_count: int = Field(alias="sectionCount")
+    stage: RfpStage = "intake"
+    last_activity_note: str = Field(default="", alias="lastActivityNote")
+
+
 class DashboardResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
     rfps: list[RfpRecord]
     all_rfps: list[RfpRecord] = Field(alias="allRfps")
     stats: DashboardStats
+    recent_activity: list[ActivityItem] = Field(
+        default_factory=list, alias="recentActivity"
+    )
+    current_proposals: list[CurrentProposalItem] = Field(
+        default_factory=list, alias="currentProposals"
+    )
+    latest_proposal: CurrentProposalItem | None = Field(
+        default=None, alias="latestProposal"
+    )
 
 
 class HealthResponse(BaseModel):

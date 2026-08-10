@@ -143,7 +143,13 @@ export function ProposalsWorkspace({ goRfps }: ProposalsWorkspaceProps) {
       if (current && goRfps.some((r) => r.id === current)) {
         return current;
       }
-      return goRfps[0]?.id ?? null;
+      // Prefer the most recently touched RFP (latest proposal / activity).
+      const newest = [...goRfps].sort((a, b) => {
+        const aTs = new Date(a.lastActivity || a.receivedDate).getTime();
+        const bTs = new Date(b.lastActivity || b.receivedDate).getTime();
+        return bTs - aTs;
+      })[0];
+      return newest?.id ?? null;
     });
   }, [rfpFromUrl, goRfps]);
 

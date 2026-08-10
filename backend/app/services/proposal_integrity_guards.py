@@ -488,6 +488,25 @@ _MAX_CHALLENGE_WORDS = 40
 _MAX_SOLUTION_WORDS = 50
 
 
+def _normalize_inline_case_study_headings(content: str) -> str:
+    """Pull Challenge / Solution / Client Voice onto their own lines when inline."""
+    text = content or ""
+    if not text.strip():
+        return text
+    # **Challenge** / **Solution / Our Approach** mid-paragraph → own lines
+    text = re.sub(
+        r"(?i)(?<!\n)\s*(\*\*\s*(?:Challenge|Solution(?:\s*/\s*Our\s+Approach)?|Our\s+Approach|Client\s+Voice)\s*\*\*)",
+        r"\n\n\1\n\n",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(?<!\n)\s*((?:Challenge|Solution(?:\s*/\s*Our\s+Approach)?|Our\s+Approach|Client\s+Voice)\s*:)",
+        r"\n\n\1\n\n",
+        text,
+    )
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def _cap_prose_words(text: str, max_words: int) -> str:
     words = (text or "").split()
     if len(words) <= max_words:
@@ -497,7 +516,11 @@ def _cap_prose_words(text: str, max_words: int) -> str:
 
 
 def _cap_case_study_section_lengths(content: str) -> tuple[str, list[str]]:
-    """Hard-cap Challenge / Solution prose so cards stay scannable."""
+    """Hard-cap Challenge / Solution prose so cards stay scannable.
+
+    Always emit blank lines around headings so the manuscript renderer treats
+    Challenge / Solution / Client Voice as separate blocks (not one wall of text).
+    """
     text = content or ""
     if not text.strip():
         return text, []
@@ -517,14 +540,20 @@ def _cap_case_study_section_lengths(content: str) -> tuple[str, list[str]]:
             capped = _cap_prose_words(body, _MAX_CHALLENGE_WORDS)
             if body and capped != body:
                 logs.append(f"Challenge capped to {_MAX_CHALLENGE_WORDS} words")
-            out.append(capped)
+            if capped:
+                out.append(capped)
+                out.append("")
         elif section == "solution":
             capped = _cap_prose_words(body, _MAX_SOLUTION_WORDS)
             if body and capped != body:
                 logs.append(f"Solution capped to {_MAX_SOLUTION_WORDS} words")
-            out.append(capped)
+            if capped:
+                out.append(capped)
+                out.append("")
         else:
-            out.append(body)
+            if body:
+                out.append(body)
+                out.append("")
         buf = []
         section = None
 
@@ -532,7 +561,11 @@ def _cap_case_study_section_lengths(content: str) -> tuple[str, list[str]]:
         if _looks_like_case_study_heading(line):
             _flush()
             key = _case_study_heading_key(line)
+            # Keep a blank line before each structural heading.
+            if out and out[-1].strip():
+                out.append("")
             out.append(line)
+            out.append("")
             if key.startswith("challenge"):
                 section = "challenge"
             elif key.startswith("solution") or key == "our approach":
@@ -606,6 +639,7 @@ def scrub_case_study_overbuild(content: str) -> tuple[str, list[str]]:
         )
         logger.info("case_study_overbuild_scrub removed=%s", removed[:8])
 
+    cleaned = _normalize_inline_case_study_headings(cleaned)
     cleaned, cap_logs = _cap_case_study_section_lengths(cleaned)
     logs.extend(cap_logs)
     return cleaned, logs

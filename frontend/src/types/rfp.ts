@@ -115,6 +115,26 @@ export interface RfpRecord {
   googleDocUrl?: string;
 }
 
+export interface ActivityItem {
+  id: string;
+  rfpId: string;
+  rfpTitle: string;
+  action: string;
+  actor: string;
+  timestamp: string;
+}
+
+export interface CurrentProposalItem {
+  rfpId: string;
+  rfpTitle: string;
+  client: string;
+  updatedAt: string;
+  filledCount: number;
+  sectionCount: number;
+  stage: RfpStage;
+  lastActivityNote: string;
+}
+
 export interface DashboardStats {
   activeRfps: number;
   pendingGoNoGo: number;
@@ -131,13 +151,4 @@ export interface TeamMember {
   role: string;
   activeCount: number;
   capacity: number;
-}
-
-export interface ActivityItem {
-  id: string;
-  rfpId: string;
-  rfpTitle: string;
-  action: string;
-  actor: string;
-  timestamp: string;
 }

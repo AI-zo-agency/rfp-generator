@@ -4,9 +4,16 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.models.rfp import DashboardResponse, ManualRfpCreate, RfpRecord
+from app.models.rfp import (
+    ActivityItem,
+    CurrentProposalItem,
+    DashboardResponse,
+    ManualRfpCreate,
+    RfpRecord,
+)
 from app.services import supabase_db as sb
 from app.services.go_no_go_service import GoNoGoError, analyze_rfp
+from app.services.proposal_repository import list_proposal_draft_summaries
 from app.services.rfp_repository import (
     TERMINAL_STATUSES,
     clear_go_no_go_analysis,
@@ -52,14 +59,158 @@ def get_rfps() -> list[RfpRecord]:
     return list_rfps()
 
 
+def _rfp_lookup(all_rfps: list[RfpRecord]) -> dict[str, RfpRecord]:
+    by_key: dict[str, RfpRecord] = {}
+    for rfp in all_rfps:
+        by_key[rfp.id] = rfp
+        if rfp.external_id:
+            by_key[rfp.external_id] = rfp
+    return by_key
+
+
+def _build_current_proposals(
+    all_rfps: list[RfpRecord],
+) -> tuple[list[CurrentProposalItem], CurrentProposalItem | None]:
+    by_key = _rfp_lookup(all_rfps)
+    items: list[CurrentProposalItem] = []
+    try:
+        summaries = list_proposal_draft_summaries()
+    except Exception as exc:
+        logger.warning("list_proposal_draft_summaries failed: %s", exc)
+        summaries = []
+
+    for summary in summaries:
+        rfp = by_key.get(str(summary.get("rfp_id") or ""))
+        if not rfp:
+            continue
+        if rfp.status in TERMINAL_STATUSES:
+            continue
+        filled = int(summary.get("filled_count") or 0)
+        if filled <= 0:
+            continue
+        items.append(
+            CurrentProposalItem(
+                rfpId=rfp.id,
+                rfpTitle=rfp.title,
+                client=rfp.client,
+                updatedAt=str(summary.get("updated_at") or rfp.last_activity or ""),
+                filledCount=filled,
+                sectionCount=int(summary.get("section_count") or 0),
+                stage=rfp.stage,
+                lastActivityNote=rfp.last_activity_note or "",
+            )
+        )
+        if len(items) >= 8:
+            break
+
+    latest = items[0] if items else None
+    return items, latest
+
+
+def _short_activity_action(note: str, *, fallback: str) -> str:
+    text = (note or "").strip()
+    if not text:
+        return fallback
+    lower = text.casefold()
+    if "go/no-go" in lower or "go / no-go" in lower:
+        # Prefer the first clause before the essay summary starts.
+        head = text.split(". ", 1)[0].strip()
+        if len(head) > 90:
+            head = head[:87].rstrip() + "…"
+        return head
+    if text.startswith("Key Personas selected"):
+        count = text.count(",") + 1 if ":" in text else 0
+        return f"Key personas selected{f' · {count}' if count else ''}"
+    if "proposal draft updated" in lower:
+        return text if len(text) <= 80 else text[:77].rstrip() + "…"
+    if len(text) > 88:
+        return text[:85].rstrip() + "…"
+    return text
+
+
+def _build_recent_activity(
+    all_rfps: list[RfpRecord],
+    current_proposals: list[CurrentProposalItem],
+) -> list[ActivityItem]:
+    items: list[ActivityItem] = []
+    proposal_ids = {p.rfp_id for p in current_proposals}
+
+    for proposal in current_proposals[:4]:
+        action = (
+            f"Draft updated · {proposal.filled_count}/"
+            f"{proposal.section_count} sections"
+        )
+        items.append(
+            ActivityItem(
+                id=f"proposal-{proposal.rfp_id}-{proposal.updated_at}",
+                rfpId=proposal.rfp_id,
+                rfpTitle=proposal.rfp_title,
+                action=action,
+                actor="Proposal",
+                timestamp=proposal.updated_at,
+            )
+        )
+
+    for rfp in all_rfps:
+        ts = (rfp.last_activity or "").strip()
+        note = (rfp.last_activity_note or "").strip()
+        if not ts or not note:
+            continue
+        # Draft updates already represented above — skip duplicate noise.
+        if rfp.id in proposal_ids and "proposal draft updated" in note.casefold():
+            continue
+        actor = "System"
+        lower_note = note.casefold()
+        if "go/no-go" in lower_note or "marked as go" in lower_note:
+            actor = "Go/No-Go"
+        elif "persona" in lower_note or "draft" in lower_note:
+            actor = "Proposal"
+        items.append(
+            ActivityItem(
+                id=f"rfp-{rfp.id}-{ts}",
+                rfpId=rfp.id,
+                rfpTitle=rfp.title,
+                action=_short_activity_action(note, fallback="Pipeline update"),
+                actor=actor,
+                timestamp=ts,
+            )
+        )
+
+    def _ts_key(item: ActivityItem) -> float:
+        try:
+            return datetime.fromisoformat(
+                item.timestamp.replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            return 0.0
+
+    items.sort(key=_ts_key, reverse=True)
+    seen: set[tuple[str, str]] = set()
+    deduped: list[ActivityItem] = []
+    for item in items:
+        key = (item.rfp_id, item.action)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+        if len(deduped) >= 8:
+            break
+    return deduped
+
+
 @router.get("/dashboard", response_model=DashboardResponse)
 def get_dashboard() -> DashboardResponse:
     all_rfps = list_rfps()
     active = [r for r in all_rfps if r.status not in TERMINAL_STATUSES]
+    current_proposals, latest_proposal = _build_current_proposals(all_rfps)
+    recent_activity = _build_recent_activity(all_rfps, current_proposals)
     return DashboardResponse(
         rfps=active,
         allRfps=all_rfps,
         stats=compute_stats(all_rfps),
+        recentActivity=recent_activity,
+        currentProposals=current_proposals,
+        latestProposal=latest_proposal,
     )
 
 
