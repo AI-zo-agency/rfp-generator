@@ -304,9 +304,6 @@ def find_budget_section_index(sections: list[ProposalSection]) -> int | None:
 
 
 _DOLLAR_RE = re.compile(r"\$[\d,]+(?:\.\d{1,2})?")
-_INTERNAL_OPT_RE = re.compile(
-    r"(?i)\bagency\s+revenue\s+estimate\b|\bmargin\b|\bsonja\b|\b00_guide_pricing\b"
-)
 _OF2_MARKER_RE = re.compile(r"(?i)\boffer\s+form\s+of-?2\b|all-?inclusive\s+contract\s+cost")
 _OF2_TABLE_RE = re.compile(
     r"(?is)\|[ \t]*Line Item[ \t]*\|[ \t]*Description[ \t]*\|[ \t]*Cost \(USD\)[ \t]*\|.*?"
@@ -604,32 +601,110 @@ def _professional_fees_and_direct(budget: ProposalBudget) -> tuple[float, float]
     return round(fee_sum, 2), round(travel_in_lines + direct, 2)
 
 
+def _parse_dollar_amounts(text: str) -> list[float]:
+    """Extract dollar amounts from text (structural parse only)."""
+    out: list[float] = []
+    for raw in _DOLLAR_RE.findall(text or ""):
+        try:
+            out.append(float(raw.replace("$", "").replace(",", "")))
+        except ValueError:
+            continue
+    return out
+
+
+def _strip_dollar_bearing_sentences(text: str) -> str:
+    """Keep non-money prose; drop sentences that embed dollar figures.
+
+    Phase/fee dollars are re-injected from structured line items instead.
+    """
+    if not text or "$" not in text:
+        return (text or "").strip()
+    kept: list[str] = []
+    buf = ""
+    flat = text.replace("\n", " ")
+    i = 0
+    while i < len(flat):
+        ch = flat[i]
+        buf += ch
+        # Sentence end: .!? not a cents decimal inside a money token.
+        if ch in ".!?":
+            is_cents = (
+                ch == "."
+                and i + 1 < len(flat)
+                and flat[i + 1].isdigit()
+                and bool(buf.rstrip()[:-1])
+                and buf.rstrip()[-2:-1].isdigit()
+            )
+            if not is_cents:
+                if "$" not in buf:
+                    piece = buf.strip()
+                    if piece:
+                        kept.append(piece if piece[-1] in ".!?" else piece + ".")
+                buf = ""
+        i += 1
+    trailing = buf.strip()
+    if trailing and "$" not in trailing:
+        kept.append(trailing if trailing[-1] in ".!?" else trailing + ".")
+    return " ".join(kept).strip()
+
+
 def _sync_narrative_total(
     text: str,
     canonical: float,
     *,
     protect: list[float] | None = None,
 ) -> str:
-    """Replace stale investment totals — never rewrite protected reimbursable amounts."""
+    """Sync a single stale grand-total figure — never rewrite multi-amount phase lists.
+
+    Structural rule: if the prose contains more than one unprotected dollar amount,
+    leave it alone (phase subtotals / fee breakdowns). Only when there is exactly
+    one stale figure do we replace it with the canonical engagement total.
+    """
     if not text or canonical <= 0:
         return text
-    amounts = _DOLLAR_RE.findall(text)
-    if not amounts:
-        return text
     protected = {round(float(p), 2) for p in (protect or []) if p and float(p) > 0}
-    canon_s = _usd(canonical)
-    out = text
-    for amt in amounts:
-        raw = amt.replace("$", "").replace(",", "")
+    matches = list(_DOLLAR_RE.finditer(text))
+    if not matches:
+        return text
+
+    stale: list[tuple[int, int]] = []
+    for m in matches:
         try:
-            val = float(raw)
+            val = float(m.group(0).replace("$", "").replace(",", ""))
         except ValueError:
             continue
         if any(abs(val - p) <= 1.0 for p in protected):
             continue
-        if abs(val - canonical) > 1.0:
-            out = out.replace(amt, canon_s, 1)
-    return out
+        if abs(val - canonical) <= 1.0:
+            continue
+        stale.append((m.start(), m.end()))
+
+    # Multi-phase / multi-fee narratives: do not paste the grand total into each slot.
+    if len(stale) != 1:
+        return text
+
+    start, end = stale[0]
+    return text[:start] + _usd(canonical) + text[end:]
+
+
+def _phase_breakdown_from_lines(budget: ProposalBudget) -> str:
+    """Build phase dollars from line items — source of truth for client narrative."""
+    phase_sums: dict[str, float] = {}
+    order: list[str] = []
+    for item in budget.line_items or []:
+        if item.extended is None:
+            continue
+        phase, _desc = _client_line_label(item)
+        if phase not in phase_sums:
+            order.append(phase)
+            phase_sums[phase] = 0.0
+        phase_sums[phase] += float(item.extended)
+    if len(order) < 2:
+        return ""
+    parts = [f"{label} ({_usd(phase_sums[label])})" for label in order]
+    if len(parts) == 2:
+        return f"Fee phases: {parts[0]} and {parts[1]}."
+    return "Fee phases: " + ", ".join(parts[:-1]) + f", and {parts[-1]}."
 
 
 # Sentence strip must allow cents inside money tokens. A naive [^.]*\. stops at
@@ -720,16 +795,27 @@ def _sync_qualifying_fee_language(
     text = (qualifying or "").strip()
     if not text or fees <= 0:
         return text
-    # Replace common stale framing like "$73,500 in professional fees, plus … $7,500"
+    fee_label = (
+        f"proposed investment of {_usd(fees)} in professional fees"
+        + (f", plus {_usd(direct)} in reimbursable travel" if direct > 0 else "")
+    )
+    # Match professional / consultant / agency fee phrasings — LLM Terms often
+    # invent "$240,000 in agency Consultant Fees" that must track the fee table.
     text = re.sub(
-        r"(?i)(?:proposed\s+investment\s+of\s+)?\$[\d,]+(?:\.\d{2})?\s+in\s+professional\s+fees"
-        r"(?:\s*,?\s*plus(?:\s+an\s+estimated)?\s+\$[\d,]+(?:\.\d{2})?\s+in\s+reimbursable\s+travel)?",
-        (
-            f"proposed investment of {_usd(fees)} in professional fees"
-            + (f", plus {_usd(direct)} in reimbursable travel" if direct > 0 else "")
-        ),
+        r"(?i)(?:proposed\s+investment\s+of\s+)?\$[\d,]+(?:\.\d{2})?\s+in\s+"
+        r"(?:professional\s+fees|agency\s+consultant\s+fees|consultant\s+fees|"
+        r"agency\s+fees|professional\s+services(?:\s+fees)?)"
+        r"(?:\s*,?\s*plus(?:\s+an\s+estimated)?\s+\$[\d,]+(?:\.\d{2})?\s+in\s+"
+        r"reimbursable\s+travel)?",
+        fee_label,
         text,
         count=1,
+    )
+    # Single stale grand-total left in Terms (e.g. only $240,000 appears) → sync.
+    text = _sync_narrative_total(
+        text,
+        fees,
+        protect=[direct] if direct > 0 else None,
     )
     return text
 
@@ -777,11 +863,19 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
             for v in (reimbursables, fees, passthrough, agency_revenue)
             if v and v > 0
         ]
-        scope = _sync_narrative_total(
-            cleaned.scope_summary or "",
-            display_total,
-            protect=protect,
-        )
+        # Money prose must come from structured line items + fee totals.
+        # Never rewrite freeform multi-$ phase lists in place (Complete-scan bug).
+        raw_scope = cleaned.scope_summary or ""
+        amounts = _parse_dollar_amounts(raw_scope)
+        phase_bit = _phase_breakdown_from_lines(cleaned)
+        if len(amounts) > 1 or phase_bit:
+            scope = _strip_dollar_bearing_sentences(raw_scope)
+            if phase_bit:
+                scope = f"{scope} {phase_bit}".strip() if scope else phase_bit
+        elif len(amounts) == 1:
+            scope = _sync_narrative_total(raw_scope, display_total, protect=protect)
+        else:
+            scope = raw_scope
         scope = _rewrite_investment_sentence(
             scope,
             fees,
@@ -805,13 +899,10 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
             updates["qualifying_language"] = ql
     opt = (cleaned.option_term_notes or "").strip()
     if opt:
-        opt2 = re.sub(
-            r"(?i)base-year\s+agency\s+revenue\s+estimate\s*:",
-            "Base-year proposed fees:",
-            opt,
-        )
-        opt2 = _INTERNAL_OPT_RE.sub("proposed fees", opt2)
-        if agency_revenue > 0:
+        # Internal jargon only — no topic/keyword rewrites of fee structure.
+        opt2 = opt.replace("agency revenue estimate", "proposed fees")
+        opt2 = opt2.replace("Agency revenue estimate", "Proposed fees")
+        if agency_revenue > 0 and len(_parse_dollar_amounts(opt2)) == 1:
             opt2 = _sync_narrative_total(
                 opt2,
                 agency_revenue,
@@ -830,12 +921,17 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
 def _client_line_label(item: BudgetLineItem) -> tuple[str, str]:
     """Return (delivery phase, deliverable label) for the client fee table.
 
-    Prefer Phase 1–4 labels from the description so the table matches the
-    narrative / Alignment Matrix — not raw guide category names like
-    "Implementation & Launch" or "Brand Identity & Creative".
+    Phase comes from structured line data (category / line type) — never from
+    keyword-guessing the description.
     """
     desc = (item.description or "").strip()
-    desc = re.sub(r"\s*\*\(?Source:[^*]+\)?\*", "", desc, flags=re.I).strip()
+    # Strip internal source footnotes without keyword topic matching.
+    if "*(Source:" in desc or "* (Source:" in desc:
+        cut = desc.find("*(Source:")
+        if cut < 0:
+            cut = desc.find("* (Source:")
+        if cut >= 0:
+            desc = desc[:cut].strip().rstrip("*").strip()
     cat = (item.category or "").strip() or "Fees"
 
     phase = _phase_label_for_line(item)
@@ -853,50 +949,16 @@ def _client_line_label(item: BudgetLineItem) -> tuple[str, str]:
     return phase, desc
 
 
-_PHASE_NUM_RE = re.compile(r"\bphase\s*([1-4])\b", re.I)
-
-
 def _phase_label_for_line(item: BudgetLineItem) -> str:
-    """Map a line item to KVCC-style Phase 1–4 (or PM / Travel) for the fee table."""
-    blob = f"{item.description or ''} {item.category or ''} {item.notes or ''}"
-    if re.search(r"\b(travel|airfare|lodging|reimbursable|per\s*diem)\b", blob, re.I):
+    """Phase column = structured category (or travel type). No keyword heuristics."""
+    from app.services.proposal_budget_validation import infer_line_item_type
+
+    if infer_line_item_type(item) == "direct_expense":
         return "Travel / Reimbursables"
-    if re.search(r"\bproject\s+management\b|\baccount\s+management\b", blob, re.I):
-        return "Project Management"
-
-    m = _PHASE_NUM_RE.search(blob)
-    if m:
-        return {
-            "1": "Phase 1 — Discovery",
-            "2": "Phase 2 — Strategy",
-            "3": "Phase 3 — Tactical Plan",
-            "4": "Phase 4 — Roadmap & Handoff",
-        }.get(m.group(1), f"Phase {m.group(1)}")
-
-    if re.search(r"\b(roadmap|handoff|strategic\s+plan\s+document)\b", blob, re.I):
-        return "Phase 4 — Roadmap & Handoff"
-    if re.search(
-        r"\b(tactical|digital\s+campaign|social\s+media|content\s+strategy|"
-        r"earned\s+media|brand\s+messaging\s+toolkit|pr\s*&?\s*earned)\b",
-        blob,
-        re.I,
-    ):
-        return "Phase 3 — Tactical Plan"
-    if re.search(
-        r"\b(messaging\s+framework|competitive\s+positioning|kpi\s+development|"
-        r"brand\s+narrative)\b",
-        blob,
-        re.I,
-    ):
-        return "Phase 2 — Strategy"
-    if re.search(
-        r"\b(discovery|stakeholder|listening\s+session|brand\s+audit|"
-        r"market\s+research|audience\s+segmentation|persona)\b",
-        blob,
-        re.I,
-    ):
-        return "Phase 1 — Discovery"
-    return (item.category or "").strip() or "Fees"
+    cat = (item.category or "").strip()
+    if cat:
+        return cat
+    return "Fees"
 
 
 def _scrub_unverified_benchmark_clients(text: str) -> str:
@@ -966,19 +1028,7 @@ def render_budget_markdown(
 
     scope = (budget.scope_summary or "").strip()
     if scope:
-        if total is not None:
-            scope = _sync_narrative_total(
-                scope,
-                total,
-                protect=[v for v in (direct, fees, passthrough) if v > 0],
-            )
-            scope = _rewrite_investment_sentence(
-                scope,
-                fees,
-                direct,
-                total,
-                passthrough=passthrough,
-            )
+        # prepare_budget_for_client_display already rebuilt money prose from line items.
         if len(scope) > 700:
             cut = scope[:700]
             scope = cut.rsplit(".", 1)[0].strip() + "."
@@ -1025,20 +1075,13 @@ def render_budget_markdown(
 
     opt = (budget.option_term_notes or "").strip()
     if opt:
-        opt2 = re.sub(
-            r"(?i)base-year\s+agency\s+revenue\s+estimate\s*:",
-            "Base-year proposed fees:",
-            opt,
-        )
-        opt2 = _INTERNAL_OPT_RE.sub("proposed fees", opt2)
-        if total is not None:
-            opt2 = _sync_narrative_total(
-                opt2,
-                total,
-                protect=[direct] if direct > 0 else None,
-            )
-        opt2 = opt2.strip()
-        if opt2 and len(opt2) > 500:
+        opt2 = opt.replace("agency revenue estimate", "proposed fees")
+        opt2 = opt2.replace("Agency revenue estimate", "Proposed fees")
+        # Incomplete fragments (one short line, one dollar) confuse reviewers — omit.
+        amounts = _parse_dollar_amounts(opt2)
+        if len(opt2) < 160 and len(amounts) <= 1:
+            opt2 = ""
+        elif len(opt2) > 500:
             opt2 = opt2[:500].rsplit(".", 1)[0].strip() + "."
         if opt2:
             lines.append("## Option Terms")
@@ -1367,6 +1410,49 @@ def reconcile_draft_budget_summaries(
         return draft, 0
     now = datetime.now(timezone.utc).isoformat()
     return draft.model_copy(update={"sections": sections, "updated_at": now}), total_changes
+
+
+def ensure_budget_section_present(
+    sections: list[ProposalSection],
+    budget: ProposalBudget | None,
+    *,
+    rfp_text: str = "",
+) -> tuple[list[ProposalSection], bool]:
+    """If the fee tab is missing but canon budget exists, append Budget & Pricing.
+
+    Used after Senior Editor / Scan compact so dedupe or delete tickets cannot
+    permanently erase a token-expensive regenerated fee table.
+    """
+    if find_budget_section_index(sections) is not None:
+        return sections, False
+    if budget is None:
+        return sections, False
+    try:
+        from app.services.proposal_fulfill_rfp_budget_kpi import (
+            pricing_model_lacks_professional_fees,
+        )
+
+        if pricing_model_lacks_professional_fees(budget):
+            return sections, False
+    except Exception:  # noqa: BLE001
+        # If the check cannot run, still restore when a budget object exists.
+        pass
+    content = render_budget_markdown(budget, rfp_text=rfp_text)
+    if not (content or "").strip():
+        return sections, False
+    restored = list(sections) + [
+        ProposalSection(
+            id="section-budget-pricing",
+            title="Budget & Pricing",
+            content=content,
+            status="generated",
+            source="generated",
+            mode="write",
+            word_target=900,
+            required=True,
+        )
+    ]
+    return restored, True
 
 
 def section_is_budgetish(section: ProposalSection) -> bool:

@@ -366,17 +366,16 @@ class StaleLedgerReclassificationTests(unittest.TestCase):
         advisory_texts = {a.requirement_text for a in result.advisory_submission_instructions}
         self.assertEqual(advisory_texts, set(NON_ADDABLE_REQUIREMENTS))
 
-        # All 7 addable items (6 required_content + 1 form) were genuinely
-        # missing (satisfiedBy=[]) and so were auto-added as sections — never
-        # declined, since 7 additions on a 1-section draft trips neither the
-        # absolute cap (5) alone... it actually exceeds 5, so confirm via the
-        # blast-radius accounting instead of assuming unconditional success.
+        # Form stays Checklist-only (not ADD). Remaining required_content
+        # addables were genuinely missing (satisfiedBy=[]) — applied or
+        # declined via blast-radius, never mixed into the admin checklist.
+        addable_narrative = {t for t in ADDABLE_REQUIREMENTS if t != _FORM_TEXT}
         added_or_declined = {a.requirement_text for a in result.applied_additions} | set(
             result.declined_addition_titles
         )
-        self.assertEqual(added_or_declined, set(ADDABLE_REQUIREMENTS))
-        # Whichever path (applied or declined-by-blast-radius), no addable
-        # item may ever appear on the non-addable compliance checklist.
+        self.assertEqual(added_or_declined, addable_narrative)
+        self.assertNotIn(_FORM_TEXT, added_or_declined)
+        self.assertTrue(any("ledger:forms" in line for line in result.logs))
         self.assertFalse(added_or_declined & advisory_texts)
 
     def test_reclassification_is_idempotent_on_a_second_scan(self) -> None:

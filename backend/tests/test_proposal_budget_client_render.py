@@ -116,6 +116,32 @@ class ClientBudgetRenderTests(unittest.TestCase):
         self.assertIn("$60,000 in professional fees plus $7,500 in direct travel", md)
         self.assertNotIn("including $67,500 in direct travel", md)
 
+    def test_syncs_stale_consultant_fee_terms(self) -> None:
+        b = _budget(
+            pricingTier="Average",
+            directExpensesTotal=0,
+            qualifyingLanguage=(
+                "Investment Framing\n"
+                "The proposed investment of $240,000 in agency Consultant Fees "
+                "represents our compensation for campaign strategy.\n"
+            ),
+            lineItems=[
+                BudgetLineItem(
+                    id="L1",
+                    category="Discovery",
+                    description="Phase 1 Discovery",
+                    extended=57_754.01,
+                    lineItemType="agency_fee",
+                ),
+            ],
+        )
+        cleaned = prepare_budget_for_client_display(b)
+        self.assertNotIn("$240,000", cleaned.qualifying_language or "")
+        self.assertIn("57,754.01", cleaned.qualifying_language or "")
+        md = render_budget_markdown(b)
+        self.assertNotIn("$240,000", md)
+        self.assertIn("57,754.01", md)
+
     def test_syncs_stale_terms_and_strips_garbled_scope(self) -> None:
         b = _budget(
             pricingTier="Average",
@@ -180,30 +206,98 @@ class ClientBudgetRenderTests(unittest.TestCase):
         self.assertIn("**Total proposed investment: $250,000**", md)
         self.assertNotIn("**Professional fees: $250,000**", md)
 
-    def test_phase_column_uses_delivery_phases_not_guide_categories(self) -> None:
+    def test_phase_column_uses_structured_category(self) -> None:
         b = _budget(
             lineItems=[
                 BudgetLineItem(
                     id="P3-4",
                     category="Implementation & Launch",
-                    description="Phase 3 Tactical Plan — PR & earned media strategy",
+                    description="PR & earned media strategy",
                     extended=3500,
                     lineItemType="agency_fee",
                 ),
                 BudgetLineItem(
                     id="P4-1",
                     category="Strategic Deliverables",
-                    description="Phase 4 Roadmap — Implementation roadmap bundle",
+                    description="Implementation roadmap bundle",
                     extended=15000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="P5-1",
+                    category="Ongoing Brand Stewardship",
+                    description="Monthly social media management",
+                    extended=12000,
                     lineItemType="agency_fee",
                 ),
             ],
         )
         md = render_budget_markdown(b)
-        self.assertIn("Phase 3 — Tactical Plan", md)
-        self.assertIn("Phase 4 — Roadmap & Handoff", md)
-        self.assertNotIn("| Implementation & Launch |", md)
-        self.assertNotIn("Lake Oswego", md)
+        self.assertIn("| Implementation & Launch |", md)
+        self.assertIn("| Strategic Deliverables |", md)
+        self.assertIn("| Ongoing Brand Stewardship |", md)
+        # Must not invent Phase-3 labels from "social media" wording.
+        self.assertNotIn("Phase 3 — Tactical Plan", md)
+
+    def test_multi_phase_scope_does_not_paste_grand_total_into_each_phase(self) -> None:
+        b = _budget(
+            lumpSumTotal=151000,
+            agencyRevenueEstimate=151000,
+            scopeSummary=(
+                "Discovery & Brand Foundation ($30,000), Brand Strategy & Identity ($40,000), "
+                "Campaign Development ($50,000), Implementation & Launch ($20,000), and "
+                "Ongoing Brand Stewardship ($11,000)."
+            ),
+            lineItems=[
+                BudgetLineItem(
+                    id="1",
+                    category="Discovery & Brand Foundation",
+                    description="Discovery",
+                    extended=30000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="2",
+                    category="Brand Strategy & Identity",
+                    description="Strategy",
+                    extended=40000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="3",
+                    category="Campaign Development",
+                    description="Campaign",
+                    extended=50000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="4",
+                    category="Implementation & Launch",
+                    description="Launch",
+                    extended=20000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="5",
+                    category="Ongoing Brand Stewardship",
+                    description="Stewardship",
+                    extended=11000,
+                    lineItemType="agency_fee",
+                ),
+            ],
+        )
+        cleaned = prepare_budget_for_client_display(b)
+        scope = cleaned.scope_summary or ""
+        # Must not turn every phase into $151,000.
+        self.assertIn("Discovery & Brand Foundation ($30,000)", scope)
+        self.assertIn("Brand Strategy & Identity ($40,000)", scope)
+        self.assertIn("Campaign Development ($50,000)", scope)
+        self.assertNotIn("Discovery & Brand Foundation ($151,000)", scope)
+        self.assertNotIn("Brand Strategy & Identity ($151,000)", scope)
+        self.assertIn("151,000", scope)  # investment total sentence
+        md = render_budget_markdown(b)
+        self.assertNotIn("Discovery & Brand Foundation ($151,000)", md)
+        self.assertIn("| Ongoing Brand Stewardship |", md)
 
 
 if __name__ == "__main__":

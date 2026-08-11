@@ -5,6 +5,7 @@ import random
 import re
 import time
 from email.utils import parsedate_to_datetime
+from collections.abc import Sequence
 from typing import Any, Literal
 
 import httpx
@@ -16,7 +17,16 @@ from app.services.llm_call_context import (
     get_llm_run_id,
 )
 from app.services.llm_routing import resolve_fireworks_eligibility
-from app.services.llm_pricing import estimate_cost_usd, estimate_tokens_from_chars
+from app.services.llm_pricing import (
+    estimate_cost_usd,
+    estimate_tokens_from_chars,
+    split_cached_input_tokens,
+)
+from app.services.llm_prompt_cache import (
+    apply_cache_control,
+    inline_cache_prefix,
+    message_char_count,
+)
 
 try:
     from langsmith import traceable as _langsmith_traceable
@@ -346,6 +356,7 @@ async def _post_chat(
     max_tokens: int | None = None,
     temperature: float = 0.2,
     json_mode: bool = True,
+    cache_prefix: str | Sequence[str] | None = None,
 ) -> str:
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
@@ -359,9 +370,16 @@ async def _post_chat(
     effective_json_mode = json_mode and not (
         "anthropic" in model_l or "claude" in model_l
     )
+    cached_messages = apply_cache_control(
+        messages,
+        model=model,
+        cache_prefix=cache_prefix,
+        ttl_1h=settings.llm_cache_ttl_1h,
+        enabled=not settings.llm_disable_prompt_cache,
+    )
     body: dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": cached_messages,
         "temperature": temperature,
     }
     if effective_json_mode:
@@ -465,15 +483,20 @@ async def _post_chat(
             raise LlmError(f"{provider} returned empty content")
 
         usage = data.get("usage") or {}
-        prompt_tokens = int(
-            usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        prompt_tokens, cache_write_tokens, cache_read_tokens = (
+            split_cached_input_tokens(usage)
         )
         completion_tokens = int(
             usage.get("completion_tokens") or usage.get("output_tokens") or 0
         )
         estimated = False
-        if prompt_tokens <= 0 and completion_tokens <= 0:
-            msg_chars = sum(len(m.get("content") or "") for m in messages)
+        if (
+            prompt_tokens <= 0
+            and completion_tokens <= 0
+            and cache_write_tokens <= 0
+            and cache_read_tokens <= 0
+        ):
+            msg_chars = sum(message_char_count(m) for m in cached_messages)
             prompt_tokens = estimate_tokens_from_chars(msg_chars)
             completion_tokens = estimate_tokens_from_chars(len(content))
             estimated = True
@@ -509,6 +532,8 @@ async def _post_chat(
         return content.strip(), {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "cache_creation_input_tokens": cache_write_tokens,
+            "cache_read_input_tokens": cache_read_tokens,
             "estimated": estimated,
         }
 
@@ -534,8 +559,17 @@ def _record_successful_call(
 
         inp = int(usage.get("prompt_tokens") or 0)
         out = int(usage.get("completion_tokens") or 0)
+        cache_write = int(usage.get("cache_creation_input_tokens") or 0)
+        cache_read = int(usage.get("cache_read_input_tokens") or 0)
         estimated = bool(usage.get("estimated"))
-        cost = estimate_cost_usd(model=model, input_tokens=inp, output_tokens=out)
+        cost = estimate_cost_usd(
+            model=model,
+            input_tokens=inp,
+            output_tokens=out,
+            cache_creation_input_tokens=cache_write,
+            cache_read_input_tokens=cache_read,
+            cache_ttl_1h=settings.llm_cache_ttl_1h,
+        )
         record_llm_call(
             run_id=run_id if run_id is not None else get_llm_run_id(),
             rfp_id=rfp_id if rfp_id is not None else get_llm_rfp_id(),
@@ -548,14 +582,19 @@ def _record_successful_call(
             cost_usd=cost,
             latency_ms=latency_ms,
             tokens_estimated=estimated,
+            cache_creation_input_tokens=cache_write,
+            cache_read_input_tokens=cache_read,
         )
         logger.info(
-            "LLM cost: node=%s model=%s tier=%s in=%d out=%d cost_usd=%.6f latency_ms=%d estimated=%s",
+            "LLM cost: node=%s model=%s tier=%s in=%d out=%d cache_w=%d cache_r=%d "
+            "cost_usd=%.6f latency_ms=%d estimated=%s",
             node_name if node_name is not None else get_llm_node_name() or "unknown",
             model,
             tier,
             inp,
             out,
+            cache_write,
+            cache_read,
             cost,
             latency_ms,
             estimated,
@@ -574,6 +613,7 @@ async def chat_json(
     node_name: str | None = None,
     rfp_id: str | None = None,
     run_id: str | None = None,
+    cache_prefix: str | Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
@@ -595,7 +635,7 @@ async def chat_json(
             raw, usage = await _post_gemini_chat(
                 api_key=gemini_key,
                 model=settings.gemini_model,
-                messages=messages,
+                messages=inline_cache_prefix(messages, cache_prefix),
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
@@ -623,6 +663,7 @@ async def chat_json(
                 api_key=openrouter_key,
                 model=openrouter_model,
                 messages=messages,
+                cache_prefix=cache_prefix,
                 provider="OpenRouter",
                 extra_headers={
                     "HTTP-Referer": settings.app_url,
@@ -673,6 +714,7 @@ async def chat_json(
                 api_key=fireworks_key,
                 model=settings.fireworks_model,
                 messages=messages,
+                cache_prefix=cache_prefix,
                 provider="Fireworks",
                 max_tokens=fireworks_tokens,
                 temperature=temperature,
@@ -711,6 +753,7 @@ async def chat_json(
                     api_key=openrouter_key,
                     model=openrouter_model,
                     messages=messages,
+                    cache_prefix=cache_prefix,
                     provider="OpenRouter",
                     extra_headers={
                         "HTTP-Referer": settings.app_url,
@@ -740,7 +783,7 @@ async def chat_json(
                 raw, usage = await _post_gemini_chat(
                     api_key=gemini_key,
                     model=settings.gemini_model,
-                    messages=messages,
+                    messages=inline_cache_prefix(messages, cache_prefix),
                     max_tokens=max_tokens,
                     temperature=temperature,
                 )
@@ -780,6 +823,7 @@ async def chat_json_soft(
     node_name: str | None = None,
     rfp_id: str | None = None,
     run_id: str | None = None,
+    cache_prefix: str | Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """One LLM JSON call. On failure return ({}, \"failed\") — never retry, never raise."""
     try:
@@ -791,6 +835,7 @@ async def chat_json_soft(
             node_name=node_name,
             rfp_id=rfp_id,
             run_id=run_id,
+            cache_prefix=cache_prefix,
         )
     except LlmError as exc:
         logger.warning("chat_json_soft: %s", str(exc)[:220])
@@ -807,6 +852,7 @@ async def chat_text(
     node_name: str | None = None,
     rfp_id: str | None = None,
     run_id: str | None = None,
+    cache_prefix: str | Sequence[str] | None = None,
 ) -> tuple[str, str]:
     """Plain-text chat completion (no JSON response format)."""
     global _FIREWORKS_SUSPENDED
@@ -827,7 +873,7 @@ async def chat_text(
             raw, usage = await _post_gemini_chat(
                 api_key=gemini_key,
                 model=settings.gemini_model,
-                messages=messages,
+                messages=inline_cache_prefix(messages, cache_prefix),
                 max_tokens=max_tokens,
                 temperature=temperature,
                 json_mode=False,
@@ -855,6 +901,7 @@ async def chat_text(
                 api_key=openrouter_key,
                 model=openrouter_model,
                 messages=messages,
+                cache_prefix=cache_prefix,
                 provider="OpenRouter",
                 extra_headers={
                     "HTTP-Referer": settings.app_url,
@@ -890,6 +937,7 @@ async def chat_text(
                 api_key=fireworks_key,
                 model=settings.fireworks_model,
                 messages=messages,
+                cache_prefix=cache_prefix,
                 provider="Fireworks",
                 max_tokens=fireworks_tokens,
                 temperature=temperature,
@@ -926,6 +974,7 @@ async def chat_text(
                     api_key=openrouter_key,
                     model=openrouter_model,
                     messages=messages,
+                    cache_prefix=cache_prefix,
                     provider="OpenRouter",
                     extra_headers={
                         "HTTP-Referer": settings.app_url,
@@ -955,7 +1004,7 @@ async def chat_text(
                 raw, usage = await _post_gemini_chat(
                     api_key=gemini_key,
                     model=settings.gemini_model,
-                    messages=messages,
+                    messages=inline_cache_prefix(messages, cache_prefix),
                     max_tokens=max_tokens,
                     temperature=temperature,
                     json_mode=False,

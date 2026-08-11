@@ -555,6 +555,12 @@ class AddGenericSectionTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertFalse(is_add_section_intent("Fill [VERIFY] tags from KB only."))
+        self.assertFalse(
+            is_add_section_intent("here add client voice for this section")
+        )
+        self.assertTrue(
+            is_add_section_intent("add another team bio for the roster")
+        )
 
     def test_custom_title_not_rejected_when_member_case_null(self) -> None:
         """Regression: null memberName/caseStudyName used to trip _is_bogus_structure_title(None)."""

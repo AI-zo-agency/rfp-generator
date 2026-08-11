@@ -101,6 +101,9 @@ def _mask_manual_fill_for_rewrite(text: str) -> tuple[str, list[str]]:
     the section.
     """
     cleaned = strip_section_draft_stub_manual_fills(text or "")
+    from app.services.proposal_manuscript_locks import strip_kpi_lock_manual_fills
+
+    cleaned, _ = strip_kpi_lock_manual_fills(cleaned)
     if not extract_manual_fill_tags(cleaned):
         return cleaned, []
     return mask_manual_fill_tags(cleaned)
@@ -2505,7 +2508,7 @@ async def _plan_edit_scope(
                 ),
             },
         ],
-        max_tokens=1600,
+        max_tokens=2400,
         temperature=0.1,
         tier="light",
         node_name="chat_edit_scope_plan",
@@ -2881,7 +2884,8 @@ Rules:
   real KB results/KPIs for clients or projects named in the draft (use those names — never the RFP buyer).
 - Never invent E-Verify enrollment as a searchable 'confirmed' fact — search companyfacts; leave enrollment VERIFY unless facts prove it.
 - If the user only wants VERIFY tags filled, say so in editorInstruction and keep surrounding prose intact.
-- editorInstruction must say: cite KPIs/results present in KB evidence; use [VERIFY] only for fields still missing after retrieval."""
+- editorInstruction must say: cite KPIs/results present in KB evidence; use [VERIFY] only for fields still missing after retrieval.
+- DEFAULT STYLE: Unless the user asks for more detail, instruct the editor to write concisely — cover every RFP requirement but in the fewest tight, proof-led sentences. No filler, no restating the RFP back to the evaluator."""
 
 SECTION_REDRAFT_PROMPT = """Rewrite ONE zö agency proposal section based on user feedback and evidence.
 
@@ -2896,17 +2900,26 @@ Rules:
     facts into the prose. Do not replace them with a Sonja [VERIFY] asking for details
     the evidence already provides.
 6. Follow the REGISTER block: narrative sections use first person we/our — NEVER "The Vendor", "The Offeror", or third-person agency distance.
+   CONSISTENCY: Once a paragraph starts with "We", do NOT switch to "zö agency" mid-paragraph.
+   Use "zö agency" only on first mention or in headings; everywhere else use "we/our/us".
 7. PRESERVE the full BRAND VOICE block — zö core voice + RFP adaptation. User edits must NOT flatten tone into generic consultant/corporate prose.
 8. Keep rhythm, confidence, warmth, and client-centered framing from the previous draft unless the user explicitly requests a tone change.
 9. Apply WRITING AVOIDANCES from lost bids when provided — do not repeat past loss patterns.
 10. Write submission-ready prose in zö's voice.
-11. LENGTH: Stay at or under the Word target when one is provided. Prefer concise over exhaustive —
-    never pad with filler, restated RFP criteria, or multi-page essays.
+11. LENGTH: The Word target is a CEILING, not a goal. Aim for 60-75% of it. Be concise and tight —
+    cover every RFP requirement and scoring criterion but use the fewest words that convey
+    the point. Never pad with filler, restated RFP criteria, generic boilerplate, or
+    multi-page essays. One strong sentence beats three weak ones. Let designer notes and
+    visual layouts carry density instead of prose.
 12. FORMAT: Prefer short paragraphs, markdown bullet lists, and markdown tables for phases,
     process steps, cadence, comparisons, and roles — whenever that improves evaluator scanability.
-13. DESIGNER NOTES: When a table, timeline, swimlane, checklist, or layout treatment would help
-    evaluators, set designerNote to a concrete layout hint AND/OR insert an inline
-    [DESIGNER NOTE: …] near that block. Skip decorative/generic notes.
+    Dense, scannable layouts score better than walls of text.
+13. DESIGNER NOTES: Actively add [DESIGNER NOTE: …] inline wherever a visual layout would
+    replace prose — tables, timelines, infographics, comparison charts, icon grids, callout
+    boxes, pull quotes, or before/after visuals. Be specific: describe the layout, columns,
+    and what data goes where so a designer can build it without guessing. Also set designerNote
+    in the JSON for the section-level layout hint. This lets the designer COMPACT the content
+    visually so it reads shorter and scans faster.
 14. Methodology / planning / approach / work-plan sections: use phased bullets or a compact
     phase table; keep each phase to a few tight lines.
 
@@ -2941,7 +2954,7 @@ Rules:
 11. One-time setup/development lines must not be multiplied by 12 unless the excerpt is explicitly a monthly recurring service from the guide.
 12. Reference excerpts: include name, title, phone, and email — never "contact on request" or deferral language.
 13. PSA/compliance excerpts: add specific acknowledgment language when user asks — cover insurance, living wage, MacBride, Title VI, Chapter 63, audit rights as applicable.
-14. Do NOT shorten or summarize the excerpt unless the user asked to remove, delete, cut, or shorten it.
+14. Do NOT shorten or summarize the excerpt unless the user asked to remove, delete, cut, shorten, make concise, trim, or condense it. When they do ask to shorten: cover ALL key points and requirements but in fewer, tighter words — never drop substance.
 15. When the user asks to fill gaps, placeholders, or [VERIFY] tags: ONLY replace those tags with KB facts — do not rewrite or summarize the surrounding prose."""
 
 SELECTION_KB_PLAN_PROMPT = """You plan a surgical edit to ONE highlighted excerpt inside a zö agency proposal section.
@@ -2962,8 +2975,13 @@ Rules:
 
 STATIC_SECTION_REDRAFT_PROMPT = """Improve ONE static zö proposal section (company overview, team bios, or case studies).
 
-Use ONLY the knowledge-base excerpts provided. For pull/select sections, include [DESIGNER NOTE: ...] where layout applies.
+Use ONLY the knowledge-base excerpts provided.
 Address the user's feedback. Do not invent clients, metrics, addresses, phones, or emails.
+
+DESIGNER NOTES: Actively insert [DESIGNER NOTE: …] inline wherever visual layout would help —
+tables, timelines, infographics, before/after visuals, callout boxes, icon grids, pull quotes.
+Be specific: describe columns, data placement, and layout so a designer can build without guessing.
+Also set designerNote in JSON for section-level layout hints.
 
 When rewriting an Our Work / case study to a DIFFERENT client or project from the KB:
 - Open the markdown with an H2 for the NEW case study (e.g. `## City of San Leandro: Brand Assessment`).
@@ -3016,7 +3034,7 @@ def _draft_supplemental_blob(draft: ProposalDraft) -> str:
 
 
 def _selection_asks_to_remove(user_message: str) -> bool:
-    """True when the user wants the highlighted span deleted (empty replacement OK)."""
+    """True when the user wants the span deleted or significantly shortened."""
     return bool(
         re.search(
             r"\b("
@@ -3024,7 +3042,9 @@ def _selection_asks_to_remove(user_message: str) -> bool:
             r"get\s+rid\s+of|take\s+(?:this|it|that)\s+out|"
             r"strip\s+(?:this|it|that|out)|"
             r"don'?t\s+(?:need|want)\s+(?:this|that)|"
-            r"this\s+(?:part\s+)?only"
+            r"this\s+(?:part\s+)?only|"
+            r"shorten|shorter|make\s+(?:it|this)\s+short|concise|condense|"
+            r"trim|brief(?:er)?|tighten|summarize|summarise|compress"
             r")\b",
             user_message or "",
             re.I,
@@ -4346,6 +4366,15 @@ async def _redraft_rfp_section(
 
     # Protect MANUAL FILL tags in the prior draft from incidental rewrite.
     source_for_tags = prior_content or original_content
+    from app.services.proposal_manuscript_locks import (
+        kpi_weave_instruction,
+        strip_kpi_lock_manual_fills,
+    )
+
+    source_for_tags, _ = strip_kpi_lock_manual_fills(source_for_tags)
+    kpi_block = kpi_weave_instruction(
+        research.manuscript_locks if research else None
+    )
     masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(source_for_tags)
     # Keep prior_for_agent length behavior but on masked text when tags exist.
     if mfill_originals:
@@ -4368,10 +4397,12 @@ async def _redraft_rfp_section(
             f"Sector: {rfp.sector}\n"
             f"RFP: {rfp.title}\n"
             f"Section: {section.title}\n"
-            f"Word target: {section.word_target} (stay at or under — be concise)\n"
-            "FORMAT: Prefer short paragraphs, markdown bullets, and markdown tables for "
+            f"Word target: {section.word_target} MAX — aim for {int(section.word_target * 0.6)}-{int(section.word_target * 0.75)} words. "
+            "Every sentence must earn its place; cut filler, redundancy, and RFP echo. "
+            "Go above 75% ONLY if substance demands it.\n"
+            "FORMAT: Prefer short paragraphs, markdown bullets, and compact markdown tables for "
             "phases/process/cadence. Add designerNote / [DESIGNER NOTE: …] when a "
-            "table/timeline/swimlane would help evaluators.\n"
+            "table/timeline/swimlane/infographic would help evaluators scan faster.\n"
             f"Requirements:\n"
             + "\n".join(f"- {r}" for r in requirements)
             + rewrite_note
@@ -4389,6 +4420,19 @@ async def _redraft_rfp_section(
 
         if is_modular_approach_section(section.title or ""):
             user_block = f"{MODULAR_APPROACH_BLOCK}\n\n{user_block}"
+        # Cross-section anti-duplication: tell LLM what other sections already cover
+        from app.services.proposal_section_dedup import (
+            format_anti_duplication_rules,
+            format_prior_sections_block,
+        )
+
+        prior_secs = [
+            s for s in draft.sections
+            if s.id != section.id and (s.content or "").strip()
+        ]
+        dedup_rules = format_anti_duplication_rules()
+        prior_block = format_prior_sections_block(prior_secs, exclude_ids={section.id})
+        user_block = f"{dedup_rules}\n\n{prior_block}\n\n{user_block}" if prior_block else f"{dedup_rules}\n\n{user_block}"
         if attempt == 2 and mfill_originals:
             user_block = (
                 "RETRY: Previous output dropped protected «MFILL_N» tokens. "
@@ -4400,6 +4444,8 @@ async def _redraft_rfp_section(
                 f"\n\n=== 04_Bio approved file (use for Work History, education, accounts) ===\n"
                 f"{bio_kb[:50_000]}\n"
             )
+        if kpi_block.strip():
+            user_block += f"\n\n{kpi_block.strip()}\n"
         if should_apply_budget_playbook(section, user_message):
             from app.services.proposal_budget_playbook import build_budget_repair_context
 
@@ -5073,6 +5119,13 @@ async def _try_manual_fill_resolution(
         target_text = (section.content or "")[sel_start:sel_end]
 
     if not extract_manual_fill_tags(target_text):
+        return None
+
+    tags = extract_manual_fill_tags(target_text)
+    from app.services.proposal_manuscript_locks import is_kpi_lock_manual_fill
+
+    if tags and all(is_kpi_lock_manual_fill(t.text) for t in tags):
+        # KPI-lock tags need prose weaving on Improve — not KB scalar fill.
         return None
 
     logger.info(

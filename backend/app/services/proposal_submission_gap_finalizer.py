@@ -212,10 +212,14 @@ async def _scrub_optional_verify_after_fills(
         budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
         skip_budget = {budget_section_id} if budget_section_id else set()
 
+        from app.services.evidence_trust.load_client_list import load_client_list_registry
+
+        client_registry = await load_client_list_registry()
         draft, claim_logs = apply_optional_claim_scrub_to_draft(
             draft,
             rfp_text=rfp_text or "",
             skip_section_ids=skip_budget,
+            registry=client_registry,
         )
         if claim_logs:
             logs.extend(claim_logs)

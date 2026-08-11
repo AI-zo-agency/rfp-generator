@@ -240,12 +240,12 @@ async def inventory_rfp_submission_requirements(
                         "- Be thorough: if Section/Exhibit/Attachment/Form is named as required "
                         "for submission, include it.\n"
                         "- signed_form / notarized form → kind=signed_form "
-                        "(proposal gets a MANUAL FILL checklist tab).\n"
+                        "(Checklist only — do NOT invent a full proposal section per form).\n"
                         "- narrative_proposal → mustInManuscript=true (needs prose in PDF).\n"
                         "- attachment (Excel, COI PDF, exhibits) → kind=attachment "
-                        "(proposal gets a checklist tab with [MANUAL FILL: attach file]).\n"
+                        "(Checklist only — attach file; no per-item sidebar section).\n"
                         "- Do NOT invent items not in the excerpt.\n"
-                        "- Prefer more items over fewer when the RFP checklist is dense.\n\n"
+                        "- Prefer accurate kinds over inventing narrative tabs for forms.\n\n"
                         "Return JSON:\n"
                         "{\n"
                         '  "items": [\n'
@@ -301,13 +301,26 @@ async def inventory_rfp_submission_requirements(
     return items
 
 
+# One consolidated sidebar tab for buyer forms/attachments — never one tab
+# per Bid Form row (that is what grew Providence 18→26 and Checklist ~60).
+_FORMS_ATTACHMENTS_SECTION_ID = "rfp-req-forms-attachments"
+_FORMS_ATTACHMENTS_TITLE = "Required Forms & Attachments"
+# Hard cap on NEW narrative tabs from submission inventory in one Scan pass.
+_SUBMISSION_MAX_NEW_NARRATIVE_TABS = 3
+
+
 def detect_missing_submission_deliverables(
     draft: ProposalDraft,
     inventory: list[SubmissionDeliverable],
     *,
     research: ProposalResearchCache | None = None,
 ) -> list[SubmissionDeliverable]:
-    """Missing required items vs LLM inventory — narratives + form/attachment tabs."""
+    """Missing required items vs LLM inventory.
+
+    Narrative deliverables may become manuscript tabs. Forms/attachments are
+    returned with their kinds intact so the caller can fold them into the
+    Checklist (+ at most one consolidated Forms tab) — never N sidebar stubs.
+    """
     manuscript = _manuscript_blob(draft)
     mapped_titles = {
         (m.title or "").casefold()
@@ -316,14 +329,10 @@ def detect_missing_submission_deliverables(
     missing: list[SubmissionDeliverable] = []
 
     for item in inventory:
-        # Always surface demanded forms/attachments as checklist tabs so Scan
-        # cannot silently drop them. Narratives still require must_in_manuscript.
-        wants_tab = item.must_in_manuscript or item.kind in (
-            "signed_form",
-            "attachment",
-            "signature_block",
-        )
-        if not wants_tab:
+        is_formish = item.kind in ("signed_form", "attachment", "signature_block")
+        # Forms always stay in the missing list for checklist / consolidate —
+        # they do not need must_in_manuscript. Narratives do.
+        if not is_formish and not item.must_in_manuscript:
             continue
         if item.section_id in {s.id for s in draft.sections}:
             sec = next(s for s in draft.sections if s.id == item.section_id)
@@ -342,7 +351,7 @@ def detect_missing_submission_deliverables(
             continue
         # Forms/attachments that are already covered by closing package tabs
         # (references, addenda, COI, signature) should not duplicate.
-        if item.kind in ("signed_form", "attachment", "signature_block"):
+        if is_formish:
             title_cf = item.title.casefold()
             closing_needles = (
                 "addenda",
@@ -361,6 +370,64 @@ def detect_missing_submission_deliverables(
         missing.append(item)
 
     return missing
+
+
+def _build_forms_attachments_section(items: list[SubmissionDeliverable]) -> ProposalSection:
+    lines = [
+        f"## {_FORMS_ATTACHMENTS_TITLE}",
+        "",
+        "Buyer forms and attachments required by this RFP. Attach the signed "
+        "buyer template or file — do not invent filled forms in narrative.",
+        "",
+    ]
+    for item in items:
+        lines.append(f"- [ ] **{item.title}**")
+        if item.draft_instructions:
+            lines.append(f"  - {item.draft_instructions.strip()[:280]}")
+        if item.rfp_citation:
+            lines.append(f"  - RFP: {item.rfp_citation.strip()[:200]}")
+    lines.append("")
+    lines.append("[MANUAL FILL: attach/complete all listed forms — owner: Sonja]")
+    return ProposalSection(
+        id=_FORMS_ATTACHMENTS_SECTION_ID,
+        title=_FORMS_ATTACHMENTS_TITLE,
+        content="\n".join(lines),
+        status="generated",
+        source="rfp",
+        mode="pull",
+        required=True,
+    )
+
+
+def _is_per_form_stub_section(section: ProposalSection) -> bool:
+    """Legacy Scan tabs: one Bid Form / MWBE stub each — collapse on rescan."""
+    sid = section.id or ""
+    title_cf = (section.title or "").casefold()
+    if sid == _FORMS_ATTACHMENTS_SECTION_ID:
+        return False
+    if not sid.startswith("rfp-req-"):
+        return False
+    formish_title = bool(
+        re.search(
+            r"(?i)\b(?:bid\s+form|signed\s+form|attachment|w-?9|mwbe|m/wbe|"
+            r"financial\s+assurance|affirmative\s+action|non[- ]?collusion|"
+            r"certificate\s+of\s+insurance|\bcoi\b|minority\s+and\s+women)\b",
+            title_cf,
+        )
+    )
+    if not formish_title:
+        return False
+    content = section.content or ""
+    # LLM-expanded form stubs can exceed 1.2k chars — still attach-only, not narrative.
+    if "[MANUAL FILL" in content.upper():
+        return True
+    attach_only = bool(
+        re.search(
+            r"(?i)\b(?:attach|signed|buyer\s+template|wet[- ]?ink|notary)\b",
+            content,
+        )
+    )
+    return attach_only and len(content) < 6000
 
 
 async def _draft_generic_deliverable(
@@ -425,7 +492,7 @@ async def ensure_all_rfp_submission_requirements(
     rfp_text: str,
     research: ProposalResearchCache | None,
 ) -> tuple[ProposalDraft, list[SubmissionDeliverable], list[str], list[str]]:
-    """Any RFP: inventory → add missing manuscript sections + catalog narratives + checklist."""
+    """Any RFP: inventory → narrative tabs (capped) + one forms checklist tab + Checklist."""
     excerpt = submission_documents_excerpt(rfp_text)
     logs: list[str] = []
     checklist: list[str] = list_submission_checklist_from_rfp(rfp_text)
@@ -457,17 +524,96 @@ async def ensure_all_rfp_submission_requirements(
             )
         )
 
+    sections = list(draft.sections)
+    # Drop legacy per-form Bid Form stubs from older Scan passes.
+    pruned: list[ProposalSection] = []
+    removed_form_stubs = 0
+    for sec in sections:
+        if _is_per_form_stub_section(sec):
+            removed_form_stubs += 1
+            continue
+        pruned.append(sec)
+    if removed_form_stubs:
+        sections = pruned
+        logs.append(
+            f"Submission scan: collapsed {removed_form_stubs} per-form stub "
+            "section(s) into Checklist / Required Forms & Attachments."
+        )
+
     if not missing and not inventory:
         logs.append(
             "Submission scan: no extra deliverables detected (excerpt may be thin — confirm PDF uploaded)."
         )
+        if removed_form_stubs:
+            now = datetime.now(timezone.utc).isoformat()
+            return (
+                draft.model_copy(update={"sections": sections, "updated_at": now}),
+                [],
+                logs,
+                checklist,
+            )
         return draft, [], logs, checklist
 
-    sections = list(draft.sections)
     ids = {s.id for s in sections}
     added: list[SubmissionDeliverable] = []
 
-    for item in missing:
+    formish_missing = [
+        m
+        for m in missing
+        if m.kind in ("signed_form", "attachment", "signature_block")
+    ]
+    narrative_missing = [
+        m
+        for m in missing
+        if m.kind not in ("signed_form", "attachment", "signature_block")
+    ]
+
+    if formish_missing:
+        for item in formish_missing:
+            label = f"{item.title} (signed/attach — buyer template)"
+            if label not in checklist:
+                checklist.append(label)
+        has_consolidated = any(
+            s.id == _FORMS_ATTACHMENTS_SECTION_ID
+            or (s.title or "").casefold() == _FORMS_ATTACHMENTS_TITLE.casefold()
+            for s in sections
+        )
+        if has_consolidated:
+            logs.append(
+                f"Submission forms: {len(formish_missing)} item(s) on Checklist "
+                "(consolidated Forms & Attachments tab already present)."
+            )
+        else:
+            consolidated = _build_forms_attachments_section(formish_missing)
+            sections.append(consolidated)
+            ids.add(consolidated.id)
+            added.append(
+                SubmissionDeliverable(
+                    id="forms-attachments",
+                    title=_FORMS_ATTACHMENTS_TITLE,
+                    section_id=_FORMS_ATTACHMENTS_SECTION_ID,
+                    kind="attachment",
+                    must_in_manuscript=False,
+                    draft_instructions=(
+                        f"{len(formish_missing)} buyer form/attachment item(s) listed."
+                    ),
+                )
+            )
+            logs.append(
+                f"Submission forms: {len(formish_missing)} item(s) → Checklist + "
+                f"one '{_FORMS_ATTACHMENTS_TITLE}' tab (not one section per form)."
+            )
+
+    narratives_added = 0
+    for item in narrative_missing:
+        if narratives_added >= _SUBMISSION_MAX_NEW_NARRATIVE_TABS and item.section_id not in ids:
+            logs.append(
+                f"Submission narratives: capped at {_SUBMISSION_MAX_NEW_NARRATIVE_TABS} "
+                f"new tabs this pass — remaining on Checklist only ({item.title})."
+            )
+            if item.title not in checklist:
+                checklist.append(item.title)
+            continue
         if item.section_id in ids:
             existing = next(s for s in sections if s.id == item.section_id)
             from app.services.proposal_fulfill_guard import fulfill_scan_preserves_section
@@ -497,10 +643,11 @@ async def ensure_all_rfp_submission_requirements(
                 )
             )
             ids.add(item.section_id)
+            narratives_added += 1
         added.append(item)
         logs.append(f"Added RFP deliverable: {item.title}")
 
-    if not added:
+    if not added and not removed_form_stubs:
         if inventory:
             logs.append(
                 f"Submission inventory: {len(inventory)} item(s) — all manuscript items appear covered."

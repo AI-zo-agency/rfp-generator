@@ -950,6 +950,19 @@ def is_add_section_intent(text: str) -> bool:
         return False
     if _is_in_place_kb_or_verify_edit(raw) or _is_in_place_manual_fill_edit(raw):
         return False
+    from app.services.proposal_budget_playbook import user_points_at_open_section
+
+    if user_points_at_open_section(raw):
+        # "add client voice for this section" is in-place content — not a new sidebar tab.
+        if not re.search(
+            r"(?i)\b(?:new|another|more)\s+(?:sidebar\s+)?(?:section|tab|h2)\b",
+            raw,
+        ) and not re.search(
+            r"(?i)\b(?:add|create)\s+(?:a\s+)?new\s+(?:section|tab)\b",
+            raw,
+        ):
+            if not _is_add_bio_intent(raw) and not _is_add_to_case_studies_intent(raw):
+                return False
     if _is_add_bio_intent(raw) or _is_add_to_case_studies_intent(raw):
         return True
     if re.search(

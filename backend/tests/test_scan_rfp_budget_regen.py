@@ -476,5 +476,168 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
         self.assertTrue(any("preserved official Pricing Form" in line for line in logs))
 
 
+class StaleManuscriptRefreshWithoutRegenTests(unittest.TestCase):
+    """Providence regression: $500 hollow tab but cached $156k model must re-render, not LLM regen."""
+
+    def test_hollow_tab_with_healthy_model_rerenders_without_phase_3_5(self) -> None:
+        hollow = (
+            "## Proposed Investment\n\n"
+            "**Direct travel / reimbursables: $500**\n"
+            "**Total proposed investment: $500**\n"
+        )
+        healthy_budget = ProposalBudget(
+            rfpId="rfp-stale",
+            updatedAt="2026-08-05T00:00:00+00:00",
+            lineItems=[
+                BudgetLineItem(
+                    id="L1",
+                    description="Strategy & creative",
+                    category="Labor",
+                    extended=120_000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="T1",
+                    description="Travel",
+                    category="Travel",
+                    extended=500,
+                    lineItemType="direct_expense",
+                ),
+            ],
+            lumpSumTotal=120_500,
+            agencyRevenueEstimate=120_500,
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-stale",
+            sections=[
+                ProposalSection(
+                    id="section-budget-pricing",
+                    title="Budget & Pricing",
+                    content=hollow,
+                    status="generated",
+                )
+            ],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        research = ProposalResearchCache(
+            rfpId="rfp-stale",
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=healthy_budget,
+        )
+
+        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
+        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
+
+        with patch.object(
+            scan_mod,
+            "_regen_budget_via_phase_3_5",
+            new=AsyncMock(),
+        ) as regen, patch.object(
+            scan_mod,
+            "run_budget_editor_pass",
+            side_effect=lambda b, **_kw: b,
+        ), patch.object(
+            scan_mod,
+            "extract_rfp_scoring_facts_llm",
+            new=AsyncMock(return_value=RfpScoringFacts()),
+        ):
+            out, _r, logs, meta = asyncio.run(
+                run_fulfill_budget_scan(
+                    rfp_id="rfp-stale",
+                    rfp=_rfp("rfp-stale"),
+                    draft=draft,
+                    research=research,
+                    rfp_text="Submit itemized professional fees and travel.",
+                    use_llm=False,
+                    skip_section_ids=set(),
+                )
+            )
+
+        regen.assert_not_awaited()
+        body = next(s for s in out.sections if s.id == "section-budget-pricing").content or ""
+        self.assertIn("120,500", body.replace(",", ","))
+        self.assertIn("120,000", body.replace(",", ","))
+        self.assertNotIn("$500", body.split("Professional")[0] if "Professional" in body else body[:200])
+        self.assertTrue(any("re-rendering from canon" in line for line in logs))
+        self.assertTrue(meta["budgetChanged"])
+
+
+class FailClosedTravelOnlyBudgetTests(unittest.TestCase):
+    def test_travel_only_total_does_not_pass_green(self) -> None:
+        """Providence regression: $500 travel == total still marked Budget step green."""
+        hollow = (
+            "## Proposed Investment\n\n"
+            "**Direct travel / reimbursables: $500**\n"
+            "**Total proposed investment: $500**\n"
+            "Rates follow zö's Industry Average pricing guide for comparable "
+            "municipal / education marketing engagements.\n"
+        )
+        travel_budget = ProposalBudget(
+            rfpId="rfp-hollow",
+            updatedAt="2026-08-05T00:00:00+00:00",
+            lineItems=[
+                BudgetLineItem(
+                    id="T1",
+                    description="Travel / reimbursables",
+                    category="Travel",
+                    extended=500,
+                    lineItemType="direct_expense",
+                )
+            ],
+            lumpSumTotal=500,
+            directExpensesTotal=500,
+            agencyRevenueEstimate=0,
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-hollow",
+            updatedAt="2026-08-05T00:00:00+00:00",
+            sections=[
+                ProposalSection(
+                    id="section-budget-pricing",
+                    title="Budget & Pricing",
+                    content=hollow,
+                    status="generated",
+                )
+            ],
+        )
+        research = ProposalResearchCache(
+            rfpId="rfp-hollow",
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=travel_budget,
+        )
+
+        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
+        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
+
+        # Regen "succeeds" but still returns travel-only — must fail closed.
+        with patch.object(
+            scan_mod,
+            "_regen_budget_via_phase_3_5",
+            new=AsyncMock(return_value=(draft, research, travel_budget)),
+        ), patch.object(
+            scan_mod,
+            "run_budget_editor_pass",
+            side_effect=lambda b, **_kw: b,
+        ), patch.object(
+            scan_mod,
+            "extract_rfp_scoring_facts_llm",
+            new=AsyncMock(return_value=RfpScoringFacts()),
+        ):
+            _out, _r, logs, meta = asyncio.run(
+                run_fulfill_budget_scan(
+                    rfp_id="rfp-hollow",
+                    rfp=_rfp("rfp-hollow"),
+                    draft=draft,
+                    research=research,
+                    rfp_text="Submit a cost proposal with professional fees.",
+                    use_llm=False,
+                    skip_section_ids=set(),
+                )
+            )
+
+        self.assertEqual(meta["budgetStatus"], "needs_human")
+        self.assertTrue(any("FAIL CLOSED" in line for line in logs))
+
+
 if __name__ == "__main__":
     unittest.main()

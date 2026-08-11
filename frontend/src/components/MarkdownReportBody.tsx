@@ -1,9 +1,12 @@
+import { humanizeGapTag, isManualFillTag } from "@/lib/gap-tag-humanize";
+
 type Block =
   | { type: "heading"; level: number; text: string }
   | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "list"; ordered: boolean; items: string[] }
   | { type: "paragraph"; text: string }
   | { type: "designer_note"; text: string }
+  | { type: "gap_callout"; tag: string }
   | { type: "hr" };
 
 function isThematicBreak(line: string): boolean {
@@ -19,6 +22,73 @@ function parseSubheadingLine(line: string): string | null {
   return null;
 }
 
+function tryManualFillCallout(text: string): string | null {
+  const trimmed = (text || "").trim();
+  if (!isManualFillTag(trimmed)) return null;
+  return trimmed.endsWith("]") ? trimmed : `${trimmed}]`;
+}
+
+function InlineGapTag({ tag, highlighted = false }: { tag: string; highlighted?: boolean }) {
+  const h = humanizeGapTag(tag);
+  return (
+    <span
+      className={`inline rounded-md border px-1.5 py-0.5 text-[0.85em] leading-relaxed ${
+        highlighted
+          ? "proposal-flag-inline-highlight border-amber-400/60 bg-amber-100/80 text-orange-950"
+          : "border-violet-300/40 bg-violet-50 text-violet-950"
+      }`}
+      role="note"
+      title={h.action}
+    >
+      <strong>{h.title}</strong>
+      {h.detail ? <> — {h.detail}</> : null}
+    </span>
+  );
+}
+
+function tagMatchesHighlight(tag: string, highlights: string[]): boolean {
+  const normalized = tag.trim();
+  return highlights.some((h) => {
+    const needle = h.trim();
+    if (!needle) return false;
+    return normalized === needle || normalized.includes(needle) || needle.includes(normalized);
+  });
+}
+
+function GapCallout({ tag, highlighted = false }: { tag: string; highlighted?: boolean }) {
+  const h = humanizeGapTag(tag);
+  return (
+    <div
+      className={`my-5 max-w-[68ch] rounded-xl border px-4 py-3.5 ${
+        highlighted
+          ? "border-zo-orange/45 bg-amber-50/90 shadow-[0_0_0_3px_rgba(239,80,24,0.12)] proposal-flag-inline-highlight"
+          : "border-violet-300/30 bg-gradient-to-b from-violet-50/95 to-slate-50/95"
+      }`}
+      role="note"
+      aria-label={h.title}
+      ref={
+        highlighted
+          ? (node) => node?.scrollIntoView({ behavior: "smooth", block: "center" })
+          : undefined
+      }
+    >
+      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+        <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-violet-800">
+          Action needed
+        </span>
+        {h.owner ? (
+          <span className="text-xs font-bold text-violet-700">{h.owner}</span>
+        ) : null}
+      </div>
+      <p className={`mb-1 text-[15px] font-bold leading-snug ${highlighted ? "text-orange-900" : "text-indigo-950"}`}>
+        {h.title}
+      </p>
+      <p className="mb-1.5 text-sm leading-relaxed text-violet-900/90">{h.detail}</p>
+      <p className="m-0 text-xs leading-relaxed text-violet-800/85">{h.action}</p>
+    </div>
+  );
+}
+
 function pushParagraphBlock(blocks: Block[], paragraphLines: string[]) {
   if (paragraphLines.length === 0) return;
 
@@ -31,6 +101,11 @@ function pushParagraphBlock(blocks: Block[], paragraphLines: string[]) {
     const designer = tryDesignerNoteFromParagraph(paragraphLines[0]!);
     if (designer) {
       blocks.push({ type: "designer_note", text: designer });
+      return;
+    }
+    const gapTag = tryManualFillCallout(paragraphLines[0]!);
+    if (gapTag) {
+      blocks.push({ type: "gap_callout", tag: gapTag });
       return;
     }
   }
@@ -206,7 +281,7 @@ function escapeRegex(value: string): string {
 }
 
 function buildInlinePattern(highlightTexts: string[]): RegExp {
-  const tagPattern = String.raw`\*\*[^*]+\*\*|\[(?:VERIFY|FLAG|DESIGNER NOTE|TBD|INSERT|PLACEHOLDER)[^\]]*\]`;
+  const tagPattern = String.raw`\*\*[^*]+\*\*|\[(?:VERIFY|FLAG|DESIGNER NOTE|TBD|INSERT|PLACEHOLDER|MANUAL FILL)[^\]]*\]`;
   const unique = [...new Set(highlightTexts.map((h) => h.trim()).filter(Boolean))].sort(
     (a, b) => b.length - a.length
   );
@@ -227,6 +302,11 @@ function renderInline(text: string | undefined | null, highlightTexts: string[] 
 
   return parts.map((part, index) => {
     if (!part) return null;
+
+    if (/^\[MANUAL\s+FILL/i.test(part)) {
+      const highlighted = tagMatchesHighlight(part, highlightTexts);
+      return <InlineGapTag key={index} tag={part} highlighted={highlighted} />;
+    }
 
     if (normalizedHighlights.has(part.trim()) || normalizedHighlights.has(part)) {
       const assignRef = !markAssigned;
@@ -256,13 +336,20 @@ function renderInline(text: string | undefined | null, highlightTexts: string[] 
       );
     }
     if (/^\[VERIFY/i.test(part)) {
+      const h = humanizeGapTag(part);
+      const highlighted = tagMatchesHighlight(part, highlightTexts);
       return (
         <span
           key={index}
-          className="rounded bg-red-100 px-1.5 py-0.5 text-xs font-semibold text-red-800"
-          title="Needs manual confirmation before submit"
+          className={`inline rounded-md border px-1.5 py-0.5 text-[0.85em] leading-relaxed ${
+            highlighted
+              ? "proposal-flag-inline-highlight border-amber-400/60 bg-amber-100/80 text-orange-950"
+              : "border-red-300/50 bg-red-50 text-red-950"
+          }`}
+          title={h.action}
         >
-          {part}
+          <strong>{h.title}</strong>
+          {h.detail ? <> — {h.detail}</> : null}
         </span>
       );
     }
@@ -383,6 +470,16 @@ export function MarkdownReportBody({
             );
           }
 
+          if (block.type === "gap_callout") {
+            return (
+              <GapCallout
+                key={index}
+                tag={block.tag}
+                highlighted={tagMatchesHighlight(block.tag, highlights)}
+              />
+            );
+          }
+
           if (block.type === "paragraph") {
             return <p key={index}>{renderInline(block.text, highlights)}</p>;
           }
@@ -479,6 +576,16 @@ export function MarkdownReportBody({
                 {renderInline(block.text ?? "", highlights)}
               </p>
             </div>
+          );
+        }
+
+        if (block.type === "gap_callout") {
+          return (
+            <GapCallout
+              key={index}
+              tag={block.tag}
+              highlighted={tagMatchesHighlight(block.tag, highlights)}
+            />
           );
         }
 

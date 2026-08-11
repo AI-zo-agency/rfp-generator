@@ -197,6 +197,12 @@ def scrub_section_optional_claims(
     logs: list[str] = []
     body = content or ""
 
+    from app.services.proposal_verify_optional_scrub import strip_inline_evidence_tags
+
+    body, n = strip_inline_evidence_tags(body)
+    if n:
+        logs.append(f"removed {n} inline evidence FLAG/VERIFY tag(s)")
+
     body, n = strip_designer_notes(body)
     if n:
         logs.append(f"removed {n} DESIGNER NOTE tag(s)")
@@ -221,20 +227,55 @@ def scrub_draft_optional_claims(
     *,
     rfp_text: str = "",
     skip_section_ids: set[str] | None = None,
+    registry: object | None = None,
 ) -> tuple[list[ProposalSection], list[str]]:
-    """Run Option B scrub across draft sections. Skips budget ids when provided."""
+    """Run Option B scrub across draft sections. Skips budget ids when provided.
+
+    Corrects ClientList work-type claim mismatches BEFORE stripping [FLAG] tags,
+    so Complete & Clean cannot hide fabricated website claims by deleting flags.
+    """
     skip = skip_section_ids or set()
     out: list[ProposalSection] = []
     logs: list[str] = []
+
+    if registry is None:
+        try:
+            from app.services.evidence_trust import load_client_list as _cl_mod
+
+            # Prefer process cache (warmed by async load in Scan / fabrication guard).
+            registry = getattr(_cl_mod, "_cache", None)
+        except Exception:  # noqa: BLE001
+            registry = None
+
+    if registry is None or not getattr(registry, "entries", None):
+        logger.warning(
+            "ClientList cache cold — claim correction skipped; "
+            "FLAG strip may leave fabricated claims intact"
+        )
+
     for section in sections:
         if section.id in skip:
             out.append(section)
             continue
-        updated, section_logs = scrub_section_optional_claims(
-            section.content or "", rfp_text=rfp_text
-        )
-        if section_logs:
-            logs.append(f"{section.title or section.id}: " + "; ".join(section_logs))
+        body = section.content or ""
+        if registry and registry.entries and body.strip():
+            from app.services.evidence_trust.claim_validator import validate_and_flag_section
+
+            corrected, report = validate_and_flag_section(
+                body,
+                registry=registry,
+                slot=section.title or section.id,
+            )
+            if report.blocks_replaced:
+                logs.append(
+                    f"{section.title or section.id}: corrected "
+                    f"{report.blocks_replaced} unsupported claim(s) before tag scrub"
+                )
+                body = corrected
+        updated, section_logs = scrub_section_optional_claims(body, rfp_text=rfp_text)
+        if section_logs or (updated != (section.content or "")):
+            if section_logs:
+                logs.append(f"{section.title or section.id}: " + "; ".join(section_logs))
             out.append(section.model_copy(update={"content": updated}))
         else:
             out.append(section)
@@ -252,9 +293,13 @@ def apply_optional_claim_scrub_to_draft(
     *,
     rfp_text: str = "",
     skip_section_ids: set[str] | None = None,
+    registry: object | None = None,
 ) -> tuple[ProposalDraft, list[str]]:
     sections, logs = scrub_draft_optional_claims(
-        draft.sections, rfp_text=rfp_text, skip_section_ids=skip_section_ids
+        draft.sections,
+        rfp_text=rfp_text,
+        skip_section_ids=skip_section_ids,
+        registry=registry,
     )
     if not logs:
         return draft, logs

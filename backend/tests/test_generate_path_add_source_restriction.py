@@ -22,14 +22,14 @@ already cover them —
     MISS  Reporting and Performance Optimization / Sample reporting dashboard or campaign report
 
 Fix: amend_outline_for_missing_requirements now filters ledger.missing() to
-sources in _ADD_ELIGIBLE_SOURCES (required_content, form) — imported from
+sources in _ADD_ELIGIBLE_SOURCES (required_content) — imported from
 proposal_rfp_compliance rather than redefined, so the pre-draft (assembler)
 and post-draft (Scan-RFP reconciler) checks can never drift on what counts
-as addable. A missing scored_criterion stays advisory (ledger.missing()
-still reports it) but is never auto-amended into the outline. The matcher
-(_match_outline_sections) is untouched — see test_outline_coverage.py /
-test_section_aliases.py's false-positive battery for why loosening it is
-rejected.
+as addable. Forms stay on the attachment checklist. A missing
+scored_criterion stays advisory (ledger.missing() still reports it) but is
+never auto-amended into the outline. The matcher (_match_outline_sections)
+is untouched — see test_outline_coverage.py / test_section_aliases.py's
+false-positive battery for why loosening it is rejected.
 """
 
 from __future__ import annotations

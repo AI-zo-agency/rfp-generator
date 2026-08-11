@@ -221,6 +221,31 @@ describe("resolveChatTarget", () => {
     }
   });
 
+  it("add client voice for this section is not outline structure", () => {
+    expect(
+      messageLooksOutlineStructure("here add client voice for this section")
+    ).toBe(false);
+    const result = resolveChatTarget(
+      sections,
+      "here add client voice for this section",
+      {
+        viewingSectionId: "section-3-work-oregon",
+        pinnedSection: sections.find((s) => s.id === "section-3-work-oregon"),
+      }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.reason).not.toBe("outline-structure");
+      expect(result.section.id).toBe("section-3-work-oregon");
+    }
+    expect(
+      chatBusyStatusLabel("here add client voice for this section", "3.1 — Oregon Employment", {
+        referenceMode: "section",
+        sameSectionPinned: true,
+      })
+    ).toBe("Improving 3.1 — Oregon Employment…");
+  });
+
   it("uses explicit pin with high confidence", () => {
     const pin = sections[0];
     const result = resolveChatTarget(sections, "make this tighter", {

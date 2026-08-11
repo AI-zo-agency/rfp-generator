@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
+import { humanizeGapTag } from "@/lib/gap-tag-humanize";
 import type { ManualFillFlag, ManualFillFlagKind } from "@/lib/proposal-manual-flags";
 
 interface ProposalManualFlagsPanelProps {
@@ -18,13 +19,13 @@ interface ProposalManualFlagsPanelProps {
 }
 
 function kindLabel(kind: ManualFillFlagKind): string {
-  if (kind === "manual_fill") return "MANUAL FILL";
-  if (kind === "verify") return "VERIFY";
-  if (kind === "placeholder") return "PLACEHOLDER";
-  if (kind === "compliance") return "COMPLIANCE";
-  if (kind === "budget") return "BUDGET";
-  if (kind === "consistency") return "CONSISTENCY";
-  return "FLAG";
+  if (kind === "manual_fill") return "Action needed";
+  if (kind === "verify") return "Confirm";
+  if (kind === "placeholder") return "Fill in";
+  if (kind === "compliance") return "Compliance";
+  if (kind === "budget") return "Budget";
+  if (kind === "consistency") return "Consistency";
+  return "Review";
 }
 
 function kindStyles(kind: ManualFillFlagKind): string {
@@ -37,10 +38,22 @@ function kindStyles(kind: ManualFillFlagKind): string {
   return "bg-zo-warm-gray/70 text-zo-text-secondary";
 }
 
-function truncateTag(tag: string, max = 96): string {
-  const inner = tag.replace(/^\[|\]$/g, "");
-  if (inner.length <= max) return inner;
-  return `${inner.slice(0, max - 1)}…`;
+function FlagRowLabel({ flag }: { flag: ManualFillFlag }) {
+  const h = humanizeGapTag(flag.tag);
+  return (
+    <span className="min-w-0 text-left">
+      <span className="block font-semibold text-amber-950">{h.title}</span>
+      <span className="mt-0.5 block text-[11px] leading-snug text-amber-900/85">
+        {h.owner ? (
+          <span className="font-semibold text-violet-800">{h.owner}: </span>
+        ) : null}
+        {h.detail}
+      </span>
+      <span className="mt-0.5 block text-[10px] leading-snug text-amber-800/70">
+        {h.action}
+      </span>
+    </span>
+  );
 }
 
 export function ProposalManualFlagsPanel({
@@ -99,8 +112,8 @@ export function ProposalManualFlagsPanel({
               {summary}
             </p>
             <p className="mt-1 text-[11px] text-amber-800/75">
-              Click a row to jump and highlight the exact passage in Content. Resolve queries
-              Supermemory only (no AI rewrite) — fills tags when KB has facts, else MANUAL FILL.
+              Click a row to jump to the gap in Content. Resolve searches KB only — fills
+              what it can and leaves clear action items for the rest.
             </p>
           </div>
           <button
@@ -150,12 +163,7 @@ export function ProposalManualFlagsPanel({
                         >
                           {kindLabel(flag.kind)}
                         </span>
-                        <span className="min-w-0 break-words text-left">
-                          {flag.owner ? (
-                            <span className="mr-1 font-semibold text-violet-800">{flag.owner}:</span>
-                          ) : null}
-                          {truncateTag(flag.tag)}
-                        </span>
+                        <FlagRowLabel flag={flag} />
                       </button>
                     </li>
                   ))}

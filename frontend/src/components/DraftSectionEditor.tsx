@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createMarkdownSourceMap } from "@/lib/markdown-source-map";
-import { getTextareaCaretViewportRect, scrollTextareaToRange } from "@/lib/textarea-selection";
+import { getTextareaCaretViewportRect } from "@/lib/textarea-selection";
 import type { FlagHighlightRange } from "@/lib/proposal-manual-flags";
 import type { OutlineSection } from "@/types/proposal";
 import { MarkdownReportBody, stripEvidenceCitations } from "./MarkdownReportBody";
@@ -79,27 +79,12 @@ export function DraftSectionEditor({
   }, [section.id]);
 
   useEffect(() => {
-    if (!highlightRange || !textareaRef.current || busy) return;
-    const ta = textareaRef.current;
-    const { start, end } = highlightRange;
-    if (start < 0 || end <= start || end > ta.value.length) return;
+    if (!highlightRange || busy) return;
 
-    const highlightKey = `${section.id}:${start}:${end}:${highlightRange.text}`;
+    const highlightKey = `${section.id}:${highlightRange.start}:${highlightRange.end}:${highlightRange.text}`;
     if (appliedHighlightKeyRef.current === highlightKey) return;
     appliedHighlightKeyRef.current = highlightKey;
-    setPreviewMode(false);
-
-    const applyHighlight = () => {
-      programmaticSelectionRef.current = true;
-      scrollTextareaToRange(ta, start, end);
-      window.requestAnimationFrame(() => {
-        programmaticSelectionRef.current = false;
-      });
-    };
-
-    requestAnimationFrame(() => {
-      requestAnimationFrame(applyHighlight);
-    });
+    setPreviewMode(true);
   }, [busy, highlightRange, section.id]);
 
   const clearSelection = useCallback(() => {
@@ -314,7 +299,11 @@ export function DraftSectionEditor({
                 onMouseUp={capturePreviewSelection}
                 onKeyUp={capturePreviewSelection}
               >
-                <MarkdownReportBody body={stripEvidenceCitations(value)} variant="report" />
+                <MarkdownReportBody
+                  body={stripEvidenceCitations(value)}
+                  variant="report"
+                  highlightTexts={highlightRange ? [highlightRange.text] : []}
+                />
               </div>
             ) : (
               <textarea

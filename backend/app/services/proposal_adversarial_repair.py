@@ -324,6 +324,22 @@ def _resolve_escalation_section_id(
     return _ensure_open_pricing_section(draft)
 
 
+def _manual_fill_code_present(existing: str, code: str) -> bool:
+    """True when this finding code (or same family prefix) is already tagged."""
+    existing_cf = (existing or "").casefold()
+    code_cf = (code or "").casefold()
+    if not code_cf:
+        return False
+    if f"— {code}".casefold() in existing_cf or code_cf in existing_cf:
+        return True
+    parts = code_cf.split("_")
+    if len(parts) >= 2 and len(parts[-1]) <= 4:
+        family = "_".join(parts[:-1])
+        if len(family) > 24 and family in existing_cf:
+            return True
+    return False
+
+
 def _append_manual_fill(
     draft: ProposalDraft,
     *,
@@ -355,7 +371,7 @@ def _append_manual_fill(
             continue
         existing = section.content or ""
         already = tag.casefold() in existing.casefold()
-        if code and f"— {code}".casefold() in existing.casefold():
+        if code and _manual_fill_code_present(existing, code):
             already = True
         if not already:
             body = existing.rstrip()

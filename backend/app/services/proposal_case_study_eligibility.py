@@ -18,12 +18,45 @@ _INELIGIBLE_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
-def is_eligible_section3_case_study_title(title: str | None) -> bool:
-    """Return False for mega-dumps and non-case-study KB artefacts."""
+def is_eligible_section3_case_study_title(
+    title: str | None,
+    *,
+    rfp_title: str = "",
+    rfp_sector: str = "",
+) -> bool:
+    """Return False for mega-dumps and non-case-study KB artefacts.
+
+    Also blocks personal-brand / private financial-advisor studies on
+    government / civic public-education RFPs (Infinite Assets pattern).
+    """
     text = (title or "").strip()
     if not text:
         return False
     for pattern in _INELIGIBLE_PATTERNS:
         if pattern.search(text):
             return False
+    rfp_blob = f"{rfp_title} {rfp_sector}".casefold()
+    civic = any(
+        token in rfp_blob
+        for token in (
+            "government",
+            "municipal",
+            "public education",
+            "ballot",
+            "charter",
+            "transit",
+            "transportation authority",
+            "city of",
+            "county",
+            "nycedc",
+            "coge",
+        )
+    )
+    if civic and re.search(
+        r"infinite\s+assets|personal\s+brand|keynote\s+speaker|"
+        r"financial\s+advisor|thought\s+leader.*coach",
+        text,
+        re.I,
+    ):
+        return False
     return True

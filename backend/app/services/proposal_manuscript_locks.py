@@ -389,6 +389,40 @@ def _kpi_present(kpi: str, haystack: str) -> bool:
     return hits >= need
 
 
+KPI_LOCK_MFILL_RE = re.compile(
+    r"\[MANUAL\s+FILL:[^\]]*deterministic\.manuscript_locks\.rfq_named_kpi[^\]]*\]",
+    re.I,
+)
+
+
+def is_kpi_lock_manual_fill(tag: str) -> bool:
+    return bool(KPI_LOCK_MFILL_RE.search(tag or ""))
+
+
+def strip_kpi_lock_manual_fills(content: str) -> tuple[str, int]:
+    """Remove KPI-lock escalation tags — Improve weaves KPIs into prose instead."""
+    body = content or ""
+    found = KPI_LOCK_MFILL_RE.findall(body)
+    if not found:
+        return body, 0
+    out = KPI_LOCK_MFILL_RE.sub("", body)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    if body.endswith("\n") and out:
+        out += "\n"
+    return out, len(found)
+
+
+def kpi_weave_instruction(locks: ManuscriptLocks | None) -> str:
+    if not locks or not locks.required_kpis:
+        return ""
+    lines = "\n".join(f"- {k}" for k in locks.required_kpis[:8])
+    return (
+        "RFQ-NAMED KPIs — weave these exact metrics into methodology/reporting "
+        "prose in this section (do NOT append [MANUAL FILL] or [VERIFY] tags):\n"
+        f"{lines}\n"
+    )
+
+
 def scan_manuscript_lock_issues(
     *,
     draft: ProposalDraft,
@@ -472,18 +506,24 @@ def scan_manuscript_lock_issues(
         f"{s.title}\n{s.content}" for s in reporting_sections
     ).casefold()
 
+    missing_kpis: list[str] = []
     for kpi in locks.required_kpis:
         haystack = reporting_blob if reporting_sections else corpus
-        if _kpi_present(kpi, haystack):
-            continue
+        if not _kpi_present(kpi, haystack):
+            missing_kpis.append(kpi)
+
+    if missing_kpis:
         target = reporting_sections[0] if reporting_sections else None
+        kpi_preview = "; ".join(missing_kpis[:4])
+        if len(missing_kpis) > 4:
+            kpi_preview += f" (+{len(missing_kpis) - 4} more)"
         issues.append(
             PreSubmitIssue(
                 severity="critical",
                 category="manuscript_locks",
                 message=(
-                    f"RFQ-named KPI missing from Methodology/Reporting: '{kpi}'. "
-                    "Add this exact metric to brand-awareness / reporting tracking."
+                    f"RFQ-named KPIs missing from Methodology/Reporting: {kpi_preview}. "
+                    "Add these exact metrics to brand-awareness / reporting tracking."
                 ),
                 sectionId=target.id if target else None,
                 sectionTitle=target.title if target else None,

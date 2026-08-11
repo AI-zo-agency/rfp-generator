@@ -457,6 +457,8 @@ def select_best_case_study_titles(
     min_count: int = 1,
     max_count: int = DEFAULT_MAX_CASE_STUDIES,
     allowed_titles: Sequence[str] | None = None,
+    rfp_title: str = "",
+    rfp_sector: str = "",
 ) -> list[str]:
     """Pick distinct strong-fit case studies for Section 3 — never pad with weak filler.
 
@@ -497,7 +499,9 @@ def select_best_case_study_titles(
     )
 
     for score, cap_idx, source in ranked:
-        if not is_eligible_section3_case_study_title(source):
+        if not is_eligible_section3_case_study_title(
+            source, rfp_title=rfp_title, rfp_sector=rfp_sector
+        ):
             continue
         key = source.casefold()
         if key in seen:
@@ -512,7 +516,9 @@ def select_best_case_study_titles(
 
     # Second pass: fill remaining slots with next-best strong fits (still never weak)
     for score, cap_idx, source in ranked:
-        if not is_eligible_section3_case_study_title(source):
+        if not is_eligible_section3_case_study_title(
+            source, rfp_title=rfp_title, rfp_sector=rfp_sector
+        ):
             continue
         key = source.casefold()
         if key in seen:

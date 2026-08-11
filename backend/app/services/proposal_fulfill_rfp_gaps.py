@@ -531,6 +531,38 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("RFP structure alignment skipped: %s", exc)
         report["logs"].append(f"RFP structure scan skipped: {exc}")
 
+    if use_llm:
+        try:
+            from app.services.proposal_draft_structure_stubs import (
+                draft_rfp_structure_stubs,
+                replace_ineligible_section3_case_studies,
+            )
+
+            await _scan_progress(
+                2,
+                "Scan RFP: draft scored stubs",
+                "Write Team Qualifications and other RFP-required stubs left as Action needed.",
+            )
+            await _ensure_not_stopped()
+            draft, stub_draft_logs = await draft_rfp_structure_stubs(
+                draft, rfp_id=rfp_id, rfp=rfp
+            )
+            report["logs"].extend(stub_draft_logs)
+            if stub_draft_logs:
+                await asave_proposal_draft(draft)
+
+            draft, cs_swap_logs = await replace_ineligible_section3_case_studies(
+                draft, rfp_id=rfp_id, rfp=rfp
+            )
+            report["logs"].extend(cs_swap_logs)
+            if cs_swap_logs:
+                await asave_proposal_draft(draft)
+        except ProposalGenerationCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Scored stub / case-study swap skipped: %s", exc)
+            report["logs"].append(f"Scored stub draft skipped: {exc}")
+
     try:
         from app.services.proposal_fulfill_fabrication_guard import (
             repair_fabricated_qualifications_async,
@@ -750,6 +782,43 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].append(f"Dedupe prune skipped: {exc}")
 
     try:
+        from app.services.agency_facts import default_business_information_markdown
+        from app.services.proposal_section_quality import word_count
+
+        fixed = False
+        sections = list(draft.sections)
+        for i, sec in enumerate(sections):
+            if sec.id != "section-1-business-info":
+                continue
+            body = (sec.content or "").strip()
+            if word_count(body) >= 40:
+                break
+            sections[i] = sec.model_copy(
+                update={
+                    "content": default_business_information_markdown(),
+                    "status": "generated",
+                }
+            )
+            fixed = True
+            break
+        if fixed:
+            draft = draft.model_copy(
+                update={
+                    "sections": sections,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            await asave_proposal_draft(draft)
+            report["logs"].append(
+                "Section 1.3: filled hollow Business Information from canonical agency facts."
+            )
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Business Information hollow fill skipped: %s", exc)
+        report["logs"].append(f"Business Information fill skipped: {exc}")
+
+    try:
         from app.services.proposal_fulfill_rfp_budget_kpi import (
             run_fulfill_budget_scan,
             run_fulfill_kpi_scan,
@@ -782,6 +851,8 @@ async def _run_fulfill_rfp_gaps_body(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Budget scan skipped: %s", exc)
         report["logs"].append(f"Budget scan skipped: {exc}")
+        report["budgetStatus"] = "needs_human"
+        report["budgetEscalationNotes"] = [f"budget scan failed: {exc}"]
 
     try:
         from app.services.proposal_cert_claim_scrub import apply_cert_claim_scrub_to_draft
@@ -853,6 +924,33 @@ async def _run_fulfill_rfp_gaps_body(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Truncation repair skipped: %s", exc)
         report["logs"].append(f"Truncation repair skipped: {exc}")
+
+    try:
+        from app.services.proposal_structure_gap_repair import (
+            repair_structure_gaps_in_draft,
+        )
+
+        await _scan_progress(
+            7,
+            "Scan RFP: empty subheadings",
+            "Fill ## headers with no body (e.g. Transportation Experience subsections).",
+        )
+        await _ensure_not_stopped()
+        draft, gap_logs = await repair_structure_gaps_in_draft(
+            draft,
+            rfp_id=rfp_id,
+            rfp=rfp,
+            rfp_client=rfp.client,
+            rfp_title=rfp.title,
+        )
+        report["logs"].extend(gap_logs)
+        if gap_logs:
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Empty subheading repair skipped: %s", exc)
+        report["logs"].append(f"Empty subheading repair skipped: {exc}")
 
     if use_llm:
         try:
@@ -1124,15 +1222,28 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].append(f"VERIFY scrub skipped: {exc}")
 
     try:
+        from app.services.evidence_trust.load_client_list import load_client_list_registry
+        from app.services.proposal_fulfill_fabrication_guard import (
+            repair_fabricated_qualifications_async,
+        )
         from app.services.proposal_rfp_optional_claim_scrub import (
             apply_optional_claim_scrub_to_draft,
         )
 
+        # Warm ClientList cache, then correct unsupported claims BEFORE stripping flags.
+        client_registry = await load_client_list_registry()
+        draft, fab_again, _fab_h = await repair_fabricated_qualifications_async(
+            draft, research
+        )
+        if fab_again:
+            report["logs"].extend(f"claim-correct: {line}" for line in fab_again[:12])
         draft, claim_logs = apply_optional_claim_scrub_to_draft(
-            draft, rfp_text=rfp_text
+            draft, rfp_text=rfp_text, registry=client_registry
         )
         if claim_logs:
             report["logs"].extend(f"optional-claim scrub: {line}" for line in claim_logs[:20])
+            await asave_proposal_draft(draft)
+        elif fab_again:
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
@@ -1178,6 +1289,26 @@ async def _run_fulfill_rfp_gaps_body(
                 f"Final compact: {len(final_logs)} action(s): "
                 + "; ".join(final_logs[:10])
             )
+        # Hard guarantee: Compact must never leave the proposal without Budget.
+        from app.services.proposal_budget_content import ensure_budget_section_present
+
+        sections, budget_restored = ensure_budget_section_present(
+            list(draft.sections),
+            research.budget if research else None,
+            rfp_text=rfp_text,
+        )
+        if budget_restored:
+            draft = draft.model_copy(
+                update={
+                    "sections": sections,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            await asave_proposal_draft(draft)
+            report["logs"].append(
+                "Budget: restored Budget & Pricing after compact (dedupe must never drop fees)."
+            )
+            report["budgetChanged"] = True
     except ProposalGenerationCancelled:
         raise
     except Exception as exc:  # noqa: BLE001

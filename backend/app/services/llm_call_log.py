@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS llm_call_log (
     provider TEXT NOT NULL DEFAULT '',
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd REAL NOT NULL DEFAULT 0,
     latency_ms INTEGER NOT NULL DEFAULT 0,
     tokens_estimated INTEGER NOT NULL DEFAULT 0,
@@ -31,6 +33,13 @@ CREATE TABLE IF NOT EXISTS llm_call_log (
 CREATE INDEX IF NOT EXISTS idx_llm_call_log_run_id ON llm_call_log (run_id);
 CREATE INDEX IF NOT EXISTS idx_llm_call_log_rfp_id ON llm_call_log (rfp_id);
 """
+
+# Columns added after the table shipped. CREATE TABLE IF NOT EXISTS will not add
+# them to a database created by an earlier build, so they are applied separately.
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("cache_creation_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("cache_read_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 
 def _use_supabase() -> bool:
@@ -46,6 +55,17 @@ def ensure_llm_call_log_table() -> None:
         return
     with _connect() as conn:
         conn.executescript(_DDL)
+        _migrate_sqlite_columns(conn)
+
+
+def _migrate_sqlite_columns(conn: sqlite3.Connection) -> None:
+    """Add post-ship columns to an existing table. Idempotent."""
+    existing = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(llm_call_log)").fetchall()
+    }
+    for name, ddl in _ADDED_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE llm_call_log ADD COLUMN {name} {ddl}")
 
 
 def record_llm_call(
@@ -61,6 +81,8 @@ def record_llm_call(
     cost_usd: float,
     latency_ms: int,
     tokens_estimated: bool = False,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
 ) -> None:
     """Insert one instrumentation row. Never raises — observability must not break generation."""
     try:
@@ -75,6 +97,8 @@ def record_llm_call(
             "provider": (provider or "").strip(),
             "input_tokens": max(0, int(input_tokens)),
             "output_tokens": max(0, int(output_tokens)),
+            "cache_creation_input_tokens": max(0, int(cache_creation_input_tokens)),
+            "cache_read_input_tokens": max(0, int(cache_read_input_tokens)),
             "cost_usd": float(cost_usd),
             "latency_ms": max(0, int(latency_ms)),
             "tokens_estimated": 1 if tokens_estimated else 0,
@@ -94,11 +118,13 @@ def _insert_sqlite(row: dict[str, Any]) -> None:
             """
             INSERT INTO llm_call_log (
                 id, run_id, rfp_id, node_name, model, tier, provider,
-                input_tokens, output_tokens, cost_usd, latency_ms,
+                input_tokens, output_tokens, cache_creation_input_tokens,
+                cache_read_input_tokens, cost_usd, latency_ms,
                 tokens_estimated, created_at
             ) VALUES (
                 :id, :run_id, :rfp_id, :node_name, :model, :tier, :provider,
-                :input_tokens, :output_tokens, :cost_usd, :latency_ms,
+                :input_tokens, :output_tokens, :cache_creation_input_tokens,
+                :cache_read_input_tokens, :cost_usd, :latency_ms,
                 :tokens_estimated, :created_at
             )
             """,
@@ -151,14 +177,20 @@ def get_run_cost_breakdown(run_id: str) -> dict[str, Any]:
     total_cost = 0.0
     total_in = 0
     total_out = 0
+    total_cache_write = 0
+    total_cache_read = 0
     for row in rows:
         node = str(row.get("node_name") or "unknown")
         cost = float(row.get("cost_usd") or 0)
         inp = int(row.get("input_tokens") or 0)
         out = int(row.get("output_tokens") or 0)
+        cache_write = int(row.get("cache_creation_input_tokens") or 0)
+        cache_read = int(row.get("cache_read_input_tokens") or 0)
         total_cost += cost
         total_in += inp
         total_out += out
+        total_cache_write += cache_write
+        total_cache_read += cache_read
         bucket = by_node.setdefault(
             node,
             {
@@ -166,6 +198,8 @@ def get_run_cost_breakdown(run_id: str) -> dict[str, Any]:
                 "cost_usd": 0.0,
                 "input_tokens": 0,
                 "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "calls": 0,
                 "latency_ms": 0,
             },
@@ -173,6 +207,8 @@ def get_run_cost_breakdown(run_id: str) -> dict[str, Any]:
         bucket["cost_usd"] += cost
         bucket["input_tokens"] += inp
         bucket["output_tokens"] += out
+        bucket["cache_creation_input_tokens"] += cache_write
+        bucket["cache_read_input_tokens"] += cache_read
         bucket["calls"] += 1
         bucket["latency_ms"] += int(row.get("latency_ms") or 0)
 
@@ -185,6 +221,8 @@ def get_run_cost_breakdown(run_id: str) -> dict[str, Any]:
         "total_cost_usd": round(total_cost, 6),
         "total_input_tokens": total_in,
         "total_output_tokens": total_out,
+        "total_cache_creation_input_tokens": total_cache_write,
+        "total_cache_read_input_tokens": total_cache_read,
         "call_count": len(rows),
         "by_node": nodes,
     }
@@ -196,6 +234,7 @@ def _fetch_sqlite(run_id: str) -> list[dict[str, Any]]:
         cur = conn.execute(
             """
             SELECT node_name, model, tier, provider, input_tokens, output_tokens,
+                   cache_creation_input_tokens, cache_read_input_tokens,
                    cost_usd, latency_ms, tokens_estimated, created_at
             FROM llm_call_log
             WHERE run_id = ?
@@ -214,6 +253,7 @@ def _fetch_supabase(run_id: str) -> list[dict[str, Any]]:
         client.table("llm_call_log")
         .select(
             "node_name,model,tier,provider,input_tokens,output_tokens,"
+            "cache_creation_input_tokens,cache_read_input_tokens,"
             "cost_usd,latency_ms,tokens_estimated,created_at"
         )
         .eq("run_id", run_id)
@@ -231,7 +271,9 @@ def format_cost_breakdown_log(breakdown: dict[str, Any]) -> str:
         f"  total_usd=${breakdown.get('total_cost_usd', 0):.4f} "
         f"calls={breakdown.get('call_count', 0)} "
         f"tokens_in={breakdown.get('total_input_tokens', 0)} "
-        f"tokens_out={breakdown.get('total_output_tokens', 0)}",
+        f"tokens_out={breakdown.get('total_output_tokens', 0)} "
+        f"cache_write={breakdown.get('total_cache_creation_input_tokens', 0)} "
+        f"cache_read={breakdown.get('total_cache_read_input_tokens', 0)}",
     ]
     for node in breakdown.get("by_node") or []:
         lines.append(

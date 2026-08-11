@@ -2239,7 +2239,13 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
     )
 
     selected_studies = [
-        s for s in selected_studies if is_eligible_section3_case_study_title(s)
+        s
+        for s in selected_studies
+        if is_eligible_section3_case_study_title(
+            s,
+            rfp_title=str(state.get("rfp_title") or ""),
+            rfp_sector=str(state.get("rfp_sector") or ""),
+        )
     ]
     if not selected_studies:
         logger.warning(
@@ -2890,7 +2896,13 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
     )
 
     selected_studies = [
-        s for s in selected_studies if is_eligible_section3_case_study_title(s)
+        s
+        for s in selected_studies
+        if is_eligible_section3_case_study_title(
+            s,
+            rfp_title=str(state.get("rfp_title") or ""),
+            rfp_sector=str(state.get("rfp_sector") or ""),
+        )
     ][:5]
 
     new_sections: list[dict[str, Any]] = []

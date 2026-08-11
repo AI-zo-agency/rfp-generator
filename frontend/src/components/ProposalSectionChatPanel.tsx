@@ -255,8 +255,7 @@ export function ProposalSectionChatPanel({
         const result = await improveProposalSection(rfpId, targetSection.id, trimmed, {
           selection: selectionForRequest,
           conversationHistory: history,
-          // Always send whole-proposal context unless editing a pinned excerpt.
-          proposalWide: true,
+          proposalWide: proposalWideAsk,
           improveSectionPinned:
             activeReference?.mode === "section" &&
             activeReference.sectionId === targetSection.id,

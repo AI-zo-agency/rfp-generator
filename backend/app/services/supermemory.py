@@ -144,6 +144,16 @@ async def list_container_memories(
     limit: int = 100,
     force_refresh: bool = False,
 ) -> list[dict[str, Any]]:
+    docs = await list_all_container_documents(force_refresh=force_refresh)
+    return docs[:limit]
+
+
+async def list_all_container_documents(
+    *,
+    page_size: int = 100,
+    force_refresh: bool = False,
+) -> list[dict[str, Any]]:
+    """Paginate Supermemory /v3/documents/list for the active container."""
     global _doc_list_cache
 
     now = time.monotonic()
@@ -152,23 +162,77 @@ async def list_container_memories(
         and _doc_list_cache is not None
         and now - _doc_list_cache[0] < _DOC_LIST_CACHE_TTL_SECONDS
     ):
-        cached = _doc_list_cache[1]
-        return cached[:limit]
+        return list(_doc_list_cache[1])
 
-    body = {"containerTag": container_tag(), "limit": limit}
-    data = await _request("POST", "/v3/documents/list", json_body=body)
-    if isinstance(data, dict):
-        memories = data.get("memories") or data.get("documents") or data.get("items")
-        if isinstance(memories, list):
-            docs = [item for item in memories if isinstance(item, dict)]
-            _doc_list_cache = (now, docs)
-            return docs[:limit]
-    if isinstance(data, list):
-        docs = [item for item in data if isinstance(item, dict)]
-        _doc_list_cache = (now, docs)
-        return docs[:limit]
-    _doc_list_cache = (now, [])
-    return []
+    all_docs: list[dict[str, Any]] = []
+    page = 1
+
+    while True:
+        body = {"containerTag": container_tag(), "limit": page_size, "page": page}
+        data = await _request("POST", "/v3/documents/list", json_body=body)
+        batch: list[dict[str, Any]] = []
+        if isinstance(data, dict):
+            raw = data.get("memories") or data.get("documents") or data.get("items")
+            if isinstance(raw, list):
+                batch = [item for item in raw if isinstance(item, dict)]
+        elif isinstance(data, list):
+            batch = [item for item in data if isinstance(item, dict)]
+
+        all_docs.extend(batch)
+
+        pagination = data.get("pagination") if isinstance(data, dict) else None
+        if not isinstance(pagination, dict):
+            break
+        total_pages = int(pagination.get("totalPages") or 1)
+        if page >= total_pages:
+            break
+        page += 1
+
+    _doc_list_cache = (now, all_docs)
+    return all_docs
+
+
+def is_knowledge_base_document(doc: dict[str, Any]) -> bool:
+    metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+    doc_type = metadata.get("type") or doc.get("type")
+    if doc_type == "knowledge_base":
+        return True
+    return str(doc.get("customId") or "").startswith("drive:")
+
+
+def drive_file_id_from_document(doc: dict[str, Any]) -> str | None:
+    custom = str(doc.get("customId") or "")
+    if custom.startswith("drive:"):
+        return custom.removeprefix("drive:")
+    metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+    drive_id = metadata.get("driveFileId")
+    return str(drive_id) if drive_id else None
+
+
+def document_updated_at(doc: dict[str, Any]) -> str | None:
+    for key in ("updatedAt", "updated_at", "modifiedTime", "modified_at"):
+        value = doc.get(key)
+        if value:
+            return str(value)
+    metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+    for key in ("modifiedTime", "driveModifiedTime"):
+        value = metadata.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+async def get_document(
+    *,
+    document_id: str | None = None,
+    custom_id: str | None = None,
+) -> dict[str, Any]:
+    """Fetch a document record via v3 GET (includes status + content when ready)."""
+    key = (custom_id or document_id or "").strip()
+    if not key or not is_fetchable_document_key(key):
+        return {}
+    data = await _request("GET", f"/v3/documents/{key}", allow_status={404})
+    return data if isinstance(data, dict) else {}
 
 
 async def get_document_content(
@@ -177,12 +241,7 @@ async def get_document_content(
     custom_id: str | None = None,
 ) -> str:
     """Fetch full indexed document text (all chunks) via v3 GET — search often returns one chunk only."""
-    key = (custom_id or document_id or "").strip()
-    if not key or not is_fetchable_document_key(key):
-        return ""
-    data = await _request("GET", f"/v3/documents/{key}", allow_status={404})
-    if not isinstance(data, dict):
-        return ""
+    data = await get_document(document_id=document_id, custom_id=custom_id)
     content = data.get("content") or data.get("text") or ""
     return str(content).strip()
 
@@ -192,7 +251,7 @@ async def find_document_by_file_name(file_name: str) -> dict[str, Any] | None:
     target = file_name.strip().casefold()
     if not target:
         return None
-    docs = await list_container_memories(limit=1000)
+    docs = await list_all_container_documents()
     for doc in docs:
         metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
         if str(metadata.get("fileName") or "").strip().casefold() == target:
@@ -444,6 +503,49 @@ def is_memory_hit(hit: dict[str, Any]) -> bool:
     if hit.get("_retrieval_mode") == "hybrid":
         return True
     return bool(hit.get("memory")) and not bool(hit.get("chunk"))
+
+
+def merge_chunk_first_hits(
+    memory_hits: list[dict[str, Any]],
+    chunk_hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Chunks first for section-level fidelity; memories only fill docs chunks missed."""
+    merged: list[dict[str, Any]] = []
+    by_doc: dict[str, dict[str, Any]] = {}
+
+    for hit in chunk_hits:
+        tagged = dict(hit)
+        tagged["_retrieval_mode"] = "documents"
+        chunk_body = hit_text(tagged)
+        if chunk_body:
+            tagged["chunk"] = chunk_body
+            tagged["content"] = chunk_body
+        key = document_dedupe_key(tagged) or str(tagged.get("id") or id(tagged))
+        if key in by_doc:
+            continue
+        by_doc[key] = tagged
+        merged.append(tagged)
+
+    for hit in memory_hits:
+        tagged = dict(hit)
+        tagged["_retrieval_mode"] = "hybrid"
+        key = document_dedupe_key(tagged) or str(tagged.get("id") or id(tagged))
+        if key in by_doc:
+            existing = by_doc[key]
+            for score_key in ("similarity", "score", "rerankScore"):
+                mem_val = tagged.get(score_key)
+                if mem_val is not None:
+                    try:
+                        ex_val = existing.get(score_key)
+                        if ex_val is None or float(mem_val) > float(ex_val):
+                            existing[score_key] = mem_val
+                    except (TypeError, ValueError):
+                        pass
+            continue
+        by_doc[key] = tagged
+        merged.append(tagged)
+
+    return merged
 
 
 def merge_memory_and_chunk_hits(

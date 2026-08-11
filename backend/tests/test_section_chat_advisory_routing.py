@@ -44,6 +44,7 @@ class WantsSectionEditTests(unittest.TestCase):
 
     def test_in_place_client_voice_add_is_edit(self) -> None:
         self.assertTrue(_wants_section_edit("here add client voice in this"))
+        self.assertTrue(_wants_section_edit("here add client voice for this section"))
 
     def test_skip_structure_planner_for_scoped_content_add(self) -> None:
         from app.services.proposal_section_editor import _should_skip_structure_planner

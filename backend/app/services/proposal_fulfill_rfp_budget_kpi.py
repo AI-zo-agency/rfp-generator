@@ -138,16 +138,12 @@ def pricing_model_lacks_professional_fees(budget: object | None) -> bool:
         if infer_line_item_type(item) not in {"direct_expense", "client_passthrough"}
         and float(getattr(item, "extended", None) or 0) > 0
     ]
-    if professional and (agency_fee > 0 or revenue > 0):
+    if professional:
         return False
-    # Travel-only envelope: lump ≈ direct, no agency fee lines.
-    if agency_fee <= 0 and revenue <= 0 and direct > 0 and (
-        lump <= 0 or abs(lump - direct) < 1.0
-    ):
+    # No agency-fee line rows — travel-only, empty, or stale totals with no fee lines.
+    if not line_items and lump <= 0 and revenue <= 0:
         return True
-    if not professional and lump <= direct + 1.0:
-        return True
-    return False
+    return True
 
 
 def manuscript_cost_section_is_hollow(content: str) -> bool:
@@ -259,20 +255,63 @@ def manuscript_budget_is_missing(
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
 ) -> bool:
-    """True when Scan RFP should regenerate Phase 3.5 budget (not just reconcile)."""
+    """True when Scan must run full Phase 3.5 LLM budget generation.
+
+    Manuscript-only gaps (hollow $500 tab but healthy cached pricing model) do
+    NOT belong here — re-rendering from the cached model fixes those without a
+    new LLM pass that can overwrite a good fee build with travel-only output.
+    """
+    budget = research.budget if research else None
+    return pricing_model_lacks_professional_fees(budget)
+
+
+def manuscript_budget_tab_stale(
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+) -> bool:
+    """True when Budget & Pricing prose does not match the cached pricing model."""
     budget = research.budget if research else None
     if pricing_model_lacks_professional_fees(budget):
         return True
-
     idx = find_budget_section_index(draft.sections)
     if idx is None:
-        # Pricing model has fees — reconcile path appends Budget & Pricing.
-        return False
+        return True
     content = draft.sections[idx].content or ""
-    # Empty "Proposed Compensation…" / Cost tabs must not stay undrafted.
     if manuscript_cost_section_is_hollow(content):
         return True
-    return False
+    return budget_manuscript_needs_restore(content, budget)
+
+
+def _fail_closed_if_budget_still_hollow(
+    *,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    logs: list[str],
+    meta: dict[str, Any],
+) -> None:
+    """Mark needs_human when travel-only / hollow budget would otherwise pass green."""
+    final_budget = research.budget if research else None
+    idx_final = find_budget_section_index(draft.sections)
+    final_content = (
+        draft.sections[idx_final].content if idx_final is not None else ""
+    )
+    still_hollow = manuscript_cost_section_is_hollow(final_content or "")
+    still_travel_only = pricing_model_lacks_professional_fees(final_budget)
+    if not (still_hollow or still_travel_only):
+        return
+    reason = (
+        "pricing model is travel/pass-through only (no professional fees)"
+        if still_travel_only
+        else "Budget & Pricing manuscript is hollow / travel-equals-total"
+    )
+    meta["budgetStatus"] = "needs_human"
+    notes = list(meta.get("budgetEscalationNotes") or [])
+    notes.append(reason)
+    meta["budgetEscalationNotes"] = notes
+    logs.append(
+        f"Budget: FAIL CLOSED — {reason}. Step must not pass green; "
+        "re-run Budget / Phase 3.5 or fill fees before submit."
+    )
 
 
 async def _regen_budget_via_phase_3_5(rfp_id: str):
@@ -304,7 +343,7 @@ async def run_fulfill_budget_scan(
 
     if manuscript_budget_is_missing(draft, research):
         logs.append(
-            "Budget: pricing model / Cost Proposal missing or travel-only — "
+            "Budget: pricing model missing professional fee line items — "
             "regenerating full Phase 3.5 fee proposal."
         )
         try:
@@ -322,6 +361,14 @@ async def run_fulfill_budget_scan(
             meta["budgetStatus"] = "needs_human"
             meta["budgetEscalationNotes"] = [f"regeneration failed: {exc}"]
             return draft, research, logs, meta
+    elif manuscript_budget_tab_stale(draft, research):
+        logs.append(
+            "Budget: manuscript tab stale vs cached pricing model — "
+            "re-rendering from canon (no LLM regen)."
+        )
+        meta["budgetRepairedNotes"].append(
+            "re-rendered Budget & Pricing from cached fee model"
+        )
 
     if not research or not research.budget:
         logs.append(
@@ -417,6 +464,9 @@ async def run_fulfill_budget_scan(
             logs.extend(patch_logs)
             if patch_logs:
                 meta["budgetChanged"] = True
+        _fail_closed_if_budget_still_hollow(
+            draft=draft, research=research, logs=logs, meta=meta
+        )
         return draft, research, logs, meta
 
     prose_broken = bool(
@@ -424,20 +474,27 @@ async def run_fulfill_budget_scan(
     )
     hollow = idx is None or manuscript_cost_section_is_hollow(before or "")
     polluted = idx is not None and budget_manuscript_needs_restore(before or "", budget)
+    stale_tab = manuscript_budget_tab_stale(draft, research)
     # Complete & Clean must NOT wipe a healthy Pricing / Budget tab just to
     # re-render from canon. Refresh when object changed, prose math is broken,
-    # section is missing/hollow, or the tab was polluted (e.g. contact-lock
-    # MANUAL FILL dumped onto the fee form — second scan restores from model).
+    # section is missing/hollow/stale, or Phase 3.5 just regenerated.
     needs_manuscript_refresh = (
         object_changed
         or prose_broken
         or hollow
         or polluted
+        or stale_tab
         or meta["budgetRegenerated"]
     )
 
     if needs_manuscript_refresh:
         content = render_budget_markdown(budget, rfp_text=rfp_text)
+        # Signature / cover DESIGNER NOTEs belong on closing tabs — never on fees.
+        content = re.sub(
+            r"(?is)\[DESIGNER\s+NOTE:[^\]]*\]\s*",
+            "",
+            content,
+        ).strip()
         if idx is not None:
             sections[idx] = sections[idx].model_copy(
                 update={"content": content, "status": "generated"}
@@ -553,6 +610,9 @@ async def run_fulfill_budget_scan(
             logger.warning("Budget grounding during Scan RFP skipped: %s", exc)
             logs.append(f"Budget: grounding check skipped ({exc}).")
 
+    _fail_closed_if_budget_still_hollow(
+        draft=draft, research=research, logs=logs, meta=meta
+    )
     return draft, research, logs, meta
 
 

@@ -183,19 +183,39 @@ class SectionDedupTests(unittest.TestCase):
         self.assertIn("rfp-posting", kept_ids)
         self.assertTrue(any("removed" in log for log in logs))
 
-    def test_dedupe_manuscript_for_scan_runs_pipeline(self) -> None:
+    def test_dedupe_never_drops_budget_pricing_tab(self) -> None:
+        budget_body = (
+            "## Proposed Investment\n\n**Professional fees: $151,000**\n\n"
+            "Total proposed investment: $151,000.\n\n"
+            "| Phase | Deliverable | Amount |\n| --- | --- | ---: |\n"
+            "| Discovery | Kickoff | $30,000 |\n| **Total** | | **$151,000** |\n"
+        )
+        twin = budget_body + "\nExtra closing sentence about fees and transparency.\n"
         sections = [
-            _sec("section-1-who-we-are", "1.1 — Who We Are", "We are zö agency."),
-            _sec("rfp-a", "Examples of Successful Campaigns", _UMATILLA_BODY),
-            _sec(
-                "rfp-b",
-                "Examples of Tourism Destination Campaigns Portfolio",
-                _UMATILLA_BODY + " more destination conversion detail for overnight stays.",
-            ),
+            _sec("section-budget-pricing", "Budget & Pricing", budget_body),
+            _sec("rfp-fees-alt", "Fee Schedule & Cost Proposal", twin),
+            _sec("rfp-other", "Understanding of Scope", "Client goals and audiences only. " * 20),
         ]
         kept, logs = dedupe_manuscript_for_scan(sections)
-        self.assertTrue(logs)
-        self.assertLessEqual(len(kept), 3)
+        kept_ids = {s.id for s in kept}
+        self.assertIn("section-budget-pricing", kept_ids)
+        self.assertTrue(any(s.title == "Budget & Pricing" for s in kept))
+
+    def test_dedupe_protects_pricing_title_with_score_under_4(self) -> None:
+        """Bare 'Pricing' scores 3 — must still be protected (threshold was wrongly >=4)."""
+        pricing_body = (
+            "## Fee table\n\nTotal: $90,000\n\n"
+            "| Line | Amount |\n| --- | ---: |\n| Media | $40,000 |\n"
+            "| Creative | $50,000 |\n"
+        )
+        twin = pricing_body + "\nAdditional fee narrative for evaluators.\n"
+        sections = [
+            _sec("rfp-pricing", "Pricing", pricing_body),
+            _sec("rfp-fees-clone", "Cost Proposal Narrative", twin),
+            _sec("rfp-other", "Understanding of Scope", "Client goals and audiences only. " * 20),
+        ]
+        kept, _logs = dedupe_manuscript_for_scan(sections)
+        self.assertIn("rfp-pricing", {s.id for s in kept})
 
 
 if __name__ == "__main__":

@@ -530,13 +530,15 @@ def _inject_designer_note_on_section(
     target_idx: int,
     note: str,
     designer_field: str,
+    allow_alongside_existing_attach_note: bool = False,
 ) -> tuple[list[ProposalSection], bool]:
     section = sections[target_idx]
     body = section.content or ""
-    if _ALREADY_HAS_ATTACH_PDF_NOTE_RE.search(body):
-        return sections, False
-    if _ALREADY_HAS_ATTACH_PDF_NOTE_RE.search(section.designer_note or ""):
-        return sections, False
+    if not allow_alongside_existing_attach_note:
+        if _ALREADY_HAS_ATTACH_PDF_NOTE_RE.search(body):
+            return sections, False
+        if _ALREADY_HAS_ATTACH_PDF_NOTE_RE.search(section.designer_note or ""):
+            return sections, False
     updates: dict[str, Any] = {"content": f"{note}\n\n{body}".strip()}
     if not (section.designer_note or "").strip():
         updates["designer_note"] = designer_field
@@ -604,16 +606,30 @@ def ensure_signed_cover_designer_note(
                 break
         if target_idx is None:
             for idx, section in enumerate(sections):
-                if _COST_TITLE_RE.search(section.title or "") or _CLOSING_PACKAGE_TITLE_RE.search(
-                    section.title or ""
-                ):
+                if _CLOSING_PACKAGE_TITLE_RE.search(section.title or ""):
                     target_idx = idx
                     break
         if target_idx is None:
-            target_idx = len(sections) - 1
+            for idx, section in enumerate(sections):
+                if _COVER_LETTER_TITLE_RE.search(section.title or ""):
+                    target_idx = idx
+                    break
+        if target_idx is None:
+            # Never stamp wet-ink / signature DESIGNER NOTEs onto Budget & Pricing
+            # — that painted the fee tab "needs input" and looked like Complete &
+            # Clean broke a finished budget (Providence). Prefer any non-cost tab.
+            for idx in range(len(sections) - 1, -1, -1):
+                if not _COST_TITLE_RE.search(sections[idx].title or ""):
+                    target_idx = idx
+                    break
+        if target_idx is None:
+            target_idx = 0
         # Avoid double-stacking identical attach notes on same section
         body = sections[target_idx].content or ""
         if "authorized signature page" not in body.casefold():
+            # Cover may already have the signed-cover attach note; still allow the
+            # distinct wet-ink signature-page note (never put it on Budget/Cost).
+            allow_stack = bool(_COVER_LETTER_TITLE_RE.search(sections[target_idx].title or ""))
             sections, changed = _inject_designer_note_on_section(
                 sections,
                 target_idx=target_idx,
@@ -622,6 +638,7 @@ def ensure_signed_cover_designer_note(
                     "Attach the authorized signature page / wet-ink signature PDF. "
                     "Do not invent signature dates or notary numbers."
                 ),
+                allow_alongside_existing_attach_note=allow_stack,
             )
             if changed:
                 logs.append(

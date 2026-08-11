@@ -309,6 +309,9 @@ def audit_duplicates(draft: ProposalDraft) -> list[DuplicateFinding]:
             # Skip pure lists of VERIFY tags
             if norm.count("[verify") > 2 and word_count(para) < 40:
                 continue
+            # Skip designer-note-only paragraphs (bio insert instructions etc.)
+            if norm.startswith("[designer note:") or norm.startswith("[designer note"):
+                continue
             indexed.append((section, i, para, norm))
 
     compared = 0
@@ -366,6 +369,62 @@ def audit_duplicates(draft: ProposalDraft) -> list[DuplicateFinding]:
                     severity="warning",
                 )
             )
+
+    # 6) Semantic dedup: same client name + stat/metric reused across sections
+    _CLIENT_STAT_RE = re.compile(
+        r"(?:^|\b)([A-Z][\w\s]{3,40}?)\b.*?"
+        r"(\d+[\d,.]*\s*%?\s*(?:increase|decrease|growth|reduction|engagement|"
+        r"renewal|impressions|reach|click|conversion|roi|savings|return))",
+        re.I,
+    )
+    client_stat_map: dict[str, list[str]] = {}
+    for section in sections:
+        for para in _paragraphs(section.content or ""):
+            for m in _CLIENT_STAT_RE.finditer(para):
+                client = m.group(1).strip().rstrip("'s").casefold()
+                stat = re.sub(r"\s+", " ", m.group(2).strip().casefold())
+                key = f"{client}||{stat}"
+                sec_title = section.title or section.id
+                if sec_title not in client_stat_map.get(key, []):
+                    client_stat_map.setdefault(key, []).append(sec_title)
+    for key, titles in client_stat_map.items():
+        if len(titles) >= 3:
+            client, stat = key.split("||", 1)
+            findings.append(
+                DuplicateFinding(
+                    kind="repeated_client_stat",
+                    section_a=titles[0],
+                    section_b=", ".join(titles[1:4]),
+                    detail=(
+                        f'"{client}" + "{stat}" reused in {len(titles)} sections — '
+                        "vary examples or cross-reference instead of restating."
+                    ),
+                    severity="warning" if len(titles) == 3 else "critical",
+                )
+            )
+
+    # 7) Empty subheadings: ## header with no body before next header or end
+    _HEADING_RE = re.compile(r"^(#{1,4})\s+(.+)$", re.M)
+    for section in sections:
+        content = section.content or ""
+        headings = list(_HEADING_RE.finditer(content))
+        for idx, hm in enumerate(headings):
+            start = hm.end()
+            end = headings[idx + 1].start() if idx + 1 < len(headings) else len(content)
+            body = content[start:end].strip()
+            if not body or word_count(body) < 5:
+                findings.append(
+                    DuplicateFinding(
+                        kind="empty_subheading",
+                        section_a=section.title or section.id,
+                        section_b="",
+                        detail=(
+                            f'Subheading "{hm.group(2).strip()}" has no body copy — '
+                            "needs content or should be removed."
+                        ),
+                        severity="critical",
+                    )
+                )
 
     # Deduplicate findings by detail prefix
     seen_detail: set[str] = set()

@@ -5,9 +5,8 @@ Interactive KB Q&A loop (CLI RAG).
 Ask questions against the zö agency Supermemory knowledge base in a terminal loop.
 Type `exit`, `quit`, or `q` to stop.
 
-Retrieval expands each question into multiple bucket-aware queries (03_CS → 06_WON/07_FIN
-Proposal → company facts), prefers agency Proposal/case-study docs over source RFP PDFs,
-and packs matching snippets + relevant windows (not TOC-from-page-1).
+Retrieval uses chunk-first Supermemory search (raw PDF/DOCX passages) with hybrid
+memories as gap-fill only — better for KPIs, tables, and section detail.
 
 Usage:
   cd backend && source .venv/bin/activate
@@ -43,7 +42,14 @@ Rules:
 - Do NOT invent clients, degrees, certifications, insurance limits, or team details.
 - Prefer facts from 03_CS case studies and *Proposal* files over source *RFP* solicitations.
 - Cite source file names in parentheses when you use them.
-- Keep answers concise and factual."""
+- Keep answers concise and factual.
+
+Budget / pricing questions:
+- There is usually NO single file named "Oregon proposal." Oregon work appears under
+  client-specific proposals and case studies (e.g. Oregon Employment, City of Umatilla,
+  Lake Oswego, Bend, Deschutes). Use 00_Guide_Pricing.docx for approved rate structures.
+- If the user asks for an Oregon budget, cite pricing-guide rates AND any Oregon-client
+  proposal budget sections present in the context. Do not say "not found" when those exist."""
 
 EXIT_COMMANDS = {"exit", "quit", "q"}
 
@@ -173,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--category",
         help="Filter Supermemory category (e.g. team_bio, company_facts)",
     )
-    parser.add_argument("--limit", type=int, default=8, help="Max hits kept after ranking (default: 8)")
+    parser.add_argument("--limit", type=int, default=12, help="Max hits kept after ranking (default: 12; chunk-first retrieval)")
     parser.add_argument(
         "--max-chars",
         type=int,

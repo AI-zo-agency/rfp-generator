@@ -183,7 +183,24 @@ async def extract_rfp_scored_section_specs(
 
 
 def _title_is_qual_or_reference(title: str) -> bool:
+    """True for project/reference qualification tabs we must not invent.
+
+    Explicitly excludes Team / Respondent / Personnel Qualifications — those are
+    scored narrative sections that Complete & Clean must draft from bios/KB.
+    """
     t = _section_title_cf(title)
+    if any(
+        token in t
+        for token in (
+            "team qualification",
+            "respondent team",
+            "personnel",
+            "key personnel",
+            "staff qualification",
+            "staffing",
+        )
+    ):
+        return False
     return any(h in t for h in _QUAL_TITLE_HINTS) or "contractor reference" in t
 
 

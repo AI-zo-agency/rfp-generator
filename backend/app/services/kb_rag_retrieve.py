@@ -1,7 +1,8 @@
 """KB RAG helpers: thorough Supermemory fetch + context packing.
 
-Searches v4 hybrid (memories) and documents (chunks). Memories win when present;
-chunks fill docs that have no memory. Full documents are packed when they fit.
+Searches v4 documents (raw chunks) first, then hybrid memories as gap-fill.
+Chunk text carries KPIs, tables, and section detail that memory summaries omit.
+Full documents are packed when they fit.
 """
 
 from __future__ import annotations
@@ -49,12 +50,30 @@ def _question_terms(question: str) -> list[str]:
     return out
 
 
-def expand_kb_queries(question: str, *, max_queries: int = 3) -> list[str]:
-    """Search queries = the user question only (no static topic expansions)."""
+def expand_kb_queries(question: str, *, max_queries: int = 4) -> list[str]:
+    """User question plus targeted supplemental queries (budget guide, Oregon clients)."""
     q = (question or "").strip()
     if not q:
         return []
-    return [q][:max_queries]
+    q_lower = q.casefold()
+    queries = [q]
+
+    budget_kw = {"budget", "pricing", "price", "rate", "fee", "cost", "hourly"}
+    if any(kw in q_lower for kw in budget_kw):
+        queries.append("zö agency pricing guide rates fees hourly")
+
+    if "oregon" in q_lower:
+        queries.append(
+            "Oregon Employment Umatilla Lake Oswego Bend Deschutes proposal budget"
+        )
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in queries:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out[:max_queries]
 
 
 def build_retrieval_question_from_entry(
@@ -174,8 +193,12 @@ def prefer_agency_evidence_filename(name: str) -> float:
         score += 2.0
     if is_source_rfp_filename(name):
         score -= 4.0
-    if "filingguide" in n or "claude_knowledge" in n or "00_guide" in n:
+    if "filingguide" in n or "claude_knowledge" in n:
         score -= 1.5
+    if "00_guide" in n and "pricing" not in n and "writing" not in n:
+        score -= 1.5
+    if "00_guide_pricing" in n or "guide_pricing" in n:
+        score += 2.0
     return score
 
 
@@ -205,7 +228,7 @@ def _looks_like_kb_filename(name: str) -> bool:
 
 
 def _hit_snippet(hit: dict[str, Any]) -> str:
-    for key in ("content", "chunk", "memory", "text", "summary"):
+    for key in ("chunk", "chunks", "content", "text", "memory", "summary"):
         value = hit.get(key)
         if value:
             if isinstance(value, list):
@@ -247,9 +270,13 @@ def rank_hits_for_question(
     question: str,
 ) -> list[dict[str, Any]]:
     """Re-rank by filename preference + term overlap (no topic hardcoding)."""
+    from app.services import supermemory
+
     terms = _question_terms(question)
     q_cf = (question or "").casefold()
     ask_about_rfp = bool(re.search(r"\brfp\b|solicitation", q_cf))
+    _BUDGET_KW = {"budget", "pricing", "price", "rate", "fee", "cost", "hourly"}
+    ask_about_budget = any(kw in q_cf for kw in _BUDGET_KW)
     scored: list[tuple[float, int, dict[str, Any]]] = []
     for index, hit in enumerate(hits):
         label = _hit_label(hit)
@@ -265,6 +292,28 @@ def rank_hits_for_question(
             + _hit_score(hit)
             + (1.5 if _looks_like_kb_filename(label) else -2.0)
         )
+        # Pricing guide is THE authoritative source for any budget/pricing question
+        if ask_about_budget and "guide_pricing" in label.casefold():
+            rank += 20.0
+        if supermemory.is_chunk_hit(hit):
+            rank += 3.0
+        elif supermemory.is_memory_hit(hit):
+            rank -= 1.5
+        # Oregon client work lives under client-specific proposal/case-study filenames
+        if "oregon" in q_cf:
+            label_cf = label.casefold()
+            if any(
+                tok in label_cf
+                for tok in (
+                    "oregon",
+                    "umatilla",
+                    "lakeoswego",
+                    "bend",
+                    "deschutes",
+                    "mcminnville",
+                )
+            ):
+                rank += 4.0
         # Boost when the filename itself matches question tokens (e.g. TorrentLaboratories)
         if label and _term_overlap(label, terms) > 0:
             rank += 3.0
@@ -353,8 +402,13 @@ def pack_hit_context(
     Critical: never discard later sections just because the search snippet was
     only the document intro.
     """
+    from app.services import supermemory as _sm
+
     label = _hit_label(hit) or "document"
-    header = f"### {label}"
+    source_tag = ""
+    if _sm.is_memory_hit(hit):
+        source_tag = " ⚠️ MEMORY SUMMARY — do NOT cite exact numbers from this; use [VERIFY] instead"
+    header = f"### {label}{source_tag}"
     full = (full_document or "").strip()
     snippet = _hit_snippet(hit).strip()
 
@@ -390,6 +444,61 @@ def pack_hit_context(
     return "\n".join(parts).strip()[:max_chars]
 
 
+async def _search_hits_chunk_first(
+    query: str,
+    *,
+    limit: int,
+    filters: dict[str, Any] | None,
+    threshold: float,
+) -> list[dict[str, Any]]:
+    """Fetch more raw chunks than memory summaries; chunks lead the merged list."""
+    import asyncio
+
+    from app.services import supermemory
+
+    active_filters = filters or supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS
+    chunk_limit = max(limit * 2, 16)
+    memory_limit = max(limit // 2, 4)
+
+    async def _chunks() -> list[dict[str, Any]]:
+        try:
+            return await supermemory.search_document_chunks(
+                query=query,
+                limit=chunk_limit,
+                filters=active_filters,
+                threshold=threshold,
+            )
+        except supermemory.SupermemoryError as exc:
+            logger.warning("KB chunk search failed for %r: %s", query[:60], exc)
+            return []
+
+    async def _hybrid() -> list[dict[str, Any]]:
+        try:
+            return await supermemory.search_hybrid(
+                query=query,
+                limit=memory_limit,
+                include_full_docs=True,
+                filters=active_filters,
+                threshold=threshold,
+            )
+        except supermemory.SupermemoryError as exc:
+            logger.warning("KB hybrid search failed for %r: %s", query[:60], exc)
+            return []
+
+    chunk_hits, memory_hits = await asyncio.gather(_chunks(), _hybrid())
+    chunk_hits = [h for h in chunk_hits if supermemory.is_knowledge_base_hit(h)]
+    memory_hits = [h for h in memory_hits if supermemory.is_knowledge_base_hit(h)]
+    merged = supermemory.merge_chunk_first_hits(memory_hits, chunk_hits)
+    logger.info(
+        "KB chunk-first search %r: chunks=%d memories=%d merged=%d",
+        query[:60],
+        len(chunk_hits),
+        len(memory_hits),
+        len(merged),
+    )
+    return merged
+
+
 async def retrieve_for_question(
     question: str,
     *,
@@ -406,7 +515,6 @@ async def retrieve_for_question(
     import asyncio
 
     from app.services import supermemory
-    from app.services.proposal_knowledge_base_tools import _search_hits_all_modes
 
     filters: dict[str, Any] | None = None
     if category:
@@ -418,11 +526,11 @@ async def retrieve_for_question(
         }
 
     queries = expand_kb_queries(question)
-    logger.info("KB RAG query %r", question[:80])
+    logger.info("KB RAG query %r → %d search(es)", question[:80], len(queries))
 
     async def _search_one(query: str, thresh: float) -> list[dict[str, Any]]:
         try:
-            return await _search_hits_all_modes(
+            return await _search_hits_chunk_first(
                 query,
                 limit=max(limit, 12),
                 filters=filters,

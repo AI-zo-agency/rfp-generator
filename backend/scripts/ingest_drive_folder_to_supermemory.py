@@ -33,8 +33,15 @@ Usage:
 
   # Dry run to see what would be ingested
   python scripts/ingest_drive_folder_to_supermemory.py --folder-id "..." --dry-run
+
+  # Compare Drive vs Supermemory (find missing/stale/stub docs)
+  python scripts/compare_drive_folder_to_supermemory.py --folder-id "..." --verify-stubs
+
+  # Re-upload docs that indexed as empty Drive loading pages (bio PDF issue)
+  python scripts/ingest_drive_folder_to_supermemory.py --folder-id "..." --verify-stubs
   
 Note: Files larger than 50MB will be skipped (Supermemory has file size limits)
+By default subfolders are included; use --no-recursive for top-level files only.
 """
 
 from __future__ import annotations
@@ -45,6 +52,7 @@ import io
 import logging
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -118,7 +126,30 @@ GOOGLE_SLIDES_EXPORT_FALLBACKS: tuple[tuple[str, str], ...] = (
     ),
 )
 
+GOOGLE_SHEET_EXPORT_FALLBACKS: tuple[tuple[str, str], ...] = (
+    (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xlsx",
+    ),
+    ("text/csv", ".csv"),
+    ("application/pdf", ".pdf"),
+)
+
 SKIP_MIMES = {FOLDER_MIME, "application/vnd.google-apps.shortcut"}
+
+# Indexed content shorter than this is likely a failed extraction.
+MIN_INDEXED_CHARS = 120
+
+INGEST_STUB_MARKERS = (
+    "appears to be a broken link",
+    "displaying a 'loading' state",
+    "displaying a loading state",
+    "google drive file, displaying",
+    "could not be previewed",
+)
+
+VERIFY_POLL_SECONDS = 5
+VERIFY_TIMEOUT_SECONDS = 180
 
 PRICING_HINTS = ("pricing", "price", "rate")
 
@@ -151,6 +182,7 @@ class DriveFile:
     mime_type: str
     modified_time: str | None
     web_view_link: str | None
+    folder_path: str = ""
 
 
 def _extract_year(text: str) -> str | None:
@@ -278,7 +310,13 @@ def find_folder_id_by_name(service: Any, folder_name: str) -> str | None:
     return files[0]["id"]
 
 
-def list_folder_files(service: Any, folder_id: str) -> list[DriveFile]:
+def list_folder_files(
+    service: Any,
+    folder_id: str,
+    *,
+    recursive: bool = True,
+    folder_path: str = "",
+) -> list[DriveFile]:
     query = f"'{folder_id}' in parents and trashed = false"
     files: list[DriveFile] = []
     page_token: str | None = None
@@ -302,15 +340,32 @@ def list_folder_files(service: Any, folder_id: str) -> list[DriveFile]:
 
         for item in response.get("files", []):
             mime = item.get("mimeType", "")
+            name = item.get("name", "untitled")
+
+            if mime == FOLDER_MIME:
+                if recursive:
+                    sub_path = f"{folder_path}{name}/" if folder_path else f"{name}/"
+                    files.extend(
+                        list_folder_files(
+                            service,
+                            item["id"],
+                            recursive=True,
+                            folder_path=sub_path,
+                        )
+                    )
+                continue
+
             if mime in SKIP_MIMES:
                 continue
+
             files.append(
                 DriveFile(
                     id=item["id"],
-                    name=item.get("name", "untitled"),
+                    name=name,
                     mime_type=mime,
                     modified_time=item.get("modifiedTime"),
                     web_view_link=item.get("webViewLink"),
+                    folder_path=folder_path,
                 )
             )
 
@@ -319,6 +374,28 @@ def list_folder_files(service: Any, folder_id: str) -> list[DriveFile]:
             break
 
     return files
+
+
+def looks_like_pending_file_url(content: str) -> bool:
+    """Supermemory returns a hosted file URL before extraction finishes."""
+    stripped = (content or "").strip()
+    if not stripped.startswith("https://"):
+        return False
+    if "\n" in stripped:
+        return False
+    return "supermemory" in stripped.casefold() and len(stripped) < 512
+
+
+def looks_like_ingest_stub(content: str) -> bool:
+    """Detect Supermemory summaries that captured Drive loading pages, not real docs."""
+    normalized = (content or "").strip().casefold()
+    if not normalized:
+        return True
+    if looks_like_pending_file_url(content):
+        return False
+    if len(normalized) < MIN_INDEXED_CHARS:
+        return True
+    return any(marker in normalized for marker in INGEST_STUB_MARKERS)
 
 
 def drive_content_url(drive_file: DriveFile) -> str:
@@ -363,6 +440,10 @@ def build_metadata(
         metadata["filingPrefix"] = parsed.prefix
     if parsed.code:
         metadata["filingCode"] = parsed.code
+    if drive_file.folder_path:
+        metadata["folderPath"] = drive_file.folder_path
+    if drive_file.modified_time:
+        metadata["driveModifiedTime"] = drive_file.modified_time
     if drive_file.web_view_link:
         metadata["driveUrl"] = drive_file.web_view_link
     return metadata
@@ -401,6 +482,14 @@ def download_file_bytes(service: Any, drive_file: DriveFile) -> tuple[bytes, str
             stem,
         )
 
+    if drive_file.mime_type == "application/vnd.google-apps.spreadsheet":
+        return _download_with_export_fallbacks(
+            service,
+            drive_file,
+            GOOGLE_SHEET_EXPORT_FALLBACKS,
+            stem,
+        )
+
     export_mime = SUPPORTED_EXPORTS.get(drive_file.mime_type)
 
     if export_mime:
@@ -414,7 +503,10 @@ def download_file_bytes(service: Any, drive_file: DriveFile) -> tuple[bytes, str
     done = False
     while not done:
         _, done = downloader.next_chunk()
-    return buffer.getvalue(), drive_file.name
+    file_bytes = buffer.getvalue()
+    if not file_bytes:
+        raise RuntimeError(f"Empty download for {drive_file.name}")
+    return file_bytes, drive_file.name
 
 
 def _download_with_export_fallbacks(
@@ -455,6 +547,124 @@ def _download_with_export_fallbacks(
                 exc,
             )
     raise RuntimeError(f"All export formats failed for {drive_file.name}") from last_error
+
+
+def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _drive_is_newer_than_supermemory(drive_file: DriveFile, doc: dict[str, Any]) -> bool:
+    drive_ts = _parse_iso_timestamp(drive_file.modified_time)
+    sm_ts = _parse_iso_timestamp(supermemory.document_updated_at(doc))
+    if not drive_ts or not sm_ts:
+        return False
+    return drive_ts > sm_ts
+
+
+async def classify_files_for_upload(
+    drive_files: list[DriveFile],
+    *,
+    force: bool,
+    refresh_stale: bool,
+    verify_stubs: bool,
+) -> tuple[list[DriveFile], dict[str, int]]:
+    """Decide which Drive files need upload (new, stale, stub, or forced)."""
+    existing_docs = await supermemory.list_all_container_documents(force_refresh=True)
+    by_drive_id: dict[str, dict[str, Any]] = {}
+    for doc in existing_docs:
+        if not supermemory.is_knowledge_base_document(doc):
+            continue
+        drive_id = supermemory.drive_file_id_from_document(doc)
+        if drive_id:
+            by_drive_id[drive_id] = doc
+
+    to_upload: list[DriveFile] = []
+    counts = {"new": 0, "stale": 0, "stub": 0, "forced": 0, "skipped": 0}
+
+    for drive_file in drive_files:
+        existing = by_drive_id.get(drive_file.id)
+
+        if force:
+            to_upload.append(drive_file)
+            counts["forced"] += 1
+            continue
+
+        if not existing:
+            to_upload.append(drive_file)
+            counts["new"] += 1
+            continue
+
+        if refresh_stale and _drive_is_newer_than_supermemory(drive_file, existing):
+            to_upload.append(drive_file)
+            counts["stale"] += 1
+            continue
+
+        if verify_stubs:
+            indexed = await supermemory.get_document_content(
+                custom_id=f"drive:{drive_file.id}"
+            )
+            if looks_like_ingest_stub(indexed):
+                to_upload.append(drive_file)
+                counts["stub"] += 1
+                continue
+
+        counts["skipped"] += 1
+
+    return to_upload, counts
+
+
+async def verify_uploaded_document(custom_id: str) -> tuple[bool, str]:
+    """Wait for Supermemory to finish extracting, then validate indexed text."""
+    import time
+
+    deadline = time.monotonic() + VERIFY_TIMEOUT_SECONDS
+    last_status = "unknown"
+
+    while time.monotonic() < deadline:
+        doc = await supermemory.get_document(custom_id=custom_id)
+        if not doc:
+            await asyncio.sleep(VERIFY_POLL_SECONDS)
+            continue
+
+        last_status = str(doc.get("status") or "unknown")
+        content = str(doc.get("content") or doc.get("text") or "").strip()
+
+        if last_status in ("failed", "error"):
+            return False, f"Supermemory indexing failed (status={last_status})"
+
+        if last_status == "done":
+            if looks_like_ingest_stub(content):
+                return False, f"Indexed content looks empty/stub ({len(content)} chars)"
+            return True, f"Indexed {len(content)} chars"
+
+        if last_status in ("extracting", "processing", "pending", "queued"):
+            logger.info(
+                "Waiting for Supermemory to index %s… status=%s",
+                custom_id,
+                last_status,
+            )
+            await asyncio.sleep(VERIFY_POLL_SECONDS)
+            continue
+
+        if content and not looks_like_pending_file_url(content):
+            if len(content) >= MIN_INDEXED_CHARS and not looks_like_ingest_stub(content):
+                return True, f"Indexed {len(content)} chars (status={last_status})"
+
+        await asyncio.sleep(VERIFY_POLL_SECONDS)
+
+    return (
+        True,
+        f"Upload accepted; still indexing after {VERIFY_TIMEOUT_SECONDS}s "
+        f"(status={last_status})",
+    )
 
 
 async def ingest_batch_urls(
@@ -595,8 +805,20 @@ async def ingest_parallel_uploads(
                         custom_id=custom_id,
                         metadata=metadata,
                     )
-                    
-                    logger.info("✅ Uploaded %s", upload_name)
+
+                    ok_verify, verify_msg = await verify_uploaded_document(custom_id)
+                    if ok_verify:
+                        if "still indexing" in verify_msg:
+                            logger.warning("✅ Uploaded %s (%s)", upload_name, verify_msg)
+                        else:
+                            logger.info("✅ Uploaded %s (%s)", upload_name, verify_msg)
+                    else:
+                        logger.warning(
+                            "⚠️  Uploaded %s but verification failed: %s",
+                            upload_name,
+                            verify_msg,
+                        )
+                        return False
                     
                     # Clean up to free memory
                     del file_bytes
@@ -674,7 +896,11 @@ async def run(args: argparse.Namespace) -> int:
     if not folder_id:
         raise SystemExit("Provide --folder-id or --folder-name (or --drive-import)")
 
-    drive_files = list_folder_files(service, folder_id)
+    drive_files = list_folder_files(
+        service,
+        folder_id,
+        recursive=not args.no_recursive,
+    )
 
     if args.drive_ids:
         wanted = {part.strip() for part in args.drive_ids.split(",") if part.strip()}
@@ -692,40 +918,48 @@ async def run(args: argparse.Namespace) -> int:
         logger.info("No ingestible files in folder %s", folder_id)
         return 0
 
-    # Check what's already uploaded to avoid duplicates
-    logger.info("Checking existing documents in Supermemory...")
-    existing_docs = await supermemory.list_container_memories(limit=1000)
-    existing_drive_ids = {
-        doc.get("customId", "").replace("drive:", "")
-        for doc in existing_docs
-        if doc.get("customId", "").startswith("drive:")
-    }
-    
-    # Filter out already uploaded files
-    files_to_upload = [f for f in drive_files if f.id not in existing_drive_ids]
-    skipped = len(drive_files) - len(files_to_upload)
-    
+    if args.dry_run:
+        files_to_upload, plan_counts = await classify_files_for_upload(
+            drive_files,
+            force=args.force,
+            refresh_stale=args.refresh_stale,
+            verify_stubs=False,
+        )
+    else:
+        files_to_upload, plan_counts = await classify_files_for_upload(
+            drive_files,
+            force=args.force,
+            refresh_stale=args.refresh_stale,
+            verify_stubs=args.verify_stubs,
+        )
+
     logger.info(
-        "Container: %s | Folder: %s | Total files: %d | mode=%s | dry_run=%s",
+        "Container: %s | Folder: %s | Drive files: %d | recursive=%s | mode=%s | dry_run=%s",
         settings.resolved_container_tag,
         folder_id,
         len(drive_files),
+        not args.no_recursive,
         args.mode,
         args.dry_run,
     )
-    
-    if skipped > 0:
-        logger.info("⏭️  Skipping %d already uploaded files", skipped)
-    
-    logger.info("📝 To upload: %d files", len(files_to_upload))
-    
+    logger.info(
+        "Plan: upload=%d (new=%d stale=%d stub=%d forced=%d) skip=%d",
+        len(files_to_upload),
+        plan_counts["new"],
+        plan_counts["stale"],
+        plan_counts["stub"],
+        plan_counts["forced"],
+        plan_counts["skipped"],
+    )
+
     if not files_to_upload:
-        logger.info("✅ All files already uploaded!")
+        logger.info("✅ Nothing to upload — folder is up to date.")
+        if plan_counts["skipped"] and args.verify_stubs is False:
+            logger.info(
+                "💡 Run with --verify-stubs to re-upload docs that indexed as Drive loading pages"
+            )
         return 0
-    
-    # Separate large files that will be skipped
-    large_files = [f for f in files_to_upload if f.mime_type in PDF_MIMES]  # Will check size during upload
-    
+
     ok = 0
     failed = 0
 
@@ -766,7 +1000,7 @@ async def run(args: argparse.Namespace) -> int:
     logger.info("\n" + "="*60)
     logger.info("✅ DONE: success=%d failed=%d", ok, failed)
     
-    total_expected = len([f for f in drive_files if f.id not in existing_drive_ids]) if 'existing_drive_ids' in locals() else len(drive_files)
+    total_expected = len(files_to_upload)
     if ok + failed < total_expected:
         logger.warning("⚠️  Script may have crashed before completing all uploads")
         logger.warning("   Uploaded: %d, Failed: %d, Expected: %d", ok, failed, total_expected)
@@ -802,6 +1036,26 @@ def main() -> None:
         "--drive-import",
         action="store_true",
         help="Use Supermemory native Google Drive import (requires SM Drive connection)",
+    )
+    parser.add_argument(
+        "--no-recursive",
+        action="store_true",
+        help="Only ingest files in the top folder (default: include subfolders)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-upload every file even if already in Supermemory",
+    )
+    parser.add_argument(
+        "--refresh-stale",
+        action="store_true",
+        help="Re-upload when Drive modifiedTime is newer than Supermemory",
+    )
+    parser.add_argument(
+        "--verify-stubs",
+        action="store_true",
+        help="Re-upload existing docs whose indexed content looks empty or like a Drive loading page",
     )
     parser.add_argument("--dry-run", action="store_true", help="Parse and log only")
     parser.add_argument("--limit", type=int, default=0, help="Max files (0 = all)")

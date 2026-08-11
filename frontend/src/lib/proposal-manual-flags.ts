@@ -252,6 +252,8 @@ export function scanManualFillFlagsInText(
   for (const match of text.matchAll(re)) {
     const tag = match[0];
     if (!tag) continue;
+    // Bio PDF insert notes are designer handoff — not submission-gap checklist rows.
+    if (/^\[DESIGNER\s+NOTE:/i.test(tag)) continue;
     flags.push({
       sectionId: section.id,
       sectionTitle: section.title,
@@ -264,11 +266,38 @@ export function scanManualFillFlagsInText(
   return flags;
 }
 
+const FORMS_ATTACHMENTS_SECTION_ID = "rfp-req-forms-attachments";
+
+const PER_FORM_STUB_TITLE_RE =
+  /\b(?:bid\s+form|signed\s+form|financial\s+assurance|mwbe|m\/wbe|w-9|certificate\s+of\s+insurance|\bcoi\b|minority\s+and\s+women)\b/i;
+
+function isPerFormStubSection(section: { id: string; title: string }): boolean {
+  const id = section.id ?? "";
+  if (id === FORMS_ATTACHMENTS_SECTION_ID) return false;
+  if (!id.startsWith("rfp-req-")) return false;
+  return PER_FORM_STUB_TITLE_RE.test(section.title ?? "");
+}
+
 /** Bracket tags only — legacy helper. */
 export function scanManualFillFlags(outline: ProposalOutline): ManualFillFlag[] {
-  return outline.sections.flatMap((section) =>
+  const formStubs = outline.sections.filter(isPerFormStubSection);
+  const narrativeSections = outline.sections.filter((s) => !isPerFormStubSection(s));
+
+  const flags = narrativeSections.flatMap((section) =>
     scanManualFillFlagsInText(section.content ?? "", section)
   );
+
+  if (formStubs.length > 0) {
+    flags.push({
+      sectionId: formStubs[0].id,
+      sectionTitle: "Required forms & attachments",
+      kind: "compliance",
+      tag: `${formStubs.length} buyer form/attachment tab(s) — attach signed templates (Submit checklist)`,
+      highlightText: formStubs[0].title,
+    });
+  }
+
+  return flags;
 }
 
 function rfpRequiresStaffHoursTable(options?: SubmissionFlagScanOptions): boolean {
@@ -696,87 +725,93 @@ function scanUncoveredRequirementFlags(
   return flags.slice(0, 8);
 }
 
-function scanPricingFlagManuscript(
+function scanBudgetIssueFlags(
   outline: ProposalOutline,
   budget?: ProposalBudget | null
 ): ManualFillFlag[] {
   const section = findBudgetSection(outline.sections);
   if (!section?.content?.trim()) return [];
 
-  const flags: ManualFillFlag[] = [];
   const content = section.content;
+  const issues: string[] = [];
 
   if (PRICING_FLAG_MANUSCRIPT_RE.test(content)) {
-    flags.push(
-      flag(
-        section,
-        "budget",
-        "Budget section contains internal Pricing Flags — regenerate budget after resolving with Sonja",
-        lineContaining(content, PRICING_FLAG_MANUSCRIPT_RE)
-      )
-    );
+    issues.push("internal pricing flags in manuscript");
+  }
+  for (const pf of budget?.pricingFlags ?? []) {
+    if (issues.length >= 4) break;
+    issues.push(pf.slice(0, 80));
   }
 
-  if (budget?.pricingFlags?.length) {
-    for (const pf of budget.pricingFlags.slice(0, 2)) {
-      flags.push(
-        flag(
-          section,
-          "budget",
-          `Unresolved pricing flag: ${pf.slice(0, 100)}`,
-          undefined
-        )
-      );
+  if (budget?.lineItems?.length) {
+    const agencyBase = budget.agencyFeeSubtotal ?? 0;
+    if (agencyBase > 0) {
+      let pmTotal = 0;
+      for (const item of budget.lineItems) {
+        const blob = `${item.category ?? ""} ${item.description ?? ""} ${item.roleTitle ?? ""}`;
+        if (PM_LINE_RE.test(blob)) {
+          pmTotal += item.extended ?? 0;
+        }
+      }
+      if (pmTotal > 0) {
+        const ratio = pmTotal / agencyBase;
+        if (ratio < 0.05 || ratio > 0.08) {
+          issues.push(`PM ratio ${(ratio * 100).toFixed(1)}% (guide 5–8%)`);
+        }
+      }
     }
   }
 
-  return flags;
-}
+  if (issues.length === 0) return [];
 
-function scanPmRatioFlags(
-  outline: ProposalOutline,
-  budget?: ProposalBudget | null
-): ManualFillFlag[] {
-  if (!budget?.lineItems?.length) return [];
-
-  const section = findBudgetSection(outline.sections);
-  if (!section) return [];
-
-  const agencyBase = budget.agencyFeeSubtotal ?? 0;
-  if (agencyBase <= 0) return [];
-
-  let pmTotal = 0;
-  for (const item of budget.lineItems) {
-    const blob = `${item.category ?? ""} ${item.description ?? ""} ${item.roleTitle ?? ""}`;
-    if (PM_LINE_RE.test(blob)) {
-      pmTotal += item.extended ?? 0;
-    }
-  }
-  if (pmTotal <= 0) return [];
-
-  const ratio = pmTotal / agencyBase;
-  if (ratio >= 0.05 && ratio <= 0.08) return [];
+  const highlight =
+    lineContaining(content, PRICING_FLAG_MANUSCRIPT_RE) ??
+    lineContaining(content, /##\s*Budget Summary/i);
 
   return [
     flag(
       section,
       "budget",
-      `PM ratio ${(ratio * 100).toFixed(1)}% of agency fees — guide targets 5–8%; adjust L01/L12 with Sonja`,
-      undefined
+      `Budget: ${issues.length} pricing issue(s) — open Budget refinery with Sonja`,
+      highlight
     ),
   ];
+}
+
+function flagDedupeKey(f: ManualFillFlag): string {
+  if (f.kind === "manual_fill") {
+    const code = f.tag.match(/—\s*([^\]|]+)/)?.[1]?.trim().toLowerCase();
+    if (code) {
+      const parts = code.split("_");
+      if (parts.length >= 2 && parts[parts.length - 1].length <= 4) {
+        return `${f.sectionId}::manual_fill::${parts.slice(0, -1).join("_")}`;
+      }
+      return `${f.sectionId}::manual_fill::${code.slice(0, 80)}`;
+    }
+  }
+  if (f.kind === "budget" && /pricing|pm ratio|budget:/i.test(f.tag)) {
+    return `${f.sectionId}::budget::rollup`;
+  }
+  return `${f.sectionId}::${f.kind}::${f.tag}`;
 }
 
 function dedupeFlags(flags: ManualFillFlag[]): ManualFillFlag[] {
   const seen = new Set<string>();
   const out: ManualFillFlag[] = [];
   for (const f of flags) {
-    const key = `${f.sectionId}::${f.kind}::${f.tag}`;
+    const key = flagDedupeKey(f);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(f);
   }
   return out;
+}
+
+/** Flags that still need human action — excludes KB-finalized rows and designer-only notes. */
+export function actionableSubmissionFlags(flags: ManualFillFlag[]): ManualFillFlag[] {
+  return flags.filter(
+    (f) => !f.finalized && !/^\[DESIGNER\s+NOTE:/i.test(f.tag.trim())
+  );
 }
 
 /** Merge finalized flags from pre-submit review with live manuscript scan. */
@@ -832,8 +867,7 @@ export function scanSubmissionFlags(
       ...scanUncoveredRequirementFlags(outline, options),
       ...scanBudgetHoursFlags(outline, options),
       ...scanBudgetRevenueFlags(outline, options?.budget),
-      ...scanPricingFlagManuscript(outline, options?.budget),
-      ...scanPmRatioFlags(outline, options?.budget),
+      ...scanBudgetIssueFlags(outline, options?.budget),
       ...scanWorkforceConsistencyFlags(outline),
       ...scanPsaAckFlags(outline, options),
     ]),

@@ -222,7 +222,9 @@ class GenuinelyMissingRequiredContentIsStillAddedTests(unittest.TestCase):
         self.assertIn("[MANUAL FILL", added.content)
         self.assertIn("A signed cover letter", added.content)
 
-    def test_missing_form_item_is_also_added(self) -> None:
+    def test_missing_form_item_is_not_added_as_section(self) -> None:
+        """Forms stay on Checklist — Providence-style Bid Form spam was one
+        ledger ADD (or submission inventory tab) per form row."""
         ledger = RequirementLedger(
             requirements=[
                 _req(
@@ -238,8 +240,9 @@ class GenuinelyMissingRequiredContentIsStillAddedTests(unittest.TestCase):
 
         result = reconcile_requirement_ledger(draft=draft, research=research, rfp=_rfp())
 
-        self.assertEqual(len(result.applied_additions), 1)
-        self.assertEqual(result.applied_additions[0].requirement_id, "r-form-1")
+        self.assertEqual(result.applied_additions, [])
+        self.assertEqual(len(result.draft.sections), 1)
+        self.assertTrue(any("ledger:forms" in line for line in result.logs))
 
 
 class BlastRadiusGuardTests(unittest.TestCase):
@@ -248,7 +251,7 @@ class BlastRadiusGuardTests(unittest.TestCase):
 
     def test_too_many_eligible_additions_are_declined_not_applied(self) -> None:
         # 7 missing required_content requirements, one more than
-        # _BLAST_RADIUS_MAX_ADDITIONS (5) — must trip the absolute cap even
+        # _BLAST_RADIUS_MAX_ADDITIONS — must trip the absolute cap even
         # on a small draft where the growth-fraction check doesn't engage.
         requirement_count = _BLAST_RADIUS_MAX_ADDITIONS + 2
         ledger = RequirementLedger(

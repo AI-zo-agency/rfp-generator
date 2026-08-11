@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from app.services import llm
@@ -29,8 +30,14 @@ async def chat_json_with_repair(
     node_name: str | None = None,
     rfp_id: str | None = None,
     run_id: str | None = None,
+    cache_prefix: str | Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
-    """chat_json with one repair pass on JSON parse failure."""
+    """chat_json with one repair pass on JSON parse failure.
+
+    The repair pass appends its instruction *after* the existing messages, so the
+    cached prefix stays byte-identical and the retry is billed as a cache read
+    rather than a second full-price send of the whole preamble.
+    """
     try:
         return await llm.chat_json(
             messages,
@@ -40,6 +47,7 @@ async def chat_json_with_repair(
             node_name=node_name,
             rfp_id=rfp_id,
             run_id=run_id,
+            cache_prefix=cache_prefix,
         )
     except LlmError as exc:
         if not is_json_parse_failure(exc):
@@ -64,4 +72,5 @@ async def chat_json_with_repair(
             node_name=node_name,
             rfp_id=rfp_id,
             run_id=run_id,
+            cache_prefix=cache_prefix,
         )

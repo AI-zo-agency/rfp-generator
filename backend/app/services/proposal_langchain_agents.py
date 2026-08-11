@@ -61,9 +61,10 @@ Your ONLY jobs for ONE pass over the proposal:
       e.g. "Relevant Experience" vs "Successful Campaigns" both rewriting the same case study),
       emit a deleteSectionTicket for the weaker/later tab with keepSectionId pointing at the
       tab that should remain. NEVER delete Sections 1.1–1.5, bio cards, or Our Work cards.
-      NEVER delete References, Compensation, Communication/Collaboration, Reports, Schedules,
-      Crisis, Workflow, or undrafted empty tabs. Prefer deleting content clones over leaving
-      the designer to cut pages.
+      NEVER delete Budget & Pricing, Cost Proposal, Fee Schedule, Pricing, Compensation,
+      References, Communication/Collaboration, Reports, Schedules, Crisis, Workflow,
+      or undrafted empty tabs. Fee tables are canonically rendered — never merge them away.
+      Prefer deleting content clones over leaving the designer to cut pages.
 2. RFP COVERAGE — For each mapped RFP requirement, check whether the manuscript covers it.
    If unmet, emit a coverageTicket with unmetRequirements and a rewriteBrief for the writer.
 3. GOV / BUYER COMPLIANCE — Flag missing mandatory public-sector items THIS RFP demands

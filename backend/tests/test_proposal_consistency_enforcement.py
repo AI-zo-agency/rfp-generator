@@ -286,6 +286,14 @@ class SignedCoverDesignerNoteTests(unittest.TestCase):
         blob = "\n".join(s.content or "" for s in out.sections)
         self.assertIn("physically signed cover letter", blob.casefold())
         self.assertIn("authorized signature page", blob.casefold())
+        cost = next(s for s in out.sections if s.id == "cost")
+        self.assertNotIn(
+            "authorized signature page",
+            (cost.content or "").casefold(),
+            "signature DESIGNER NOTE must not land on Budget/Cost tabs",
+        )
+        cover = next(s for s in out.sections if s.id == "cover")
+        self.assertIn("authorized signature page", (cover.content or "").casefold())
 
 
 if __name__ == "__main__":

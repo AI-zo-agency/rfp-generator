@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -564,6 +565,29 @@ def _parse_line_items(raw_items: Any) -> list[BudgetLineItem]:
     return items
 
 
+def _line_items_payload_from_raw(raw: Any) -> Any:
+    if not isinstance(raw, dict):
+        return None
+    for key in ("lineItems", "line_items", "lineitems", "budgetLineItems"):
+        payload = raw.get(key)
+        if payload:
+            return payload
+    return None
+
+
+def _parse_line_items_from_raw(raw: Any) -> list[BudgetLineItem]:
+    return _parse_line_items(_line_items_payload_from_raw(raw))
+
+
+_LINE_ITEMS_RETRY_USER = (
+    "Your previous JSON omitted a usable lineItems array (required for submission). "
+    "Return the COMPLETE budget JSON again. lineItems MUST be a non-empty array with "
+    "at least 5 rows covering Discovery, Strategy, Creative, Digital/PM, and Travel when "
+    "applicable. Each item needs id, description, category, lineItemType, quantity, rate, "
+    "extended (numbers). agencyRevenueEstimate and lumpSumTotal MUST match summed agency fees."
+)
+
+
 def _normalize_qualifying_language(raw: Any) -> str:
     if isinstance(raw, dict):
         labels = {
@@ -984,12 +1008,34 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             "[PRICING FLAG: No 00_Guide_Pricing in KB — ingest pricing guide before submission]"
         )
 
-    line_items = _parse_line_items(raw.get("lineItems"))
+    line_items = _parse_line_items_from_raw(raw)
     if not line_items:
         logger.warning(
             "Stage 3 budget returned no lineItems (keys=%s)",
             sorted(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
         )
+        step_trace(
+            "pricing_llm_missing_line_items_retry",
+            rfp_id=rfp_id,
+            keys=sorted(raw.keys()) if isinstance(raw, dict) else [],
+        )
+        with pipeline_step("budget_llm_json_line_items_retry"):
+            raw, provider = await llm.chat_json(
+                [
+                    *messages,
+                    {"role": "assistant", "content": json.dumps(raw)},
+                    {"role": "user", "content": _LINE_ITEMS_RETRY_USER},
+                ],
+                max_tokens=8192,
+                temperature=0.2,
+            )
+        line_items = _parse_line_items_from_raw(raw)
+        if not line_items:
+            raise ProposalError(
+                "Stage 3 budget generation failed: model returned no lineItems after retry. "
+                "Check Stage 2 structural map and 00_Guide_Pricing KB, then re-run Budget.",
+                status_code=502,
+            )
 
     confidence = int(raw.get("confidence") or 0)
     if not stage_one_ready or not stage_two_ready:

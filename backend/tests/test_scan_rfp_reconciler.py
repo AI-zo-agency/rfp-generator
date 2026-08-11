@@ -175,20 +175,19 @@ class MissingRequirementIsAddedTests(unittest.TestCase):
     def test_scored_eligible_missing_requirements_are_added_before_unscored_ones(
         self,
     ) -> None:
-        """Among the sources ADD is eligible for (required_content, form), a
-        pointed one is still added first — the ordering priority is
-        unaffected by the source restriction, only WHICH sources are
-        eligible at all changed.
+        """Among ADD-eligible sources (required_content only), a pointed one
+        is still added first — the ordering priority is unaffected by the
+        source restriction, only WHICH sources are eligible at all changed.
 
         Fixture text is deliberately unambiguous real deliverable phrasing
-        ("Provide a detailed project schedule...", "...signed W-9 form")
-        rather than bare placeholders like "Appendix B": every ledger handed
-        to reconcile_requirement_ledger is re-classified from its TEXT on
-        every scan (_reclassify_persisted_ledger, task 18), so placeholder
-        filler would silently re-label itself out of _ADD_ELIGIBLE_SOURCES
-        and make this ordering test assert nothing. This test is about ADD
-        ORDERING, not classification — see
-        test_scan_rfp_fail_closed_classification.py for the latter."""
+        ("Provide a detailed project schedule...", cover letter) rather than
+        bare placeholders like "Appendix B": every ledger handed to
+        reconcile_requirement_ledger is re-classified from its TEXT on every
+        scan (_reclassify_persisted_ledger, task 18), so placeholder filler
+        would silently re-label itself out of _ADD_ELIGIBLE_SOURCES and make
+        this ordering test assert nothing. This test is about ADD ORDERING,
+        not classification — see test_scan_rfp_fail_closed_classification.py
+        for the latter."""
         ledger = RequirementLedger(
             requirements=[
                 _req(
@@ -197,9 +196,9 @@ class MissingRequirementIsAddedTests(unittest.TestCase):
                     satisfiedBy=[],
                 ),
                 _req(
-                    "r-form-scored",
-                    "Submit a completed and signed W-9 form",
-                    source="form",
+                    "r-scored-content",
+                    "Provide a signed cover letter introducing the firm",
+                    source="required_content",
                     points=15.0,
                     satisfiedBy=[],
                 ),
@@ -211,7 +210,7 @@ class MissingRequirementIsAddedTests(unittest.TestCase):
 
         self.assertEqual(
             [a.requirement_id for a in result.applied_additions],
-            ["r-form-scored", "r-unscored"],
+            ["r-scored-content", "r-unscored"],
         )
 
     def test_missing_scored_criterion_is_never_auto_added_but_reported_as_advisory(

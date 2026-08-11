@@ -202,6 +202,42 @@ class AdversarialRepairLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("MANUAL FILL", pricing.content or "")
         self.assertIn("MANUAL FILL", letter.content or "")
 
+    def test_append_manual_fill_dedupes_code_family_suffix(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-dedupe",
+            sections=[
+                ProposalSection(
+                    id="letter",
+                    title="1.1 — Who We Are",
+                    content="We submit this proposal.",
+                    status="generated",
+                ),
+            ],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        updated, first = _append_manual_fill(
+            draft,
+            section_id="letter",
+            issue="Physical signed attachment required (bid form).",
+            finding_code=(
+                "deterministic.compliance.disqualification_risk_rfp_requires_"
+                "physical_signed_attachment_bi"
+            ),
+        )
+        self.assertIsNotNone(first)
+        updated, second = _append_manual_fill(
+            updated,
+            section_id="letter",
+            issue="Physical signed attachment required (affidavit).",
+            finding_code=(
+                "deterministic.compliance.disqualification_risk_rfp_requires_"
+                "physical_signed_attachment_au"
+            ),
+        )
+        self.assertIsNone(second)
+        letter = updated.sections[0].content or ""
+        self.assertEqual(letter.upper().count("[MANUAL FILL"), 1)
+
     def test_dedupe_collapses_integrity_and_audit_siblings(self) -> None:
         findings = [
             AdversarialAuditFinding(

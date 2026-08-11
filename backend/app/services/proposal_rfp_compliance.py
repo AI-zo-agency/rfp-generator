@@ -291,13 +291,18 @@ def scan_uncovered_requirement_gaps(
 # matching an abstract category name to requirement-phrased prose lexically
 # is not a problem the matcher can be tuned to solve reliably (5 of 5 misses
 # on the real RFP above). ADD now applies ONLY to source in
-# _ADD_ELIGIBLE_SOURCES (required_content, form) — the two ledger sources
-# that name an actual submittable deliverable, where "no section covers
-# this" really does mean "this is missing". A missing scored_criterion is
-# never auto-added; it is downgraded to an advisory line in the report so a
-# human can judge whether it is genuinely uncovered, exactly the judgment
-# call the matcher cannot safely make on its own. Do NOT try to fix this by
-# loosening the matcher instead — see test_outline_coverage.py /
+# _ADD_ELIGIBLE_SOURCES (required_content) — narrative deliverables where
+# "no section covers this" really does mean "this is missing". Forms and
+# signed attachments used to be ADD-eligible too; a live Providence scan
+# then spawned one Bid Form / MWBE / Financial Assurance tab per checklist
+# row (18→26 sections) and ballooned Manual Fill / Checklist counts. Those
+# are physical or buyer-template submissions — they belong on the attachment
+# checklist (and at most one consolidated Forms & Attachments tab), never as
+# N separate manuscript stubs. A missing scored_criterion is never
+# auto-added; it is downgraded to an advisory line in the report so a human
+# can judge whether it is genuinely uncovered, exactly the judgment call the
+# matcher cannot safely make on its own. Do NOT try to fix this by loosening
+# the matcher instead — see test_outline_coverage.py /
 # test_section_aliases.py's false-positive battery for what that
 # reintroduces.
 #
@@ -362,18 +367,16 @@ _ADDED_SECTION_MANUAL_FILL_OWNER = "Sonja"
 # complete. The classifier's default is now fail-closed instead of extended
 # with a fifth pattern set: see assembler.py's _classify_compliance_source
 # module note.
-_ADD_ELIGIBLE_SOURCES = frozenset({"required_content", "form"})
+_ADD_ELIGIBLE_SOURCES = frozenset({"required_content"})
 
 # Blast-radius guard (see module note above). Both are module-level named
 # constants, not magic numbers, because the threshold decision itself is the
 # safety mechanism and needs to be reviewable/tunable in one place.
-#   - _BLAST_RADIUS_MAX_ADDITIONS: an absolute cap. 5 mirrors namedList's
-#     MAX_NAMED_TITLES on the frontend (proposal-scan-report.ts) — a banner
-#     that names every addition individually stays readable up to about 5;
-#     past that a human should review a list, not a sentence. Always active,
-#     regardless of the existing draft's size.
+#   - _BLAST_RADIUS_MAX_ADDITIONS: an absolute cap. 3 keeps Complete & Clean
+#     from quietly minting a cluster of MANUAL FILL stubs (each inflates
+#     Checklist). Always active, regardless of the existing draft's size.
 #   - _BLAST_RADIUS_MAX_GROWTH_FRACTION: a relative cap so a large proposal
-#     (60+ sections) isn't held to the same absolute-5 ceiling as a small
+#     (60+ sections) isn't held to the same absolute ceiling as a small
 #     one. 0.25 means a single Scan-RFP click can grow a document by at most
 #     a quarter — the incident this guards against would have grown a
 #     23-section proposal by 91% (21/23) in one click. Only checked once the
@@ -382,7 +385,7 @@ _ADD_ELIGIBLE_SOURCES = frozenset({"required_content", "form"})
 #     outline) a fraction is not a meaningful signal (100% "growth") and the
 #     absolute cap alone is the right guard.
 # Either threshold alone is enough to decline the pass.
-_BLAST_RADIUS_MAX_ADDITIONS = 5
+_BLAST_RADIUS_MAX_ADDITIONS = 3
 _BLAST_RADIUS_MAX_GROWTH_FRACTION = 0.25
 
 # Soft headroom under the hard page cap — evaluators count cover/TOC; shipping
@@ -1043,15 +1046,36 @@ def reconcile_requirement_ledger(
             "drafted as a section; review and comply with each one manually."
         )
 
+    # Forms / signed attachments: checklist (and at most one consolidated
+    # Forms tab from submission inventory) — never N ledger stub sections.
+    advisory_forms: list[AdvisorySubmissionInstruction] = []
+    for requirement in missing_requirements:
+        if requirement.source == "form":
+            advisory_forms.append(
+                AdvisorySubmissionInstruction(
+                    requirement_id=requirement.id,
+                    requirement_text=requirement.text,
+                )
+            )
+    if advisory_forms:
+        names = ", ".join(f'"{a.requirement_text[:80]}"' for a in advisory_forms[:5])
+        extra = len(advisory_forms) - min(5, len(advisory_forms))
+        if extra > 0:
+            names += f", +{extra} more"
+        logs.append(
+            f"ledger:forms — {len(advisory_forms)} form/attachment item(s) stay on "
+            f"the Checklist (not new sidebar sections): {names}"
+        )
+
     # Remove stale ledger stubs that an older classifier wrongly ADDed as
     # required_content (font rules, FOAA exemptions, blanket statutory clauses).
     # Also drop ledger-{id} sections for requirements that are now classified
-    # as submission_instruction / scored_criterion (never deliverables).
+    # as submission_instruction / scored_criterion / form (never narrative tabs).
     removed_admin_stubs: list[AppliedCutAction] = []
     non_addable_ids = {
         _ADDED_SECTION_ID_TEMPLATE.format(requirement_id=r.id)
         for r in ledger.requirements
-        if r.source in {"submission_instruction", "scored_criterion"}
+        if r.source in {"submission_instruction", "scored_criterion", "form"}
     }
     kept_sections: list[ProposalSection] = []
     for section in sections:

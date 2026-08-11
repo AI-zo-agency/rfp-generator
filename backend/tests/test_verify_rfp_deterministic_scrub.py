@@ -45,6 +45,36 @@ class DeterministicVerifyStripTests(unittest.TestCase):
         self.assertGreaterEqual(removed, 1)
         self.assertNotIn("[VERIFY", cleaned)
 
+    def test_removes_gated_evidence_verify_noise(self) -> None:
+        body = (
+            "[VERIFY: 3.2 — Deschutes County named but not in gated evidence "
+            "set for this draft]\n\n"
+            "Deschutes County was a prior municipal client."
+        )
+        rfp = (
+            "Provide two professional references from municipal or public health "
+            "clients. Include name, title, organization, phone, and email."
+        )
+        cleaned, removed = strip_verify_tags_not_required_by_rfp(body, rfp)
+        self.assertGreaterEqual(removed, 1)
+        self.assertNotIn("[VERIFY", cleaned)
+        self.assertIn("Deschutes County", cleaned)
+
+    def test_removes_weak_token_overlap_non_critical_asks(self) -> None:
+        """Old behavior kept any tag whose tokens appeared once in the RFP."""
+        body = "Timeline: [VERIFY: campaign launch week for county outreach]."
+        rfp = "The County seeks a marketing partner for outreach campaigns."
+        cleaned, removed = strip_verify_tags_not_required_by_rfp(body, rfp)
+        self.assertGreaterEqual(removed, 1)
+        self.assertNotIn("[VERIFY", cleaned)
+
+    def test_keeps_reference_contact_when_rfp_requires_references(self) -> None:
+        body = "Ref 1: [VERIFY: reference contact — name, title, org, phone, email from KB]"
+        rfp = "Provide three professional references with phone and email."
+        cleaned, removed = strip_verify_tags_not_required_by_rfp(body, rfp)
+        self.assertEqual(removed, 0)
+        self.assertIn("[VERIFY: reference contact", cleaned)
+
 
 class ScrubAntiFabricationTests(unittest.TestCase):
     def test_rejects_new_phone_not_in_sources(self) -> None:

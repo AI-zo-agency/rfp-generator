@@ -15,24 +15,28 @@ from app.services.proposal_section_health import is_dead_section
 
 logger = logging.getLogger(__name__)
 
-# Asks that must never be auto-stripped (compliance / legal / identity).
-_KEEP_VERIFY_ASK_RE = re.compile(
+# Asks that may stay ONLY when THIS RFP actually requires them for DQ /
+# scored submission — default is REMOVE (selection-critical bias).
+_SELECTION_CRITICAL_ASK_RE = re.compile(
     r"(?i)"
     r"\b("
     r"fein|ein\b|tax\s*id|federal\s+employer|"
     r"insurance|coi\b|certificate\s+of\s+insurance|liability\s+limit|"
     r"e-?verify|perjury|attestation|affidavit|conflict\s+of\s+interest|"
-    r"staffing\s+hours|percent\s*time|gross-?receipts|"
-    r"sonja|operations\s+confirm|"
-    r"missing\s+from\s+outline|draft\s+content\s+for|"
-    r"reference\s+contact|manual\s+fill"
+    r"bonding|bid\s+bond|performance\s+bond|"
+    r"w-?9\b|sam\.?gov|duns\b|uei\b|"
+    r"reference\s+contact|references?\s+(?:with\s+)?(?:phone|email|contact)|"
+    r"staffing\s+hours|percent\s*time|percent-time|%\s*time|"
+    r"gross-?receipts|not[- ]to[- ]exceed|hard\s+cap|budget\s+ceiling"
     r")\b",
 )
 
-# Clearly optional niceties the RFP rarely mandates by name.
-_OPTIONAL_VERIFY_ASK_RE = re.compile(
+# Internal audit / nicety tags — never selection-critical; always strip.
+_ALWAYS_REMOVE_VERIFY_ASK_RE = re.compile(
     r"(?i)"
     r"("
+    r"gated\s+evidence|not\s+in\s+(?:gated\s+)?evidence\s+set|"
+    r"not\s+supported\s+for|claim\s+['\"]?\w+['\"]?\s+not\s+supported|"
     r"backup\s+(?:mobile\s+)?(?:partner|vendor|firm|subcontractor)|"
     r"subcontractor\s+name|"
     r"mobile\s+app\s+partner|"
@@ -40,9 +44,17 @@ _OPTIONAL_VERIFY_ASK_RE = re.compile(
     r"optional\s+(?:name|contact|partner)|"
     r"sample\s+(?:dashboard|screenshot|report\s+graphic)|"
     r"kpi\s+dashboard\s+screenshot|"
-    r"designer\s+(?:note|graphic|diagram)"
+    r"designer\s+(?:note|graphic|diagram)|"
+    r"week/?dates|timing\s+within\s+rfp|"
+    r"fit\s+rfp\s+award|"
+    r"operations\s+confirm|"
+    r"missing\s+from\s+outline|draft\s+content\s+for"
     r")",
 )
+
+# Kept for backward-compatible imports / older call sites.
+_KEEP_VERIFY_ASK_RE = _SELECTION_CRITICAL_ASK_RE
+_OPTIONAL_VERIFY_ASK_RE = _ALWAYS_REMOVE_VERIFY_ASK_RE
 
 _STOP_ASK_TOKENS = frozenset(
     {
@@ -68,6 +80,20 @@ _STOP_ASK_TOKENS = frozenset(
         "insert",
         "tbd",
         "placeholder",
+        "named",
+        "but",
+        "this",
+        "draft",
+        "gated",
+        "evidence",
+        "set",
+        "client",
+        "section",
+        "that",
+        "only",
+        "sonja",
+        "manual",
+        "fill",
     }
 )
 
@@ -82,10 +108,11 @@ def strip_verify_tags_not_required_by_rfp(
     content: str,
     rfp_text: str,
 ) -> tuple[str, int]:
-    """Remove [VERIFY] tags whose ask is not grounded in THIS RFP. Never invents.
+    """Remove [VERIFY] tags that are not selection/DQ-critical for THIS RFP.
 
-    Keeps locked legal tags and asks the RFP explicitly discusses. Strips optional
-    partner/name/dashboard placeholders when the RFP is silent on that topic.
+    Fail-closed: default REMOVE. Keep only locked legal tags, or asks that are
+    both selection-critical in kind AND grounded in the RFP text (or no RFP
+    text yet for locked/critical categories). Never invents replacements.
     """
     body = content or ""
     if not VERIFY_TAG_RE.search(body) and not re.search(r"\[VERIFY\]", body or "", re.I):
@@ -93,6 +120,53 @@ def strip_verify_tags_not_required_by_rfp(
 
     rfp_cf = (rfp_text or "").casefold()
     removed = 0
+
+    def _rfp_mandates_topic(ask: str) -> bool:
+        """True when the RFP clearly cares about this compliance/scoring topic."""
+        if not rfp_cf.strip():
+            # No RFP loaded — keep only locked legal (handled before this) and
+            # selection-critical patterns; still strip always-remove noise.
+            return True
+        ask_cf = ask.casefold()
+        # Topic-specific RFP anchors (must appear in RFP, not just the ask).
+        topic_needles: list[str] = []
+        if re.search(r"(?i)\b(fein|ein\b|tax\s*id|federal\s+employer)\b", ask_cf):
+            topic_needles.extend(["fein", "ein", "tax id", "employer identification", "federal tax"])
+        if re.search(r"(?i)\b(insurance|coi\b|liability)\b", ask_cf):
+            topic_needles.extend(["insurance", "certificate of insurance", "liability", "coi"])
+        if re.search(r"(?i)\be-?verify\b", ask_cf):
+            topic_needles.extend(["e-verify", "everify", "employment eligibility"])
+        if re.search(r"(?i)\b(affidavit|attestation|perjury|conflict\s+of\s+interest)\b", ask_cf):
+            topic_needles.extend(
+                ["affidavit", "attestation", "perjury", "conflict of interest"]
+            )
+        if re.search(r"(?i)\b(bond|bonding)\b", ask_cf):
+            topic_needles.extend(["bond", "bonding", "surety"])
+        if re.search(r"(?i)\bw-?9\b", ask_cf):
+            topic_needles.extend(["w-9", "w9", "taxpayer"])
+        if re.search(r"(?i)\b(reference|references)\b", ask_cf):
+            topic_needles.extend(["reference", "references"])
+        if re.search(r"(?i)\b(percent\s*time|staffing\s+hours|%\s*time)\b", ask_cf):
+            topic_needles.extend(
+                ["percent-time", "percent time", "% time", "fte", "hours dedicated"]
+            )
+        if re.search(r"(?i)\b(not[- ]to[- ]exceed|hard\s+cap|budget\s+ceiling|gross-?receipts)\b", ask_cf):
+            topic_needles.extend(
+                ["not to exceed", "nte", "budget ceiling", "gross receipts", "hard cap"]
+            )
+        if topic_needles:
+            return any(n in rfp_cf for n in topic_needles)
+        # Generic selection-critical ask without a mapped topic: require 2+
+        # meaningful tokens to appear in the RFP (weak single-token hits drop).
+        tokens = [
+            t
+            for t in re.split(r"\W+", ask_cf)
+            if len(t) >= 4 and t not in _STOP_ASK_TOKENS
+        ]
+        if not tokens:
+            return False
+        hits = sum(1 for t in tokens if t in rfp_cf)
+        return hits >= 2
 
     def _repl(match: re.Match[str]) -> str:
         nonlocal removed
@@ -109,35 +183,14 @@ def strip_verify_tags_not_required_by_rfp(
                 return match.group(0)
         except Exception:  # noqa: BLE001
             pass
-        if _KEEP_VERIFY_ASK_RE.search(ask):
-            # Contact/phone/email keep only when RFP asks for references/contacts.
-            if re.search(r"(?i)\b(phone|email|contact)\b", ask) and not re.search(
-                r"(?i)\b(reference|references|contact\s+information|phone|email)\b",
-                rfp_cf,
-            ):
-                removed += 1
-                return ""
+        if _ALWAYS_REMOVE_VERIFY_ASK_RE.search(ask):
+            removed += 1
+            return ""
+        if _SELECTION_CRITICAL_ASK_RE.search(ask) and _rfp_mandates_topic(ask):
             return match.group(0)
-        if _OPTIONAL_VERIFY_ASK_RE.search(ask):
-            removed += 1
-            return ""
-        tokens = [
-            t
-            for t in re.split(r"\W+", ask.casefold())
-            if len(t) >= 4 and t not in _STOP_ASK_TOKENS
-        ]
-        if not tokens:
-            removed += 1
-            return ""
-        if not rfp_cf.strip():
-            # No RFP text → only strip obvious optional patterns (above); keep rest.
-            return match.group(0)
-        hits = sum(1 for t in tokens if t in rfp_cf)
-        # Topic never appears in RFP → not a required compliance gap.
-        if hits == 0:
-            removed += 1
-            return ""
-        return match.group(0)
+        # Default fail-closed: not selection-critical for this RFP → remove.
+        removed += 1
+        return ""
 
     out = VERIFY_TAG_RE.sub(_repl, body)
     # Bare [VERIFY] with no ask is never actionable — drop.
@@ -372,25 +425,28 @@ async def scrub_optional_verify_tags(
 
     system = (
         "You scrub proposal manuscript [VERIFY: …] placeholders using the RFP and the KB.\n"
-        "BIAS: Prefer REMOVING tags, but a REAL fact beats a removal — never settle for vague "
-        "prose when the KB evidence below already answers the tag.\n"
+        "BIAS (HARD): Default is REMOVE. Keep a [VERIFY] ONLY when it is selection-critical "
+        "for THIS RFP — i.e. dropping it would risk disqualification OR clearly cost "
+        "evaluation points the RFP scores. Internal audit noise never stays.\n"
         "RULES:\n"
         "1. FIRST — check the KB EVIDENCE below. If it contains the exact fact a [VERIFY] tag "
         "asks for (a name, number, cert, contact, partner, etc.), REPLACE the tag with that real "
-        "fact, verbatim from the evidence. This is the preferred outcome: it lowers the VERIFY "
-        "count with a correct answer instead of a placeholder or a vague generic line.\n"
-        "2. IF KB evidence does NOT answer it — REMOVE the tag and rewrite the sentence/row/cell "
-        "so the section still reads cleanly. Drop optional name/contact/backup columns; say work "
-        "is in-house or with vetted partners when names are unknown — WITHOUT inventing.\n"
-        "3. KEEP a short [VERIFY: brief field] ONLY when the RFP EXPLICITLY mandates that "
-        "exact fact for compliance or scoring (e.g. required named references + phone, "
-        "FEIN, insurance dollar limits, required legal attestation) AND neither the KB "
-        "evidence nor the RFP already supplies it. If unsure whether it is required → REMOVE.\n"
-        "4. NEVER invent facts — no names, phones, emails, rates, certs, clients, or wins. "
-        "Only use a fact if it is verbatim in the KB evidence or RFP excerpts below.\n"
-        "5. Never leave empty brackets like [] or bare [VERIFY].\n"
-        "6. Preserve useful tables/structure; only change what VERIFY tags force.\n"
-        "7. Return JSON only."
+        "fact, verbatim from the evidence.\n"
+        "2. ALWAYS REMOVE these (never selection-critical): gated-evidence / 'not in evidence "
+        "set' tags; claim-mismatch noise; optional partner/subcontractor names; week/date "
+        "calendar stubs; designer notes; sample dashboard screenshots; vague 'confirm with "
+        "operations' asks.\n"
+        "3. IF KB does NOT answer it — REMOVE the tag and rewrite the sentence/row/cell so the "
+        "section still reads cleanly, WITHOUT inventing. Prefer clean prose over placeholders.\n"
+        "4. KEEP a short [VERIFY: brief field] ONLY when ALL are true: (a) the RFP EXPLICITLY "
+        "mandates that exact fact for compliance or scored evaluation (FEIN, COI limits, "
+        "required reference phone/email, E-Verify, affidavit, bonding, required %time when "
+        "scored), (b) neither KB nor RFP already supplies it, (c) keeping it materially helps "
+        "win / avoid DQ. If unsure → REMOVE.\n"
+        "5. NEVER invent facts — no names, phones, emails, rates, certs, clients, or wins.\n"
+        "6. Never leave empty brackets like [] or bare [VERIFY].\n"
+        "7. Preserve useful tables/structure; only change what VERIFY tags force.\n"
+        "8. Return JSON only."
     )
     user = (
         f"Section title: {section_title}\n\n"

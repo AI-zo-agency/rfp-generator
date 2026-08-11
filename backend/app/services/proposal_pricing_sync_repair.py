@@ -111,6 +111,56 @@ def rerender_budget_section_from_canon(
     return draft.model_copy(update={"sections": sections, "updated_at": now})
 
 
+def _strip_resolved_budget_grounding_tags(
+    draft: ProposalDraft,
+    budget: ProposalBudget,
+) -> ProposalDraft:
+    """Drop budget_grounding MANUAL FILL tags once Terms dollars match canon fees."""
+    from app.services.proposal_budget_content import (
+        find_budget_section_index,
+        prepare_budget_for_client_display,
+    )
+
+    cleaned = prepare_budget_for_client_display(budget)
+    fees = float(cleaned.agency_fee_subtotal or cleaned.lump_sum_total or 0)
+    if fees <= 0:
+        return draft
+    idx = find_budget_section_index(draft.sections)
+    if idx is None:
+        return draft
+    body = draft.sections[idx].content or ""
+    if "budget_grounding" not in body.casefold():
+        return draft
+    # If the stale agency-fee figure no longer appears, the handoff is resolved.
+    money = re.findall(r"\$\s*([\d,]+(?:\.\d{2})?)", body)
+    amounts = []
+    for tok in money:
+        try:
+            amounts.append(float(tok.replace(",", "")))
+        except ValueError:
+            continue
+    if not any(abs(a - fees) <= 1.0 for a in amounts):
+        return draft
+    # Canon fee is present — remove grounding handoff tags.
+    new_body = re.sub(
+        r"\[MANUAL\s+FILL:[^\]]*budget_grounding[^\]]*\]\s*",
+        "",
+        body,
+        flags=re.I,
+    )
+    new_body = re.sub(r"\n{3,}", "\n\n", new_body).strip()
+    if new_body == (body or "").strip():
+        return draft
+    sections = list(draft.sections)
+    sections[idx] = sections[idx].model_copy(update={"content": new_body})
+    return draft.model_copy(
+        update={
+            "sections": sections,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
 def _mismatch_sample(mismatch: BudgetNarrativeMismatch) -> str:
     return ((mismatch.note or mismatch.sentence or "").strip())[:160]
 
@@ -215,6 +265,12 @@ async def run_pricing_sync_repair_or_handoff(
 
     for round_number in range(1, MAX_SYNC_ROUNDS + 1):
         before_count = len(mismatches)
+        # Sync Terms / Investment Framing dollars on the budget object itself
+        # before re-render — fee-slot LLM skips the Budget tab, so stale
+        # "Consultant Fees $240k" in qualifying_language otherwise survives.
+        from app.services.proposal_budget_content import prepare_budget_for_client_display
+
+        budget = prepare_budget_for_client_display(budget)
         draft = rerender_budget_section_from_canon(draft, budget, rfp_text=rfp_text)
         draft, reconciled_count = reconcile_draft_budget_summaries(draft, budget)
         draft = await align_fee_narrative_with_budget(
@@ -223,6 +279,7 @@ async def run_pricing_sync_repair_or_handoff(
             budget=budget,
         )
         draft, scrubbed_count = scrub_invented_ceiling_claims(draft, budget)
+        draft = _strip_resolved_budget_grounding_tags(draft, budget)
         mismatches = await run_budget_grounding_check(
             rfp_id=rfp_id,
             draft=draft,

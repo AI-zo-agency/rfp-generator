@@ -371,23 +371,52 @@ async def _apply_senior_editor_tickets(
 ) -> tuple[ProposalDraft, ProposalResearchCache | None]:
     """Dispatch Phase 3 single-section redrafts for already-emitted Senior Editor tickets."""
     from app.services.proposal_budget_content import find_budget_section_index
-    from app.services.proposal_section_dedup import _is_static_cq_section_id
+    from app.services.proposal_section_dedup import (
+        _is_protected_budget_section,
+        _is_static_cq_section_id,
+    )
+
+    # Budget / Pricing is canonically rendered — never hard-delete via LLM tickets.
+    protected_budget_ids = {
+        s.id for s in draft.sections if _is_protected_budget_section(s)
+    }
+    budget_idx_pre = find_budget_section_index(draft.sections)
+    if budget_idx_pre is not None:
+        protected_budget_ids.add(draft.sections[budget_idx_pre].id)
 
     # Apply hard deletes first — no point repairing a tab we are about to remove.
     delete_tickets = [
         t for t in (tickets.get("deleteSectionTickets") or []) if isinstance(t, dict)
     ]
     drop_ids: set[str] = set()
+    blocked_budget_deletes = 0
     for raw in delete_tickets:
         sid = str(raw.get("sectionId") or "").strip()
         keep = str(raw.get("keepSectionId") or "").strip()
         if not sid or _is_static_cq_section_id(sid):
+            continue
+        if sid in protected_budget_ids:
+            blocked_budget_deletes += 1
+            logger.warning(
+                "Senior editor refused delete ticket for protected budget section %s",
+                sid,
+            )
             continue
         if keep and not any(s.id == keep for s in draft.sections):
             continue
         if not any(s.id == sid for s in draft.sections):
             continue
         drop_ids.add(sid)
+    if blocked_budget_deletes:
+        report.section_logs.append(
+            {
+                "section": "senior-editor",
+                "detail": (
+                    f"Blocked {blocked_budget_deletes} delete ticket(s) "
+                    "targeting Budget/Pricing (fee tab is protected)"
+                ),
+            }
+        )
     if drop_ids:
         kept = [s for s in draft.sections if s.id not in drop_ids]
         draft = draft.model_copy(
@@ -880,7 +909,14 @@ async def run_self_edit_loop(
     # Deterministic manuscript compact — fast, no LLM call, so it runs before the
     # concurrent scans below and they see already-deduped / trimmed content.
     sections, dedupe_logs = dedupe_manuscript_for_scan(list(draft.sections))
-    if dedupe_logs:
+    from app.services.proposal_budget_content import ensure_budget_section_present
+
+    sections, budget_restored = ensure_budget_section_present(
+        sections,
+        research.budget if research else None,
+        rfp_text=rfp_context or "",
+    )
+    if dedupe_logs or budget_restored:
         draft = draft.model_copy(
             update={
                 "sections": sections,
@@ -888,16 +924,24 @@ async def run_self_edit_loop(
             }
         )
         await asave_proposal_draft(draft)
+        detail_parts: list[str] = []
+        if dedupe_logs:
+            detail_parts.append("; ".join(dedupe_logs[:12]))
+        if budget_restored:
+            detail_parts.append(
+                "restored Budget & Pricing after compact (fee tab must never be dropped)"
+            )
         report.section_logs.append(
             {
                 "section": "dedupe",
-                "detail": "; ".join(dedupe_logs[:12]),
+                "detail": "; ".join(detail_parts),
             }
         )
         await record_pipeline_activity(
             rfp_id,
             label="Senior editor: Compact manuscript",
-            detail=f"{len(dedupe_logs)} compact action(s)",
+            detail=f"{len(dedupe_logs)} compact action(s)"
+            + (" + budget restore" if budget_restored else ""),
             step_index=0,
             step_total=1,
             in_progress_phase="phase-3-6-self-edit",
@@ -950,10 +994,14 @@ async def run_self_edit_loop(
         **{**summarize_sections(draft.sections), "verify_tag_count": verify_before},
     )
 
+    from app.services.evidence_trust.load_client_list import load_client_list_registry
+
+    client_registry = await load_client_list_registry()
     draft, claim_logs = apply_optional_claim_scrub_to_draft(
         draft,
         rfp_text=rfp_context,
         skip_section_ids=skip_budget,
+        registry=client_registry,
     )
     if claim_logs:
         await asave_proposal_draft(draft)
@@ -1091,6 +1139,29 @@ async def run_self_edit_loop(
     )
     draft = await aget_proposal_draft(rfp_id) or draft
     research = await aget_research_cache(rfp_id) or research
+
+    # Belt-and-suspenders: ticket deletes must never leave the fee tab gone.
+    from app.services.proposal_budget_content import ensure_budget_section_present
+
+    sections_final, budget_restored_after_tickets = ensure_budget_section_present(
+        list(draft.sections),
+        research.budget if research else None,
+        rfp_text=rfp_context or "",
+    )
+    if budget_restored_after_tickets:
+        draft = draft.model_copy(
+            update={
+                "sections": sections_final,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        await asave_proposal_draft(draft)
+        report.section_logs.append(
+            {
+                "section": "senior-editor",
+                "detail": "Restored Budget & Pricing after ticket pass (fee tab protected)",
+            }
+        )
 
     ticket_results = [
         {

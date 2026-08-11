@@ -14,6 +14,31 @@ AGENCY_FOUNDED_DATE = date(2013, 8, 21)
 AGENCY_FOUNDED_DISPLAY = "August 21, 2013"
 AGENCY_LEGAL_NAME = "Z'Onion Creative Group LLC"
 AGENCY_DBA = "zö agency"
+AGENCY_FEIN = "47-4333943"
+AGENCY_OFFICE = "220 NW Oregon Ave, Suite 204, Bend, OR 97703"
+AGENCY_MAILING = "70 SW Century Drive #1100, Bend, OR 97702"
+AGENCY_PHONE = "(541) 678-4048"
+AGENCY_EMAIL = "sonja@zo.agency"
+
+
+def default_business_information_markdown(as_of: date | None = None) -> str:
+    """Fallback 1.3 table when generation left a bare header (never ship empty)."""
+    years = agency_years_in_operation(as_of)
+    return (
+        "## Business Information\n\n"
+        "| Field | Detail |\n"
+        "| --- | --- |\n"
+        f"| Legal Name | {AGENCY_LEGAL_NAME} |\n"
+        f"| DBA | {AGENCY_DBA} |\n"
+        f"| Founded | {AGENCY_FOUNDED_DISPLAY} |\n"
+        f"| Years in Operation | {years} |\n"
+        f"| Federal EIN (FEIN) | {AGENCY_FEIN} |\n"
+        "| Ownership | Women-owned — Sonja Anderson, sole owner |\n"
+        f"| Office | {AGENCY_OFFICE} |\n"
+        f"| Mailing | {AGENCY_MAILING} |\n"
+        f"| Phone | {AGENCY_PHONE} |\n"
+        f"| Email | {AGENCY_EMAIL} |\n"
+    )
 
 
 def agency_years_in_operation(as_of: date | None = None) -> int:

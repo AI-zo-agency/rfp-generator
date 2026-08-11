@@ -280,6 +280,61 @@ def _is_static_cq_section_id(section_id: str) -> bool:
     return False
 
 
+def _is_protected_budget_section(section: Any) -> bool:
+    """Budget / Pricing tabs must never be deleted by scan/senior-editor dedupe.
+
+    Protects known fee-tab ids and high-score dedicated titles. Pair with
+    ``find_budget_section_index`` so the live canon fee tab is always excluded
+    even when its title scores mid (e.g. bare ``Pricing`` = 3).
+    """
+    sid = _section_id(section).casefold()
+    if sid in {"section-budget-pricing", "section-budget", "section-pricing"}:
+        return True
+    if "budget" in sid and "pricing" in sid:
+        return True
+    title = _section_title(section)
+    try:
+        from app.services.proposal_budget_content import budget_section_score
+
+        if budget_section_score(title) >= 4:
+            return True
+        # Short dedicated fee-tab titles that find_budget_section_index prefers.
+        return title.casefold().strip() in {
+            "budget",
+            "pricing",
+            "fees",
+            "fee schedule",
+            "cost proposal",
+            "budget & pricing",
+            "budget and pricing",
+        }
+    except Exception:  # noqa: BLE001
+        t = title.casefold()
+        return ("budget" in t and "pricing" in t) or t.strip() in {
+            "budget",
+            "pricing",
+            "budget & pricing",
+            "cost proposal",
+            "fee schedule",
+        }
+
+
+def _canonical_budget_section_id(sections: list[Any]) -> str | None:
+    """Id of the live Budget/Pricing write target, if present."""
+    try:
+        from app.services.proposal_budget_content import find_budget_section_index
+
+        typed = [s for s in sections if hasattr(s, "title")]
+        if not typed:
+            return None
+        idx = find_budget_section_index(typed)  # type: ignore[arg-type]
+        if idx is None:
+            return None
+        return _section_id(sections[idx]) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _content_token_set(content: str) -> set[str]:
     tokens = re.findall(r"[a-z]{4,}", (content or "").casefold())
     return {t for t in tokens if t not in _CONTENT_STOPWORDS}
@@ -388,11 +443,14 @@ def prune_near_duplicate_sections(
 
     drop_ids: set[str] = set()
     dropped_labels: list[str] = []
+    canon_budget_id = _canonical_budget_section_id(sections)
     candidates: list[tuple[int, Any]] = []
     for idx, section in enumerate(sections):
         sid = _section_id(section)
         body = _section_content(section).strip()
         if not sid or _is_static_cq_section_id(sid):
+            continue
+        if sid == canon_budget_id or _is_protected_budget_section(section):
             continue
         if not body:
             continue
@@ -412,6 +470,14 @@ def prune_near_duplicate_sections(
             sid_b = _section_id(sec_b)
             if sid_b in drop_ids:
                 continue
+            # Never delete (or pair-delete against) the Budget / Pricing tab.
+            if (
+                sid_a == canon_budget_id
+                or sid_b == canon_budget_id
+                or _is_protected_budget_section(sec_a)
+                or _is_protected_budget_section(sec_b)
+            ):
+                continue
             title_b = _section_title(sec_b)
             body_b = _section_content(sec_b)
             pts_b = _section_eval_points(sec_b)
@@ -419,7 +485,15 @@ def prune_near_duplicate_sections(
 
             title_dup = outline_titles_near_duplicate(title_a, title_b, threshold=0.55)
             jaccard = _content_jaccard(body_a, body_b)
-            content_dup = jaccard >= content_jaccard_threshold
+            # Structural near-copy (same clauses restated) — no topic keywords.
+            from difflib import SequenceMatcher
+
+            seq_ratio = SequenceMatcher(
+                None,
+                body_a.casefold()[:5000],
+                body_b.casefold()[:5000],
+            ).ratio()
+            content_dup = jaccard >= content_jaccard_threshold or seq_ratio >= 0.72
             # Shorter section is mostly restated inside the longer one.
             cover_a_in_b = _content_coverage(body_a, body_b)
             cover_b_in_a = _content_coverage(body_b, body_a)
@@ -442,6 +516,8 @@ def prune_near_duplicate_sections(
                 wc_b=wc_b,
             )
             if drop_b:
+                if sid_b == canon_budget_id or _is_protected_budget_section(sec_b):
+                    continue
                 drop_ids.add(sid_b)
                 reason = (
                     "title near-duplicate"
@@ -450,6 +526,8 @@ def prune_near_duplicate_sections(
                 )
                 dropped_labels.append(f"{title_b} ({reason} of {title_a})")
             else:
+                if sid_a == canon_budget_id or _is_protected_budget_section(sec_a):
+                    continue
                 drop_ids.add(sid_a)
                 reason = (
                     "title near-duplicate"
@@ -502,11 +580,14 @@ def remove_aggregate_restatement_sections(
     drop_ids: set[str] = set()
     logs: list[str] = []
 
+    canon_budget_id = _canonical_budget_section_id(sections)
     for section in sections:
         sid = _section_id(section)
         title = _section_title(section)
         body = _section_content(section)
         if not sid or _is_static_cq_section_id(sid) or not body.strip():
+            continue
+        if sid == canon_budget_id or _is_protected_budget_section(section):
             continue
         if word_count(body) < min_words:
             continue

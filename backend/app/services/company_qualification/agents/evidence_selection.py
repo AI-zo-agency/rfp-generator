@@ -192,7 +192,13 @@ async def _fit_rank_case_studies(
     except Exception as exc:  # noqa: BLE001 - fit is advisory; never block Section 3
         logger.warning("Case study fit ranking skipped: %s", str(exc)[:180])
         return [], None
-    titles = select_best_case_study_titles(report, min_count=1, max_count=3)
+    titles = select_best_case_study_titles(
+        report,
+        min_count=1,
+        max_count=3,
+        rfp_title=rfp_title,
+        rfp_sector=rfp_sector,
+    )
     if titles:
         logger.info(
             "Case study fit ranked %d strong studies for capabilities=%s",
@@ -225,8 +231,13 @@ async def run_evidence_selection_agent(
     for c in candidates:
         title = (c.title or "").strip()
         source = (c.source or "").strip()
-        if is_eligible_section3_case_study_title(title) and (
-            not source or is_eligible_section3_case_study_title(source)
+        if is_eligible_section3_case_study_title(
+            title, rfp_title=rfp_title, rfp_sector=rfp_sector
+        ) and (
+            not source
+            or is_eligible_section3_case_study_title(
+                source, rfp_title=rfp_title, rfp_sector=rfp_sector
+            )
         ):
             eligible.append(c)
         else:

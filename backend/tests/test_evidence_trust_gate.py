@@ -154,7 +154,11 @@ class GateTests(unittest.TestCase):
 
 class ClaimValidatorTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.registry = parse_client_list_markdown(CLIENT_LIST_FIXTURE)
+        self.registry = parse_client_list_markdown(
+            CLIENT_LIST_FIXTURE
+            + "| Oregon Employment Department | State Government | Precision geofencing and digital targeting campaigns | Yes |\n"
+            + "| Deschutes Brand Only Co | Title Insurance | Brand modernization and branded templates | Yes |\n"
+        )
 
     def test_flags_confirm_in_prose(self) -> None:
         prose = "We delivered a website for Thrive Guides with measurable results."
@@ -162,6 +166,45 @@ class ClaimValidatorTests(unittest.TestCase):
         self.assertGreaterEqual(report.flags_inserted, 1)
         self.assertIn("[FLAG:", out)
         self.assertIn("Thrive Guides", out)
+
+    def test_rewrites_unsupported_website_claim_not_just_flag(self) -> None:
+        from app.services.evidence_trust.claim_validator import rewrite_blocked_claim_prose
+        from app.services.proposal_verify_optional_scrub import strip_inline_evidence_tags
+
+        prose = (
+            "Oregon Employment Department campaigns drove hits on our website "
+            "and stronger renewal intent.\n\n"
+            "We focused on geofencing near workforce centers."
+        )
+        out, report = validate_and_flag_section(prose, registry=self.registry)
+        self.assertGreaterEqual(report.blocks_replaced, 1)
+        self.assertNotIn("hits on our website", out.casefold())
+        self.assertIn("geofencing", out.casefold())
+        # After tag scrub, fabricated website claim must still be gone.
+        cleaned, _n = strip_inline_evidence_tags(out)
+        self.assertNotIn("website", cleaned.casefold())
+
+    def test_rewrites_deschutes_mortgage_calculator_when_work_type_blocks(self) -> None:
+        prose = (
+            "For Deschutes Brand Only Co we created a professional website with "
+            "custom-programmed mortgage calculators and a full collateral suite."
+        )
+        out, report = validate_and_flag_section(prose, registry=self.registry)
+        self.assertGreaterEqual(report.blocks_replaced, 1)
+        self.assertNotIn("mortgage calculator", out.casefold())
+        self.assertNotIn("professional website", out.casefold())
+        self.assertIn("brand modernization", out.casefold())
+
+    def test_media_planners_does_not_flag_tourism_mci(self) -> None:
+        prose = (
+            "Our team includes brand strategists and media planners who understand "
+            "government communications. We have worked with the City of Santa Clara "
+            "as a long-term brand partner."
+        )
+        out, report = validate_and_flag_section(prose, registry=self.registry)
+        self.assertEqual(report.flags_inserted, 0)
+        self.assertNotIn("[FLAG:", out)
+        self.assertNotIn("tourism_mci", out)
 
     def test_clears_invented_references(self) -> None:
         prose = (

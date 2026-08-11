@@ -361,8 +361,8 @@ class AmendOutlineForMissingRequirementsTests(unittest.TestCase):
                 LedgerRequirement(id="r1", text="Cover Letter", satisfiedBy=[]),
                 LedgerRequirement(
                     id="r2",
-                    text="Standard Form 330",
-                    source="form",
+                    text="Detailed project schedule with milestones",
+                    source="required_content",
                     points=30.0,
                     satisfiedBy=[],
                 ),
@@ -374,8 +374,25 @@ class AmendOutlineForMissingRequirementsTests(unittest.TestCase):
 
         titles = [s.title for s in amended]
         self.assertIn("Cover Letter", titles)
-        self.assertIn("Standard Form 330", titles)
+        self.assertIn("Detailed project schedule with milestones", titles)
         self.assertEqual(len(amended), 3, "must not duplicate the already-satisfied section")
+
+    def test_a_missing_form_is_never_amended_into_the_outline(self) -> None:
+        """Forms belong on the attachment checklist — not Phase 2 outline tabs."""
+        ledger = RequirementLedger(
+            requirements=[
+                LedgerRequirement(
+                    id="r1",
+                    text="Standard Form 330",
+                    source="form",
+                    points=30.0,
+                    satisfiedBy=[],
+                ),
+            ]
+        )
+        amended = amend_outline_for_missing_requirements(ledger, [])
+        self.assertEqual(amended, [])
+        self.assertIn("Standard Form 330", {r.text for r in ledger.missing()})
 
     def test_a_missing_scored_criterion_is_never_amended_into_the_outline(self) -> None:
         """Post-incident correction (identical defect to Scan-RFP's
@@ -409,14 +426,14 @@ class AmendOutlineForMissingRequirementsTests(unittest.TestCase):
 
     def test_a_fractional_criterion_weight_is_not_truncated(self) -> None:
         """An RFP can weight a criterion at 12.5 pts; int() silently made it 12.
-        Uses source="form" (ADD-eligible) since a scored_criterion is never
-        amended — see test_a_missing_scored_criterion_is_never_amended_into_the_outline."""
+        Uses source="required_content" (ADD-eligible) since a scored_criterion
+        / form is never amended."""
         ledger = RequirementLedger(
             requirements=[
                 LedgerRequirement(
                     id="r1",
-                    text="Technical Approach",
-                    source="form",
+                    text="Technical Approach narrative",
+                    source="required_content",
                     points=12.5,
                     satisfiedBy=[],
                 )

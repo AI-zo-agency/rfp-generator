@@ -128,15 +128,17 @@ _PRICING_TITLE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def is_pricing_outline_title(title: str) -> bool:
+    return bool(_PRICING_TITLE_RE.search(title or ""))
+
+
 _G_CODE_RE = re.compile(r"\bG\.\s*(\d+)\b", re.IGNORECASE)
 
 
 def is_agency_requirements_title(title: str) -> bool:
     return bool(_AGENCY_REQ_TITLE_RE.search(title or ""))
-
-
-def is_pricing_outline_title(title: str) -> bool:
-    return bool(_PRICING_TITLE_RE.search(title or ""))
 
 
 def _agency_req_g_codes(title: str) -> list[int]:

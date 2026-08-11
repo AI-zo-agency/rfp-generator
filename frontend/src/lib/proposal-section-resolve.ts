@@ -609,6 +609,15 @@ export function messageNeedsCaseStudyClarify(message: string): boolean {
 export function messageLooksOutlineStructure(message: string): boolean {
   const text = message.trim();
   if (!text) return false;
+  // "add client voice for this section" = edit the open tab, not a new sidebar tab.
+  if (
+    messagePointsAtOpenSection(text) &&
+    !/\b(?:new|another|more)\s+(?:sidebar\s+)?(?:section|tab|h2)\b/i.test(text) &&
+    !/\b(?:add|create)\s+(?:a\s+)?new\s+(?:section|tab)\b/i.test(text) &&
+    !/\b(?:add|create)\s+another\s+(?:bio|case\s*stud)/i.test(text)
+  ) {
+    return false;
+  }
   return (
     // "make this section tighter" is an edit — not outline structure.
     /\b(?:add|create|insert)\b.{0,60}\b(?:new\s+)?(?:sidebar\s+)?(?:section|tab|h2)\b/i.test(

@@ -69,6 +69,7 @@ import {
 import {
   scanSubmissionFlags,
   mergeSubmissionFlags,
+  actionableSubmissionFlags,
   resolveFlagHighlight,
   sectionManualFillCount,
   summarizeManualFillFlags,
@@ -921,10 +922,14 @@ function ProposalDraftWorkspaceInner({
       ),
     [outline, budget, rfp.title, rfp.client, research?.rfpSections, presubmitReview?.manualFillFlags]
   );
-  const manualFillCount = manualFillFlags.length;
-  const manualFillSummary = useMemo(
-    () => summarizeManualFillFlags(manualFillFlags),
+  const actionableFlags = useMemo(
+    () => actionableSubmissionFlags(manualFillFlags),
     [manualFillFlags]
+  );
+  const manualFillCount = actionableFlags.length;
+  const manualFillSummary = useMemo(
+    () => summarizeManualFillFlags(actionableFlags),
+    [actionableFlags]
   );
   const sectionProgress = Math.round(
     manuscriptProgress.total > 0
@@ -2302,7 +2307,7 @@ function ProposalDraftWorkspaceInner({
 
       <ProposalManualFlagsPanel
         open={showManualFlags}
-        flags={manualFillFlags}
+        flags={actionableFlags}
         summary={manualFillSummary}
         activeSectionId={
           activeSubmissionFlag?.sectionId ?? selectedSectionId ?? highlightedSectionId
@@ -2480,7 +2485,7 @@ function ProposalDraftWorkspaceInner({
                 manuscriptIndexById={manuscriptIndexById}
                 selectedSectionId={selectedSectionId}
                 highlightedSectionId={highlightedSectionId}
-                manualFillFlags={manualFillFlags}
+                manualFillFlags={actionableFlags}
                 sectionRevisions={sectionRevisions}
                 sectionButtonRefs={sectionButtonRefs}
                 onSelectSection={selectSection}
@@ -2784,7 +2789,7 @@ function ProposalDraftWorkspaceInner({
                     <h3 className="proposal-content-section-title">
                       <span className="text-zo-text-muted">{index + 1}.</span>{" "}
                       {section.title}
-                      {sectionManualFillCount(section.id, manualFillFlags) > 0 ? (
+                      {sectionManualFillCount(section.id, actionableFlags) > 0 ? (
                         <span className="ml-2 text-[11px] font-medium text-amber-800">
                           · needs input
                         </span>

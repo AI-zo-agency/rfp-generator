@@ -38,6 +38,22 @@ class Section3CaseStudyEligibilityTests(unittest.TestCase):
             is_eligible_section3_case_study_title("Oregon Employment Geofencing")
         )
 
+    def test_rejects_infinite_assets_on_civic_rfp(self) -> None:
+        self.assertFalse(
+            is_eligible_section3_case_study_title(
+                "Infinite Assets Verbal and Visual Brand Identity",
+                rfp_title="Public Education Campaign for NYC Charter Ballot Items",
+                rfp_sector="Government / Civic",
+            )
+        )
+        self.assertTrue(
+            is_eligible_section3_case_study_title(
+                "Infinite Assets Verbal and Visual Brand Identity",
+                rfp_title="Financial advisory personal branding",
+                rfp_sector="Professional Services",
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

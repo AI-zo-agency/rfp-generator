@@ -984,6 +984,308 @@ async def _draft_batch(
         return merged, provider
 
 
+def _build_draft_prompt_zones(
+    *,
+    batch: list[dict[str, Any]],
+    batch_payload: list[dict[str, Any]],
+    state: DraftingGraphState,
+) -> tuple[str, str, str]:
+    """Assemble the drafting prompt as (zone_a, zone_b, zone_c).
+
+    Pure and synchronous so the zone boundaries can be tested directly — the
+    cache saving depends entirely on zone_a staying byte-identical across the
+    batches of a run, and that is only worth asserting if it is cheap to assert.
+    """
+    narrative_sections = [p for p in batch_payload if p.get("register") == "narrative"]
+    procurement_sections = [
+        p for p in batch_payload if p.get("register") == "procurement"
+    ]
+
+    # ------------------------------------------------------------------
+    # Prompt zones (see docs/superpowers/specs/2026-08-11-proposal-llm-cost-
+    # optimization-design.md).
+    #
+    # The assembled prompt is the same text it always was; only the ORDER
+    # changed, so that the parts which repeat across batches sit in a stable
+    # prefix that Anthropic can cache.
+    #
+    #   zone_a  — constant for the whole run. Cached once, read by every batch.
+    #   zone_b  — the prior-sections block. Append-only, so batch N reuses
+    #             batch N-1's cached copy and writes only the delta.
+    #   zone_c  — anything derived from this batch. Never cached.
+    #
+    # THE RULE: a block belongs in zone_a only if its content is independent of
+    # `batch`, `batch_payload` and `narrative_sections`. If it reads any of
+    # those, it is zone_c. Putting a batch-dependent block in zone_a does not
+    # corrupt the prompt, but it silently destroys the cache hit for every
+    # batch — which is why test_draft_prompt_zones.py asserts zone_a is
+    # byte-identical across batches.
+    # ------------------------------------------------------------------
+    zone_a = (
+        f"Client: {state['rfp_client']}\n"
+        f"Sector: {state['rfp_sector']}\n"
+        f"Location: {state.get('rfp_location') or ''}\n"
+        f"RFP: {state['rfp_title']}\n\n"
+    )
+    zone_c = ""
+    if narrative_sections:
+        zone_c += (
+            "NARRATIVE sections in this batch (first person we/our — never The Vendor):\n"
+            f"{format_register_block('narrative')}\n\n"
+            f"Brand voice for narrative sections:\n"
+            f"{_brand_voice_block(state.get('brand_voice'), register='narrative', rfp_client=state['rfp_client'])}\n\n"
+        )
+    if procurement_sections:
+        zone_c += (
+            "PROCUREMENT sections in this batch (formal third-person OK):\n"
+            f"{format_register_block('procurement')}\n\n"
+        )
+    zo_ctx = (state.get("zo_sections_context") or "").strip()
+    if zo_ctx:
+        # Framing matters more than the content here. This block used to be
+        # labelled a reference that barred only word-for-word copying, which
+        # invited restating the same facts in fresh wording — a tab titled
+        # "A brief description of the firm, including the year the firm was
+        # established" duly repeated the founding date and entity type already
+        # covered by 1.1 and 1.3. These sections are ALREADY IN THE DOCUMENT.
+        zone_a += (
+            "ALREADY WRITTEN — these sections are in this proposal already. The "
+            "reader will have read them before reaching your section.\n"
+            "Do NOT restate their facts in ANY form, including paraphrase, "
+            "summary, or 'as noted above' recaps: company history, founding "
+            "date, entity type, ownership, certifications, insurance limits, "
+            "office locations, team member bios or credentials, and case-study "
+            "narratives all belong to these sections and must not be repeated.\n"
+            "If your RFP section needs one of these facts, write ONE short "
+            "cross-reference (e.g. 'see Company Overview') and spend your words "
+            "on what THIS section uniquely requires. Only re-state a fact when "
+            "the RFP explicitly demands it inside your section (a required form "
+            "field or a numbered submission item).\n\n"
+            f"{zo_ctx[:6000]}\n\n"
+        )
+
+    from app.services.proposal_section_dedup import (
+        format_anti_duplication_rules,
+        format_prior_sections_block,
+    )
+
+    zone_a += f"{format_anti_duplication_rules()}\n\n"
+    from app.services.proposal_budget_slots import money_slots_prompt_hint
+
+    zone_a += f"{money_slots_prompt_hint()}\n\n"
+    prior = state.get("drafted_sections") or []
+    batch_ids = {
+        str(s.get("id") or "") for s in batch if s.get("id")
+    }
+    prior_block = format_prior_sections_block(prior, exclude_ids=batch_ids)
+    zone_b = f"{prior_block}\n\n" if prior_block else ""
+
+    from app.services.proposal_manuscript_locks import format_manuscript_locks_block
+    from app.models.proposal import ManuscriptLocks
+
+    locks_raw = state.get("manuscript_locks")
+    locks = None
+    if isinstance(locks_raw, ManuscriptLocks):
+        locks = locks_raw
+    elif isinstance(locks_raw, dict):
+        try:
+            locks = ManuscriptLocks.model_validate(locks_raw)
+        except Exception:
+            locks = None
+    locks_block = format_manuscript_locks_block(locks)
+    if locks_block:
+        zone_a += f"{locks_block}\n\n"
+
+    avoid_block = format_avoidance_block(
+        state.get("writing_avoidances") or [],
+        [
+            LossLesson.model_validate(item)
+            for item in (state.get("loss_lessons") or [])
+            if isinstance(item, dict)
+        ],
+    )
+    if avoid_block:
+        zone_a += f"{avoid_block}\n\n"
+
+    weight_block = format_weight_priority_block(state.get("rfp_sections") or [])
+    if weight_block:
+        zone_a += f"{weight_block}\n\n"
+
+    proof_points = state.get("proof_points") or []
+    if proof_points and narrative_sections:
+        for payload in batch_payload:
+            if payload.get("register") != "narrative":
+                continue
+            block = format_proof_points_block(
+                proof_points,
+                section_id=str(payload.get("sectionId") or ""),
+                section_title=str(payload.get("title") or ""),
+            )
+            if block:
+                zone_c += f"{block}\n\n"
+                break
+
+    from app.models.evidence_allocation import EvidenceAllocationLedger
+    from app.services.evidence_allocator import drafting_exclusion_contract
+
+    alloc_raw = state.get("evidence_allocation")
+    alloc_ledger = None
+    if isinstance(alloc_raw, EvidenceAllocationLedger):
+        alloc_ledger = alloc_raw
+    elif isinstance(alloc_raw, dict):
+        try:
+            alloc_ledger = EvidenceAllocationLedger.model_validate(alloc_raw)
+        except Exception:
+            alloc_ledger = None
+    if alloc_ledger:
+        for payload in batch_payload:
+            contract = drafting_exclusion_contract(
+                alloc_ledger,
+                section_id=str(payload.get("sectionId") or ""),
+            )
+            if contract:
+                zone_c += (
+                    f"For section {payload.get('sectionId')}:\n{contract}\n\n"
+                )
+
+    if any(is_modular_approach_section(str(p.get("title") or "")) for p in batch_payload):
+        zone_c += f"{MODULAR_APPROACH_BLOCK}\n\n"
+
+    for payload in batch_payload:
+        plan_ctx = str(payload.get("planContext") or "").strip()
+        if plan_ctx:
+            zone_c += (
+                f"Execution plan context for {payload.get('sectionId')}:\n{plan_ctx}\n\n"
+            )
+        from app.services.proposal_evidence_gate import (
+            EvidenceDecision,
+            EvidenceGateResult,
+            evidence_policy_prompt_stanza,
+        )
+
+        policy = str(payload.get("evidencePolicy") or "")
+        if policy:
+            decision = EvidenceGateResult(
+                action=EvidenceDecision(policy),
+                reason=str(payload.get("evidencePolicyReason") or ""),
+                requires_retrieval=policy == EvidenceDecision.RETRIEVE_THEN_WRITE.value,
+                safe_plan_driven=policy == EvidenceDecision.WRITE_FROM_PLAN.value,
+            )
+            zone_c += (
+                evidence_policy_prompt_stanza(
+                    decision, section_id=str(payload.get("sectionId") or "")
+                )
+                + "\n\n"
+            )
+        if _is_plan_driven_narrative(
+            title=str(payload.get("title") or ""),
+            register=str(payload.get("register") or ""),
+        ) or policy == EvidenceDecision.WRITE_FROM_PLAN.value:
+            evidence_text = str(payload.get("evidence") or "")
+            thin_evidence = (
+                not evidence_text.strip()
+                or "No evidence items tagged" in evidence_text
+            )
+            if thin_evidence:
+                zone_c += (
+                    f"IMPORTANT for {payload.get('sectionId')} ({payload.get('title')}): "
+                    "Evidence is thin or empty. Still draft full submission-ready narrative "
+                    "from Opportunity Understanding, Section Strategy, Winning Pattern, "
+                    "RFP requirements, and Proposal Memory. Do not return an empty content "
+                    "field or a whole-section VERIFY about insufficient evidence.\n\n"
+                )
+            if _is_qualifications_narrative(str(payload.get("title") or "")):
+                zone_c += (
+                    f"QUALIFICATIONS SECTION {payload.get('sectionId')}: "
+                    "Write full experience narrative using retrieved case studies, references, "
+                    "and agency credentials when present. If geo-specific case studies are "
+                    "missing, describe transferable place-branding / economic development "
+                    "capabilities without inventing false project names or metrics.\n\n"
+                )
+            title_lower = str(payload.get("title") or "").lower()
+            if any(
+                k in title_lower
+                for k in (
+                    "team qualification",
+                    "agency team",
+                    "staffing",
+                    "personnel",
+                    "key personnel",
+                    "project team",
+                )
+            ):
+                zone_c += (
+                    f"TEAM / STAFFING SECTION {payload.get('sectionId')}: "
+                    "Do NOT invent percent-time / FTE percentages. If the RFP does not "
+                    "require percent-time or dedicated FTE %, omit that column entirely "
+                    "(Role | Name | relevant experience only — names from approved bios). "
+                    "If the RFP requires percent-time, every cell must be "
+                    "[VERIFY: percent time] — never invent 10%/35%/25% grids or reuse "
+                    "static tables from other proposals.\n\n"
+                )
+            if any(k in title_lower for k in ("budget", "pricing", "fees", "cost")):
+                zone_c += (
+                    f"BUDGET NARRATIVE REQUIRED for {payload.get('sectionId')}: "
+                    "Write transparency, pass-through media buys, compensation model, and "
+                    "allocation rationale using RFP spend figures from requirements/plan. "
+                    "Do not invent agency fee line-item tables. Do not return empty content.\n\n"
+                )
+            if any(
+                k in title_lower
+                for k in (
+                    "schedule",
+                    "timeline",
+                    "delivery schedule",
+                    "project schedule",
+                    "work schedule",
+                )
+            ):
+                zone_c += (
+                    f"SCHEDULE / TIMELINE SECTION {payload.get('sectionId')}: "
+                    "Dates, milestones, and owners ONLY — do not restate Approach phases. "
+                    "Fit entirely inside the RFP award→launch / contract window from RFP "
+                    "context / Delivery Timeline Plan. Never invent a longer sequential "
+                    "plan than the RFP allows. Missing dates → [VERIFY: …], never fabricate.\n\n"
+                )
+            if any(
+                k in title_lower
+                for k in (
+                    "cover letter",
+                    "letter of transmittal",
+                    "transmittal letter",
+                )
+            ):
+                zone_c += (
+                    f"COVER LETTER SECTION {payload.get('sectionId')}: "
+                    "Write a complete short offer letter addressing RFP submission asks. "
+                    "If the RFP requires a physically signed cover letter / transmittal, "
+                    "include designerNote instructing attachment of the signed PDF — "
+                    "do not invent signature dates, notary numbers, or claim the PDF is attached.\n\n"
+                )
+            if any(
+                k in title_lower
+                for k in (
+                    "approach",
+                    "methodology",
+                    "work plan",
+                    "technical approach",
+                    "understanding",
+                    "scope of work",
+                )
+            ):
+                zone_c += (
+                    f"SCORED NARRATIVE {payload.get('sectionId')}: "
+                    "First-pass must thoroughly cover every requirement listed for this "
+                    "section (requirements array / Section Strategy / ledger). Dense and "
+                    "complete — no thin outline, no 'details to follow'. Stay under "
+                    "wordTarget; do not invent facts absent from RFP/KB.\n\n"
+                )
+
+    zone_c += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
+
+    return zone_a, zone_b, zone_c
+
+
 async def _draft_batch_once(
     batch: list[dict[str, Any]],
     state: DraftingGraphState,
@@ -1034,272 +1336,16 @@ async def _draft_batch_once(
             }
         )
 
-    narrative_sections = [p for p in batch_payload if p.get("register") == "narrative"]
-    procurement_sections = [
-        p for p in batch_payload if p.get("register") == "procurement"
-    ]
-
-    user_content = (
-        f"Client: {state['rfp_client']}\n"
-        f"Sector: {state['rfp_sector']}\n"
-        f"Location: {state.get('rfp_location') or ''}\n"
-        f"RFP: {state['rfp_title']}\n\n"
+    zone_a, zone_b, zone_c = _build_draft_prompt_zones(
+        batch=batch,
+        batch_payload=batch_payload,
+        state=state,
     )
-    if narrative_sections:
-        user_content += (
-            "NARRATIVE sections in this batch (first person we/our — never The Vendor):\n"
-            f"{format_register_block('narrative')}\n\n"
-            f"Brand voice for narrative sections:\n"
-            f"{_brand_voice_block(state.get('brand_voice'), register='narrative', rfp_client=state['rfp_client'])}\n\n"
-        )
-    if procurement_sections:
-        user_content += (
-            "PROCUREMENT sections in this batch (formal third-person OK):\n"
-            f"{format_register_block('procurement')}\n\n"
-        )
-    zo_ctx = (state.get("zo_sections_context") or "").strip()
-    if zo_ctx:
-        # Framing matters more than the content here. This block used to be
-        # labelled a reference that barred only word-for-word copying, which
-        # invited restating the same facts in fresh wording — a tab titled
-        # "A brief description of the firm, including the year the firm was
-        # established" duly repeated the founding date and entity type already
-        # covered by 1.1 and 1.3. These sections are ALREADY IN THE DOCUMENT.
-        user_content += (
-            "ALREADY WRITTEN — these sections are in this proposal already. The "
-            "reader will have read them before reaching your section.\n"
-            "Do NOT restate their facts in ANY form, including paraphrase, "
-            "summary, or 'as noted above' recaps: company history, founding "
-            "date, entity type, ownership, certifications, insurance limits, "
-            "office locations, team member bios or credentials, and case-study "
-            "narratives all belong to these sections and must not be repeated.\n"
-            "If your RFP section needs one of these facts, write ONE short "
-            "cross-reference (e.g. 'see Company Overview') and spend your words "
-            "on what THIS section uniquely requires. Only re-state a fact when "
-            "the RFP explicitly demands it inside your section (a required form "
-            "field or a numbered submission item).\n\n"
-            f"{zo_ctx[:6000]}\n\n"
-        )
-
-    from app.services.proposal_section_dedup import (
-        format_anti_duplication_rules,
-        format_prior_sections_block,
-    )
-
-    user_content += f"{format_anti_duplication_rules()}\n\n"
-    from app.services.proposal_budget_slots import money_slots_prompt_hint
-
-    user_content += f"{money_slots_prompt_hint()}\n\n"
-    prior = state.get("drafted_sections") or []
-    batch_ids = {
-        str(s.get("id") or "") for s in batch if s.get("id")
-    }
-    prior_block = format_prior_sections_block(prior, exclude_ids=batch_ids)
-    if prior_block:
-        user_content += f"{prior_block}\n\n"
-
-    from app.services.proposal_manuscript_locks import format_manuscript_locks_block
-    from app.models.proposal import ManuscriptLocks
-
-    locks_raw = state.get("manuscript_locks")
-    locks = None
-    if isinstance(locks_raw, ManuscriptLocks):
-        locks = locks_raw
-    elif isinstance(locks_raw, dict):
-        try:
-            locks = ManuscriptLocks.model_validate(locks_raw)
-        except Exception:
-            locks = None
-    locks_block = format_manuscript_locks_block(locks)
-    if locks_block:
-        user_content += f"{locks_block}\n\n"
-
-    avoid_block = format_avoidance_block(
-        state.get("writing_avoidances") or [],
-        [
-            LossLesson.model_validate(item)
-            for item in (state.get("loss_lessons") or [])
-            if isinstance(item, dict)
-        ],
-    )
-    if avoid_block:
-        user_content += f"{avoid_block}\n\n"
-
-    weight_block = format_weight_priority_block(state.get("rfp_sections") or [])
-    if weight_block:
-        user_content += f"{weight_block}\n\n"
-
-    proof_points = state.get("proof_points") or []
-    if proof_points and narrative_sections:
-        for payload in batch_payload:
-            if payload.get("register") != "narrative":
-                continue
-            block = format_proof_points_block(
-                proof_points,
-                section_id=str(payload.get("sectionId") or ""),
-                section_title=str(payload.get("title") or ""),
-            )
-            if block:
-                user_content += f"{block}\n\n"
-                break
-
-    from app.models.evidence_allocation import EvidenceAllocationLedger
-    from app.services.evidence_allocator import drafting_exclusion_contract
-
-    alloc_raw = state.get("evidence_allocation")
-    alloc_ledger = None
-    if isinstance(alloc_raw, EvidenceAllocationLedger):
-        alloc_ledger = alloc_raw
-    elif isinstance(alloc_raw, dict):
-        try:
-            alloc_ledger = EvidenceAllocationLedger.model_validate(alloc_raw)
-        except Exception:
-            alloc_ledger = None
-    if alloc_ledger:
-        for payload in batch_payload:
-            contract = drafting_exclusion_contract(
-                alloc_ledger,
-                section_id=str(payload.get("sectionId") or ""),
-            )
-            if contract:
-                user_content += (
-                    f"For section {payload.get('sectionId')}:\n{contract}\n\n"
-                )
-
-    if any(is_modular_approach_section(str(p.get("title") or "")) for p in batch_payload):
-        user_content += f"{MODULAR_APPROACH_BLOCK}\n\n"
-
-    for payload in batch_payload:
-        plan_ctx = str(payload.get("planContext") or "").strip()
-        if plan_ctx:
-            user_content += (
-                f"Execution plan context for {payload.get('sectionId')}:\n{plan_ctx}\n\n"
-            )
-        from app.services.proposal_evidence_gate import (
-            EvidenceDecision,
-            EvidenceGateResult,
-            evidence_policy_prompt_stanza,
-        )
-
-        policy = str(payload.get("evidencePolicy") or "")
-        if policy:
-            decision = EvidenceGateResult(
-                action=EvidenceDecision(policy),
-                reason=str(payload.get("evidencePolicyReason") or ""),
-                requires_retrieval=policy == EvidenceDecision.RETRIEVE_THEN_WRITE.value,
-                safe_plan_driven=policy == EvidenceDecision.WRITE_FROM_PLAN.value,
-            )
-            user_content += (
-                evidence_policy_prompt_stanza(
-                    decision, section_id=str(payload.get("sectionId") or "")
-                )
-                + "\n\n"
-            )
-        if _is_plan_driven_narrative(
-            title=str(payload.get("title") or ""),
-            register=str(payload.get("register") or ""),
-        ) or policy == EvidenceDecision.WRITE_FROM_PLAN.value:
-            evidence_text = str(payload.get("evidence") or "")
-            thin_evidence = (
-                not evidence_text.strip()
-                or "No evidence items tagged" in evidence_text
-            )
-            if thin_evidence:
-                user_content += (
-                    f"IMPORTANT for {payload.get('sectionId')} ({payload.get('title')}): "
-                    "Evidence is thin or empty. Still draft full submission-ready narrative "
-                    "from Opportunity Understanding, Section Strategy, Winning Pattern, "
-                    "RFP requirements, and Proposal Memory. Do not return an empty content "
-                    "field or a whole-section VERIFY about insufficient evidence.\n\n"
-                )
-            if _is_qualifications_narrative(str(payload.get("title") or "")):
-                user_content += (
-                    f"QUALIFICATIONS SECTION {payload.get('sectionId')}: "
-                    "Write full experience narrative using retrieved case studies, references, "
-                    "and agency credentials when present. If geo-specific case studies are "
-                    "missing, describe transferable place-branding / economic development "
-                    "capabilities without inventing false project names or metrics.\n\n"
-                )
-            title_lower = str(payload.get("title") or "").lower()
-            if any(
-                k in title_lower
-                for k in (
-                    "team qualification",
-                    "agency team",
-                    "staffing",
-                    "personnel",
-                    "key personnel",
-                    "project team",
-                )
-            ):
-                user_content += (
-                    f"TEAM / STAFFING SECTION {payload.get('sectionId')}: "
-                    "Do NOT invent percent-time / FTE percentages. If the RFP does not "
-                    "require percent-time or dedicated FTE %, omit that column entirely "
-                    "(Role | Name | relevant experience only — names from approved bios). "
-                    "If the RFP requires percent-time, every cell must be "
-                    "[VERIFY: percent time] — never invent 10%/35%/25% grids or reuse "
-                    "static tables from other proposals.\n\n"
-                )
-            if any(k in title_lower for k in ("budget", "pricing", "fees", "cost")):
-                user_content += (
-                    f"BUDGET NARRATIVE REQUIRED for {payload.get('sectionId')}: "
-                    "Write transparency, pass-through media buys, compensation model, and "
-                    "allocation rationale using RFP spend figures from requirements/plan. "
-                    "Do not invent agency fee line-item tables. Do not return empty content.\n\n"
-                )
-            if any(
-                k in title_lower
-                for k in (
-                    "schedule",
-                    "timeline",
-                    "delivery schedule",
-                    "project schedule",
-                    "work schedule",
-                )
-            ):
-                user_content += (
-                    f"SCHEDULE / TIMELINE SECTION {payload.get('sectionId')}: "
-                    "Dates, milestones, and owners ONLY — do not restate Approach phases. "
-                    "Fit entirely inside the RFP award→launch / contract window from RFP "
-                    "context / Delivery Timeline Plan. Never invent a longer sequential "
-                    "plan than the RFP allows. Missing dates → [VERIFY: …], never fabricate.\n\n"
-                )
-            if any(
-                k in title_lower
-                for k in (
-                    "cover letter",
-                    "letter of transmittal",
-                    "transmittal letter",
-                )
-            ):
-                user_content += (
-                    f"COVER LETTER SECTION {payload.get('sectionId')}: "
-                    "Write a complete short offer letter addressing RFP submission asks. "
-                    "If the RFP requires a physically signed cover letter / transmittal, "
-                    "include designerNote instructing attachment of the signed PDF — "
-                    "do not invent signature dates, notary numbers, or claim the PDF is attached.\n\n"
-                )
-            if any(
-                k in title_lower
-                for k in (
-                    "approach",
-                    "methodology",
-                    "work plan",
-                    "technical approach",
-                    "understanding",
-                    "scope of work",
-                )
-            ):
-                user_content += (
-                    f"SCORED NARRATIVE {payload.get('sectionId')}: "
-                    "First-pass must thoroughly cover every requirement listed for this "
-                    "section (requirements array / Section Strategy / ledger). Dense and "
-                    "complete — no thin outline, no 'details to follow'. Stay under "
-                    "wordTarget; do not invent facts absent from RFP/KB.\n\n"
-                )
-
-    user_content += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
+    # zone_a and zone_b are handed to the LLM layer as cache breakpoints; zone_c
+    # is the volatile remainder. Concatenated, they are the same prompt text the
+    # model has always received.
+    cache_prefix = [zone for zone in (zone_a, zone_b) if zone]
+    user_content = zone_c
 
     # Keep ≤ Fireworks 8192 output cap so prefer/fallback Fireworks can serve
     # when Gemini/OpenRouter are unavailable (expired models / credit exhaustion).
@@ -1326,6 +1372,7 @@ async def _draft_batch_once(
                 temperature=0.35,
                 node_name=draft_node,
                 rfp_id=str(state.get("rfp_id") or "") or None,
+                cache_prefix=cache_prefix,
             )
 
     results: list[dict[str, Any]] = []

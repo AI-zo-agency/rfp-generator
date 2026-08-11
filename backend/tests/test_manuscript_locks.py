@@ -5,6 +5,7 @@ from app.services.proposal_manuscript_locks import (
     format_manuscript_locks_block,
     scan_manuscript_lock_issues,
     strip_internal_proposal_meta,
+    strip_kpi_lock_manual_fills,
 )
 
 
@@ -121,3 +122,46 @@ def test_locks_block_mentions_primary() -> None:
     block = format_manuscript_locks_block(locks)
     assert "Ron Comer" in block
     assert "Mississippi Outdoors Media" in block
+
+
+def test_strip_kpi_lock_manual_fills() -> None:
+    body = (
+        "We track engagement monthly.\n\n"
+        "[MANUAL FILL: Sonja — deterministic.manuscript_locks.rfq_named_kpi_missing_from_x | KPI one]\n"
+    )
+    clean, n = strip_kpi_lock_manual_fills(body)
+    assert n == 1
+    assert "MANUAL FILL" not in clean
+    assert "engagement monthly" in clean
+
+
+def test_consolidated_kpi_missing_issues() -> None:
+    locks = ManuscriptLocks(
+        primaryContactName="Ron Comer",
+        requiredKpis=[
+            "# of print and digital materials",
+            "# of project management meetings",
+        ],
+        updatedAt="2026-07-20T00:00:00Z",
+    )
+    draft = ProposalDraft(
+        rfpId="rfp-1",
+        sections=[
+            ProposalSection(
+                id="analytics",
+                title="Social Media Analytics Experience",
+                content="We report monthly on reach and engagement.",
+            ),
+        ],
+        updatedAt="2026-07-20T00:00:00Z",
+    )
+    research = ProposalResearchCache(
+        rfpId="rfp-1",
+        manuscriptLocks=locks,
+        updatedAt="2026-07-20T00:00:00Z",
+    )
+    issues = scan_manuscript_lock_issues(draft=draft, research=research)
+    kpi_issues = [i for i in issues if "KPI" in (i.message or "")]
+    assert len(kpi_issues) == 1
+    assert "print and digital" in kpi_issues[0].message
+    assert "project management" in kpi_issues[0].message
