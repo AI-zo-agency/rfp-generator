@@ -38,6 +38,10 @@ IS a contradiction (flag these):
   that conflicts with companyfacts (e.g. companyfacts Team Size: 35 but draft
   says "20 core team + 35+ specialists" — invented split with no KB source)
 - DIFFERENT team-size numbers in DIFFERENT sections of the same manuscript
+- Bio **Role on this engagement** that contradicts the org chart (e.g. Agency Director
+  in Section 1.2 but Creative Director on the bio tab for the same person)
+- Sector-tailored bio claims (transit authority, bike share, Northeast mobility) when
+  04_Bio KB does not support them
 - Founded year, legal name, or tenure that conflicts with companyfacts
 - Agency certifications in prose when not listed in companyfacts
 - Treating numbers from old won/finalist proposals (06_WON_, 07_FIN_) as current

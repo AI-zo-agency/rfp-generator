@@ -322,6 +322,8 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
          legitimate authoring artifacts
       4. drop evidence markers and internal pricing flags (existing behavior)
       5. collapse standalone empty subheadings ("Client Voice" with no body)
+      6. normalize bold/plain "Designer Note:" prose into [DESIGNER NOTE: …]
+         so the manuscript UI renders the callout box
     """
     cleaned = text or ""
     cleaned = convert_bare_confirmation_lines(cleaned)
@@ -330,7 +332,38 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
     cleaned = strip_inline_instruction_tags(cleaned)
     cleaned = strip_internal_pricing_flags(strip_evidence_citation_markers(cleaned))
     cleaned = collapse_empty_subheadings(cleaned)
+    cleaned = normalize_designer_note_markup(cleaned)
     return cleaned
+
+
+# Bold / plain "Designer Note:" labels LLMs often emit instead of the canonical tag.
+_DESIGNER_NOTE_PROSE_RE = re.compile(
+    r"(?im)^[ \t]*(?:\*\*|__)?[ \t]*Designer[ \t]+Note(?:\*\*|__)?[ \t]*:[ \t]*(.+?)\s*$"
+)
+
+
+def normalize_designer_note_markup(text: str) -> str:
+    """Turn ``**Designer Note:** …`` / ``Designer Note: …`` into ``[DESIGNER NOTE: …]``.
+
+    The manuscript UI only promotes the bracket tag into a callout div. Bold prose
+    labels render as ordinary body text — which is the wrong handoff shape.
+    """
+    if not text or "designer note" not in text.casefold():
+        return text
+
+    def _repl(match: re.Match[str]) -> str:
+        body = (match.group(1) or "").strip()
+        body = re.sub(r"^(?:\*\*|__)+|(?:\*\*|__)+$", "", body).strip()
+        if not body:
+            return match.group(0)
+        if re.match(r"^\[DESIGNER\s+NOTE\b", body, re.I):
+            return body
+        # Already wrapped with trailing ] from a half-formed tag.
+        if body.endswith("]") and body.upper().startswith("[DESIGNER"):
+            return body
+        return f"[DESIGNER NOTE: {body}]"
+
+    return _DESIGNER_NOTE_PROSE_RE.sub(_repl, text)
 
 
 # --- Internal handoff tags: THE single definition ---------------------------------

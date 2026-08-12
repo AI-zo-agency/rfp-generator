@@ -1,8 +1,13 @@
 """Deterministic legal / attestation gates for Senior Editor KB fact-check.
 
 Converts confident-but-unverified certifications (E-Verify under perjury, conflict
-disclosures) into [VERIFY]/[FLAG] tags. Also flags invented staffing hours, filler
-credentials, and missing near-direct case studies (e.g. Recovery Network of Oregon).
+disclosures, completed vendor registration / procurement downloads, false complete-RFP
+review claims) into [VERIFY]/[MANUAL FILL] tags. Also flags invented staffing hours,
+filler credentials, and missing near-direct case studies (e.g. Recovery Network of Oregon).
+
+Principle: any statement that certifies an external compliance action was ALREADY
+completed must trace to KB evidence or become MANUAL FILL — never a growing list of
+client-specific edge cases.
 """
 
 from __future__ import annotations
@@ -121,6 +126,162 @@ _RNO_FLAG = (
     "scope; prefer for references / previous experience / case studies]"
 )
 
+# --- Procurement / submission action assertions (general — any buyer portal) ----
+
+_NOTICE_ONLY_RFP_RE = re.compile(
+    r"(?is)"
+    r"(?:"
+    r"no documents have been uploaded"
+    r"|contract reporter"
+    r"|notice only"
+    r"|bid\s+notice\s+only"
+    r"|full\s+(?:solicitation|rfp)\s+(?:not|un)available"
+    r")",
+)
+
+_THIN_RFP_CHAR_THRESHOLD = 2500
+
+# Past-tense certification that an external procurement step already happened.
+_PROCUREMENT_COMPLETED_RE = re.compile(
+    r"(?is)"
+    r"(?:"
+    r"(?:we|zö|our\s+(?:firm|agency|team)|the\s+(?:offeror|vendor|agency)|"
+    r"zö\s+agency)\s+"
+    r"(?:have\s+)?(?:completed|registered|downloaded|obtained|secured|filed)\s+"
+    r".{0,140}?(?:vendor|registration|procurement|solicitation|portal|addenda)"
+    r"|"
+    r"(?:registration|vendor)\s+confirmation\s+(?:will\s+be|is)\s+included"
+    r"|"
+    r"(?:attachment|exhibit|appendix)\s+[A-Z0-9]+\s+(?:will\s+include|contains?)\s+"
+    r"(?:registration|vendor|procurement)"
+    r"|"
+    r"(?:reviewed|obtained)\s+the\s+complete\s+(?:rfp|solicitation|procurement)\s+"
+    r"(?:document|package|materials?)"
+    r"|"
+    r"obtained\s+through\s+vendor\s+registration"
+    r")",
+)
+
+_MANUAL_FILL_PROCUREMENT = (
+    "[MANUAL FILL: Sonja — confirm vendor registration / procurement portal steps "
+    "are complete and attach confirmation before submission. Do not certify registration, "
+    "downloads, or promised attachments until proof exists on file.]"
+)
+
+_MANUAL_FILL_RFP_OBTAINED = (
+    "[MANUAL FILL: Sonja — confirm full RFP/procurement documents were obtained "
+    "from the buyer before certifying review. A notice or ad without uploaded "
+    "documents is not the complete solicitation package.]"
+)
+
+
+def rfp_documents_likely_incomplete(rfp_context: str) -> bool:
+    """True when the RFP source looks like a notice/ad, not a full solicitation."""
+    text = (rfp_context or "").strip()
+    if len(text) < _THIN_RFP_CHAR_THRESHOLD:
+        return True
+    return bool(_NOTICE_ONLY_RFP_RE.search(text))
+
+
+def _evidence_supports_procurement_action(evidence_text: str) -> bool:
+    blob = (evidence_text or "").casefold()
+    return any(
+        token in blob
+        for token in (
+            "registration confirmation",
+            "vendor registration complete",
+            "registered vendor",
+            "vendor portal confirmation",
+            "procurement documents obtained",
+            "addenda acknowledgement signed",
+        )
+    )
+
+
+def _replace_paragraphs_matching(
+    content: str,
+    pattern: re.Pattern[str],
+    replacement: str,
+) -> tuple[str, int]:
+    """Replace whole paragraphs that match — avoids partial regex surgery."""
+    text = content or ""
+    if not pattern.search(text):
+        return text, 0
+
+    blocks = re.split(r"(\n\s*\n)", text)
+    changed = 0
+    out: list[str] = []
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
+        if i + 1 < len(blocks) and re.fullmatch(r"\n\s*\n", blocks[i + 1] or ""):
+            sep = blocks[i + 1]
+            i += 2
+        else:
+            sep = ""
+            i += 1
+        if block.strip() and pattern.search(block):
+            if not out or out[-1].strip() != replacement.strip():
+                out.append(replacement)
+            changed += 1
+        else:
+            out.append(block)
+            if sep:
+                out.append(sep)
+    merged = "".join(out)
+    merged = re.sub(r"\n{3,}", "\n\n", merged)
+    return merged.strip() + ("\n" if content.endswith("\n") else ""), changed
+
+
+def _replace_asserted_procurement_actions(
+    content: str,
+    *,
+    evidence_text: str = "",
+    rfp_context: str = "",
+) -> tuple[str, int]:
+    """Gate any past-tense procurement/compliance action without KB proof."""
+    if not content:
+        return content, 0
+    if not _PROCUREMENT_COMPLETED_RE.search(content):
+        # Also gate false complete-RFP review when source is notice-only.
+        if rfp_documents_likely_incomplete(rfp_context):
+            updated, n = _replace_paragraphs_matching(
+                content,
+                re.compile(
+                    r"(?is)"
+                    r"(?:we\s+have\s+reviewed\s+the\s+complete\s+rfp|"
+                    r"reviewed\s+the\s+complete\s+(?:rfp|solicitation|procurement))",
+                ),
+                _MANUAL_FILL_RFP_OBTAINED,
+            )
+            return updated, n
+        return content, 0
+
+    if _evidence_supports_procurement_action(evidence_text):
+        return content, 0
+
+    updated, n = _replace_paragraphs_matching(
+        content,
+        _PROCUREMENT_COMPLETED_RE,
+        _MANUAL_FILL_PROCUREMENT,
+    )
+    if n:
+        return updated, n
+
+    if rfp_documents_likely_incomplete(rfp_context):
+        updated, n2 = _replace_paragraphs_matching(
+            updated,
+            re.compile(
+                r"(?is)"
+                r"(?:we\s+have\s+reviewed\s+the\s+complete\s+rfp|"
+                r"reviewed\s+the\s+complete\s+(?:rfp|solicitation|procurement))",
+            ),
+            _MANUAL_FILL_RFP_OBTAINED,
+        )
+        return updated, n + n2
+
+    return updated, n
+
 
 @dataclass
 class LegalAttestationReport:
@@ -129,6 +290,7 @@ class LegalAttestationReport:
     hours_flags: int = 0
     percent_time_flags: int = 0
     filler_flags: int = 0
+    procurement_flags: int = 0
     rno_flags: int = 0
     logs: list[str] = field(default_factory=list)
 
@@ -280,6 +442,8 @@ def gate_section_legal_attestations(
     section: ProposalSection,
     *,
     force: bool = False,
+    evidence_text: str = "",
+    rfp_context: str = "",
 ) -> tuple[ProposalSection, LegalAttestationReport]:
     """Scrub one section for unverified legal attestations and filler credentials."""
     report = LegalAttestationReport()
@@ -306,6 +470,18 @@ def gate_section_legal_attestations(
             report.logs.append(
                 f"Gated conflict-disclosure assertion in {section.title} → VERIFY for Sonja"
             )
+
+    # Always run — any section can falsely certify procurement steps.
+    content, n = _replace_asserted_procurement_actions(
+        content,
+        evidence_text=evidence_text,
+        rfp_context=rfp_context,
+    )
+    if n:
+        report.procurement_flags += n
+        report.logs.append(
+            f"Gated unverified procurement/compliance action in {section.title} → MANUAL FILL"
+        )
 
     content, n = _flag_invented_hours(content)
     if n:
@@ -413,17 +589,23 @@ def apply_legal_attestation_gates(
     *,
     rfp: RfpRecord | object | None = None,
     rfp_context: str = "",
+    evidence_text: str = "",
 ) -> tuple[ProposalDraft, LegalAttestationReport]:
-    """Run attestation + filler + RNO gates across the manuscript."""
+    """Run attestation + filler + procurement + RNO gates across the manuscript."""
     combined = LegalAttestationReport()
     updated: list[ProposalSection] = []
     for section in draft.sections:
-        section, report = gate_section_legal_attestations(section)
+        section, report = gate_section_legal_attestations(
+            section,
+            evidence_text=evidence_text,
+            rfp_context=rfp_context,
+        )
         updated.append(section)
         combined.everify_flags += report.everify_flags
         combined.conflict_flags += report.conflict_flags
         combined.hours_flags += report.hours_flags
         combined.filler_flags += report.filler_flags
+        combined.procurement_flags += report.procurement_flags
         combined.logs.extend(report.logs)
 
     draft = draft.model_copy(update={"sections": updated})

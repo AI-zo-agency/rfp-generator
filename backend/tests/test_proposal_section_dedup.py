@@ -217,6 +217,31 @@ class SectionDedupTests(unittest.TestCase):
         kept, _logs = dedupe_manuscript_for_scan(sections)
         self.assertIn("rfp-pricing", {s.id for s in kept})
 
+    def test_dedupe_never_drops_required_forms_or_experience_tabs(self) -> None:
+        sections = [
+            _sec(
+                "rfp-req-forms",
+                "Required Forms & Attachments",
+                "W-9, COI, and signed addenda checklist. " * 15,
+            ),
+            _sec(
+                "ledger-comp-1",
+                "Public Sector/Transportation Industry Experience",
+                "Transit and government campaign experience narrative. " * 20,
+            ),
+            _sec(
+                "rfp-mega",
+                "Qualifications Summary",
+                "Required Forms & Attachments\n"
+                "Public Sector/Transportation Industry Experience\n"
+                + ("Restated sibling content. " * 80),
+            ),
+        ]
+        kept, _logs = dedupe_manuscript_for_scan(sections)
+        kept_ids = {s.id for s in kept}
+        self.assertIn("rfp-req-forms", kept_ids)
+        self.assertIn("ledger-comp-1", kept_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

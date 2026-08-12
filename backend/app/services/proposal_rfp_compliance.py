@@ -434,6 +434,13 @@ def _is_trust_anchor_section(
             req.mandatory or (req.points or 0) > 0 or req.source == "required_content"
         ):
             return True
+    try:
+        from app.services.proposal_section_dedup import _is_protected_scan_section
+
+        if _is_protected_scan_section(section):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
     return False
 
 
@@ -1069,8 +1076,11 @@ def reconcile_requirement_ledger(
 
     # Remove stale ledger stubs that an older classifier wrongly ADDed as
     # required_content (font rules, FOAA exemptions, blanket statutory clauses).
-    # Also drop ledger-{id} sections for requirements that are now classified
-    # as submission_instruction / scored_criterion / form (never narrative tabs).
+    # Also drop ledger-{id} stubs for requirements now classified as
+    # submission_instruction / scored_criterion / form — but ONLY when the
+    # section is still an auto-added reconciler stub. Never delete substantive
+    # manuscript tabs (Public Sector Experience, Required Forms, etc.) that
+    # Phase 3 or the user already drafted.
     removed_admin_stubs: list[AppliedCutAction] = []
     non_addable_ids = {
         _ADDED_SECTION_ID_TEMPLATE.format(requirement_id=r.id)
@@ -1081,7 +1091,18 @@ def reconcile_requirement_ledger(
     for section in sections:
         drop = False
         if section.id in non_addable_ids:
-            drop = True
+            body = section.content or ""
+            body_cf = body.casefold()
+            is_reconciler_stub = _LEDGER_STUB_MARKER in body_cf
+            mostly_manual_fill = (
+                body.upper().count("[MANUAL FILL") >= 1
+                and _word_count(body) < 120
+            )
+            if is_reconciler_stub and mostly_manual_fill:
+                drop = True
+            elif is_reconciler_stub and "never invent the answer" in body_cf:
+                drop = True
+            # Substantive drafted tabs stay — even if source is scored_criterion.
         elif _is_stale_administrative_ledger_stub(section):
             drop = True
         if drop:

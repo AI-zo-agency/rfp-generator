@@ -103,6 +103,8 @@ export interface ScanRfpFulfillReport {
   rfpContradictionVerifyTags?: number;
   rfpContradictionUnresolved?: number;
   rfpContradictionSummary?: string;
+  /** False vendor-registration / complete-RFP-review / bio-role / carrier claims scrubbed. */
+  complianceFabricationRepairs?: string[];
 }
 
 const NOTHING_CHANGED_MESSAGE =
@@ -204,6 +206,15 @@ export function buildScanRfpBanner(report: ScanRfpFulfillReport): string {
       `applied ${consistency} consistency fix(es)${namedList(
         report.consistencyFixSummaries
       )}`
+    );
+  }
+
+  const complianceFab = report.complianceFabricationRepairs?.length ?? 0;
+  if (complianceFab > 0) {
+    clauses.push(
+      `scrubbed ${complianceFab} fabricated compliance claim(s) (vendor registration, ` +
+        `complete-RFP review, bio role mismatch, or unverified insurance carrier) — ` +
+        `Sonja must confirm before submit`
     );
   }
 

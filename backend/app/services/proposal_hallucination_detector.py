@@ -76,6 +76,16 @@ HALLUCINATION_PATTERNS = [
      "Unnamed attachment reference (include data inline or specific [VERIFY])"),
     (r"available\s+(through|via)\s+the\s+Bureau",
      "Deferred to Bureau (provide contact details inline)"),
+
+    # Fabricated compliance actions — must not certify procurement steps without proof
+    (r"completed\s+(?:online\s+)?vendor\s+registration",
+     "Fabricated vendor registration claim — do not certify registration without confirmation"),
+    (r"downloaded\s+the\s+complete\s+procurement\s+documents?",
+     "Fabricated procurement download claim — verify documents were actually obtained"),
+    (r"registration\s+confirmation\s+will\s+be\s+included",
+     "Promised registration attachment without confirmed registration on file"),
+    (r"we\s+have\s+reviewed\s+the\s+complete\s+rfp\s+document",
+     "False complete-RFP review claim — verify full solicitation was obtained"),
     
     # Name misspellings
     (r"\bLindeau\b",

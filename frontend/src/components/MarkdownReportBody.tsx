@@ -272,8 +272,19 @@ function parseBlocks(body: string): Block[] {
 }
 
 function tryDesignerNoteFromParagraph(text: string): string | null {
-  const m = text.match(/^\[(?:DESIGNER NOTE|Designer Note)\s*:?\s*([\s\S]*)\]\s*$/i);
-  return m ? m[1].trim() : null;
+  const trimmed = text.trim();
+  const bracket = trimmed.match(
+    /^\[(?:DESIGNER NOTE|Designer Note)\s*:?\s*([\s\S]*)\]\s*$/i
+  );
+  if (bracket) return bracket[1].trim();
+  // LLMs often emit bold/plain labels instead of the canonical bracket tag.
+  const prose = trimmed.match(
+    /^(?:\*\*|__)?\s*Designer\s+Note(?:\*\*|__)?\s*:\s*([\s\S]+)$/i
+  );
+  if (prose) {
+    return prose[1].replace(/^(?:\*\*|__)+|(?:\*\*|__)+$/g, "").trim();
+  }
+  return null;
 }
 
 function escapeRegex(value: string): string {

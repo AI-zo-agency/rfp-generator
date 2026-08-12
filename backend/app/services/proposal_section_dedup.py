@@ -423,6 +423,47 @@ def _prefer_drop_b(
     return idx_b >= idx_a
 
 
+def _is_protected_scan_section(section: Any) -> bool:
+    """Tabs Complete Scan must never delete — scored, closing, forms, references."""
+    sid = _section_id(section).casefold()
+    if _is_static_cq_section_id(sid):
+        return True
+    if _is_protected_budget_section(section):
+        return True
+    if _section_eval_points(section) > 0:
+        return True
+    title_cf = _section_title(section).casefold()
+    protected_title_hints = (
+        "reference",
+        "required form",
+        "attachment",
+        "submission",
+        "compliance",
+        "experience",
+        "qualification",
+        "capability",
+        "past performance",
+        "cover letter",
+        "transmittal",
+        "certification",
+        "acknowledg",
+        "insurance",
+        "closing",
+        "offeror",
+        "transportation",
+        "public sector",
+        "regional",
+        "five-year",
+        "5-year",
+        "proposal instruction",
+    )
+    if any(h in title_cf for h in protected_title_hints):
+        return True
+    if sid.startswith(("rfp-closing-", "rfp-req-", "rfp-sec-", "ledger-comp-")):
+        return True
+    return False
+
+
 def prune_near_duplicate_sections(
     sections: list[Any],
     *,
@@ -452,6 +493,8 @@ def prune_near_duplicate_sections(
             continue
         if sid == canon_budget_id or _is_protected_budget_section(section):
             continue
+        if _is_protected_scan_section(section):
+            continue
         if not body:
             continue
         if word_count(body) < 40:
@@ -476,6 +519,8 @@ def prune_near_duplicate_sections(
                 or sid_b == canon_budget_id
                 or _is_protected_budget_section(sec_a)
                 or _is_protected_budget_section(sec_b)
+                or _is_protected_scan_section(sec_a)
+                or _is_protected_scan_section(sec_b)
             ):
                 continue
             title_b = _section_title(sec_b)
@@ -516,7 +561,11 @@ def prune_near_duplicate_sections(
                 wc_b=wc_b,
             )
             if drop_b:
-                if sid_b == canon_budget_id or _is_protected_budget_section(sec_b):
+                if (
+                    sid_b == canon_budget_id
+                    or _is_protected_budget_section(sec_b)
+                    or _is_protected_scan_section(sec_b)
+                ):
                     continue
                 drop_ids.add(sid_b)
                 reason = (
@@ -526,7 +575,11 @@ def prune_near_duplicate_sections(
                 )
                 dropped_labels.append(f"{title_b} ({reason} of {title_a})")
             else:
-                if sid_a == canon_budget_id or _is_protected_budget_section(sec_a):
+                if (
+                    sid_a == canon_budget_id
+                    or _is_protected_budget_section(sec_a)
+                    or _is_protected_scan_section(sec_a)
+                ):
                     continue
                 drop_ids.add(sid_a)
                 reason = (
@@ -588,6 +641,8 @@ def remove_aggregate_restatement_sections(
         if not sid or _is_static_cq_section_id(sid) or not body.strip():
             continue
         if sid == canon_budget_id or _is_protected_budget_section(section):
+            continue
+        if _is_protected_scan_section(section):
             continue
         if word_count(body) < min_words:
             continue

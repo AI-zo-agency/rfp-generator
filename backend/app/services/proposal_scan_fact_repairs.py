@@ -302,6 +302,17 @@ async def rebuild_team_bios_from_kb(
             sections.append(section)
             continue
 
+        org_role = ""
+        org_roles = parse_org_chart_roles(draft)
+        key = member.casefold()
+        org_role = org_roles.get(key, "")
+        if not org_role:
+            for name, role in org_roles.items():
+                parts = key.split()
+                if len(parts) >= 2 and parts[0] in name and parts[-1] in name:
+                    org_role = role
+                    break
+
         try:
             kb_text, sources = await _fetch_member_bio_kb(member)
         except Exception as exc:  # noqa: BLE001
@@ -321,7 +332,7 @@ async def rebuild_team_bios_from_kb(
 
         new_content = stub_from_extraction(
             member=member,
-            role="",
+            role=org_role,
             pdf_filename=pdf_name,
             kb_text=kb_text if inline_required else "",
             kb_available=kb_available,
@@ -371,6 +382,17 @@ async def run_scan_fact_repairs(
 
     draft, bio_logs = await rebuild_team_bios_from_kb(draft, rfp_text=rfp_text)
     logs.extend(bio_logs)
+
+    from app.services.proposal_scan_compliance_fabrication import (
+        run_compliance_fabrication_repairs,
+    )
+
+    draft, compliance_logs = await run_compliance_fabrication_repairs(
+        draft,
+        rfp_text=rfp_text,
+        evidence_text=evidence,
+    )
+    logs.extend(compliance_logs)
 
     org_roles = parse_org_chart_roles(draft)
     bio_by_name = _bio_index_by_name(draft)

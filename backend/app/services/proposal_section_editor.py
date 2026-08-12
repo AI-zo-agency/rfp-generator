@@ -2527,6 +2527,11 @@ Rules:
 4. Do not invent facts. If sourcing from KB is required, list kbQueries; if the ask is only
    remove / make qualitative, return "kbQueries": [].
 5. For full_rewrite, return "patches": [] and put the rewrite instruction in understoodAsk.
+6. When the user asks to add a designer note: editorInstruction MUST require a standalone
+   paragraph exactly as [DESIGNER NOTE: …] after a blank line — NEVER **Designer Note:**,
+   HTML/div, or "styled as …". The note body must be a layout/production handoff
+   (callout box, columns, attach signed form/PDF, visual separation) — never meta
+   commentary like "This section establishes…" or "critical for budget control".
 """
 
 
@@ -3221,12 +3226,12 @@ Rules:
 12. FORMAT: Prefer short paragraphs, markdown bullet lists, and markdown tables for phases,
     process steps, cadence, comparisons, and roles — whenever that improves evaluator scanability.
     Dense, scannable layouts score better than walls of text.
-13. DESIGNER NOTES: Actively add [DESIGNER NOTE: …] inline wherever a visual layout would
-    replace prose — tables, timelines, infographics, comparison charts, icon grids, callout
-    boxes, pull quotes, or before/after visuals. Be specific: describe the layout, columns,
-    and what data goes where so a designer can build it without guessing. Also set designerNote
-    in the JSON for the section-level layout hint. This lets the designer COMPACT the content
-    visually so it reads shorter and scans faster.
+13. DESIGNER NOTES: Insert ONLY as a standalone paragraph
+    `[DESIGNER NOTE: concrete layout handoff]` after a blank line — never **Designer Note:**,
+    HTML/div, or "styled as". Content is a production handoff (callout box title + placement,
+    table columns, attach signed PDF, visual separation) so a designer can build without
+    guessing. Do NOT write meta commentary ("This section establishes…", "critical for…").
+    Also set designerNote in the JSON for the section-level layout hint.
 14. Methodology / planning / approach / work-plan sections: use phased bullets or a compact
     phase table; keep each phase to a few tight lines.
 
@@ -3262,7 +3267,11 @@ Rules:
 12. Reference excerpts: include name, title, phone, and email — never "contact on request" or deferral language.
 13. PSA/compliance excerpts: add specific acknowledgment language when user asks — cover insurance, living wage, MacBride, Title VI, Chapter 63, audit rights as applicable.
 14. Do NOT shorten or summarize the excerpt unless the user asked to remove, delete, cut, shorten, make concise, trim, or condense it. When they do ask to shorten: cover ALL key points and requirements but in fewer, tighter words — never drop substance.
-15. When the user asks to fill gaps, placeholders, or [VERIFY] tags: ONLY replace those tags with KB facts — do not rewrite or summarize the surrounding prose."""
+15. When the user asks to fill gaps, placeholders, or [VERIFY] tags: ONLY replace those tags with KB facts — do not rewrite or summarize the surrounding prose.
+16. Designer notes: insert ONLY a standalone paragraph `[DESIGNER NOTE: concrete layout handoff]`
+    (blank line before/after). Never **Designer Note:**, HTML/div, or "styled as". Body =
+    layout/production only (callout box, columns, attach form/PDF) — never meta commentary
+    ("This section establishes…")."""
 
 SELECTION_KB_PLAN_PROMPT = """You plan a surgical edit to ONE highlighted excerpt inside a zö agency proposal section.
 
@@ -3298,9 +3307,9 @@ STATIC_SECTION_REDRAFT_PROMPT = """Improve ONE static zö proposal section (comp
 Use ONLY the knowledge-base excerpts provided.
 Address the user's feedback. Do not invent clients, metrics, addresses, phones, or emails.
 
-DESIGNER NOTES: Actively insert [DESIGNER NOTE: …] inline wherever visual layout would help —
-tables, timelines, infographics, before/after visuals, callout boxes, icon grids, pull quotes.
-Be specific: describe columns, data placement, and layout so a designer can build without guessing.
+DESIGNER NOTES: Insert ONLY standalone `[DESIGNER NOTE: …]` paragraphs (blank line before/after) —
+never **Designer Note:** or HTML. Content = layout/production handoff (callout, columns, attach PDF),
+never meta commentary ("This section establishes…"). Be specific so a designer can build without guessing.
 Also set designerNote in JSON for section-level layout hints.
 
 When rewriting an Our Work / case study to a DIFFERENT client or project from the KB:

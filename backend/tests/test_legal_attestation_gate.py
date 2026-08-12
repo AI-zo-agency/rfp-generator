@@ -95,6 +95,27 @@ class EVerifyGateTests(unittest.TestCase):
         self.assertNotIn("We have no financial relationships", updated.content or "")
 
 
+class ProcurementGateTests(unittest.TestCase):
+    def test_gates_completed_vendor_registration_without_evidence(self) -> None:
+        section = ProposalSection(
+            id="submission-11",
+            title="PDF format proposal submission",
+            content=(
+                "zö agency completed online vendor registration at www.example.org and "
+                "downloaded the complete procurement documents. Registration confirmation "
+                "will be included as Attachment A."
+            ),
+        )
+        updated, report = gate_section_legal_attestations(
+            section,
+            evidence_text="",
+            rfp_context="Contract Reporter — No documents have been uploaded.",
+        )
+        self.assertGreaterEqual(report.procurement_flags, 1)
+        self.assertIn("[MANUAL FILL:", updated.content or "")
+        self.assertNotIn("Attachment A", updated.content or "")
+
+
 class HoursAndFillerTests(unittest.TestCase):
     def test_flags_invented_staffing_hours(self) -> None:
         section = ProposalSection(

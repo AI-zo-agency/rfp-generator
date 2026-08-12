@@ -171,6 +171,9 @@ async def _draft_closing_section(
                         "Use ONLY what THIS RFP demands — never invent client-specific facts, "
                         "phones, emails, policy numbers, or signatures.\n"
                         "When a field needs a human/file, use [MANUAL FILL: …].\n"
+                        "NEVER certify vendor registration complete, procurement documents "
+                        "downloaded, or promise registration attachments — use [MANUAL FILL: Sonja "
+                        "confirm registration] unless registration confirmation is on file.\n"
                         "When insurance/pricing numbers are stated in the RFP excerpt, copy them exactly.\n"
                         "NEVER cite HTA strategic-plan / agency four KPIs (Resident Sentiment, Visitor "
                         "Satisfaction, Average Daily Visitor Spending as an agency set). If KPIs appear, "
@@ -397,6 +400,7 @@ async def _run_fulfill_rfp_gaps_body(
         "Remove duplicate sections",
         "Budget (regen if missing + thorough)",
         "Consistency repairs",
+        "Compliance fabrication guard",
         "Contractor KPIs (Section 2.3)",
         "KB fact-check (Supermemory)",
         "RFP contradiction check (LLM)",
@@ -614,7 +618,8 @@ async def _run_fulfill_rfp_gaps_body(
         await _scan_progress(
             2,
             "Scan RFP: fact repairs",
-            "Rebuild bios from 04_Bio KB; fix leaks, ownership, cover letter, timeline.",
+            "Rebuild bios from 04_Bio KB; scrub false vendor-registration claims, "
+            "bio/org-chart conflicts, unverified insurance carriers.",
         )
         await _ensure_not_stopped()
         draft, fact_logs = await run_scan_fact_repairs(
@@ -624,6 +629,28 @@ async def _run_fulfill_rfp_gaps_body(
         )
         report["logs"].extend(fact_logs)
         report["factRepairs"] = fact_logs[:24]
+        compliance_hits = [
+            line
+            for line in fact_logs
+            if any(
+                token in line.casefold()
+                for token in (
+                    "vendor-registration",
+                    "complete-rfp-reviewed",
+                    "bio role",
+                    "invented bio vertical",
+                    "insurance carrier",
+                    "registration confirmation",
+                )
+            )
+        ]
+        if compliance_hits:
+            report["complianceFabricationRepairs"] = compliance_hits[:16]
+            report["humanDecisionGaps"].append(
+                "Fabricated compliance actions detected (vendor registration / complete RFP "
+                "review / bio role mismatch / unverified carrier) — repaired to MANUAL FILL "
+                "or VERIFY; Sonja must confirm before submission."
+            )
         if fact_logs:
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:

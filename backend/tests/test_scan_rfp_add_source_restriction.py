@@ -407,5 +407,76 @@ class AddThenCutOrderingTests(unittest.TestCase):
         self.assertNotIn("ledger-r-cover-letter", cut_ids)
 
 
+class SubstantiveScoredSectionPreservationTests(unittest.TestCase):
+    """Complete Scan must not delete drafted scored/form tabs — only empty stubs."""
+
+    def test_scored_criterion_tab_with_real_prose_is_not_dropped(self) -> None:
+        body = (
+            "zö agency brings deep public sector and transportation marketing experience. "
+            "Our work for Oregon Employment Department and regional transit clients "
+            "demonstrates campaign planning, stakeholder engagement, and multi-channel "
+            "execution across government communications programs. "
+        ) * 3
+        draft = _draft(
+            _section("sec-ok", "Cover", "Existing cover letter content here."),
+            _section(
+                "ledger-r-transport",
+                "Public Sector/Transportation Industry Experience",
+                body,
+            ),
+        )
+        ledger = RequirementLedger(
+            requirements=[
+                _req(
+                    "r-transport",
+                    "Public Sector/Transportation Industry Experience",
+                    source="scored_criterion",
+                    points=25.0,
+                ),
+            ]
+        )
+        result = reconcile_requirement_ledger(
+            draft=draft,
+            research=_research(ledger),
+            rfp=_rfp(),
+        )
+        ids = {s.id for s in result.draft.sections}
+        self.assertIn("ledger-r-transport", ids)
+        self.assertNotIn(
+            "remove-admin-stubs",
+            " ".join(result.logs).casefold(),
+        )
+
+    def test_forms_tab_stub_still_dropped(self) -> None:
+        stub = (
+            "[MANUAL FILL: Sonja — Required Forms & Attachments]\n\n"
+            "No section in the draft addressed this mandatory RFP requirement; "
+            "the requirement-ledger reconciler added this section as a "
+            "placeholder so it cannot silently ship missing. "
+            "never invent the answer."
+        )
+        draft = _draft(
+            _section("ledger-r-forms", "Required Forms & Attachments", stub),
+        )
+        ledger = RequirementLedger(
+            requirements=[
+                _req(
+                    "r-forms",
+                    "Required Forms & Attachments",
+                    source="form",
+                ),
+            ]
+        )
+        result = reconcile_requirement_ledger(
+            draft=draft,
+            research=_research(ledger),
+            rfp=_rfp(),
+        )
+        self.assertNotIn(
+            "ledger-r-forms",
+            {s.id for s in result.draft.sections},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
