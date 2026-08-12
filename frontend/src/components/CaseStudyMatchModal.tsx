@@ -1,6 +1,15 @@
 "use client";
 
-import type { CaseStudyMatchResult } from "@/lib/proposal-api";
+import type { CaseStudyMatchResult, CaseStudyMatchStudy } from "@/lib/proposal-api";
+
+type StudyListItem = CaseStudyMatchStudy | { title: string };
+
+function studyHeading(study: StudyListItem): string {
+  if ("displayName" in study && typeof study.displayName === "string" && study.displayName) {
+    return study.displayName;
+  }
+  return study.title;
+}
 
 function fitBadgeClass(label: string): string {
   if (label === "strong_fit") {
@@ -100,16 +109,14 @@ export function CaseStudyMatchModal({
                     {(result.studies.length > 0
                       ? result.studies
                       : result.selectedTitles.map((title) => ({ title }))
-                    ).map((study) => (
+                    ).map((study: StudyListItem) => (
                       <li
                         key={study.title}
                         className="rounded-xl border border-zo-border/80 bg-white px-3 py-3"
                       >
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-medium text-foreground">
-                            {"displayName" in study && study.displayName
-                              ? study.displayName
-                              : study.title}
+                            {studyHeading(study)}
                           </span>
                           {"fitLabel" in study && study.fitLabel ? (
                             <span
