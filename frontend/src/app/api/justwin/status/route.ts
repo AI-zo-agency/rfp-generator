@@ -11,6 +11,29 @@ const BACKEND_URL =
 
 export const runtime = "nodejs";
 
+function parseSyncMeta(error: unknown): {
+  error: string | null;
+  rfpsSkipped?: number;
+  rfpsCreated?: number;
+} {
+  if (typeof error !== "string" || !error.startsWith("ZO_SYNC_META:")) {
+    return { error: (error as string | null) ?? null };
+  }
+  try {
+    const meta = JSON.parse(error.slice("ZO_SYNC_META:".length)) as {
+      rfpsSkipped?: number;
+      rfpsCreated?: number;
+    };
+    return {
+      error: null,
+      rfpsSkipped: meta.rfpsSkipped,
+      rfpsCreated: meta.rfpsCreated,
+    };
+  } catch {
+    return { error: error as string };
+  }
+}
+
 export async function GET() {
   if (!JUSTWIN_SYNC_ENABLED) {
     return NextResponse.json({
@@ -24,14 +47,25 @@ export async function GET() {
     if (backendRes.ok) {
       const data = (await backendRes.json()) as { job?: Record<string, unknown> };
       if (data.job) {
+        const meta = parseSyncMeta(data.job.error);
+        const rfpsSkipped =
+          typeof data.job.rfps_skipped === "number"
+            ? data.job.rfps_skipped
+            : meta.rfpsSkipped;
+        const rfpsCreated =
+          typeof data.job.rfps_created === "number"
+            ? data.job.rfps_created
+            : meta.rfpsCreated;
         return NextResponse.json({
           id: data.job.id,
           status: data.job.status,
           startedAt: data.job.started_at,
           finishedAt: data.job.finished_at,
           rfpsFound: data.job.rfps_found,
+          rfpsCreated,
+          rfpsSkipped,
           pdfsDownloaded: data.job.pdfs_downloaded,
-          error: data.job.error,
+          error: meta.error,
         });
       }
     }

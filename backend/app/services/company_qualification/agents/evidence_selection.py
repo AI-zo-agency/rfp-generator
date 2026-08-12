@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import re
 
-from app.services import llm
 from app.services.company_qualification.schemas import (
     EvidenceCandidate,
     EvidenceScore,
@@ -16,30 +15,12 @@ from app.services.evidence_trust.client_list import ClientListRegistry
 from app.services.evidence_trust.gate import ClaimIntent, GateDecision, gate_client_for_claim
 from app.services.evidence_trust.load_client_list import load_client_list_registry
 from app.services.evidence_trust.provenance import is_win_eligible, provenance_block_reason
-from app.services.llm import LlmError
-from app.services.proposal_case_study_fit import (
-    CaseStudyFitReport,
-    assess_case_study_fit,
-    capabilities_for_case_study_fit,
-    select_best_case_study_titles,
-)
+from app.services.proposal_case_study_fit import CaseStudyFitReport
 from app.services.proposal_case_study_eligibility import (
     is_eligible_section3_case_study_title,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _heuristic_select(candidates: list[EvidenceCandidate], limit: int = 4) -> list[str]:
-    """Zero-cost fallback: keep top catalog titles (already retrieval-ranked)."""
-    titles: list[str] = []
-    for c in candidates:
-        t = (c.title or "").strip()
-        if t and t not in titles:
-            titles.append(t)
-        if len(titles) >= limit:
-            break
-    return titles
 
 
 def _title_in_catalog(title: str, catalog: list[EvidenceCandidate]) -> str | None:
@@ -173,44 +154,41 @@ async def _fit_rank_case_studies(
     rfp_client: str,
     rfp_sector: str = "",
     rfp_title: str = "",
-) -> tuple[list[str], CaseStudyFitReport | None]:
-    """Capability-fit ranker — prefer RFP-best studies over 'any strong catalog title'."""
-    capabilities = capabilities_for_case_study_fit(
-        services_requested=list(proposal_context.services_requested or []),
-        rfp_context=rfp_context,
-        rfp_sector=rfp_sector,
-    )
-    if not capabilities:
-        return [], None
+    rfp_id: str | None = None,
+) -> tuple[list[str], CaseStudyFitReport | None, str]:
+    """Same resolver as Match studies — strong fits, then closest 03_CS, min 2."""
+    from app.services.proposal_case_study_match import resolve_case_study_selection
+
+    min_studies = _min_case_studies_for_rfp(rfp_context, proposal_context)
     try:
-        report = await assess_case_study_fit(
-            capabilities,
+        resolved = await resolve_case_study_selection(
             rfp_client=rfp_client,
             rfp_sector=rfp_sector,
             rfp_title=rfp_title,
+            rfp_id=rfp_id,
+            rfp_context=rfp_context,
+            services_requested=list(proposal_context.services_requested or []),
+            min_count=min_studies,
+            max_count=5,
+            fetch_full_text=True,
         )
     except Exception as exc:  # noqa: BLE001 - fit is advisory; never block Section 3
-        logger.warning("Case study fit ranking skipped: %s", str(exc)[:180])
-        return [], None
-    titles = select_best_case_study_titles(
-        report,
-        min_count=1,
-        max_count=3,
-        rfp_title=rfp_title,
-        rfp_sector=rfp_sector,
-    )
-    if titles:
+        logger.warning("Case study resolver skipped: %s", str(exc)[:180])
+        return [], None, "none"
+
+    if resolved.titles:
         logger.info(
-            "Case study fit ranked %d strong studies for capabilities=%s",
-            len(titles),
-            capabilities[:4],
+            "Case study resolver picked %d (%s): %s",
+            len(resolved.titles),
+            resolved.match_quality,
+            [resolved.display_names.get(t, t) for t in resolved.titles],
         )
     else:
         logger.warning(
-            "Case study fit found no strong matches for capabilities=%s",
-            capabilities[:4],
+            "Case study resolver found no 03_CS matches for capabilities=%s",
+            resolved.capabilities[:4],
         )
-    return titles, report
+    return resolved.titles, resolved.fit_report, resolved.match_quality
 
 
 async def run_evidence_selection_agent(
@@ -221,6 +199,7 @@ async def run_evidence_selection_agent(
     candidates: list[EvidenceCandidate],
     rfp_sector: str = "",
     rfp_title: str = "",
+    rfp_id: str | None = None,
 ) -> tuple[EvidenceSelectionResult, str]:
     if not candidates:
         return EvidenceSelectionResult(candidatesConsidered=0, selectedStudies=[]), ""
@@ -276,22 +255,26 @@ async def run_evidence_selection_agent(
 
     # Prefer capability-fit ranking so Section 3 proves what the RFP asks for —
     # not the first/strongest titles sitting in the retrieval catalog.
-    fit_titles, _fit_report = await _fit_rank_case_studies(
+    fit_titles, _fit_report, match_quality = await _fit_rank_case_studies(
         proposal_context=proposal_context,
         rfp_context=rfp_context,
         rfp_client=rfp_client,
         rfp_sector=rfp_sector,
         rfp_title=rfp_title,
+        rfp_id=rfp_id,
     )
     fit_selected = _prefer_fit_ranked(fit_titles, filtered, limit=5)
-    # Strong RFP fits win even when fewer than the preferred portfolio count —
-    # never pad with off-capability catalog titles just to hit a number.
     if fit_selected:
+        rationale = (
+            "RFP capability strong fit"
+            if match_quality == "strong"
+            else "Closest KB match — review before use"
+        )
         scores = [
             EvidenceScore(
                 title=t,
-                score=1.0,
-                rationale="RFP capability strong fit",
+                score=1.0 if match_quality == "strong" else 0.5,
+                rationale=rationale,
             )
             for t in fit_selected
         ]
@@ -304,125 +287,17 @@ async def run_evidence_selection_agent(
             "case_study_fit",
         )
 
-    # No strong capability fits — LLM picks from the gated catalog with
-    # capability-first instructions (still no weak-filler backfill).
-    selection_pool = filtered
-    catalog_lines = []
-    for i, c in enumerate(selection_pool, 1):
-        catalog_lines.append(
-            f"{i}. TITLE: {c.title}\n   SNIPPET: {c.snippet[:400]}\n   SOURCE: {c.source}"
-        )
-    catalog = "\n\n".join(catalog_lines)
-    capability_hint = ", ".join(
-        capabilities_for_case_study_fit(
-            services_requested=list(proposal_context.services_requested or []),
-            rfp_context=rfp_context,
-            rfp_sector=rfp_sector,
-        )[:5]
+    # Resolver found nothing in 03_CS — do not LLM-pick unrelated catalog filler.
+    logger.warning(
+        "Evidence selection: case study resolver returned 0 titles after gating "
+        "(%d candidates considered)",
+        len(candidates),
     )
-
-    try:
-        raw, provider = await llm.chat_json(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are the Evidence Selection Agent for zö agency Section 3.\n"
-                        "SELECT only case studies that BEST prove the RFP's required capabilities.\n"
-                        "You are scoring metadata/snippets only — full documents are fetched later.\n"
-                        "Compact JSON only — no markdown fences. Finish every brace.\n"
-                        "Rationale ≤8 words each.\n\n"
-                        "Scoring weights: Capability match 50%, Service 25%, Industry 15%, "
-                        "Proof strength 10%.\n\n"
-                        "STRICT RULES:\n"
-                        f"- Do NOT select work for '{rfp_client}' — that is the CURRENT client.\n"
-                        "- ONLY titles from the candidate catalog below.\n"
-                        f"- Prefer studies that demonstrate: {capability_hint or claim}.\n"
-                        "- NEVER pick a brand/website/tourism case study just because it is "
-                        "strong writing if the RFP asks for a different capability "
-                        "(e.g. digital ads / geofencing / paid media).\n"
-                        f"- Return UP TO 5 studies. Prefer AT LEAST {min_studies} ONLY if they "
-                        "are genuine capability matches. An honest shorter list beats "
-                        "padding with irrelevant work.\n"
-                        "- Prefer distinct clients and campaign types (do not pick two near-duplicates).\n"
-                        "- Omit weak or off-capability examples — do NOT pad to hit a count.\n"
-                        f"- Required claim applicability: '{claim}' — do not pick nearest-topic "
-                        "work that does not actually deliver that work type.\n"
-                        "- Never treat finalist/loss files as wins.\n\n"
-                        "Return JSON:\n"
-                        '{"selectedStudies":["Exact Title 1","Exact Title 2"],'
-                        '"scores":[{"title":"...","score":0.85,"rationale":"..."}]}'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"proposalType: {proposal_context.proposal_type}\n"
-                        f"industry: {proposal_context.industry}\n"
-                        f"servicesRequested: {proposal_context.services_requested}\n"
-                        f"summary: {(proposal_context.summary or '')[:280]}\n"
-                        f"minimumStudiesPreferred: {min_studies}\n"
-                        f"rfpCapabilitiesToProve: {capability_hint}\n\n"
-                        f"RFP requirements summary:\n{rfp_context[:8000]}\n\n"
-                        f"Candidate catalog ({len(selection_pool)} items, pre-gated):\n{catalog[:40000]}"
-                    ),
-                },
-            ],
-            max_tokens=1536,
-            temperature=0.0,
-            tier="light",
-        )
-    except LlmError as exc:
-        logger.warning(
-            "Evidence selection LLM failed (%s); using catalog heuristic (no retry)",
-            str(exc)[:180],
-        )
-        return (
-            EvidenceSelectionResult(
-                candidatesConsidered=len(candidates),
-                selectedStudies=_heuristic_select(filtered, limit=max(min_studies, 3)),
-                scores=[],
-            ),
-            "heuristic",
-        )
-
-    selected = raw.get("selectedStudies") or raw.get("selected_studies") or []
-    selected = [str(s).strip() for s in selected if str(s).strip()]
-    allowed = {c.title.casefold(): c.title for c in selection_pool}
-    for c in filtered:
-        allowed.setdefault((c.title or "").casefold(), c.title)
-    normalized: list[str] = []
-    for title in selected:
-        canonical = allowed.get(title.casefold())
-        if not canonical:
-            mapped = _title_in_catalog(title, filtered)
-            if not mapped:
-                continue
-            canonical = mapped
-        if canonical not in normalized:
-            normalized.append(canonical)
-    normalized = normalized[:5]
-    if not normalized:
-        normalized = _heuristic_select(filtered, limit=max(min_studies, 3))
-
-    scores_raw = raw.get("scores") or []
-    scores: list[EvidenceScore] = []
-    for entry in scores_raw:
-        if isinstance(entry, dict) and entry.get("title"):
-            try:
-                scores.append(EvidenceScore.model_validate(entry))
-            except Exception:
-                scores.append(
-                    EvidenceScore(
-                        title=str(entry.get("title")),
-                        score=float(entry.get("score") or 0),
-                        rationale=str(entry.get("rationale") or ""),
-                    )
-                )
-
-    result = EvidenceSelectionResult(
-        candidatesConsidered=len(candidates),
-        selectedStudies=normalized,
-        scores=scores,
+    return (
+        EvidenceSelectionResult(
+            candidatesConsidered=len(candidates),
+            selectedStudies=[],
+            scores=[],
+        ),
+        "case_study_fit_empty",
     )
-    return result, provider

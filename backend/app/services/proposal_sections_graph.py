@@ -404,6 +404,7 @@ class SectionsGraphState(TypedDict, total=False):
     evidence_selection: dict[str, Any]
     section1_editorial_review: dict[str, Any]
     manuscript_locks: dict[str, Any]
+    prefetched_case_studies: dict[str, Any]
 
 
 def _proposal_voice_block(state: SectionsGraphState) -> str:
@@ -2205,6 +2206,7 @@ async def _select_evidence(state: SectionsGraphState) -> dict[str, Any]:
         candidates=candidates,
         rfp_sector=state.get("rfp_sector") or "",
         rfp_title=state.get("rfp_title") or "",
+        rfp_id=state.get("rfp_id"),
     )
 
     return {
@@ -2788,6 +2790,16 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
 
     case_corpus = state.get("kb_case_studies") or ""
     case_sources = state.get("kb_case_sources") or []
+
+    # Use prefetched case studies from Go/No-Go when available
+    prefetched = state.get("prefetched_case_studies") or {}
+    prefetched_studies: dict[str, str] = prefetched.get("studies", {}) if isinstance(prefetched, dict) else {}
+
+    if not case_corpus.strip() and prefetched.get("corpus"):
+        case_corpus = prefetched["corpus"]
+        case_sources = prefetched.get("sources", [])
+        logger.info("Section 3: using Go/No-Go prefetched case study corpus (%d chars)", len(case_corpus))
+
     if not case_corpus.strip():
         case_corpus, case_sources = await proposal_knowledge_base_tools.fetch_case_study_candidates_jit(
             rfp_client=rfp_client,
@@ -2802,94 +2814,44 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
         if isinstance(raw_services, list):
             services_requested = [str(s).strip() for s in raw_services if str(s).strip()]
 
-    # Prefer capability-fit ranking so Section 3 proves what the RFP asks for —
-    # not whichever titles look "strong" in a generic corpus.
-    from app.services.proposal_case_study_fit import (
-        assess_case_study_fit,
-        capabilities_for_case_study_fit,
-        select_best_case_study_titles,
-    )
+    # Canonical resolver — same logic as Match studies button (strong → closest, min 2).
+    from app.services.proposal_case_study_match import resolve_case_study_selection
 
-    capabilities = capabilities_for_case_study_fit(
-        services_requested=services_requested,
-        rfp_context=state.get("rfp_context") or "",
-        rfp_sector=state.get("rfp_sector") or "",
-    )
     selected_studies: list[str] = []
-    if capabilities:
+    if prefetched.get("titles"):
+        selected_studies = list(prefetched["titles"])
+        logger.info(
+            "Section 3: using %d prefetched case study titles",
+            len(selected_studies),
+        )
+
+    if not selected_studies:
         try:
-            fit_report = await assess_case_study_fit(
-                capabilities,
+            resolved = await resolve_case_study_selection(
                 rfp_client=rfp_client,
                 rfp_sector=state.get("rfp_sector") or "",
                 rfp_title=state.get("rfp_title") or "",
                 rfp_id=state.get("rfp_id"),
+                rfp_context=state.get("rfp_context") or "",
+                services_requested=services_requested,
+                min_count=2,
+                max_count=5,
+                fetch_full_text=True,
             )
-            selected_studies = select_best_case_study_titles(
-                fit_report, min_count=2, max_count=5
-            )
+            selected_studies = resolved.titles
+            if resolved.study_texts:
+                prefetched_studies = {**prefetched_studies, **resolved.study_texts}
             if selected_studies:
                 logger.info(
-                    "Section 3 fit-ranked %d strong case studies for %s",
+                    "Section 3 resolver: %d studies (%s) — %s",
                     len(selected_studies),
-                    capabilities[:4],
+                    resolved.match_quality,
+                    [resolved.display_names.get(t, t) for t in selected_studies],
                 )
-        except Exception as exc:  # noqa: BLE001 - fit failure falls through to LLM
-            logger.warning("Section 3 fit ranking failed (%s); LLM fallback", str(exc)[:160])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Section 3 case study resolver failed (%s)", str(exc)[:160])
 
-    if not selected_studies:
-        capability_hint = ", ".join(capabilities[:5]) if capabilities else "RFP-required services"
-        try:
-            selection, _ = await llm.chat_json(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are the Evidence Selection Agent for zö agency Section 3.\n"
-                            "Select ONLY case studies that BEST prove the RFP's required capabilities.\n"
-                            "Compact JSON only — no markdown fences.\n\n"
-                            "Scoring weights: Capability match 50%, Service 25%, Industry 15%, "
-                            "Proof strength 10%.\n\n"
-                            "STRICT RULES:\n"
-                            f"- Do NOT select work for '{rfp_client}' — that is the CURRENT client.\n"
-                            "- ONLY titles explicitly present in the case study corpus below.\n"
-                            f"- Prefer studies that demonstrate: {capability_hint}.\n"
-                            "- NEVER pick a brand/website/tourism case study just because it is "
-                            "strong writing if the RFP asks for a different capability "
-                            "(e.g. digital ads / geofencing / paid media).\n"
-                            "- Return up to 5 studies. Prefer quality over quantity — do NOT pad "
-                            "with off-capability examples to hit a count.\n"
-                            "- Omit weak or irrelevant examples.\n"
-                            'Return JSON: {"selectedStudies": ["Exact Title 1", "Exact Title 2"], '
-                            '"scores": [{"title": "...", "score": 0.0, "rationale": "..."}]}'
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Proposal context:\n{context_block}\n\n"
-                            f"RFP capabilities to prove: {capability_hint}\n\n"
-                            f"RFP requirements summary:\n{state['rfp_context'][:15000]}\n\n"
-                            f"Case study corpus (ONLY use titles listed here):\n{case_corpus}"
-                        )
-                    }
-                ],
-                max_tokens=1536,
-                temperature=0.0,
-                tier="light",
-            )
-        except LlmError as exc:
-            logger.warning(
-                "Legacy evidence selection failed (%s); empty studies (no retry)",
-                str(exc)[:160],
-            )
-            selection = {}
-        selected_studies = selection.get("selectedStudies") or selection.get("selected_studies") or []
-        # DO NOT fallback to generic names — if nothing found, leave empty so no hallucination.
-        selected_studies = [s for s in selected_studies if s.strip()]
-        selected_studies = list(dict.fromkeys(selected_studies))[:5]
-    else:
-        selected_studies = list(dict.fromkeys(s.strip() for s in selected_studies if s.strip()))[:5]
+    selected_studies = list(dict.fromkeys(s.strip() for s in selected_studies if s.strip()))[:5]
 
     from app.services.proposal_case_study_eligibility import (
         is_eligible_section3_case_study_title,
@@ -2951,7 +2913,8 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                         "role": "user",
                         "content": (
                             f"Voice:\n{voice}\n\n"
-                            f"Case studies knowledge base:\n{case_corpus[:8000]}"
+                            f"Case studies knowledge base:\n"
+                            f"{prefetched_studies.get(study, '')[:12000] or case_corpus[:8000]}"
                         ),
                     },
                 ],
@@ -3116,6 +3079,7 @@ async def run_sections_1_3_graph(
     skip_section_2: bool = False,
     skip_section_3: bool = False,
     manuscript_locks: dict[str, Any] | None = None,
+    prefetched_case_studies: dict[str, Any] | None = None,
 ) -> tuple[list[ProposalSection], ProposalBrandVoice, str, Section1EditorialReview | None]:
     if not llm.is_configured():
         raise LlmError(
@@ -3144,6 +3108,7 @@ async def run_sections_1_3_graph(
         "skip_section_2": skip_section_2,
         "skip_section_3": skip_section_3,
         "manuscript_locks": manuscript_locks or {},
+        "prefetched_case_studies": prefetched_case_studies or {},
     }
 
     cq_mode = settings.use_company_qualification_s1

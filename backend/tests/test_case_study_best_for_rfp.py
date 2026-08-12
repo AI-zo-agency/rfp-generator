@@ -12,7 +12,9 @@ from app.services.proposal_case_study_fit import (
     CaseStudyFitReport,
     CaseStudyFitResult,
     capabilities_for_case_study_fit,
+    case_study_display_name,
     select_best_case_study_titles,
+    select_closest_case_study_titles,
 )
 
 
@@ -76,6 +78,32 @@ class SelectBestCaseStudyTitlesTests(unittest.TestCase):
         titles = select_best_case_study_titles(report, min_count=3, max_count=5)
         self.assertEqual(titles, ["03_CS_Oregon_Geofencing.pdf"])
 
+    def test_closest_falls_back_to_weak_when_no_strong(self) -> None:
+        report = CaseStudyFitReport(
+            results=[
+                CaseStudyFitResult(
+                    capability="public education campaign",
+                    candidates=[
+                        _cand("03_CS_Maricopa_County.pdf", 0.18),
+                        _cand("03_CS_Unrelated.pdf", 0.04),
+                    ],
+                    gap=True,
+                ),
+                CaseStudyFitResult(
+                    capability="media buying",
+                    candidates=[
+                        _cand("03_CS_Umatilla.pdf", 0.22),
+                    ],
+                    gap=True,
+                ),
+            ]
+        )
+        titles = select_closest_case_study_titles(report, max_count=2)
+        self.assertEqual(
+            titles,
+            ["03_CS_Umatilla.pdf", "03_CS_Maricopa_County.pdf"],
+        )
+
     def test_capabilities_prefer_services_over_generic_sector_filler(self) -> None:
         caps = capabilities_for_case_study_fit(
             services_requested=["Digital advertising including geofencing"],
@@ -85,6 +113,16 @@ class SelectBestCaseStudyTitlesTests(unittest.TestCase):
         joined = " ".join(caps).casefold()
         self.assertTrue(any("geofenc" in c.casefold() or "digital" in c.casefold() for c in caps))
         self.assertNotIn("case study project outcomes", joined)
+
+    def test_display_name_strips_pdf_prefix(self) -> None:
+        raw = (
+            "03_CS_Infinite Assets_Verbal and Visual Brand Identity System, "
+            "Website, Marketing Materials_2019-2020.pdf"
+        )
+        self.assertEqual(
+            case_study_display_name(raw),
+            "Infinite Assets",
+        )
 
 
 class EvidenceSelectionFitTests(unittest.IsolatedAsyncioTestCase):
@@ -130,13 +168,14 @@ class EvidenceSelectionFitTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 es,
-                "assess_case_study_fit",
-                new=AsyncMock(return_value=fit_report),
-            ),
-            patch.object(
-                es.llm,
-                "chat_json",
-                new=AsyncMock(side_effect=AssertionError("LLM must not run when fit is enough")),
+                "_fit_rank_case_studies",
+                new=AsyncMock(
+                    return_value=(
+                        ["03_CS_Oregon_Geofencing.pdf"],
+                        fit_report,
+                        "strong",
+                    )
+                ),
             ),
         ):
             result, provider = await es.run_evidence_selection_agent(

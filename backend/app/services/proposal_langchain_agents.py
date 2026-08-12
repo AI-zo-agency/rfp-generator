@@ -65,17 +65,23 @@ Your ONLY jobs for ONE pass over the proposal:
       References, Communication/Collaboration, Reports, Schedules, Crisis, Workflow,
       or undrafted empty tabs. Fee tables are canonically rendered — never merge them away.
       Prefer deleting content clones over leaving the designer to cut pages.
-2. RFP COVERAGE — For each mapped RFP requirement, check whether the manuscript covers it.
+2. COMPACT FORMAT — For ANY tab that exceeds wordTarget OR reads like essay walls (long
+   paragraphs, repeated subsection headings, bullet dumps under every heading), emit a
+   compactFormatTicket: rewrite to short lead + tables/bullets + [DESIGNER NOTE] for
+   layout. COMPLETE coverage is mandatory — compress FORMAT, never drop RFP asks. Skip
+   form/checklist/MANUAL FILL tabs and canon Budget/Pricing / static Sections 1–3 / bio cards.
+3. RFP COVERAGE — For each mapped RFP requirement, check whether the manuscript covers it.
    If unmet, emit a coverageTicket with unmetRequirements and a rewriteBrief for the writer.
-3. GOV / BUYER COMPLIANCE — Flag missing mandatory public-sector items THIS RFP demands
+4. GOV / BUYER COMPLIANCE — Flag missing mandatory public-sector items THIS RFP demands
    (addenda ack, non-collusion, insurance/COI, W-9, authorized signature, pricing form,
    MCCS/state terms, validity period, tax-exempt handling, required exhibits). Emit a
    complianceTicket with policyOrGuideline + rewriteBrief. Do NOT invent policies the RFP
    never mentions. Do NOT paste generic FAR/GSA boilerplate unprompted by THIS RFP.
-4. Do NOT rewrite section prose yourself. Do NOT emit tickets for style/tone polish.
-5. Return ONLY JSON:
+5. Do NOT rewrite section prose yourself. Do NOT emit tickets for style/tone polish.
+6. Return ONLY JSON:
 {"deleteSectionTickets":[{"sectionId":"...","keepSectionId":"...","reason":"..."}],
  "dedupeTickets":[{"sectionId":"...","keepHomeSectionId":"...","trimGuidance":"..."}],
+ "compactFormatTickets":[{"sectionId":"...","reason":"...","rewriteBrief":"..."}],
  "coverageTickets":[{"sectionId":"...","unmetRequirements":["..."],"rewriteBrief":"..."}],
  "complianceTickets":[{"sectionId":"...","policyOrGuideline":"...","rewriteBrief":"..."}],
  "notes":[]}
@@ -108,8 +114,10 @@ Rules:
    - Pick ONE tier deliberately from RFP budget pressure + evaluation weight on cost, then build fees from the guide.
    - Never invent dollar amounts. Use [VERIFY: …] when guide/RFP lacks a figure. Never put a phone number in a Fee column.
 11. MWBE and Personnel must use the same workforce percentages — align to one HR-verified figure.
-12. ANTI-DUPLICATION: This section has ONE job. Do not re-paste company bio, full bios, or full case studies owned by other sections. One short cross-reference is OK — then add NEW detail only. Prefer concise prose.
-13. LENGTH & FORMAT: Stay at or under the Word target. Prefer short paragraphs, markdown bullets, and markdown tables for phases/process/cadence. Set designerNote (or inline [DESIGNER NOTE: …]) when a table/timeline/swimlane would help evaluators.
+12. ANTI-DUPLICATION: This section has ONE job. Do not re-paste company bio, full bios, or full case studies owned by other sections. One short cross-reference is OK — then add NEW detail only. Prefer concise, designer-ready layout within wordTarget.
+13. LENGTH & FORMAT (designer-compact): Stay at or under wordTarget but cover EVERY RFP ask.
+    Short lead + tables/bullets/rows + [DESIGNER NOTE: …] for layout. Dense tables carry
+    full coverage — never omit requirements to shorten. No essay walls.
 14. When done researching, respond with ONLY JSON:
 {"content":"full section prose","kbRefs":["E1"],"designerNote":"layout hint or null"}"""
 
@@ -442,10 +450,16 @@ async def senior_editor_emit_tickets(
             if isinstance(raw.get("complianceTickets"), list)
             else []
         )
+        compact = (
+            raw.get("compactFormatTickets")
+            if isinstance(raw.get("compactFormatTickets"), list)
+            else []
+        )
         notes = raw.get("notes") if isinstance(raw.get("notes"), list) else []
         return {
             "deleteSectionTickets": [t for t in deletes if isinstance(t, dict)],
             "dedupeTickets": [t for t in dedupe if isinstance(t, dict)],
+            "compactFormatTickets": [t for t in compact if isinstance(t, dict)],
             "coverageTickets": [t for t in coverage if isinstance(t, dict)],
             "complianceTickets": [t for t in compliance if isinstance(t, dict)],
             "notes": [str(n) for n in notes if str(n).strip()],
@@ -455,6 +469,7 @@ async def senior_editor_emit_tickets(
         return {
             "deleteSectionTickets": [],
             "dedupeTickets": [],
+            "compactFormatTickets": [],
             "coverageTickets": [],
             "complianceTickets": [],
             "notes": [str(exc)],

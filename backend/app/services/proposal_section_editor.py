@@ -6211,6 +6211,60 @@ async def improve_proposal_section(
         raise ProposalError(f"Section {section_id} not found in draft.", status_code=404)
     before_section = section.model_copy()
 
+    if not selection_mode and not apply_fix:
+        from app.services.proposal_manuscript_compact import (
+            section_needs_designer_compact,
+            user_requests_designer_compact,
+        )
+        from app.services.proposal_self_edit_loop import designer_compact_single_section
+
+        if (
+            improve_section_pinned
+            and section_needs_designer_compact(section)
+        ) or user_requests_designer_compact(raw_user_message):
+            changed, detail, compact_draft, compact_research = (
+                await designer_compact_single_section(
+                    rfp_id,
+                    section_id,
+                    rfp=rfp,
+                    force=user_requests_designer_compact(raw_user_message),
+                )
+            )
+            if changed and compact_draft:
+                updated_section = next(
+                    (s for s in compact_draft.sections if s.id == section_id),
+                    section,
+                )
+                if compact_research is not None:
+                    research = compact_research
+                if persist:
+                    await _persist_section_improve_draft(
+                        compact_draft,
+                        research,
+                        section_title=section.title,
+                    )
+                bw = word_count(before_section.content or "")
+                aw = word_count(updated_section.content or "")
+                provider = _provider_name()
+                assistant_message = (
+                    f"Designer-compact rewrite for **{section.title}** "
+                    f"({bw} → {aw} words). All RFP asks kept — dense tables/bullets "
+                    f"for layout. ({detail})"
+                )
+                return _improve_outcome(
+                    updated_section,
+                    compact_draft,
+                    research or ProposalResearchCache(
+                        rfpId=rfp_id,
+                        updatedAt=datetime.now(timezone.utc).isoformat(),
+                        provider=provider,
+                    ),
+                    provider,
+                    assistant_message,
+                    True,
+                    None,
+                )
+
     requirements_block = _rfp_section_requirements_block(research, section_id)
     if requirements_block:
         rfp_context = f"{rfp_context}\n\n--- Mapped section requirements ---\n{requirements_block}"

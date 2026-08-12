@@ -180,10 +180,19 @@ def patch_improves_section(
     *,
     rfp: RfpRecord,
     budget: ProposalBudget | None = None,
+    designer_compact: bool = False,
 ) -> bool:
     from app.services.proposal_presubmit_review import issue_score, scan_section_issues
     from app.services.proposal_section_quality import verify_count
     from app.services.proposal_manuscript_cleanup import has_grammar_glitches
+
+    if designer_compact:
+        from app.services.proposal_manuscript_compact import is_designer_compact_improvement
+
+        if is_designer_compact_improvement(before, after):
+            if budget and introduces_unauthorized_dollars(after.content or "", budget):
+                return False
+            return True
 
     if regression_vs_prior(before, after):
         return False

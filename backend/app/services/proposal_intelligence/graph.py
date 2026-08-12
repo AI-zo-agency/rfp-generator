@@ -60,6 +60,7 @@ class IntelligenceGraphState(TypedDict, total=False):
     rfp_sector: str
     rfp_location: str | None
     rfp_context: str
+    page_limit: int | None
     plan: dict[str, Any]
     legacy: dict[str, Any]
     provider: str
@@ -78,12 +79,21 @@ def _dump_plan(plan: ProposalExecutionPlan) -> dict[str, Any]:
 
 
 def _meta(state: IntelligenceGraphState) -> dict[str, str]:
-    return {
+    from app.services.rfp_page_limit import resolve_page_limit
+
+    page_limit = resolve_page_limit(
+        state.get("page_limit"),
+        state.get("rfp_context") or "",
+    )
+    meta = {
         "title": state.get("rfp_title") or "",
         "client": state.get("rfp_client") or "",
         "sector": state.get("rfp_sector") or "",
         "location": state.get("rfp_location") or "",
     }
+    if page_limit and page_limit > 0:
+        meta["pageLimit"] = str(page_limit)
+    return meta
 
 
 async def _with_sem(coro):  # type: ignore[no-untyped-def]
@@ -297,6 +307,7 @@ async def run_intelligence_graph(
     rfp_sector: str,
     rfp_location: str | None,
     rfp_context: str,
+    page_limit: int | None = None,
 ) -> tuple[ProposalExecutionPlan, dict[str, Any]]:
     """Run Phase 2 intelligence. Returns (plan, legacy_fields)."""
     log_path = get_intelligence_log_path()
@@ -309,6 +320,7 @@ async def run_intelligence_graph(
         "rfp_sector": rfp_sector,
         "rfp_location": rfp_location,
         "rfp_context": rfp_context,
+        "page_limit": page_limit,
         "plan": ProposalExecutionPlan(rfpId=rfp_id).model_dump(by_alias=True),
         "legacy": {},
     }

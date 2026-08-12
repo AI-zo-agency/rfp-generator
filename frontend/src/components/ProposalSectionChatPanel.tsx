@@ -61,6 +61,7 @@ interface ProposalSectionChatPanelProps {
 }
 
 const QUICK_PROMPTS = [
+  "Designer-compact: tables + layout, keep every RFP ask.",
   "Check duplicates thoroughly.",
   "Remove fabricated content (content → RFP → KB).",
   "Fill [VERIFY] tags from KB only.",

@@ -2398,7 +2398,7 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
             raw, provider = await llm.chat_json(
                 messages,
                 max_tokens=5500,
-                temperature=0.25,
+                temperature=0.0,
                 node_name="go_no_go_analysis",
             )
             try:
@@ -2481,6 +2481,19 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
         [row.score for row in analysis.decision_matrix],
         analysis.insufficient_data,
     )
+
+    if analysis.recommendation in ("go", "review") and not analysis.insufficient_data:
+        try:
+            from app.services.proposal_case_study_match import prefetch_case_studies_after_go_no_go
+
+            await prefetch_case_studies_after_go_no_go(rfp, content, analysis)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Go/No-Go case study prefetch failed for %s: %s — non-blocking",
+                rfp.id,
+                str(exc)[:200],
+            )
+
     return analysis
 
 

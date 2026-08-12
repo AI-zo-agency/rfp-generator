@@ -32,6 +32,7 @@ import {
   runPhase3Drafting,
   runPhase3_5BudgetWithRecovery,
   runPhase3_6SelfEditWithRecovery,
+  runDesignerCompactManuscript,
   runPhase4PreSubmitReview,
   runPhase4FinalizeGaps,
   runFulfillRfpGaps,
@@ -41,6 +42,8 @@ import {
   saveProposalDraft,
   startLiveDraftPolling,
   fullProposalProgressFromInFlight,
+  matchCaseStudiesForRfp,
+  type CaseStudyMatchResult,
   type FullProposalProgress,
   type ProposalPipelineStatus,
 } from "@/lib/proposal-api";
@@ -61,6 +64,8 @@ import { ProposalPipelineProgressStrip } from "./ProposalPipelineProgressStrip";
 import { ProposalVersionCompare } from "./ProposalVersionCompare";
 import { KeyPersonasBox } from "./KeyPersonasBox";
 import { KeyPersonasModal } from "./KeyPersonasModal";
+import { CaseStudyMatchModal } from "./CaseStudyMatchModal";
+import { ProposalTabMoreMenu } from "./ProposalTabMoreMenu";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
 import {
   ConfirmDialogProvider,
@@ -248,6 +253,12 @@ function ProposalDraftWorkspaceInner({
   const [restoreSnapshotAt, setRestoreSnapshotAt] = useState("");
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [isResettingDraft, setIsResettingDraft] = useState(false);
+  const [isDesignerCompacting, setIsDesignerCompacting] = useState(false);
+  const [isMatchingCaseStudies, setIsMatchingCaseStudies] = useState(false);
+  const [caseStudyMatchOpen, setCaseStudyMatchOpen] = useState(false);
+  const [caseStudyMatchResult, setCaseStudyMatchResult] =
+    useState<CaseStudyMatchResult | null>(null);
+  const [caseStudyMatchError, setCaseStudyMatchError] = useState<string | null>(null);
   const [gapResolveNotice, setGapResolveNotice] = useState<string | null>(null);
   const [gapResolveError, setGapResolveError] = useState<string | null>(null);
   const [presubmitReview, setPresubmitReview] = useState<PreSubmitReview | null>(null);
@@ -1401,6 +1412,54 @@ function ProposalDraftWorkspaceInner({
     setGenerateError(null);
   }, [rfp.id, applyOutlineFromServer]);
 
+  const handleDesignerCompactAll = useCallback(async () => {
+    if (isDesignerCompacting || anyPipelineRunning) return;
+    setIsDesignerCompacting(true);
+    setGenerateError(null);
+    setGenerateNotice(null);
+    try {
+      const { draft, research: compactResearch } = await runDesignerCompactManuscript(
+        rfp.id
+      );
+      applyOutlineFromServer(draft);
+      setResearch(compactResearch);
+      if (compactResearch.budget) setBudget(compactResearch.budget);
+      setGenerateNotice(
+        "Designer-compact pass complete — overlong tabs rewritten as tables/bullets with full RFP coverage."
+      );
+    } catch (error) {
+      setGenerateError(
+        error instanceof Error ? error.message : "Designer-compact pass failed"
+      );
+    } finally {
+      setIsDesignerCompacting(false);
+    }
+  }, [
+    rfp.id,
+    applyOutlineFromServer,
+    isDesignerCompacting,
+    anyPipelineRunning,
+  ]);
+
+  const handleMatchCaseStudies = useCallback(async () => {
+    if (isMatchingCaseStudies || anyPipelineRunning) return;
+    setCaseStudyMatchOpen(true);
+    setIsMatchingCaseStudies(true);
+    setCaseStudyMatchError(null);
+    setCaseStudyMatchResult(null);
+    try {
+      const result = await matchCaseStudiesForRfp(rfp.id);
+      setCaseStudyMatchResult(result);
+      setGenerateNotice(result.message || "Case study match complete.");
+    } catch (error) {
+      setCaseStudyMatchError(
+        error instanceof Error ? error.message : "Case study match failed"
+      );
+    } finally {
+      setIsMatchingCaseStudies(false);
+    }
+  }, [rfp.id, isMatchingCaseStudies, anyPipelineRunning]);
+
   const handleFulfillRfpGaps = useCallback(async () => {
     const scanOk = await confirm({
       title: "Complete & clean this draft?",
@@ -2392,49 +2451,82 @@ function ProposalDraftWorkspaceInner({
                 {isRestoringSnapshot ? "Restoring…" : "Restore"}
               </button>
             </label>
-            <button
-              type="button"
-              onClick={() => setResetConfirmOpen(true)}
-              disabled={isResettingDraft}
-              className="zo-btn secondary proposal-toolbar-btn disabled:opacity-60"
-            >
-              {isResettingDraft ? "Resetting…" : "Reset draft"}
-            </button>
-            {anyPipelineRunning ? (
+            <div className="flex shrink-0 items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => void handleStopPipeline()}
-                className="proposal-toolbar-btn proposal-toolbar-btn--danger"
+                onClick={() => void handleMatchCaseStudies()}
+                disabled={anyPipelineRunning || isMatchingCaseStudies}
+                className="inline-flex min-h-[2.125rem] items-center gap-1.5 rounded-lg border border-[#ef5018]/30 bg-[#ef5018]/10 px-2.5 py-1.5 text-xs font-semibold text-[#ef5018] hover:bg-[#ef5018]/15 disabled:cursor-not-allowed disabled:opacity-50"
+                title="Rank KB case studies against this RFP"
               >
-                Stop
+                <svg
+                  className="h-3.5 w-3.5 shrink-0"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  aria-hidden
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
+                  />
+                </svg>
+                {isMatchingCaseStudies ? "Matching…" : "Match studies"}
               </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() =>
-                requireKeyPersonas(() =>
-                  void handleGenerateFullProposal({ startFromCaseStudies: true })
-                )
-              }
-              disabled={anyPipelineRunning}
-              className="proposal-toolbar-btn disabled:opacity-60"
-              title="Keeps Company + Team Bios; re-extracts relevant short case studies, then rebuilds Intelligence onward"
-            >
-              Start from Case Studies
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                requireKeyPersonas(() =>
-                  void handleGenerateFullProposal({ startAfterSections1to3: true })
-                )
-              }
-              disabled={anyPipelineRunning}
-              className="proposal-toolbar-btn disabled:opacity-60"
-              title="Deletes existing Intelligence / RFP tabs / Budget / Review, keeps Sections 1–3, then rebuilds from Phase 2"
-            >
-              Start from Intelligence
-            </button>
+              {anyPipelineRunning ? (
+                <button
+                  type="button"
+                  onClick={() => void handleStopPipeline()}
+                  className="proposal-toolbar-btn proposal-toolbar-btn--danger !min-h-[2.125rem] !px-2.5 !py-1.5 !text-xs"
+                >
+                  Stop
+                </button>
+              ) : null}
+              <ProposalTabMoreMenu
+                disabled={anyPipelineRunning}
+                items={[
+                  {
+                    id: "designer-compact",
+                    label: "Designer-compact all",
+                    title: "Rewrite overlong tabs as designer-ready tables/bullets",
+                    disabled:
+                      anyPipelineRunning ||
+                      isDesignerCompacting ||
+                      manuscriptProgress.complete === 0,
+                    onClick: () => void handleDesignerCompactAll(),
+                  },
+                  {
+                    id: "reset",
+                    label: "Reset draft",
+                    disabled: isResettingDraft,
+                    tone: "danger",
+                    onClick: () => setResetConfirmOpen(true),
+                  },
+                  {
+                    id: "from-case-studies",
+                    label: "Start from Case Studies",
+                    title: "Keeps Company + Team Bios; re-extracts case studies",
+                    disabled: anyPipelineRunning,
+                    onClick: () =>
+                      requireKeyPersonas(() =>
+                        void handleGenerateFullProposal({ startFromCaseStudies: true })
+                      ),
+                  },
+                  {
+                    id: "from-intelligence",
+                    label: "Start from Intelligence",
+                    title: "Keeps Sections 1–3; rebuilds Intelligence onward",
+                    disabled: anyPipelineRunning,
+                    onClick: () =>
+                      requireKeyPersonas(() =>
+                        void handleGenerateFullProposal({ startAfterSections1to3: true })
+                      ),
+                  },
+                ]}
+              />
+            </div>
             <KeyPersonasBox
               rfpId={rfp.id}
               initialSelectedIds={outline.selectedKeyPersonas || []}
@@ -3174,6 +3266,13 @@ function ProposalDraftWorkspaceInner({
             document.body
           )
         : null}
+      <CaseStudyMatchModal
+        open={caseStudyMatchOpen}
+        onClose={() => setCaseStudyMatchOpen(false)}
+        result={caseStudyMatchResult}
+        loading={isMatchingCaseStudies}
+        error={caseStudyMatchError}
+      />
     </section>
   );
 }

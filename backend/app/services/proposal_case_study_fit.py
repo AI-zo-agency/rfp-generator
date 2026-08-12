@@ -162,6 +162,45 @@ def _hit_label(hit: dict[str, Any]) -> str:
     )
 
 
+def _is_case_study_kb_label(
+    label: str,
+    *,
+    rfp_title: str = "",
+    rfp_sector: str = "",
+) -> bool:
+    """True only for real 03_CS case studies — not pricing guides or company facts."""
+    from app.services.proposal_case_study_eligibility import (
+        is_eligible_section3_case_study_title,
+    )
+    from app.services.proposal_knowledge_base_tools import _is_case_study_source
+
+    text = (label or "").strip()
+    if not text or not _is_case_study_source(text):
+        return False
+    return is_eligible_section3_case_study_title(
+        text,
+        rfp_title=rfp_title,
+        rfp_sector=rfp_sector,
+    )
+
+
+def case_study_display_name(source: str) -> str:
+    """Human-readable client/project name — e.g. 'Maricopa County', not 03_CS_…pdf."""
+    from app.services.proposal_blocker_prevention import clean_case_study_label
+
+    raw = (source or "").strip()
+    if not raw:
+        return "Case study"
+
+    # 03_CS_ClientName_Type_Year.pdf → prefer the client segment before type/year
+    stem = re.sub(r"(?i)\.(pdf|docx?|pptx?)$", "", raw)
+    stem = re.sub(r"(?i)^(?:0[0-9]_)?cs_", "", stem)
+    client_part = stem.split("_", 1)[0].strip() if "_" in stem else stem
+    if client_part and len(client_part) >= 3:
+        return clean_case_study_label(client_part, index=None)
+    return clean_case_study_label(raw, index=None)
+
+
 def _hit_text(hit: dict[str, Any], *, max_chars: int = 2000) -> str:
     content = (
         hit.get("content")
@@ -325,7 +364,12 @@ def _parse_planner_output(raw: dict[str, Any]) -> dict[str, dict[str, list[str]]
     return parsed
 
 
-async def _fetch_hits(queries: list[str]) -> list[dict[str, Any]]:
+async def _fetch_hits(
+    queries: list[str],
+    *,
+    rfp_title: str = "",
+    rfp_sector: str = "",
+) -> list[dict[str, Any]]:
     raw_hits: list[dict[str, Any]] = []
     seen: set[str] = set()
     for query in queries:
@@ -346,6 +390,10 @@ async def _fetch_hits(queries: list[str]) -> list[dict[str, Any]]:
             if not supermemory.is_knowledge_base_hit(hit):
                 continue
             label = _hit_label(hit)
+            if not _is_case_study_kb_label(
+                label, rfp_title=rfp_title, rfp_sector=rfp_sector
+            ):
+                continue
             key = str(hit.get("id") or hit.get("customId") or label)
             if key in seen:
                 continue
@@ -435,7 +483,11 @@ async def assess_case_study_fit(
             continue
 
         capability_tokens = _tokenize(capability) | _tokenize(" ".join(plan["keywords"]))
-        hits = await _fetch_hits(cleaned_queries)
+        hits = await _fetch_hits(
+            cleaned_queries,
+            rfp_title=rfp_title,
+            rfp_sector=rfp_sector,
+        )
         candidates = _rank_hits(hits, capability_tokens)
         gap, gap_reason = _gap_status(candidates, capability)
         results.append(
@@ -531,6 +583,95 @@ def select_best_case_study_titles(
     # Do not pad with weak fits to satisfy min_count — caller may show a gap.
     _ = min_count  # documented contract; intentional no-op pad
     return selected[:max_count]
+
+
+def select_closest_case_study_titles(
+    report: CaseStudyFitReport,
+    *,
+    max_count: int = DEFAULT_MAX_CASE_STUDIES,
+    allowed_titles: Sequence[str] | None = None,
+    rfp_title: str = "",
+    rfp_sector: str = "",
+) -> list[str]:
+    """Best available matches when nothing clears the strong-fit bar.
+
+    Used by the Match Case Studies button — always surfaces the closest KB
+    candidates for human review. Never pretends weak fits are strong proof.
+    """
+    allowed: set[str] | None = None
+    if allowed_titles is not None:
+        allowed = {t.strip().casefold() for t in allowed_titles if str(t).strip()}
+
+    ranked: list[tuple[float, int, str]] = []
+    for cap_idx, result in enumerate(report.results or []):
+        for cand in result.candidates or []:
+            source = (cand.source or "").strip()
+            if not source:
+                continue
+            if allowed is not None and source.casefold() not in allowed:
+                if not any(
+                    source.casefold() in a or a in source.casefold() for a in allowed
+                ):
+                    continue
+            score = float(cand.fit_score or 0.0)
+            ranked.append((score, cap_idx, source))
+
+    ranked.sort(key=lambda row: (-row[0], row[1], row[2].casefold()))
+    selected: list[str] = []
+    seen: set[str] = set()
+    per_cap_seen: set[int] = set()
+    from app.services.proposal_case_study_eligibility import (
+        is_eligible_section3_case_study_title,
+    )
+
+    for score, cap_idx, source in ranked:
+        if not is_eligible_section3_case_study_title(
+            source, rfp_title=rfp_title, rfp_sector=rfp_sector
+        ):
+            continue
+        key = source.casefold()
+        if key in seen or cap_idx in per_cap_seen:
+            continue
+        selected.append(source)
+        seen.add(key)
+        per_cap_seen.add(cap_idx)
+        if len(selected) >= max_count:
+            return selected[:max_count]
+
+    for _score, _cap_idx, source in ranked:
+        if not is_eligible_section3_case_study_title(
+            source, rfp_title=rfp_title, rfp_sector=rfp_sector
+        ):
+            continue
+        key = source.casefold()
+        if key in seen:
+            continue
+        selected.append(source)
+        seen.add(key)
+        if len(selected) >= max_count:
+            break
+
+    return selected[:max_count]
+
+
+def closest_match_per_capability(
+    report: CaseStudyFitReport,
+    *,
+    rfp_title: str = "",
+    rfp_sector: str = "",
+) -> list[tuple[str, CaseStudyCandidate]]:
+    """Top eligible 03_CS case study per capability."""
+    rows: list[tuple[str, CaseStudyCandidate]] = []
+    for result in report.results or []:
+        for cand in result.candidates or []:
+            source = (cand.source or "").strip()
+            if not _is_case_study_kb_label(
+                source, rfp_title=rfp_title, rfp_sector=rfp_sector
+            ):
+                continue
+            rows.append((result.capability, cand))
+            break
+    return rows
 
 
 def capabilities_for_case_study_fit(

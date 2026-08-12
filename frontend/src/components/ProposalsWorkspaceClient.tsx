@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { ProposalsWorkspace } from "@/components/ProposalsWorkspace";
 import { ProposalsWorkspaceSkeleton } from "@/components/loading/ProposalsWorkspaceSkeleton";
+import type { ProposalDraftSummary } from "@/lib/proposal-draft-progress";
 import type { RfpRecord } from "@/types/rfp";
 
 const GO_RFP_FETCH_TIMEOUT_MS = 0; // 0 = wait; no artificial abort
@@ -12,7 +13,7 @@ const GO_RFP_FETCH_TIMEOUT_MS = 0; // 0 = wait; no artificial abort
 function filterGoRfps(all: RfpRecord[]): RfpRecord[] {
   return all.filter(
     (r) =>
-      (r.goNoGo === "go" || r.goNoGo === "review") &&
+      r.goNoGo === "go" &&
       !["won", "lost", "passed", "submitted"].includes(r.status)
   );
 }
@@ -27,11 +28,34 @@ async function fetchRfpById(id: string, signal?: AbortSignal): Promise<RfpRecord
   return data?.id ? data : null;
 }
 
+async function fetchDraftSummaries(): Promise<Record<string, ProposalDraftSummary>> {
+  try {
+    const res = await fetch("/api/rfps/proposal-draft-summaries", {
+      cache: "no-store",
+    });
+    if (!res.ok) return {};
+    const body = (await res.json()) as {
+      summaries?: ProposalDraftSummary[];
+    };
+    const map: Record<string, ProposalDraftSummary> = {};
+    for (const row of body.summaries ?? []) {
+      if (!row?.rfpId) continue;
+      map[row.rfpId] = row;
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
 function ProposalsWorkspaceClientInner() {
   const searchParams = useSearchParams();
   const rfpFromUrl = searchParams.get("rfp");
 
   const [goRfps, setGoRfps] = useState<RfpRecord[]>([]);
+  const [draftSummariesByRfpId, setDraftSummariesByRfpId] = useState<
+    Record<string, ProposalDraftSummary>
+  >({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -46,18 +70,23 @@ function ProposalsWorkspaceClientInner() {
 
     let list: RfpRecord[] = [];
     let errorMessage: string | null = null;
+    let summaries: Record<string, ProposalDraftSummary> = {};
 
     try {
-      const res = await fetch("/api/rfps/list", {
-        cache: "no-store",
-        ...(GO_RFP_FETCH_TIMEOUT_MS > 0 ? { signal: controller.signal } : {}),
-      });
-      const body = await res.json();
-      if (!res.ok) {
+      const [listRes, summaryMap] = await Promise.all([
+        fetch("/api/rfps/list", {
+          cache: "no-store",
+          ...(GO_RFP_FETCH_TIMEOUT_MS > 0 ? { signal: controller.signal } : {}),
+        }),
+        fetchDraftSummaries(),
+      ]);
+      summaries = summaryMap;
+      const body = await listRes.json();
+      if (!listRes.ok) {
         errorMessage =
           (typeof body === "object" && body && "error" in body
             ? String((body as { error: string }).error)
-            : null) || `Could not load RFP list (${res.status})`;
+            : null) || `Could not load RFP list (${listRes.status})`;
       } else if (Array.isArray(body)) {
         list = filterGoRfps(body as RfpRecord[]);
       }
@@ -75,7 +104,8 @@ function ProposalsWorkspaceClientInner() {
     if (rfpFromUrl && !list.some((r) => r.id === rfpFromUrl)) {
       try {
         const one = await fetchRfpById(rfpFromUrl);
-        if (one) {
+        // Deep links only open RFPs that are actually marked Go.
+        if (one && filterGoRfps([one]).length > 0) {
           list = [...list, one];
           errorMessage = null;
         }
@@ -85,6 +115,7 @@ function ProposalsWorkspaceClientInner() {
     }
 
     setGoRfps(list);
+    setDraftSummariesByRfpId(summaries);
     setLoadError(errorMessage);
     setLoading(false);
   }, [rfpFromUrl]);
@@ -144,7 +175,10 @@ function ProposalsWorkspaceClientInner() {
           {loadError} — showing {goRfps.length} RFP(s) from URL or partial load.
         </p>
       ) : null}
-      <ProposalsWorkspace goRfps={goRfps} />
+      <ProposalsWorkspace
+        goRfps={goRfps}
+        draftSummariesByRfpId={draftSummariesByRfpId}
+      />
     </>
   );
 }

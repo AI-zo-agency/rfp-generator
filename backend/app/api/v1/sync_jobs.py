@@ -16,6 +16,8 @@ class SyncJobFinish(BaseModel):
     status: str
     rfps_found: int = Field(alias="rfpsFound", default=0)
     pdfs_downloaded: int = Field(alias="pdfsDownloaded", default=0)
+    rfps_skipped: int = Field(alias="rfpsSkipped", default=0)
+    rfps_created: int | None = Field(alias="rfpsCreated", default=None)
     error: str | None = None
 
     model_config = {"populate_by_name": True}
@@ -41,6 +43,8 @@ def finish_sync_job(job_id: str, payload: SyncJobFinish) -> dict[str, str]:
             status=payload.status,
             rfps_found=payload.rfps_found,
             pdfs_downloaded=payload.pdfs_downloaded,
+            rfps_skipped=payload.rfps_skipped,
+            rfps_created=payload.rfps_created,
             error=payload.error,
         )
     return {"ok": "true"}
@@ -50,7 +54,13 @@ def finish_sync_job(job_id: str, payload: SyncJobFinish) -> dict[str, str]:
 def get_latest_sync_job() -> dict[str, object]:
     if not sb.use_supabase_db():
         return {"job": None}
-    job = sb.get_latest_sync_job()
+    try:
+        job = sb.get_latest_sync_job()
+    except Exception as exc:  # noqa: BLE001 — poll endpoint must not 500 the modal
+        logging.getLogger(__name__).warning(
+            "get_latest_sync_job transient failure: %s", exc
+        )
+        return {"job": None, "transientError": True}
     return {"job": job}
 
 
@@ -58,7 +68,13 @@ def get_latest_sync_job() -> dict[str, object]:
 def get_running_sync_job() -> dict[str, object]:
     if not sb.use_supabase_db():
         return {"job": None}
-    job = sb.get_running_sync_job()
+    try:
+        job = sb.get_running_sync_job()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "get_running_sync_job transient failure: %s", exc
+        )
+        return {"job": None, "transientError": True}
     return {"job": job}
 
 

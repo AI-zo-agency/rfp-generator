@@ -581,6 +581,57 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Fabrication guard skipped: %s", exc)
         report["logs"].append(f"Fabrication guard skipped: {exc}")
 
+    try:
+        from app.services.proposal_integrity_guards import (
+            apply_manuscript_integrity_guards,
+            apply_reference_contact_evidence_guard,
+        )
+        from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
+
+        draft, integrity_logs = apply_manuscript_integrity_guards(draft)
+        report["logs"].extend(integrity_logs[:16])
+        draft, phone_logs = apply_reference_contact_evidence_guard(draft, research)
+        report["logs"].extend(phone_logs[:12])
+        draft, zf_report = apply_zero_fabrication_guards(
+            draft,
+            research=research,
+            budget=research.budget if research else None,
+            rfp_text=rfp_text,
+            label="scan-preflight",
+        )
+        report["logs"].extend(zf_report.logs[:16])
+        if integrity_logs or phone_logs or zf_report.logs:
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Scan preflight integrity skipped: %s", exc)
+        report["logs"].append(f"Scan preflight integrity skipped: {exc}")
+
+    try:
+        from app.services.proposal_scan_fact_repairs import run_scan_fact_repairs
+
+        await _scan_progress(
+            2,
+            "Scan RFP: fact repairs",
+            "Rebuild bios from 04_Bio KB; fix leaks, ownership, cover letter, timeline.",
+        )
+        await _ensure_not_stopped()
+        draft, fact_logs = await run_scan_fact_repairs(
+            draft,
+            research=research,
+            rfp_text=rfp_text,
+        )
+        report["logs"].extend(fact_logs)
+        report["factRepairs"] = fact_logs[:24]
+        if fact_logs:
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Scan fact repairs skipped: %s", exc)
+        report["logs"].append(f"Scan fact repairs skipped: {exc}")
+
     draft, repair_logs = await _repair_misstated_closing_sections(
         draft=draft,
         rfp=rfp,
@@ -1073,6 +1124,23 @@ async def _run_fulfill_rfp_gaps_body(
     except Exception as exc:  # noqa: BLE001
         logger.warning("KB fact-check during Scan RFP skipped: %s", exc)
         report["logs"].append(f"KB fact-check skipped: {exc}")
+
+    try:
+        from app.services.proposal_scan_fact_repairs import run_scan_fact_repairs
+
+        draft, post_fc_logs = await run_scan_fact_repairs(
+            draft,
+            research=research,
+            rfp_text=rfp_text,
+        )
+        if post_fc_logs:
+            report["logs"].extend(f"post-fact-check: {line}" for line in post_fc_logs[:16])
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Post fact-check repairs skipped: %s", exc)
+        report["logs"].append(f"Post fact-check repairs skipped: {exc}")
 
     # Fact-check can rewrite Approach/Schedule — run the SAME blocker suite
     # Generate-from-scratch uses (titles, consistency, certs, signed PDF note,

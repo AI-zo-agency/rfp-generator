@@ -67,22 +67,22 @@ CERTIFICATIONS & INSURANCE:
 - Do not add platform certifications (Google Ads, Meta, etc.) unless they appear in verified KB
 """
 
-MODULAR_APPROACH_BLOCK = """## MODULAR TECHNICAL APPROACH (use for approach / marketing plan / work plan sections)
+DESIGNER_READY_BLOCK = """## DESIGNER-READY FORMAT (every section — mandatory)
 
-Structure the section in four swappable phases — each phase is a standalone block evaluators can scan:
+wordTarget is a HARD CEILING. Designers paste tabs into InDesign — scannable structure, not pages they must cut.
 
-**Phase 1 — Discover:** stakeholder interviews, document review, audience analysis, success metrics
-**Phase 2 — Strategize:** message architecture, channel plan, bilingual/creative brief as required
-**Phase 3 — Create:** creative development, production, Spanish variants if required
-**Phase 4 — Activate:** launch, optimization cadence, reporting rhythm
+**Concise layout ≠ missing requirements.** Every RFP ask for the tab must appear — use dense tables/Q&A rows to fit more substance in fewer words.
 
-Include one **impact-first insight** — a specific, client-centered recommendation that challenges a default assumption
-(e.g., validate message comprehension in a pilot market before statewide spend).
+**Every tab:**
+1. **Lead** — 1–3 tight sentences: what this tab proves.
+2. **Body** — markdown tables, short bullets, or labeled rows matched to THIS tab's job (matrix, Q&A, references, phases, checklist). One row per RFP item when there are many asks. Same fact once — not in prose AND bullets.
+3. **Visual handoff** — when layout beats prose (timeline, comparison, grid, icons): one specific [DESIGNER NOTE: …] with columns/data. Do not write paragraphs a graphic would replace.
+4. **Complete then stop** — hit every RFP ask in compact form, then stop. No filler, no restating the RFP, no duplicating other tabs.
 
-Keep it concise and within wordTarget. Prefer markdown bullets and tables for phases/cadence.
-Only add [DESIGNER NOTE: …] when THIS RFP explicitly requires a visual OR a verified template asset
-exists OR a table/timeline/swimlane would clearly help evaluators; otherwise describe cadence in
-prose/tables without inventing diagrams."""
+Never write multi-page essay blocks or repeated subsection walls (*Activities:* / *Deliverables:* under every heading). Tables + designer notes carry density."""
+
+# Backward-compatible alias for callers that still import MODULAR_APPROACH_BLOCK.
+MODULAR_APPROACH_BLOCK = DESIGNER_READY_BLOCK
 
 
 def is_modular_approach_section(title: str) -> bool:

@@ -1576,3 +1576,162 @@ async def incorporate_budget_into_draft(
     updated = draft.model_copy(update={"sections": sections, "updated_at": now})
     await asave_proposal_draft(updated)
     return updated
+
+
+_PHASE_FEE_TABLE_HEADER_RE = re.compile(
+    r"(?im)^\|[^\n]*(?:\bphase\b|\bmilestone\b|\bdeliverable\b)[^\n]*\|"
+    r"[^\n]*(?:amount|fee|cost|\$)[^\n]*\|"
+)
+
+_INVENTED_PHASE_TABLE_BLOCK_RE = re.compile(
+    r"(?is)(?:^|\n)("
+    r"(?:#{1,4}\s*(?:"
+    r"Fee\s+Detail(?:\s+by\s+Phase)?|"
+    r"Disbursement(?:\s+Schedule)?|"
+    r"Budget\s+Allocation|"
+    r"Milestone\s+(?:Payment|Disbursement)|"
+    r"Payment\s+Schedule"
+    r")\b[^\n]*\n)?"
+    r"(?:[^\n|]*\n)?"
+    r"(?:\|[^\n]+\|\n)+"
+    r")"
+)
+
+_BUDGET_PHASE_CROSS_REF = (
+    "\n\n> **Fee detail by phase:** See the **Budget & Pricing** section for the "
+    "canonical milestone and fee breakdown.\n"
+)
+
+
+def _body_has_invented_phase_fee_table(content: str) -> bool:
+    """True when section body contains a phase/milestone dollar table not from canon."""
+    text = content or ""
+    if not text.strip():
+        return False
+    if _PHASE_FEE_TABLE_HEADER_RE.search(text):
+        return True
+    if re.search(r"(?i)fee detail by phase", text) and re.search(r"\$\s*[\d,]+", text):
+        return True
+    if (
+        re.search(r"(?i)(?:disbursement|budget allocation|milestone payment)", text)
+        and text.count("|") >= 4
+        and re.search(r"\$\s*[\d,]+", text)
+    ):
+        return True
+    return False
+
+
+def _strip_invented_phase_fee_tables(content: str) -> str:
+    """Remove LLM-invented phase/disbursement markdown tables from narrative sections."""
+    text = content or ""
+    if not text.strip():
+        return text
+    cleaned = _INVENTED_PHASE_TABLE_BLOCK_RE.sub("\n", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def render_disbursement_schedule_markdown(budget: ProposalBudget) -> str:
+    """Milestone disbursement table from canonical budget line items — one source of truth."""
+    budget = prepare_budget_for_client_display(budget)
+    total = _canonical_client_total(budget)
+    lines: list[str] = [
+        "### Disbursement Schedule",
+        "",
+        "| **Phase / Milestone** | **Amount** |",
+        "| --- | ---: |",
+    ]
+    subtotal = 0.0
+    for item in budget.line_items or []:
+        phase, _desc = _client_line_label(item)
+        amount = item.extended
+        if isinstance(amount, (int, float)):
+            subtotal += float(amount)
+        lines.append(f"| {phase} | {_usd(amount)} |")
+    fees, direct = _professional_fees_and_direct(budget)
+    if direct > 0 and not any(_line_looks_like_travel(i) for i in (budget.line_items or [])):
+        lines.append(f"| Direct expenses | {_usd(direct)} |")
+        subtotal += direct
+    grand = round(subtotal, 2)
+    if total is not None and abs(grand - float(total)) > 1.0:
+        grand = round(float(total), 2)
+    lines.append(f"| **Total** | **{_usd(grand)}** |")
+    lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _section_wants_canonical_phase_table(section: ProposalSection) -> bool:
+    """Budget-adjacent tabs that must show the same phase dollars as the canon budget."""
+    if section_is_budgetish(section):
+        return True
+    title = (section.title or "").casefold()
+    sid = (section.id or "").casefold()
+    keys = (
+        "disbursement",
+        "allocation",
+        "payment schedule",
+        "milestone",
+        "fee detail",
+        "budget",
+    )
+    return any(k in title or k in sid for k in keys)
+
+
+def _canonical_table_for_section(section: ProposalSection, budget: ProposalBudget) -> str:
+    title = (section.title or "").casefold()
+    if "disbursement" in title or "payment schedule" in title or "milestone" in title:
+        return render_disbursement_schedule_markdown(budget)
+    return render_embedded_budget_table_markdown(budget)
+
+
+def sync_phase_budget_tables_across_draft(
+    draft: ProposalDraft,
+    budget: ProposalBudget,
+) -> tuple[ProposalDraft, list[str]]:
+    """Replace invented phase-$ tables in sibling sections with the canonical budget.
+
+    Phase 3 drafts each section independently, so Disbursement / Fee Detail / Budget
+    Allocation often invent different phase splits that still sum to the same total.
+    After Phase 3.5 freezes ProposalBudget, this overwrites those tables everywhere.
+    """
+    if not draft.sections or not budget.line_items:
+        return draft, []
+
+    canon_idx = find_budget_section_index(draft.sections)
+    logs: list[str] = []
+    updated_sections: list[ProposalSection] = []
+
+    for i, section in enumerate(draft.sections):
+        body = section.content or ""
+        if i == canon_idx or not _body_has_invented_phase_fee_table(body):
+            updated_sections.append(section)
+            continue
+
+        if _section_wants_canonical_phase_table(section):
+            stripped = _strip_invented_phase_fee_tables(body)
+            table_md = _canonical_table_for_section(section, budget)
+            title_cf = (section.title or "").casefold()
+            if "disbursement" in title_cf or "payment schedule" in title_cf:
+                new_body = stripped.rstrip() + "\n\n" + table_md.strip() + "\n"
+                action = "replaced" if stripped != body else "inserted"
+            else:
+                new_body, action = insert_budget_table_into_section(stripped, table_md)
+            if new_body != body:
+                logs.append(
+                    f"{section.title or section.id}: synced canonical phase table ({action})"
+                )
+                section = section.model_copy(update={"content": new_body})
+        else:
+            stripped = _strip_invented_phase_fee_tables(body)
+            if stripped != body:
+                new_body = stripped.rstrip() + _BUDGET_PHASE_CROSS_REF
+                logs.append(
+                    f"{section.title or section.id}: removed invented phase $ table → cross-ref"
+                )
+                section = section.model_copy(update={"content": new_body})
+
+        updated_sections.append(section)
+
+    if not logs:
+        return draft, logs
+    return draft.model_copy(update={"sections": updated_sections}), logs

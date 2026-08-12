@@ -237,6 +237,56 @@ def get_rfp_pdf_path(rfp_id: str) -> str | None:
     return row["pdf_path"] if row and row["pdf_path"] else None
 
 
+def find_existing_justwin_rfp(
+    *,
+    external_id: str,
+    title: str = "",
+    received_date: str = "",
+) -> RfpRecord | None:
+    """Return an existing JustWin RFP so re-sync can skip duplicates.
+
+    Match order: external_id / rfp-jw-{id}, then same title + received date
+    (catches rare id drift without creating a second card for the same day).
+    """
+    if _use_supabase():
+        return _with_supabase_retry(
+            "find_existing_justwin_rfp",
+            lambda: sb.find_existing_justwin_rfp(
+                external_id=external_id,
+                title=title,
+                received_date=received_date,
+            ),
+        )
+
+    external_id = (external_id or "").strip()
+    with _connect() as conn:
+        if external_id:
+            row = conn.execute(
+                """
+                SELECT * FROM rfps
+                WHERE external_id = ? OR id = ? OR id = ?
+                LIMIT 1
+                """,
+                (external_id, external_id, f"rfp-jw-{external_id}"),
+            ).fetchone()
+            if row:
+                return _row_to_rfp(row)
+        title_key = (title or "").strip().casefold()
+        date_key = (received_date or "").strip()[:10]
+        if title_key and date_key:
+            rows = conn.execute(
+                """
+                SELECT * FROM rfps
+                WHERE source = 'justwin' AND received_date = ?
+                """,
+                (date_key,),
+            ).fetchall()
+            for row in rows:
+                if (row["title"] or "").strip().casefold() == title_key:
+                    return _row_to_rfp(row)
+    return None
+
+
 def insert_manual_rfp(payload: ManualRfpCreate, pdf_path: str | None = None) -> RfpRecord:
     now = datetime.now(timezone.utc).isoformat()
     rfp_id = f"manual-{uuid.uuid4()}"

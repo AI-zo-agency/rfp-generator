@@ -256,5 +256,51 @@ class OutlineDedupTests(unittest.TestCase):
         self.assertTrue(len(added) >= 1)
 
 
+    def test_structural_head_label_merges_siblings(self) -> None:
+        """Same head before — merges without topic-specific regex."""
+        self.assertTrue(
+            outline_titles_near_duplicate(
+                "Specific Experience — Three Similar Projects",
+                "Specific Experience — Public-Private Partnerships",
+            )
+        )
+        self.assertTrue(
+            outline_titles_near_duplicate(
+                "Cover Letter (maximum one page)",
+                "Cover Letter — Respondent Contact Information",
+            )
+        )
+        self.assertFalse(
+            outline_titles_near_duplicate(
+                "General Experience — Team",
+                "Specific Experience — Case Studies",
+            )
+        )
+        kept, dropped = filter_lean_outline_sections(
+            [
+                {
+                    "id": "a",
+                    "title": "Budget — Detailed Narrative",
+                    "required": True,
+                },
+                {
+                    "id": "b",
+                    "title": "Budget — Milestone Disbursement Schedule",
+                    "required": True,
+                },
+                {
+                    "id": "c",
+                    "title": "References — Three Contacts",
+                    "required": True,
+                },
+            ],
+            rfp_context="budget references",
+        )
+        titles = [s["title"] for s in kept]
+        self.assertEqual(len([t for t in titles if t.startswith("Budget")]), 1)
+        self.assertTrue(any("References" in t for t in titles))
+        self.assertTrue(any("near-duplicate" in d for d in dropped))
+
+
 if __name__ == "__main__":
     unittest.main()

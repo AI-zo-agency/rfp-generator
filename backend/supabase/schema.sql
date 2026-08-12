@@ -94,5 +94,7 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
   finished_at TIMESTAMPTZ,
   rfps_found INTEGER DEFAULT 0,
   pdfs_downloaded INTEGER DEFAULT 0,
+  rfps_skipped INTEGER DEFAULT 0,
+  rfps_created INTEGER DEFAULT 0,
   error TEXT
 );

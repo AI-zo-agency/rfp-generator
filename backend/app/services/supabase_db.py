@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable, TypeVar
+
+import httpx
 
 from app.models.go_no_go import GoNoGoAnalysis
 from app.models.proposal import ProposalDraft, ProposalResearchCache
@@ -15,12 +18,45 @@ from app.services import supabase_storage
 logger = logging.getLogger(__name__)
 
 _client = None
+_T = TypeVar("_T")
+_TRANSIENT = (
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.ConnectError,
+    httpx.TimeoutException,
+    OSError,
+    ConnectionError,
+)
 
 
 def reset_supabase_client() -> None:
     """Drop cached client so the next request opens a fresh HTTP connection."""
     global _client
     _client = None
+
+
+def _with_transient_retry(op_name: str, fn: Callable[[], _T], *, attempts: int = 3) -> _T:
+    """Retry flaky Supabase HTTP disconnects (common under polling + sync load)."""
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except _TRANSIENT as exc:
+            last = exc
+            reset_supabase_client()
+            if attempt >= attempts - 1:
+                break
+            delay = 0.2 * (attempt + 1)
+            logger.warning(
+                "Supabase transient failure in %s (attempt %d/%d): %s",
+                op_name,
+                attempt + 1,
+                attempts,
+                exc,
+            )
+            time.sleep(delay)
+    assert last is not None
+    raise last
 
 
 class SupabaseDbError(Exception):
@@ -238,6 +274,49 @@ def rfp_exists(rfp_id: str) -> bool:
     )
     rows = _handle_response(result.data, context="rfp_exists")
     return bool(rows)
+
+
+def find_existing_justwin_rfp(
+    *,
+    external_id: str,
+    title: str = "",
+    received_date: str = "",
+) -> RfpRecord | None:
+    """Match an already-imported JustWin lead so re-sync skips duplicates."""
+    external_id = (external_id or "").strip()
+    client = _get_client()
+    if external_id:
+        result = (
+            client.table("rfps")
+            .select("*")
+            .or_(
+                f"external_id.eq.{external_id},"
+                f"id.eq.{external_id},"
+                f"id.eq.rfp-jw-{external_id}"
+            )
+            .limit(1)
+            .execute()
+        )
+        rows = _handle_response(result.data, context="find_existing_justwin_rfp id")
+        if rows:
+            return _dict_to_rfp(rows[0])
+
+    title_key = (title or "").strip().casefold()
+    date_key = (received_date or "").strip()[:10]
+    if not title_key or not date_key:
+        return None
+    result = (
+        client.table("rfps")
+        .select("*")
+        .eq("source", "justwin")
+        .eq("received_date", date_key)
+        .execute()
+    )
+    rows = _handle_response(result.data, context="find_existing_justwin_rfp title")
+    for row in rows:
+        if (row.get("title") or "").strip().casefold() == title_key:
+            return _dict_to_rfp(row)
+    return None
 
 
 def get_rfp_pdf_path(rfp_id: str) -> str | None:
@@ -653,18 +732,39 @@ def finish_sync_job(
     rfps_found: int,
     pdfs_downloaded: int,
     error: str | None = None,
+    rfps_skipped: int = 0,
+    rfps_created: int | None = None,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     client = _get_client()
-    client.table("sync_jobs").update(
-        {
-            "status": status,
-            "finished_at": now,
-            "rfps_found": rfps_found,
-            "pdfs_downloaded": pdfs_downloaded,
-            "error": error,
-        }
-    ).eq("id", job_id).execute()
+    created = rfps_found if rfps_created is None else rfps_created
+    base = {
+        "status": status,
+        "finished_at": now,
+        "rfps_found": rfps_found,
+        "pdfs_downloaded": pdfs_downloaded,
+        "error": error,
+    }
+    rich = {
+        **base,
+        "rfps_skipped": int(rfps_skipped or 0),
+        "rfps_created": int(created),
+    }
+    try:
+        client.table("sync_jobs").update(rich).eq("id", job_id).execute()
+    except Exception:
+        # Older DBs without rfps_skipped / rfps_created columns.
+        # Encode extras in error only when the job succeeded (error is empty).
+        if error is None and (rfps_skipped or created != rfps_found):
+            import json
+
+            base["error"] = (
+                "ZO_SYNC_META:"
+                + json.dumps(
+                    {"rfpsSkipped": int(rfps_skipped or 0), "rfpsCreated": int(created)}
+                )
+            )
+        client.table("sync_jobs").update(base).eq("id", job_id).execute()
 
 
 # uvicorn --reload kills in-flight Playwright tasks but leaves sync_jobs.status=
@@ -719,29 +819,35 @@ def expire_stale_running_sync_jobs(
 
 
 def get_latest_sync_job() -> dict[str, Any] | None:
-    expire_stale_running_sync_jobs()
-    client = _get_client()
-    result = (
-        client.table("sync_jobs")
-        .select("*")
-        .order("started_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    rows = _handle_response(result.data, context="get_latest_sync_job")
-    return rows[0] if rows else None
+    def _read() -> dict[str, Any] | None:
+        expire_stale_running_sync_jobs()
+        client = _get_client()
+        result = (
+            client.table("sync_jobs")
+            .select("*")
+            .order("started_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = _handle_response(result.data, context="get_latest_sync_job")
+        return rows[0] if rows else None
+
+    return _with_transient_retry("get_latest_sync_job", _read)
 
 
 def get_running_sync_job() -> dict[str, Any] | None:
-    expire_stale_running_sync_jobs()
-    client = _get_client()
-    result = (
-        client.table("sync_jobs")
-        .select("*")
-        .eq("status", "running")
-        .order("started_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    rows = _handle_response(result.data, context="get_running_sync_job")
-    return rows[0] if rows else None
+    def _read() -> dict[str, Any] | None:
+        expire_stale_running_sync_jobs()
+        client = _get_client()
+        result = (
+            client.table("sync_jobs")
+            .select("*")
+            .eq("status", "running")
+            .order("started_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = _handle_response(result.data, context="get_running_sync_job")
+        return rows[0] if rows else None
+
+    return _with_transient_retry("get_running_sync_job", _read)

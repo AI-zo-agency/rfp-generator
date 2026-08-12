@@ -15,6 +15,11 @@ _INELIGIBLE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"02_mastertemplate", re.I),
     re.compile(r"company\s*facts?", re.I),
     re.compile(r"01_company", re.I),
+    re.compile(r"00_guide", re.I),
+    re.compile(r"pricing\s*guide", re.I),
+    re.compile(r"filing\s*guide", re.I),
+    re.compile(r"06_won_", re.I),
+    re.compile(r"07_fin_", re.I),
 )
 
 

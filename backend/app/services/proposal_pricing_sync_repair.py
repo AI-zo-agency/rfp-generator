@@ -273,6 +273,16 @@ async def run_pricing_sync_repair_or_handoff(
         budget = prepare_budget_for_client_display(budget)
         draft = rerender_budget_section_from_canon(draft, budget, rfp_text=rfp_text)
         draft, reconciled_count = reconcile_draft_budget_summaries(draft, budget)
+        from app.services.proposal_budget_content import sync_phase_budget_tables_across_draft
+
+        draft, phase_sync_logs = sync_phase_budget_tables_across_draft(draft, budget)
+        if phase_sync_logs:
+            logger.info(
+                "pricing_sync_repair phase table sync round %s for %s: %s",
+                round_number,
+                rfp_id,
+                phase_sync_logs[:6],
+            )
         draft = await align_fee_narrative_with_budget(
             rfp_id=rfp_id,
             draft=draft,

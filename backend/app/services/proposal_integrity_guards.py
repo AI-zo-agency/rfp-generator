@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from app.models.proposal import ProposalBudget, ProposalDraft, ProposalResearchCache
+from app.services.proposal_manuscript import strip_internal_flag_tags
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,11 @@ def apply_manuscript_integrity_guards(draft: ProposalDraft) -> tuple[ProposalDra
             new, bio_logs = fix_known_bio_typos(new)
             section_logs.extend(bio_logs)
 
+        flag_scrubbed = strip_internal_flag_tags(new)
+        if flag_scrubbed != new:
+            new = flag_scrubbed
+            section_logs.append("Removed internal [FLAG FOR ...] handoff tags")
+
         if (
             sid.startswith("section-3-work")
             or "our work" in title_cf
@@ -299,6 +305,91 @@ def apply_manuscript_integrity_guards(draft: ProposalDraft) -> tuple[ProposalDra
             sections.append(section.model_copy(update={"content": new}))
             for line in section_logs:
                 logs.append(f"{sid}: {line}")
+        else:
+            sections.append(section)
+
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs
+
+
+def _phone_digits(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        return digits[1:]
+    return digits
+
+
+def _research_evidence_blob(research: ProposalResearchCache | None) -> str:
+    if research is None:
+        return ""
+    corpus = getattr(research, "evidence_corpus", None) or []
+    parts: list[str] = []
+    for item in corpus:
+        excerpt = getattr(item, "excerpt", None) or getattr(item, "text", None) or ""
+        if excerpt:
+            parts.append(str(excerpt))
+    return "\n".join(parts)
+
+
+def scrub_unverified_reference_phones(
+    content: str,
+    *,
+    evidence_text: str,
+) -> tuple[str, list[str]]:
+    """Replace reference phones that do not appear anywhere in KB evidence."""
+    text = content or ""
+    logs: list[str] = []
+    if not text.strip() or not evidence_text.strip():
+        return text, logs
+
+    evidence_phones = {
+        _phone_digits(match.group(0))
+        for match in _REAL_PHONE_RE.finditer(evidence_text)
+        if len(_phone_digits(match.group(0))) >= 10
+    }
+    if not evidence_phones:
+        return text, logs
+
+    def _replace_phone(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        digits = _phone_digits(raw)
+        if len(digits) < 10 or digits in evidence_phones:
+            return raw
+        logs.append(f"Replaced unverified phone {raw} with [VERIFY]")
+        return "[VERIFY: phone from KB reference doc]"
+
+    updated = _REAL_PHONE_RE.sub(_replace_phone, text)
+    return updated, logs
+
+
+def apply_reference_contact_evidence_guard(
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+) -> tuple[ProposalDraft, list[str]]:
+    """Drop fabricated reference phones when digits are absent from evidence corpus."""
+    evidence = _research_evidence_blob(research)
+    if not evidence.strip():
+        return draft, []
+
+    logs: list[str] = []
+    sections: list[Any] = []
+    changed = False
+    for section in draft.sections:
+        title_cf = (section.title or "").casefold()
+        sid_cf = (section.id or "").casefold()
+        if "reference" not in title_cf and "reference" not in sid_cf:
+            sections.append(section)
+            continue
+        new, sec_logs = scrub_unverified_reference_phones(
+            section.content or "",
+            evidence_text=evidence,
+        )
+        if new != (section.content or ""):
+            changed = True
+            sections.append(section.model_copy(update={"content": new}))
+            for line in sec_logs:
+                logs.append(f"{section.id}: {line}")
         else:
             sections.append(section)
 

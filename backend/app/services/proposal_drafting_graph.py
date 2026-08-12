@@ -23,7 +23,7 @@ from app.services.proposal_drafting_prompts import (
     MODULAR_APPROACH_BLOCK,
     format_proof_points_block,
     format_weight_priority_block,
-    is_modular_approach_section,
+    DESIGNER_READY_BLOCK,
 )
 from app.services.proposal_voice_enforcement import (
     enforce_narrative_voice,
@@ -43,10 +43,78 @@ from app.services.proposal_ralph import inject_ralph_into_system_prompt
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 1
-DEFAULT_WORD_TARGET = 550
+DEFAULT_WORD_TARGET = 420
 # Cap concurrent LLM calls within a single RFP's drafting run — created per
 # invocation in run_drafting_graph so unrelated RFPs never wait on each other.
 LLM_CONCURRENCY = 1
+
+
+def _phase3_concurrency() -> int:
+    """Parallel section drafting when fast_proposal_generation is enabled."""
+    from app.core.config import settings
+
+    if not settings.fast_proposal_generation:
+        return 1
+    return max(1, min(4, int(settings.phase3_llm_concurrency or 1)))
+
+
+async def _draft_sections_parallel(
+    *,
+    state: DraftingGraphState,
+    sections: list[dict[str, Any]],
+    seed_prior: list[dict[str, Any]],
+    concurrency: int,
+) -> tuple[list[dict[str, Any]], str]:
+    """Draft RFP tabs concurrently — each sees static seed prior only (fast path)."""
+    sem = asyncio.Semaphore(concurrency)
+    rfp_id = str(state.get("rfp_id") or "")
+    provider = str(state.get("provider") or _provider_name())
+    results_by_index: dict[int, dict[str, Any]] = {}
+
+    async def draft_one(index: int, section: dict[str, Any]) -> None:
+        nonlocal provider
+        async with sem:
+            if rfp_id:
+                from app.services.proposal_generation_cancel import check_generation_cancelled
+
+                await check_generation_cancelled(rfp_id)
+            sec_title = str(section.get("title") or section.get("id") or "Section")
+            if rfp_id:
+                from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
+
+                await record_pipeline_activity(
+                    rfp_id,
+                    label=f"Drafting: {sec_title}",
+                    detail=f"Parallel tab draft (concurrency={concurrency}).",
+                    step_index=index + 1,
+                    step_total=len(sections),
+                )
+            batch_state = {**state, "drafted_sections": seed_prior}
+            try:
+                batch_results, batch_provider = await _draft_batch([section], batch_state)
+                provider = batch_provider
+                if batch_results:
+                    results_by_index[index] = batch_results[0]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Phase 3 parallel section failed for %s (%s): %s",
+                    rfp_id,
+                    section.get("id"),
+                    exc,
+                )
+                results_by_index[index] = {
+                    "id": section.get("id"),
+                    "title": section.get("title"),
+                    "source": "rfp",
+                    "mode": section.get("zoMode") or "write",
+                    "content": SECTION_DRAFT_FAILURE_PLACEHOLDER,
+                    "status": "outline",
+                    "kbRefs": [],
+                }
+
+    await asyncio.gather(*(draft_one(i, s) for i, s in enumerate(sections)))
+    ordered = [results_by_index[i] for i in range(len(sections)) if i in results_by_index]
+    return ordered, provider
 
 SectionDraftedCallback = Callable[[list["ProposalSection"], str], Awaitable[None]]
 _SECTION_DRAFT_CALLBACKS: dict[str, SectionDraftedCallback] = {}
@@ -99,12 +167,11 @@ Rules (strict):
 5. Match the BRAND VOICE and REGISTER blocks for each section.
 6. NARRATIVE sections (register=narrative): first person we/our — NEVER "The Vendor", "The Offeror", or third-person agency distance. RFP form language does not apply to narrative prose.
 7. PROCUREMENT sections (register=procurement): formal third-person Vendor/Offeror language is OK for attachments, forms, and compliance tables.
-8. Write complete, submission-ready prose (not bullet outlines unless the RFP requires bullets).
+8. DESIGNER-READY: every tab uses short lead + tables/bullets/rows + [DESIGNER NOTE] for layout-heavy content — never multi-page essay prose.
 9. Apply WRITING AVOIDANCES from lost bids/debriefs when provided — do not repeat patterns that caused past losses.
 10. Lead narrative sections with PROOF POINTS — specific case studies tied to requirements ("why we win").
-11. For approach/marketing plan sections, use the MODULAR APPROACH block (Discover → Strategize → Create → Activate).
-12. Highest evaluationWeight sections need the most depth and proof — still stay at or under wordTarget (hard ceiling).
-13. For non-Budget narrative sections: do NOT invent pricing tiers, agency fee tables, or lump-sum totals — those belong in Fees/Budget / Phase 3.5. You may still mention the RFP's stated media budget if it appears in requirements/plan (e.g. $200,000 annual).
+11. Highest evaluationWeight sections need the strongest proof — still stay at or under wordTarget (hard ceiling). Scannable layout beats long prose.
+13. For non-Budget narrative sections: do NOT invent pricing tiers, agency fee tables, phase-by-phase dollar breakdowns, disbursement schedules, or lump-sum totals — those belong in Fees/Budget / Phase 3.5 only. Never embed a markdown table with Phase | Amount columns outside the Budget tab. You may still mention the RFP's stated media budget if it appears in requirements/plan (e.g. $200,000 annual).
 14. When RFP requires portfolio, writing samples, or reference contacts, use evidence excerpts with [E#] citations — do not leave passive VERIFY placeholders if evidence contains samples or contacts.
 15. NEVER defer required submission data to unnamed attachments or "upon request" — include reference phones, workforce %, hours tables, or PSA acknowledgments in the proposal body.
 16. References: when RFP requires contact names and phone numbers, include ONLY clients whose name, title, organization, phone, AND email are present in KB evidence. If any of those fields are missing, OMIT that reference entirely — never invent an org shell with [VERIFY: contact/phone/email] rows.
@@ -135,7 +202,7 @@ Rules (strict):
 41. HOURLY RATES: Never invent individual ZO member $/hr. If a staff-hours table is required, use labor-category / work rates from 00_Guide_Pricing evidence, or [VERIFY: hourly rate — {role}]. namedPerson is a staffing note only.
 42. PERCENT-TIME / FTE: Never invent percent-time columns or reuse static % grids from other proposals. If the RFP does not require percent-time/FTE, omit that column entirely (Role | Name | experience only). If the RFP requires it, every cell is [VERIFY: percent time] — never invent 10%/35%/25%/25-30%.
 43. CASE STUDIES / PAST WORK: Keep the REAL project name and what the engagement was (e.g. Rock the Locks Festival). NEVER rewrite a verified case study into a generic "municipal communications / community outreach" story the source does not support. Cover Challenge (≤40 words) and Solution (≤50 words) only, facts staying faithful to evidence [E#]. If the evidence contains a client quote, include it verbatim as Client Voice (quotation marks, speaker name/title if given) — never paraphrase or invent one. Do not add a Results/KPI/metrics list or a separate "Why Relevant" section. Prefer 2–3 strong RFP-relevant studies over a long gallery of weak/adjacent ones.
-44. FIRST-PASS COMPLETENESS (one attempt must be submission-ready prose): Address EVERY scored/required ask listed for THIS section in requirements / Requirement Ledger / Section Strategy — do not leave "we'll cover later" gaps. Prefer dense, complete answers over thin stubs. If a discrete fact is missing from KB/RFP, use one [VERIFY: …] for that field only — never invent numbers, $, %, dates, signature IDs, or client claims.
+44. FIRST-PASS COMPLETENESS: Address EVERY scored/required ask for THIS section — no "details to follow." Prefer dense, scannable designer-ready answers (tables/bullets) over essay walls or thin stubs. One [VERIFY: …] per missing discrete fact only.
 45. SCHEDULE / TIMELINE: Use ONLY award→launch / contract dates and windows stated in the RFP (or Delivery Timeline Plan grounded in RFP). Never invent a multi-month sequential plan that overruns the RFP window. Dates and milestones only — methodology lives in Approach. Missing dates → [VERIFY: week/dates within RFP window], never fabricate a calendar.
 46. COVER LETTER / TRANSMITTAL: If the RFP requires a physically signed cover letter or letter of transmittal, write the short offer letter AND set designerNote (or an inline [DESIGNER NOTE: …]) to attach the signed PDF separately. Do not claim the signed file is attached. Do not invent signature dates, notary numbers, or stamp IDs.
 47. Concise ≠ incomplete: hit every RFP ask for the section, then STOP. No filler, no duplicated Sections 1–3, no Approach essay pasted into Schedule.
@@ -329,12 +396,12 @@ def _word_target(section: dict[str, Any]) -> int:
     if isinstance(weight, (int, float)) and weight > 0:
         w = int(weight)
         if w >= 30:
-            return min(1100, max(900, w * 40))
+            return min(900, max(750, w * 32))
         if w >= 20:
-            return min(900, max(700, w * 36))
+            return min(750, max(580, w * 30))
         if w >= 10:
-            return min(700, max(500, w * 32))
-        return min(550, max(400, w * 30))
+            return min(580, max(420, w * 28))
+        return min(480, max(350, w * 26))
     return DEFAULT_WORD_TARGET
 
 
@@ -1148,8 +1215,7 @@ def _build_draft_prompt_zones(
                     f"For section {payload.get('sectionId')}:\n{contract}\n\n"
                 )
 
-    if any(is_modular_approach_section(str(p.get("title") or "")) for p in batch_payload):
-        zone_c += f"{MODULAR_APPROACH_BLOCK}\n\n"
+    zone_c += f"{DESIGNER_READY_BLOCK}\n\n"
 
     for payload in batch_payload:
         plan_ctx = str(payload.get("planContext") or "").strip()
@@ -1262,24 +1328,11 @@ def _build_draft_prompt_zones(
                     "include designerNote instructing attachment of the signed PDF — "
                     "do not invent signature dates, notary numbers, or claim the PDF is attached.\n\n"
                 )
-            if any(
-                k in title_lower
-                for k in (
-                    "approach",
-                    "methodology",
-                    "work plan",
-                    "technical approach",
-                    "understanding",
-                    "scope of work",
-                )
-            ):
-                zone_c += (
-                    f"SCORED NARRATIVE {payload.get('sectionId')}: "
-                    "First-pass must thoroughly cover every requirement listed for this "
-                    "section (requirements array / Section Strategy / ledger). Dense and "
-                    "complete — no thin outline, no 'details to follow'. Stay under "
-                    "wordTarget; do not invent facts absent from RFP/KB.\n\n"
-                )
+        zone_c += (
+            f"DESIGNER-COMPACT {payload.get('sectionId')}: "
+            f"wordTarget {payload.get('wordTarget')} max — cover EVERY RFP ask in dense "
+            "tables/bullets + [DESIGNER NOTE]. Complete substance, compact layout.\n\n"
+        )
 
     zone_c += f"Sections to draft:\n{json.dumps(batch_payload, indent=2)}"
 
@@ -1539,6 +1592,27 @@ async def _draft_all_sections(state: DraftingGraphState) -> dict[str, Any]:
         if isinstance(s, dict) and str(s.get("content") or "").strip()
     ]
     provider = state.get("provider") or _provider_name()
+
+    concurrency = _phase3_concurrency()
+    if concurrency > 1 and len(sections) > 1:
+        logger.info(
+            "Phase 3 parallel drafting for %s: %d sections, concurrency=%d",
+            state.get("rfp_id"),
+            len(sections),
+            concurrency,
+        )
+        parallel_results, provider = await _draft_sections_parallel(
+            state=state,
+            sections=sections,
+            seed_prior=seed_prior,
+            concurrency=concurrency,
+        )
+        all_drafted.extend(parallel_results)
+        return {
+            "drafted_sections": all_drafted,
+            "provider": provider,
+            "evidence_corpus": state.get("evidence_corpus") or [],
+        }
 
     batches = _chunk_sections(sections, BATCH_SIZE)
     logger.info(

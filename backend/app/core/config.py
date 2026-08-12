@@ -108,6 +108,17 @@ class Settings(BaseSettings):
     # MONEY_SLOTS_BLOCK — unresolved {{budget.*}} tokens block readiness.
     money_slots_block: bool = True
 
+    # Fast / cost-optimized full proposal generation (default OFF — quality first).
+    # Set FAST_PROPOSAL_GENERATION=true only for dev/staging or time-sensitive drafts.
+    # When false (default): sequential Phase 3 with full prior-context chain, adversarial
+    # repair, LLM structure reframe, and full contradiction coverage.
+    fast_proposal_generation: bool = False
+    phase3_llm_concurrency: int = 1
+    designer_compact_in_generate: bool = True
+    designer_compact_max_sections: int = 25
+    senior_editor_max_tickets: int = 18
+    self_edit_repair_parallel: int = 1
+
     # LangSmith — process env is synced at startup (see langsmith_tracing.py).
     langsmith_tracing: bool = False
     langsmith_endpoint: str = "https://api.smith.langchain.com"

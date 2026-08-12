@@ -39,6 +39,20 @@ Rules:
   RFP TOC names that heading as an evaluation tab, References forms, Pricing forms, Addenda.
 - Prefer a LEAN outline evaluators can finish reading — merge overlapping asks into one tab
   when the RFP language allows; never pad with optional narrative the RFP does not score.
+- SUBMISSION PACKAGE RFPs (Cover Letter + Direct Questions + Budget, e.g. MTC-style):
+  Emit ONLY the buyer-named response packages — typically:
+  (1) ONE Cover Letter tab (contact + interest + qualifications — never split),
+  (2) ONE tab per Direct Question heading (General Experience, Specific Experience,
+      Approach & Timetable, Requirements, References, Additional Information),
+  (3) ONE Budget tab that covers detailed narrative, rates/fees, AND milestone
+      disbursement schedule together.
+  Do NOT create separate tabs for every bullet under a Direct Question.
+  Do NOT create a wrapper tab named "Address all Direct Questions…" when the individual
+  Direct Question headings already exist.
+  Do NOT create essay tabs for contractual acknowledgments (no pre-award reimbursement,
+  N-day deliverable review period) — fold those into Requirements or Cover Letter.
+  Do NOT duplicate Budget / Cover Letter under both a short label and a long "Budget — …"
+  / "Cover Letter — …" label.
 - Agency Requirements / capability checklist rows (G.1, G.2, … G.16 or Section III A.1–12):
   emit ONE tab only — "Agency Requirements — Capability Matrix (G.1–G.16…)" — covering every
   service line in a single matrix/response. Do NOT create a separate tab per G.# / service.
@@ -52,12 +66,18 @@ Rules:
   Never rename "Qualifications and Experience of the Firm" to bare "Qualifications".
   Keep section numbers from the RFP when present (e.g. 4.2 …).
 - IMPORTANT scored tabs from evaluation criteria + TOC MUST be included when the RFP names them.
-- CLOSING / compliance package items MUST be included when the RFP names them (even if forms):
+-   CLOSING / compliance package items MUST be included when the RFP names them (even if forms):
   References, Acknowledgement of Addenda, Non-Collusion / Ownership Disclosure, Pricing
   Proposal Form, Authorized Signature, Exemplar Agreement acknowledgment, Offeror Commitment
   & Closing Statement, and attachment CHECKLISTS (W-9 / signed forms / "attach COI PDF").
   Do NOT add a narrative "Certificate of Insurance" / insurance-coverage essay — Section 1.5
   already owns coverage; attachment items are file-return checklists only.
+  ATTACHMENTS (COI, W-9, signed/notarized forms, exhibits the buyer supplies): outline them
+  as checklist tabs only — never as essay topics. The writer will emit short
+  [DESIGNER NOTE: Attach …] / [MANUAL FILL: attach …] handoffs for layout, not prose.
+  Do NOT invent acknowledgment essay tabs for standing contract clauses that are not a
+  named proposal section (pre-award cost rules, deliverable review windows) unless the RFP
+  TOC lists them as their own response heading.
 - For References: capture exact count, institution type, and contact fields from the RFP.
 - For Pricing/Quotation forms: include as a section when the RFP supplies a form; do NOT
   replace it with a custom Section A/B/C/D narrative structure in the outline.
@@ -175,6 +195,15 @@ async def run_dynamic_section_planner(
         kept,
         rfp_context=rfp_context,
     )
+    # Closing merge can reintroduce near-dups — free Jaccard/head-label pass only
+    # (no second LLM call; cost stays in the single planner request).
+    if closing_added:
+        kept, post_dropped = filter_lean_outline_sections(
+            kept,
+            rfp_context=rfp_context,
+            drop_generic_filler=False,
+        )
+        dropped = list(dropped) + list(post_dropped)
     if dropped:
         logger.info(
             "%s dropped %d lean-outline tab(s): %s",
@@ -202,7 +231,7 @@ async def run_dynamic_section_planner(
         ),
         reason=(
             "Dynamic section plan from THIS RFP structure + evaluation + closing package "
-            "(full titles, no boring shortened labels)"
+            "(lean prompt + free near-dup hygiene; no extra LLM consolidate call)"
         ),
         confidence=outline.confidence,
     )

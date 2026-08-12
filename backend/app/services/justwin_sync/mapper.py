@@ -7,7 +7,7 @@ from app.models.rfp import RfpRecord
 from app.services.justwin_sync.api import JustWinLead
 
 
-def _parse_justwin_date(raw: str) -> str:
+def parse_justwin_date(raw: str) -> str:
     trimmed = (raw or "").strip()
     today = datetime.now(timezone.utc).date().isoformat()
     if not trimmed:
@@ -29,6 +29,10 @@ def _parse_justwin_date(raw: str) -> str:
         return parsed.date().isoformat()
     except ValueError:
         return today
+
+
+# Back-compat for callers that imported the private name.
+_parse_justwin_date = parse_justwin_date
 
 
 def _extract_client(title: str) -> str:

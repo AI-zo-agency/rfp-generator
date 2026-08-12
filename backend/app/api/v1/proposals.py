@@ -553,6 +553,27 @@ async def restart_from_case_studies_endpoint(rfp_id: str) -> dict[str, object]:
     }
 
 
+@router.post("/{rfp_id}/proposal/match-case-studies")
+async def match_case_studies_endpoint(rfp_id: str) -> dict[str, object]:
+    """Rank KB case studies against this RFP (one-click — no full proposal run)."""
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    from app.services.proposal_case_study_match import match_case_studies_for_rfp
+
+    try:
+        result = await match_case_studies_for_rfp(rfp)
+    except Exception as exc:
+        logger.exception("match-case-studies failed for %s", rfp_id)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Case study match failed: {exc}",
+        ) from exc
+
+    return result.model_dump(by_alias=True)
+
+
 @router.post("/{rfp_id}/proposal/stop")
 async def stop_proposal_generation_endpoint(rfp_id: str) -> dict[str, object]:
     """Request cooperative stop — ends current LLM/Supermemory work and saves checkpoint."""
@@ -670,6 +691,20 @@ async def phase3_drafting_endpoint(rfp_id: str) -> JSONResponse:
         await run_phase3_drafting(rfp_id)
 
     return await _enqueue_pipeline_phase(rfp_id, "phase-3", work)
+
+
+@router.post(
+    "/{rfp_id}/proposal/designer-compact",
+)
+async def designer_compact_endpoint(rfp_id: str) -> JSONResponse:
+    """Compact every overlong tab to designer-ready layout (tables/bullets, full RFP coverage)."""
+
+    async def work() -> None:
+        from app.services.proposal_self_edit_loop import run_designer_compact_manuscript
+
+        await run_designer_compact_manuscript(rfp_id)
+
+    return await _enqueue_pipeline_phase(rfp_id, "phase-3-6-self-edit", work)
 
 
 @router.post(

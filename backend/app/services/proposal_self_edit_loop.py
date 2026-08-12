@@ -440,7 +440,7 @@ async def _apply_senior_editor_tickets(
     budget_idx = find_budget_section_index(draft.sections)
     budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
 
-    # Coverage + compliance first (accuracy); dedupe last (cheapest quality risk).
+    # Coverage + compliance first (accuracy); dedupe last. Compact runs in its own pass.
     coverage = list(tickets.get("coverageTickets") or [])
     dedupe = list(tickets.get("dedupeTickets") or [])
     compliance = list(tickets.get("complianceTickets") or [])
@@ -488,9 +488,12 @@ async def _apply_senior_editor_tickets(
     for ticket in ordered:
         sid = str(ticket.get("sectionId") or "")
         brief = _ticket_rewrite_brief(ticket)
-        # Pure dedupe: Section Repair (cheaper) instead of full Phase-3 regenerate.
         is_dedupe = ticket in dedupe and ticket not in coverage and ticket not in compliance
         if is_dedupe:
+            default_msg = (
+                "Trim duplicated company/bio/case-study content; keep this "
+                "section's unique job and one short cross-reference."
+            )
             _sid, improved, detail = await _repair_one_section(
                 rfp_id,
                 sid,
@@ -499,11 +502,7 @@ async def _apply_senior_editor_tickets(
                 rfp_client=rfp.client,
                 rfp_title=rfp.title,
                 budget=research.budget if research else None,
-                repair_message=(
-                    brief
-                    or "Trim duplicated company/bio/case-study content; keep this "
-                    "section's unique job and one short cross-reference."
-                ),
+                repair_message=brief or default_msg,
             )
             draft = await aget_proposal_draft(rfp_id) or draft
             research = await aget_research_cache(rfp_id) or research
@@ -541,6 +540,168 @@ async def _apply_senior_editor_tickets(
     return draft, research
 
 
+async def _apply_designer_compact_pass(
+    *,
+    rfp_id: str,
+    rfp: RfpRecord,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    report: SelfEditReport,
+    max_sections: int | None = None,
+    skip_section_ids: set[str] | None = None,
+) -> tuple[ProposalDraft, ProposalResearchCache | None]:
+    """Rewrite every overlong/essay tab to designer-compact layout — full RFP coverage."""
+    from app.core.config import settings as app_settings
+    from app.services.proposal_manuscript_compact import (
+        build_designer_compact_brief,
+        list_sections_needing_compact,
+    )
+
+    if not app_settings.designer_compact_in_generate:
+        return draft, research
+
+    cap = max_sections
+    if cap is None:
+        cap = max(1, int(app_settings.designer_compact_max_sections or 12))
+    skip = skip_section_ids or set()
+    targets = [
+        s for s in list_sections_needing_compact(draft) if s.id not in skip
+    ][:cap]
+    if not targets:
+        return draft, research
+
+    report.section_logs.append(
+        {
+            "section": "designer-compact",
+            "detail": f"Compacting {len(targets)} tab(s) — complete coverage, dense layout",
+        }
+    )
+
+    parallel = max(1, min(4, int(app_settings.self_edit_repair_parallel or 1)))
+    if parallel <= 1 or len(targets) <= 1:
+
+        for section in targets:
+            _sid, improved, detail = await _repair_one_section(
+                rfp_id,
+                section.id,
+                use_senior_editor=False,
+                rfp=rfp,
+                rfp_client=rfp.client,
+                rfp_title=rfp.title,
+                budget=research.budget if research else None,
+                repair_message=build_designer_compact_brief(section),
+                designer_compact=True,
+            )
+            draft = await aget_proposal_draft(rfp_id) or draft
+            research = await aget_research_cache(rfp_id) or research
+            report.sections_targeted += 1
+            if improved:
+                report.sections_improved += 1
+            else:
+                report.sections_unchanged += 1
+            report.section_logs.append(
+                {"sectionId": section.id, "detail": detail, "ticket": "compact"}
+            )
+        return draft, research
+
+    sem = asyncio.Semaphore(parallel)
+
+    async def compact_one(section: ProposalSection) -> tuple[str, bool, str]:
+        async with sem:
+            return await _repair_one_section(
+                rfp_id,
+                section.id,
+                use_senior_editor=False,
+                rfp=rfp,
+                rfp_client=rfp.client,
+                rfp_title=rfp.title,
+                budget=research.budget if research else None,
+                repair_message=build_designer_compact_brief(section),
+                designer_compact=True,
+            )
+
+    results = await asyncio.gather(*(compact_one(s) for s in targets))
+    draft = await aget_proposal_draft(rfp_id) or draft
+    research = await aget_research_cache(rfp_id) or research
+    for section, (_sid, improved, detail) in zip(targets, results, strict=True):
+        report.sections_targeted += 1
+        if improved:
+            report.sections_improved += 1
+        else:
+            report.sections_unchanged += 1
+        report.section_logs.append(
+            {"sectionId": section.id, "detail": detail, "ticket": "compact"}
+        )
+
+    return draft, research
+
+
+async def designer_compact_single_section(
+    rfp_id: str,
+    section_id: str,
+    *,
+    rfp: RfpRecord | None = None,
+    force: bool = False,
+) -> tuple[bool, str, ProposalDraft | None, ProposalResearchCache | None]:
+    """Compact one tab to designer-ready layout. Returns (changed, detail, draft, research)."""
+    from app.services.proposal_manuscript_compact import (
+        build_designer_compact_brief,
+        section_needs_designer_compact,
+        section_skip_compact,
+    )
+
+    draft = await aget_proposal_draft(rfp_id)
+    if not draft:
+        return False, "no draft", None, None
+    section = next((s for s in draft.sections if s.id == section_id), None)
+    if not section:
+        return False, "missing section", draft, None
+    if section_skip_compact(section):
+        return False, "section skipped (checklist/static/budget)", draft, None
+    if not force and not section_needs_designer_compact(section):
+        return False, "section within layout budget", draft, None
+
+    if rfp is None:
+        rfp, _, _ = await aload_rfp_for_proposal(rfp_id)
+    research = await aget_research_cache(rfp_id)
+    _sid, improved, detail = await _repair_one_section(
+        rfp_id,
+        section_id,
+        use_senior_editor=False,
+        rfp=rfp,
+        rfp_client=rfp.client,
+        rfp_title=rfp.title,
+        budget=research.budget if research else None,
+        repair_message=build_designer_compact_brief(section),
+        designer_compact=True,
+    )
+    draft = await aget_proposal_draft(rfp_id)
+    research = await aget_research_cache(rfp_id)
+    return improved, detail, draft, research
+
+
+async def run_designer_compact_manuscript(rfp_id: str) -> dict[str, Any]:
+    """Compact every overlong tab in the draft (Phase 3.6 designer pass only)."""
+    rfp, _, _ = await aload_rfp_for_proposal(rfp_id)
+    draft = await aget_proposal_draft(rfp_id)
+    if not draft:
+        raise ProposalError("No proposal draft found.", status_code=404)
+    research = await aget_research_cache(rfp_id)
+    report = SelfEditReport(iterations_run=1)
+    draft, research = await _apply_designer_compact_pass(
+        rfp_id=rfp_id,
+        rfp=rfp,
+        draft=draft,
+        research=research,
+        report=report,
+    )
+    return {
+        "sections_targeted": report.sections_targeted,
+        "sections_improved": report.sections_improved,
+        "logs": report.section_logs,
+    }
+
+
 async def _repair_one_section(
     rfp_id: str,
     section_id: str,
@@ -551,6 +712,7 @@ async def _repair_one_section(
     rfp_title: str,
     budget: object | None,
     repair_message: str | None = None,
+    designer_compact: bool = False,
 ) -> tuple[str, bool, str]:
     """Section Repair LangChain agent (KB tools + patch JSON)."""
     from app.models.proposal import ProposalBudget
@@ -723,7 +885,9 @@ async def _repair_one_section(
         }
     )
 
-    if patch_improves_section(before, after, rfp=rfp, budget=typed_budget):
+    if patch_improves_section(
+        before, after, rfp=rfp, budget=typed_budget, designer_compact=designer_compact
+    ):
         await asave_proposal_draft(updated_draft)
         tools_note = f" tools={','.join(tool_log[:4])}" if tool_log else ""
         return (
@@ -732,6 +896,22 @@ async def _repair_one_section(
             f"verify {verify_count(before.content)}→{verify_count(after.content)} "
             f"words {word_count(before.content)}→{word_count(after.content)}{tools_note}",
         )
+
+    if designer_compact:
+        from app.services.proposal_consistency import introduces_unauthorized_dollars
+        from app.services.proposal_manuscript_compact import is_designer_compact_improvement
+
+        if is_designer_compact_improvement(before, after):
+            if not (
+                typed_budget
+                and introduces_unauthorized_dollars(after.content or "", typed_budget)
+            ):
+                await asave_proposal_draft(updated_draft)
+                return (
+                    section_id,
+                    True,
+                    f"designer-compact {word_count(before.content)}→{word_count(after.content)}w",
+                )
 
     after_draft = updated_draft
     after_blockers = len(
@@ -878,6 +1058,14 @@ async def run_self_edit_loop(
         await asave_proposal_draft(draft)
         for line in integrity_logs[:12]:
             logger.info("Self-edit integrity preflight %s: %s", rfp_id, line)
+
+    from app.services.proposal_integrity_guards import apply_reference_contact_evidence_guard
+
+    draft, phone_logs = apply_reference_contact_evidence_guard(draft, research)
+    if phone_logs:
+        await asave_proposal_draft(draft)
+        for line in phone_logs[:12]:
+            logger.info("Self-edit reference phone guard %s: %s", rfp_id, line)
 
     from app.services.proposal_blocker_prevention import (
         apply_feedback_blocker_suite,
@@ -1069,6 +1257,10 @@ async def run_self_edit_loop(
         tickets = await ticket_coro
         scrubbed_sections, scrub_logs = list(draft.sections), []
 
+    from app.services.proposal_manuscript_compact import merge_compact_tickets
+
+    tickets = merge_compact_tickets(tickets, draft)
+
     if scrub_logs:
         draft = draft.model_copy(
             update={
@@ -1102,11 +1294,13 @@ async def run_self_edit_loop(
     delete_n = len(tickets.get("deleteSectionTickets") or [])
     coverage_n = len(tickets.get("coverageTickets") or [])
     compliance_n = len(tickets.get("complianceTickets") or [])
+    compact_n = len(tickets.get("compactFormatTickets") or [])
     step_trace(
         "senior_editor_tickets_emitted",
         rfp_id=rfp_id,
         delete=delete_n,
         dedupe=dedupe_n,
+        compact=compact_n,
         coverage=coverage_n,
         compliance=compliance_n,
         ticket_samples=[
@@ -1120,6 +1314,7 @@ async def run_self_edit_loop(
             for kind, bucket in (
                 ("delete", tickets.get("deleteSectionTickets") or []),
                 ("dedupe", tickets.get("dedupeTickets") or []),
+                ("compact", tickets.get("compactFormatTickets") or []),
                 ("coverage", tickets.get("coverageTickets") or []),
                 ("compliance", tickets.get("complianceTickets") or []),
             )
@@ -1128,6 +1323,9 @@ async def run_self_edit_loop(
         ][:12],
     )
 
+    from app.core.config import settings as app_settings
+
+    ticket_cap = max(1, int(app_settings.senior_editor_max_tickets or 10))
     draft, research = await _apply_senior_editor_tickets(
         tickets=tickets,
         rfp_id=rfp_id,
@@ -1135,10 +1333,62 @@ async def run_self_edit_loop(
         draft=draft,
         research=research,
         report=report,
-        max_tickets=5,
+        max_tickets=ticket_cap,
     )
     draft = await aget_proposal_draft(rfp_id) or draft
     research = await aget_research_cache(rfp_id) or research
+
+    recently_repaired = {
+        str(row.get("sectionId") or "")
+        for row in report.section_logs
+        if isinstance(row, dict)
+        and row.get("ticket") in ("coverage", "compliance", "dedupe")
+        and row.get("sectionId")
+    }
+
+    from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
+
+    await record_pipeline_activity(
+        rfp_id,
+        label="Senior editor: Designer-compact pass",
+        detail="Rewriting overlong tabs — dense tables/bullets, full RFP coverage",
+        step_index=0,
+        step_total=1,
+        in_progress_phase="phase-3-6-self-edit",
+    )
+    draft, research = await _apply_designer_compact_pass(
+        rfp_id=rfp_id,
+        rfp=rfp,
+        draft=draft,
+        research=research,
+        report=report,
+        skip_section_ids=recently_repaired,
+    )
+    draft = await aget_proposal_draft(rfp_id) or draft
+    research = await aget_research_cache(rfp_id) or research
+
+    # Re-run deterministic guards after compact/ticket LLM passes — compact rewrites
+    # can reintroduce invented phase tables or internal flags.
+    from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
+
+    draft, zf_report = apply_zero_fabrication_guards(
+        draft,
+        research=research,
+        budget=research.budget if research else None,
+        rfp_text=rfp_context or "",
+        label="post-compact",
+    )
+    if zf_report.logs:
+        await asave_proposal_draft(draft)
+        for line in zf_report.logs[:12]:
+            logger.info("Self-edit zero-fabrication %s: %s", rfp_id, line)
+        report.section_logs.append(
+            {
+                "section": "zero-fabrication",
+                "detail": f"{len(zf_report.logs)} guard action(s); "
+                f"{len(zf_report.phase_table_conflicts)} phase-table conflict(s)",
+            }
+        )
 
     # Belt-and-suspenders: ticket deletes must never leave the fee tab gone.
     from app.services.proposal_budget_content import ensure_budget_section_present

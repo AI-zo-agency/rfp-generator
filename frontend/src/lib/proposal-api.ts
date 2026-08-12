@@ -1282,6 +1282,70 @@ export async function restartProposalFromCaseStudies(
   return apiDraftToOutline(data.draft);
 }
 
+export interface CaseStudyMatchGap {
+  capability: string;
+  gapReason: string;
+  closestTitle?: string;
+  closestDisplayName?: string;
+  closestScore?: number;
+  closestExcerpt?: string;
+}
+
+export interface CaseStudyMatchStudy {
+  title: string;
+  displayName?: string;
+  fitScore: number;
+  fitLabel: string;
+  capability: string;
+  excerpt: string;
+  matchedTerms: string[];
+}
+
+export interface CaseStudyMatchResult {
+  ok: boolean;
+  rfpId: string;
+  capabilities: string[];
+  selectedTitles: string[];
+  studies: CaseStudyMatchStudy[];
+  gaps: CaseStudyMatchGap[];
+  matchQuality?: "strong" | "closest" | "none";
+  prefetchedAt?: string | null;
+  message: string;
+}
+
+export async function matchCaseStudiesForRfp(
+  rfpId: string
+): Promise<CaseStudyMatchResult> {
+  const res = await fetch(`/api/rfps/${rfpId}/proposal/match-case-studies`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  const text = await res.text();
+  let data: { detail?: string } & Partial<CaseStudyMatchResult> = {};
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from match-case-studies.");
+  }
+  if (!res.ok) {
+    throw new Error(
+      formatApiDetail(data.detail, "Failed to match case studies")
+    );
+  }
+  return {
+    ok: data.ok ?? true,
+    rfpId: data.rfpId ?? rfpId,
+    capabilities: data.capabilities ?? [],
+    selectedTitles: data.selectedTitles ?? [],
+    studies: data.studies ?? [],
+    gaps: data.gaps ?? [],
+    matchQuality: data.matchQuality,
+    prefetchedAt: data.prefetchedAt,
+    message: data.message ?? "",
+  };
+}
+
 export async function generateProposalSections1to3(
   rfpId: string,
   signal?: AbortSignal,
@@ -1331,6 +1395,22 @@ export async function runPhase3Drafting(
   );
   if (!result.draft || !result.research) {
     throw new Error("No draft or research returned after Phase 3");
+  }
+  return { draft: result.draft, research: result.research };
+}
+
+export async function runDesignerCompactManuscript(
+  rfpId: string,
+  signal?: AbortSignal
+): Promise<{ draft: ProposalOutline; research: ProposalResearch }> {
+  const result = await runProposalPhaseAsync(
+    rfpId,
+    "phase-3-6-self-edit",
+    `/api/rfps/${rfpId}/proposal/designer-compact`,
+    signal
+  );
+  if (!result.draft || !result.research) {
+    throw new Error("No draft returned from designer-compact");
   }
   return { draft: result.draft, research: result.research };
 }

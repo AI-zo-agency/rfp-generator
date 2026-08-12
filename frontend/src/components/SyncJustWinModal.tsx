@@ -52,7 +52,14 @@ export function SyncJustWinModal({
   // started. Poll the job until it reports a terminal state before claiming
   // success and refreshing the dashboard.
   const waitForJob = useCallback(
-    async (jobId: string): Promise<{ rfpsFound: number; pdfsDownloaded: number }> => {
+    async (
+      jobId: string
+    ): Promise<{
+      rfpsFound: number;
+      rfpsCreated: number;
+      rfpsSkipped: number;
+      pdfsDownloaded: number;
+    }> => {
       const deadline = Date.now() + 10 * 60 * 1000;
 
       while (Date.now() < deadline) {
@@ -65,6 +72,8 @@ export function SyncJustWinModal({
           id?: string;
           status?: string;
           rfpsFound?: number;
+          rfpsCreated?: number;
+          rfpsSkipped?: number;
           pdfsDownloaded?: number;
           error?: string | null;
         };
@@ -73,8 +82,16 @@ export function SyncJustWinModal({
         if (job.id && job.id !== jobId) continue;
 
         if (job.status === "completed") {
+          const found = job.rfpsFound ?? 0;
+          const skipped = job.rfpsSkipped ?? 0;
+          const created =
+            typeof job.rfpsCreated === "number"
+              ? job.rfpsCreated
+              : Math.max(0, found - skipped);
           return {
-            rfpsFound: job.rfpsFound ?? 0,
+            rfpsFound: found,
+            rfpsCreated: created,
+            rfpsSkipped: skipped,
             pdfsDownloaded: job.pdfsDownloaded ?? 0,
           };
         }
@@ -163,14 +180,32 @@ export function SyncJustWinModal({
 
       setStatusMessage(`Fetching ${tabFilter} leads ${scope}...`);
 
-      const { rfpsFound, pdfsDownloaded } = await waitForJob(result.jobId ?? "");
+      const { rfpsFound, rfpsCreated, rfpsSkipped, pdfsDownloaded } = await waitForJob(
+        result.jobId ?? ""
+      );
+
+      let message: string;
+      if (rfpsFound === 0) {
+        message = `No ${tabFilter} leads found ${scope}.`;
+      } else if (rfpsCreated === 0 && rfpsSkipped > 0) {
+        message =
+          `No new RFPs ${scope} — ${rfpsSkipped} already in ZO were skipped` +
+          (pdfsDownloaded > 0
+            ? ` (${pdfsDownloaded} missing PDF${pdfsDownloaded === 1 ? "" : "s"} backfilled).`
+            : ".");
+      } else if (rfpsSkipped > 0) {
+        message =
+          `Added ${rfpsCreated} new RFP${rfpsCreated === 1 ? "" : "s"} ${scope}` +
+          ` (${rfpsSkipped} already synced skipped` +
+          `, ${pdfsDownloaded} PDF${pdfsDownloaded === 1 ? "" : "s"} downloaded).`;
+      } else {
+        message =
+          `Synced ${rfpsCreated} ${tabFilter} RFP${rfpsCreated === 1 ? "" : "s"} ${scope}` +
+          ` (${pdfsDownloaded} PDF${pdfsDownloaded === 1 ? "" : "s"} downloaded).`;
+      }
 
       setSuccessResult({
-        message:
-          rfpsFound === 0
-            ? `No ${tabFilter} leads found ${scope}.`
-            : `Synced ${rfpsFound} ${tabFilter} RFP${rfpsFound === 1 ? "" : "s"} ${scope}` +
-              ` (${pdfsDownloaded} PDF${pdfsDownloaded === 1 ? "" : "s"} downloaded).`,
+        message,
         finishedAt: new Date().toISOString(),
       });
 
@@ -221,6 +256,9 @@ export function SyncJustWinModal({
               >
                 Sync JustWin RFPs
               </h2>
+              <p className="mt-1 text-xs text-zo-text-secondary">
+                Re-syncing a date skips RFPs already in ZO — no duplicates.
+              </p>
             </div>
           </div>
           <button

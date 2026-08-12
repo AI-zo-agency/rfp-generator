@@ -88,6 +88,21 @@ def outline_title_tokens(title: str) -> set[str]:
     }
 
 
+def outline_title_head_label(title: str) -> str:
+    """Structural head before — / : / |, ignoring parentheticals.
+
+    Free, RFP-agnostic sibling detector: "Budget — Narrative" and
+    "Budget — Disbursement" share head "budget"; "Cover Letter (1 page)" and
+    "Cover Letter — Contact Info" share "cover letter". No topic word lists.
+    """
+    text = (title or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.split(r"\s*[—–|:]\s*", text, maxsplit=1)[0]
+    return normalize_outline_title(text)
+
+
 def outline_titles_near_duplicate(a: str, b: str, *, threshold: float = 0.72) -> bool:
     """True when two outline titles likely cover the same ask."""
     na = normalize_outline_title(a)
@@ -103,6 +118,15 @@ def outline_titles_near_duplicate(a: str, b: str, *, threshold: float = 0.72) ->
     # collapse_agency_requirements_siblings (need all titles to build G.1–G.16 span).
     if is_agency_requirements_title(a) and is_agency_requirements_title(b):
         return False
+    # Same structural head ("Specific Experience — …" twins) — any RFP wording.
+    ha, hb = outline_title_head_label(a), outline_title_head_label(b)
+    if ha and hb and ha == hb:
+        a_sep = bool(re.search(r"[—–|:]", a or ""))
+        b_sep = bool(re.search(r"[—–|:]", b or ""))
+        # Two "Head — variant" siblings, or a multi-word head shared after
+        # stripping parentheticals (Cover Letter (1 page) vs Cover Letter — …).
+        if (a_sep and b_sep) or len(ha.split()) >= 2:
+            return True
     if na in nb or nb in na:
         return True
     ta, tb = outline_title_tokens(a), outline_title_tokens(b)

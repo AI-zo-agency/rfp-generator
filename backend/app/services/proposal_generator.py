@@ -1140,6 +1140,7 @@ async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
                 rfp_sector=rfp.sector,
                 rfp_location=rfp.location or None,
                 rfp_context=rfp_context,
+                page_limit=rfp.page_limit,
             )
         except IntelligenceError as exc:
             step_trace(
@@ -1549,6 +1550,10 @@ async def _generate_sections_1_3_inner(
     skip_section_1 = preserve_existing and has_section1
     skip_section_2 = preserve_existing and has_section2
     skip_section_3 = preserve_existing and has_section3
+    prefetched_cs = None
+    if prior_research and getattr(prior_research, "prefetched_case_studies", None):
+        prefetched_cs = prior_research.prefetched_case_studies
+
     sections_1_3, brand_voice, provider, section1_editorial = await run_sections_1_3_graph(
         rfp_id=rfp.id,
         rfp_title=rfp.title,
@@ -1565,6 +1570,7 @@ async def _generate_sections_1_3_inner(
         manuscript_locks=(
             manuscript_locks.model_dump(by_alias=True) if manuscript_locks else None
         ),
+        prefetched_case_studies=prefetched_cs if isinstance(prefetched_cs, dict) else None,
     )
 
     # Merge with existing sections if any were already complete
@@ -1678,11 +1684,10 @@ async def _generate_sections_1_3_inner(
             page_limit=rfp.page_limit,
             on_sections_partial=_on_sections_partial,
             existing_sections=existing_sections_for_graph,
-            # Never skip Section 1 while Who We Are (or any required 1.x) is empty —
-            # that was causing Team Bios to run with 1.1 still OUTLINE.
             skip_section_1=skip_section_1 or section_1_subsections_complete(sections_1_3),
             skip_section_2=skip_section_2 or _group_has_content("section-2-"),
             skip_section_3=skip_section_3 or _group_has_content("section-3-"),
+            prefetched_case_studies=prefetched_cs if isinstance(prefetched_cs, dict) else None,
         )
         # Re-fold draft after retry — still never resurrect legacy monoliths
         draft_after_retry = await aget_proposal_draft(rfp_id)
@@ -2090,13 +2095,14 @@ async def _run_phase3_drafting_inner(
         from app.services.proposal_blocker_prevention import (
             apply_feedback_blocker_suite,
         )
+        from app.core.config import settings as app_settings
 
         suite = await apply_feedback_blocker_suite(
             draft,
             rfp=rfp,
             research=research,
             rfp_text=rfp_source_text or "",
-            use_llm_contradiction=True,
+            use_llm_contradiction=not app_settings.fast_proposal_generation,
         )
         draft = suite.draft
         for line in suite.logs[:16]:
@@ -2266,6 +2272,15 @@ async def run_phase3_5_budget_reconcile(
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
     draft, _ = reconcile_draft_budget_summaries(draft, budget)
+    from app.services.proposal_budget_content import sync_phase_budget_tables_across_draft
+
+    draft, phase_sync_logs = sync_phase_budget_tables_across_draft(draft, budget)
+    if phase_sync_logs:
+        logger.info(
+            "Phase 3.5 reconcile synced canonical phase tables for %s: %s",
+            rfp_id,
+            phase_sync_logs[:8],
+        )
     draft = await align_fee_narrative_with_budget(
         rfp_id=rfp_id,
         draft=draft,
@@ -2460,6 +2475,21 @@ async def _run_phase3_5_budget_inner(
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
     draft, _ = reconcile_draft_budget_summaries(draft, budget)
+    from app.services.proposal_budget_content import sync_phase_budget_tables_across_draft
+
+    draft, phase_sync_logs = sync_phase_budget_tables_across_draft(draft, budget)
+    if phase_sync_logs:
+        logger.info(
+            "Phase 3.5 synced canonical phase tables for %s: %s",
+            rfp_id,
+            phase_sync_logs[:8],
+        )
+        step_trace(
+            "phase3_5_phase_table_sync",
+            rfp_id=rfp_id,
+            sync_count=len(phase_sync_logs),
+            samples=phase_sync_logs[:6],
+        )
     draft = await align_fee_narrative_with_budget(
         rfp_id=rfp_id,
         draft=draft,
@@ -2516,6 +2546,25 @@ async def _run_phase3_5_budget_inner(
     if research:
         await asave_research_cache(research)
     await _assert_proposal_not_reset(rfp_id)
+
+    from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
+
+    draft, zf_report = apply_zero_fabrication_guards(
+        draft,
+        research=research,
+        budget=budget,
+        rfp_text=rfp_context,
+        label="phase3_5",
+    )
+    for line in zf_report.logs[:12]:
+        logger.info("Phase 3.5 zero-fabrication: %s — %s", rfp_id, line)
+    if zf_report.phase_table_conflicts:
+        step_trace(
+            "phase3_5_phase_table_conflicts",
+            rfp_id=rfp_id,
+            conflicts=zf_report.phase_table_conflicts[:6],
+        )
+
     await asave_proposal_draft(draft)
 
     logger.info(
@@ -2885,6 +2934,8 @@ async def generate_full_proposal(
         run_id=run_id,
         budget_before_drafting=bool(app_settings.budget_before_drafting),
         adversarial_repair_loop=bool(app_settings.adversarial_repair_loop),
+        fast_proposal_generation=bool(app_settings.fast_proposal_generation),
+        phase3_llm_concurrency=int(app_settings.phase3_llm_concurrency),
         adversarial_audit_block=bool(
             getattr(app_settings, "adversarial_audit_block", False)
         ),
@@ -2918,6 +2969,15 @@ async def generate_full_proposal(
                     or draft
                 )
                 draft, _unresolved = render_draft_budget_slots(draft, research.budget)
+                from app.services.proposal_budget_content import (
+                    reconcile_draft_budget_summaries,
+                    sync_phase_budget_tables_across_draft,
+                )
+
+                draft, _ = reconcile_draft_budget_summaries(draft, research.budget)
+                draft, _phase_logs = sync_phase_budget_tables_across_draft(
+                    draft, research.budget
+                )
                 await asave_proposal_draft(draft)
                 step_trace(
                     "budget_reincorporate_after_draft",
@@ -3020,35 +3080,113 @@ async def generate_full_proposal(
                     )
 
                 await _assert_proposal_not_reset(rfp_id)
-                try:
-                    from app.services.proposal_blocker_prevention import (
-                        apply_feedback_blocker_suite,
-                    )
+                from app.core.config import settings as app_settings
 
-                    suite = await apply_feedback_blocker_suite(
-                        draft,
-                        rfp=rfp,
-                        research=research,
-                        rfp_text=full_rfp_text,
-                        use_llm_contradiction=True,
-                    )
-                    draft = suite.draft
-                    for line in suite.logs[:10]:
-                        logger.info(
-                            "Full proposal post-closing blocker suite: %s — %s",
-                            rfp_id,
-                            line,
+                if not app_settings.fast_proposal_generation:
+                    try:
+                        from app.services.proposal_blocker_prevention import (
+                            apply_feedback_blocker_suite,
                         )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Full proposal post-closing blocker suite skipped for %s: %s",
+
+                        suite = await apply_feedback_blocker_suite(
+                            draft,
+                            rfp=rfp,
+                            research=research,
+                            rfp_text=full_rfp_text,
+                            use_llm_contradiction=True,
+                        )
+                        draft = suite.draft
+                        for line in suite.logs[:10]:
+                            logger.info(
+                                "Full proposal post-closing blocker suite: %s — %s",
+                                rfp_id,
+                                line,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Full proposal post-closing blocker suite skipped for %s: %s",
+                            rfp_id,
+                            exc,
+                        )
+                else:
+                    logger.info(
+                        "Full proposal: skipping post-closing contradiction scan (fast mode) %s",
                         rfp_id,
-                        exc,
                     )
                 await asave_proposal_draft(draft)
                 await asave_research_cache(research)
 
+        # RFP structure coverage — add missing scored tabs before senior editor.
+        rfp = get_rfp(rfp_id)
+        if rfp:
+            try:
+                from app.services.rfp_content import combine_rfp_text, load_local_rfp_text
+                from app.services.proposal_zero_fabrication import (
+                    apply_structure_coverage_pass,
+                )
+
+                _desc, pdf_text, *_rest = load_local_rfp_text(rfp, max_chars=250_000)
+                struct_rfp_text = combine_rfp_text(
+                    _desc or (rfp.description or ""), pdf_text, max_chars=250_000
+                )
+                if len(struct_rfp_text.strip()) < 200:
+                    struct_rfp_text = load_rfp_for_proposal(rfp_id)[2]
+                from app.core.config import settings as app_settings
+
+                draft, struct_logs = await apply_structure_coverage_pass(
+                    draft,
+                    rfp=rfp,
+                    rfp_text=struct_rfp_text,
+                    research=research,
+                    use_llm=llm.is_configured()
+                    and not app_settings.fast_proposal_generation,
+                )
+                if struct_logs:
+                    await asave_proposal_draft(draft)
+                    for line in struct_logs[:10]:
+                        logger.info("Full proposal structure coverage: %s — %s", rfp_id, line)
+                    step_trace(
+                        "structure_coverage_pass",
+                        rfp_id=rfp_id,
+                        log_count=len(struct_logs),
+                        samples=struct_logs[:8],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Full proposal structure coverage skipped for %s: %s", rfp_id, exc
+                )
+
         draft, research, edit_report = await run_phase3_6_self_edit(rfp_id)
+
+        # Final zero-fabrication pass — canonical budget, reference phones, flags.
+        try:
+            from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
+
+            rfp_final = get_rfp(rfp_id)
+            final_rfp_text = load_rfp_for_proposal(rfp_id)[2] if rfp_final else ""
+            draft, zf_report = apply_zero_fabrication_guards(
+                draft,
+                research=research,
+                budget=research.budget if research else None,
+                rfp_text=final_rfp_text,
+                label="post-self-edit",
+            )
+            if zf_report.logs:
+                await asave_proposal_draft(draft)
+                for line in zf_report.logs[:16]:
+                    logger.info("Full proposal zero-fabrication: %s — %s", rfp_id, line)
+                step_trace(
+                    "zero_fabrication_pass",
+                    rfp_id=rfp_id,
+                    log_count=len(zf_report.logs),
+                    phase_table_conflicts=len(zf_report.phase_table_conflicts),
+                    budget_mismatches=zf_report.budget_mismatch_count,
+                    samples=zf_report.logs[:10],
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Full proposal zero-fabrication pass skipped for %s: %s", rfp_id, exc
+            )
 
         # Final blocker suite AFTER senior editor — Generate-from-scratch must
         # not ship the same feedback defects Scan is expected to catch.
@@ -3097,7 +3235,11 @@ async def generate_full_proposal(
             extra_issues = self_edit_exhausted_issues(edit_report.section_logs, draft)
             from app.core.config import settings as app_settings
 
-            if app_settings.adversarial_repair_loop:
+            run_adversarial = (
+                app_settings.adversarial_repair_loop
+                and not app_settings.fast_proposal_generation
+            )
+            if run_adversarial:
                 with pipeline_phase("adversarial-repair", rfp_id=rfp_id):
                     draft, research, _audit, repair_report = await run_adversarial_repair_loop(
                         rfp=rfp,

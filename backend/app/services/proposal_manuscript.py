@@ -100,6 +100,27 @@ def strip_evidence_citation_markers(text: str) -> str:
     return cleaned
 
 
+_FLAG_FOR_TAG_RE = re.compile(
+    r"\[FLAG(?:\s+FOR\b)?[^\]]*\]",
+    re.IGNORECASE,
+)
+
+
+def strip_internal_flag_tags(text: str) -> str:
+    """Remove [FLAG FOR …] / [FLAG: …] internal handoff notes from saved draft bodies.
+
+    Preserves [MANUAL FILL], [DESIGNER NOTE], and [VERIFY] — those may still be
+    needed for designer / Sonja handoff. Export-time scrub uses strip_internal_handoff_tags
+    which removes the full handoff set.
+    """
+    if not text:
+        return text
+    cleaned = _FLAG_FOR_TAG_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
 def strip_internal_pricing_flags(text: str) -> str:
     """Remove [PRICING FLAG: …] blocks — internal Sonja notes, not client prose."""
     if not text:

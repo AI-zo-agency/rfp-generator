@@ -5,6 +5,14 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { daysUntil, formatDate } from "@/lib/format";
+import {
+  classifyProposalDraftProgress,
+  PROPOSAL_DRAFT_PROGRESS_FILTERS,
+  PROPOSAL_DRAFT_PROGRESS_LABELS,
+  type ProposalDraftProgressFilter,
+  type ProposalDraftProgressStatus,
+  type ProposalDraftSummary,
+} from "@/lib/proposal-draft-progress";
 import { STAGE_LABELS } from "@/lib/rfp-process";
 import type { RfpRecord } from "@/types/rfp";
 import { GoSign } from "./GoSign";
@@ -12,6 +20,18 @@ import { ProposalDraftWorkspace } from "./ProposalDraftWorkspace";
 
 interface ProposalsWorkspaceProps {
   goRfps: RfpRecord[];
+  draftSummariesByRfpId?: Record<string, ProposalDraftSummary>;
+}
+
+function progressPillClass(status: ProposalDraftProgressStatus): string {
+  switch (status) {
+    case "done":
+      return "border-emerald-500/35 bg-emerald-500/10 text-emerald-700";
+    case "in_progress":
+      return "border-amber-500/40 bg-amber-500/10 text-amber-800";
+    default:
+      return "border-zo-border bg-white text-zo-text-secondary";
+  }
 }
 
 function GoRfpPickerPanel({
@@ -19,6 +39,10 @@ function GoRfpPickerPanel({
   filtered,
   query,
   setQuery,
+  progressFilter,
+  setProgressFilter,
+  counts,
+  draftSummariesByRfpId,
   selectedId,
   onSelect,
   onClose,
@@ -27,10 +51,21 @@ function GoRfpPickerPanel({
   filtered: RfpRecord[];
   query: string;
   setQuery: (value: string) => void;
+  progressFilter: ProposalDraftProgressFilter;
+  setProgressFilter: (value: ProposalDraftProgressFilter) => void;
+  counts: Record<ProposalDraftProgressFilter, number>;
+  draftSummariesByRfpId: Record<string, ProposalDraftSummary>;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onClose: () => void;
 }) {
+  const emptyLabel =
+    progressFilter === "all"
+      ? `No matches for “${query}”`
+      : query.trim()
+        ? `No ${PROPOSAL_DRAFT_PROGRESS_LABELS[progressFilter].toLowerCase()} matches for “${query}”`
+        : `No ${PROPOSAL_DRAFT_PROGRESS_LABELS[progressFilter].toLowerCase()} proposals`;
+
   return (
     <aside className="proposal-go-drawer" aria-label="Go RFP picker">
       <div className="proposal-go-drawer-header">
@@ -78,17 +113,51 @@ function GoRfpPickerPanel({
             className="zo-input w-full rounded-xl py-2.5 pl-10 pr-3 text-sm outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10 [&::-webkit-search-cancel-button]:hidden"
           />
         </div>
+
+        <div
+          className="mt-3 flex flex-wrap gap-1.5"
+          role="tablist"
+          aria-label="Filter by draft progress"
+        >
+          {PROPOSAL_DRAFT_PROGRESS_FILTERS.map((tab) => {
+            const active = progressFilter === tab.id;
+            const count = counts[tab.id];
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setProgressFilter(tab.id)}
+                className={`rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition-all ${
+                  active
+                    ? "bg-[#ef5018] text-white shadow-sm"
+                    : "border border-zo-border bg-white text-zo-text-secondary hover:border-[#ef5018]/50 hover:text-foreground"
+                }`}
+              >
+                {tab.label}
+                <span className={`ml-1 tabular-nums ${active ? "opacity-90" : "opacity-70"}`}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <ul className="custom-scrollbar proposal-go-drawer-list">
         {filtered.length === 0 ? (
           <li className="px-5 py-10 text-center text-sm text-zo-text-muted">
-            No matches for &ldquo;{query}&rdquo;
+            {emptyLabel}
           </li>
         ) : (
           filtered.map((rfp) => {
             const active = selectedId === rfp.id;
             const due = daysUntil(rfp.dueDate);
+            const progress = classifyProposalDraftProgress(
+              draftSummariesByRfpId[rfp.id]
+            );
+            const summary = draftSummariesByRfpId[rfp.id];
             return (
               <li key={rfp.id}>
                 <button
@@ -104,6 +173,14 @@ function GoRfpPickerPanel({
                       {rfp.location ? ` · ${rfp.location}` : ""}
                     </p>
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                      <span
+                        className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${progressPillClass(progress)}`}
+                      >
+                        {PROPOSAL_DRAFT_PROGRESS_LABELS[progress]}
+                        {summary && summary.sectionCount > 0
+                          ? ` · ${summary.filledCount}/${summary.sectionCount}`
+                          : ""}
+                      </span>
                       <span className="rounded-md border border-zo-border bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zo-text-secondary">
                         {STAGE_LABELS[rfp.stage]}
                       </span>
@@ -126,12 +203,17 @@ function GoRfpPickerPanel({
   );
 }
 
-export function ProposalsWorkspace({ goRfps }: ProposalsWorkspaceProps) {
+export function ProposalsWorkspace({
+  goRfps,
+  draftSummariesByRfpId = {},
+}: ProposalsWorkspaceProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const rfpFromUrl = searchParams.get("rfp");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [progressFilter, setProgressFilter] =
+    useState<ProposalDraftProgressFilter>("all");
   const [rfpDrawerOpen, setRfpDrawerOpen] = useState(false);
 
   useEffect(() => {
@@ -178,16 +260,41 @@ export function ProposalsWorkspace({ goRfps }: ProposalsWorkspaceProps) {
     [goRfps, selectedId]
   );
 
+  const progressById = useMemo(() => {
+    const map: Record<string, ProposalDraftProgressStatus> = {};
+    for (const rfp of goRfps) {
+      map[rfp.id] = classifyProposalDraftProgress(draftSummariesByRfpId[rfp.id]);
+    }
+    return map;
+  }, [goRfps, draftSummariesByRfpId]);
+
+  const counts = useMemo(() => {
+    const next: Record<ProposalDraftProgressFilter, number> = {
+      all: goRfps.length,
+      not_started: 0,
+      in_progress: 0,
+      done: 0,
+    };
+    for (const rfp of goRfps) {
+      next[progressById[rfp.id]] += 1;
+    }
+    return next;
+  }, [goRfps, progressById]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return goRfps;
-    return goRfps.filter(
-      (r) =>
+    return goRfps.filter((r) => {
+      if (progressFilter !== "all" && progressById[r.id] !== progressFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return (
         r.title.toLowerCase().includes(q) ||
         r.client.toLowerCase().includes(q) ||
         r.location.toLowerCase().includes(q)
-    );
-  }, [goRfps, query]);
+      );
+    });
+  }, [goRfps, query, progressFilter, progressById]);
 
   if (goRfps.length === 0) {
     return (
@@ -248,6 +355,10 @@ export function ProposalsWorkspace({ goRfps }: ProposalsWorkspaceProps) {
                 filtered={filtered}
                 query={query}
                 setQuery={setQuery}
+                progressFilter={progressFilter}
+                setProgressFilter={setProgressFilter}
+                counts={counts}
+                draftSummariesByRfpId={draftSummariesByRfpId}
                 selectedId={selectedRfp?.id ?? null}
                 onSelect={selectRfp}
                 onClose={() => setRfpDrawerOpen(false)}

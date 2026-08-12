@@ -597,6 +597,11 @@ class ProposalResearchCache(BaseModel):
         alias="pricingContract",
         description="Deterministic pre-Stage-3 PricingContract (fee model + evidenced media spend).",
     )
+    prefetched_case_studies: dict[str, Any] | None = Field(
+        default=None,
+        alias="prefetchedCaseStudies",
+        description="Case study candidates pre-fetched during Go/No-Go (go/review fit).",
+    )
     updated_at: str = Field(alias="updatedAt")
     provider: str | None = None
 
