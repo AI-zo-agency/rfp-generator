@@ -8,17 +8,19 @@ import { IWorkerTimesheetsTable, TimesheetEntry } from "./IWorkerTimesheetsTable
 import { AiInsightsPanel, AiInsightsData } from "./AiInsightsPanel";
 import { AuditQueueTable, AuditItem } from "./AuditQueueTable";
 import { DataSourcesGrid, DataSource } from "./DataSourcesGrid";
+import { QuickBooksPanels } from "./QuickBooksPanels";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 
 const FINANCIAL_TABS = [
+  { id: "quickbooks", label: "QuickBooks Ledger" },
   { id: "iworker", label: "iWorker Ingestion & Logs" },
   { id: "ai", label: "AI Audit Queue & Insights" },
   { id: "sources", label: "Data Sources Inventory" },
 ];
 
 export function FinancialInsightsClient() {
-  const [activeTab, setActiveTab] = useState<string>("iworker");
+  const [activeTab, setActiveTab] = useState<string>("quickbooks");
   const [loading, setLoading] = useState<boolean>(true);
   const [selectedContractor, setSelectedContractor] = useState<string>("all");
 
@@ -163,6 +165,14 @@ export function FinancialInsightsClient() {
           accentColor="#3C5A56"
         />
       </div>
+
+      {/* Tab 0: QuickBooks ledger — mounted on demand so the ledger isn't read
+          on every page load; the panel does its own fetch and caching. */}
+      {activeTab === "quickbooks" && (
+        <TabFade active>
+          <QuickBooksPanels />
+        </TabFade>
+      )}
 
       {/* Tab 1: iWorker Ingestion — always mounted, hidden when not active */}
       <TabFade active={activeTab === "iworker"}>

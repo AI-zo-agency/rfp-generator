@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     google_refresh_token: str = ""
 
+    # QuickBooks Online — read-only. The refresh token rotates on use, so the
+    # value here is only the seed; the live one lives in the token store
+    # (see services/quickbooks_oauth.py).
+    quickbooks_client_id: str = ""
+    quickbooks_client_secret: str = ""
+    quickbooks_refresh_token: str = ""
+    quickbooks_realm_id: str = ""
+    quickbooks_environment: str = "sandbox"
+    quickbooks_minor_version: str = "75"
+
     # Legacy optional — prefer OAuth client id/secret above
     google_service_account_json: Path | None = None
     google_drive_shared_drive_name: str = "RFPs"
@@ -164,6 +174,21 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def quickbooks_api_base(self) -> str:
+        if self.quickbooks_environment.strip().lower() == "production":
+            return "https://quickbooks.api.intuit.com"
+        return "https://sandbox-quickbooks.api.intuit.com"
+
+    @property
+    def quickbooks_configured(self) -> bool:
+        return bool(
+            self.quickbooks_client_id
+            and self.quickbooks_client_secret
+            and self.quickbooks_refresh_token
+            and self.quickbooks_realm_id
+        )
 
 
 settings = Settings()

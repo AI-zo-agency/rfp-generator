@@ -11,6 +11,9 @@ interface AnimatedNumberProps {
   prefix?: string;
   suffix?: string;
   className?: string;
+  /** Render the in-flight value. Defaults to `toFixed(decimals)`; pass a
+   * locale formatter when the number is money and needs group separators. */
+  format?: (value: number) => string;
 }
 
 /** Counts up from its previous value to `value` whenever it changes — the one
@@ -22,6 +25,7 @@ export function AnimatedNumber({
   prefix = "",
   suffix = "",
   className,
+  format,
 }: AnimatedNumberProps) {
   const [display, setDisplay] = useState(value);
   const fromRef = useRef(0);
@@ -56,7 +60,7 @@ export function AnimatedNumber({
   return (
     <span className={className}>
       {prefix}
-      {display.toFixed(decimals)}
+      {format ? format(display) : display.toFixed(decimals)}
       {suffix}
     </span>
   );

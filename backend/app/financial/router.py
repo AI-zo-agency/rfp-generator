@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 import logging
-from app.financial import google_sheets, ai_classifier
+from app.financial import google_sheets, ai_classifier, quickbooks
+from app.services import quickbooks_oauth
 from app.services.llm import chat_json
 from app.core.config import settings
 
@@ -700,6 +701,73 @@ def get_sources_status():
             }
         ]
     }
+
+# ── QuickBooks (read-only) ───────────────────────────────────────────────────
+# Panels are cached briefly: a full overview is ~6 API calls plus a paged
+# Purchase scan, and the underlying ledger changes a handful of times a day.
+_QB_CACHE: dict[str, tuple[float, Any]] = {}
+_QB_CACHE_TTL = 300.0
+
+
+def _qb_cached(key: str, build):
+    now = time.monotonic()
+    hit = _QB_CACHE.get(key)
+    if hit and now - hit[0] < _QB_CACHE_TTL:
+        return hit[1]
+    value = build()
+    _QB_CACHE[key] = (now, value)
+    return value
+
+
+@router.get("/quickbooks/status")
+def quickbooks_status():
+    """Connection health — safe to poll, never raises."""
+    return quickbooks_oauth.connection_status()
+
+
+@router.get("/quickbooks/overview")
+def quickbooks_overview(
+    year: int = Query(default_factory=lambda: datetime.now().year),
+    since: Optional[str] = Query(None, description="ISO timestamp for the activity feed"),
+    refresh: bool = Query(False, description="Bypass the 5-minute panel cache"),
+):
+    """Every QuickBooks panel the dashboard can render today.
+
+    Each panel degrades independently — one failing report does not blank the page.
+    """
+    if not settings.quickbooks_configured:
+        raise HTTPException(status_code=503, detail="QuickBooks credentials are not configured")
+
+    activity_since = since or f"{datetime.now().year}-{datetime.now().month:02d}-01T00:00:00-07:00"
+    cache_key = f"overview:{year}:{activity_since}"
+    if refresh:
+        _QB_CACHE.pop(cache_key, None)
+
+    def build() -> dict[str, Any]:
+        panels: dict[str, Any] = {"year": year, "errors": {}}
+        jobs = {
+            "company": quickbooks.company_profile,
+            "ar": quickbooks.ar_aging,
+            "ap": quickbooks.ap_aging,
+            "revenue_by_class": lambda: quickbooks.revenue_by_class(year),
+            "by_account_manager": lambda: quickbooks.by_account_manager(year),
+            "client_profitability": lambda: quickbooks.client_profitability(year),
+            "monthly_trend": lambda: quickbooks.monthly_trend(year),
+            "unattached_cost": lambda: quickbooks.unattached_cost(year),
+            "activity": lambda: quickbooks.recent_activity(activity_since),
+        }
+        for name, job in jobs.items():
+            try:
+                panels[name] = job()
+            except Exception as exc:  # noqa: BLE001 — one bad panel shouldn't blank the page
+                logger.warning("[QB] panel %r failed: %s", name, exc)
+                panels[name] = None
+                panels["errors"][name] = str(exc)[:200]
+        panels["generated_at"] = datetime.now().isoformat()
+        return panels
+
+    return _qb_cached(cache_key, build)
+
 
 @router.get("/audit-queue")
 def get_audit_queue():

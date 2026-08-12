@@ -1,0 +1,32 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "zo-backend",
+      "runtimeExecutable": "../.venv/bin/python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--port",
+        "8001",
+        "--reload"
+      ],
+      "cwd": "backend",
+      "port": 8001
+    },
+    {
+      "name": "zo-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "3001"
+      ],
+      "cwd": "frontend",
+      "port": 3001
+    }
+  ]
+}
