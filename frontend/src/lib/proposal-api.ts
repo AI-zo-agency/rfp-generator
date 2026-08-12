@@ -2076,7 +2076,8 @@ export async function fetchKeyPersonas(
 
 export interface SaveKeyPersonasResult {
   ok: boolean;
-  bioRebuildStarted?: boolean;
+  biosSynced?: boolean;
+  draft?: ProposalOutline;
 }
 
 export async function saveProposalKeyPersonas(
@@ -2094,9 +2095,14 @@ export async function saveProposalKeyPersonas(
   if (!res.ok) return { ok: false };
   try {
     const data = (await res.json()) as {
-      bioRebuildStarted?: boolean;
+      biosSynced?: boolean;
+      draft?: ApiProposalDraft;
     };
-    return { ok: true, bioRebuildStarted: Boolean(data.bioRebuildStarted) };
+    return {
+      ok: true,
+      biosSynced: Boolean(data.biosSynced),
+      draft: data.draft ? apiDraftToOutline(data.draft) : undefined,
+    };
   } catch {
     return { ok: true };
   }

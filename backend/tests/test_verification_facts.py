@@ -208,6 +208,9 @@ class AdvisoryUsesVerifiedFactsTests(unittest.IsolatedAsyncioTestCase):
         async def fake_blob(queries, **kwargs):
             return blob, ""
 
+        async def fake_plan(**kwargs):
+            return ["zö agency legal name 01 companyfacts"]
+
         section = ProposalSection(
             id="1.3", title="Business Information",
             content="**Legal Name:** Z'Onion Creative Group LLC", mode="write", word_target=187,
@@ -219,6 +222,7 @@ class AdvisoryUsesVerifiedFactsTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.object(editor, "chat_json_with_repair", side_effect=fake_chat),
+            patch.object(editor, "_plan_verification_kb_queries", side_effect=fake_plan),
             patch.object(editor, "_verification_facts_block", side_effect=fake_facts),
             patch.object(editor, "_fetch_kb_blob_for_selection", side_effect=fake_blob),
         ):
@@ -245,6 +249,158 @@ class AdvisoryUsesVerifiedFactsTests(unittest.IsolatedAsyncioTestCase):
     async def test_genuinely_empty_kb_says_nothing_found(self) -> None:
         prompt = await self._prompt(facts="")
         self.assertIn("no matching", prompt.lower())
+
+    async def test_pinned_excerpt_wrong_triggers_kb_lookup(self) -> None:
+        """'here its wrong' + pinned excerpt must query KB via the planner."""
+        from app.models.proposal import ProposalSection
+        from app.models.rfp import RfpRecord
+
+        captured: dict[str, str] = {}
+
+        async def fake_chat(messages, **kwargs):
+            captured["user"] = messages[-1]["content"]
+            return {"reply": "ok"}, "stub"
+
+        async def fake_plan(**kwargs):
+            return ["01_companyfacts verified email zö agency"]
+
+        async def fake_facts(queries, **kwargs):
+            return "- Email: connect@zo.agency  [source: 01_companyfacts verified.docx]"
+
+        section = ProposalSection(
+            id="1.3", title="1.3 — Business Information",
+            content="Email | info@zo.agency", mode="write", word_target=187,
+        )
+        rfp = RfpRecord(
+            id="r1", title="Website Redesign", client="DuPage", sector="Government",
+            source="manual", dueDate="2026-09-01", receivedDate="2026-08-01",
+            lastActivity="2026-08-01", lastActivityNote="t",
+        )
+        with (
+            patch.object(editor, "chat_json_with_repair", side_effect=fake_chat),
+            patch.object(editor, "_plan_verification_kb_queries", side_effect=fake_plan),
+            patch.object(editor, "_verification_facts_block", side_effect=fake_facts),
+            patch.object(editor, "_fetch_kb_blob_for_selection", return_value=("", "")),
+        ):
+            await editor._section_chat_advisory_reply(
+                section=section, rfp=rfp, rfp_context="",
+                user_message="here its wrong",
+                conversation_history=[],
+                selection_text="Email | info@zo.agency",
+                requirements_block="",
+            )
+        prompt = captured["user"]
+        self.assertIn("Verified KB facts", prompt)
+        self.assertIn("connect@zo.agency", prompt)
+
+    async def test_pinned_wrong_uses_query_planner(self) -> None:
+        from app.models.proposal import ProposalSection
+        from app.models.rfp import RfpRecord
+
+        planned: list[str] = []
+
+        async def fake_plan(**kwargs):
+            planned.append(kwargs.get("user_message") or "")
+            return ["01_companyfacts verified email zö agency"]
+
+        async def fake_facts(queries, **kwargs):
+            return "- Email: connect@zo.agency  [source: 01_companyfacts verified.docx]"
+
+        async def fake_chat(messages, **kwargs):
+            return {"reply": "Incorrect — use connect@zo.agency per companyfacts."}, "stub"
+
+        section = ProposalSection(
+            id="1.3", title="1.3 — Business Information",
+            content="Email | info@zo.agency", mode="write", word_target=187,
+        )
+        rfp = RfpRecord(
+            id="r1", title="Website Redesign", client="DuPage", sector="Government",
+            source="manual", dueDate="2026-09-01", receivedDate="2026-08-01",
+            lastActivity="2026-08-01", lastActivityNote="t",
+        )
+        with (
+            patch.object(editor, "chat_json_with_repair", side_effect=fake_chat),
+            patch.object(editor, "_plan_verification_kb_queries", side_effect=fake_plan),
+            patch.object(editor, "_verification_facts_block", side_effect=fake_facts),
+            patch.object(editor, "_fetch_kb_blob_for_selection", return_value=("", "")),
+        ):
+            await editor._section_chat_advisory_reply(
+                section=section, rfp=rfp, rfp_context="",
+                user_message="here its wrong",
+                conversation_history=[],
+                selection_text="Email | info@zo.agency",
+                requirements_block="",
+            )
+        self.assertTrue(planned, "query planner must run for pinned excerpt wrong-ask")
+        self.assertIn("here its wrong", planned[0])
+
+
+class VerificationQueryPlannerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_merges_heuristic_and_agent_queries(self) -> None:
+        from app.models.proposal import ProposalSection
+
+        section = ProposalSection(
+            id="1.3", title="1.3 — Business Information",
+            content="Email | info@zo.agency", mode="write", word_target=187,
+        )
+
+        async def fake_plan(**kwargs):
+            return ["01_companyfacts verified email connect zö agency"]
+
+        with (
+            patch.object(editor.llm, "is_configured", return_value=True),
+            patch(
+                "app.services.proposal_langchain_agents.plan_section_queries_agent",
+                side_effect=fake_plan,
+            ),
+        ):
+            queries = await editor._plan_verification_kb_queries(
+                section=section,
+                user_message="here its wrong",
+                excerpt="Email | info@zo.agency",
+                rfp_client="DuPage",
+                rfp_sector="Government",
+                rfp_title="RFP",
+            )
+        self.assertTrue(queries)
+        self.assertTrue(
+            any("companyfacts" in q.casefold() for q in queries),
+            queries,
+        )
+
+
+class CompanyfactsContactPinTests(unittest.TestCase):
+    def test_prefers_verified_docx_over_md(self) -> None:
+        facts = (
+            "- Email: hello@zo.agency  [source: 01_companyfacts.md]\n"
+            "- Email: connect@zo.agency  [source: 01_companyfacts verified.docx]"
+        )
+        pin = editor._extract_companyfacts_contact_pin(facts)
+        self.assertIn("connect@zo.agency", pin)
+        self.assertNotIn("hello@zo.agency", pin)
+
+
+class VerificationFactsRankingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verified_companyfacts_ranked_first(self) -> None:
+        async def fake_search(**kwargs):
+            return [
+                {
+                    "memory": "Email: hello@zo.agency",
+                    "similarity": 0.92,
+                    "metadata": {"fileName": "01_companyfacts.md"},
+                },
+                {
+                    "memory": "Email: connect@zo.agency",
+                    "similarity": 0.90,
+                    "metadata": {"fileName": "01_companyfacts verified.docx"},
+                },
+            ]
+
+        with patch.object(editor.supermemory, "search_hybrid", side_effect=fake_search):
+            block = await editor._verification_facts_block(
+                ["01_companyfacts verified email zö agency"]
+            )
+        self.assertLess(block.index("connect@"), block.index("hello@"))
 
 
 if __name__ == "__main__":

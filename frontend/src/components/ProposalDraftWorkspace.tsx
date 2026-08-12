@@ -308,6 +308,7 @@ function ProposalDraftWorkspaceInner({
   const assistantPaneRef = useRef<HTMLDivElement>(null);
 
   const handleKeyPersonasChange = useCallback((selectedPersonaIds: string[]) => {
+    skipNextSaveRef.current = true;
     setOutline((prev) => ({
       ...prev,
       selectedKeyPersonas: selectedPersonaIds,
@@ -370,51 +371,13 @@ function ProposalDraftWorkspaceInner({
     setOutline(prepareOutline(draft));
   }, []);
 
-  // Backend kicks off a Section 2 rebuild when personas change on an already-
-  // generated proposal (see save_proposal_key_personas). Two things have to
-  // happen here for the editor to actually refresh:
-  //
-  //  1. Drop the existing section-2-bio-* tabs from local state IMMEDIATELY —
-  //     otherwise the workspace's autosave PUTs the stale outline (with the
-  //     old bios) back onto the server between the persona-save response and
-  //     the background rebuild's first draft read, and the rebuild silently
-  //     no-ops via the sections 1-3 cache path (has_section2 comes back true).
-  //  2. Refetch the proposal so research.pipelineCheckpoint.inProgressPhase
-  //     flips to "sections-1-3", waking the live-draft polling useEffect below
-  //     that streams the new bios as they generate.
-  const handleBioRebuildStarted = useCallback(() => {
-    setOutline((prev) => ({
-      ...prev,
-      sections: prev.sections.filter(
-        (s) =>
-          !(
-            s.id.startsWith("section-2-bio-") &&
-            s.id !== "section-2-bio-placeholder"
-          )
-      ),
-    }));
-    skipNextSaveRef.current = true;
-
-    void (async () => {
-      try {
-        const snap = await fetchProposalDraft(rfp.id);
-        if (snap.draft) {
-          applyOutlineFromServer(snap.draft);
-        }
-        if (snap.research) {
-          setResearch(snap.research);
-          setPipelineStatus(
-            buildPipelineStatus(snap.draft, snap.research, snap.pipelineStatus)
-          );
-        }
-        setGenerateNotice(
-          "Rebuilding Team Bios for the new Key Personas — the section will refresh as it completes."
-        );
-      } catch {
-        // Non-fatal — the standing polling loop still catches up on its own.
-      }
-    })();
-  }, [rfp.id, applyOutlineFromServer]);
+  const handlePersonasDraftSynced = useCallback(
+    (draft: ProposalOutline) => {
+      applyOutlineFromServer(draft);
+      setGenerateNotice("Team Bios updated to match Key Personas.");
+    },
+    [applyOutlineFromServer]
+  );
 
   const recordSectionRevision = useCallback(
     (sectionId: string, revision: SectionRevisionRecord) => {
@@ -2531,7 +2494,7 @@ function ProposalDraftWorkspaceInner({
               rfpId={rfp.id}
               initialSelectedIds={outline.selectedKeyPersonas || []}
               onSelectionChange={handleKeyPersonasChange}
-              onBioRebuildStarted={handleBioRebuildStarted}
+              onDraftSynced={handlePersonasDraftSynced}
             />
             {/* Gate shown when generation is attempted with no personas chosen.
                 Separate instance from KeyPersonasBox so its open state is
@@ -2542,7 +2505,7 @@ function ProposalDraftWorkspaceInner({
               rfpId={rfp.id}
               initialSelectedIds={outline.selectedKeyPersonas || []}
               onSelectionChange={handleKeyPersonasChange}
-              onBioRebuildStarted={handleBioRebuildStarted}
+              onDraftSynced={handlePersonasDraftSynced}
             />
             <button
               type="button"

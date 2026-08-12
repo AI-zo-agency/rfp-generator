@@ -17,7 +17,7 @@ from app.services.proposal_common import ProposalError
 
 logger = logging.getLogger(__name__)
 
-StructureAction = Literal["edit", "add_sections", "delete_sections", "clarify"]
+StructureAction = Literal["edit", "add_sections", "delete_sections", "clarify", "stub_bio"]
 
 
 class StructureAddition(BaseModel):
@@ -109,6 +109,9 @@ Rules:
      draftHint = what to extract. Do NOT action=edit that only deletes text without adding a tab.
    - Other new tabs → kind "custom" or "rfp".
 3. Use "delete_sections" when they clearly ask to remove/delete a section from the sidebar.
+   EXCEPTION: "remove/replace this bio and add a Designer note / attach the resume PDF"
+   is NOT a sidebar delete. Keep the bio tab and rewrite the body to a designer-note
+   stub (action=edit on that bio). Never delete the person from the outline.
 4. Use "clarify" only when intent is genuinely ambiguous after reading the full ask
    (e.g. "add more people" with no count, delete without naming which).
    Ask one concise question — do not guess destructive deletes.
@@ -920,10 +923,334 @@ def _is_add_to_case_studies_intent(text: str) -> bool:
     return bool(_ADD_CASE_STUDY_INTENT_RE.search(text or ""))
 
 
+def is_bio_resume_attachment_intent(text: str) -> bool:
+    """True when the user wants the bio tab kept, body replaced with a PDF designer note.
+
+    "Remove this whole bio and add a Designer note of attachment of this resume"
+    is an in-place stub — not a sidebar delete and not a new tab.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    cf = raw.casefold()
+    if not re.search(r"\b(?:bio(?:graphy)?|resume|cv|curriculum\s+vitae)\b", cf):
+        return False
+    if re.search(r"designer\s*-?\s*note", cf):
+        return True
+    has_attach = bool(
+        re.search(
+            r"\b(?:attach(?:ment|ed)?|insert(?:ing)?\s+(?:the\s+)?(?:approved\s+)?(?:bio\s+)?pdf|04_bio_)\b",
+            cf,
+        )
+    )
+    if not has_attach:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:remove|replace|instead\s+of|don'?t\s+write|do\s+not\s+write|"
+            r"strip|delete\s+the\s+(?:written\s+)?(?:bio|resume))\b",
+            cf,
+        )
+    )
+
+
+def _member_name_from_bio_section(section: ProposalSection) -> str:
+    title = section.title or ""
+    name = title.split("—", 1)[-1].strip() if "—" in title else title
+    name = re.sub(r"^2\.\d+\s*[—\-–:]\s*", "", name).strip()
+    if name and not name.casefold().startswith("[verify"):
+        return name
+    heading = re.search(r"^###\s+([^—\n]+)", section.content or "", re.M)
+    if heading:
+        return heading.group(1).strip()
+    return name or "Team member"
+
+
+def _resolve_bio_stub_targets(
+    draft: ProposalDraft,
+    *,
+    focus_section_id: str,
+    user_message: str,
+    planned_deletions: list[StructureDeletion] | None = None,
+    planned_edit_id: str | None = None,
+) -> list[ProposalSection]:
+    """Pick which bio tab(s) should become designer-note stubs — never delete them."""
+    bios = _bio_sections(draft.sections)
+    if not bios:
+        return []
+    msg = (user_message or "").casefold()
+    named: list[ProposalSection] = []
+    for bio in bios:
+        member = _member_name_from_bio_section(bio)
+        if member and len(member) >= 4 and member.casefold() in msg:
+            named.append(bio)
+    if named:
+        return named
+
+    found: list[ProposalSection] = []
+    seen: set[str] = set()
+    for deletion in planned_deletions or []:
+        sid = _resolve_deletion_id(draft, deletion)
+        hit = next((s for s in bios if s.id == sid), None)
+        if hit is not None and hit.id not in seen:
+            found.append(hit)
+            seen.add(hit.id)
+    if found:
+        return found
+
+    for sid in (planned_edit_id, focus_section_id):
+        if not sid:
+            continue
+        hit = next((s for s in bios if s.id == sid), None)
+        if hit is not None:
+            return [hit]
+    return []
+
+
+def _bio_resume_attachment_plan(
+    draft: ProposalDraft,
+    *,
+    user_message: str,
+    focus_section_id: str,
+    planned_deletions: list[StructureDeletion] | None = None,
+    planned_edit_id: str | None = None,
+) -> StructurePlan | None:
+    if not is_bio_resume_attachment_intent(user_message):
+        return None
+    targets = _resolve_bio_stub_targets(
+        draft,
+        focus_section_id=focus_section_id,
+        user_message=user_message,
+        planned_deletions=planned_deletions,
+        planned_edit_id=planned_edit_id,
+    )
+    if not targets:
+        return None
+    primary = targets[0]
+    return StructurePlan(
+        action="stub_bio",
+        edit_section_id=primary.id,
+        deletions=[
+            StructureDeletion(section_id=t.id, title=t.title) for t in targets
+        ],
+        assistant_note=(
+            "Replacing the bio body with a Designer resume-attachment note "
+            "(keeping the sidebar tab)."
+        ),
+    )
+
+
+def apply_bio_resume_stub_to_section(section: ProposalSection) -> ProposalSection:
+    """Keep the bio tab; replace dumped resume prose with the PDF designer-note stub."""
+    from app.services.proposal_bio_stub import (
+        expected_bio_pdf_filename,
+        format_bio_stub_content,
+    )
+
+    member = _member_name_from_bio_section(section)
+    pdf = expected_bio_pdf_filename(member)
+    role = ""
+    role_m = re.search(
+        r"\*\*Role on this engagement:\*\*\s*(.+)",
+        section.content or "",
+        re.I,
+    )
+    if role_m:
+        role = role_m.group(1).strip()
+    content = format_bio_stub_content(
+        member=member,
+        role=role,
+        pdf_filename=pdf,
+        kb_text="",
+        kb_available=True,
+        inline_required=False,
+    )
+    return section.model_copy(
+        update={
+            "content": content,
+            "designer_note": (
+                f"Insert approved bio PDF — {pdf}. Do not rewrite Key Accounts."
+            ),
+            "status": "generated",
+            "word_target": 120,
+        }
+    )
+
+
+def _graph_bio_section_id(member: str) -> str:
+    """Same id rule as proposal_sections_graph._build_bios."""
+    safe = (member or "").lower().replace(" ", "-").replace("'", "")
+    return f"section-2-bio-{safe or 'member'}"
+
+
+def _bio_ids_for_member(member: str) -> set[str]:
+    return {_graph_bio_section_id(member), f"section-2-bio-{_slug(member)}"}
+
+
+def _stub_bio_section_for_persona(
+    *,
+    member: str,
+    role: str,
+    index: int,
+) -> ProposalSection:
+    from app.services.proposal_bio_stub import (
+        expected_bio_pdf_filename,
+        format_bio_stub_content,
+    )
+
+    pdf = expected_bio_pdf_filename(member)
+    content = format_bio_stub_content(
+        member=member,
+        role=role,
+        pdf_filename=pdf,
+        kb_text="",
+        kb_available=True,
+        inline_required=False,
+    )
+    return ProposalSection(
+        id=_graph_bio_section_id(member),
+        title=f"2.{index} — {member}",
+        wordTarget=120,
+        required=True,
+        custom=False,
+        source="template",
+        mode="select",
+        content=content,
+        status="generated",
+        designerNote=(
+            f"Insert approved bio PDF — {pdf}. Do not rewrite Key Accounts."
+        ),
+    )
+
+
+def _reorder_bios_to_persona_order(
+    sections: list[ProposalSection],
+    selected_names: list[str],
+) -> list[ProposalSection]:
+    bios = _bio_sections(sections)
+    if not bios:
+        return sections
+    by_name: dict[str, ProposalSection] = {}
+    for bio in bios:
+        by_name[_member_name_from_bio_section(bio).casefold()] = bio
+    ordered: list[ProposalSection] = []
+    used: set[str] = set()
+    for name in selected_names:
+        hit = by_name.get(name.casefold())
+        if hit is not None and hit.id not in used:
+            ordered.append(hit)
+            used.add(hit.id)
+    for bio in bios:
+        if bio.id not in used:
+            ordered.append(bio)
+            used.add(bio.id)
+    out: list[ProposalSection] = []
+    inserted = False
+    for section in sections:
+        if (
+            section.id.startswith("section-2-bio-")
+            and section.id != "section-2-bio-placeholder"
+        ):
+            if not inserted:
+                out.extend(ordered)
+                inserted = True
+            continue
+        out.append(section)
+    if not inserted:
+        out.extend(ordered)
+    return out
+
+
+def sync_draft_bios_to_key_personas(
+    draft: ProposalDraft,
+    personas: list[dict[str, Any]],
+) -> tuple[ProposalDraft, bool]:
+    """Add/remove Section 2 bio tabs to match Key Persona picks. Keeps remaining bios.
+
+    No-op when the draft has no manuscript yet (generation will create bios).
+    """
+    selected_names = [
+        str(p.get("name") or "").strip()
+        for p in personas
+        if str(p.get("name") or "").strip()
+    ]
+    selected_cf = {n.casefold() for n in selected_names}
+    expected_ids: set[str] = set()
+    for name in selected_names:
+        expected_ids |= _bio_ids_for_member(name)
+
+    existing_bios = _bio_sections(draft.sections)
+    has_manuscript = any((s.content or "").strip() for s in draft.sections)
+    if not existing_bios and not has_manuscript:
+        return draft, False
+
+    keep: list[ProposalSection] = []
+    kept_names: set[str] = set()
+    for bio in existing_bios:
+        member = _member_name_from_bio_section(bio)
+        if member.casefold() in selected_cf or bio.id in expected_ids:
+            keep.append(bio)
+            kept_names.add(member.casefold())
+
+    keep_ids = {b.id for b in keep}
+    sections = [
+        s
+        for s in draft.sections
+        if not (
+            s.id.startswith("section-2-bio-")
+            and s.id != "section-2-bio-placeholder"
+            and s.id not in keep_ids
+        )
+    ]
+
+    last_bio = next(
+        (s for s in reversed(sections) if s.id in keep_ids),
+        None,
+    )
+    insert_after = last_bio.id if last_bio else next(
+        (
+            s.id
+            for s in reversed(sections)
+            if s.id.startswith("section-1-") or s.id == "section-2-bio-placeholder"
+        ),
+        None,
+    )
+    role_by_name = {
+        str(p.get("name") or "").strip().casefold(): str(p.get("title") or "").strip()
+        for p in personas
+    }
+    for name in selected_names:
+        if name.casefold() in kept_names:
+            continue
+        new_sec = _stub_bio_section_for_persona(
+            member=name,
+            role=role_by_name.get(name.casefold(), ""),
+            index=len(_bio_sections(sections)) + 1,
+        )
+        if any(s.id == new_sec.id for s in sections):
+            kept_names.add(name.casefold())
+            continue
+        sections = _insert_after(sections, new_sec, insert_after)
+        insert_after = new_sec.id
+        kept_names.add(name.casefold())
+
+    sections = _reorder_bios_to_persona_order(sections, selected_names)
+    sections = renumber_dynamic_group_titles(sections)
+
+    before_ids = [s.id for s in draft.sections]
+    after_ids = [s.id for s in sections]
+    if before_ids == after_ids:
+        return draft, False
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), True
+
+
 def _is_add_bio_intent(text: str) -> bool:
     """True when the user wants a NEW team bio tab — not rewrite an existing one."""
     raw = (text or "").strip()
     if not raw:
+        return False
+    if is_bio_resume_attachment_intent(raw):
         return False
     if re.search(
         r"\b(?:replace|swap|instead\s+of|change\s+.+\s+to)\b",
@@ -947,6 +1274,8 @@ def is_add_section_intent(text: str) -> bool:
     """
     raw = (text or "").strip()
     if not raw:
+        return False
+    if is_bio_resume_attachment_intent(raw):
         return False
     if _is_in_place_kb_or_verify_edit(raw) or _is_in_place_manual_fill_edit(raw):
         return False
@@ -1517,9 +1846,18 @@ async def plan_chat_structure_action(
 ) -> StructurePlan:
     """Decide edit vs add/delete sections vs ask the user.
 
-    LLM-only: no regex pre-routing or regex fallbacks. Retries once on failure.
-    Post-plan safety coerce (VERIFY / MANUAL FILL / bogus titles) remains.
+    LLM-only for outline changes, with post-plan safety coerces (VERIFY / MANUAL
+    FILL / bio→designer-note stub / bogus titles).
     """
+    # Keep the bio tab; replace dumped resume with a designer PDF note.
+    stub_plan = _bio_resume_attachment_plan(
+        draft,
+        user_message=user_message,
+        focus_section_id=focus_section_id,
+    )
+    if stub_plan is not None:
+        return stub_plan
+
     # Unnamed "add another case study" — ask which KB client before an LLM call
     # that often times out mid-reload / during Continue Proposal.
     msg_cf = user_message.casefold()
@@ -1633,6 +1971,44 @@ async def plan_chat_structure_action(
                 "or delete something?"
             ),
         )
+
+    # "Remove this bio and add a designer note" must never delete the sidebar tab.
+    if is_bio_resume_attachment_intent(user_message):
+        coerced = _bio_resume_attachment_plan(
+            draft,
+            user_message=user_message,
+            focus_section_id=focus_section_id,
+            planned_deletions=plan.deletions,
+            planned_edit_id=plan.edit_section_id,
+        )
+        if coerced is not None:
+            logger.info(
+                "Coercing structure plan → stub_bio (designer resume-attachment note)"
+            )
+            return coerced
+        if plan.action in {"delete_sections", "add_sections"}:
+            return StructurePlan(
+                action="clarify",
+                clarify_question=(
+                    "Which team bio should get the Designer resume-attachment note? "
+                    "Name the person (e.g. Sonja Anderson). I will keep their tab "
+                    "and replace the written resume with the PDF insert note."
+                ),
+            )
+        edit_id = plan.edit_section_id or focus_section_id
+        edit_sec = next((s for s in draft.sections if s.id == edit_id), None)
+        if edit_sec is None or not (
+            edit_sec.id.startswith("section-2-bio-")
+            and edit_sec.id != "section-2-bio-placeholder"
+        ):
+            return StructurePlan(
+                action="clarify",
+                clarify_question=(
+                    "Which team bio should get the Designer resume-attachment note? "
+                    "Name the person (e.g. Sonja Anderson). I will keep their tab "
+                    "and replace the written resume with the PDF insert note."
+                ),
+            )
 
     # Only VERIFY / MANUAL FILL / E-Verify safety asks force in-place edit.
     # Do NOT coerce real add_sections (e.g. split into Project Staff Planning) just
@@ -1784,11 +2160,13 @@ async def _build_bio_section(
     index: int,
     rfp_client: str,
 ) -> ProposalSection:
+    from app.services.proposal_bio_stub import (
+        resolve_bio_pdf_filename,
+        stub_from_extraction,
+    )
     from app.services.proposal_sections_graph import (
         _apply_verified_corrections,
-        _extract_member_bio_facts,
         _fetch_member_bio_kb,
-        _format_member_bio_content,
         _sanitize_content,
     )
 
@@ -1798,29 +2176,33 @@ async def _build_bio_section(
     title = f"2.{index} — {member}"
 
     kb_text, bio_sources = await _fetch_member_bio_kb(member)
-    if kb_text.strip() and len(kb_text) >= 200:
-        extracted = await _extract_member_bio_facts(member, kb_text)
-        content = _apply_verified_corrections(
-            _sanitize_content(_format_member_bio_content(member, extracted)),
-            rfp_client=rfp_client,
-        )
-    else:
-        content = (
-            f"### {member}\n\n"
-            f"[VERIFY: Bio for {member} — add 04_Bio file or confirm name]\n"
-        )
+    kb_available = bool(kb_text.strip() and len(kb_text) >= 200)
+    pdf_name = resolve_bio_pdf_filename(member, bio_sources)
+    content = stub_from_extraction(
+        member=member,
+        role="",
+        pdf_filename=pdf_name,
+        kb_text="",
+        kb_available=kb_available,
+        inline_required=False,
+        extracted=None,
+    )
+    content = _apply_verified_corrections(
+        _sanitize_content(content),
+        rfp_client=rfp_client,
+    )
 
     return ProposalSection(
         id=sec_id,
         title=title,
-        wordTarget=500,
+        wordTarget=120,
         required=True,
         custom=False,
         source="template",
         mode="select",
         content=content,
         status="generated" if content.strip() else "outline",
-        designerNote=f"Bio for {member}. From 04_Bio when available.",
+        designerNote=f"Insert approved bio PDF — {pdf_name}. Do not rewrite Key Accounts.",
         kbRefs=bio_sources[:6] if bio_sources else [],
     )
 
@@ -2225,6 +2607,38 @@ async def apply_chat_structure_plan(
     notes: list[str] = []
 
     focus: ProposalSection | None = None
+
+    if plan.action == "stub_bio":
+        target_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for sid in [plan.edit_section_id] + [
+            _resolve_deletion_id(draft, deletion) for deletion in plan.deletions
+        ]:
+            if sid and sid not in seen_ids:
+                target_ids.append(sid)
+                seen_ids.add(sid)
+        stubbed: list[ProposalSection] = []
+        for sid in target_ids:
+            target = next((s for s in sections if s.id == sid), None)
+            if target is None or not target.id.startswith("section-2-bio-"):
+                continue
+            new_sec = apply_bio_resume_stub_to_section(target)
+            sections = _replace_section(
+                sections, old_id=target.id, new_section=new_sec
+            )
+            stubbed.append(new_sec)
+        if not stubbed:
+            raise ProposalError(
+                "Could not match a team bio to convert to a Designer resume note. "
+                "Name the person (e.g. 2.1 — Sonja Anderson).",
+                status_code=400,
+            )
+        notes.append(
+            "Replaced written bio with Designer resume-attachment note: "
+            + ", ".join(f"**{s.title}**" for s in stubbed[:8])
+            + " (tab kept)"
+        )
+        focus = stubbed[0]
 
     if plan.action == "delete_sections":
         remove_ids: list[str] = []

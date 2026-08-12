@@ -70,5 +70,51 @@ class ScanFactRepairTests(unittest.TestCase):
         self.assertNotIn("Principal & Creative Director, 15", fixed)
 
 
+class RebuildBioStubTests(unittest.IsolatedAsyncioTestCase):
+    async def test_full_resume_becomes_designer_pdf_stub(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+        from app.services import proposal_sections_graph as sections_graph
+        from app.services.proposal_scan_fact_repairs import rebuild_team_bios_from_kb
+
+        draft = ProposalDraft(
+            rfpId="rfp-test",
+            updatedAt="2026-08-12T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="section-2-bio-ron-comer",
+                    title="2.3 — Ron Comer",
+                    content=(
+                        "### Ron Comer — senior account manager\n\n"
+                        "Ron Comer has 40 years of experience in advertising.\n\n"
+                        "**Years of Experience**\n"
+                        "| Area of Expertise | Years |\n"
+                        "| --- | --- |\n"
+                        "| Traditional Media | 20 years |\n"
+                    ),
+                )
+            ],
+        )
+        with patch.object(
+            sections_graph,
+            "_fetch_member_bio_kb",
+            new=AsyncMock(
+                return_value=(
+                    "Approved 04_Bio content for Ron Comer. " * 20,
+                    ["04_Bio_RonComer.pdf"],
+                )
+            ),
+        ):
+            updated, logs = await rebuild_team_bios_from_kb(draft)
+        body = updated.sections[0].content or ""
+        self.assertTrue(logs)
+        self.assertIn("Insert approved bio PDF — 04_Bio_RonComer.pdf", body)
+        self.assertNotIn("**Years of Experience**", body)
+        self.assertNotIn("40 years of experience", body)
+        self.assertTrue(is_bio_pdf_designer_note(body))
+
+
 if __name__ == "__main__":
     unittest.main()

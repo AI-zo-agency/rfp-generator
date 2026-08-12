@@ -2713,6 +2713,21 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
         )
 
 
+    from app.services.proposal_bio_stub import (
+        resolve_bio_pdf_filename,
+        rfp_requires_inline_bios,
+        stub_from_extraction,
+    )
+
+    role_by_name: dict[str, str] = {}
+    for persona in selected_personas or []:
+        name = str(persona.get("name") or "").strip()
+        if name:
+            role_by_name[name] = str(
+                persona.get("title") or persona.get("role") or ""
+            ).strip()
+
+    inline_required = rfp_requires_inline_bios(state.get("rfp_context") or "")
     new_sections: list[dict[str, Any]] = []
     kb_sources = state.get("kb_bio_sources") or []
 
@@ -2722,39 +2737,51 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
         sec_title = f"2.{i} — {member}"
         _log_section_generate_next(state, section_id=sec_id, title=sec_title)
 
-        logger.info("Fetching 04_Bio file for: %s", member)
-        kb_text_for_extraction, bio_sources = await _fetch_member_bio_kb(member)
-
-        if not kb_text_for_extraction.strip() or len(kb_text_for_extraction) < 200:
-            logger.warning("No 04_Bio content for %s — sections will use [VERIFY] placeholders", member)
-
-        extracted = await _extract_member_bio_facts(member, kb_text_for_extraction)
         logger.info(
-            "Bio extraction for %s: title=%r expertise=%d work=%d credentials=%d accounts=%d education=%d",
+            "Building bio stub for %s (legacy path, inline_required=%s)",
             member,
-            extracted.get("title"),
-            len(extracted.get("expertise") or []),
-            len(extracted.get("work_history") or []),
-            len(extracted.get("licenses") or [])
-            + len(extracted.get("certifications") or []),
-            len(extracted.get("key_accounts") or []),
-            len(extracted.get("education") or []),
+            inline_required,
         )
+        kb_text_for_extraction, bio_sources = await _fetch_member_bio_kb(member)
+        kb_available = bool(
+            kb_text_for_extraction.strip() and len(kb_text_for_extraction) >= 200
+        )
+        if not kb_available:
+            logger.warning(
+                "No 04_Bio content for %s — stub with Ella MANUAL FILL",
+                member,
+            )
 
+        pdf_name = resolve_bio_pdf_filename(member, bio_sources)
+        extracted: dict[str, Any] = {}
+        if inline_required and kb_available:
+            extracted = await _extract_member_bio_facts(member, kb_text_for_extraction)
+
+        content = stub_from_extraction(
+            member=member,
+            role=role_by_name.get(member, ""),
+            pdf_filename=pdf_name,
+            kb_text=kb_text_for_extraction if inline_required else "",
+            kb_available=kb_available,
+            inline_required=inline_required,
+            extracted=extracted,
+        )
         content = _apply_verified_corrections(
-            _sanitize_content(_format_member_bio_content(member, extracted)),
+            _sanitize_content(content),
             rfp_client=state.get("rfp_client", ""),
         )
-        raw = {"content": content, "kbRefs": bio_sources or [f"04_Bio_{_bio_file_slug(member)}.pdf"]}
+        raw = {"content": content, "kbRefs": bio_sources or [pdf_name]}
 
         section = _section_payload(
             section_id=sec_id,
             title=sec_title,
             mode="select",
-            word_target=500,
+            word_target=120 if not inline_required else 220,
             page_limit=state.get("page_limit"),
-            page_ratio=0.05,
-            designer_note_default=f"Bio for {member}. From 04_Bio file only — no rewrites.",
+            page_ratio=0.02,
+            designer_note_default=(
+                f"Insert approved bio PDF — {pdf_name}. Do not rewrite Key Accounts."
+            ),
             raw=raw,
             kb_sources=bio_sources or kb_sources,
             extra_refs=[member],

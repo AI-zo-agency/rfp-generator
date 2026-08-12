@@ -168,14 +168,28 @@ Rules:
    Multi-item recommendation lists still count as one single-section hasFix —
    put the full scrub checklist into applyInstruction. Never invent KB contacts
    in applyInstruction (say remove or [VERIFY: Sonja…]).
-9a. Highlighted excerpt + a verify/confirm/check question: they want a VERDICT on
-    that text, not a rewrite. Answer in this shape:
+9a. Highlighted excerpt + verify/confirm/check — OR the user says the excerpt is
+    wrong/incorrect: they want a VERDICT on that text, not a rewrite. You MUST use
+    the Verified KB facts block when present — never answer from memory alone.
+    Answer in this shape:
     - State the verdict first: **Correct**, **Incorrect**, or **Cannot confirm**.
+      **Cannot confirm** means KB has no matching capacity/pricing guide — NOT that
+      the table is wrong. Still check internal arithmetic (do line items sum to the
+      stated total?) and say so clearly.
     - Quote the KB fact you checked against and name its source doc
-      (e.g. 01_companyfacts). If no KB excerpt covers it, say so plainly —
+      (e.g. 01_companyfacts verified.docx). Prefer verified.docx over older .md
+      when both appear. If no KB excerpt covers it, say so plainly —
       never imply you verified something you only read back from the draft.
     - If it is wrong or needs a scrub, show what to change and set hasFix so they
       can apply it. Do not apply it in this turn.
+    - **Cannot confirm** on capacity/hours/pricing: set hasFix=false unless you are
+      asking to insert a specific [PRICING FLAG: …] — then hasFix=true with that
+      flag in applyInstruction. Never use contact-scrub language for hour tables.
+    - Contact fields (email, phone, website): use ONLY the value in Verified KB
+      facts / CANONICAL CONTACT from 01_companyfacts. Never substitute a different
+      @zo.agency address from memory (e.g. hello@ or info@ when companyfacts says
+      connect@). Won/finalist proposals may repeat contact info but companyfacts
+      wins for agency-wide Business Information.
 10. Budget/pricing/fees: follow the pricing playbook when provided — refuse invented
     numbers and reverse-engineered totals; flag out-of-guide scope with
     [PRICING FLAG: … — Sonja review required].
@@ -237,8 +251,15 @@ def _should_skip_structure_planner(
     Improve-pin / single_edit content asks must NOT hit the outline planner
     (that produced "couldn't plan the outline change" for 'make it concise').
     """
-    from app.services.proposal_chat_structure import is_add_section_intent
+    from app.services.proposal_chat_structure import (
+        is_add_section_intent,
+        is_bio_resume_attachment_intent,
+    )
 
+    # Bio → designer PDF note must run the planner (stub in place), not a rewrite
+    # and not a sidebar delete — even when Improve is pinned or the ask says "here".
+    if is_bio_resume_attachment_intent(user_message):
+        return False
     # Add/delete sidebar tabs always go through the structure planner — even when
     # Improve is pinned or the classifier guessed single_edit.
     if chat_intent == "structure" or is_add_section_intent(user_message):
@@ -332,6 +353,78 @@ _SECTION_MARK_IN_TITLE_RE = re.compile(
     r"^\s*\d+(?:\.\d+)*\s*[.:—–\-)]\s*",
     re.I,
 )
+
+_COMPANYFACTS_SOURCE_RE = re.compile(r"01_companyfacts", re.I)
+_ZO_AGENCY_EMAIL_RE = re.compile(r"\b([a-z0-9._+-]+@zo\.agency)\b", re.I)
+
+
+def _companyfacts_source_rank(source: str) -> int:
+    """Lower rank = higher priority. verified.docx beats stale .md."""
+    s = (source or "").casefold()
+    if "01_companyfacts" not in s:
+        return 2
+    if "verified" in s:
+        return 0
+    return 1
+
+
+def _extract_companyfacts_contact_pin(facts_block: str) -> str:
+    """Pull canonical email/phone/website only from 01_companyfacts lines."""
+    if not (facts_block or "").strip():
+        return ""
+    companyfacts_lines = [
+        ln
+        for ln in facts_block.splitlines()
+        if _COMPANYFACTS_SOURCE_RE.search(ln)
+    ]
+    if not companyfacts_lines:
+        return ""
+    verified_lines = [
+        ln for ln in companyfacts_lines if "verified" in ln.casefold()
+    ]
+    blob = "\n".join(verified_lines or companyfacts_lines)
+
+    email = ""
+    for match in _ZO_AGENCY_EMAIL_RE.finditer(blob):
+        email = match.group(1).casefold()
+        break
+
+    phone = ""
+    phone_match = re.search(
+        r"(?:\*\*Main Phone:\*\*|Main Phone:)\s*(\(\d{3}\)\s*\d{3}-\d{4})",
+        blob,
+        re.I,
+    )
+    if phone_match:
+        phone = phone_match.group(1).strip()
+    if not phone:
+        generic = re.search(r"\(\d{3}\)\s*\d{3}-\d{4}", blob)
+        if generic:
+            phone = generic.group(0).strip()
+
+    website = ""
+    site_match = re.search(
+        r"(?:\*\*Website:\*\*|Website:)\s*([a-z0-9][a-z0-9.-]+\.[a-z]{2,})",
+        blob,
+        re.I,
+    )
+    if site_match:
+        website = site_match.group(1).strip().rstrip(".")
+
+    if not any((email, phone, website)):
+        return ""
+
+    lines = [
+        "CANONICAL CONTACT (01_companyfacts verified — cite exactly; "
+        "do NOT substitute a different @zo.agency address):"
+    ]
+    if email:
+        lines.append(f"- Email: {email}")
+    if phone:
+        lines.append(f"- Main phone: {phone}")
+    if website:
+        lines.append(f"- Website: {website}")
+    return "\n".join(lines)
 
 
 def _is_verification_only_ask(user_message: str) -> bool:
@@ -495,6 +588,78 @@ def _build_verification_kb_queries(
         if len(queries) >= 8:
             break
     return queries
+
+
+async def _plan_verification_kb_queries(
+    *,
+    section: ProposalSection,
+    user_message: str,
+    excerpt: str,
+    rfp_client: str = "",
+    rfp_sector: str = "",
+    rfp_title: str = "",
+    research: ProposalResearchCache | None = None,
+) -> list[str]:
+    """Agent decides Supermemory queries for fact-check / pinned-excerpt asks."""
+    heuristic = _build_verification_kb_queries(
+        section=section,
+        user_message=user_message,
+        excerpt=excerpt,
+        rfp_client=rfp_client,
+        rfp_sector=rfp_sector,
+        rfp_title=rfp_title,
+    )
+    from app.services import llm
+
+    if not llm.is_configured():
+        return heuristic
+
+    from app.services.proposal_langchain_agents import AgentRole, plan_section_queries_agent
+
+    task_parts = [
+        "Fact-check ask: plan Supermemory queries to verify whether the draft "
+        "excerpt or user concern matches zö agency verified facts.",
+        "Prefer 01_companyfacts verified.docx for agency profile (legal name, "
+        "email, phone, team size, certifications). Use 03_CS / 06_WON for "
+        "case-study claims. For capacity/hours/budget tables use 00_Guide_Pricing. "
+        "Return queries only — empty list if KB cannot help.",
+        f"User message: {user_message.strip()}",
+        f"Open tab: {section.title or ''}",
+    ]
+    if excerpt.strip():
+        task_parts.append(f"Highlighted excerpt under review:\n{excerpt[:800]}")
+    task = "\n\n".join(task_parts)
+
+    try:
+        planned = await plan_section_queries_agent(
+            role=AgentRole.QUERY_PLANNER,
+            rfp_client=rfp_client,
+            rfp_sector=rfp_sector,
+            rfp_title=rfp_title,
+            section_title=section.title or "",
+            requirements=_rfp_section_requirements_list(research, section.id),
+            retrieval_focus=[excerpt[:400]] if excerpt.strip() else [],
+            prior_queries=heuristic,
+            user_message=task,
+            current_content=(section.content or "")[:2000],
+        )
+    except Exception:
+        logger.warning(
+            "Verification query planner failed for %s", section.id, exc_info=True
+        )
+        return heuristic
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for q in [*heuristic, *(planned or [])]:
+        key = q.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(q)
+        if len(merged) >= 8:
+            break
+    return merged
 
 
 def _selection_ask_is_advisory(
@@ -839,6 +1004,118 @@ class ChatRoute:
     reason: str
 
 
+def _format_apply_fix_prior_context(
+    conversation_history: list[dict[str, str]] | None,
+) -> str:
+    """Prior audit chat — already contains KB-backed facts; no re-fetch on Apply."""
+    if not conversation_history:
+        return ""
+    parts: list[str] = []
+    for turn in conversation_history[-10:]:
+        role = str(turn.get("role") or "user").strip()
+        content = str(turn.get("content") or "").strip()
+        if not content:
+            continue
+        label = "User" if role == "user" else "Assistant"
+        parts.append(f"{label}: {content[:3500]}")
+    return "\n\n".join(parts)
+
+
+async def _apply_suggested_fix_to_section(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    rfp: RfpRecord,
+    instruction: str,
+    conversation_history: list[dict[str, str]] | None,
+    persist: bool,
+) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache, str, str, bool]:
+    """One-click Apply the fix — rewrite from prior audit context, no KB re-plan."""
+    prior_content = section.content or ""
+    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(prior_content)
+    prior_chat = _format_apply_fix_prior_context(conversation_history)
+
+    user_content = (
+        f"Section: {section.title}\n"
+        f"Client: {rfp.client}\n\n"
+        f"Apply instruction:\n{instruction.strip()}\n\n"
+    )
+    if prior_chat:
+        user_content += (
+            "Prior chat (verified audit — use facts cited here; do not re-verify):\n"
+            f"{prior_chat}\n\n"
+        )
+    user_content += f"Current section content:\n{masked_prior[:12000]}"
+
+    system_prompt = APPLY_FIX_REDRAFT_PROMPT
+    if mfill_originals:
+        system_prompt = f"{APPLY_FIX_REDRAFT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
+
+    raw, provider = await llm.chat_json(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        max_tokens=4096,
+        temperature=0.2,
+        node_name="chat_apply_suggested_fix",
+    )
+    content = enforce_narrative_voice(
+        str(raw.get("content", "")).strip(),
+        section_id=section.id,
+        title=section.title,
+        register="narrative",
+    )
+    content = _unmask_manual_fill_checked(content, mfill_originals, attempt=1)
+
+    working = section.model_copy(update={"content": content, "status": "generated"})
+    if research is None:
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+    else:
+        research = research.model_copy(update={"provider": provider})
+
+    changed = (content or "") != prior_content
+    merged = [working if s.id == section.id else s for s in draft.sections]
+    now = datetime.now(timezone.utc).isoformat()
+    updated_draft = draft.model_copy(
+        update={"sections": merged, "updated_at": now, "provider": provider}
+    )
+    if changed and persist:
+        updated_draft = await _persist_section_improve_draft(
+            updated_draft,
+            research,
+            section_title=section.title,
+        )
+        working = _find_draft_section(updated_draft, section.id) or working
+
+    before_words = word_count(prior_content)
+    after_words = word_count(content)
+    if changed:
+        assistant_message = (
+            f"Applied the suggested fix to **{section.title}** "
+            f"({before_words} → {after_words} words)."
+        )
+    else:
+        assistant_message = (
+            f"I could not apply the fix to **{section.title}** — "
+            "the section content did not change. Try editing the instruction or "
+            "select the exact line and ask again."
+        )
+    logger.info(
+        "Apply suggested fix for %s / %s changed=%s (no KB re-plan)",
+        rfp_id,
+        section.id,
+        changed,
+    )
+    return working, updated_draft, research, provider, assistant_message, changed
+
+
 def _improve_outcome(
     section: ProposalSection,
     draft: ProposalDraft,
@@ -916,7 +1193,7 @@ async def _finish_chat_structure_plan(
         focus = _find_draft_section(draft, section_id) or draft.sections[0]
         return _improve_outcome(focus, draft, research, provider, question, False)
 
-    if structure_plan.action not in {"add_sections", "delete_sections"}:
+    if structure_plan.action not in {"add_sections", "delete_sections", "stub_bio"}:
         return None
 
     focus_before = _find_draft_section(draft, section_id)
@@ -1577,10 +1854,16 @@ def _open_section_owns_case_study_ask(
 
 def _is_outline_structure_ask(user_message: str) -> bool:
     """Add/create/delete sidebar sections — proposal-wide, not open-tab rewrite."""
-    from app.services.proposal_chat_structure import is_add_section_intent
+    from app.services.proposal_chat_structure import (
+        is_add_section_intent,
+        is_bio_resume_attachment_intent,
+    )
 
     text = (user_message or "").strip()
     if not text:
+        return False
+    # Keep the bio tab; this is an in-place designer-note stub, not a delete.
+    if is_bio_resume_attachment_intent(text):
         return False
     if is_add_section_intent(text):
         return True
@@ -2582,7 +2865,23 @@ async def _verification_facts_block(
 
     matched: list[str] = []
     other: list[str] = []
+    companyfacts_verified: list[str] = []
+    companyfacts_other: list[str] = []
     seen: set[str] = set()
+
+    def _append_line(line: str, hit: dict) -> None:
+        source = _source(hit)
+        if _COMPANYFACTS_SOURCE_RE.search(source):
+            bucket = (
+                companyfacts_verified
+                if _companyfacts_source_rank(source) == 0
+                else companyfacts_other
+            )
+            bucket.append(line)
+        elif _matches_needle(hit):
+            matched.append(line)
+        else:
+            other.append(line)
 
     for query in queries:
         try:
@@ -2605,18 +2904,19 @@ async def _verification_facts_block(
             source = _source(hit)
             fact_line = re.sub(r"\s+", " ", fact)[:400]
             line = f"- {fact_line}" + (f"  [source: {source}]" if source else "")
-            if _matches_needle(hit):
-                matched.append(line)
-            else:
-                other.append(line)
-            if len(matched) >= VERIFICATION_FACT_LIMIT:
-                return "\n".join(matched[:VERIFICATION_FACT_LIMIT])
+            _append_line(line, hit)
+        total = (
+            len(companyfacts_verified)
+            + len(companyfacts_other)
+            + len(matched)
+        )
+        if total >= VERIFICATION_FACT_LIMIT:
+            break
 
-    if matched:
-        # A few generic companyfacts lines can still help legal-name checks.
-        room = max(0, VERIFICATION_FACT_LIMIT - len(matched))
-        return "\n".join(matched + other[: min(2, room)])
-    return "\n".join(other[:VERIFICATION_FACT_LIMIT])
+    ordered = companyfacts_verified + companyfacts_other + matched + other
+    if ordered:
+        return "\n".join(ordered[:VERIFICATION_FACT_LIMIT])
+    return ""
 
 
 async def _section_chat_advisory_reply(
@@ -2682,16 +2982,19 @@ async def _section_chat_advisory_reply(
                 "found no matching case-study snippets. Say what is still missing — "
                 "do NOT claim you searched if this block is empty.\n"
             )
-    elif _is_verification_only_ask(user_message) or _VERIFY_ASK_RE.search(
-        user_message or ""
+    elif (
+        excerpt
+        or _is_verification_only_ask(user_message)
+        or _VERIFY_ASK_RE.search(user_message or "")
     ):
-        queries = _build_verification_kb_queries(
+        queries = await _plan_verification_kb_queries(
             section=section,
             user_message=user_message or "",
             excerpt=excerpt,
             rfp_client=rfp.client,
             rfp_sector=rfp.sector or "",
             rfp_title=rfp.title or "",
+            research=research,
         )
         prefer = _verification_needles_from_content(
             section.title or "", section.content or ""
@@ -2700,7 +3003,8 @@ async def _section_chat_advisory_reply(
         facts = ""
         try:
             facts = await _verification_facts_block(
-                queries, prefer_needles=prefer
+                queries,
+                prefer_needles=prefer,
             )
         except Exception:
             reachable = False
@@ -2721,11 +3025,14 @@ async def _section_chat_advisory_reply(
                 "fact is missing from the knowledge base.\n"
             )
         elif facts:
+            contact_pin = _extract_companyfacts_contact_pin(facts)
             kb_block = (
                 "\n\nVerified KB facts (zö agency source of truth — check the "
                 "draft against these and cite the [source: …] you used):\n"
-                f"{facts}\n"
             )
+            if contact_pin:
+                kb_block += f"{contact_pin}\n\n"
+            kb_block += f"{facts}\n"
             if supporting.strip():
                 kb_block += f"\nSupporting KB excerpts:\n{supporting[:4000]}\n"
         else:
@@ -2972,6 +3279,19 @@ Rules:
 - preserveFullExcerpt must be true when the selection is long or the user wants gaps/placeholders filled — the editor must NOT shorten or summarize.
 - kbQueries must target zö facts missing in the excerpt, not the RFP buyer and not the user's chat message verbatim.
 - If the instruction only removes, strips, or makes wording qualitative (no new facts needed), return "kbQueries": []."""
+
+APPLY_FIX_REDRAFT_PROMPT = """Apply ONE suggested fix to a zö agency proposal section.
+
+The user clicked Apply the fix after an advisory audit. PRIOR CHAT holds the
+KB-backed verdict — use cited facts exactly. Do NOT invent or substitute values.
+
+Rules:
+- Implement the apply instruction only; preserve all unrelated prose and structure.
+- Keep markdown tables/lists/headings unless the instruction requires layout change.
+- For table cell fixes: same columns — change only the wrong value(s).
+- Never add deferred "upon request" language or new unverified contacts.
+
+Return ONLY JSON: {"content": "<full updated section markdown>"}"""
 
 STATIC_SECTION_REDRAFT_PROMPT = """Improve ONE static zö proposal section (company overview, team bios, or case studies).
 
@@ -4327,6 +4647,7 @@ async def _plan_refined_queries(
 
 async def _redraft_rfp_section(
     *,
+    draft: ProposalDraft,
     section: ProposalSection,
     rfp_section: RfpSectionMap | None,
     rfp: RfpRecord,
@@ -4339,6 +4660,7 @@ async def _redraft_rfp_section(
     zo_context: str,
     avoidance_block: str = "",
     research: ProposalResearchCache | None = None,
+    compliance_user_message: str | None = None,
 ) -> tuple[ProposalSection, str]:
     requirements = rfp_section.requirements if rfp_section else []
     register = classify_section_register(
@@ -4497,7 +4819,9 @@ async def _redraft_rfp_section(
             zo_mode=section.mode,
         )
 
-        refusal = refuse_noncompliant_budget_edit(user_message, content)
+        refusal = refuse_noncompliant_budget_edit(
+            (compliance_user_message or user_message), content
+        )
         if refusal:
             raise ProposalError(refusal, status_code=422)
 
@@ -6211,6 +6535,23 @@ async def improve_proposal_section(
         raise ProposalError(f"Section {section_id} not found in draft.", status_code=404)
     before_section = section.model_copy()
 
+    if apply_fix:
+        working, updated_draft, research, provider, reply, changed = (
+            await _apply_suggested_fix_to_section(
+                rfp_id=rfp_id,
+                section=section,
+                draft=draft,
+                research=research,
+                rfp=rfp,
+                instruction=raw_user_message,
+                conversation_history=conversation_history,
+                persist=persist,
+            )
+        )
+        return _improve_outcome(
+            working, updated_draft, research, provider, reply, changed, None
+        )
+
     if not selection_mode and not apply_fix:
         from app.services.proposal_manuscript_compact import (
             section_needs_designer_compact,
@@ -7260,7 +7601,7 @@ async def improve_proposal_section(
             avoidance_block=avoidance_block,
             working_excerpt=working_excerpt if pre_fills > 0 else None,
             research=research,
-            compliance_user_message=user_message,
+            compliance_user_message=latest_user_ask,
             lean=lean_patch,
         )
         if research is None:
@@ -7578,6 +7919,7 @@ async def improve_proposal_section(
         )
 
         updated_section, provider = await _redraft_rfp_section(
+            draft=draft,
             section=section,
             rfp_section=rfp_section,
             rfp=rfp,
@@ -7590,6 +7932,7 @@ async def improve_proposal_section(
             zo_context=zo_context,
             avoidance_block=avoidance_block,
             research=research,
+            compliance_user_message=raw_user_message,
         )
 
         new_queries = {

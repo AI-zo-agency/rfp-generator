@@ -52,6 +52,29 @@ class ReverseEngineerGuardTests(unittest.TestCase):
             )
         )
 
+    def test_policy_or_prior_refusal_mention_is_not_an_ask(self) -> None:
+        """Conversation history / playbook text often contains the phrase —
+        that must not refuse a References question like 'what to add here?'."""
+        poisoned = (
+            "Prior conversation (MUST remember — address the latest message using this context):\n"
+            "Assistant: That request would reverse-engineer line items to hit a target total. "
+            "Per the pricing playbook, each line must trace to the Pricing Guide.\n"
+            "Assistant: Never reverse-engineer a line to hit a total.\n\n"
+            "Latest user message:\nwhat to add here?"
+        )
+        self.assertFalse(user_asked_reverse_engineered_total(poisoned))
+        self.assertFalse(user_asked_reverse_engineered_total("what to add here?"))
+        self.assertIsNone(
+            refuse_noncompliant_budget_edit("what to add here?", "…references…")
+        )
+
+    def test_affirmative_reverse_engineer_ask_is_refused(self) -> None:
+        self.assertTrue(
+            user_asked_reverse_engineered_total(
+                "Please reverse-engineer the line items to hit $80,000"
+            )
+        )
+
 
 class BudgetRebuildAskTests(unittest.TestCase):
     def test_fill_budget_detected(self) -> None:

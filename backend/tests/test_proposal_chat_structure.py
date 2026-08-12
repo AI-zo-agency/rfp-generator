@@ -561,6 +561,12 @@ class AddGenericSectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             is_add_section_intent("add another team bio for the roster")
         )
+        self.assertFalse(
+            is_add_section_intent(
+                "here remove this whole bio and add Designer note "
+                "of attachment of this resume"
+            )
+        )
 
     def test_custom_title_not_rejected_when_member_case_null(self) -> None:
         """Regression: null memberName/caseStudyName used to trip _is_bogus_structure_title(None)."""
@@ -825,6 +831,125 @@ class SplitSectionTests(unittest.IsolatedAsyncioTestCase):
 
         msg = "replace Hampton Lumber case study with Bend from KB"
         self.assertFalse(_is_in_place_kb_or_verify_edit(msg))
+
+
+class BioResumeAttachmentStubTests(unittest.IsolatedAsyncioTestCase):
+    USER_MSG = (
+        "here remove this whole bio and add Designer note of attachment of this resume"
+    )
+
+    def _draft(self) -> ProposalDraft:
+        return ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec("section-1-who", "1.1 — Who We Are", "zö agency overview"),
+                _sec(
+                    "section-2-bio-sonja",
+                    "2.1 — Sonja Anderson",
+                    "### Sonja Anderson\n\nFull resume dump\nYears of Experience | 20+",
+                ),
+                _sec("section-2-bio-todd", "2.2 — Todd Anderson", "Todd bio"),
+            ],
+            updatedAt="2026-08-12T00:00:00+00:00",
+        )
+
+    def test_intent_detects_designer_note_resume_ask(self) -> None:
+        from app.services.proposal_chat_structure import (
+            is_bio_resume_attachment_intent,
+        )
+
+        self.assertTrue(is_bio_resume_attachment_intent(self.USER_MSG))
+        self.assertTrue(
+            is_bio_resume_attachment_intent(
+                "replace this bio with a designer note to attach the PDF"
+            )
+        )
+        self.assertFalse(is_bio_resume_attachment_intent("delete Sonja Anderson bio"))
+        self.assertFalse(
+            is_bio_resume_attachment_intent(
+                "make it short and concise even add designer note if needed"
+            )
+        )
+
+    async def test_plan_stubs_open_bio_without_llm(self) -> None:
+        from app.services.proposal_chat_structure import plan_chat_structure_action
+
+        draft = self._draft()
+        with patch(
+            "app.services.proposal_chat_structure._structure_plan_llm_once",
+            new=AsyncMock(side_effect=AssertionError("LLM should not run")),
+        ):
+            plan = await plan_chat_structure_action(
+                draft=draft,
+                user_message=self.USER_MSG,
+                focus_section_id="section-2-bio-sonja",
+                rfp_title="DuPage County",
+                rfp_client="DuPage County",
+                rfp_context="",
+            )
+        self.assertEqual(plan.action, "stub_bio")
+        self.assertEqual(plan.edit_section_id, "section-2-bio-sonja")
+
+    async def test_llm_delete_of_named_bio_is_coerced_to_stub(self) -> None:
+        from app.services.proposal_chat_structure import plan_chat_structure_action
+
+        draft = self._draft()
+        llm_plan = StructurePlan(
+            action="delete_sections",
+            deletions=[
+                StructureDeletion(
+                    sectionId="section-2-bio-sonja",
+                    title="2.1 — Sonja Anderson",
+                )
+            ],
+            assistantNote="Removing Sonja Anderson bio and replacing with a Designer note.",
+        )
+        with patch(
+            "app.services.proposal_chat_structure._structure_plan_llm_once",
+            new=AsyncMock(return_value=llm_plan),
+        ):
+            plan = await plan_chat_structure_action(
+                draft=draft,
+                user_message=self.USER_MSG,
+                focus_section_id="section-1-who",
+                rfp_title="DuPage County",
+                rfp_client="DuPage County",
+                rfp_context="",
+                chat_intent="structure",
+            )
+        self.assertEqual(plan.action, "stub_bio")
+        self.assertEqual(plan.edit_section_id, "section-2-bio-sonja")
+
+    async def test_apply_keeps_tab_and_writes_designer_note(self) -> None:
+        from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+
+        draft = self._draft()
+        plan = StructurePlan(
+            action="stub_bio",
+            editSectionId="section-2-bio-sonja",
+            deletions=[
+                StructureDeletion(
+                    sectionId="section-2-bio-sonja",
+                    title="2.1 — Sonja Anderson",
+                )
+            ],
+            assistantNote="Replacing the bio body with a Designer resume-attachment note.",
+        )
+        updated, focus, message = await apply_chat_structure_plan(
+            draft=draft, plan=plan, rfp_client="DuPage County"
+        )
+        ids = [s.id for s in updated.sections]
+        self.assertIn("section-2-bio-sonja", ids)
+        self.assertIn("section-2-bio-todd", ids)
+        self.assertEqual(
+            [i for i in ids if i.startswith("section-2-bio-")],
+            ["section-2-bio-sonja", "section-2-bio-todd"],
+        )
+        self.assertEqual(focus.id, "section-2-bio-sonja")
+        self.assertTrue(is_bio_pdf_designer_note(focus.content or ""))
+        self.assertIn("04_Bio_SonjaAnderson.pdf", focus.content or "")
+        self.assertNotIn("Years of Experience", focus.content or "")
+        self.assertIn("tab kept", message.casefold())
 
 
 if __name__ == "__main__":

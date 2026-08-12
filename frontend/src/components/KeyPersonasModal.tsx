@@ -7,6 +7,7 @@ import {
   saveProposalKeyPersonas,
   type KeyPersonaItem,
 } from "@/lib/proposal-api";
+import type { ProposalOutline } from "@/types/proposal";
 
 interface KeyPersonasModalProps {
   isOpen: boolean;
@@ -14,7 +15,7 @@ interface KeyPersonasModalProps {
   rfpId?: string;
   initialSelectedIds?: string[];
   onSelectionChange?: (selectedPersonaIds: string[]) => void;
-  onBioRebuildStarted?: () => void;
+  onDraftSynced?: (draft: ProposalOutline) => void;
 }
 
 export function KeyPersonasModal({
@@ -23,7 +24,7 @@ export function KeyPersonasModal({
   rfpId,
   initialSelectedIds = [],
   onSelectionChange,
-  onBioRebuildStarted,
+  onDraftSynced,
 }: KeyPersonasModalProps) {
   const [personas, setPersonas] = useState<KeyPersonaItem[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>(initialSelectedIds);
@@ -105,8 +106,8 @@ export function KeyPersonasModal({
           setSaveSuccess(true);
           window.setTimeout(() => setSaveSuccess(false), 2000);
         }
-        if (result.bioRebuildStarted) {
-          onBioRebuildStarted?.();
+        if (result.draft && result.biosSynced) {
+          onDraftSynced?.(result.draft);
         }
       } catch {
         // silent fallback
@@ -116,7 +117,7 @@ export function KeyPersonasModal({
         }
       }
     },
-    [rfpId, onSelectionChange, onBioRebuildStarted, applySelectedIds]
+    [rfpId, onSelectionChange, onDraftSynced, applySelectedIds]
   );
 
   const togglePersona = useCallback(

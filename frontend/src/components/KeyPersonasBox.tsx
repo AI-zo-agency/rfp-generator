@@ -2,12 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { KeyPersonasModal } from "./KeyPersonasModal";
+import type { ProposalOutline } from "@/types/proposal";
 
 interface KeyPersonasBoxProps {
   rfpId?: string;
   initialSelectedIds?: string[];
   onSelectionChange?: (selectedPersonaIds: string[]) => void;
-  onBioRebuildStarted?: () => void;
+  onDraftSynced?: (draft: ProposalOutline) => void;
   className?: string;
 }
 
@@ -15,7 +16,7 @@ export function KeyPersonasBox({
   rfpId,
   initialSelectedIds = [],
   onSelectionChange,
-  onBioRebuildStarted,
+  onDraftSynced,
   className = "",
 }: KeyPersonasBoxProps) {
   const [isOpen, setIsOpen] = useState(false);
@@ -79,7 +80,7 @@ export function KeyPersonasBox({
         rfpId={rfpId}
         initialSelectedIds={selectedIds}
         onSelectionChange={handleSelectionChange}
-        onBioRebuildStarted={onBioRebuildStarted}
+        onDraftSynced={onDraftSynced}
       />
     </div>
   );

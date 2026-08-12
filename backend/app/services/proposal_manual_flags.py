@@ -714,6 +714,29 @@ def apply_finalize_handoff_to_draft(
     )
 
 
+def _sanitize_manual_fill_field(field: str) -> str:
+    """Strip leaked code identifiers (dotted snake_case + tabs) from field text.
+
+    A ComplianceGap's rfp_requirement / message sometimes carries a rule_id
+    like 'deterministic.manuscript_locks.primary_contact_lock_is_ron_comer' —
+    concatenating that into a MANUAL FILL tag produced the DuPage-class leak
+    where the visible tag read
+        [MANUAL FILL: Sonja, deterministic.manuscript_locks…\tPrimary contact…]
+    Drop dotted-snake_case identifier runs and embedded tabs before use.
+    """
+    if not field:
+        return field
+    sanitized = re.sub(
+        r"\b[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+[ \t]*",
+        "",
+        field,
+        flags=re.I,
+    )
+    sanitized = sanitized.replace("\t", " ")
+    sanitized = re.sub(r"[ \t]{2,}", " ", sanitized)
+    return sanitized.strip(" ,.-—–")
+
+
 def gaps_to_manual_fill_flags(
     gaps: list[ComplianceGap],
     *,
@@ -723,7 +746,8 @@ def gaps_to_manual_fill_flags(
     flags: list[ManualFillFlag] = []
     for gap in gaps:
         owner = _owner_for_gap(gap)
-        field = (gap.rfp_requirement or gap.message)[:100].strip()
+        raw_field = (gap.rfp_requirement or gap.message)[:100].strip()
+        field = _sanitize_manual_fill_field(raw_field) or "confirm before submission"
         tag = f"[MANUAL FILL: {owner} — {field}]"
         kind: Literal[
             "verify", "placeholder", "manual_fill", "compliance", "budget", "consistency", "other"

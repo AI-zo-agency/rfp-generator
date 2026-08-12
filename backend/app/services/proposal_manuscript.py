@@ -131,6 +131,171 @@ def strip_internal_pricing_flags(text: str) -> str:
     return cleaned
 
 
+# --- Additional authoring-time scrubs (DuPage-class defects) ---------------------
+#
+# These strip / convert artifacts observed shipping in real drafts that neither
+# INTERNAL_HANDOFF_TAG_RE nor scrub_client_facing_section_artifacts previously
+# caught. Each is deliberately narrow so it cannot silently eat legitimate prose.
+
+# [REMOVE: ...], [NOTE: ...], [TODO: ...] etc. — inline authoring instructions
+# that leaked into the DuPage Creative team roster ("[REMOVE: verify roster, not
+# on approved team] Graphic Designer") and elsewhere. These are NEVER legitimate
+# handoffs — MANUAL FILL / DESIGNER NOTE / VERIFY / FLAG cover the real cases.
+_INLINE_INSTRUCTION_TAG_RE = re.compile(
+    r"\[(?:REMOVE|NOTE|TODO|FIXME|INTERNAL|CONFIRM)\b[^\]]*\]",
+    re.IGNORECASE,
+)
+
+
+def strip_inline_instruction_tags(text: str) -> str:
+    """Remove [REMOVE:]/[NOTE:]/[TODO:]/[FIXME:]/[INTERNAL:]/[CONFIRM:] tags.
+
+    Observed inline mid-sentence in the DuPage draft — never a legitimate
+    handoff shape. Real handoffs use MANUAL FILL / DESIGNER NOTE / VERIFY / FLAG.
+    """
+    if not text:
+        return text
+    cleaned = _INLINE_INSTRUCTION_TAG_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+# Unresolved template tokens ({{budget.agency_revenue}}, {{budget.total_client_invoicing}}).
+# The LLM emitted these as literal Jinja-style variables in the DuPage Bid Pricing
+# section and no substitution step ever ran, so "monthly professional services fee
+# of {{budget.agency_revenue}}" shipped verbatim. Do NOT silently delete — that
+# hides the missing fee. Convert to a highly visible MANUAL FILL the writer must
+# resolve before submission.
+_TEMPLATE_TOKEN_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}")
+
+
+def convert_unresolved_template_tokens(text: str) -> str:
+    """Turn stray {{namespace.field}} tokens into visible MANUAL FILL handoffs."""
+    if not text:
+        return text
+
+    def _repl(match: re.Match[str]) -> str:
+        raw = match.group(1).strip()
+        ns, _, field = raw.partition(".")
+        hint = f"resolve {ns} token: {field}" if ns and field else f"resolve token: {raw}"
+        return f"[MANUAL FILL: Sonja — {hint}]"
+
+    return _TEMPLATE_TOKEN_RE.sub(_repl, text)
+
+
+# Bare "Confirm before submit —" / "Needs your input —" / "Action needed —" lines
+# that the LLM writes as ordinary prose. In DuPage they shipped as plain visible
+# text ("Confirm before submit — Primary case study, workforce board …"). Convert
+# to proper MANUAL FILL tags so (a) writers see them as a real gap in the UI's
+# flag panel, and (b) the export-time internal-handoff scrub removes them from
+# the client-facing DOCX / Google Doc.
+_BARE_CONFIRMATION_LINE_RE = re.compile(
+    r"(?im)^[ \t]*"
+    r"(?:confirm\s+before\s+(?:submit|submission)"
+    r"|needs?\s+your\s+input"
+    r"|action\s+needed"
+    r"|flag\s+for\s+sonja)"
+    r"\s*[—–\-,:]\s*"
+    r"(?P<body>[^\n]{3,400})"
+    r"[ \t]*$"
+)
+
+
+def convert_bare_confirmation_lines(text: str) -> str:
+    """Turn free-text 'Confirm before submit — X' lines into [MANUAL FILL: …] tags.
+
+    Only matches lines that START with the trigger phrase followed by a dash,
+    comma, or colon and a real body — a paragraph containing the phrase
+    mid-sentence is left alone.
+    """
+    if not text:
+        return text
+
+    def _repl(match: re.Match[str]) -> str:
+        body = match.group("body").strip().rstrip(".;")
+        if not body or "[" in body or "]" in body:
+            return match.group(0)
+        return f"[MANUAL FILL: Sonja — {body}]"
+
+    return _BARE_CONFIRMATION_LINE_RE.sub(_repl, text)
+
+
+# Leaked internal identifiers inside MANUAL FILL descriptions — the DuPage draft
+# shipped:
+#   [MANUAL FILL: Sonja, deterministic.manuscript_locks.primary_contact_lock_is_ron_comer_but_this_section_names_haley_n\tPrimary contact lock is 'Ron Comer', but this section names Ron Comer, Sonja…]
+# The producer concatenated a rule_id (dotted snake_case) with a tab and the
+# human message. Strip the rule_id + tab so writers see the plain-English message.
+_LEAKED_IDENTIFIER_RE = re.compile(
+    r"(\[MANUAL\s+FILL:\s*[^,\]]+),\s*"
+    r"[a-z][a-z0-9_.]*(?:_[a-z0-9]+){2,}"        # snake_case with ≥3 underscored tokens
+    r"[ \t]*",
+    re.IGNORECASE,
+)
+
+
+def strip_leaked_manual_fill_identifiers(text: str) -> str:
+    """Drop dotted-snake_case rule_ids that leaked into MANUAL FILL descriptions."""
+    if not text:
+        return text
+    cleaned = _LEAKED_IDENTIFIER_RE.sub(r"\1 — ", text)
+    cleaned = cleaned.replace("\t", " ")
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned
+
+
+# Standalone subheadings with no body content beneath them — the DuPage draft had
+# "Client Voice" heading with nothing under it, "City of Medford: Rogue X
+# Community Recreation Center" with only a heading, "1.3 — Business Information"
+# with only the label "Business Information" beneath. Reader / designer sees a
+# labelled empty box — worse than dropping the heading entirely.
+_MD_HEADING_LINE_RE = re.compile(r"^\s{0,3}#{1,6}\s+.+$")
+
+
+def collapse_empty_subheadings(text: str) -> str:
+    """Remove heading lines that have no substantive body content beneath them.
+
+    A line counts as "body" only if it contains visible non-tag content before
+    the next heading. Standalone MANUAL FILL / DESIGNER NOTE / instruction-tag
+    lines are not treated as body — an empty section with only a handoff tag is
+    still an empty section for the reader.
+    """
+    if not text:
+        return text
+    lines = text.split("\n")
+    keep = [True] * len(lines)
+
+    def _is_heading(idx: int) -> bool:
+        return 0 <= idx < len(lines) and bool(_MD_HEADING_LINE_RE.match(lines[idx]))
+
+    def _has_body_before_next_heading(start: int) -> bool:
+        j = start + 1
+        while j < len(lines):
+            if _is_heading(j):
+                return False
+            body = lines[j].strip()
+            if not body:
+                j += 1
+                continue
+            # Standalone tag lines don't count as body.
+            if (
+                INTERNAL_HANDOFF_TAG_RE.fullmatch(body)
+                or _INLINE_INSTRUCTION_TAG_RE.fullmatch(body)
+            ):
+                j += 1
+                continue
+            return True
+        return False
+
+    for i in range(len(lines)):
+        if _is_heading(i) and not _has_body_before_next_heading(i):
+            keep[i] = False
+
+    cleaned = "\n".join(line for line, k in zip(lines, keep) if k)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip("\n")
+
+
 def scrub_client_facing_section_artifacts(text: str) -> str:
     """Strip evidence markers + pricing flags from manuscript section bodies.
 
@@ -147,8 +312,25 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
     For the literal document that leaves the building (DOCX / Google Doc
     export), use scrub_text_for_client_export below, which also strips the
     handoff tags this function preserves.
+
+    Order matters:
+      1. convert bare "Confirm before submit — X" / template tokens INTO real
+         MANUAL FILL tags so writers see them in the flag panel
+      2. sanitize any MANUAL FILL tags that already contain leaked internal
+         rule_ids (dotted snake_case + tab) so the display copy is human-readable
+      3. strip inline [REMOVE:] / [NOTE:] / [TODO:] instruction tags — never
+         legitimate authoring artifacts
+      4. drop evidence markers and internal pricing flags (existing behavior)
+      5. collapse standalone empty subheadings ("Client Voice" with no body)
     """
-    return strip_internal_pricing_flags(strip_evidence_citation_markers(text or ""))
+    cleaned = text or ""
+    cleaned = convert_bare_confirmation_lines(cleaned)
+    cleaned = convert_unresolved_template_tokens(cleaned)
+    cleaned = strip_leaked_manual_fill_identifiers(cleaned)
+    cleaned = strip_inline_instruction_tags(cleaned)
+    cleaned = strip_internal_pricing_flags(strip_evidence_citation_markers(cleaned))
+    cleaned = collapse_empty_subheadings(cleaned)
+    return cleaned
 
 
 # --- Internal handoff tags: THE single definition ---------------------------------

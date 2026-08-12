@@ -1835,6 +1835,31 @@ async def _generate_sections_1_3_inner(
         logger.info("Sections 1–3 integrity: %s — %s", rfp_id, line)
     await asave_proposal_draft(draft)
 
+    from app.core.config import settings as app_settings
+
+    if not app_settings.fast_proposal_generation and llm.is_configured():
+        try:
+            from app.services.proposal_manuscript_fact_contradictions import (
+                run_manuscript_fact_contradiction_pass,
+            )
+
+            fact = await run_manuscript_fact_contradiction_pass(
+                draft,
+                rfp=rfp,
+                use_llm=True,
+            )
+            draft = fact.draft
+            if fact.rewrites_applied or fact.verify_tags_added:
+                await asave_proposal_draft(draft)
+            for line in fact.logs[:10]:
+                logger.info("Sections 1–3 fact-contradiction: %s — %s", rfp_id, line)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Sections 1–3 fact-contradiction pass skipped for %s: %s",
+                rfp_id,
+                exc,
+            )
+
     prior_research = await aget_research_cache(rfp_id)
     research = ProposalResearchCache(
         rfpId=rfp.id,

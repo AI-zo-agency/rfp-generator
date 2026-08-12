@@ -28,20 +28,38 @@ class SuggestedFix:
 
 
 # Reply looks like an audit that proposed draft changes (even if hasFix was omitted).
+# "Cannot confirm" alone is NOT actionable — it means KB is silent, not that contacts
+# need scrubbing.
 _RECOMMENDATION_REPLY_RE = re.compile(
     r"(?is)\b("
     r"recommendation(?:s)?|"
     r"apply\s+these\s+fixes|"
     r"factual\s+errors?|"
-    r"unverifiable|"
-    r"cannot\s+confirm|"
+    r"\*\*incorrect\*\*|"
     r"incorrect\s*:|"
     r"problem\s*:|"
     r"kb\s+coverage\s*:\s*none|"
     r"does\s+not\s+(?:provide|mention)|"
     r"invented\s+these\s+details|"
     r"remove\s+or\s+verify|"
-    r"flag\s+for\s+sonja"
+    r"flag\s+for\s+sonja|"
+    r"\[pricing\s+flag:"
+    r")"
+)
+
+_CONTACT_AUDIT_RE = re.compile(
+    r"(?is)\b("
+    r"contact|phone|email|reference|clientlist|"
+    r"invented\s+contact|wrong\s+client"
+    r")\b"
+)
+
+_PRICING_CAPACITY_AUDIT_RE = re.compile(
+    r"(?is)\b("
+    r"\[pricing\s+flag:|pricing\s+flag|"
+    r"capacity\s+allocation|hours?\s*/\s*month|monthly\s+capacity|"
+    r"hour\s+breakdown|fee\s+table|budget|pricing\s+playbook|"
+    r"reverse-engineered|blended\s+hour"
     r")\b"
 )
 
@@ -117,7 +135,12 @@ def reply_offers_actionable_fixes(reply: str) -> bool:
     if not text or len(text) < 80:
         return False
     if _CLEAN_PASS_RE.search(text) and not _RECOMMENDATION_REPLY_RE.search(text):
-        return False
+        if not re.search(r"(?is)\[pricing\s+flag:", text):
+            return False
+    if re.search(r"(?is)\[pricing\s+flag:", text) and _PRICING_CAPACITY_AUDIT_RE.search(
+        text
+    ):
+        return True
     return bool(_RECOMMENDATION_REPLY_RE.search(text))
 
 
@@ -156,6 +179,29 @@ def build_rfp_fit_replace_instruction(
         "3) Keep [VERIFY] only for fields truly missing from KB.\n"
         "4) Do NOT invent overnight visitation, conversion, or visitor-spending metrics.\n"
         "5) Preserve entries the audit marked as correct or well-evidenced.\n\n"
+        f"Audit to follow:\n{audit}"
+    )
+
+
+def build_pricing_flag_instruction(
+    *,
+    section_title: str,
+    reply: str,
+) -> str:
+    """Insert PRICING FLAG from audit — capacity/hours/budget, not contact scrub."""
+    title = (section_title or "this section").strip() or "this section"
+    audit = re.sub(r"\s+", " ", (reply or "").strip())[:1800]
+    return (
+        f"Edit ONLY the sidebar section titled “{title}”. "
+        "The audit could not verify capacity/pricing numbers against KB.\n"
+        "1) Do NOT rewrite the hour table or dollar amounts unless the audit marks "
+        "them **Incorrect**.\n"
+        "2) If the audit includes a [PRICING FLAG: …] line, insert it once at the top "
+        "of this section (or next to the capacity table) exactly as written.\n"
+        "3) If no PRICING FLAG text is in the audit, add: "
+        "[PRICING FLAG: Monthly capacity allocation not verified against KB guide — "
+        "Sonja review required]\n"
+        "4) Do NOT remove contacts, clients, or unrelated prose.\n\n"
         f"Audit to follow:\n{audit}"
     )
 
@@ -217,9 +263,17 @@ def resolve_advisory_suggested_fix(
             section_title=title, reply=reply
         )
         summary = "Replace weak example with KB-backed tourism case study"
-    else:
+    elif _PRICING_CAPACITY_AUDIT_RE.search(reply) and not _CONTACT_AUDIT_RE.search(
+        reply
+    ):
+        instruction = build_pricing_flag_instruction(section_title=title, reply=reply)
+        summary = "Add PRICING FLAG from audit (capacity/pricing)"
+    elif _CONTACT_AUDIT_RE.search(reply):
         instruction = build_safe_scrub_instruction(section_title=title, reply=reply)
         summary = "Apply safe scrub from audit (no invented contacts)"
+    else:
+        # Generic audit with no contact/pricing shape — do not offer a misleading button.
+        return None
 
     synthesized = SuggestedFix(
         section_id=fallback_section_id,

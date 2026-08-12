@@ -1134,6 +1134,7 @@ async def save_proposal_key_personas(
 
     draft = await aget_proposal_draft(rfp_id)
     now = datetime.now(timezone.utc).isoformat()
+    prior = draft
     if not draft:
         draft = ProposalDraft(
             rfp_id=rfp_id,
@@ -1142,45 +1143,54 @@ async def save_proposal_key_personas(
             selected_key_personas=payload.selected_persona_ids,
         )
     else:
-        draft.selected_key_personas = payload.selected_persona_ids
-        draft.updated_at = now
+        draft = draft.model_copy(
+            update={
+                "selected_key_personas": payload.selected_persona_ids,
+                "updated_at": now,
+            }
+        )
 
-    # If the proposal is already past Section 2 generation, a new Key Personas
-    # pick has to trigger a Section 2 rebuild — otherwise the manuscript keeps
-    # the bio tabs (and their designer-note stubs) for whoever was selected at
-    # generation time. The strip itself lives inside generate_sections_1_3 (see
-    # regenerate_section_2_only) so a racing client autosave cannot resurrect
-    # the old bios between here and the background job reading the draft.
-    rebuild_bios = False
+    # Keep Team Bios tabs in lockstep with the Key Personas picker — add stubs
+    # for new picks, drop tabs for people who were unchecked. Do this in-request
+    # (no sections-1-3 job): a background rebuild raced with client autosave and
+    # merged the old bios back in.
+    bios_synced = False
     if draft.sections:
-        existing_bio_ids = {
-            s.id
-            for s in draft.sections
-            if s.id.startswith("section-2-bio-")
-            and s.id != "section-2-bio-placeholder"
-        }
-        if existing_bio_ids:
-            try:
-                from app.services import team_personas_service
+        try:
+            from app.services import team_personas_service
+            from app.services.proposal_chat_structure import (
+                sync_draft_bios_to_key_personas,
+            )
+            from app.services.proposal_draft_snapshots import (
+                push_before_structure_change_snapshot,
+            )
 
-                all_personas = await team_personas_service.get_all_key_personas()
-                by_id = {p["id"]: p for p in all_personas}
-                selected_members = [
-                    str(by_id[pid]["name"])
-                    for pid in payload.selected_persona_ids
-                    if pid in by_id
-                ]
-                # Slug rule mirrors _build_bios in proposal_sections_graph.py.
-                expected_bio_ids = {
-                    f"section-2-bio-{m.lower().replace(' ', '-').replace(chr(39), '')}"
-                    for m in selected_members
-                }
-                if expected_bio_ids != existing_bio_ids:
-                    rebuild_bios = True
-            except Exception as exc:
-                logger.warning(
-                    "Persona bio delta check failed for %s: %s", rfp_id, exc
+            all_personas = await team_personas_service.get_all_key_personas()
+            by_id = {p["id"]: p for p in all_personas}
+            selected_personas = [
+                by_id[pid]
+                for pid in payload.selected_persona_ids
+                if pid in by_id
+            ]
+            synced, bios_synced = sync_draft_bios_to_key_personas(
+                draft, selected_personas
+            )
+            if bios_synced:
+                base = prior or draft
+                draft = push_before_structure_change_snapshot(
+                    base, section_title="Key Personas"
                 )
+                draft = draft.model_copy(
+                    update={
+                        "sections": synced.sections,
+                        "updated_at": now,
+                        "selected_key_personas": payload.selected_persona_ids,
+                    }
+                )
+        except Exception as exc:
+            logger.warning(
+                "Key Persona bio sync failed for %s: %s", rfp_id, exc
+            )
 
     try:
         await asave_proposal_draft(draft)
@@ -1207,26 +1217,13 @@ async def save_proposal_key_personas(
             detail=f"Failed to save Key Personas: {exc}",
         ) from exc
 
-    response: dict[str, object] = {
+    return {
         "ok": True,
         "rfpId": rfp_id,
         "selectedPersonaIds": draft.selected_key_personas or [],
+        "biosSynced": bios_synced,
+        "draft": draft.model_dump(by_alias=True),
     }
-
-    if rebuild_bios:
-        async def _rebuild() -> None:
-            async with pipeline_phase(rfp_id, "sections-1-3"):
-                await generate_sections_1_3(
-                    rfp_id,
-                    force_regenerate=False,
-                    regenerate_section_2_only=True,
-                )
-
-        record = await start_proposal_job(rfp_id, "sections-1-3", _rebuild)
-        response["bioRebuildStarted"] = True
-        response["proposalJob"] = proposal_job_to_dict(record)
-
-    return response
 
 
 proposals_direct_router = APIRouter(prefix="/proposals", tags=["proposals"])

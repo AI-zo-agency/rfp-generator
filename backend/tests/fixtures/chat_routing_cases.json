@@ -276,6 +276,12 @@
       "message": "please tighten this up",
       "edit": true,
       "structure": false
+    },
+    {
+      "category": "edit",
+      "message": "here remove this whole bio and add Designer note of attachment of this resume",
+      "edit": true,
+      "structure": false
     }
   ]
 }

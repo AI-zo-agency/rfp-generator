@@ -78,7 +78,11 @@ Your ONLY jobs for ONE pass over the proposal:
    complianceTicket with policyOrGuideline + rewriteBrief. Do NOT invent policies the RFP
    never mentions. Do NOT paste generic FAR/GSA boilerplate unprompted by THIS RFP.
 5. Do NOT rewrite section prose yourself. Do NOT emit tickets for style/tone polish.
-6. Return ONLY JSON:
+6. BUDGET CROSS-SECTION (notes only — dedicated pass fixes these): when Budget/Pricing
+   coexists with Monthly Capacity / hours tables, watch for double-billed coordination
+   (Planning + PM both claiming meetings/status reporting) and hours-vs-fee mismatch.
+   Mention in notes[] if seen; do not delete Budget tab.
+7. Return ONLY JSON:
 {"deleteSectionTickets":[{"sectionId":"...","keepSectionId":"...","reason":"..."}],
  "dedupeTickets":[{"sectionId":"...","keepHomeSectionId":"...","trimGuidance":"..."}],
  "compactFormatTickets":[{"sectionId":"...","reason":"...","rewriteBrief":"..."}],

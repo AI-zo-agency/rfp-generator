@@ -112,6 +112,32 @@ class WantsSectionEditTests(unittest.TestCase):
             )
         )
 
+    def test_bio_designer_note_ask_runs_structure_planner(self) -> None:
+        from app.services.proposal_section_editor import _should_skip_structure_planner
+
+        msg = (
+            "here remove this whole bio and add Designer note "
+            "of attachment of this resume"
+        )
+        self.assertFalse(
+            _should_skip_structure_planner(
+                "single_edit",
+                user_message=msg,
+                selection_mode=False,
+                apply_fix=False,
+                improve_section_pinned=True,
+            )
+        )
+        self.assertFalse(
+            _should_skip_structure_planner(
+                "structure",
+                user_message=msg,
+                selection_mode=False,
+                apply_fix=False,
+                improve_section_pinned=False,
+            )
+        )
+
     def test_improve_pin_does_not_skip_add_section_structure(self) -> None:
         from app.services.proposal_section_editor import _should_skip_structure_planner
 

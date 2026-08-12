@@ -1147,8 +1147,8 @@ async def _run_fulfill_rfp_gaps_body(
     # LLM manuscript-vs-RFP contradictions).
     await _scan_progress(
         10,
-        "Scan RFP: RFP contradiction check",
-        "Blocker suite + LLM manuscript vs RFP — same guards as Generate-from-scratch.",
+        "Scan RFP: Contradiction check",
+        "LLM manuscript vs verified company facts + vs RFP requirements.",
     )
     await _ensure_not_stopped()
     try:
@@ -1178,6 +1178,9 @@ async def _run_fulfill_rfp_gaps_body(
         report["rfpContradictionCount"] = suite.contradiction_count
         report["rfpContradictionRewrites"] = suite.contradiction_rewrites
         report["rfpContradictionUnresolved"] = suite.contradiction_unresolved
+        report["factContradictionCount"] = suite.fact_contradiction_count
+        report["factContradictionRewrites"] = suite.fact_contradiction_rewrites
+        report["factContradictionUnresolved"] = suite.fact_contradiction_unresolved
         report["rfpContradictionTitles"] = suite.contradiction_unresolved_titles or [
             line for line in suite.logs if "FIXED contradiction" in line
         ][:8]
@@ -1187,8 +1190,9 @@ async def _run_fulfill_rfp_gaps_body(
                 risk
                 for risk in (report.get("disqualificationRisks") or [])
                 if "manuscript contradicts rfp" not in risk.casefold()
+                and "fact contradiction" not in risk.casefold()
             ] + [
-                f"Unresolved RFP contradiction — {line}"
+                f"Unresolved contradiction — {line}"
                 for line in suite.contradiction_unresolved_titles[:6]
             ]
             seen_r: set[str] = set()

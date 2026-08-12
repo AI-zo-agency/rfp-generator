@@ -78,7 +78,11 @@ _BUDGET_TOPIC_RE = re.compile(
 _REVERSE_ENGINEER_ASK_RE = re.compile(
     r"(?is)"
     r"(?:"
-    r"reverse[\s-]?engineer|"
+    # Affirmative reverse-engineer ask with a nearby target — bare playbook/refusal
+    # mentions ("Never reverse-engineer…", "would reverse-engineer…") are filtered
+    # in user_asked_reverse_engineered_total.
+    r"reverse[\s-]?engineer(?:ing)?\b.{0,80}"
+    r"(?:\$\s*\d|\b(?:hit|reach|meet|fit|make|force|squeeze)\b)|"
     r"(?:hit|reach|make|get(?:\s+it)?\s+to|force|squeeze|pad|inflate)\s+"
     r"(?:(?:the|a)\s+)?(?:total|budget|ceiling|cap|sum)\b.{0,24}\$?\s*\d|"
     r"(?:total|budget|sum|ceiling|cap)\s*(?:of|to|at|=|:)?\s*\$\s*\d|"
@@ -86,6 +90,14 @@ _REVERSE_ENGINEER_ASK_RE = re.compile(
     r"(?:fit|reduce|lower|cut)\s+(?:(?:the|it|our)\s+)?(?:total|budget|sum)\s+to\s+\$?\s*\d|"
     r"so\s+the\s+total\s+(?:is|equals|hits|reaches|=)\s+\$?\s*\d"
     r")"
+)
+
+_LATEST_USER_MESSAGE_RE = re.compile(
+    r"(?is)\nLatest user message:\s*\n(.*)\Z"
+)
+
+_REVERSE_ENGINEER_NEGATION_RE = re.compile(
+    r"(?is)\b(?:do\s+not|don't|dont|never|refuse|would|not)\s+$"
 )
 
 # Completing / reconciling Cost from the guide is NOT reverse-engineering.
@@ -418,6 +430,13 @@ def user_asked_reverse_engineered_total(user_message: str) -> bool:
     text = user_message or ""
     if not text.strip():
         return False
+    # When improve() composes prior turns, only judge the latest user ask — prior
+    # assistant refusals/playbook text often contain "reverse-engineer".
+    latest = _LATEST_USER_MESSAGE_RE.search(text)
+    if latest:
+        text = (latest.group(1) or "").strip()
+        if not text:
+            return False
     # Completing Cost from the guide / canonical object is allowed even if wording
     # includes "match" or "fit" without an explicit dollar/target figure.
     if _SAFE_BUDGET_COMPLETE_RE.search(text) and not re.search(
@@ -425,7 +444,14 @@ def user_asked_reverse_engineered_total(user_message: str) -> bool:
         text,
     ):
         return False
-    return bool(_REVERSE_ENGINEER_ASK_RE.search(text))
+    for match in _REVERSE_ENGINEER_ASK_RE.finditer(text):
+        # Skip policy / refusal phrasing that mentions reverse-engineering.
+        if match.group(0).lower().startswith("reverse"):
+            prefix = text[max(0, match.start() - 48) : match.start()]
+            if _REVERSE_ENGINEER_NEGATION_RE.search(prefix):
+                continue
+        return True
+    return False
 
 
 def refuse_noncompliant_budget_edit(user_message: str, new_text: str) -> str | None:

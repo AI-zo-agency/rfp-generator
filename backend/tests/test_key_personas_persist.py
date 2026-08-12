@@ -186,5 +186,112 @@ class TeamSelectionFromPersonasTests(unittest.TestCase):
         self.assertEqual(resolved[3]["name"], "Missing Person")
 
 
+class SyncBiosToKeyPersonasTests(unittest.TestCase):
+    def _draft(self, *bios: tuple[str, str]) -> ProposalDraft:
+        from app.models.proposal import ProposalSection
+
+        sections = [
+            ProposalSection(
+                id="section-1-who",
+                title="1.1 — Who We Are",
+                content="zö agency overview",
+                source="template",
+                mode="select",
+            )
+        ]
+        for sid, title in bios:
+            sections.append(
+                ProposalSection(
+                    id=sid,
+                    title=title,
+                    content=f"### {title.split('—')[-1].strip()}\n\nFull resume",
+                    source="template",
+                    mode="select",
+                )
+            )
+        return ProposalDraft(
+            rfpId="rfp-1",
+            sections=sections,
+            updatedAt="2026-08-12T00:00:00Z",
+            selectedKeyPersonas=["sonja-anderson", "todd-anderson"],
+        )
+
+    def test_removing_a_persona_drops_that_bio_tab(self) -> None:
+        from app.services.proposal_chat_structure import sync_draft_bios_to_key_personas
+
+        draft = self._draft(
+            ("section-2-bio-sonja-anderson", "2.1 — Sonja Anderson"),
+            ("section-2-bio-todd-anderson", "2.2 — Todd Anderson"),
+        )
+        updated, changed = sync_draft_bios_to_key_personas(
+            draft,
+            [{"id": "todd-anderson", "name": "Todd Anderson", "title": "Strategist"}],
+        )
+        self.assertTrue(changed)
+        ids = [s.id for s in updated.sections]
+        self.assertNotIn("section-2-bio-sonja-anderson", ids)
+        self.assertIn("section-2-bio-todd-anderson", ids)
+        todd = next(s for s in updated.sections if s.id == "section-2-bio-todd-anderson")
+        self.assertEqual(todd.title, "2.1 — Todd Anderson")
+        self.assertIn("Full resume", todd.content)
+
+    def test_adding_a_persona_inserts_designer_note_stub(self) -> None:
+        from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+        from app.services.proposal_chat_structure import sync_draft_bios_to_key_personas
+
+        draft = self._draft(
+            ("section-2-bio-todd-anderson", "2.1 — Todd Anderson"),
+        )
+        updated, changed = sync_draft_bios_to_key_personas(
+            draft,
+            [
+                {"id": "todd-anderson", "name": "Todd Anderson", "title": "Strategist"},
+                {"id": "ron-comer", "name": "Ron Comer", "title": "Account Lead"},
+            ],
+        )
+        self.assertTrue(changed)
+        ids = [s.id for s in updated.sections]
+        self.assertIn("section-2-bio-todd-anderson", ids)
+        self.assertIn("section-2-bio-ron-comer", ids)
+        ron = next(s for s in updated.sections if s.id == "section-2-bio-ron-comer")
+        self.assertTrue(is_bio_pdf_designer_note(ron.content or ""))
+        self.assertIn("04_Bio_RonComer.pdf", ron.content or "")
+
+    def test_clearing_all_personas_removes_every_bio_tab(self) -> None:
+        from app.services.proposal_chat_structure import sync_draft_bios_to_key_personas
+
+        draft = self._draft(
+            ("section-2-bio-sonja-anderson", "2.1 — Sonja Anderson"),
+            ("section-2-bio-todd-anderson", "2.2 — Todd Anderson"),
+        )
+        updated, changed = sync_draft_bios_to_key_personas(draft, [])
+        self.assertTrue(changed)
+        self.assertFalse(
+            any(
+                s.id.startswith("section-2-bio-")
+                and s.id != "section-2-bio-placeholder"
+                for s in updated.sections
+            )
+        )
+        self.assertTrue(
+            any(s.id == "section-1-who" for s in updated.sections)
+        )
+
+    def test_empty_outline_does_not_invent_bios(self) -> None:
+        from app.services.proposal_chat_structure import sync_draft_bios_to_key_personas
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[],
+            updatedAt="2026-08-12T00:00:00Z",
+        )
+        updated, changed = sync_draft_bios_to_key_personas(
+            draft,
+            [{"id": "todd-anderson", "name": "Todd Anderson", "title": "Strategist"}],
+        )
+        self.assertFalse(changed)
+        self.assertEqual(updated.sections, [])
+
+
 if __name__ == "__main__":
     unittest.main()

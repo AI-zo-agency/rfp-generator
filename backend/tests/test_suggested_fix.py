@@ -157,6 +157,56 @@ def test_resolve_no_fallback_for_clean_pass():
     )
 
 
+def test_resolve_no_fallback_for_cannot_confirm_capacity():
+    """Cannot confirm on hours table must not offer contact scrub."""
+    draft = ProposalDraft(
+        rfpId="r1",
+        updatedAt="2026-08-10T00:00:00Z",
+        sections=[
+            ProposalSection(
+                id="sec-capacity",
+                title="Monthly Capacity Allocation",
+                content="Total: 235 hours/month",
+            ),
+        ],
+    )
+    reply = (
+        "**Cannot confirm**\n\n"
+        "The 235-hour total is not verified against any KB capacity guide.\n\n"
+        "[PRICING FLAG: Monthly capacity allocation not verified — Sonja review required]"
+    )
+    fix = resolve_advisory_suggested_fix(
+        {"reply": reply, "hasFix": False},
+        fallback_section_id="sec-capacity",
+        section_title="Monthly Capacity Allocation",
+        draft=draft,
+    )
+    assert fix is not None
+    assert "PRICING FLAG" in fix.instruction
+    assert "contact" not in fix.instruction.casefold() or "do not remove contacts" in fix.instruction.casefold()
+
+
+def test_resolve_no_fix_for_cannot_confirm_without_flag_or_contacts():
+    draft = ProposalDraft(
+        rfpId="r1",
+        updatedAt="2026-08-10T00:00:00Z",
+        sections=[ProposalSection(id="sec-a", title="A", content="x")],
+    )
+    reply = (
+        "**Cannot confirm** — KB has no document matching this claim. "
+        "I cannot verify the number."
+    )
+    assert (
+        resolve_advisory_suggested_fix(
+            {"reply": reply, "hasFix": False},
+            fallback_section_id="sec-a",
+            section_title="A",
+            draft=draft,
+        )
+        is None
+    )
+
+
 def test_resolve_prefers_model_instruction_when_present():
     draft = ProposalDraft(
         rfpId="r1",

@@ -35,7 +35,7 @@ export async function POST(
   try {
     const body = await request.json();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    const timeout = setTimeout(() => controller.abort(), 20000);
     const res = await fetch(
       `${BACKEND_URL}/api/v1/proposals/${encodeURIComponent(id)}/key-personas`,
       {
