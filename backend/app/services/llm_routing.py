@@ -93,6 +93,21 @@ _QUALITY_EXACT = frozenset(
         # Requirement-ledger ADD (Task 10) — drafts client-facing prose for a
         # section that had no draft content at all; a client reads this.
         "ledger_add_section_draft",
+        # Complete & Scan review agent. Every one of these is a correctness or
+        # persuasiveness judgment about prose a client reads, so none may fall
+        # through to the economy model:
+        #   claim_verifier      decides whether a fact is true, false, or unproven
+        #   evaluator           scores the draft the way the agency will
+        #   consistency_auditor decides which of two conflicting facts is right
+        #   repetition_auditor  decides what to cut from the manuscript
+        #   slop_auditor        rewrites client-facing prose
+        #   manual_fill_triage  decides what would disqualify the bid
+        "claim_verifier",
+        "evaluator",
+        "consistency_auditor",
+        "repetition_auditor",
+        "slop_auditor",
+        "manual_fill_triage",
         # Scan-RFP truncation repair (Task 12) — completes a section a
         # client reads that was cut off mid-sentence; grounded on KB
         # evidence, so getting the completion right matters the same way

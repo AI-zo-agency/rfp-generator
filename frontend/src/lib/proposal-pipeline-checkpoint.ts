@@ -134,19 +134,33 @@ function phase3SectionContentUsable(content: string | undefined | null): boolean
   return true;
 }
 
-/** UI chip labels for the Scan RFP button (full RFP update). */
+/**
+ * UI chip labels for the Scan RFP button (full RFP update).
+ *
+ * Must stay in sync with FULFILL_STEPS in
+ * backend/app/services/proposal_fulfill_rfp_gaps.py — this list is maintained by hand,
+ * so a stage added on the backend is invisible here until it is added below.
+ */
 export const FULFILL_SCAN_STEP_LABELS = [
   "Closing & submission tabs",
   "RFP structure (all scored sections)",
   "Requirement ledger (merge / cut / add)",
   "DQ & gov-policy gate (agentic loop)",
+  "Remove duplicate sections",
+  "Senior editor review (RFP reviewer)",
   "Budget (regen if missing + thorough)",
   "Consistency repairs",
+  "Compliance fabrication guard",
   "Contractor KPIs (Section 2.3)",
   "KB fact-check (Supermemory)",
   "RFP contradiction check (LLM)",
-  "Remove optional [VERIFY] tags",
+  "Remove optional VERIFY/MANUAL FILL",
+  "Line-by-line KB grounding (async)",
+  "Compact manuscript (remove duplicates)",
+  "Page limit & anti-invention (Ralph)",
+  "Review & quality gate (3 acts)",
   "Pre-submit refresh",
+  "Submission readiness (triage + score)",
 ] as const;
 
 export const FULL_PROPOSAL_STEP_LABELS: { phase: PipelinePhase; label: string }[] = [

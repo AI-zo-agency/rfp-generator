@@ -230,6 +230,14 @@ class ManualFillFlag(BaseModel):
     owner: str | None = None
     finalized: bool = False
     kb_searched: bool = Field(default=False, alias="kbSearched")
+    # Triage — see proposal_manual_fill_triage. All optional so drafts persisted
+    # before this existed deserialize unchanged.
+    criticality: Literal["disqualifying", "scored", "optional"] | None = None
+    # Verbatim RFP clause requiring this item. "disqualifying" without one is
+    # downgraded to "scored": a DQ claim is a factual claim and needs a source.
+    rfp_evidence: str | None = Field(default=None, alias="rfpEvidence")
+    why_required: str | None = Field(default=None, alias="whyRequired")
+    if_skipped: str | None = Field(default=None, alias="ifSkipped")
 
 
 class PreSubmitReview(BaseModel):
@@ -248,6 +256,81 @@ class PreSubmitReview(BaseModel):
     ready_to_submit: bool = Field(default=False, alias="readyToSubmit")
     scanned_at: str = Field(alias="scannedAt")
     provider: str | None = None
+
+
+GateDetector = Literal["claim", "evaluator", "consistency", "repetition", "slop"]
+
+
+class ClaimVerdict(BaseModel):
+    """Act 1 verdict on one fact-bound claim. Three-state, never two.
+
+    `unresolved` covers both "retrieval failed" and "KB is silent" deliberately: both
+    mean a human must confirm, and neither is evidence the claim is false. Content is
+    removed only on positive evidence of falsity.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    claim: str
+    status: Literal["verified", "contradicted", "unresolved"] = "unresolved"
+    evidence: str = ""
+    evidence_doc: str | None = Field(default=None, alias="evidenceDoc")
+    corrected_value: str | None = Field(default=None, alias="correctedValue")
+
+
+class GateTicket(BaseModel):
+    """One repairable finding. Keyed structurally by (section_id, code)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    code: str
+    detector: GateDetector = "slop"
+    message: str = ""
+    guidance: str = ""
+    # True when the fix asserts a fact, so the patcher may not write it without
+    # retrieved evidence. Enforced mechanically, not by prompt instruction.
+    requires_evidence: bool = Field(default=False, alias="requiresEvidence")
+    outcome: Literal["open", "fixed", "manual_fill", "reverted", "unfixed"] = "open"
+    detail: str = ""
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.section_id, self.code)
+
+
+class CriterionVerdict(BaseModel):
+    """Act 2 score for one section against one scored criterion."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    section_id: str = Field(alias="sectionId")
+    criterion: str = ""
+    weight: float | None = None
+    score: int = 0
+    what_would_lose_points: str = Field(default="", alias="whatWouldLosePoints")
+    fix_ticket: str = Field(default="", alias="fixTicket")
+
+
+class QualityGateReport(BaseModel):
+    """Everything the gate did, and everything it could not do."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    rounds_run: int = Field(default=0, alias="roundsRun")
+    ran: bool = True
+    stopped_reason: str = Field(default="", alias="stoppedReason")
+    claims: list[ClaimVerdict] = Field(default_factory=list)
+    scorecard: list[CriterionVerdict] = Field(default_factory=list)
+    tickets: list[GateTicket] = Field(default_factory=list)
+    changes: list[str] = Field(default_factory=list)
+    # What round 3 could not fix, and why — the tuning signal.
+    convergence: list[str] = Field(default_factory=list)
+
+    @property
+    def unresolved_claims(self) -> list[ClaimVerdict]:
+        return [c for c in self.claims if c.status == "unresolved"]
 
 
 class AdversarialAuditFinding(BaseModel):

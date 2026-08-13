@@ -1027,6 +1027,92 @@ async def export_proposal_docx(rfp_id: str) -> Response:
     )
 
 
+@router.post("/{rfp_id}/proposal/export/readiness-report")
+async def export_readiness_report_docx(rfp_id: str) -> Response:
+    """Download the Submission Readiness Report (.docx) — internal, never submitted.
+
+    Renders from the data Complete & Scan persisted, so it never re-runs the scan.
+    """
+    from app.services.proposal_manual_fill_triage import triage_manual_fill_flags  # noqa: F401
+    from app.services.proposal_readiness import CriterionScore, compute_readiness
+    from app.services.proposal_readiness_report import (
+        build_readiness_report_docx_bytes,
+        build_readiness_report_filename,
+    )
+    from app.services.proposal_repository import aget_proposal_draft, aget_research_cache
+
+    try:
+        if not rfp_exists(rfp_id):
+            raise HTTPException(status_code=404, detail="RFP not found")
+
+        draft = await aget_proposal_draft(rfp_id)
+        if not draft:
+            raise HTTPException(status_code=400, detail="No proposal draft to report on.")
+
+        stored = draft.last_fulfill_report or {}
+        payload_data = stored.get("readinessReport") or {}
+        if not stored.get("readiness"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No readiness data yet. Run Complete & Scan first — the report is "
+                    "built from that pass."
+                ),
+            )
+
+        research = await aget_research_cache(rfp_id)
+        review = getattr(research, "presubmit_review", None) if research else None
+        flags = list(getattr(review, "manual_fill_flags", None) or [])
+
+        scores = [
+            CriterionScore(
+                section_id=str(row.get("sectionId") or ""),
+                criterion=str(row.get("criterion") or ""),
+                score=int(row.get("score") or 0),
+                weight=row.get("weight"),
+            )
+            for row in (payload_data.get("scorecard") or [])
+        ]
+        # Recomputed rather than read back so the number always matches the flags and
+        # scorecard rendered beside it, even if the draft changed after the scan.
+        readiness = compute_readiness(
+            scores=scores,
+            flags=flags,
+            unresolved=len(payload_data.get("unverifiedClaims") or []),
+        )
+
+        title = str(payload_data.get("rfpTitle") or "") or "Proposal"
+        payload = build_readiness_report_docx_bytes(
+            rfp_title=title,
+            readiness=readiness,
+            flags=flags,
+            scores=scores,
+            changes=list(payload_data.get("changes") or []),
+            unverified_claims=list(payload_data.get("unverifiedClaims") or []),
+            unfixed=list(payload_data.get("unfixed") or []),
+        )
+        filename = build_readiness_report_filename(rfp_title=title)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Readiness report export failed: {exc}"
+        ) from exc
+
+    encoded = quote(filename)
+    return Response(
+        content=payload,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{encoded}"; filename*=UTF-8\'\'{encoded}'
+            ),
+        },
+    )
+
+
 @router.post(
     "/{rfp_id}/proposal/export/google-doc",
     response_model=ProposalGoogleDocExportResponse,

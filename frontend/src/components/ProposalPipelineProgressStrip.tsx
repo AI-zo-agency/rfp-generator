@@ -9,6 +9,7 @@ import {
   type PipelinePhase,
   type ProposalPipelineCheckpoint,
 } from "@/lib/proposal-pipeline-checkpoint";
+import { FULFILL_SCAN_STEP_GROUPS } from "@/lib/proposal-scan-step-groups";
 import type { FullProposalProgress } from "@/lib/proposal-api";
 
 type Props = {
@@ -147,27 +148,57 @@ export function ProposalPipelineProgressStrip({
           })}
         </ol>
       ) : stepLabels ? (
-        <ol className="mt-2 flex flex-wrap gap-1.5">
-          {stepLabels.map((label, i) => {
-            const n = i + 1;
-            const active = stepIndex === n;
-            const done = stepIndex != null && stepIndex > n;
+        // Grouped by phase rather than one flat row: nineteen equal-weight pills read
+        // as noise, and the stage actually running gets lost among them. Every stage
+        // stays listed — the point is legibility, not hiding work.
+        <div className="mt-2 space-y-1.5">
+          {FULFILL_SCAN_STEP_GROUPS.map((group) => {
+            const numbers = group.steps.map(
+              (s) => stepLabels.indexOf(s as (typeof stepLabels)[number]) + 1
+            );
+            const groupDone =
+              stepIndex != null && numbers.every((n) => n > 0 && stepIndex > n);
+            const groupActive =
+              stepIndex != null && numbers.some((n) => n === stepIndex);
             return (
-              <li
-                key={label}
-                className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                  active
-                    ? "bg-zo-orange/15 text-zo-orange"
-                    : done
-                      ? "bg-emerald-50 text-emerald-800"
-                      : "bg-zo-surface text-zo-text-muted"
-                }`}
-              >
-                {label}
-              </li>
+              <div key={group.label} className="flex flex-wrap items-baseline gap-1.5">
+                <span
+                  className={`w-24 shrink-0 text-[10px] font-bold uppercase tracking-[0.08em] ${
+                    groupActive
+                      ? "text-zo-orange"
+                      : groupDone
+                        ? "text-emerald-700"
+                        : "text-zo-text-muted"
+                  }`}
+                >
+                  {group.label}
+                </span>
+                <ol className="flex flex-wrap gap-1.5">
+                  {group.steps.map((label) => {
+                    const n =
+                      stepLabels.indexOf(label as (typeof stepLabels)[number]) + 1;
+                    const active = stepIndex === n;
+                    const done = stepIndex != null && n > 0 && stepIndex > n;
+                    return (
+                      <li
+                        key={label}
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                          active
+                            ? "bg-zo-orange/15 text-zo-orange"
+                            : done
+                              ? "bg-emerald-50 text-emerald-800"
+                              : "bg-zo-surface text-zo-text-muted"
+                        }`}
+                      >
+                        {label}
+                      </li>
+                    );
+                  })}
+                </ol>
+              </div>
             );
           })}
-        </ol>
+        </div>
       ) : null}
     </div>
   );

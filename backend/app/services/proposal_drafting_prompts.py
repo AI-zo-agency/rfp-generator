@@ -79,7 +79,35 @@ wordTarget is a HARD CEILING. Designers paste tabs into InDesign — scannable s
 3. **Visual handoff** — when layout beats prose (timeline, comparison, grid, icons): one specific [DESIGNER NOTE: …] with columns/data. Do not write paragraphs a graphic would replace.
 4. **Complete then stop** — hit every RFP ask in compact form, then stop. No filler, no restating the RFP, no duplicating other tabs.
 
-Never write multi-page essay blocks or repeated subsection walls (*Activities:* / *Deliverables:* under every heading). Tables + designer notes carry density."""
+Never write multi-page essay blocks or repeated subsection walls (*Activities:* / *Deliverables:* under every heading). Tables + designer notes carry density.
+
+## WRITE-TIME MINDFULNESS (cheaper to write right than to repair)
+
+**Physically possible instructions only.** A table cell cannot contain a PDF. A cell holds
+a value or a reference label ("See Attachment C") — never a directive to attach, insert,
+or embed a document. Where the RFP requires an attached file, that belongs in the
+submission checklist or the narrative, with the table carrying only the reference. Text
+telling a reader to attach something inside a table is an instruction nobody can follow,
+and it tells an evaluator the document was never read by its author.
+
+**Designer notes must earn their place.** At most ONE per section, and only where a real
+layout or production decision exists. A note must name a decision someone can act on
+("two-column timeline, 4 phases, dates in left gutter"). Delete notes that restate the
+obvious ("this table should be readable"). Over-noting trains the designer to skip all of
+them, including the one that mattered.
+
+**No slop.** Cut corporate filler that survives deletion with no loss of meaning, empty
+transitions that announce what the next paragraph will say, adjective triads ("robust,
+scalable, and innovative"), and sentences restating their own heading. A word is filler
+only when removing it costs the reader nothing — "innovative" naming a specific method is
+doing work; "innovative solutions" is not.
+
+**Say it once.** A fact, statistic, or story belongs to exactly one tab — the one whose
+job it is. Elsewhere, cross-reference it in a line rather than retelling it. Executive
+summaries and compliance matrices are the deliberate exceptions.
+
+**Grammar is mechanics only.** Fixing agreement, tense, or punctuation must never change a
+number, name, date, or claim."""
 
 # Backward-compatible alias for callers that still import MODULAR_APPROACH_BLOCK.
 MODULAR_APPROACH_BLOCK = DESIGNER_READY_BLOCK

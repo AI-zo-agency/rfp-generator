@@ -409,7 +409,9 @@ async def _run_fulfill_rfp_gaps_body(
         "Line-by-line KB grounding (async)",
         "Compact manuscript (remove duplicates)",
         "Page limit & anti-invention (Ralph)",
+        "Review & quality gate (3 acts)",
         "Pre-submit refresh",
+        "Submission readiness (triage + score)",
     )
 
     async def _ensure_not_stopped() -> None:
@@ -1569,8 +1571,54 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Scan RFP Ralph skipped: %s", exc)
         report["logs"].append(f"Ralph page-fit skipped: {exc}")
 
+    # Stage 17 — the review agent. Runs before pre-submit refresh so the existing
+    # pre-submit pass still has the last word and reports on the gate's edits rather
+    # than a stale draft.
+    gate_report = None
     await _scan_progress(
         17,
+        "Scan RFP: review & quality gate",
+        "Verify every fact-bound claim, score against RFP criteria, then cut slop and repetition.",
+    )
+    try:
+        await _ensure_not_stopped()
+        from app.core.config import settings as _cfg
+        from app.services.proposal_quality_gate import run_quality_gate
+
+        if not getattr(_cfg, "quality_gate_enabled", True):
+            # The expensive stage. Off means Scan stays quick while iterating; on is
+            # what you want for the pass before submission.
+            report["qualityGate"] = {
+                "ran": False,
+                "stoppedReason": "disabled by config (QUALITY_GATE_ENABLED=false)",
+            }
+            report["logs"].append("Quality gate disabled by config.")
+        else:
+            draft, gate_report = await run_quality_gate(
+                rfp=rfp,
+                draft=draft,
+                research=research,
+                rfp_text=rfp_text,
+                ensure_not_stopped=_ensure_not_stopped,
+            )
+            await asave_proposal_draft(draft)
+            report["qualityGate"] = gate_report.model_dump(by_alias=True)
+            report["logs"].extend(f"Gate: {line}" for line in gate_report.changes[:20])
+            report["logs"].append(
+                f"Gate: {gate_report.rounds_run} round(s), "
+                f"{sum(1 for t in gate_report.tickets if t.outcome == 'fixed')} fixed, "
+                f"{sum(1 for t in gate_report.tickets if t.outcome == 'manual_fill')} to manual fill, "
+                f"stopped because {gate_report.stopped_reason}"
+            )
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Scan RFP quality gate skipped: %s", exc)
+        report["logs"].append(f"Quality gate skipped: {exc}")
+        report["qualityGate"] = {"ran": False, "stoppedReason": str(exc)}
+
+    await _scan_progress(
+        18,
         "Scan RFP: pre-submit refresh",
         "Checklist, manual flags, and ending report.",
     )
@@ -1579,6 +1627,95 @@ async def _run_fulfill_rfp_gaps_body(
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp, draft=draft, research=research, finalized=False
     )
+
+    # Stage 18 — Submission readiness. Triage every open flag against the RFP text so
+    # each one carries a criticality and the clause justifying it, then score what is
+    # still open. Best-effort like the 17 stages above: a failure records "not run" and
+    # leaves the flags untriaged rather than dropping them.
+    await _scan_progress(
+        19,
+        "Scan RFP: submission readiness",
+        "Triage manual flags against the RFP, then score what is still open.",
+    )
+    try:
+        await _ensure_not_stopped()
+        from app.services.proposal_manual_fill_triage import triage_manual_fill_flags
+        from app.services.proposal_readiness import CriterionScore, compute_readiness
+
+        triaged = await triage_manual_fill_flags(
+            flags=list(review.manual_fill_flags or []),
+            rfp_text=rfp_text,
+            rfp_client=rfp.client or "",
+            rfp_title=rfp.title or "",
+        )
+        review = review.model_copy(update={"manual_fill_flags": triaged})
+
+        # The gate's Act 2 scorecard is what makes readiness measurable. Without it
+        # compute_readiness reports measured=False rather than a damning 0%.
+        criterion_scores = [
+            CriterionScore(
+                section_id=v.section_id,
+                criterion=v.criterion,
+                score=v.score,
+                weight=v.weight,
+            )
+            for v in (gate_report.scorecard if gate_report else [])
+        ]
+        unresolved_claims = (
+            len(gate_report.unresolved_claims) if gate_report else 0
+        )
+        readiness = compute_readiness(
+            scores=criterion_scores, flags=triaged, unresolved=unresolved_claims
+        )
+        report["readiness"] = {
+            "score": readiness.score,
+            "measured": readiness.measured,
+            "confidence": readiness.confidence,
+            "confidenceNote": readiness.confidence_note,
+            "verdict": readiness.verdict,
+            "ready": readiness.ready,
+            "openDisqualifying": readiness.open_disqualifying,
+            "openScored": readiness.open_scored,
+        }
+        report["logs"].append(
+            f"Readiness: {readiness.verdict} "
+            f"(disqualifying={readiness.open_disqualifying}, "
+            f"scored={readiness.open_scored})"
+        )
+        # Everything the Submission Readiness Report needs, so the export endpoint
+        # renders from persisted data rather than re-running the scan.
+        report["readinessReport"] = {
+            "rfpTitle": rfp.title or "",
+            "scorecard": [
+                {
+                    "sectionId": v.section_id,
+                    "criterion": v.criterion,
+                    "weight": v.weight,
+                    "score": v.score,
+                    "whatWouldLosePoints": v.what_would_lose_points,
+                }
+                for v in (gate_report.scorecard if gate_report else [])
+            ],
+            "changes": list(gate_report.changes) if gate_report else [],
+            "unverifiedClaims": [
+                f"{c.claim} (section {c.section_id})"
+                for c in (gate_report.unresolved_claims if gate_report else [])
+            ],
+            "unfixed": list(gate_report.convergence) if gate_report else [],
+        }
+        for flag in triaged:
+            if flag.criticality != "disqualifying":
+                continue
+            gap = f"BLOCKER — {flag.tag} ({flag.section_title or flag.section_id})"
+            if gap not in report["humanDecisionGaps"]:
+                report["humanDecisionGaps"].append(gap)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Scan RFP submission readiness skipped: %s", exc)
+        report["logs"].append(f"Submission readiness skipped: {exc}")
+        report["readiness"] = {"measured": False, "verdict": "Readiness stage did not run."}
+
     now = datetime.now(timezone.utc).isoformat()
     research_for_ending = (research or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)).model_copy(
         update={"presubmit_review": review, "updated_at": now}

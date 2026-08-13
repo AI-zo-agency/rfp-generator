@@ -33,13 +33,17 @@ def _requirements_by_section(
     research: ProposalResearchCache | None,
 ) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
-    mapped = {m.id: m for m in (research.rfp_sections or []) if research}
+    # Guard `research` before touching .rfp_sections — the comprehension's `if`
+    # filters m, so it does not protect this attribute access.
+    mapped = {m.id: m for m in ((research.rfp_sections or []) if research else [])}
     for section in draft.sections:
         m = mapped.get(section.id)
+        # Requirements live only on RfpSectionMap. ProposalSection has no
+        # `requirements` field, so there is no per-section fallback to read:
+        # sections Scan adds (closing tabs, submission forms) are simply absent
+        # from research.rfp_sections and carry no requirements of their own.
         if m and m.requirements:
             out[section.id] = list(m.requirements)
-        elif section.requirements:
-            out[section.id] = list(section.requirements)
     return out
 
 

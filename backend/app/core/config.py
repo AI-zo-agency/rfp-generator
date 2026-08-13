@@ -103,6 +103,30 @@ class Settings(BaseSettings):
     adversarial_repair_max_findings_per_round: int = 12
     # Full LLM residual audit only on first + final round; middle rounds deterministic.
     adversarial_repair_llm_audit_each_round: bool = False
+    # Complete & Scan review agent (three acts + four detectors).
+    # QUALITY_GATE_ENABLED — the full reviewer: claim verification, RFP scoring, slop /
+    # repetition / consistency detection and repair. This is the expensive stage; a
+    # 24-section draft costs roughly 15-25 quality-tier calls. Leave it on for the pass
+    # before submission; turn it off while iterating if you want Scan to stay quick.
+    quality_gate_enabled: bool = True
+    # Sections verified per claim-check call. Act 1 asked one call per section, which on
+    # a 24-section draft was 24 calls to answer one question. Batching cuts that ~6x
+    # with no loss of coverage — the model still sees every section and its evidence.
+    quality_gate_claim_batch_chars: int = 24_000
+    # Concurrency for the per-section KB retrievals behind Act 1. These are independent,
+    # so running them sequentially only added latency.
+    quality_gate_retrieval_concurrency: int = 6
+    # Rounds of detect -> patch -> re-detect. Rounds 2+ only re-examine sections that
+    # actually changed, so the extra rounds are cheap; keeping 3 preserves accuracy.
+    quality_gate_max_rounds: int = 3
+    # REPETITION_SWEEP_ENABLED — the stage-1 whole-manuscript pass. Default OFF: the
+    # pipeline already dedupes at "Remove duplicate sections" (stage 6), "Compact
+    # manuscript" (stage 16), and the gate's own repetition detector (stage 18). Its
+    # only argument was deduping before prose is polished, but the stages before 6 are
+    # structural, so it mostly pays for a fourth pass at the same job. Turn it on if
+    # duplicates are surviving all three.
+    repetition_sweep_enabled: bool = False
+
     # BUDGET_BEFORE_DRAFTING — Phase 3.5 before Phase 3 (T5.6); default off.
     budget_before_drafting: bool = False
     # MONEY_SLOTS_BLOCK — unresolved {{budget.*}} tokens block readiness.

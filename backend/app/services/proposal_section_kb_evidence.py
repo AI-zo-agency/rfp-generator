@@ -13,20 +13,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Markdown H2 / bold labels often name the client or project in the draft.
-_DRAFT_ENTITY_RE = re.compile(
-    r"(?m)^(?:#{1,3}\s+|\*\*)([A-Z][^#\n*]{2,80}?)(?:\*\*)?\s*$"
-)
-
-# Prefer evidence-heavy sections for packed RAG (others still use planned queries).
-_EVIDENCE_HEAVY_RE = re.compile(
-    r"(?is)\b("
-    r"case\s+stud|our\s+work|references?|experience|examples?\s+of|"
-    r"social\s+media|campaign|portfolio|proof|results?|kpi|"
-    r"destination|tourism|visitor|accounts?\s+managed"
-    r")\b"
-)
-
 ACCURATE_KB_EDITOR_RULES = """ACCURATE KB EVIDENCE RULES (mandatory):
 1) Prefer facts from the PACKED KB EVIDENCE block below over vague prior draft prose.
 2) When the block lists strategy, deliverables, or results/KPIs for a named client or
@@ -95,46 +81,27 @@ def user_asks_kb_fetch_or_fill(user_message: str) -> bool:
     return False
 
 
-def section_wants_packed_kb_evidence(
-    *,
-    section_title: str = "",
-    section_content: str = "",
-    user_message: str = "",
-) -> bool:
-    blob = f"{section_title}\n{user_message}\n{(section_content or '')[:1500]}"
-    if user_asks_kb_fetch_or_fill(user_message):
-        return True
-    return bool(_EVIDENCE_HEAVY_RE.search(blob))
+# NOTE: section_wants_packed_kb_evidence() was removed. It gated evidence packing on a
+# regex of industry words (case stud|results|kpi|destination|tourism|visitor|…), so
+# whether a section got grounded depended on the client's vertical vocabulary — in a
+# module documented as having no vertical hardcodes. Callers that genuinely want to skip
+# retrieval gate before calling; the rest always ground.
 
 
-def draft_entity_hints(section_content: str, *, limit: int = 6) -> list[str]:
-    """Pull client/project names from draft headings — dynamic, not a fixed list."""
-    text = section_content or ""
-    out: list[str] = []
-    seen: set[str] = set()
-    for match in _DRAFT_ENTITY_RE.finditer(text):
-        name = re.sub(r"\s+", " ", match.group(1)).strip(" -:|")
-        # Skip boilerplate headings
-        if len(name) < 4 or name.casefold() in {
-            "strategy",
-            "results",
-            "approach",
-            "overview",
-            "challenge",
-            "solution",
-            "kpis",
-            "recommendation",
-            "tourism portfolio approach",
-        }:
-            continue
-        key = name.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(name)
-        if len(out) >= limit:
-            break
-    return out
+def section_prose_excerpt(section_content: str, *, limit: int = 400) -> str:
+    """Whitespace-normalised head of the section, for semantic retrieval.
+
+    Replaces the old draft_entity_hints(), which pulled "entities" with a regex that
+    only matched markdown headings and then dropped any name appearing in a
+    hardcoded stoplist. Both halves were wrong: a client named in an ordinary
+    sentence was invisible, and the stoplist carried one client's phrase
+    ("tourism portfolio approach") into every other client's retrieval.
+
+    Handing the retriever the actual prose needs no extraction — Supermemory
+    embeds the question, so real sentences carry the names, numbers, and context a
+    pattern could only approximate.
+    """
+    return " ".join((section_content or "").split())[:limit]
 
 
 def build_section_kb_question(
@@ -147,18 +114,14 @@ def build_section_kb_question(
     """One retrieval question for retrieve_for_question (kb_qa_loop-style)."""
     from app.services.kb_rag_retrieve import build_retrieval_question_from_entry
 
-    entities = draft_entity_hints(section_content)
+    # Requirements are structured RFP data, so they stay an explicit asset list.
     assets = [r.strip() for r in (requirements or []) if str(r).strip()][:8]
-    assets.extend(e for e in entities if e not in assets)
-    base = build_retrieval_question_from_entry(
+    return build_retrieval_question_from_entry(
         section_title=section_title,
         required_assets=assets,
         planner_queries=[user_message.strip()] if user_message.strip() else [],
-        why_needed="",
+        why_needed=section_prose_excerpt(section_content),
     )
-    if user_message.strip():
-        return base
-    return base
 
 
 async def fetch_packed_section_kb_evidence(
@@ -169,14 +132,13 @@ async def fetch_packed_section_kb_evidence(
     section_content: str = "",
     max_chars: int = 12_000,
 ) -> tuple[str, list[str]]:
-    """Pack KB context for section improve. Returns (block, sources)."""
-    if not section_wants_packed_kb_evidence(
-        section_title=section_title,
-        section_content=section_content,
-        user_message=user_message,
-    ):
-        return "", []
+    """Pack KB context for section improve. Returns (block, sources).
 
+    Always retrieves. Deciding *whether* a section deserves evidence by matching words
+    in its title is what left non-tourism clients ungrounded, and a section with nothing
+    to say is exactly the one that needs facts most. Retrieval failure returns ("", [])
+    rather than raising, so callers degrade to their previous behaviour.
+    """
     from app.services.kb_rag_retrieve import retrieve_for_question
 
     question = build_section_kb_question(

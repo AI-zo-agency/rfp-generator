@@ -535,6 +535,88 @@ def _build_repair_message_for_finding(
     return "\n\n".join(part for part in parts if part)
 
 
+async def _ground_repair_message_in_kb(
+    *,
+    rfp_id: str,
+    section_id: str,
+    finding: AdversarialAuditFinding,
+    repair_plan: RepairPlan,
+    repair_message: str,
+    draft: ProposalDraft | None = None,
+    research: ProposalResearchCache | None = None,
+) -> tuple[str, list[str]]:
+    """Attach packed KB evidence to a repair instruction before the model rewrites.
+
+    build_repair_plan already decides whether a finding needs evidence, but until now
+    requires_targeted_retrieval was only read to *label* a failed repair
+    "evidence_missing" — nothing ever fetched the evidence. So the loop was told
+    "never invent fact-bound claims" with no facts to work from, leaving it only two
+    moves: restate what was already there, or hedge.
+
+    Best-effort by construction: any failure returns the instruction untouched, so a
+    Supermemory outage degrades the repair to today's behaviour instead of breaking
+    the loop.
+    """
+    if not repair_plan.requires_targeted_retrieval:
+        return repair_message, []
+
+    try:
+        from app.services.proposal_repository import (
+            aget_proposal_draft,
+            aget_research_cache,
+        )
+        from app.services.proposal_section_kb_evidence import (
+            fetch_packed_section_kb_evidence,
+            inject_packed_evidence_into_instruction,
+        )
+
+        # The repair loop already holds both in memory and saves them immediately
+        # before calling, so re-reading would be pure duplicate I/O per attempt.
+        if draft is None:
+            draft = await aget_proposal_draft(rfp_id)
+        section = next(
+            (s for s in (draft.sections if draft else []) if s.id == section_id),
+            None,
+        )
+        # Requirements live on the research cache's RfpSectionMap, not on
+        # ProposalSection — that model has no `requirements` field.
+        if research is None:
+            research = await aget_research_cache(rfp_id)
+        mapped = next(
+            (
+                m
+                for m in ((research.rfp_sections or []) if research else [])
+                if m.id == section_id
+            ),
+            None,
+        )
+        packed, sources = await fetch_packed_section_kb_evidence(
+            section_title=(section.title if section else finding.section_title) or "",
+            user_message=finding.message or "",
+            requirements=list(mapped.requirements or []) if mapped else None,
+            section_content=(section.content if section else "") or "",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "adversarial_repair KB grounding failed rfp_id=%s section_id=%s: %s",
+            rfp_id,
+            section_id,
+            exc,
+        )
+        return repair_message, []
+
+    if not packed.strip():
+        logger.info(
+            "adversarial_repair KB grounding empty rfp_id=%s section_id=%s code=%s",
+            rfp_id,
+            section_id,
+            finding.code,
+        )
+        return repair_message, []
+
+    return inject_packed_evidence_into_instruction(repair_message, packed), sources
+
+
 async def repair_section_for_finding(
     *,
     rfp_id: str,
@@ -544,8 +626,14 @@ async def repair_section_for_finding(
     failure_reason: str | None,
     prior_attempt_summary: str,
     use_strong_model: bool = False,
+    draft: ProposalDraft | None = None,
+    research: ProposalResearchCache | None = None,
 ) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache | None, str]:
-    """Run a targeted section improve pass for one adversarial audit finding."""
+    """Run a targeted section improve pass for one adversarial audit finding.
+
+    draft/research are the caller's in-memory copies, used for KB grounding so the
+    repair does not re-read what the loop just saved. Omit them and they are loaded.
+    """
     if not (section_id or "").strip():
         raise ValueError("section_id is required for targeted section repair")
 
@@ -556,15 +644,25 @@ async def repair_section_for_finding(
         prior_attempt_summary=prior_attempt_summary,
         use_strong_model=use_strong_model,
     )
+    repair_message, evidence_sources = await _ground_repair_message_in_kb(
+        rfp_id=rfp_id,
+        section_id=section_id,
+        finding=finding,
+        repair_plan=repair_plan,
+        repair_message=repair_message,
+        draft=draft,
+        research=research,
+    )
     logger.info(
         "adversarial_repair section repair rfp_id=%s section_id=%s finding_code=%s "
-        "repair_mode=%s failure_reason=%s use_strong_model=%s",
+        "repair_mode=%s failure_reason=%s use_strong_model=%s kb_sources=%s",
         rfp_id,
         section_id,
         finding.code,
         repair_plan.repair_mode,
         failure_reason or "none",
         use_strong_model or repair_plan.needs_strong_model,
+        evidence_sources[:5] or "none",
     )
     section, draft, research, provider, _detail, _changed, _ = await improve_proposal_section(
         rfp_id,
@@ -1066,6 +1164,8 @@ async def run_adversarial_repair_loop(
                             failure_reason=plan.failure_reason,
                             prior_attempt_summary=plan.previous_outcome or "none",
                             use_strong_model=plan.needs_strong_model,
+                            draft=working_draft,
+                            research=working_research,
                         )
                     )
                     rewritten_sections.add(sid)

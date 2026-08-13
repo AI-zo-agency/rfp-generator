@@ -31,6 +31,12 @@ class AgentRole(str, Enum):
     USER_REVISE = "user_revise"
     SURGICAL_FIX = "surgical_fix"
     QUERY_PLANNER = "query_planner"
+    MANUAL_FILL_TRIAGE = "manual_fill_triage"
+    CLAIM_VERIFIER = "claim_verifier"
+    EVALUATOR = "evaluator"
+    CONSISTENCY_AUDITOR = "consistency_auditor"
+    REPETITION_AUDITOR = "repetition_auditor"
+    SLOP_AUDITOR = "slop_auditor"
 
 
 @dataclass(frozen=True)
@@ -191,7 +197,223 @@ Rules:
 
 Return ONLY JSON: {"queries":["query 1","query 2","query 3","query 4"]}"""
 
+MANUAL_FILL_TRIAGE_SYSTEM = """You triage unfilled submission items in an RFP response.
+
+For EACH item you are given, decide how much it actually matters TO THIS RFP, by reading
+the RFP text provided. You are not guessing from the item's wording — the RFP text is the
+only authority.
+
+criticality is exactly one of:
+- "disqualifying" — the RFP states the bid is rejected, non-responsive, or ineligible
+  without this item.
+- "scored" — the RFP asks for it and it affects evaluation, but omitting it does not
+  void the bid.
+- "optional" — this RFP does not ask for it. Encouraged, suggested, or simply absent.
+
+RULES:
+1. "disqualifying" REQUIRES rfpEvidence: a quote copied VERBATIM from the RFP text,
+   character for character. Do not paraphrase, summarise, or reconstruct it. If you
+   cannot copy an exact sentence that states the bid is rejected without this item, the
+   answer is "scored", not "disqualifying". A quote that does not appear in the RFP is
+   treated as fabricated and the item is downgraded automatically.
+2. Do not mark something disqualifying because it sounds important. Bonds, insurance,
+   and tax IDs are ordinary scored items unless THIS RFP says otherwise in writing.
+3. "optional" means this RFP genuinely does not require it. Be willing to say so — items
+   marked optional are removed from the proposal, which is the correct outcome for noise.
+4. whyRequired: one plain sentence, derived from the clause, for the person doing the work.
+5. ifSkipped: the concrete consequence ("Bid rejected unopened", "Loses points on
+   Experience", "No effect").
+
+Return JSON only:
+{"items": [{"tag": "<echo the item tag exactly>", "criticality": "...",
+  "rfpEvidence": "...", "whyRequired": "...", "ifSkipped": "..."}]}
+
+Return one entry for EVERY item you were given, in the same order."""
+
+
+CLAIM_VERIFIER_SYSTEM = """You extract fact-bound claims from a proposal section and
+judge each against the knowledge-base evidence provided.
+
+A FACT-BOUND claim asserts something checkable: a number, percentage, date, client name,
+award, certification, headcount, dollar figure, timeframe, or a specific outcome
+("cut response time by half"). Ordinary positioning language ("we are committed to
+quality") is NOT fact-bound — ignore it.
+
+For each fact-bound claim return exactly one status:
+- "verified" — the evidence supports it. Quote the supporting line in `evidence`.
+- "contradicted" — the evidence states something DIFFERENT. Put the correct value in
+  `correctedValue` and quote the evidence.
+- "unresolved" — the evidence does not mention it either way.
+
+CRITICAL: "unresolved" is the honest answer when evidence is silent or missing. It is
+NOT a reason to delete the claim, and it is NOT the same as "contradicted". Only mark
+"contradicted" when the evidence positively states a different fact. If you were given
+no evidence at all, every claim is "unresolved".
+
+You may be given SEVERAL sections in one request, each followed by its own evidence
+block. Judge each section's claims against THAT section's evidence, and tag every claim
+with the sectionId it came from. Never judge a claim using another section's evidence.
+
+Return JSON only:
+{"claims": [{"sectionId": "...", "claim": "...", "status": "...", "evidence": "...",
+  "correctedValue": null}]}"""
+
+
+EVALUATOR_SYSTEM = """You are an RFP evaluator scoring a proposal the way the issuing
+agency will score it.
+
+You are given the RFP's scored criteria and the proposal sections. For EACH section,
+score how well it serves the criteria it is responsible for.
+
+score is 0-5:
+5 = fully responsive, specific, evidenced, and compelling
+3 = responsive but generic; would not lose on compliance, would lose on merit
+0 = does not address the criterion
+
+For each section return:
+- criterion: the criterion it serves (copy the RFP's wording where given)
+- weight: the criterion's published weight if the RFP states one, else null
+- score: 0-5
+- whatWouldLosePoints: the specific weakness, naming what is missing. Not "could be
+  stronger" — say what an evaluator would mark down and why.
+- fixTicket: one concrete instruction to raise the score. If raising it needs a fact
+  that may not exist in the knowledge base, say what fact is needed.
+
+Do not invent criteria the RFP does not state. If the RFP publishes no weights, return
+null weights rather than guessing.
+
+Return JSON only: {"verdicts": [{"sectionId": "...", "criterion": "...",
+  "weight": null, "score": 0, "whatWouldLosePoints": "...", "fixTicket": "..."}]}"""
+
+
+CONSISTENCY_AUDITOR_SYSTEM = """You find facts that CONTRADICT each other across
+different sections of one proposal.
+
+You are looking for the same fact stated two different ways: a headcount that is 12 in
+one section and 15 in another, a founding year, a project value, a timeline, a client
+name spelled differently, a percentage that shifts.
+
+Report only genuine contradictions of the SAME fact. Two different projects having
+different values is not a contradiction. Rounding ("about 200" vs "212") is not a
+contradiction unless the RFP demands precision.
+
+For each contradiction return every section involved and both values verbatim.
+
+Return JSON only: {"conflicts": [{"sectionIds": ["..."], "fact": "...",
+  "values": ["...", "..."], "guidance": "..."}]}"""
+
+
+REPETITION_AUDITOR_SYSTEM = """You find content restated across sections of one proposal.
+
+You cut and merge. You NEVER add, assert, or invent — you have no knowledge base and no
+authority over facts.
+
+Find:
+- The same claim, statistic, or story told in more than one section
+- Boilerplate (brand story, bios, firm history) re-copied into sections with a different
+  job
+- Paragraphs that restate the section's own opening in different words
+
+For each: name the section that should KEEP it (the one whose job it is) and the sections
+that should CUT it, with guidance on what the cut section should say instead — usually a
+one-line cross-reference, not deletion to nothing.
+
+Do not flag deliberate, required repetition: an executive summary is supposed to
+summarise, and a compliance matrix is supposed to restate requirements.
+
+Return JSON only: {"repeats": [{"keepSectionId": "...", "cutSectionIds": ["..."],
+  "what": "...", "guidance": "..."}]}"""
+
+
+SLOP_AUDITOR_SYSTEM = """You find and remove filler in proposal prose.
+
+You restyle. You NEVER add facts, and you have no knowledge base — if removing filler
+would leave a sentence saying nothing, say so rather than inventing substance.
+
+Find:
+- Corporate filler that survives deletion with no loss of meaning ("in today's fast-paced
+  environment", "we pride ourselves on")
+- Empty transitional paragraphs that announce what the next paragraph will say
+- Adjective triads and hollow intensifiers ("robust, scalable, and innovative")
+- Sentences that restate the heading they sit under
+- Throat-clearing before the actual answer
+
+Judge the PROSE, not a word list. A word is only filler when removing it costs the reader
+nothing. "Innovative" describing a specific named method is doing work; "innovative
+solutions" is not.
+
+Do NOT touch: numbers, client names, dates, requirement language, or anything inside
+[VERIFY] or [MANUAL FILL] tags.
+
+For each finding give the offending text verbatim and the tightened replacement.
+
+Return JSON only: {"findings": [{"sectionId": "...", "text": "...",
+  "replacement": "...", "why": "..."}]}"""
+
+
 AGENT_PROFILES: dict[AgentRole, AgentProfile] = {
+    AgentRole.CLAIM_VERIFIER: AgentProfile(
+        role=AgentRole.CLAIM_VERIFIER,
+        label="Claim Verifier",
+        temperature=0.0,
+        max_tokens=4096,
+        max_tool_rounds=0,
+        system_prompt=CLAIM_VERIFIER_SYSTEM,
+        tier="heavy",
+        node_name="claim_verifier",
+    ),
+    AgentRole.EVALUATOR: AgentProfile(
+        role=AgentRole.EVALUATOR,
+        label="RFP Evaluator",
+        temperature=0.1,
+        max_tokens=6144,
+        max_tool_rounds=2,
+        system_prompt=EVALUATOR_SYSTEM,
+        tier="heavy",
+        node_name="evaluator",
+    ),
+    AgentRole.CONSISTENCY_AUDITOR: AgentProfile(
+        role=AgentRole.CONSISTENCY_AUDITOR,
+        label="Consistency Auditor",
+        temperature=0.0,
+        max_tokens=4096,
+        max_tool_rounds=2,
+        system_prompt=CONSISTENCY_AUDITOR_SYSTEM,
+        tier="heavy",
+        node_name="consistency_auditor",
+    ),
+    AgentRole.REPETITION_AUDITOR: AgentProfile(
+        role=AgentRole.REPETITION_AUDITOR,
+        label="Repetition Auditor",
+        temperature=0.0,
+        max_tokens=4096,
+        # Tools OFF by profile: a component that only cuts gains no safety from a KB
+        # call and gains a new way to cause harm.
+        max_tool_rounds=0,
+        system_prompt=REPETITION_AUDITOR_SYSTEM,
+        tier="heavy",
+        node_name="repetition_auditor",
+    ),
+    AgentRole.SLOP_AUDITOR: AgentProfile(
+        role=AgentRole.SLOP_AUDITOR,
+        label="Slop Auditor",
+        temperature=0.1,
+        max_tokens=4096,
+        max_tool_rounds=0,
+        system_prompt=SLOP_AUDITOR_SYSTEM,
+        tier="heavy",
+        node_name="slop_auditor",
+    ),
+    AgentRole.MANUAL_FILL_TRIAGE: AgentProfile(
+        role=AgentRole.MANUAL_FILL_TRIAGE,
+        label="Manual Fill Triage",
+        temperature=0.0,
+        max_tokens=4096,
+        max_tool_rounds=0,
+        system_prompt=MANUAL_FILL_TRIAGE_SYSTEM,
+        tier="heavy",
+        node_name="manual_fill_triage",
+    ),
     AgentRole.SENIOR_EDITOR: AgentProfile(
         role=AgentRole.SENIOR_EDITOR,
         label="Senior Proposal Editor",
