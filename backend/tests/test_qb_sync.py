@@ -2,9 +2,12 @@ import logging
 from datetime import date, datetime, timezone
 from unittest.mock import patch
 
+import pytest
+
 from app.financial import qb_sync
 from app.financial import qb_panels_from_db as panels
 from app.financial.qb_map import params_hash
+from app.financial.quickbooks import QuickBooksError
 
 
 def test_auto_backfill_when_not_completed(monkeypatch):
@@ -430,3 +433,35 @@ def test_nightly_lease_failure_before_reports_skips_ingest(monkeypatch):
         pass
 
     assert ingested == []
+
+
+def test_ingest_skips_permission_denied_reports(monkeypatch):
+    snapshots = []
+
+    def fake_report(name, **params):
+        if name == "ExpensesByVendorSummary":
+            raise QuickBooksError(
+                'QuickBooks 400: {"Fault":{"Error":[{"Message":'
+                '"Permission Denied Error","code":"5020","element":"ReportName"}]}}'
+            )
+        return {"ok": name}
+
+    monkeypatch.setattr(qb_sync, "report", fake_report)
+    monkeypatch.setattr(qb_sync, "upsert_report_snapshot", lambda row: snapshots.append(row))
+
+    count = qb_sync._ingest_reports("r1", [2026], date(2026, 8, 13), "now")
+    names = {row["report_name"] for row in snapshots}
+    assert "ExpensesByVendorSummary" not in names
+    assert "ProfitAndLoss" in names
+    assert "CustomerIncome" in names
+    assert count == len(snapshots)
+
+
+def test_ingest_reraises_non_permission_report_errors(monkeypatch):
+    def fake_report(name, **params):
+        raise QuickBooksError("QuickBooks 500: boom")
+
+    monkeypatch.setattr(qb_sync, "report", fake_report)
+    monkeypatch.setattr(qb_sync, "upsert_report_snapshot", lambda row: None)
+    with pytest.raises(QuickBooksError, match="500"):
+        qb_sync._ingest_reports("r1", [2026], date(2026, 8, 13), "now")

@@ -213,6 +213,8 @@ Backfill uses `TxnDate >= 2024-01-01` for transaction entities. Customer, Class,
 
 Empty optional params are omitted from the query string. Snapshots are stored in `qb_report_snapshots` (latest per `report_name`, `year`, `params_hash`).
 
+Intuit **5020 Permission Denied** on a report is skipped so the rest of the sync can finish. See `docs/QUICKBOOKS_REPORT_PERMISSIONS.md`. The matching dashboard panel then lands in overview `errors`. Other report failures still abort the run.
+
 ---
 
 ### 3. Change Data Capture (CDC)

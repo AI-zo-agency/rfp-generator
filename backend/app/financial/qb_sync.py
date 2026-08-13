@@ -29,7 +29,7 @@ from app.financial.qb_repository import (
     upsert_report_snapshot,
     upsert_sync_state,
 )
-from app.financial.quickbooks import _get, cdc_records, query_page, report
+from app.financial.quickbooks import QuickBooksError, _get, cdc_records, query_page, report
 
 logger = logging.getLogger(__name__)
 
@@ -124,12 +124,29 @@ def _activity_since(started: datetime) -> str:
     return started.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
+def _is_report_permission_denied(exc: BaseException) -> bool:
+    text = str(exc)
+    return "5020" in text or "Permission Denied" in text
+
+
 def _ingest_reports(realm_id: str, years: list[int], as_of: date, fetched_at: str) -> int:
     count = 0
     for year in years:
         for report_name, hash_params in report_jobs(year, as_of):
             fetch_params = _report_fetch_params(year, as_of, report_name, hash_params)
-            payload = report(report_name, **fetch_params)
+            try:
+                payload = report(report_name, **fetch_params)
+            except QuickBooksError as exc:
+                if not _is_report_permission_denied(exc):
+                    raise
+                logger.warning(
+                    "operation=ingest_report realm_id=%s report_name=%s year=%s "
+                    "skipped=true reason=permission_denied",
+                    realm_id,
+                    report_name,
+                    year,
+                )
+                continue
             upsert_report_snapshot({
                 "realm_id": realm_id,
                 "report_name": report_name,
