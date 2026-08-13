@@ -39,6 +39,10 @@ Rules:
   RFP TOC names that heading as an evaluation tab, References forms, Pricing forms, Addenda.
 - Prefer a LEAN outline evaluators can finish reading — merge overlapping asks into one tab
   when the RFP language allows; never pad with optional narrative the RFP does not score.
+- HARD CAP: emit at most the max section count given in the user message (typically 8–18
+  RFP tabs). One tab per Direct Question / TOC heading — NEVER one tab per bullet, sub-bullet,
+  evaluation criterion synonym, or form field. If the RFP lists many criteria, fold related
+  asks under the buyer's parent TOC heading.
 - SUBMISSION PACKAGE RFPs (Cover Letter + Direct Questions + Budget, e.g. MTC-style):
   Emit ONLY the buyer-named response packages — typically:
   (1) ONE Cover Letter tab (contact + interest + qualifications — never split),
@@ -108,18 +112,38 @@ Return JSON only:
 """
 
 
+def _parse_page_limit(rfp_meta: dict[str, str] | None) -> int | None:
+    if not rfp_meta:
+        return None
+    raw = (rfp_meta.get("pageLimit") or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 async def run_dynamic_section_planner(
     *,
     plan: ProposalExecutionPlan,
     rfp_context: str,
     rfp_meta: dict[str, str] | None = None,
 ) -> ProposalExecutionPlan:
+    from app.services.proposal_outline_dedup import max_rfp_outline_sections
+
+    page_limit = _parse_page_limit(rfp_meta)
+    section_cap = max_rfp_outline_sections(page_limit)
     raw, provider = await safe_chat_json(
         [
             {"role": "system", "content": _SYSTEM},
             {
                 "role": "user",
                 "content": (
+                    f"HARD MAXIMUM RFP outline tabs (excluding static Sections 1–3): {section_cap}. "
+                    f"Emit at most {section_cap} sections in the JSON array — merge aggressively.\n"
+                    f"Page limit from RFP: {page_limit if page_limit else 'not stated'}.\n\n"
                     f"Understanding:\n{plan.opportunity.understanding.model_dump_json()}\n"
                     f"Compliance item count: {len(plan.opportunity.compliance.items)}\n"
                     f"Evaluation:\n{plan.opportunity.evaluation.model_dump_json()}\n"
@@ -167,6 +191,7 @@ async def run_dynamic_section_planner(
         )
     outline.confidence = clamp_confidence(outline.confidence)
     from app.services.proposal_outline_dedup import (
+        enforce_outline_section_cap,
         filter_lean_outline_sections,
         merge_closing_components_into_outline,
         stamp_outline_evaluation_weights,
@@ -204,6 +229,8 @@ async def run_dynamic_section_planner(
             drop_generic_filler=False,
         )
         dropped = list(dropped) + list(post_dropped)
+    kept, cap_dropped = enforce_outline_section_cap(kept, section_cap)
+    dropped = list(dropped) + list(cap_dropped)
     if dropped:
         logger.info(
             "%s dropped %d lean-outline tab(s): %s",
@@ -218,6 +245,14 @@ async def run_dynamic_section_planner(
             len(closing_added),
             closing_added[:12],
         )
+    if cap_dropped:
+        logger.info(
+            "%s hard-capped outline to %d tab(s); dropped %d: %s",
+            AGENT,
+            section_cap,
+            len(cap_dropped),
+            cap_dropped[:12],
+        )
     outline.sections = kept
 
     plan.writing.proposal_outline = outline
@@ -226,12 +261,13 @@ async def run_dynamic_section_planner(
         plan,
         agent=AGENT,
         decision_text=(
-            f"Outline sections: {len(outline.sections)}"
+            f"Outline sections: {len(outline.sections)} (cap {section_cap})"
             + (f"; closing added: {len(closing_added)}" if closing_added else "")
+            + (f"; hard-cap dropped: {len(cap_dropped)}" if cap_dropped else "")
         ),
         reason=(
             "Dynamic section plan from THIS RFP structure + evaluation + closing package "
-            "(lean prompt + free near-dup hygiene; no extra LLM consolidate call)"
+            "(lean prompt + near-dup hygiene + hard section cap)"
         ),
         confidence=outline.confidence,
     )

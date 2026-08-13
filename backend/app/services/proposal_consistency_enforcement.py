@@ -740,6 +740,14 @@ def apply_consistency_enforcement(
         sections = sections3
 
     working = draft.model_copy(update={"sections": sections}) if changed else draft
+
+    from app.services.proposal_section_dedup import compress_rfp_company_identity_forms
+
+    working, company_logs = compress_rfp_company_identity_forms(working)
+    if company_logs:
+        changed = True
+        logs.extend(company_logs)
+
     working, note_logs = ensure_signed_cover_designer_note(
         working,
         attachment_labels=attachment_labels,

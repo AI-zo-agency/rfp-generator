@@ -48,15 +48,26 @@ and compliance obligations. Split bundled scope into separate requirements:
 requirements, not one. Do not merge, do not summarise, do not skip items you
 suspect the vendor lacks — those matter most.
 
-For EACH requirement give 1-3 kbQueries phrased the way zö's own materials
-would describe that work — job titles, tools, deliverables. Search for the
-PERSON or the PROJECT that proves it:
-  "user experience (UX) design" -> "zo agency UX designer wireframes information architecture 04_Bio"
-  "CMS implementation"          -> "zo agency CMS Drupal WordPress implementation developer 03_CS"
+For EACH requirement give 1-3 kbQueries you would run in Supermemory, phrased
+the way zö's own materials describe that work — job titles, tools, deliverables.
+Always search for BOTH the PERSON (04_Bio) and the PROJECT (03_CS / 06_WON) that
+could prove it. Examples of query shape (adapt to THIS requirement — do not copy
+names from these examples):
+  "user experience (UX) design" -> "zö agency UX designer wireframes 04_Bio"
+  "CMS / platform implementation" -> "zö agency CMS platform developer 04_Bio 03_CS"
 Never use the buyer's name as the search subject.
 
 isCore=true when the RFP makes the requirement mandatory, scores it, or it is
 central to the scope of work. isCore=false for incidental or optional items.
+
+category MUST be accurate — scoring depends on it:
+- technical = platforms/tools/methods (CMS, WordPress, ADA/WCAG audit, hosting,
+  content migration, SEO, security, integrations, QA)
+- service = delivery work types (website redesign, brand campaign, training)
+- role = named staff titles to assign (project manager, UX designer, trainer)
+- compliance = certifications, insurance, registrations
+- logistics = office location, geography, on-site presence
+Do NOT label a platform skill as "role" just because a person would do it.
 
 Return ONLY JSON:
 {"requirements":[{"requirement":"...","category":"service|role|technical|compliance|logistics",

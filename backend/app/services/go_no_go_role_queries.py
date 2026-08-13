@@ -24,14 +24,17 @@ _ROLE_LEXICON: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "web development",
         (r"\bweb\s*site\b", r"\bwebsite\b", r"\bweb\s+development\b", r"\bfront[- ]?end\b",
-         r"\bhtml\b", r"\bcss\b", r"\bjavascript\b", r"\bresponsive\s+design\b"),
-        "web developer front-end developer WordPress website build 04_Bio",
+         r"\bhtml\b", r"\bcss\b", r"\bjavascript\b", r"\bresponsive\s+design\b",
+         r"\bwebsite\s+redesign\b", r"\bweb\s+moderni"),
+        "web developer front-end developer website build redesign modernization "
+        "WordPress CMS 04_Bio 03_CS",
     ),
     (
         "CMS",
         (r"\bCMS\b", r"\bcontent\s+management\s+system\b", r"\bdrupal\b",
          r"\bwordpress\b", r"\bsitecore\b", r"\bcontentful\b"),
-        "CMS content management system Drupal WordPress implementation developer 04_Bio",
+        "CMS content management system Drupal WordPress Sitecore implementation "
+        "developer 04_Bio 03_CS 06_WON",
     ),
     (
         "hosting and infrastructure",
@@ -168,3 +171,30 @@ def role_evidence_queries(rfp_text: str, *, max_queries: int = 12) -> list[str]:
         if any(re.search(p, text, re.IGNORECASE) for p in patterns):
             queries.append(f"zö agency {terms}")
     return queries
+
+
+def role_queries_for_requirement(requirement: str, *, max_queries: int = 2) -> list[str]:
+    """Attach discipline searches to a single RFP requirement.
+
+    Role queries used to run only as a global pool. When the query fan-out
+    filled with planner strings first, platform/discipline searches never ran —
+    and even when they did, hits were not attributed to the matching row.
+    """
+    text = requirement or ""
+    if not text.strip():
+        return []
+    queries: list[str] = []
+    for _name, patterns, terms in _ROLE_LEXICON:
+        if len(queries) >= max_queries:
+            break
+        if any(re.search(p, text, re.IGNORECASE) for p in patterns):
+            queries.append(f"zö agency {terms}")
+    return queries
+
+
+def primary_query_for_requirement(requirement: str) -> str:
+    """One compact KB search derived from the requirement's own wording."""
+    text = re.sub(r"\s+", " ", (requirement or "")).strip()
+    if not text:
+        return ""
+    return f"zö agency {text[:140]} 04_Bio 03_CS 06_WON"

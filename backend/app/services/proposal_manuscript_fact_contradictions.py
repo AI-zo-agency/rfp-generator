@@ -46,6 +46,27 @@ IS a contradiction (flag these):
 - Agency certifications in prose when not listed in companyfacts
 - Treating numbers from old won/finalist proposals (06_WON_, 07_FIN_) as current
   agency facts when they conflict with companyfacts (e.g. "15 professionals")
+- SIGNED INSURANCE CERTIFICATIONS: Exception Forms / compliance tables that mark
+  coverages "Compliant", assert "meets or exceeds" RFP insurance minimums, or claim
+  "No exceptions" when Section 1.5 / companyfacts do not list that coverage type
+  (e.g. Automobile Liability) or do not state the certified dollar limits
+  (e.g. $2M aggregate vs types-only / $1M narrative). Severity=critical.
+  fixAction=rewrite → MANUAL FILL for Sonja/COI verification OR an honest exception /
+  bind-before-execution commitment — NEVER leave a false Compliant certification.
+- INVENTED PAST TECHNICAL CAPABILITY: "We have implemented / integrated / delivered"
+  specific systems, integrations, or specialist workflows when NO case study, bio,
+  or companyfacts excerpt in the manuscript evidences that exact past delivery.
+  Severity=critical/major. Rewrite to adjacent verified experience or [VERIFY] —
+  never assert checkable past work that is not in the evidence.
+- CASE STUDY / SECTOR FRAMING MISMATCH: narrative claims government / utility /
+  enterprise web proof while the included Section 3 case studies are private
+  healthcare, retail, or otherwise do not demonstrate the claimed capability.
+  Rewrite the framing to match the actual studies shown, or flag VERIFY for
+  better portfolio selections.
+- INVENTED SPECIALIST ROLES: team org charts naming dedicated specialist titles
+  (e.g. dedicated accessibility lead, QA lead) when Section 2 bios do not include
+  a matching named person — rewrite to real roster names / generalist coverage /
+  [MANUAL FILL: subcontractor] rather than phantom specialists.
 
 NOT a contradiction (do NOT flag):
 - RFP-specific project staffing (named roles on THIS engagement — Section 2 bios)
@@ -184,13 +205,20 @@ async def _rewrite_section_for_fact_contradiction(
         return section, False, ""
     system = (
         "You fix ONE proposal section so it no longer contradicts verified zö "
-        "company facts.\n"
+        "company facts OR invents ungrounded certifications / capabilities.\n"
         "01_companyfacts_verified is the single source of truth for agency profile "
         "(team size, founded year, legal name, agency certifications).\n"
+        "Section 1.5 Insurance Information is authoritative for which coverage TYPES "
+        "are claimed in this manuscript — never leave Exception Form 'Compliant' marks "
+        "or 'meets or exceeds' insurance language when 1.5/companyfacts do not support "
+        "that coverage type or dollar limit. Use [MANUAL FILL: Sonja — confirm on COI…] "
+        "or an honest exception / bind-before-execution commitment.\n"
+        "Do not invent past technical deliveries, specialist role titles without named "
+        "bios, or sector proof the included case studies do not support.\n"
         "Do not invent numbers or splits (e.g. '20 core + 35 network') unless "
         "explicitly supported in the verified corpus below.\n"
-        "Prefer removing fabricated headcount prose and stating the verified fact "
-        "simply, or one precise [VERIFY: specific field] if the corpus is silent.\n"
+        "Prefer removing fabricated claims and stating verified facts simply, or one "
+        "precise [VERIFY]/[MANUAL FILL] if the corpus is silent.\n"
         "Keep brand voice for narrative sections. Return JSON: "
         '{"content": "full markdown", "changed": true/false, "notes": "one line"}'
     )

@@ -170,6 +170,8 @@ def is_designer_compact_improvement(
 
 def user_requests_designer_compact(message: str) -> bool:
     m = (message or "").casefold()
+    # Explicit designer-compact product language only. Chat must never auto-run
+    # compact and swallow the user's real instruction — Claude decides.
     return any(
         phrase in m
         for phrase in (
@@ -177,15 +179,27 @@ def user_requests_designer_compact(message: str) -> bool:
             "designer-compact",
             "designer ready",
             "designer-ready",
-            "make it compact",
-            "too long",
-            "essay",
-            "shorter",
-            "concise",
             "layout ready",
-            "table format",
+            "layout-ready",
+            "make it designer",
+            "table format for designer",
         )
     )
+
+
+def should_run_designer_compact_for_chat(
+    *,
+    user_message: str,
+    improve_section_pinned: bool = False,
+    section: ProposalSection | None = None,
+) -> bool:
+    """Designer-compact runs ONLY when the user explicitly asks for it.
+
+    Improve-pin + long section must NOT hijack \"remove / fetch / fix\" asks —
+    those go to the Claude User Revise agent with the verbatim instruction.
+    """
+    del improve_section_pinned, section  # kept for call-site compatibility
+    return user_requests_designer_compact(user_message)
 
 
 def merge_compact_tickets(

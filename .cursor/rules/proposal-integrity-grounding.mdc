@@ -1,0 +1,37 @@
+---
+description: Proposal integrity — lean outlines, grounded claims, insurance certs, consistent facts
+alwaysApply: true
+---
+
+# Proposal integrity (every RFP)
+
+Principle-based — never client-specific keyword exceptions.
+
+## Outline
+- Intelligence outlines hard-cap RFP tabs (page-budget, typically 8–18). No one-tab-per-bullet.
+- Eval-weight stamps need containment or ≥2 shared tokens — not one shared word.
+- Offeror / Company Identification *forms* may stay (buyer needs the form) but must
+  cross-ref Section 1.3 — never a second full Business Information dump.
+
+## Facts & consistency
+- After each section draft: full KB fact-check + consistency + companyfacts contradiction pass.
+- Same agency fact (team size, certs, email, insurance types) must match everywhere; companyfacts wins.
+
+## Insurance certifications (signed forms)
+- Exception / compliance forms must NOT mark coverages Compliant or claim "meets or exceeds" unless Section 1.5 (or companyfacts) lists that coverage type and limit.
+- Otherwise → `[MANUAL FILL: Sonja — confirm on COI]` or a real exception / bind-before-execution. Same severity as fabricated vendor registration.
+- Gate runs on generate (blocker suite + zero-fabrication) and Complete Scan — not only one path.
+
+## Capabilities & case studies
+- Never assert past technical deliveries the included case studies / bios / companyfacts do not evidence.
+- Past-proven tables ("we have implemented…") → can-deliver language or VERIFY — Complete Scan,
+  chat **remove fabricated content**, and content-risk repair all run this scrub.
+- Case-study framing must match the studies shown; utility/gov RFPs must not keep private medical personal-brand studies.
+- Specialist role titles must map to a named Section 2 bio or be MANUAL FILL / subcontractor / generalist.
+- Bio years/specializations must match 04_Bio exactly — never inflate years or add sector specialization
+  the bio PDF does not state (chat + Complete Scan ground bios to KB).
+- Chat/Apply-fix must REPLACE invented bio sentences with 04_Bio wording — never delete the
+  paragraph and leave a Role-only gap. Strip [E#] markers. Drop empty headers.
+
+## Evidence matching
+- Follow `no-regex-evidence-matching.mdc`: LLM + Supermemory + grounded quotes — no platform synonym frozensets.

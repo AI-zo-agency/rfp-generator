@@ -43,6 +43,9 @@ class GoNoGoCapabilityRow(BaseModel):
     evidence: str = ""
     # True when the RFP treats this requirement as mandatory or scored.
     is_core: bool = Field(default=False, alias="isCore")
+    # service|role|technical|compliance|logistics — Technical Capability score
+    # uses craft/platform categories; role/logistics feed Resource Availability.
+    category: str = "service"
     # Set by the validator when a claim fails its citation check.
     downgrade_reason: str = Field(default="", alias="downgradeReason")
     # Why a gap is a gap. "absent" = nothing in the KB addresses it.

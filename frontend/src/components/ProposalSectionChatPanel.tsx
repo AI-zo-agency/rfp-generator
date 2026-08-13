@@ -160,7 +160,10 @@ export function ProposalSectionChatPanel({
       let activeReference = reference;
       if (
         activeReference &&
-        pinnedSectionConflictsWithMessage(trimmed, activeReference.sectionId)
+        pinnedSectionConflictsWithMessage(trimmed, activeReference.sectionId, {
+          viewingSectionId,
+          sections,
+        })
       ) {
         activeReference = null;
         onSetReference(null);

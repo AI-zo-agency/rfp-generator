@@ -840,7 +840,7 @@ async def _incremental_fact_check_after_sections(
     rfp_id: str,
     section_ids: list[str],
 ) -> None:
-    """Run KB fact-check agent on sections just generated (before next section drafts)."""
+    """Run KB fact-check + consistency sync on sections just generated."""
     ids = list(dict.fromkeys(sid for sid in section_ids if sid))
     if not ids:
         return
@@ -851,6 +851,12 @@ async def _incremental_fact_check_after_sections(
         rfp, _, rfp_context = await aload_rfp_for_proposal(rfp_id)
         research = await aget_research_cache(rfp_id)
         from app.services.proposal_kb_fact_checker import run_kb_fact_check_section_ids
+        from app.services.proposal_consistency_enforcement import (
+            apply_consistency_enforcement,
+        )
+        from app.services.proposal_manuscript_fact_contradictions import (
+            run_manuscript_fact_contradiction_pass,
+        )
         from app.services.proposal_intelligence.log import log_intel_event
 
         draft, fc_report = await run_kb_fact_check_section_ids(
@@ -860,13 +866,26 @@ async def _incremental_fact_check_after_sections(
             rfp_context=rfp_context,
             research=research,
         )
+        draft, consistency_logs = apply_consistency_enforcement(
+            draft,
+            research=research,
+            rfp_text=rfp_context,
+        )
+        fact_result = await run_manuscript_fact_contradiction_pass(
+            draft,
+            rfp=rfp,
+            use_llm=True,
+        )
+        draft = fact_result.draft
         await asave_proposal_draft(draft)
-        if fc_report.logs:
+        if fc_report.logs or consistency_logs or fact_result.logs:
             logger.info(
-                "KB fact-check after %s for %s: %s",
+                "KB fact-check/consistency after %s for %s: fc=%s; cons=%s; facts=%s",
                 ", ".join(ids[:3]),
                 rfp_id,
-                "; ".join(fc_report.logs[:3]),
+                "; ".join(fc_report.logs[:3]) or "ok",
+                "; ".join(consistency_logs[:2]) or "ok",
+                "; ".join(fact_result.logs[:2]) or "ok",
             )
         log_intel_event(
             "SECTION_FACT_CHECK_DONE",
@@ -874,6 +893,8 @@ async def _incremental_fact_check_after_sections(
             section_ids=",".join(ids[:8]),
             repairs=fc_report.requirement_repairs,
             verify_fills=fc_report.verify_tags_filled,
+            consistency_fixes=len(consistency_logs),
+            fact_contradiction_rewrites=fact_result.rewrites_applied,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Incremental KB fact-check failed for %s %s: %s", rfp_id, ids, exc)

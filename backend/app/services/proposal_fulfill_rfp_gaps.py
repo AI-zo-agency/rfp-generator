@@ -398,13 +398,15 @@ async def _run_fulfill_rfp_gaps_body(
         "Requirement ledger (merge / cut / add)",
         "DQ & gov-policy gate (agentic loop)",
         "Remove duplicate sections",
+        "Senior editor review (RFP reviewer)",
         "Budget (regen if missing + thorough)",
         "Consistency repairs",
         "Compliance fabrication guard",
         "Contractor KPIs (Section 2.3)",
         "KB fact-check (Supermemory)",
         "RFP contradiction check (LLM)",
-        "Remove optional [VERIFY] tags",
+        "Remove optional VERIFY/MANUAL FILL",
+        "Line-by-line KB grounding (async)",
         "Compact manuscript (remove duplicates)",
         "Page limit & anti-invention (Ralph)",
         "Pre-submit refresh",
@@ -618,8 +620,8 @@ async def _run_fulfill_rfp_gaps_body(
         await _scan_progress(
             2,
             "Scan RFP: fact repairs",
-            "Rebuild bios from 04_Bio KB; scrub false vendor-registration claims, "
-            "bio/org-chart conflicts, unverified insurance carriers.",
+            "Rebuild bios from 04_Bio KB; scrub false vendor-registration / insurance "
+            "Compliant certifications, bio/org-chart conflicts, unverified carriers.",
         )
         await _ensure_not_stopped()
         draft, fact_logs = await run_scan_fact_repairs(
@@ -628,6 +630,13 @@ async def _run_fulfill_rfp_gaps_body(
             rfp_text=rfp_text,
         )
         report["logs"].extend(fact_logs)
+        for line in fact_logs:
+            if line.startswith("HUMAN_GAP:"):
+                gap = line.split("HUMAN_GAP:", 1)[1].strip()
+                if gap and gap not in report["humanDecisionGaps"]:
+                    report["humanDecisionGaps"].append(gap)
+        if fact_logs:
+            await asave_proposal_draft(draft)
         report["factRepairs"] = fact_logs[:24]
         compliance_hits = [
             line
@@ -641,6 +650,10 @@ async def _run_fulfill_rfp_gaps_body(
                     "invented bio vertical",
                     "insurance carrier",
                     "registration confirmation",
+                    "compliant",
+                    "meets or exceeds insurance",
+                    "manual fill: sonja",
+                    "human_gap",
                 )
             )
         ]
@@ -859,6 +872,48 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Scan RFP dedupe prune skipped: %s", exc)
         report["logs"].append(f"Dedupe prune skipped: {exc}")
 
+    await _scan_progress(
+        6,
+        "Scan RFP: senior editor review",
+        "RFP proposal reviewer — dedupe, cross-refs, coverage gaps; no invented facts.",
+    )
+    await _ensure_not_stopped()
+    try:
+        from app.services.proposal_scan_senior_reviewer import (
+            run_complete_scan_senior_reviewer,
+        )
+
+        draft, research, reviewer = await run_complete_scan_senior_reviewer(
+            rfp_id=rfp_id,
+            rfp=rfp,
+            draft=draft,
+            research=research,
+            rfp_text=rfp_text,
+        )
+        report["seniorReviewer"] = {
+            "deleteTickets": reviewer.delete_tickets,
+            "dedupeTickets": reviewer.dedupe_tickets,
+            "sectionsImproved": reviewer.sections_improved,
+            "coverageGaps": reviewer.coverage_gaps[:12],
+            "complianceGaps": reviewer.compliance_gaps[:12],
+            "logs": reviewer.logs[:30],
+        }
+        for gap in reviewer.coverage_gaps[:8]:
+            if gap not in report["humanDecisionGaps"]:
+                report["humanDecisionGaps"].append(gap)
+        for gap in reviewer.compliance_gaps[:8]:
+            if gap not in report["humanDecisionGaps"]:
+                report["humanDecisionGaps"].append(gap)
+        for line in reviewer.logs[:20]:
+            report["logs"].append(line)
+        if reviewer.sections_improved or reviewer.logs:
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Senior reviewer during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"Senior reviewer skipped: {exc}")
+
     try:
         from app.services.agency_facts import default_business_information_markdown
         from app.services.proposal_section_quality import word_count
@@ -903,7 +958,7 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
         await _scan_progress(
-            6,
+            7,
             "Scan RFP: budget (thorough)",
             "Regenerate if missing; reconcile math; grounding vs manuscript.",
         )
@@ -943,7 +998,7 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
         await _scan_progress(
-            7,
+            8,
             "Scan RFP: consistency repairs",
             "Primary contact, references, schedule vs approach, cert claims, "
             "signed-PDF designer notes — existing draft only (no full regen).",
@@ -1004,38 +1059,45 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].append(f"Truncation repair skipped: {exc}")
 
     try:
-        from app.services.proposal_structure_gap_repair import (
-            repair_structure_gaps_in_draft,
-        )
+        from app.services.proposal_manuscript import collapse_empty_subheadings
 
-        await _scan_progress(
-            7,
-            "Scan RFP: empty subheadings",
-            "Fill ## headers with no body (e.g. Transportation Experience subsections).",
-        )
-        await _ensure_not_stopped()
-        draft, gap_logs = await repair_structure_gaps_in_draft(
-            draft,
-            rfp_id=rfp_id,
-            rfp=rfp,
-            rfp_client=rfp.client,
-            rfp_title=rfp.title,
-        )
+        gap_logs: list[str] = []
+        sections = list(draft.sections)
+        changed = False
+        for idx, section in enumerate(sections):
+            before = section.content or ""
+            if not before.strip():
+                continue
+            after = collapse_empty_subheadings(before)
+            if after != before:
+                sections[idx] = section.model_copy(update={"content": after})
+                changed = True
+                gap_logs.append(
+                    f"Removed empty subheading(s) in “{section.title or section.id}” "
+                    "(deterministic — no LLM fill)."
+                )
+        if changed:
+            draft = draft.model_copy(
+                update={
+                    "sections": sections,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
         report["logs"].extend(gap_logs)
         if gap_logs:
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Empty subheading repair skipped: %s", exc)
-        report["logs"].append(f"Empty subheading repair skipped: {exc}")
+        logger.warning("Empty subheading collapse skipped: %s", exc)
+        report["logs"].append(f"Empty subheading collapse skipped: {exc}")
 
     if use_llm:
         try:
             from app.services.proposal_fulfill_rfp_budget_kpi import run_fulfill_kpi_scan
 
             await _scan_progress(
-                8,
+                9,
                 "Scan RFP: contractor KPIs + detail",
                 "Activity Measure tables & BMP linkages — rewrite, not label swap.",
             )
@@ -1061,7 +1123,7 @@ async def _run_fulfill_rfp_gaps_body(
         try:
             from app.services.proposal_fulfill_rfp_budget_kpi import run_fulfill_kpi_scan
 
-            await _scan_progress(8, "Scan RFP: contractor KPIs", "Deterministic KPI alignment (no LLM).")
+            await _scan_progress(10, "Scan RFP: contractor KPIs", "Deterministic KPI alignment (no LLM).")
             await _ensure_not_stopped()
             draft, kpi_logs, kpi_human = await run_fulfill_kpi_scan(
                 draft=draft,
@@ -1089,9 +1151,10 @@ async def _run_fulfill_rfp_gaps_body(
 
     report["logs"].append(
         "Scan RFP walks full PDF text, submission checklist, RFP-scored section structure "
-        "(Exhibit A / criteria), budget reconcile/sync, contractor KPI alignment, and "
-        "removes [VERIFY] tags unless critically required by the RFP — never invents; "
-        "team bios and case studies are not rewritten."
+        "(Exhibit A / criteria), budget reconcile/sync, contractor KPI alignment, "
+        "removes [VERIFY]/[MANUAL FILL] unless RFP-critical, and line-grounds each "
+        "section against the KB (async queries) — never invents; "
+        "team bios and case studies are not rewritten from scratch."
     )
 
     # Flag qualification gaps that writing cannot invent (references type, geo experience).
@@ -1108,7 +1171,7 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
     await _scan_progress(
-        9,
+        11,
         "Scan RFP: KB fact-check",
         "Requirements → RFP excerpt → Supermemory per section (smart rewrite when needed).",
     )
@@ -1160,6 +1223,11 @@ async def _run_fulfill_rfp_gaps_body(
             research=research,
             rfp_text=rfp_text,
         )
+        for line in post_fc_logs:
+            if line.startswith("HUMAN_GAP:"):
+                gap = line.split("HUMAN_GAP:", 1)[1].strip()
+                if gap and gap not in report["humanDecisionGaps"]:
+                    report["humanDecisionGaps"].append(gap)
         if post_fc_logs:
             report["logs"].extend(f"post-fact-check: {line}" for line in post_fc_logs[:16])
             await asave_proposal_draft(draft)
@@ -1173,7 +1241,7 @@ async def _run_fulfill_rfp_gaps_body(
     # Generate-from-scratch uses (titles, consistency, certs, signed PDF note,
     # LLM manuscript-vs-RFP contradictions).
     await _scan_progress(
-        10,
+        12,
         "Scan RFP: Contradiction check",
         "LLM manuscript vs verified company facts + vs RFP requirements.",
     )
@@ -1208,6 +1276,10 @@ async def _run_fulfill_rfp_gaps_body(
         report["factContradictionCount"] = suite.fact_contradiction_count
         report["factContradictionRewrites"] = suite.fact_contradiction_rewrites
         report["factContradictionUnresolved"] = suite.fact_contradiction_unresolved
+        for line in suite.fact_contradiction_unresolved_titles[:8]:
+            gap = f"Unresolved fact contradiction — {line}"
+            if gap not in report["humanDecisionGaps"]:
+                report["humanDecisionGaps"].append(gap)
         report["rfpContradictionTitles"] = suite.contradiction_unresolved_titles or [
             line for line in suite.logs if "FIXED contradiction" in line
         ][:8]
@@ -1249,40 +1321,54 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("RFP blocker suite / contradiction scan skipped: %s", exc)
         report["logs"].append(f"RFP blocker suite skipped: {exc}")
 
-    # Dedicated pass: every section with [VERIFY] → RFP scan → remove unless critical.
+    # Dedicated pass: every section with [VERIFY]/[MANUAL FILL] → RFP scan →
+    # remove unless critically required. Never invents.
     await _scan_progress(
-        11,
-        "Scan RFP: remove optional [VERIFY]",
-        "Read each VERIFY section vs full RFP — drop tags unless critically required; never invent.",
+        13,
+        "Scan RFP: remove optional VERIFY/MANUAL FILL",
+        "Drop placeholders unless RFP-critical; fill from KB verbatim only — never invent.",
     )
     await _ensure_not_stopped()
     try:
         from app.services.proposal_verify_optional_scrub import (
+            count_placeholder_tags,
             count_verify_tags,
+            count_manual_fill_tags,
             scrub_draft_optional_verify_tags,
         )
 
-        verify_sections = [
-            s.id for s in draft.sections if count_verify_tags(s.content or "") > 0
+        placeholder_sections = [
+            s.id
+            for s in draft.sections
+            if count_placeholder_tags(s.content or "") > 0
         ]
-        if verify_sections:
-            before_counts = {
+        if placeholder_sections:
+            before_v = {
                 s.id: count_verify_tags(s.content or "") for s in draft.sections
+            }
+            before_m = {
+                s.id: count_manual_fill_tags(s.content or "") for s in draft.sections
             }
             scrubbed, scrub_logs = await scrub_draft_optional_verify_tags(
                 list(draft.sections),
                 rfp_text=rfp_text,
-                section_filter_ids=set(verify_sections),
+                section_filter_ids=set(placeholder_sections),
             )
-            after_counts = {
+            after_v = {
                 s.id: count_verify_tags(s.content or "") for s in scrubbed
             }
-            removed = sum(
-                max(0, before_counts.get(i, 0) - after_counts.get(i, 0))
-                for i in before_counts
+            after_m = {
+                s.id: count_manual_fill_tags(s.content or "") for s in scrubbed
+            }
+            removed_v = sum(
+                max(0, before_v.get(i, 0) - after_v.get(i, 0)) for i in before_v
             )
-            kept = sum(after_counts.values())
-            report["verifyTagsRemoved"] = removed
+            removed_m = sum(
+                max(0, before_m.get(i, 0) - after_m.get(i, 0)) for i in before_m
+            )
+            kept = sum(after_v.values()) + sum(after_m.values())
+            report["verifyTagsRemoved"] = removed_v
+            report["manualFillTagsRemoved"] = removed_m
             report["verifyTagsKept"] = kept
             before_map = {s.id: (s.content or "") for s in draft.sections}
             changed = any(
@@ -1290,13 +1376,14 @@ async def _run_fulfill_rfp_gaps_body(
             )
             if scrub_logs:
                 report["verifyScrub"] = {
-                    "sectionsScanned": len(verify_sections),
-                    "verifyTagsRemoved": removed,
+                    "sectionsScanned": len(placeholder_sections),
+                    "verifyTagsRemoved": removed_v,
+                    "manualFillTagsRemoved": removed_m,
                     "verifyTagsKept": kept,
                     "logs": scrub_logs,
                 }
                 for line in scrub_logs[:25]:
-                    report["logs"].append(f"VERIFY scrub: {line}")
+                    report["logs"].append(f"Placeholder scrub: {line}")
             if changed:
                 draft = draft.model_copy(
                     update={
@@ -1307,18 +1394,58 @@ async def _run_fulfill_rfp_gaps_body(
                 await asave_proposal_draft(draft)
             else:
                 report["logs"].append(
-                    f"VERIFY scrub: scanned {len(verify_sections)} section(s); "
+                    f"Placeholder scrub: scanned {len(placeholder_sections)} section(s); "
                     "no optional tags removed (kept only if RFP-critical)."
                 )
         else:
             report["verifyTagsRemoved"] = 0
+            report["manualFillTagsRemoved"] = 0
             report["verifyTagsKept"] = 0
-            report["logs"].append("VERIFY scrub: no [VERIFY] tags found.")
+            report["logs"].append("Placeholder scrub: no [VERIFY]/[MANUAL FILL] tags found.")
     except ProposalGenerationCancelled:
         raise
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Optional VERIFY scrub during Scan RFP skipped: %s", exc)
-        report["logs"].append(f"VERIFY scrub skipped: {exc}")
+        logger.warning("Optional placeholder scrub during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"Placeholder scrub skipped: {exc}")
+
+    # Async per-section KB line grounding — confirm claims in DB; never invent.
+    await _scan_progress(
+        14,
+        "Scan RFP: line-by-line KB grounding",
+        "Agent plans queries per section (async) — remove ungrounded claims; no fabrication.",
+    )
+    await _ensure_not_stopped()
+    try:
+        from app.services.proposal_scan_line_grounding import (
+            run_scan_line_grounding_pass,
+        )
+
+        draft, ground_report = await run_scan_line_grounding_pass(
+            draft,
+            rfp=rfp,
+            rfp_text=rfp_text,
+            research=research,
+        )
+        report["lineGrounding"] = {
+            "sectionsChecked": ground_report.sections_checked,
+            "sectionsChanged": ground_report.sections_changed,
+            "queriesRun": ground_report.queries_run,
+            "logs": ground_report.logs[:40],
+        }
+        if ground_report.logs:
+            for line in ground_report.logs[:20]:
+                report["logs"].append(f"Line ground: {line}")
+            await asave_proposal_draft(draft)
+        else:
+            report["logs"].append(
+                f"Line ground: checked {ground_report.sections_checked} section(s); "
+                f"{ground_report.queries_run} KB queries."
+            )
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Line grounding during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"Line grounding skipped: {exc}")
 
     try:
         from app.services.evidence_trust.load_client_list import load_client_list_registry
@@ -1354,7 +1481,7 @@ async def _run_fulfill_rfp_gaps_body(
         from app.services.proposal_section_dedup import dedupe_manuscript_for_scan
 
         await _scan_progress(
-            12,
+            15,
             "Scan RFP: Compact manuscript",
             "Final pass — remove leftover duplicate/restated tabs after adds/rewrites.",
         )
@@ -1418,7 +1545,7 @@ async def _run_fulfill_rfp_gaps_body(
         from app.services.proposal_ralph import apply_ralph_to_draft
 
         await _scan_progress(
-            13,
+            16,
             "Scan RFP: Page limit & anti-invention",
             "If THIS RFP states a page limit, hard-fit without cutting identity/budget/scored floors; scrub invented diagrams.",
         )
@@ -1443,7 +1570,7 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].append(f"Ralph page-fit skipped: {exc}")
 
     await _scan_progress(
-        14,
+        17,
         "Scan RFP: pre-submit refresh",
         "Checklist, manual flags, and ending report.",
     )

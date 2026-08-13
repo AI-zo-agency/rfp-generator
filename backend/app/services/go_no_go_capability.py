@@ -327,6 +327,33 @@ def reconcile_narrative(
     return out.replace(_VERDICT_PLACEHOLDER, label)
 
 
+def gap_matrix_from_requirements(
+    requirements: list[Any],
+    *,
+    reason: str = "capability adjudicator unavailable — treat as unverified",
+) -> list[GoNoGoCapabilityRow]:
+    """Fail closed without keyword matching: every requirement starts as a gap.
+
+    Used when the LLM adjudicator cannot run. Keyword fallbacks understate
+    semantic matches (e.g. WordPress bio for CMS) and overstate false overlaps.
+    """
+    rows: list[GoNoGoCapabilityRow] = []
+    for requirement in requirements:
+        name = getattr(requirement, "requirement", "") or ""
+        if not name:
+            continue
+        rows.append(
+            GoNoGoCapabilityRow(
+                requirement=name,
+                status="gap",
+                isCore=bool(getattr(requirement, "is_core", False)),
+                category=str(getattr(requirement, "category", "") or "service"),
+                downgradeReason=reason,
+            )
+        )
+    return rows
+
+
 def build_matrix_from_requirements(
     requirements: list[Any],
     hits_by_requirement: dict[str, list[dict[str, Any]]],
@@ -345,6 +372,7 @@ def build_matrix_from_requirements(
         if not name:
             continue
         is_core = bool(getattr(requirement, "is_core", False))
+        category = str(getattr(requirement, "category", "") or "service")
         hits = hits_by_requirement.get(name, [])
         index = build_source_index(hits)
 
@@ -364,6 +392,7 @@ def build_matrix_from_requirements(
                     kbSource=best_source,
                     evidence=best_evidence,
                     isCore=is_core,
+                    category=category,
                 )
             )
         else:
@@ -374,6 +403,7 @@ def build_matrix_from_requirements(
                     kbSource="",
                     evidence="",
                     isCore=is_core,
+                    category=category,
                     downgradeReason=(
                         "no retrieved KB document evidences this requirement"
                         if hits
@@ -510,26 +540,30 @@ def upsert_capability_section(report: str, rows: list[GoNoGoCapabilityRow]) -> s
 
 
 def unverified_core_requirements(rows: list[GoNoGoCapabilityRow]) -> list[str]:
-    """Core requirements with no surviving verified evidence."""
+    """Core craft/platform requirements with no surviving verified evidence.
+
+    Role/logistics cores are staffing/presence issues — they must not force the
+    Technical NO-GO banner when WordPress/CMS craft is already evidenced.
+    """
     return [
         row.requirement
         for row in rows
-        if row.is_core and row.status not in {"verified", "partial"}
+        if row.is_core
+        and row.status not in {"verified", "partial"}
+        and (row.category or "service").casefold() in _TECHNICAL_SCORE_CATEGORIES
     ]
 
 
 # Dimensions that cannot outrun demonstrated capability.
-#
-# Observed: Technical Capability Match 0/5 (20 core requirements unevidenced)
-# sitting beside Win Probability 4/5 and Resource Availability 4/5, averaging
-# to a 3.0 "moderate" verdict. You cannot be likely to win, or be staffed for,
-# work you cannot evidence having done. Financial Viability (is the money
-# worthwhile) and Strategic Value (is the win worth having) are genuinely
-# independent of whether zö can deliver, so they are left alone.
 _CAPABILITY_DEPENDENT_DIMENSIONS = {
     "win probability": 1,
     "resource availability": 1,
 }
+
+# Craft / platform / delivery asks drive Technical Capability.
+_TECHNICAL_SCORE_CATEGORIES = frozenset({"technical", "service", "compliance"})
+# Staffing titles and presence asks drive Resource Availability.
+_RESOURCE_SCORE_CATEGORIES = frozenset({"role", "logistics"})
 
 
 def coherent_dimension_cap(dimension: str, technical_score: int | None) -> int | None:
@@ -546,17 +580,26 @@ def coherent_dimension_cap(dimension: str, technical_score: int | None) -> int |
 
 
 def derive_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | None:
-    """Score 0-5 from the verified share of requirements, not model opinion.
+    """Score 0-5 from craft/platform requirement evidence, not staffing titles.
 
-    Core requirements count double: an RFP whose load-bearing asks are
-    unevidenced is a poor technical match however many peripheral rows match.
+    Role and logistics rows (assign a PM, open a CA office) are real gaps but they
+    belong in Resource Availability — counting them here produced live 1/5
+    Technical scores while a WordPress specialist bio was already in the KB.
     """
     if not rows:
         return None
 
+    craft_rows = [
+        row
+        for row in rows
+        if (row.category or "service").casefold() in _TECHNICAL_SCORE_CATEGORIES
+    ]
+    # Older rows without category still participate.
+    scored = craft_rows or list(rows)
+
     earned = 0.0
     possible = 0.0
-    for row in rows:
+    for row in scored:
         weight = 2.0 if row.is_core else 1.0
         possible += weight
         if row.status == "verified":
@@ -566,4 +609,32 @@ def derive_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | 
 
     if possible <= 0:
         return None
-    return max(0, min(5, round((earned / possible) * 5)))
+    # Half-up so 2.5 (craft evidenced, infrastructure gaps) becomes 3, matching
+    # human recalibration — Python round() uses bankers rounding (2.5→2).
+    return max(0, min(5, int((earned / possible) * 5 + 0.5)))
+
+
+def derive_resource_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | None:
+    """Score 0-5 from role / logistics evidence (staffing, presence, assignments)."""
+    if not rows:
+        return None
+    staff_rows = [
+        row
+        for row in rows
+        if (row.category or "").casefold() in _RESOURCE_SCORE_CATEGORIES
+    ]
+    if not staff_rows:
+        return None
+
+    earned = 0.0
+    possible = 0.0
+    for row in staff_rows:
+        weight = 2.0 if row.is_core else 1.0
+        possible += weight
+        if row.status == "verified":
+            earned += weight
+        elif row.status == "partial":
+            earned += weight * 0.5
+    if possible <= 0:
+        return None
+    return max(0, min(5, int((earned / possible) * 5 + 0.5)))

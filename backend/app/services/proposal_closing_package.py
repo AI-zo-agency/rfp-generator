@@ -167,7 +167,10 @@ _CLOSING_CATALOG: list[tuple[str, str, str, str, tuple[str, ...], str]] = [
             "exceptions clearly. If the RFP wants a marked page returned, note [MANUAL FILL]. "
             "Section 1.5 Insurance Information already states zö's coverage; do NOT restate "
             "limits, carriers or coverage types here — even if the agreement text itself "
-            "discusses insurance provisions, acknowledge/except that clause by reference only."
+            "discusses insurance provisions, acknowledge/except that clause by reference only. "
+            "NEVER mark insurance rows Compliant or claim meets-or-exceeds RFP minimums unless "
+            "Section 1.5 already lists that coverage type and limit — use [MANUAL FILL: Sonja — "
+            "confirm on COI] or take a real exception instead."
         ),
     ),
     (

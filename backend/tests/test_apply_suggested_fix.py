@@ -55,6 +55,7 @@ class ApplySuggestedFixFastPathTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("connect@zo.agency", user)
             self.assertIn("Prior chat", user)
             self.assertNotIn("KB excerpts", user)
+            self.assertNotIn("04_Bio KB", user)
             return {"content": "| Email | connect@zo.agency |"}, "stub"
 
         with (

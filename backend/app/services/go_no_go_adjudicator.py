@@ -40,16 +40,33 @@ For every requirement you are given the KB documents retrieved for it. Decide:
   "partial"  - a document evidences a related or narrower form of it
   "gap"      - no document evidences it
 
-Judge by MEANING, not wording. WordPress work IS content-management-system
-experience. "Improve clarity and user flow" IS user-experience evidence.
+Judge by MEANING, not wording. A named platform skill in a bio (e.g. WordPress,
+Drupal, Salesforce, ArcGIS) IS evidence for that platform / CMS / tool
+requirement. "Improve clarity and user flow" IS user-experience evidence.
 A page-structure redesign IS information architecture. Do not require the
 document to repeat the RFP's phrasing.
+
+EVIDENCE PRINCIPLES (apply to EVERY RFP — never invent absent proof, never
+ignore retrieved proof):
+- A specialist BIO that states a tool/platform/discipline skill IS "verified"
+  for that skill. Do NOT mark gap solely because there is no separately titled
+  case study for the same tool.
+- A case study that describes the same kind of delivery (redesign, migration,
+  campaign, integration) IS "verified" or "partial" for that delivery ask even
+  when the client sector differs — use "partial"/"adjacent" when sector is
+  material to the ask (e.g. government-only), not when the ask is the craft.
+- Thin bench / one specialist plus supporting creatives is staffing DEPTH, not
+  proof the skill is missing. Mark depth concerns "partial" or
+  evidenceState="adjacent"; never treat them as "absent" for the skill itself.
+- Keep orthogonal gaps separate: missing hosting/SLA/office/registration must
+  NOT be used to claim missing platform or craft capability, and vice versa.
 
 But do NOT stretch across a real difference: content development is not content
 migration; print/brand design is not web development; branding for a city is not
 building that city a website; a pricing guide is not proof of delivery
-capability. Sector matters — private-sector website work does not evidence
-"government website experience", though it does evidence "website redesign".
+capability. Sector matters when the RFP requires it — private-sector work does
+not fully evidence "government website experience", though it does evidence
+generic "website redesign".
 
 NEVER invent or confirm staff names that are not verbatim in the cited excerpt.
 Known fabrications include Brittany Frazier, Drew Stone, Ben Edwards, Erica
@@ -199,8 +216,13 @@ def rows_from_assessments(
     requirements: list[Any],
     assessments: list[dict[str, Any]],
     sources: dict[str, dict[str, str]],
-) -> tuple[list[GoNoGoCapabilityRow], list[str]]:
-    """Turn adjudications into rows, dropping any whose quote is not grounded."""
+) -> tuple[list[GoNoGoCapabilityRow], list[str], set[str]]:
+    """Turn adjudications into rows, dropping any whose quote is not grounded.
+
+    Returns (rows, rejected_messages, recoverable_requirement_names).
+    ``recoverable`` are rows the model called gap (or omitted) — eligible for an
+    LLM semantic re-check. Quote-grounding failures are NOT recoverable.
+    """
     by_requirement = {
         str(item.get("requirement") or "").strip().casefold(): item
         for item in assessments
@@ -209,12 +231,14 @@ def rows_from_assessments(
 
     rows: list[GoNoGoCapabilityRow] = []
     rejected: list[str] = []
+    recoverable: set[str] = set()
 
     for requirement in requirements:
         name = getattr(requirement, "requirement", "") or ""
         if not name:
             continue
         is_core = bool(getattr(requirement, "is_core", False))
+        category = str(getattr(requirement, "category", "") or "service").casefold()
         item = by_requirement.get(name.casefold())
         available = sources.get(name, {})
 
@@ -227,11 +251,13 @@ def rows_from_assessments(
             evidence_state = "" if status in {"verified", "partial"} else "absent"
 
         if status not in {"verified", "partial"}:
+            recoverable.add(name)
             rows.append(
                 GoNoGoCapabilityRow(
                     requirement=name,
                     status="gap",
                     isCore=is_core,
+                    category=category,
                     evidenceState=evidence_state,
                     downgradeReason=reason
                     or (
@@ -275,6 +301,7 @@ def rows_from_assessments(
                         kbSource=kb_source,
                         evidence=quote[:400],
                         isCore=is_core,
+                        category=category,
                     )
                 )
                 continue
@@ -285,6 +312,7 @@ def rows_from_assessments(
                 requirement=name,
                 status="gap",
                 isCore=is_core,
+                category=category,
                 downgradeReason=failure,
             )
         )
@@ -295,4 +323,91 @@ def rows_from_assessments(
             len(rejected),
             "; ".join(rejected[:8]),
         )
-    return rows, rejected
+    return rows, rejected, recoverable
+
+
+GAP_RECOVER_PROMPT = """You re-check Go/No-Go requirements that were marked GAP even though
+KB documents were retrieved for them.
+
+Judge by MEANING only — never by keyword lists:
+- A specialist bio that names a tool/platform (e.g. WordPress) evidences that
+  platform and related CMS/web-development asks.
+- A delivery case study that describes the same kind of work evidences that
+  craft ask (redesign, UX, migration, etc.).
+- Do NOT require a separately titled case study when a bio already proves the skill.
+- Do NOT invent. If nothing in the documents supports the ask, keep status=gap.
+
+For verified or partial you MUST return kbSource (exact document name) and a
+VERBATIM quote copied from that document's text. Quotes are checked mechanically.
+
+Return ONLY JSON:
+{"assessments":[{"requirement":"...","status":"verified|partial|gap",
+  "kbSource":"...","quote":"...","evidenceState":"absent|contradicted|adjacent",
+  "reason":"one short sentence"}]}
+Only include requirements listed below."""
+
+
+def build_gap_recover_payload(
+    gap_requirements: list[Any],
+    sources: dict[str, dict[str, str]],
+) -> str:
+    blocks: list[str] = []
+    for requirement in gap_requirements:
+        name = getattr(requirement, "requirement", "") or ""
+        if not name:
+            continue
+        docs = sources.get(name, {})
+        if not docs:
+            continue
+        lines = [f"### REQUIREMENT: {name}"]
+        for display, text in list(docs.items())[:_MAX_DOCS_PER_REQUIREMENT]:
+            lines.append(f"--- DOCUMENT: {display}\n{(text or '')[:_MAX_DOC_CHARS]}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def apply_gap_recover_assessments(
+    rows: list[GoNoGoCapabilityRow],
+    *,
+    recoverable: set[str],
+    assessments: list[dict[str, Any]],
+    sources: dict[str, dict[str, str]],
+    requirements: list[Any],
+) -> list[GoNoGoCapabilityRow]:
+    """Apply LLM gap re-checks onto recoverable rows; quote failures stay frozen."""
+    if not recoverable or not assessments:
+        return rows
+    req_by_name = {
+        (getattr(r, "requirement", "") or ""): r
+        for r in requirements
+        if getattr(r, "requirement", "")
+    }
+    subset = [req_by_name[name] for name in recoverable if name in req_by_name]
+    if not subset:
+        return rows
+    recovered_rows, _rejected, _rec = rows_from_assessments(
+        subset, assessments, sources
+    )
+    by_name = {r.requirement: r for r in recovered_rows}
+    out: list[GoNoGoCapabilityRow] = []
+    upgraded = 0
+    for row in rows:
+        if row.requirement not in recoverable:
+            out.append(row)
+            continue
+        nxt = by_name.get(row.requirement, row)
+        # Only accept upgrades — never let a second pass invent new gaps over verified.
+        if row.status in {"verified", "partial"}:
+            out.append(row)
+            continue
+        if nxt.status in {"verified", "partial"}:
+            upgraded += 1
+            out.append(nxt)
+        else:
+            out.append(row)
+    if upgraded:
+        logger.info(
+            "go_no_go LLM gap recover upgraded %d row(s) from grounded evidence",
+            upgraded,
+        )
+    return out

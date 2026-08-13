@@ -266,7 +266,12 @@ def collapse_empty_subheadings(text: str) -> str:
     keep = [True] * len(lines)
 
     def _is_heading(idx: int) -> bool:
-        return 0 <= idx < len(lines) and bool(_MD_HEADING_LINE_RE.match(lines[idx]))
+        if not (0 <= idx < len(lines)):
+            return False
+        if _MD_HEADING_LINE_RE.match(lines[idx]):
+            return True
+        # Bold-only title line (**Team Qualifications Summary**) with no other text.
+        return bool(re.match(r"^\s*\*\*[^*]+\*\*\s*$", lines[idx]))
 
     def _has_body_before_next_heading(start: int) -> bool:
         j = start + 1

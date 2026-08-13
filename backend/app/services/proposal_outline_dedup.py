@@ -394,18 +394,91 @@ def stamp_outline_evaluation_weights(
         best_score = 0
         for name, pts in crit_rows:
             name_cf = name.casefold()
+            # Exact / containment match only — a single shared token (e.g. "Experience")
+            # used to stamp every related tab as "scored", which blocked lean drops and
+            # ballooned outlines past 30 tabs.
             if name_cf == title_cf or name_cf in title_cf or title_cf in name_cf:
                 best = pts
                 best_score = 100
                 break
             name_tokens = {t for t in outline_title_tokens(name) if len(t) >= 4}
             overlap = len(title_tokens & name_tokens)
-            if overlap >= 1 and overlap > best_score:
+            if overlap >= 2 and overlap > best_score:
                 best = pts
                 best_score = overlap
-        if best is not None and best_score >= 1:
+        if best is not None and best_score >= 2:
             _set_section_evaluation_weight(section, best)
     return sections
+
+
+def max_rfp_outline_sections(page_limit: int | None = None) -> int:
+    """Hard ceiling for RFP outline tabs (excludes static Sections 1–3).
+
+    Page-budget heuristic: ~55% of narrative words for RFP tabs at ~400 words/tab.
+    Without a page limit, default as if ~20 pages. Absolute floor 8 / ceiling 18 —
+    evaluators cannot finish a 30–40 tab manuscript.
+    """
+    pages = page_limit if page_limit and page_limit > 0 else 20
+    soft = int((pages * 350 * 0.55) // 400)
+    return max(8, min(18, soft))
+
+
+def enforce_outline_section_cap(
+    sections: list[Any],
+    max_n: int,
+) -> tuple[list[Any], list[str]]:
+    """Keep at most ``max_n`` outline tabs, preferring closing + scored + required.
+
+    Deterministic post-planner safety net when the LLM emits one tab per bullet /
+    criterion. Reorders by priority for selection, then restores original order.
+    """
+    if max_n <= 0 or len(sections) <= max_n:
+        return list(sections), []
+
+    def _title(section: Any) -> str:
+        if hasattr(section, "title"):
+            return str(section.title or "")
+        if isinstance(section, dict):
+            return str(section.get("title") or "")
+        return ""
+
+    def _required(section: Any) -> bool:
+        if hasattr(section, "required"):
+            return bool(section.required)
+        if isinstance(section, dict):
+            return bool(section.get("required"))
+        return False
+
+    def _weight(section: Any) -> float:
+        pts = _section_evaluation_points(section)
+        try:
+            return float(pts) if pts is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    ranked = sorted(
+        enumerate(sections),
+        key=lambda pair: (
+            0 if is_important_or_closing_outline_title(_title(pair[1])) else 1,
+            0 if section_carries_evaluation_points(pair[1]) else 1,
+            -_weight(pair[1]),
+            0 if _required(pair[1]) else 1,
+            pair[0],
+        ),
+    )
+    keep_idx = {idx for idx, _ in ranked[:max_n]}
+    kept = [sec for i, sec in enumerate(sections) if i in keep_idx]
+    dropped = [
+        f"{_title(sec)} (outline hard-cap {max_n})"
+        for i, sec in enumerate(sections)
+        if i not in keep_idx
+    ]
+    for i, section in enumerate(kept, start=1):
+        if hasattr(section, "order"):
+            section.order = i
+        elif isinstance(section, dict):
+            section["order"] = i
+    return kept, dropped
 
 
 def is_generic_filler_outline_title(title: str) -> bool:

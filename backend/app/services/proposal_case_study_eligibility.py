@@ -55,11 +55,19 @@ def is_eligible_section3_case_study_title(
             "county",
             "nycedc",
             "coge",
+            "utility",
+            "water district",
+            "wastewater",
+            "municipal water",
+            "public agency",
+            "special district",
         )
     )
     if civic and re.search(
         r"infinite\s+assets|personal\s+brand|keynote\s+speaker|"
-        r"financial\s+advisor|thought\s+leader.*coach",
+        r"financial\s+advisor|thought\s+leader.*coach|"
+        r"gynecolog|dermatolog|orthopedic|dental\s+practice|"
+        r"private\s+(?:medical|practice|clinic)|plastic\s+surg",
         text,
         re.I,
     ):

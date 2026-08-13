@@ -342,6 +342,54 @@ export function isBioSection(section: OutlineSection | null | undefined): boolea
   );
 }
 
+export function isPersonnelSection(
+  section: OutlineSection | null | undefined
+): boolean {
+  if (!section) return false;
+  const title = (section.title || "").toLowerCase();
+  return (
+    /experience\s+of\s+personnel|key\s+personnel|personnel\s+qualif|team\s+qualif|proposed\s+personnel|staffing\s+plan|project\s+team|resumes?\b/i.test(
+      title
+    ) && !isBioSection(section)
+  );
+}
+
+/** True when the user wants an in-place bio/resume fix on the open tab — not a Section 2 tab pick. */
+export function messageIsInPlaceBioEdit(message: string): boolean {
+  const text = (message || "").trim();
+  if (!text || messageLooksOutlineStructure(text)) return false;
+  const hasBioSource = /\b(?:resume|resumes|04_bio|bio\b|bios\b)\b/i.test(text);
+  if (!hasBioSource) return false;
+  const hasEdit =
+    /\b(?:fetch|pull|get|grab|load|populate|fill|correct|update|fix|rewrite|revise|make\s+sure)\b/i.test(
+      text
+    );
+  if (hasEdit) return true;
+  // Named person + resume/bio mention (e.g. "Shawn DiCriscio … from its resume").
+  if (/\b[A-Z][a-z]+(?:\s+[A-Z][a-z'\-]+){1,3}\b/.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+function personNamedInSectionContent(
+  section: OutlineSection,
+  message: string
+): boolean {
+  const content = section.content || "";
+  if (!content.trim()) return false;
+  const lower = message.toLowerCase();
+  for (const match of content.matchAll(
+    /(?:^#{1,4}\s+|\*\*)([A-Z][a-z]+(?:\s+[A-Z][a-z'\-]+){1,3})/gm
+  )) {
+    const name = (match[1] || "").trim();
+    if (name.length >= 4 && lower.includes(name.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function isOurWorkSection(section: OutlineSection | null | undefined): boolean {
   if (!section) return false;
   return (
@@ -570,8 +618,9 @@ export function messageLooksProposalWide(message: string): boolean {
   );
 }
 
-/** User is talking about team bios as a group. */
+/** User is talking about team bios as a group (add tab / all bios) — not in-place resume fetch on open tab. */
 export function messageTargetsBios(message: string): boolean {
+  if (messageIsInPlaceBioEdit(message)) return false;
   return /\b(bio|bios|resume|resumes|team\s*bios?|team\s*member)\b/i.test(message);
 }
 
@@ -651,9 +700,22 @@ export function messageLooksStructural(message: string): boolean {
  */
 export function pinnedSectionConflictsWithMessage(
   message: string,
-  pinnedSectionId: string | null | undefined
+  pinnedSectionId: string | null | undefined,
+  options?: {
+    viewingSectionId?: string | null;
+    sections?: OutlineSection[];
+  }
 ): boolean {
   if (!pinnedSectionId) return false;
+  if (messageIsInPlaceBioEdit(message)) return false;
+  const viewingId = options?.viewingSectionId ?? null;
+  const sections = options?.sections ?? [];
+  const viewing = viewingId
+    ? sections.find((s) => s.id === viewingId) ?? null
+    : null;
+  if (viewing && isPersonnelSection(viewing) && messageTargetsBios(message)) {
+    return false;
+  }
   const isBio = pinnedSectionId.startsWith("section-2-bio-");
   if (messageTargetsBios(message) && !isBio) return true;
   return false;
@@ -728,10 +790,23 @@ export function resolveChatTarget(
   }
 
   const lower = text.toLowerCase();
-  const safeViewingId = pinnedSectionConflictsWithMessage(text, viewingId)
+  const safeViewingId = pinnedSectionConflictsWithMessage(text, viewingId, {
+    viewingSectionId: viewingId,
+    sections,
+  })
     ? null
     : viewingId;
   const viewing = sections.find((s) => s.id === safeViewingId) ?? null;
+
+  // In-place bio/resume fetch on the open tab — never Section 2 tab picker.
+  if (viewing && messageIsInPlaceBioEdit(text)) {
+    return {
+      kind: "resolved",
+      section: viewing,
+      confidence: "high",
+      reason: "in-place-bio",
+    };
+  }
 
   // Pasted clarify option / "currently open in the UI" — before stale Improve pins.
   const fromClarify = resolveSectionFromClarifyReply(

@@ -28,6 +28,26 @@ class StripEvidenceMarkersTests(unittest.TestCase):
         self.assertNotIn("References", out)
         self.assertIn("on-budget task orders", out)
 
+    def test_strips_trailing_single_and_pair_markers(self) -> None:
+        raw = (
+            "Curt brings 25+ years of creative direction. [E3]\n\n"
+            "Ron leads account management. [E3, E4]\n"
+        )
+        out = strip_evidence_citation_markers(raw)
+        self.assertNotIn("[E3]", out)
+        self.assertNotIn("E4", out)
+        self.assertIn("creative direction", out)
+
+    def test_scrub_drops_empty_bold_summary_header(self) -> None:
+        raw = (
+            "### Curt Schultz\n"
+            "Curt brings 25+ years of creative direction.\n\n"
+            "**Team Qualifications Summary**\n"
+        )
+        out = scrub_client_facing_section_artifacts(raw)
+        self.assertNotIn("Team Qualifications Summary", out)
+        self.assertIn("Curt brings", out)
+
     def test_scrub_removes_pricing_flags(self) -> None:
         raw = (
             "[PRICING FLAG: Cost weight → force Low tier]\n"

@@ -17,6 +17,8 @@ OWNED BY STATIC SECTIONS (mention once with a short pointer, never re-write):
 - Org roster, FEIN, address, certifications, insurance → Section 1.2–1.5
 - Full team bios and titles → Section 2
 - Full case studies with Challenge / What We Did / Outcome → Section 3
+- Offeror / Vendor / Company Identification forms → short FIELD table + pointer to 1.3 only
+  (never a second Business Information essay)
 
 OWNED BY RFP TABS (write only the part THIS tab scores):
 - Understanding / Opportunity → client goals, constraints, audiences — NOT company bio
@@ -670,6 +672,8 @@ def dedupe_manuscript_for_scan(
     sections: list[Any],
 ) -> tuple[list[Any], list[str]]:
     """Scan-RFP dedupe: compress case studies → prune clones → drop mega restates."""
+    from app.models.proposal import ProposalDraft
+
     logs: list[str] = []
     sections, n = compress_duplicate_case_study_sections(list(sections))
     if n:
@@ -679,4 +683,185 @@ def dedupe_manuscript_for_scan(
     logs.extend(removed)
     sections, pruned = prune_near_duplicate_sections(sections)
     logs.extend(pruned)
+    # Offeror/Company Information forms that restate 1.3 → cross-ref only (no table copy)
+    draft_like = ProposalDraft(
+        rfpId="dedupe-scan",
+        sections=sections,
+        updatedAt="1970-01-01T00:00:00Z",
+    )
+    compressed, company_logs = compress_rfp_company_identity_forms(draft_like)
+    if company_logs:
+        sections = list(compressed.sections)
+        logs.extend(company_logs)
     return sections, logs
+
+
+_COMPANY_IDENTITY_FORM_TITLE_RE = re.compile(
+    r"(?i)\b(?:"
+    r"offeror\s+identification|vendor\s+identification|"
+    r"proposer\s+identification|contractor\s+identification|"
+    r"company\s+information|firm\s+information|"
+    r"business\s+information\s+form|identification\b.{0,40}\bform"
+    r")\b"
+)
+
+_IDENTITY_FIELD_HINTS = (
+    "legal name",
+    "dba",
+    "fein",
+    "ein",
+    "office address",
+    "mailing address",
+    "primary contact",
+    "contact phone",
+    "contact email",
+)
+
+
+def _looks_like_company_identity_table(content: str) -> bool:
+    cf = (content or "").casefold()
+    hits = sum(1 for hint in _IDENTITY_FIELD_HINTS if hint in cf)
+    return hits >= 3
+
+
+def _extract_markdown_field_table(content: str) -> str:
+    """Keep the first markdown field/response-style table from business info."""
+    lines = (content or "").splitlines()
+    table: list[str] = []
+    in_table = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            in_table = True
+            table.append(stripped)
+            continue
+        if in_table:
+            break
+    if len(table) >= 3:
+        return "\n".join(table)
+    return ""
+
+
+def user_asks_remove_company_identity_dump(user_message: str) -> bool:
+    """True for 'remove this company info' on Offeror / Company Identification forms."""
+    text = (user_message or "").strip()
+    if not text:
+        return False
+    if not re.search(
+        r"(?is)\b(?:remove|delete|strip|drop|cut|omit|take\s+out|get\s+rid\s+of)\b",
+        text,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"(?is)\b("
+            r"company\s+info(?:rmation)?|"
+            r"business\s+info(?:rmation)?|"
+            r"company\s+profile|"
+            r"duplicate\s+company|"
+            r"second\s+(?:company|business)|"
+            r"who\s+we\s+are\s+dump"
+            r")\b",
+            text,
+        )
+    )
+
+
+def is_rfp_company_identity_form_section(
+    *,
+    section_id: str,
+    title: str,
+    content: str,
+) -> bool:
+    """True for RFP Offeror/Company Information forms that restate Section 1.3."""
+    sid = (section_id or "").casefold()
+    if sid.startswith("section-1-") or sid == "section-1-business-info":
+        return False
+    title_cf = (title or "").casefold()
+    if _COMPANY_IDENTITY_FORM_TITLE_RE.search(title or ""):
+        return _looks_like_company_identity_table(content) or "form" in title_cf
+    # Untitled-as-form but body is clearly a company identity FIELD table
+    if _looks_like_company_identity_table(content) and any(
+        token in title_cf
+        for token in ("company", "offeror", "vendor", "proposer", "identification")
+    ):
+        return True
+    return False
+
+
+def compress_rfp_company_identity_forms(
+    draft: Any,
+) -> tuple[Any, list[str]]:
+    """Collapse Offeror/Company Information form tabs that restate Business Info.
+
+    Keeps the required form tab (buyer often needs Section 4 Form returned) but
+    replaces a second full company dump with a cross-reference + the same field
+    table owned by Section 1.3 — never a second Who We Are / Business Info essay.
+    """
+    from app.models.proposal import ProposalDraft, ProposalSection
+
+    if not isinstance(draft, ProposalDraft):
+        return draft, []
+
+    business: ProposalSection | None = None
+    for section in draft.sections:
+        sid = (section.id or "").casefold()
+        title_cf = (section.title or "").casefold()
+        if sid == "section-1-business-info" or (
+            title_cf.startswith("1.3") and "business" in title_cf
+        ):
+            business = section
+            break
+        if business is None and "business information" in title_cf:
+            business = section
+
+    if not business or not (business.content or "").strip():
+        return draft, []
+
+    biz_title = business.title or "1.3 — Business Information"
+
+    pointer = (
+        f"*Company identity for this form matches **{biz_title}** "
+        "(same legal name, contacts, and addresses — not a second company profile).*\n\n"
+    )
+    compact = (
+        pointer
+        + f"See **{biz_title}** for legal name, DBA, FEIN, contacts, and addresses. "
+        "Complete any form-specific fields below only if this RFP requires them here "
+        "and they are not already in that tab."
+    )
+
+    logs: list[str] = []
+    sections: list[ProposalSection] = []
+    changed = False
+    for section in draft.sections:
+        body = section.content or ""
+        if not is_rfp_company_identity_form_section(
+            section_id=section.id or "",
+            title=section.title or "",
+            content=body,
+        ):
+            sections.append(section)
+            continue
+        # Already compressed to cross-ref only (no duplicated field table)
+        if (
+            "matches **" in body
+            and "not a second company profile" in body.casefold()
+            and not _looks_like_company_identity_table(body)
+        ):
+            sections.append(section)
+            continue
+        # Skip thin stubs / MANUAL FILL only
+        if word_count(body) < 40 and "[manual fill" in body.casefold():
+            sections.append(section)
+            continue
+        sections.append(section.model_copy(update={"content": compact, "status": "generated"}))
+        changed = True
+        logs.append(
+            f"{section.title or section.id}: compressed company-identity form → "
+            f"cross-ref {biz_title} (no second Business Information dump)"
+        )
+
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs

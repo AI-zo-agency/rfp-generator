@@ -145,6 +145,19 @@ def apply_zero_fabrication_guards(
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s fabrication guard skipped: %s", label, exc)
 
+    try:
+        from app.services.proposal_scan_insurance_certification import (
+            gate_draft_insurance_certifications,
+        )
+
+        draft, ins_logs, ins_human = gate_draft_insurance_certifications(draft)
+        for line in ins_logs:
+            report.logs.append(f"{label}: insurance cert — {line}")
+        for gap in ins_human:
+            report.logs.append(f"{label}: HUMAN_GAP: {gap}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s insurance certification gate skipped: %s", label, exc)
+
     conflicts = detect_contradictory_phase_tables(draft)
     report.phase_table_conflicts = conflicts
     for line in conflicts:

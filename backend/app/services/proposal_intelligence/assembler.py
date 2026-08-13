@@ -750,7 +750,11 @@ def amend_outline_for_missing_requirements(
     return amended
 
 
-def derive_legacy_fields(plan: ProposalExecutionPlan) -> dict[str, Any]:
+def derive_legacy_fields(
+    plan: ProposalExecutionPlan,
+    *,
+    page_limit: int | None = None,
+) -> dict[str, Any]:
     """Derive rfpSections / sectionQueries / proofPoints. Never returns evidenceCorpus."""
     from app.services.proposal_outline_dedup import filter_lean_outline_sections
 
@@ -802,7 +806,7 @@ def derive_legacy_fields(plan: ProposalExecutionPlan) -> dict[str, Any]:
                     weight = float(crit.weight)
                     break
                 name_tokens = {t for t in re.split(r"\W+", name_cf) if len(t) >= 4}
-                if title_tokens and len(title_tokens & name_tokens) >= 1:
+                if title_tokens and len(title_tokens & name_tokens) >= 2:
                     weight = float(crit.weight)
                     break
 
@@ -875,6 +879,11 @@ def derive_legacy_fields(plan: ProposalExecutionPlan) -> dict[str, Any]:
 
     # Ledger amend can reintroduce near-dup titles (e.g. "Letter of Interest"
     # beside "Letter of Interest — brief overview…"). Collapse before Phase 3.
+    from app.services.proposal_outline_dedup import (
+        enforce_outline_section_cap,
+        max_rfp_outline_sections,
+    )
+
     rfp_sections, post_amend_dropped = filter_lean_outline_sections(
         rfp_sections,
         rfp_context="",
@@ -885,6 +894,15 @@ def derive_legacy_fields(plan: ProposalExecutionPlan) -> dict[str, Any]:
             "derive_legacy_fields post-amend lean-outline dropped %d tab(s): %s",
             len(post_amend_dropped),
             post_amend_dropped[:12],
+        )
+    section_cap = max_rfp_outline_sections(page_limit)
+    rfp_sections, cap_dropped = enforce_outline_section_cap(rfp_sections, section_cap)
+    if cap_dropped:
+        logger.info(
+            "derive_legacy_fields hard-capped RFP tabs to %d; dropped %d: %s",
+            section_cap,
+            len(cap_dropped),
+            cap_dropped[:12],
         )
 
     return {

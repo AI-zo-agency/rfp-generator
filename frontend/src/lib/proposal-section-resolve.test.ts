@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   chatBusyStatusLabel,
+  messageIsInPlaceBioEdit,
   messageLooksChatQuestion,
   messageLooksOutlineStructure,
   messageLooksStructural,
@@ -12,11 +13,11 @@ import {
 } from "./proposal-section-resolve";
 import type { OutlineSection } from "@/types/proposal";
 
-function sec(id: string, title: string): OutlineSection {
+function sec(id: string, title: string, content = "x"): OutlineSection {
   return {
     id,
     title,
-    content: "x",
+    content,
     wordTarget: 500,
     required: true,
     custom: false,
@@ -651,6 +652,31 @@ describe("resolveChatTarget", () => {
     expect(result?.kind).toBe("resolved");
     if (result?.kind === "resolved") {
       expect(result.section.id).toBe("compliance");
+    }
+  });
+
+  it("experience of personnel resume fetch stays on open tab — no Section 2 bio picker", () => {
+    const personnel = sec(
+      "rfp-sec-23",
+      "23 Experience of Personnel",
+      "### Shawn DiCriscio\n**Role on this engagement:** Lead WordPress developer.\n"
+    );
+    const withPersonnel = [
+      ...sections,
+      personnel,
+      sec("section-2-bio-ella", "2.1 — Ella Lindau"),
+      sec("section-2-bio-curt", "2.2 — Curt Schultz"),
+    ];
+    const msg =
+      "here in shawn DiCriscio make sure you fetch correct info from its resume and update it";
+    expect(messageIsInPlaceBioEdit(msg)).toBe(true);
+    const result = resolveChatTarget(withPersonnel, msg, {
+      viewingSectionId: personnel.id,
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("rfp-sec-23");
+      expect(result.reason).toBe("in-place-bio");
     }
   });
 });

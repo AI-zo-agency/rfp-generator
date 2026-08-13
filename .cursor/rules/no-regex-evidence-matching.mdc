@@ -1,0 +1,14 @@
+---
+description: Never use regex or keyword synonym lists for KB evidence matching
+alwaysApply: true
+---
+
+# No regex / keyword synonym evidence matching
+
+When matching RFP requirements to knowledge-base evidence (Go/No-Go, proposals, capability checks):
+
+- **Do NOT** add regex patterns, frozenset synonym lists, or hardcoded token maps for platforms/tools (WordPress, CMS, Drupal, ADA, website, etc.).
+- **Do NOT** invent client- or person-specific query anchors to "fix" retrieval.
+- **DO** let an LLM agent decide Supermemory queries and judge evidence by **meaning**, with mechanical **verbatim quote grounding** only.
+- Prefer principle-based prompts ("a specialist bio naming a tool evidences that tool") over expanding keyword tables.
+- If scoring is wrong, fix retrieval fairness + LLM judgment + grounded quotes — never another regex exception.

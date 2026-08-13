@@ -20,23 +20,28 @@ from app.services import llm, supermemory
 from app.services.go_no_go_requirements import (
     REQUIREMENT_PLANNER_PROMPT,
     RfpRequirement,
-    all_queries,
     parse_requirements,
 )
 from app.services.go_no_go_role_queries import (
-    required_disciplines,
+    primary_query_for_requirement,
     role_evidence_queries,
+    role_queries_for_requirement,
 )
 from app.models.go_no_go import GoNoGoCapabilityRow
 from app.services.go_no_go_adjudicator import (
     ADJUDICATOR_PROMPT,
+    GAP_RECOVER_PROMPT,
+    apply_gap_recover_assessments,
     build_adjudication_payload,
+    build_gap_recover_payload,
     rows_from_assessments,
 )
 from app.services.go_no_go_capability import (
     build_matrix_from_requirements,
     coherent_dimension_cap,
+    derive_resource_capability_score,
     derive_technical_capability_score,
+    gap_matrix_from_requirements,
     reconcile_narrative,
     upsert_capability_section,
     unverified_core_requirements,
@@ -150,7 +155,9 @@ worthScore ("Worth It Score") — financial return vs pursuit effort:
   unpaid/prize_only) without confirmed_fee → Worth ≤ 1 and prefer no_go. Do not invent a fee.
 
 decisionMatrix — exactly 5 rows; each score is independent (they will often differ):
-  1. Technical Capability Match — scope execution per KB (verified proof only; adjacent ≠ verified)
+  1. Technical Capability Match — scope execution per KB excerpts actually retrieved
+     for this run (verified proof only; adjacent ≠ verified). Specialist bios that
+     name a tool/platform ARE verified for that skill when present in the excerpts.
   2. Resource Availability — team bandwidth, geography, live-demo/on-site needs
   3. Financial Viability — agency revenue vs cost (use commission math when budget is mostly media spend).
      open_competition / unpaid / prize_only without confirmed fee → 0 (do not invent payout)
@@ -168,6 +175,14 @@ paid professional-services procurements even if the header says "Sealed Bid" or 
 EVIDENCE CALIBRATION (accurate — neither reject-everything NOR invent pessimism):
 - Score each matrix row against THIS RFP's stated requirements and the KB excerpts returned for the searches run.
 - Do not invent KB proof. Missing evidence for a required capability → discount that row and note the gap.
+- Specialist BIOS that name a tool/platform/discipline ARE verified proof for that capability.
+  Do NOT write "no X case studies" or score Technical as if the skill is absent when a bio (or
+  adjacent delivery case study) evidences it. Thin bench ≠ missing skill; keep hosting/SLA/office
+  gaps separate from craft/platform gaps.
+- When KB shows platform/craft proof (bios and/or delivery case studies) but still has real gaps
+  (ADA-audit specialist, enterprise hosting/SLA, named gov integrations), Technical Capability
+  Match should typically land around 3/5 — not 1–2/5. Reserve ≤2/5 for when core craft/platform
+  skills themselves are absent from the KB excerpts.
 - FLOORS when KB proof is strong: If KB returns a near-direct case study for the RFP's core scope
   (same work type + sector/use-case, e.g. coalition health communications for a health-policy RFP),
   Technical Capability Match should normally be ≥ 4 and Win Probability should not be ≤ 2 unless
@@ -520,6 +535,107 @@ def _deterministic_evidence_queries(rfp: RfpRecord, content: RfpContentInfo) -> 
     return queries
 
 
+# Hard cap on parallel Supermemory searches — unbounded fan-out caused long
+# runs and one flaky query could 502 the entire Go/No-Go analyze.
+# Reserve discipline slots and round-robin requirement queries so later rows
+# (and platform/craft searches) are never starved by planner fan-out.
+MAX_KB_QUERIES = 20
+MAX_RESERVED_ROLE_QUERIES = 6
+
+
+def _append_unique_queries(
+    bucket: list[str],
+    candidates: list[str],
+    *,
+    seen: set[str],
+    limit: int,
+) -> None:
+    for query in candidates:
+        if len(bucket) >= limit:
+            return
+        key = query.strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        bucket.append(query.strip())
+
+
+def _enrich_requirements_with_role_queries(
+    requirements: list[RfpRequirement],
+) -> list[RfpRequirement]:
+    """Put discipline + requirement-literal searches on each row."""
+    enriched: list[RfpRequirement] = []
+    for req in requirements:
+        role_qs = role_queries_for_requirement(req.requirement)
+        primary = primary_query_for_requirement(req.requirement)
+        merged: list[str] = []
+        seen: set[str] = set()
+        for query in [*role_qs, primary, *req.kb_queries]:
+            cleaned = (query or "").strip()
+            if not cleaned:
+                continue
+            key = cleaned.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cleaned)
+        enriched.append(req.model_copy(update={"kb_queries": merged[:5]}))
+    return enriched
+
+
+def _select_kb_queries(
+    *,
+    requirements: list[RfpRequirement],
+    rfp_sample: str,
+    extras: list[str],
+    max_queries: int | None = None,
+    reserved_role: int | None = None,
+) -> list[str]:
+    """Fair query budget: every requirement gets a search before fillers.
+
+    Old behavior filled the cap with the first N planner strings, so later
+    requirements (and all role/platform searches) never ran — Technical
+    Capability then scored as if evidence did not exist.
+    """
+    limit = max_queries if max_queries is not None else MAX_KB_QUERIES
+    role_budget = (
+        reserved_role if reserved_role is not None else MAX_RESERVED_ROLE_QUERIES
+    )
+    seen: set[str] = set()
+    selected: list[str] = []
+
+    # 1) Reserve discipline searches so platform/craft evidence always runs.
+    role_qs = role_evidence_queries(rfp_sample, max_queries=role_budget)
+    _append_unique_queries(
+        selected, role_qs, seen=seen, limit=min(role_budget, limit)
+    )
+
+    # 2) Round-robin across requirements so no core ask is starved.
+    pointers = [0 for _ in requirements]
+    while len(selected) < limit:
+        progressed = False
+        for idx, req in enumerate(requirements):
+            if len(selected) >= limit:
+                break
+            qs = req.kb_queries or []
+            while pointers[idx] < len(qs):
+                candidate = qs[pointers[idx]]
+                pointers[idx] += 1
+                before = len(selected)
+                _append_unique_queries(
+                    selected, [candidate], seen=seen, limit=limit
+                )
+                if len(selected) > before:
+                    progressed = True
+                    break
+        if not progressed:
+            break
+
+    # 3) Sector / scope / deterministic fillers with leftover budget.
+    _append_unique_queries(selected, extras, seen=seen, limit=limit)
+    return selected
+
+
 def _annotate_go_no_go_hit(hit: dict[str, Any]) -> dict[str, Any]:
     """Tag FIN vs WON and competitor markers so the analyst cannot misread provenance."""
     metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
@@ -618,9 +734,6 @@ def _merge_kb_hits_round_robin(
 KB_SEARCH_LIMIT = 8
 KB_CONTEXT_MAX_CHARS = 45_000
 RFP_PROMPT_MAX_CHARS = 50_000
-# Hard cap on parallel Supermemory searches — unbounded fan-out caused long
-# runs and one flaky query could 502 the entire Go/No-Go analyze.
-MAX_KB_QUERIES = 16
 MAX_KB_CONCURRENCY = 8
 
 MIN_SUBSTANTIVE_CHARS = 400
@@ -1070,11 +1183,12 @@ async def _gather_knowledge_context(
 ) -> tuple[str, list[dict[str, Any]], list[RfpRequirement], dict[str, list[dict[str, Any]]]]:
     """Return (KB excerpts, all hits, RFP requirements, hits per requirement).
 
-    The hits are returned as well as the prose so capability claims can be
-    validated against documents that were actually retrieved. Previously only
-    the string escaped this function, which is why nothing downstream could
-    tell a real citation from an invented one.
+    An LLM evidence agent decides what to query in Supermemory (initial plan +
+    follow-ups for thin rows). Downstream scoring/adjudication uses only the
+    retrieved hits — not regex lexicons or hard-coded client/person anchors.
     """
+    from app.services.go_no_go_evidence_agent import run_evidence_agent
+
     if not supermemory.is_configured():
         return (
             "(Knowledge base search unavailable — SUPERMEMORY_API_KEY not configured.)",
@@ -1084,68 +1198,7 @@ async def _gather_knowledge_context(
         )
 
     requirements = await _plan_rfp_requirements(rfp, content)
-    planned = all_queries(requirements)
-    sector_query = f"zö agency {rfp.sector} sector experience case studies similar clients"
-    location_query = (
-        f"zö agency {rfp.location} state registration vendor compliance"
-        if rfp.location
-        else ""
-    )
-    scope_query = _build_scope_search_query(rfp, content)
-
-    # Priority order: requirement-linked queries first (accuracy), then roles,
-    # then broad sector/scope. Cap fan-out so one analyze can't fire 50+ searches.
-    priority_queries: list[str] = []
-    priority_queries.extend(planned)
     rfp_sample = combine_rfp_text(content.description, content.pdf_text)[:20_000]
-    priority_queries.extend(role_evidence_queries(rfp_sample))
-    priority_queries.append(sector_query)
-    if location_query:
-        priority_queries.append(location_query)
-    priority_queries.append(scope_query)
-    if rfp.client.strip():
-        priority_queries.append(f"zö agency {rfp.client} case study proposal references")
-    if re.search(r"WCAG|Section 508|accessibility|VPAT|EPub", rfp_sample, re.IGNORECASE):
-        priority_queries.append("zö agency WCAG accessibility Section 508 VPAT compliance")
-    if re.search(
-        r"FTC Safeguard|data retention|data security|backup.{0,20}recovery",
-        rfp_sample,
-        re.IGNORECASE,
-    ):
-        priority_queries.append(
-            "zö agency data security FTC safeguard data retention backup recovery policy"
-        )
-    if re.search(
-        r"higher education|university|college|TBR|community college",
-        rfp_sample,
-        re.IGNORECASE,
-    ):
-        priority_queries.append(
-            "zö agency higher education university college case studies references"
-        )
-    if re.search(r"housing authority|HUD|public housing", rfp_sample, re.IGNORECASE):
-        priority_queries.append("zö agency housing authority HUD public housing case study")
-    priority_queries.extend(_deterministic_evidence_queries(rfp, content))
-
-    seen_queries: set[str] = set()
-    unique_queries: list[str] = []
-    for query in priority_queries:
-        key = query.strip().lower()
-        if not key or key in seen_queries:
-            continue
-        seen_queries.add(key)
-        unique_queries.append(query.strip())
-        if len(unique_queries) >= MAX_KB_QUERIES:
-            break
-
-    if len(priority_queries) > len(unique_queries):
-        logger.info(
-            "Go/No-Go KB query fan-out capped for %s: kept %d of %d unique candidates",
-            rfp.id,
-            len(unique_queries),
-            len({q.strip().lower() for q in priority_queries if q.strip()}),
-        )
-
     sem = asyncio.Semaphore(MAX_KB_CONCURRENCY)
 
     async def run_query(query: str) -> list[dict[str, Any]]:
@@ -1166,7 +1219,6 @@ async def _gather_knowledge_context(
                 )
                 return []
             except Exception as exc:
-                # Transport / JSON / cancel noise must never 502 Stage 1.
                 logger.warning(
                     "Supermemory transport error for %s query=%r: %s",
                     rfp.id,
@@ -1175,20 +1227,18 @@ async def _gather_knowledge_context(
                 )
                 return []
 
-    results = await asyncio.gather(*(run_query(query) for query in unique_queries))
-    by_query = dict(zip(unique_queries, results))
-
-    # Attribute hits to the requirement whose query produced them, so the
-    # capability matrix is built from each requirement's OWN evidence rather
-    # than from one undifferentiated pool.
-    hits_by_requirement: dict[str, list[dict[str, Any]]] = {}
-    for requirement in requirements:
-        collected: list[dict[str, Any]] = []
-        for query in requirement.kb_queries:
-            collected.extend(by_query.get(query.strip(), []))
-        hits_by_requirement[requirement.requirement] = collected
-
-    merged = _merge_kb_hits_round_robin(list(results))
+    (
+        requirements,
+        hits_by_requirement,
+        merged,
+        unique_queries,
+    ) = await run_evidence_agent(
+        rfp_id=rfp.id,
+        rfp_title=rfp.title or "",
+        rfp_excerpt=rfp_sample,
+        requirements=requirements,
+        search=run_query,
+    )
 
     formatted = _format_go_no_go_kb_hits(
         merged,
@@ -1196,7 +1246,7 @@ async def _gather_knowledge_context(
         queries=unique_queries,
     )
     logger.info(
-        "Supermemory KB search for %s: %d queries, %d unique hits, %d chars",
+        "Supermemory KB search for %s: %d agent queries, %d unique hits, %d chars",
         rfp.id,
         len(unique_queries),
         len(merged),
@@ -1954,6 +2004,39 @@ def compute_overall_go_score(analysis: GoNoGoAnalysis) -> float | None:
     return float(fit if fit is not None else worth)
 
 
+def _format_rfp_requirements_brief(
+    requirements: list[RfpRequirement],
+    rows: list[GoNoGoCapabilityRow] | None = None,
+) -> str:
+    """Show the analyst the same RFP requirement × evidence map that drives scores."""
+    if not requirements:
+        return "(No discrete RFP requirements extracted yet.)"
+    by_name = {r.requirement: r for r in (rows or [])}
+    lines = [
+        "AUTHORITATIVE RFP REQUIREMENT EVIDENCE (score Technical Capability from THIS). "
+        "Specialist bios that name a tool ARE proof for that tool — do not write "
+        "'no case studies' as if the skill is absent when a bio evidences it. "
+        "Keep hosting/SLA/office gaps separate from craft/platform gaps.",
+        "",
+    ]
+    for req in requirements:
+        core = "core" if req.is_core else "optional"
+        row = by_name.get(req.requirement)
+        if row is None:
+            lines.append(f"- [{core}] {req.requirement} — (pending evidence judgment)")
+            continue
+        status = (row.status or "gap").upper()
+        evidence = (row.evidence or "").replace("\n", " ").strip()
+        src = (row.kb_source or "").strip()
+        detail = ""
+        if status in {"VERIFIED", "PARTIAL"} and evidence:
+            detail = f" | {src}: {evidence[:160]}"
+        elif row.downgrade_reason:
+            detail = f" | {row.downgrade_reason[:140]}"
+        lines.append(f"- [{core}] {req.requirement} — {status}{detail}")
+    return "\n".join(lines)
+
+
 # Overall ≥ this never wears a hard No-Go badge (unless a true deadline DQ).
 _SCORE_BLOCKS_NO_GO = 3.0
 _LEADING_NO_GO_RE = re.compile(r"(?i)^\s*NO[\s-]?GO\s*[—\-–:]?\s*")
@@ -2040,39 +2123,104 @@ async def _adjudicate_capabilities(
         requirements, hits_by_requirement, all_hits
     )
     if not body.strip():
-        return build_matrix_from_requirements(requirements, hits_by_requirement)
-
-    try:
-        raw, provider = await llm.chat_json(
-            [
-                {"role": "system", "content": ADJUDICATOR_PROMPT},
-                {"role": "user", "content": body[:60_000]},
-            ],
-            max_tokens=3500,
-            temperature=0.0,
-            tier="light",
-            node_name="capability_adjudicator",
-            rfp_id=rfp.id,
+        return gap_matrix_from_requirements(
+            requirements,
+            reason="no KB documents available for adjudication",
         )
-    except llm.LlmError as exc:
+
+    assessments: list[Any] | None = None
+    provider = "none"
+    last_error = ""
+    for attempt in range(2):
+        try:
+            raw, provider = await llm.chat_json(
+                [
+                    {"role": "system", "content": ADJUDICATOR_PROMPT},
+                    {"role": "user", "content": body[:60_000]},
+                ],
+                max_tokens=3500,
+                temperature=0.0,
+                tier="heavy",
+                node_name="capability_adjudicator",
+                rfp_id=rfp.id,
+            )
+            maybe = raw.get("assessments") if isinstance(raw, dict) else None
+            if isinstance(maybe, list) and maybe:
+                assessments = maybe
+                break
+            last_error = "empty assessments"
+        except llm.LlmError as exc:
+            last_error = str(exc)[:160]
+            logger.warning(
+                "capability adjudication attempt %d failed for %s: %s",
+                attempt + 1,
+                rfp.id,
+                last_error,
+            )
+
+    if not assessments:
         logger.warning(
-            "capability adjudication failed for %s (%s) — falling back to "
-            "term matching",
+            "capability adjudication unavailable for %s (%s) — gap matrix "
+            "(no keyword fallback)",
             rfp.id,
-            str(exc)[:160],
+            last_error or "empty",
         )
-        return build_matrix_from_requirements(requirements, hits_by_requirement)
-
-    assessments = raw.get("assessments")
-    if not isinstance(assessments, list):
-        logger.warning(
-            "capability adjudication returned no assessments for %s — falling "
-            "back to term matching",
-            rfp.id,
+        return gap_matrix_from_requirements(
+            requirements,
+            reason="capability adjudicator unavailable — treat as unverified",
         )
-        return build_matrix_from_requirements(requirements, hits_by_requirement)
 
-    rows, rejected = rows_from_assessments(requirements, assessments, sources)
+    rows, rejected, recoverable = rows_from_assessments(
+        requirements, assessments, sources
+    )
+
+    # Second LLM pass: semantic re-check of gaps that still have retrieved docs.
+    # No keyword/synonym lists — the model judges meaning; quotes stay grounded.
+    gap_with_docs = [
+        r
+        for r in requirements
+        if (getattr(r, "requirement", "") or "") in recoverable
+        and sources.get(getattr(r, "requirement", "") or "")
+    ]
+    if gap_with_docs:
+        recover_body = build_gap_recover_payload(gap_with_docs, sources)
+        if recover_body.strip():
+            try:
+                raw2, provider2 = await llm.chat_json(
+                    [
+                        {"role": "system", "content": GAP_RECOVER_PROMPT},
+                        {"role": "user", "content": recover_body[:40_000]},
+                    ],
+                    max_tokens=2500,
+                    temperature=0.0,
+                    tier="heavy",
+                    node_name="capability_gap_recover",
+                    rfp_id=rfp.id,
+                )
+                assessments2 = (
+                    raw2.get("assessments") if isinstance(raw2, dict) else None
+                )
+                if isinstance(assessments2, list) and assessments2:
+                    rows = apply_gap_recover_assessments(
+                        rows,
+                        recoverable=recoverable,
+                        assessments=assessments2,
+                        sources=sources,
+                        requirements=requirements,
+                    )
+                    logger.info(
+                        "capability gap recover for %s via %s: %d candidate(s)",
+                        rfp.id,
+                        provider2,
+                        len(gap_with_docs),
+                    )
+            except llm.LlmError as exc:
+                logger.warning(
+                    "capability gap recover failed for %s: %s",
+                    rfp.id,
+                    str(exc)[:160],
+                )
+
     logger.info(
         "capability adjudication for %s via %s: %d rows, %d verified, "
         "%d ungrounded claims rejected",
@@ -2184,31 +2332,75 @@ def _enforce_capability_evidence(
 
     core_gaps = unverified_core_requirements(validated)
     derived = derive_technical_capability_score(validated)
+    derived_resource = derive_resource_capability_score(validated)
 
     matrix = [row.model_copy() for row in analysis.decision_matrix]
     if derived is not None:
         for row in matrix:
             if row.dimension.casefold() == "technical capability match":
-                if derived < row.score:
+                if derived != row.score:
+                    direction = "raised" if derived > row.score else "reduced"
                     row.notes = (
-                        f"{row.notes} | Score reduced to {derived}/5: "
-                        f"{len(core_gaps)} core requirement(s) lack verifiable "
-                        "KB evidence."
+                        f"{row.notes} | Score {direction} to {derived}/5 from "
+                        f"craft/platform requirement evidence "
+                        f"({len(core_gaps)} core craft gap(s) remaining)."
                     ).strip(" |")
                     row.score = derived
                 continue
 
-            # Dimensions downstream of capability cannot outrun it. A 0/5
-            # technical match beside a 4/5 win probability averaged out to a
-            # "moderate" 3.0 on an opportunity zö cannot deliver.
+            if (
+                row.dimension.casefold() == "resource availability"
+                and derived_resource is not None
+                and derived_resource != row.score
+            ):
+                direction = "raised" if derived_resource > row.score else "reduced"
+                row.notes = (
+                    f"{row.notes} | Score {direction} to {derived_resource}/5 "
+                    "from role/logistics requirement evidence."
+                ).strip(" |")
+                row.score = derived_resource
+                continue
+
+            # Dimensions downstream of capability cannot outrun it.
             cap = coherent_dimension_cap(row.dimension, derived)
             if cap is not None and row.score > cap:
                 row.notes = (
                     f"{row.notes} | Capped at {cap}/5: cannot exceed technical "
-                    f"capability ({derived}/5) — {len(core_gaps)} core "
+                    f"capability ({derived}/5) — {len(core_gaps)} core craft "
                     "requirement(s) lack verifiable KB evidence."
                 ).strip(" |")
                 row.score = cap
+
+        # When Technical was understated (bio/platform proof ignored), Win often
+        # sat at 2 from the same mistake. Floor Win to min(3, tech) when enough
+        # core craft rows are evidenced.
+        craft_cores = [
+            r
+            for r in validated
+            if r.is_core
+            and (r.category or "service").casefold()
+            in {"technical", "service", "compliance"}
+        ]
+        evidenced_core = sum(
+            1 for r in craft_cores if r.status in {"verified", "partial"}
+        )
+        if (
+            derived >= 3
+            and craft_cores
+            and evidenced_core / len(craft_cores) >= 0.4
+        ):
+            win_floor = min(3, derived)
+            for row in matrix:
+                if (
+                    row.dimension.casefold() == "win probability"
+                    and row.score < win_floor
+                ):
+                    row.notes = (
+                        f"{row.notes} | Raised to {win_floor}/5 floor: technical "
+                        f"capability evidenced at {derived}/5 "
+                        f"({evidenced_core}/{len(craft_cores)} core craft rows)."
+                    ).strip(" |")
+                    row.score = win_floor
         updates["decision_matrix"] = matrix
 
     if core_gaps:
@@ -2317,6 +2509,22 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
     kb_context, kb_hits, rfp_requirements, hits_by_requirement = (
         await _gather_knowledge_context(rfp, content)
     )
+    # Judge each RFP requirement against retrieved KB evidence BEFORE the
+    # narrative analyst runs, so Technical/Win scores follow requirement needs.
+    capability_rows: list[GoNoGoCapabilityRow] = []
+    try:
+        if rfp_requirements:
+            capability_rows = await _adjudicate_capabilities(
+                rfp, rfp_requirements, hits_by_requirement, kb_hits
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Go/No-Go pre-analyst adjudication failed for %s: %s",
+            rfp.id,
+            str(exc)[:200],
+        )
+        capability_rows = gap_matrix_from_requirements(rfp_requirements)
+
     rfp_context = _build_rfp_context(rfp, content)
     deadline_info = _assess_deadline(rfp, content)
     hard_facts = extract_rfp_hard_facts(
@@ -2333,6 +2541,19 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
             "is missing. Do NOT issue no_go solely because content is missing.\n"
         )
 
+    requirements_brief = _format_rfp_requirements_brief(
+        rfp_requirements, capability_rows
+    )
+    derived_tech = derive_technical_capability_score(capability_rows)
+    tech_hint = (
+        f"Derived Technical Capability from RFP requirement evidence: {derived_tech}/5. "
+        "Set decisionMatrix Technical Capability Match to this value (or within ±0 only if "
+        "you have a concrete reason documented in notes). Win Probability must not sit at 1–2 "
+        "solely because craft/platform bios were ignored."
+        if derived_tech is not None
+        else "Technical Capability will be derived from the requirement evidence matrix."
+    )
+
     user_prompt = f"""Produce a full Stage 1 Fit Analysis for zö agency.
 
 {_evaluation_questions_block()}
@@ -2342,6 +2563,11 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
 
 ## Scoring factors / HARD FACTS for THIS RFP (extracted from full solicitation text)
 {_build_scoring_factors(rfp, content)}
+
+## RFP requirements vs KB evidence (AUTHORITATIVE for Technical Capability)
+{requirements_brief}
+
+{tech_hint}
 
 Write a CONCISE stageOneReport (~800–1000 words max) LAST in the JSON — short bullets and
 compact tables, not essays. Emit fitScore, worthScore, recommendation, and decisionMatrix
@@ -2448,17 +2674,11 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
     if analysis is None:
         raise GoNoGoError("Go/No-Go analysis failed after retries", status_code=502)
 
-    # Build the matrix from RFP requirements and each one's own evidence. The
-    # model no longer authors it, so it cannot omit a requirement it lacks
-    # evidence for nor assert one the KB does not support.
+    # Attach pre-computed requirement evidence and enforce score coherence.
     try:
-        if rfp_requirements:
+        if capability_rows:
             analysis = analysis.model_copy(
-                update={
-                    "capability_matrix": await _adjudicate_capabilities(
-                        rfp, rfp_requirements, hits_by_requirement, kb_hits
-                    )
-                }
+                update={"capability_matrix": capability_rows}
             )
         analysis = _enforce_capability_evidence(analysis, kb_hits)
     except Exception as exc:

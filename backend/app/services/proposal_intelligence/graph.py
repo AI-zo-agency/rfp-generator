@@ -208,7 +208,12 @@ async def _derive_legacy(state: IntelligenceGraphState) -> dict[str, Any]:
     if state.get("error"):
         return {}
     plan = _load_plan(state)
-    legacy = derive_legacy_fields(plan)
+    page_limit = state.get("page_limit")
+    try:
+        page_limit_int = int(page_limit) if page_limit else None
+    except (TypeError, ValueError):
+        page_limit_int = None
+    legacy = derive_legacy_fields(plan, page_limit=page_limit_int)
     sections = legacy.get("rfpSections") or []
     log_intel_event(
         "legacy_derived",
@@ -330,7 +335,7 @@ async def run_intelligence_graph(
         raise IntelligenceError(str(final["error"]))
 
     plan = ProposalExecutionPlan.model_validate(final.get("plan") or {})
-    legacy = final.get("legacy") or derive_legacy_fields(plan)
+    legacy = final.get("legacy") or derive_legacy_fields(plan, page_limit=page_limit)
     log_intel_event(
         "graph_end",
         rfp_id=rfp_id,

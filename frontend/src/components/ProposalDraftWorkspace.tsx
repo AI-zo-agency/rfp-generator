@@ -1435,7 +1435,9 @@ function ProposalDraftWorkspaceInner({
         "• Regenerate budget if missing; thorough reconcile + grounding if present\n" +
         "• Full blocker suite (same as Generate): primary contact, refs, schedule/calendar, certs, case-study titles\n" +
         "• LLM manuscript-vs-RFP contradiction check + signed-cover PDF designer note\n" +
-        "• KPI repairs, KB fact-check, optional [VERIFY] scrub\n" +
+        "• KPI repairs, KB fact-check, line-by-line KB grounding (async per section)\n" +
+        "• Drop optional [VERIFY] / [MANUAL FILL] unless this RFP requires them\n" +
+        "• Dedup repeated company info; keep zö voice (no AI-slop expansion)\n" +
         "• Refresh pre-submit review\n\n" +
         "Does NOT invent facts, figures, or signature details. A saved version is stored first.",
       confirmLabel: "Complete & clean",

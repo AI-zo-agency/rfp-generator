@@ -301,6 +301,61 @@ class OutlineDedupTests(unittest.TestCase):
         self.assertTrue(any("References" in t for t in titles))
         self.assertTrue(any("near-duplicate" in d for d in dropped))
 
+    def test_hard_cap_prefers_scored_and_closing(self) -> None:
+        from app.services.proposal_outline_dedup import (
+            enforce_outline_section_cap,
+            max_rfp_outline_sections,
+            stamp_outline_evaluation_weights,
+        )
+        from app.services.proposal_intelligence.schemas import (
+            EvaluationCriterion,
+            OutlineSection,
+        )
+
+        self.assertEqual(max_rfp_outline_sections(12), 8)
+        self.assertEqual(max_rfp_outline_sections(40), 18)
+        self.assertEqual(max_rfp_outline_sections(None), 9)
+
+        sections = [
+            OutlineSection(id=f"s{i}", title=f"Filler Narrative Tab {i}", order=i)
+            for i in range(1, 21)
+        ]
+        sections[0] = OutlineSection(
+            id="s1", title="References Form", order=1, required=True
+        )
+        sections[1] = OutlineSection(
+            id="s2", title="Technical Approach & Methodology", order=2, required=True
+        )
+        stamp_outline_evaluation_weights(
+            sections,
+            [EvaluationCriterion(name="Technical Approach", weight=40)],
+        )
+        kept, dropped = enforce_outline_section_cap(sections, 8)
+        self.assertEqual(len(kept), 8)
+        self.assertEqual(len(dropped), 12)
+        titles = {s.title for s in kept}
+        self.assertIn("References Form", titles)
+        self.assertIn("Technical Approach & Methodology", titles)
+
+    def test_stamp_ignores_single_token_overlap(self) -> None:
+        from app.services.proposal_outline_dedup import stamp_outline_evaluation_weights
+        from app.services.proposal_intelligence.schemas import (
+            EvaluationCriterion,
+            OutlineSection,
+        )
+
+        section = OutlineSection(
+            id="x",
+            title="Prior Experience with Similar Clients",
+            order=1,
+        )
+        stamp_outline_evaluation_weights(
+            [section],
+            [EvaluationCriterion(name="Cost and Overall Value", weight=25)],
+        )
+        # Only shared token would be none / weak — must NOT stamp
+        self.assertIsNone(section.evaluation_weight)
+
 
 if __name__ == "__main__":
     unittest.main()

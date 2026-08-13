@@ -158,6 +158,21 @@ async def apply_feedback_blocker_suite(
     )
     logs.extend(polish_logs)
 
+    # Always — every generate + Complete Scan. Signed insurance certifications
+    # must match Section 1.5 inventory before LLM contradiction passes.
+    try:
+        from app.services.proposal_scan_insurance_certification import (
+            gate_draft_insurance_certifications,
+        )
+
+        draft, ins_logs, ins_human = gate_draft_insurance_certifications(draft)
+        logs.extend(ins_logs)
+        for gap in ins_human:
+            logs.append(f"HUMAN_GAP: {gap}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Insurance certification gate skipped: %s", exc)
+        logs.append(f"insurance certification gate skipped: {exc}")
+
     contradiction_count = 0
     contradiction_rewrites = 0
     contradiction_unresolved = 0

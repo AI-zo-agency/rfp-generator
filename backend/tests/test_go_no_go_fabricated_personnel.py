@@ -68,7 +68,7 @@ class FabricatedPersonnelGroundingTests(unittest.TestCase):
             "Project Lead": [MASTER],
         }
         _body, sources = build_adjudication_payload(reqs, hits)
-        rows, rejected = rows_from_assessments(
+        rows, rejected, _rec = rows_from_assessments(
             reqs,
             [
                 {

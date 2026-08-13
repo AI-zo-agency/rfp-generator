@@ -195,7 +195,21 @@ Rules:
     [PRICING FLAG: … — Sonja review required].
 11. For duplicates / fabrication / ClientList trust: prefer directing them to say
     **check duplicates**, **remove duplicates**, or **remove fabricated content** so
-    the system can run the full content→RFP→KB pipeline.
+    the system can run the full content→RFP→KB pipeline. Also recognize these issue
+    classes and set hasFix when the open tab has them:
+    - **Past-proven capability fabrication**: tables/prose saying "we have implemented /
+      integrated …" (enterprise permissions, municipal integrations, etc.) when case
+      studies/bios do not evidence that past delivery → applyInstruction: rewrite to
+      capability-we-can-deliver OR [VERIFY: substantiate from 03_CS / 04_Bio].
+    - **Bio year / specialization inflation**: draft years higher than 04_Bio KB, or
+      government/municipal/enterprise specialization not in the bio PDF → applyInstruction:
+      REPLACE the invented sentences with 2–4 sentences copied from that person's 04_Bio
+      (years, tools, markets the KB actually states). NEVER delete the paragraph and leave
+      only a Role line. NEVER invent a replacement specialization. Also strip [E#] citation
+      markers and drop empty headers with no body (e.g. Team Qualifications Summary).
+    When the user pastes a multi-item audit covering capability + bio fabrications across
+    tabs, tell them to say **remove fabricated content** or **fix these content issues**
+    so the proposal-wide purge runs — still set hasFix for the open tab's safe scrub.
 
 Return ONLY JSON:
 {
@@ -1044,9 +1058,30 @@ async def _apply_suggested_fix_to_section(
     )
     if prior_chat:
         user_content += (
-            "Prior chat (verified audit — use facts cited here; do not re-verify):\n"
+            "Prior chat (verified audit — use facts cited here; do not invent):\n"
             f"{prior_chat}\n\n"
         )
+
+    from app.services.proposal_capability_bio_grounding import (
+        pack_04_bio_kb_for_section,
+        section_or_instruction_needs_bio_kb,
+    )
+
+    if section_or_instruction_needs_bio_kb(section, instruction):
+        try:
+            bio_kb = await pack_04_bio_kb_for_section(
+                section, user_message=instruction
+            )
+        except Exception:
+            logger.exception("04_Bio pack for apply-fix failed")
+            bio_kb = ""
+        if bio_kb.strip():
+            user_content += (
+                "04_Bio KB (authoritative — every restored sentence must come from here; "
+                "never invent specialization or years):\n"
+                f"{bio_kb[:18000]}\n\n"
+            )
+
     user_content += f"Current section content:\n{masked_prior[:12000]}"
 
     system_prompt = APPLY_FIX_REDRAFT_PROMPT
@@ -1069,6 +1104,9 @@ async def _apply_suggested_fix_to_section(
         register="narrative",
     )
     content = _unmask_manual_fill_checked(content, mfill_originals, attempt=1)
+    from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
+
+    content = scrub_client_facing_section_artifacts(content)
 
     working = section.model_copy(update={"content": content, "status": "generated"})
     if research is None:
@@ -2255,6 +2293,14 @@ def _resolve_section_from_message(
             return topic_hits[0]
 
     if re.search(r"\b(bio|bios|resume|resumes|team\s*bios?|team\s*member)\b", text, re.I):
+        from app.services.proposal_capability_bio_grounding import (
+            is_personnel_bio_section,
+        )
+
+        if user_points_at_open_section(text) or (
+            default and is_personnel_bio_section(default)
+        ):
+            return default
         bios = [
             s
             for s in draft.sections
@@ -2525,7 +2571,10 @@ Rules:
 3. Each anchorExcerpt MUST be copied verbatim from Current section content — usually one
    paragraph or a few sentences, NEVER the entire section, NEVER overlapping duplicates.
 4. Do not invent facts. If sourcing from KB is required, list kbQueries; if the ask is only
-   remove / make qualitative, return "kbQueries": [].
+   scrubbing fabricated past-proven capability claims or inflated bio years, instruct the
+   rewriter to use can-deliver / VERIFY language and match 04_Bio year numbers exactly —
+   never add government/municipal specialization the bio KB does not state. If the ask is
+   only remove / make qualitative, return "kbQueries": [].
 5. For full_rewrite, return "patches": [] and put the rewrite instruction in understoodAsk.
 6. When the user asks to add a designer note: editorInstruction MUST require a standalone
    paragraph exactly as [DESIGNER NOTE: …] after a blank line — NEVER **Designer Note:**,
@@ -3203,7 +3252,14 @@ SECTION_REDRAFT_PROMPT = """Rewrite ONE zö agency proposal section based on use
 
 Rules:
 1. Directly address the user's edit request.
-2. Use ONLY facts from the evidence corpus. Do NOT put citation markers like [E1], [E12, E13], or **References:** [E…] lists in the prose — write clean client-facing sentences with proper **bold** markdown for labels and amounts.
+2. Use ONLY facts from the evidence corpus. If PACKED KB / 04_Bio is provided, every
+   sentence you add must be supportable from that text — never invent years, sector
+   specialization, clients, or metrics. Do NOT put citation markers like [E1], [E12, E13],
+   or **References:** [E…] lists in the prose — write clean client-facing sentences with
+   proper **bold** markdown for labels and amounts.
+2a. Team bios / Experience of Personnel: never delete a person's supporting paragraph
+    to "fix" fabrication. Rewrite it from 04_Bio only. Never leave a named person with
+    only a Role line when KB facts exist. Drop empty headers with no body.
 3. Never dump [PRICING FLAG: …] into Compliance / narrative sections — those are internal only.
 4. Improve substantially on the previous draft — never return the same placeholder or [VERIFY] block if evidence now supports the content.
 5. Use [VERIFY: ...] only for requirements still missing from evidence — never for
@@ -3291,14 +3347,25 @@ Rules:
 
 APPLY_FIX_REDRAFT_PROMPT = """Apply ONE suggested fix to a zö agency proposal section.
 
+The user's apply instruction is authoritative. Obey it. Do NOT invent a different task.
+
 The user clicked Apply the fix after an advisory audit. PRIOR CHAT holds the
-KB-backed verdict — use cited facts exactly. Do NOT invent or substitute values.
+KB-backed verdict — use cited facts exactly. If a 04_Bio / companyfacts block is
+provided, that block is authoritative. Do NOT invent or substitute values.
 
 Rules:
 - Implement the apply instruction only; preserve all unrelated prose and structure.
 - Keep markdown tables/lists/headings unless the instruction requires layout change.
 - For table cell fixes: same columns — change only the wrong value(s).
 - Never add deferred "upon request" language or new unverified contacts.
+- Bios / Experience of Personnel: if a named person's specialization was invented,
+  REPLACE it with 2–4 sentences from that person's 04_Bio KB. Never leave only a
+  Role line when 04_Bio is provided. Never add government/municipal/enterprise
+  claims the KB does not state. Years must match the KB number exactly. If 04_Bio
+  is missing for that person, keep Role + [VERIFY: restore bio from 04_Bio] —
+  do not invent years or specializations.
+- Never insert citation markers like [E3] or [E3, E4]. Strip any that are present.
+- Drop empty headers with no body (e.g. **Team Qualifications Summary** with nothing under it).
 
 Return ONLY JSON: {"content": "<full updated section markdown>"}"""
 
@@ -3306,6 +3373,11 @@ STATIC_SECTION_REDRAFT_PROMPT = """Improve ONE static zö proposal section (comp
 
 Use ONLY the knowledge-base excerpts provided.
 Address the user's feedback. Do not invent clients, metrics, addresses, phones, or emails.
+Every sentence you add must be supportable from the KB excerpts — if a fact is not there,
+omit it or use [VERIFY: specific field], never guess.
+
+When fixing an invented bio specialization: REPLACE with 2–4 sentences from that person's
+04_Bio. Never leave only a Role line. Never insert [E#] markers. Drop empty headers.
 
 DESIGNER NOTES: Insert ONLY standalone `[DESIGNER NOTE: …]` paragraphs (blank line before/after) —
 never **Designer Note:** or HTML. Content = layout/production handoff (callout, columns, attach PDF),
@@ -3960,9 +4032,24 @@ async def _fetch_kb_blob_for_selection(
     return "\n\n".join(llm_parts), "\n\n".join(fact_parts)
 
 
-async def _bio_kb_context_for_section(section: ProposalSection) -> str:
-    """Authoritative 04_Bio PDF text for Section 2 team member bios."""
-    if not section.id.startswith("section-2-bio"):
+async def _bio_kb_context_for_section(
+    section: ProposalSection,
+    *,
+    user_message: str = "",
+) -> str:
+    """Authoritative 04_Bio PDF text for team bios and Experience of Personnel tabs."""
+    from app.services.proposal_capability_bio_grounding import (
+        is_personnel_bio_section,
+        pack_04_bio_kb_for_section,
+    )
+
+    if is_personnel_bio_section(section):
+        packed = await pack_04_bio_kb_for_section(
+            section, user_message=user_message
+        )
+        if packed.strip():
+            return packed
+    if not (section.id or "").startswith("section-2-bio"):
         return ""
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
     from app.services.proposal_sections_graph import _fetch_member_bio_kb
@@ -4010,8 +4097,11 @@ async def _merge_bio_kb_into_blobs(
     *,
     kb_block: str,
     fact_blob: str,
+    user_message: str = "",
 ) -> tuple[str, str]:
-    bio_text = await _bio_kb_context_for_section(section)
+    bio_text = await _bio_kb_context_for_section(
+        section, user_message=user_message
+    )
     if bio_text:
         header = f"=== 04_Bio approved file ({section.title}) ===\n{bio_text[:80_000]}"
         merged_kb = f"{kb_block}\n\n{header}".strip() if kb_block.strip() else header
@@ -4687,7 +4777,9 @@ async def _redraft_rfp_section(
     original_content = (section.content or "").strip()
     prior_for_agent, full_rewrite = prior_content_for_redraft(section)
     rewrite_note = ""
-    bio_kb = await _bio_kb_context_for_section(section)
+    bio_kb = await _bio_kb_context_for_section(
+        section, user_message=user_message or compliance_user_message or ""
+    )
     if full_rewrite:
         rewrite_note = (
             "\n\nIMPORTANT: Prior draft is below the word target or not marked generated. "
@@ -4737,8 +4829,19 @@ async def _redraft_rfp_section(
             f"Requirements:\n"
             + "\n".join(f"- {r}" for r in requirements)
             + rewrite_note
-            + f"\n\nUser edit request:\n{user_message}\n\n"
-            f"Previous draft:\n{prior_for_agent[:3000] if prior_for_agent else '(none — write from scratch)'}\n\n"
+            + (
+                f"\n\n=== USER INSTRUCTION (verbatim — obey this; YOU decide tools/queries) ===\n"
+                f"{(compliance_user_message or user_message).strip()}\n"
+            )
+            + (
+                f"\nPlanner notes (secondary — do not override the user instruction):\n"
+                f"{user_message.strip()}\n"
+                if compliance_user_message
+                and user_message.strip()
+                and user_message.strip() != compliance_user_message.strip()
+                else ""
+            )
+            + f"\nPrevious draft:\n{prior_for_agent[:3000] if prior_for_agent else '(none — write from scratch)'}\n\n"
             f"RFP excerpt:\n{rfp_context[:4000]}\n\n"
             f"Evidence corpus:\n{_format_evidence(evidence)}\n\n"
             + (f"{avoidance_block}\n\n" if avoidance_block else "")
@@ -5015,7 +5118,9 @@ async def _improve_static_section(
                 ) from exc
 
     # Prefer deterministic KB fill for remaining VERIFY tags after rewrite
-    bio_kb = await _bio_kb_context_for_section(section)
+    bio_kb = await _bio_kb_context_for_section(
+        section, user_message=user_message
+    )
     if bio_kb.strip():
         kb_parts.insert(0, bio_kb[:50_000])
     if content and kb_parts:
@@ -6561,17 +6666,21 @@ async def improve_proposal_section(
             working, updated_draft, research, provider, reply, changed, None
         )
 
+    # Principle: the user's verbatim instruction reaches Claude. Do NOT short-circuit
+    # with Designer-compact or deterministic compress — the User Revise agent decides
+    # (tools + rewrite). Designer-compact only when the user explicitly asks for it.
     if not selection_mode and not apply_fix:
         from app.services.proposal_manuscript_compact import (
-            section_needs_designer_compact,
+            should_run_designer_compact_for_chat,
             user_requests_designer_compact,
         )
         from app.services.proposal_self_edit_loop import designer_compact_single_section
 
-        if (
-            improve_section_pinned
-            and section_needs_designer_compact(section)
-        ) or user_requests_designer_compact(raw_user_message):
+        if should_run_designer_compact_for_chat(
+            user_message=raw_user_message,
+            improve_section_pinned=improve_section_pinned,
+            section=section,
+        ):
             changed, detail, compact_draft, compact_research = (
                 await designer_compact_single_section(
                     rfp_id,
@@ -7512,6 +7621,7 @@ async def improve_proposal_section(
                     section,
                     kb_block=kb_block,
                     fact_blob=contact_fact_blob,
+                    user_message=user_message,
                 )
         fact_blob = "\n\n".join(
             part
@@ -7794,19 +7904,54 @@ async def improve_proposal_section(
         rfp_section = _find_rfp_section(research, section_id)
 
         if _open_tab_kb_fetch_ask(raw_user_message):
-            understood_ask = raw_user_message.strip()
-            user_message = (
-                f"{understood_ask}\n\n"
-                "Fill named client/project blocks in this section from PACKED KB EVIDENCE. "
-                "Write strategy, deliverables, and KPIs when the KB has them. "
-                "Keep [VERIFY] only for fields truly absent from the packed evidence."
+            from app.services.proposal_capability_bio_grounding import (
+                is_personnel_bio_section,
+                pack_04_bio_kb_for_section,
             )
+
+            understood_ask = raw_user_message.strip()
+            if is_personnel_bio_section(section):
+                user_message = (
+                    f"{understood_ask}\n\n"
+                    "Claude: YOU decide queries. Ground named team members to 04_Bio only. "
+                    "REPLACE invented specialization / year claims with 2–4 sentences "
+                    "from that person's packed 04_Bio. Keep Role lines. "
+                    "Never leave only a Role line when 04_Bio has facts. "
+                    "Never invent government/municipal/enterprise specialization. "
+                    "Strip [E#] markers. Drop empty headers with no body."
+                )
+            else:
+                user_message = (
+                    f"{understood_ask}\n\n"
+                    "Claude: YOU decide tools and queries. Obey the user instruction above. "
+                    "Prefer the smallest edit that fully satisfies it. "
+                    "Use PACKED KB / tools only for missing zö facts — do not invent."
+                )
             queries = []
             logger.info(
                 "kb_fetch_fast_path: skipping section_improve planner for %s / %s",
                 rfp_id,
                 section_id,
             )
+            if is_personnel_bio_section(section):
+                try:
+                    bio_pack = await pack_04_bio_kb_for_section(
+                        section, user_message=raw_user_message
+                    )
+                except Exception:
+                    logger.exception("04_Bio pack for kb_fetch personnel failed")
+                    bio_pack = ""
+                if bio_pack.strip():
+                    user_message = (
+                        f"{user_message}\n\n"
+                        "=== 04_Bio approved files (authoritative — write ONLY from this) ===\n"
+                        f"{bio_pack[:20_000]}\n"
+                    )
+                    logger.info(
+                        "kb_fetch_fast_path: injected 04_Bio pack (%d chars) for %s",
+                        len(bio_pack),
+                        section_id,
+                    )
         else:
             understood_ask, editor_instruction, queries, outline_action = await _plan_section_improve(
                 section=section,
@@ -7834,7 +7979,18 @@ async def improve_proposal_section(
                 )
                 if forced is not None:
                     return forced
-            user_message = editor_instruction
+            # Verbatim user ask reaches Claude — planner must not replace it.
+            if (
+                editor_instruction.strip()
+                and editor_instruction.strip() != raw_user_message.strip()
+            ):
+                user_message = (
+                    f"{raw_user_message.strip()}\n\n"
+                    f"Planner notes (secondary — do not override the user instruction):\n"
+                    f"{editor_instruction.strip()}"
+                )
+            else:
+                user_message = raw_user_message.strip()
         skip_kb = bool(
             gate is not None
             and (
@@ -7874,21 +8030,33 @@ async def improve_proposal_section(
         # references, campaigns…). Uses section title + RFP needs + names already
         # in the draft — no vertical hardcodes.
         if not skip_kb:
+            from app.services.proposal_capability_bio_grounding import (
+                is_personnel_bio_section,
+            )
             from app.services.proposal_section_kb_evidence import (
                 fetch_packed_section_kb_evidence,
                 inject_packed_evidence_into_instruction,
             )
 
-            packed_block, _packed_sources = await fetch_packed_section_kb_evidence(
-                section_title=section.title or "",
-                user_message=raw_user_message,
-                requirements=list(rfp_section.requirements or []) if rfp_section else [],
-                section_content=section.content or "",
-            )
-            if packed_block:
-                user_message = inject_packed_evidence_into_instruction(
-                    user_message, packed_block
+            # Personnel resume/bio fetch already has authoritative 04_Bio in
+            # user_message — do not bury it under pricing-guide packed RAG.
+            if not (
+                _open_tab_kb_fetch_ask(raw_user_message)
+                and is_personnel_bio_section(section)
+                and "04_Bio approved files" in (user_message or "")
+            ):
+                packed_block, _packed_sources = await fetch_packed_section_kb_evidence(
+                    section_title=section.title or "",
+                    user_message=raw_user_message,
+                    requirements=list(rfp_section.requirements or [])
+                    if rfp_section
+                    else [],
+                    section_content=section.content or "",
                 )
+                if packed_block:
+                    user_message = inject_packed_evidence_into_instruction(
+                        user_message, packed_block
+                    )
 
         query_count = len(queries)
 

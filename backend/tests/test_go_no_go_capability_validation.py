@@ -151,8 +151,66 @@ class TechnicalScoreTests(unittest.TestCase):
         self.assertIsNotNone(score)
         self.assertLessEqual(score, 2)
 
-    def test_empty_matrix_returns_none(self) -> None:
-        self.assertIsNone(derive_technical_capability_score([]))
+    def test_technical_score_ignores_role_gaps_when_craft_is_evidenced(self) -> None:
+        """Staffing gaps must not drag Technical to 1 while WordPress craft is verified."""
+        rows = [
+            GoNoGoCapabilityRow(
+                requirement="WordPress CMS implementation",
+                status="verified",
+                isCore=True,
+                category="technical",
+                evidence="Specializes in WordPress",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Website redesign",
+                status="verified",
+                isCore=True,
+                category="service",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Responsive design",
+                status="partial",
+                isCore=True,
+                category="technical",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="ADA/WCAG audit",
+                status="gap",
+                isCore=True,
+                category="technical",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Hosting / SLA",
+                status="gap",
+                isCore=True,
+                category="technical",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Project manager",
+                status="gap",
+                isCore=True,
+                category="role",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="UX designer",
+                status="gap",
+                isCore=True,
+                category="role",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="CA office presence",
+                status="gap",
+                isCore=True,
+                category="logistics",
+            ),
+        ]
+        tech = derive_technical_capability_score(rows)
+        gaps = unverified_core_requirements(rows)
+        self.assertIsNotNone(tech)
+        self.assertGreaterEqual(tech or 0, 3)
+        self.assertNotIn("Project manager", gaps)
+        self.assertNotIn("UX designer", gaps)
+        self.assertIn("Hosting / SLA", gaps)
 
 
 
@@ -238,6 +296,58 @@ class EnforceCapabilityEvidenceTests(unittest.TestCase):
 
         self.assertEqual(out.capability_matrix[0].status, "verified")
         self.assertEqual(out.recommendation, "go")
+
+    def test_technical_score_is_raised_to_match_evidence_matrix(self) -> None:
+        """LLM understated Technical at 2 while matrix evidence supports ~3+."""
+        from app.models.go_no_go import GoNoGoDecisionMatrixRow
+        from app.services.go_no_go_service import _enforce_capability_evidence
+
+        analysis = self._analysis().model_copy(
+            update={
+                "capability_matrix": [
+                    _row("WordPress CMS", "verified", "04_Bio_ShawnDiCriscio.pdf"),
+                    _row("Website redesign", "verified", "03_CS_TorrentLaboratories.pdf"),
+                    _row("Responsive design", "verified", "03_CS_TorrentLaboratories.pdf"),
+                    _row("SEO basics", "partial", "03_CS_TorrentLaboratories.pdf"),
+                    _adjudicated_gap("Enterprise hosting SLA", "absent"),
+                    _adjudicated_gap("PlanetBids integration", "absent"),
+                ],
+                "decision_matrix": [
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Technical Capability Match",
+                        score=2,
+                        notes="no WordPress case studies",
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Resource Availability", score=2, notes=""
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Financial Viability", score=3, notes=""
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Strategic Value", score=2, notes=""
+                    ),
+                    GoNoGoDecisionMatrixRow(
+                        dimension="Win Probability", score=2, notes=""
+                    ),
+                ],
+            }
+        )
+
+        out = _enforce_capability_evidence(analysis, KB_HITS)
+        tech = next(
+            r
+            for r in out.decision_matrix
+            if r.dimension.casefold() == "technical capability match"
+        )
+        win = next(
+            r
+            for r in out.decision_matrix
+            if r.dimension.casefold() == "win probability"
+        )
+        self.assertGreaterEqual(tech.score, 3)
+        self.assertGreaterEqual(win.score, 3)
+        self.assertEqual(out.recommendation, "review")
 
     def test_partial_core_gaps_with_strong_composite_are_conditions_not_no_go(
         self,

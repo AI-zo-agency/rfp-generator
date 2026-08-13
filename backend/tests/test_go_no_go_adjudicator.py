@@ -70,7 +70,8 @@ class QuoteGroundingTests(unittest.TestCase):
 class AdjudicationTests(unittest.TestCase):
     def _rows(self, assessments):
         _body, sources = build_adjudication_payload(REQS, HITS)
-        return rows_from_assessments(REQS, assessments, sources)
+        rows, rejected, _recoverable = rows_from_assessments(REQS, assessments, sources)
+        return rows, rejected
 
     def test_semantic_match_survives_with_grounded_quote(self) -> None:
         """WordPress evidences CMS — the case keyword matching could not see."""
@@ -105,6 +106,43 @@ class AdjudicationTests(unittest.TestCase):
             r for r in rows if r.requirement == "Website redesign and modernization"
         )
         self.assertEqual(row.status, "verified")
+
+    def test_wrongly_gapped_wordpress_bio_is_recovered_by_llm_pass(self) -> None:
+        """Gap + WordPress bio in sources → LLM recover upgrades with grounded quote."""
+        from app.services.go_no_go_adjudicator import apply_gap_recover_assessments
+
+        rows, rejected = self._rows(
+            [
+                {
+                    "requirement": "CMS implementation",
+                    "status": "gap",
+                    "evidenceState": "absent",
+                    "reason": "no WordPress case study",
+                }
+            ]
+        )
+        cms = next(r for r in rows if r.requirement == "CMS implementation")
+        self.assertEqual(cms.status, "gap")
+        _body, sources = build_adjudication_payload(REQS, HITS)
+        upgraded = apply_gap_recover_assessments(
+            rows,
+            recoverable={"CMS implementation"},
+            assessments=[
+                {
+                    "requirement": "CMS implementation",
+                    "status": "verified",
+                    "kbSource": "04_Bio_ShawnDiCriscio.pdf",
+                    "quote": "Specializes in WordPress",
+                    "reason": "WordPress bio evidences CMS",
+                }
+            ],
+            sources=sources,
+            requirements=REQS,
+        )
+        cms2 = next(r for r in upgraded if r.requirement == "CMS implementation")
+        self.assertEqual(cms2.status, "verified")
+        self.assertIn("WordPress", cms2.evidence)
+        self.assertEqual(rejected, [])
 
     def test_fabricated_quote_is_downgraded(self) -> None:
         """The Fairmont failure mode: an assertion with no grounding."""
@@ -170,7 +208,8 @@ class AdjudicationTests(unittest.TestCase):
         self.assertEqual(row.status, "gap")
         self.assertIn("private sector", row.downgrade_reason)
 
-    def test_missing_assessment_defaults_to_gap(self) -> None:
+    def test_missing_assessment_defaults_to_gap_without_llm_recover(self) -> None:
+        """Without the LLM recover pass, omitted assessments stay gaps."""
         rows, _ = self._rows([])
         self.assertTrue(all(r.status == "gap" for r in rows))
         self.assertEqual(len(rows), len(REQS))
@@ -218,7 +257,7 @@ class SharedEvidencePoolTests(unittest.TestCase):
         _body, sources = build_adjudication_payload(
             self.REQS, self.HITS, all_hits=[SHAWN, self.ORG]
         )
-        rows, rejected = rows_from_assessments(
+        rows, rejected, _rec = rows_from_assessments(
             self.REQS,
             [
                 {
@@ -237,7 +276,7 @@ class SharedEvidencePoolTests(unittest.TestCase):
     def test_without_shared_pool_the_same_claim_fails(self) -> None:
         """Confirms the isolation really was the cause."""
         _body, sources = build_adjudication_payload(self.REQS, self.HITS)
-        rows, rejected = rows_from_assessments(
+        rows, rejected, _rec = rows_from_assessments(
             self.REQS,
             [
                 {
@@ -283,7 +322,7 @@ class NonCapabilitySourceTests(unittest.TestCase):
         _b, sources = build_adjudication_payload(
             self.REQS, {"Discovery and stakeholder engagement": [self.GUIDE]}
         )
-        rows, rejected = rows_from_assessments(
+        rows, rejected, _rec = rows_from_assessments(
             self.REQS,
             [{
                 "requirement": "Discovery and stakeholder engagement",
@@ -420,7 +459,7 @@ class LongDocumentWindowingTests(unittest.TestCase):
         _b, sources = build_adjudication_payload(
             self.REQS, {"WordPress website development": [self.ROSTER]}
         )
-        rows, rejected = rows_from_assessments(
+        rows, rejected, _rec = rows_from_assessments(
             self.REQS,
             [{
                 "requirement": "WordPress website development",

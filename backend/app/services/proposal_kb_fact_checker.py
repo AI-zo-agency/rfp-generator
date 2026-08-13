@@ -946,10 +946,14 @@ def _dedupe_section3_case_studies(
 async def _flag_unverified_metrics_in_case_study(
     section: ProposalSection,
     kb_context: str,
+    *,
+    any_section: bool = False,
 ) -> tuple[ProposalSection, bool]:
     """If section cites % not present in KB context, strip or VERIFY via LLM."""
     body = section.content or ""
-    if not section.id.startswith("section-3-work-") or not _PERCENT_RE.search(body):
+    if not any_section and not section.id.startswith("section-3-work-"):
+        return section, False
+    if not _PERCENT_RE.search(body):
         return section, False
     kb_cf = kb_context.casefold()
     suspicious: list[str] = []
@@ -965,9 +969,10 @@ async def _flag_unverified_metrics_in_case_study(
                 {
                     "role": "system",
                     "content": (
-                        "Remove or replace unverified statistics in a case study section.\n"
+                        "Remove or replace unverified statistics in a proposal section.\n"
                         "Metrics must appear verbatim in the KB context or become "
-                        "[VERIFY: metric — confirm from 03_CS source].\n"
+                        "[VERIFY: metric — confirm from 03_CS / 01_companyfacts].\n"
+                        "Do not invent replacement numbers.\n"
                         'Return JSON: {"content": "..."}'
                     ),
                 },
@@ -998,6 +1003,7 @@ async def _fact_check_one_section(
     rfp_context: str,
     research: ProposalResearchCache | None,
     brand_voice: dict[str, Any] | None,
+    force_full_check: bool = False,
 ) -> tuple[ProposalSection, FactCheckReport]:
     """Fact-check a single section; returns section + per-section report deltas."""
     report = FactCheckReport(sections_checked=1)
@@ -1063,7 +1069,10 @@ async def _fact_check_one_section(
     kb_context = ""
     sources: list[str] = []
 
-    if _should_run_requirement_agent(current, mapped, current.content or ""):
+    run_agent = force_full_check or _should_run_requirement_agent(
+        current, mapped, current.content or ""
+    )
+    if run_agent:
         queries = await _plan_kb_queries(
             section=current,
             requirements=requirements,
@@ -1155,13 +1164,14 @@ async def _fact_check_one_section(
                     f"Replaced false insufficient-evidence stub in {section.title}"
                 )
 
-    if current.id.startswith("section-3-work-"):
+    if current.id.startswith("section-3-work-") or force_full_check:
         if not kb_context:
             kb_context, _ = await _kb_blob_for_section(current, rfp, mapped=mapped)
         if kb_context:
             current, metric_fixed = await _flag_unverified_metrics_in_case_study(
                 current,
                 kb_context,
+                any_section=force_full_check,
             )
             if metric_fixed:
                 report.metric_flags += 1
@@ -1185,12 +1195,17 @@ async def run_kb_fact_check_pass(
     rfp_context: str,
     research: ProposalResearchCache | None = None,
     only_section_ids: list[str] | None = None,
+    force_full_check: bool = False,
 ) -> tuple[ProposalDraft, FactCheckReport]:
     """Cross-verify sections; repair from KB when evidence exists.
 
     When ``only_section_ids`` is set, only those sections are fact-checked; others pass through unchanged.
+    Incremental generation always forces the full requirement agent (polished fabrications
+    used to skip the light path when no [VERIFY] tags were present).
     """
     only_set = set(only_section_ids) if only_section_ids else None
+    # Targeted post-section builds must always run the heavy agent.
+    force_full = force_full_check or only_set is not None
     report = FactCheckReport()
     brand_voice = _brand_voice_payload(research)
     scope = (
@@ -1200,11 +1215,12 @@ async def run_kb_fact_check_pass(
     )
     logger.info(
         "KB fact-check pass for %s — %s section(s), mapped_rfp_sections=%d, "
-        "section_parallel=%d",
+        "section_parallel=%d, force_full=%s",
         draft.rfp_id,
         scope,
         len(research.rfp_sections) if research and research.rfp_sections else 0,
         FACT_CHECK_SECTION_PARALLEL,
+        force_full,
     )
 
     # Preserve original order; process eligible sections concurrently.
@@ -1227,6 +1243,7 @@ async def run_kb_fact_check_pass(
                 rfp_context=rfp_context,
                 research=research,
                 brand_voice=brand_voice,
+                force_full_check=force_full,
             )
             return idx, updated, partial
 

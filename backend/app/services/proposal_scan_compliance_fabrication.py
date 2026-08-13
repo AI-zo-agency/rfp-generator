@@ -6,12 +6,16 @@ Every Complete Scan run applies the same rules:
    that vendor registration, document download, or complete-RFP review already
    happened → MANUAL FILL unless KB evidence proves it.
 
-2. **Org chart wins** — bio *Role on this engagement* must match Section 1.2.
+2. **Insurance certification gate** — Exception Forms / compliance tables that mark
+   coverages Compliant or assert "meets or exceeds" RFP insurance minimums must be
+   grounded in Section 1.5 inventory; otherwise → MANUAL FILL for Sonja/COI.
 
-3. **Bio KB grounding** — narrative bio prose must overlap 04_Bio KB text; otherwise
+3. **Org chart wins** — bio *Role on this engagement* must match Section 1.2.
+
+4. **Bio KB grounding** — narrative bio prose must overlap 04_Bio KB text; otherwise
    revert to PDF designer-note stub (no sector-tailored invention).
 
-4. **Named-entity grounding** — specific insurer/carrier/org names in compliance prose
+5. **Named-entity grounding** — specific insurer/carrier/org names in compliance prose
    must appear in scan evidence corpus or become VERIFY tags.
 """
 
@@ -265,6 +269,15 @@ async def run_compliance_fabrication_repairs(
     )
     logs.extend(att_report.logs)
 
+    from app.services.proposal_scan_insurance_certification import (
+        gate_draft_insurance_certifications,
+    )
+
+    draft, ins_logs, ins_human = gate_draft_insurance_certifications(draft)
+    logs.extend(ins_logs)
+    for gap in ins_human:
+        logs.append(f"HUMAN_GAP: {gap}")
+
     org_roles = parse_org_chart_roles(draft)
     sections: list[ProposalSection] = []
     changed = att_report.procurement_flags > 0 or bool(att_report.logs)
@@ -316,7 +329,14 @@ async def run_compliance_fabrication_repairs(
 
         if any(
             k in title_cf
-            for k in ("insurance", "certification", "business information", "submission", "compliance")
+            for k in (
+                "insurance",
+                "certification",
+                "business information",
+                "submission",
+                "compliance",
+                "exception",
+            )
         ) or sid.startswith("section-1-"):
             fixed_ent, ent_logs = scrub_ungrounded_named_entities(
                 new_body,
@@ -334,6 +354,24 @@ async def run_compliance_fabrication_repairs(
         else:
             sections.append(section)
 
-    if not changed:
+    working = draft.model_copy(update={"sections": sections}) if changed else draft
+
+    from app.services.proposal_capability_bio_grounding import (
+        run_capability_bio_grounding,
+    )
+
+    grounded = await run_capability_bio_grounding(
+        working,
+        extra_evidence=evidence_text,
+        rfp_text=rfp_text,
+        rfp_id=draft.rfp_id,
+        use_llm=True,
+    )
+    logs.extend(grounded.logs)
+    if grounded.logs:
+        changed = True
+        working = grounded.draft
+
+    if not changed and not logs:
         return draft, logs
-    return draft.model_copy(update={"sections": sections}), logs
+    return working, logs

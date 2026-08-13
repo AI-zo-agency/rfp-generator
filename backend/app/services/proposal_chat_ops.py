@@ -72,10 +72,12 @@ _DUPE_REMOVE_RE = re.compile(
 _FAB_REMOVE_RE = re.compile(
     r"\b("
     r"remove|delete|strip|clean|purge|fix|scrub|kill|cut"
-    r")\b.{0,60}\b("
+    r")\b.{0,80}\b("
     r"fabricat\w*|hallucinat\w*|invent\w*|made[\s-]?up|fake|"
     r"unverif\w*|not\s+in\s+(?:the\s+)?(?:kb|knowledge)|"
-    r"confirm\s+clients?|wrong\s+(?:case\s*stud|client|claim)"
+    r"confirm\s+clients?|wrong\s+(?:case\s*stud|client|claim)|"
+    r"capability\s+claims?|past[- ]proven|bio\s+inflat\w*|"
+    r"inflated?\s+(?:years?|bio)|ungrounded\s+(?:capability|bio|claim)"
     r")",
     re.I | re.S,
 )
@@ -679,6 +681,35 @@ async def remove_fabricated_content(
 
     if changed:
         draft = draft.model_copy(update={"sections": sections})
+
+    from app.services.proposal_capability_bio_grounding import (
+        run_capability_bio_grounding,
+    )
+
+    evidence_extra = ""
+    if research and research.evidence_corpus:
+        chunks = []
+        for item in research.evidence_corpus[:40]:
+            ex = getattr(item, "excerpt", None) or getattr(item, "content", None) or ""
+            if ex:
+                chunks.append(str(ex)[:800])
+        evidence_extra = "\n".join(chunks)
+
+    grounded = await run_capability_bio_grounding(
+        draft,
+        extra_evidence=evidence_extra,
+        rfp_text=rfp_context,
+        rfp_id=rfp.id,
+        use_llm=True,
+    )
+    draft = grounded.draft
+    logs.extend(grounded.logs)
+    if grounded.capability_fixes or grounded.bio_fixes:
+        human.append(
+            "Past-proven capability claims and/or bio year/specialization overclaims "
+            "were grounded to case studies / 04_Bio KB — confirm remaining [VERIFY] tags."
+        )
+
     return draft, logs, human
 
 

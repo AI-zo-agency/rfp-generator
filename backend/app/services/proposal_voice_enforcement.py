@@ -42,6 +42,9 @@ _STATIC_COVERED_TITLE_RES = (
     re.compile(r"\bcore\s+services\b", re.IGNORECASE),
     re.compile(r"\borganizational?\s+structure\b", re.IGNORECASE),
     re.compile(r"\bbusiness\s+information\b", re.IGNORECASE),
+    # Bare "Company Information" essay — owned by 1.3. Offeror/Vendor Identification
+    # *forms* stay in the outline (buyer needs the form) but are compressed at draft/scan.
+    re.compile(r"^\s*company\s+information\s*$", re.IGNORECASE),
     re.compile(r"\bcertifications?\b", re.IGNORECASE),
     re.compile(r"\binsurance\s+information\b", re.IGNORECASE),
     # Coverage narrative / COI delivery is owned by Section 1.5 — do not draft a

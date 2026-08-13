@@ -1,4 +1,4 @@
-"""RFP-aware scrub of optional [VERIFY] tags — drop if not required; never invent."""
+"""RFP-aware scrub of optional [VERIFY] / [MANUAL FILL] — drop if not required; never invent."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.services import llm
-from app.services.proposal_manual_flags import VERIFY_TAG_RE
+from app.services.proposal_manual_flags import MANUAL_FILL_TAG_RE, VERIFY_TAG_RE
 from app.services.proposal_rfp_excerpt import build_priority_rfp_excerpt
 from app.services.proposal_section_health import is_dead_section
 
@@ -43,6 +43,8 @@ _ALWAYS_REMOVE_VERIFY_ASK_RE = re.compile(
     r"unnamed\s+partner|"
     r"optional\s+(?:name|contact|partner)|"
     r"sample\s+(?:dashboard|screenshot|report\s+graphic)|"
+    r"optional\s+dashboard|"
+    r"dashboard\s+screenshot|"
     r"kpi\s+dashboard\s+screenshot|"
     r"designer\s+(?:note|graphic|diagram)|"
     r"week/?dates|timing\s+within\s+rfp|"
@@ -121,53 +123,6 @@ def strip_verify_tags_not_required_by_rfp(
     rfp_cf = (rfp_text or "").casefold()
     removed = 0
 
-    def _rfp_mandates_topic(ask: str) -> bool:
-        """True when the RFP clearly cares about this compliance/scoring topic."""
-        if not rfp_cf.strip():
-            # No RFP loaded — keep only locked legal (handled before this) and
-            # selection-critical patterns; still strip always-remove noise.
-            return True
-        ask_cf = ask.casefold()
-        # Topic-specific RFP anchors (must appear in RFP, not just the ask).
-        topic_needles: list[str] = []
-        if re.search(r"(?i)\b(fein|ein\b|tax\s*id|federal\s+employer)\b", ask_cf):
-            topic_needles.extend(["fein", "ein", "tax id", "employer identification", "federal tax"])
-        if re.search(r"(?i)\b(insurance|coi\b|liability)\b", ask_cf):
-            topic_needles.extend(["insurance", "certificate of insurance", "liability", "coi"])
-        if re.search(r"(?i)\be-?verify\b", ask_cf):
-            topic_needles.extend(["e-verify", "everify", "employment eligibility"])
-        if re.search(r"(?i)\b(affidavit|attestation|perjury|conflict\s+of\s+interest)\b", ask_cf):
-            topic_needles.extend(
-                ["affidavit", "attestation", "perjury", "conflict of interest"]
-            )
-        if re.search(r"(?i)\b(bond|bonding)\b", ask_cf):
-            topic_needles.extend(["bond", "bonding", "surety"])
-        if re.search(r"(?i)\bw-?9\b", ask_cf):
-            topic_needles.extend(["w-9", "w9", "taxpayer"])
-        if re.search(r"(?i)\b(reference|references)\b", ask_cf):
-            topic_needles.extend(["reference", "references"])
-        if re.search(r"(?i)\b(percent\s*time|staffing\s+hours|%\s*time)\b", ask_cf):
-            topic_needles.extend(
-                ["percent-time", "percent time", "% time", "fte", "hours dedicated"]
-            )
-        if re.search(r"(?i)\b(not[- ]to[- ]exceed|hard\s+cap|budget\s+ceiling|gross-?receipts)\b", ask_cf):
-            topic_needles.extend(
-                ["not to exceed", "nte", "budget ceiling", "gross receipts", "hard cap"]
-            )
-        if topic_needles:
-            return any(n in rfp_cf for n in topic_needles)
-        # Generic selection-critical ask without a mapped topic: require 2+
-        # meaningful tokens to appear in the RFP (weak single-token hits drop).
-        tokens = [
-            t
-            for t in re.split(r"\W+", ask_cf)
-            if len(t) >= 4 and t not in _STOP_ASK_TOKENS
-        ]
-        if not tokens:
-            return False
-        hits = sum(1 for t in tokens if t in rfp_cf)
-        return hits >= 2
-
     def _repl(match: re.Match[str]) -> str:
         nonlocal removed
         ask = (match.group(1) or "").strip()
@@ -186,7 +141,9 @@ def strip_verify_tags_not_required_by_rfp(
         if _ALWAYS_REMOVE_VERIFY_ASK_RE.search(ask):
             removed += 1
             return ""
-        if _SELECTION_CRITICAL_ASK_RE.search(ask) and _rfp_mandates_topic(ask):
+        if _SELECTION_CRITICAL_ASK_RE.search(ask) and _rfp_mandates_placeholder_ask(
+            ask, rfp_cf
+        ):
             return match.group(0)
         # Default fail-closed: not selection-critical for this RFP → remove.
         removed += 1
@@ -267,6 +224,160 @@ def count_verify_tags(text: str) -> int:
     return len(VERIFY_TAG_RE.findall(text or "")) + len(
         re.findall(r"\[VERIFY\]", text or "", flags=re.I)
     )
+
+
+def count_manual_fill_tags(text: str) -> int:
+    return len(MANUAL_FILL_TAG_RE.findall(text or ""))
+
+
+def count_placeholder_tags(text: str) -> int:
+    return count_verify_tags(text) + count_manual_fill_tags(text)
+
+
+def _ask_from_manual_fill_tag(tag: str) -> str:
+    """Inner instruction text from a [MANUAL FILL…] span."""
+    inner = (tag or "").strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    inner = re.sub(r"(?i)^MANUAL\s+FILL\s*:?\s*", "", inner).strip()
+    return inner
+
+
+def _rfp_mandates_placeholder_ask(ask: str, rfp_cf: str) -> bool:
+    """True when THIS RFP clearly cares about the placeholder topic."""
+    if not rfp_cf.strip():
+        return True
+    ask_cf = ask.casefold()
+    topic_needles: list[str] = []
+    if re.search(r"(?i)\b(fein|ein\b|tax\s*id|federal\s+employer)\b", ask_cf):
+        topic_needles.extend(
+            ["fein", "ein", "tax id", "employer identification", "federal tax"]
+        )
+    if re.search(r"(?i)\b(insurance|coi\b|liability|coverage)\b", ask_cf):
+        topic_needles.extend(
+            ["insurance", "certificate of insurance", "liability", "coi"]
+        )
+    if re.search(r"(?i)\be-?verify\b", ask_cf):
+        topic_needles.extend(["e-verify", "everify", "employment eligibility"])
+    if re.search(
+        r"(?i)\b(affidavit|attestation|perjury|conflict\s+of\s+interest)\b", ask_cf
+    ):
+        topic_needles.extend(
+            ["affidavit", "attestation", "perjury", "conflict of interest"]
+        )
+    if re.search(r"(?i)\b(bond|bonding)\b", ask_cf):
+        topic_needles.extend(["bond", "bonding", "surety"])
+    if re.search(r"(?i)\bw-?9\b", ask_cf):
+        topic_needles.extend(["w-9", "w9", "taxpayer"])
+    if re.search(r"(?i)\b(reference|references)\b", ask_cf):
+        topic_needles.extend(["reference", "references"])
+    if re.search(r"(?i)\b(percent\s*time|staffing\s+hours|%\s*time)\b", ask_cf):
+        topic_needles.extend(
+            ["percent-time", "percent time", "% time", "fte", "hours dedicated"]
+        )
+    if re.search(
+        r"(?i)\b(not[- ]to[- ]exceed|hard\s+cap|budget\s+ceiling|gross-?receipts)\b",
+        ask_cf,
+    ):
+        topic_needles.extend(
+            ["not to exceed", "nte", "budget ceiling", "gross receipts", "hard cap"]
+        )
+    if topic_needles:
+        return any(n in rfp_cf for n in topic_needles)
+    tokens = [
+        t
+        for t in re.split(r"\W+", ask_cf)
+        if len(t) >= 4 and t not in _STOP_ASK_TOKENS
+    ]
+    if not tokens:
+        return False
+    hits = sum(1 for t in tokens if t in rfp_cf)
+    return hits >= 2
+
+
+def strip_manual_fill_tags_not_required_by_rfp(
+    content: str,
+    rfp_text: str,
+) -> tuple[str, int]:
+    """Remove [MANUAL FILL] tags that are not selection/DQ-critical for THIS RFP.
+
+    Fail-closed: default REMOVE. Keep whole-section draft stubs, locked legal
+    handoffs, and asks that are selection-critical AND grounded in the RFP.
+    Never invents replacements.
+    """
+    body = content or ""
+    if not MANUAL_FILL_TAG_RE.search(body):
+        return body, 0
+
+    rfp_cf = (rfp_text or "").casefold()
+    removed = 0
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal removed
+        tag = match.group(0)
+        ask = _ask_from_manual_fill_tag(tag)
+        try:
+            from app.services.proposal_manual_flags import (
+                is_section_draft_stub_manual_fill,
+            )
+
+            if is_section_draft_stub_manual_fill(tag):
+                return tag
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from app.services.evidence_trust.legal_attestation_gate import (
+                is_locked_legal_verify_tag,
+            )
+
+            # Owner prefixes ("Sonja — …") must not lock every MANUAL FILL — LEGAL
+            # lock matches bare "sonja". Judge the ask body only.
+            ask_body = re.sub(
+                r"(?i)^(sonja|ella|operations)\s*[—\-–:]\s*",
+                "",
+                ask or "",
+            ).strip()
+            if ask_body and is_locked_legal_verify_tag(ask_body):
+                return tag
+        except Exception:  # noqa: BLE001
+            pass
+        if not ask:
+            removed += 1
+            return ""
+        if _ALWAYS_REMOVE_VERIFY_ASK_RE.search(ask):
+            removed += 1
+            return ""
+        # Also check ask body without owner prefix for always-remove / critical.
+        ask_for_rules = re.sub(
+            r"(?i)^(sonja|ella|operations)\s*[—\-–:]\s*",
+            "",
+            ask,
+        ).strip() or ask
+        if _ALWAYS_REMOVE_VERIFY_ASK_RE.search(ask_for_rules):
+            removed += 1
+            return ""
+        if _SELECTION_CRITICAL_ASK_RE.search(ask_for_rules) and _rfp_mandates_placeholder_ask(
+            ask_for_rules, rfp_cf
+        ):
+            return tag
+        removed += 1
+        return ""
+
+    out = MANUAL_FILL_TAG_RE.sub(_repl, body)
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    out = re.sub(r"  +", " ", out)
+    return out.strip() if body.strip() else out, removed
+
+
+def strip_placeholder_tags_not_required_by_rfp(
+    content: str,
+    rfp_text: str,
+) -> tuple[str, int]:
+    """Strip optional [VERIFY] and [MANUAL FILL] unless RFP-critical. Never invents."""
+    body, v_removed = strip_verify_tags_not_required_by_rfp(content, rfp_text)
+    body, m_removed = strip_manual_fill_tags_not_required_by_rfp(body, rfp_text)
+    return body, v_removed + m_removed
 
 
 def user_asks_scrub_optional_verify(user_message: str) -> bool:
@@ -354,12 +465,14 @@ async def scrub_optional_verify_tags(
     rfp_text: str,
     force: bool = False,
 ) -> VerifyOptionalScrubResult:
-    """Rewrite section: drop [VERIFY] tags the RFP does not require; never invent facts.
+    """Drop [VERIFY]/[MANUAL FILL] the RFP does not require; never invent facts.
 
-    When force=False and there are no VERIFY tags, returns unchanged.
+    When force=False and there are no placeholder tags, returns unchanged.
     """
     body = content or ""
-    before = count_verify_tags(body)
+    before_v = count_verify_tags(body)
+    before_m = count_manual_fill_tags(body)
+    before = before_v + before_m
     if before <= 0 and not force:
         return VerifyOptionalScrubResult(
             content=body,
@@ -368,12 +481,14 @@ async def scrub_optional_verify_tags(
             removed=0,
             kept_required=0,
             changed=False,
-            note="No [VERIFY] tags to scrub.",
+            note="No [VERIFY]/[MANUAL FILL] tags to scrub.",
         )
 
     # Fast path: drop tags the RFP clearly does not require — no LLM, no invention.
-    body, det_removed = strip_verify_tags_not_required_by_rfp(body, rfp_text or "")
-    mid = count_verify_tags(body)
+    body, det_removed = strip_placeholder_tags_not_required_by_rfp(
+        body, rfp_text or ""
+    )
+    mid = count_placeholder_tags(body)
     if mid <= 0:
         return VerifyOptionalScrubResult(
             content=body,
@@ -383,7 +498,7 @@ async def scrub_optional_verify_tags(
             kept_required=0,
             changed=body.strip() != (content or "").strip(),
             note=(
-                f"Removed {before} [VERIFY] tag(s) not required by this RFP "
+                f"Removed {before} placeholder tag(s) not required by this RFP "
                 "(deterministic scan)."
             ),
         )
@@ -408,9 +523,13 @@ async def scrub_optional_verify_tags(
     # a genuine KB-sourced fact beats both a bracket placeholder AND a vague generic
     # rewrite. Bounded to a short, single retrieval per section (asks are batched into
     # one question) to keep this cheap: this only fires on sections that already have
-    # [VERIFY] tags, and only once per section, not per tag.
+    # placeholders, and only once per section, not per tag.
     kb_context = ""
     asks = [a.strip() for a in VERIFY_TAG_RE.findall(body) if a.strip()]
+    for tag in MANUAL_FILL_TAG_RE.findall(body):
+        ask = _ask_from_manual_fill_tag(tag)
+        if ask:
+            asks.append(ask)
     if asks:
         try:
             from app.services.kb_rag_retrieve import retrieve_for_question
@@ -420,45 +539,52 @@ async def scrub_optional_verify_tags(
                 question, limit=4, max_chars=4_000
             )
         except Exception:
-            logger.warning("KB lookup for VERIFY scrub failed on %s", section_title, exc_info=True)
+            logger.warning(
+                "KB lookup for placeholder scrub failed on %s",
+                section_title,
+                exc_info=True,
+            )
             kb_context = ""
 
     system = (
-        "You scrub proposal manuscript [VERIFY: …] placeholders using the RFP and the KB.\n"
-        "BIAS (HARD): Default is REMOVE. Keep a [VERIFY] ONLY when it is selection-critical "
-        "for THIS RFP — i.e. dropping it would risk disqualification OR clearly cost "
-        "evaluation points the RFP scores. Internal audit noise never stays.\n"
+        "You scrub proposal manuscript [VERIFY: …] and [MANUAL FILL: …] placeholders "
+        "using the RFP and the KB.\n"
+        "BIAS (HARD): Default is REMOVE. Keep a placeholder ONLY when it is "
+        "selection-critical for THIS RFP — i.e. dropping it would risk disqualification "
+        "OR clearly cost evaluation points the RFP scores. Internal audit noise never stays.\n"
         "RULES:\n"
-        "1. FIRST — check the KB EVIDENCE below. If it contains the exact fact a [VERIFY] tag "
+        "1. FIRST — check the KB EVIDENCE below. If it contains the exact fact a tag "
         "asks for (a name, number, cert, contact, partner, etc.), REPLACE the tag with that real "
         "fact, verbatim from the evidence.\n"
         "2. ALWAYS REMOVE these (never selection-critical): gated-evidence / 'not in evidence "
         "set' tags; claim-mismatch noise; optional partner/subcontractor names; week/date "
         "calendar stubs; designer notes; sample dashboard screenshots; vague 'confirm with "
-        "operations' asks.\n"
+        "operations' asks; redundant company-info asks already covered in Who We Are / 1.3.\n"
         "3. IF KB does NOT answer it — REMOVE the tag and rewrite the sentence/row/cell so the "
         "section still reads cleanly, WITHOUT inventing. Prefer clean prose over placeholders.\n"
-        "4. KEEP a short [VERIFY: brief field] ONLY when ALL are true: (a) the RFP EXPLICITLY "
-        "mandates that exact fact for compliance or scored evaluation (FEIN, COI limits, "
-        "required reference phone/email, E-Verify, affidavit, bonding, required %time when "
-        "scored), (b) neither KB nor RFP already supplies it, (c) keeping it materially helps "
-        "win / avoid DQ. If unsure → REMOVE.\n"
+        "4. KEEP a short [VERIFY: brief field] or [MANUAL FILL: Owner — field] ONLY when ALL "
+        "are true: (a) the RFP EXPLICITLY mandates that exact fact for compliance or scored "
+        "evaluation (FEIN, COI limits, required reference phone/email, E-Verify, affidavit, "
+        "bonding, required %time when scored), (b) neither KB nor RFP already supplies it, "
+        "(c) keeping it materially helps win / avoid DQ. If unsure → REMOVE.\n"
         "5. NEVER invent facts — no names, phones, emails, rates, certs, clients, or wins.\n"
-        "6. Never leave empty brackets like [] or bare [VERIFY].\n"
-        "7. Preserve useful tables/structure; only change what VERIFY tags force.\n"
-        "8. Return JSON only."
+        "6. Never leave empty brackets like [] or bare [VERIFY] / [MANUAL FILL].\n"
+        "7. Preserve useful tables/structure; only change what placeholders force. Do not "
+        "expand the section with AI filler or restated company boilerplate.\n"
+        "8. zö voice: concrete, human, no corporate AI-slop.\n"
+        "9. Return JSON only."
     )
     user = (
         f"Section title: {section_title}\n\n"
         f"RFP excerpts (source of truth for what is required):\n"
         f"{rfp_excerpt or '(no RFP text provided — treat unknown-named optional details as removable)'}\n\n"
-        f"KB evidence (use ONLY if it genuinely answers a [VERIFY] tag below; ignore otherwise):\n"
+        f"KB evidence (use ONLY if it genuinely answers a placeholder below; ignore otherwise):\n"
         f"{kb_context or '(no relevant KB evidence found)'}\n\n"
         f"Current section body:\n{body}\n\n"
         "Return JSON:\n"
         "{\n"
         '  "content": "full updated section markdown",\n'
-        '  "keptRequiredCount": <int how many [VERIFY] tags you intentionally kept>,\n'
+        '  "keptRequiredCount": <int how many [VERIFY]/[MANUAL FILL] tags you intentionally kept>,\n'
         '  "note": "one short sentence: what you filled from KB vs removed vs kept"\n'
         "}"
     )
@@ -527,11 +653,11 @@ async def scrub_optional_verify_tags(
         )
 
     # Second deterministic pass after LLM (in case it left optional tags).
-    updated, extra_removed = strip_verify_tags_not_required_by_rfp(
+    updated, extra_removed = strip_placeholder_tags_not_required_by_rfp(
         updated, rfp_text or ""
     )
 
-    after = count_verify_tags(updated)
+    after = count_placeholder_tags(updated)
     removed = max(0, before - after)
     return VerifyOptionalScrubResult(
         content=updated,
@@ -542,7 +668,7 @@ async def scrub_optional_verify_tags(
         changed=updated.strip() != (content or "").strip(),
         note=note
         or (
-            f"Removed {removed} optional [VERIFY] tag(s)"
+            f"Removed {removed} optional placeholder tag(s)"
             + (f" (+{extra_removed} deterministic)" if extra_removed else "")
             + f"; kept {after} required."
         ),
@@ -995,7 +1121,7 @@ async def scrub_draft_optional_verify_tags(
     rfp_text: str,
     section_filter_ids: set[str] | None = None,
 ) -> tuple[list, list[str]]:
-    """Scrub optional VERIFYs on draft sections that still have tags. Returns (sections, logs).
+    """Scrub optional VERIFY/MANUAL FILL on draft sections. Returns (sections, logs).
 
     Each section's scrub is an independent, side-effect-free LLM call (no DB writes
     inside the loop), so sections-with-tags are scrubbed concurrently — this is the
@@ -1010,7 +1136,7 @@ async def scrub_draft_optional_verify_tags(
         content = getattr(section, "content", "") or ""
         if section_filter_ids is not None and sid not in section_filter_ids:
             continue
-        if count_verify_tags(content) <= 0:
+        if count_placeholder_tags(content) <= 0:
             continue
         if is_dead_section(content):
             # The whole body is a failure stub, not prose with optional tags in
@@ -1042,9 +1168,9 @@ async def scrub_draft_optional_verify_tags(
         if result.changed:
             out[idx] = section.model_copy(update={"content": result.content})
             logs.append(
-                f"verify-scrub:{sid}: removed {result.removed}, "
+                f"placeholder-scrub:{sid}: removed {result.removed}, "
                 f"kept {result.tags_after} — {result.note[:120]}"
             )
         elif result.note:
-            logs.append(f"verify-scrub:{sid}: {result.note[:120]}")
+            logs.append(f"placeholder-scrub:{sid}: {result.note[:120]}")
     return out, logs

@@ -24,11 +24,15 @@ _CONTENT_RISK_FIX_RE = re.compile(
     r"content\s+issues?\s+that\s+still\s+matter|"
     r"content\s+(?:gaps?|risks?|issues?)\b|"
     r"unsubstantiat\w+|"
-    r"unverif(?:ied|iable)\s+(?:client\s+)?claims?|"
+    r"unverif(?:ied|iable)\s+(?:client\s+|technical\s+|capability\s+)?claims?|"
     r"incomplete\s+as\s+content|"
     r"reference\s+list\s+still\s+incomplete|"
-    r"fabricated\s+(?:mid[- ]?document\s+)?(?:tagline|positioning)|"
+    r"fabricated\s+(?:mid[- ]?document\s+)?(?:tagline|positioning|capability|bio)|"
     r"positioning\s+tagline\s+is\s+fabricated|"
+    r"past[- ]proven|capability[- ]we[- ](?:can|have)|"
+    r"bio\s+(?:inflat\w*|overclaim|years?)|"
+    r"inflated?\s+years?|"
+    r"ungrounded\s+(?:capability|technical|bio)|"
     r"(?:fix|change|solve|address|repair|scrub|clean|apply)\s+"
     r"(?:these\s+)?(?:content\s+)?(?:issues?|risks?|claims?|gaps?)|"
     r"must\s+be\s+capabl\w*\s+(?:of\s+)?solv|"
@@ -55,6 +59,7 @@ def user_asks_content_risk_repair(user_message: str) -> bool:
             r"tagline|campaign\s+theme|next\s+chapter",
             r"executive\s+summary|evaluation\s+criteria",
             r"case\s+stud",
+            r"capability|wordpress|past[- ]proven|bio\s+inflat|years?\s+of\s+experience",
         )
         if re.search(pat, text, re.I)
     )
@@ -109,19 +114,43 @@ async def _llm_repair_section(
         "You are a proposal content-risk editor for zö agency.\n"
         "Fix ONLY the issues in the instruction. Keep brand voice.\n"
         "NEVER invent phones, emails, titles, metrics, contract lengths, "
-        "renewals, or client quotes. If KB/evidence lacks a fact, use "
-        "[VERIFY: specific field] or remove the overclaim — do not fabricate.\n"
+        "renewals, years, specializations, or client quotes. If KB/evidence "
+        "lacks a fact, use [VERIFY: specific field] or remove the overclaim — "
+        "do not fabricate a replacement.\n"
+        "Bios: REPLACE invented sentences with 04_Bio wording. Never leave a "
+        "named person with only a Role line when 04_Bio is provided. Never "
+        "insert [E#] markers. Drop empty headers with no body.\n"
         "Return JSON: {\"content\": \"full markdown\", \"changed\": true/false, "
         "\"notes\": \"one line\"}"
     )
+    bio_kb = ""
+    from app.services.proposal_capability_bio_grounding import (
+        pack_04_bio_kb_for_section,
+        section_or_instruction_needs_bio_kb,
+    )
+
+    if section_or_instruction_needs_bio_kb(section, instruction):
+        try:
+            bio_kb = await pack_04_bio_kb_for_section(
+                section, user_message=instruction
+            )
+        except Exception:
+            logger.exception("04_Bio pack for content-risk repair failed")
+            bio_kb = ""
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\n"
         f"Section: {section.title} (id={section.id})\n\n"
         f"Instruction:\n{instruction}\n\n"
         f"RFP excerpt:\n{(rfp_excerpt or '')[:8_000]}\n\n"
         f"KB / evidence (authoritative for claims):\n{(evidence or '')[:14_000]}\n\n"
-        f"Current draft:\n{(section.content or '')[:12_000]}"
     )
+    if bio_kb.strip():
+        user += (
+            "04_Bio KB (authoritative — every restored bio sentence must come "
+            "from here; never invent specialization or years):\n"
+            f"{bio_kb[:18_000]}\n\n"
+        )
+    user += f"Current draft:\n{(section.content or '')[:12_000]}"
     try:
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -141,6 +170,9 @@ async def _llm_repair_section(
         return section, False, str(raw.get("notes") or "")
     if len(content.split()) < 30 and len((section.content or "").split()) > 60:
         return section, False, "refused thin rewrite"
+    from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
+
+    content = scrub_client_facing_section_artifacts(content)
     return (
         section.model_copy(update={"content": content, "status": "generated"}),
         True,
@@ -160,15 +192,33 @@ Complete the REFERENCES / qualifications contact package as CONTENT (not formatt
 """
 
 _CLAIM_INSTRUCTION = """\
-Scrub UNVERIFIED quantified client claims that are not supported by the KB/evidence:
+Scrub UNVERIFIED quantified / past-proven claims that are not supported by KB/evidence:
 - Contract length claims (multi-year, five-year, every department) without KB support
 - Specific performance metrics / geofencing results without KB support
 - 'cataloging over N brand applications' style counts without KB support
 - 'comprehensive PR and brand partner for city and stadium authority' overclaims
   unless evidence explicitly supports them
+- PAST-PROVEN technical capability language ("we have implemented / integrated /
+  delivered …", enterprise permissions, third-party municipal integrations) when
+  case studies / bios do not evidence that exact past delivery — rewrite to
+  capability-we-can-deliver language OR [VERIFY: substantiate from 03_CS / 04_Bio]
 Replace unsupported specifics with honest capability language OR
 [VERIFY: substantiate from 03_CS / ClientList — {claim}].
 Keep verified relationships that evidence supports. Do not invent replacements.
+"""
+
+_BIO_INSTRUCTION = """\
+Ground TEAM BIOS to 04_Bio KB only:
+- Years of experience must match KB numbers exactly (never inflate 10→12).
+- If KB lists skill categories (Management N years, Creative M years), keep that
+  breakdown — do not invent a larger total "marketing industry experience".
+- Remove government / municipal / enterprise-integration specialization unless
+  the KB uses that language.
+- NEVER leave a named person with only a Role line. Restore 2–4 sentences from
+  that person's packed 04_Bio only (years, tools, markets the KB actually names).
+  If 04_Bio is missing for that person, keep Role + [VERIFY: restore bio from 04_Bio].
+- Strip [E#] citation markers. Drop empty headers with no body
+  (e.g. Team Qualifications Summary).
 """
 
 _TAGLINE_INSTRUCTION = """\
@@ -238,6 +288,9 @@ async def run_content_risk_repair(
                     "claim",
                     "unsubstant",
                     "unverif",
+                    "capability",
+                    "past-proven",
+                    "past proven",
                     "maricopa",
                     "santa clara",
                     "bend",
@@ -246,6 +299,50 @@ async def run_content_risk_repair(
             ) or not ask:
                 if _section_matches(section, "qualif", "experience", "relevant"):
                     jobs.append((idx, _CLAIM_INSTRUCTION, "chat_content_risk_claims"))
+        if _section_matches(
+            section,
+            "approach",
+            "work plan",
+            "methodology",
+            "schedule",
+            "timeline",
+            "requirement",
+            "experience",
+            "technical",
+            "capability",
+        ):
+            if any(
+                k in ask
+                for k in (
+                    "claim",
+                    "capability",
+                    "wordpress",
+                    "past-proven",
+                    "past proven",
+                    "unsubstant",
+                    "unverif",
+                    "fabricat",
+                    "content",
+                )
+            ) or not ask:
+                jobs.append((idx, _CLAIM_INSTRUCTION, "chat_content_risk_capability"))
+        if (section.id or "").startswith("section-2-bio-") or _section_matches(
+            section, "bio", "personnel", "key staff", "team"
+        ):
+            if any(
+                k in ask
+                for k in (
+                    "bio",
+                    "years",
+                    "inflat",
+                    "shawn",
+                    "sonja",
+                    "fabricat",
+                    "unverif",
+                    "content",
+                )
+            ) or not ask:
+                jobs.append((idx, _BIO_INSTRUCTION, "chat_content_risk_bio"))
         if _section_matches(
             section, "approach", "work plan", "methodology", "schedule", "timeline"
         ):
@@ -285,7 +382,28 @@ async def run_content_risk_repair(
                 + (f" — {notes}" if notes else "")
             )
 
-    result.draft = draft.model_copy(update={"sections": sections})
+    working = draft.model_copy(update={"sections": sections})
+    from app.services.proposal_capability_bio_grounding import (
+        run_capability_bio_grounding,
+    )
+
+    grounded = await run_capability_bio_grounding(
+        working,
+        extra_evidence=evidence,
+        rfp_text=rfp_context,
+        rfp_id=rfp.id,
+        use_llm=True,
+    )
+    sections = list(grounded.draft.sections)
+    for line in grounded.logs:
+        result.logs.append(line)
+        # Mark changed sections from grounding log titles when possible
+        for section in sections:
+            title = section.title or ""
+            if title and title in line:
+                result.sections_changed.append(section.id)
+
+    result.draft = grounded.draft
     changed_titles = []
     for sid in dict.fromkeys(result.sections_changed):
         sec = next((s for s in sections if s.id == sid), None)
@@ -302,9 +420,9 @@ async def run_content_risk_repair(
                 if changed_titles
                 else ""
             )
-            + "\n\nI did **not** invent contact details or metrics — missing facts "
-            "are `[VERIFY]` or removed overclaims. Attach real signed PDFs separately; "
-            "confirm any remaining VERIFY against KB before submit."
+            + "\n\nI scrubbed ungrounded **past-proven capability** claims and "
+            "**bio year/specialization** overclaims against case studies / 04_Bio. "
+            "Missing facts stay `[VERIFY]` — I did not invent replacements."
         )
     else:
         result.reply = (
