@@ -1,13 +1,16 @@
 import asyncio
+from hmac import compare_digest
 import json
 import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 import logging
-from app.financial import google_sheets, ai_classifier, quickbooks
+from app.financial import google_sheets, ai_classifier
+from app.financial.qb_repository import get_panel_cache, get_sync_state
+from app.financial.qb_sync import LeaseHeld, run_sync
 from app.services import quickbooks_oauth
 from app.services.llm import chat_json
 from app.core.config import settings
@@ -702,88 +705,155 @@ def get_sources_status():
         ]
     }
 
-# ── QuickBooks (read-only) ───────────────────────────────────────────────────
-# Panels are cached briefly: a full overview is ~6 API calls plus a paged
-# Purchase scan, and the underlying ledger changes a handful of times a day.
-_QB_CACHE: dict[str, tuple[float, Any]] = {}
-_QB_CACHE_TTL = 300.0
+# ── QuickBooks ────────────────────────────────────────────────────────────────
+_QB_PANEL_KEYS = (
+    "company",
+    "ar",
+    "ap",
+    "revenue_by_class",
+    "by_account_manager",
+    "client_profitability",
+    "monthly_trend",
+    "unattached_cost",
+    "activity",
+    "cash_collections",
+    "billing_vs_cash",
+    "dso",
+    "aged_ar_detail",
+    "purchase_orders",
+    "expenses_by_vendor",
+    "bill_payments",
+    "customers",
+    "sales_by_customer",
+    "credit_memos",
+    "class_coverage",
+    "department_coverage",
+    "liquidity",
+)
 
 
-def _qb_cached(key: str, build):
-    now = time.monotonic()
-    hit = _QB_CACHE.get(key)
-    if hit and now - hit[0] < _QB_CACHE_TTL:
-        return hit[1]
-    value = build()
-    _QB_CACHE[key] = (now, value)
-    return value
+class QuickBooksSyncBody(BaseModel):
+    mode: str = "auto"
+
+
+def _cron_authorized(secret: str | None) -> bool:
+    expected = settings.quickbooks_cron_secret or ""
+    if not expected or not secret:
+        return False
+    return compare_digest(secret, expected)
+
+
+@router.post("/quickbooks/sync")
+def quickbooks_sync(
+    request: Request,
+    payload: QuickBooksSyncBody | None = None,
+):
+    mode = payload.mode if payload else "auto"
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        logger.warning(
+            "operation=quickbooks_sync mode=%s status=unauthorized",
+            mode,
+        )
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+
+    logger.info("operation=quickbooks_sync mode=%s status=started", mode)
+    try:
+        result = run_sync(mode)
+    except LeaseHeld as exc:
+        logger.warning(
+            "operation=quickbooks_sync mode=%s status=lease_held",
+            mode,
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    logger.info(
+        "operation=quickbooks_sync mode=%s status=completed run_id=%s",
+        result.get("mode", mode),
+        result.get("run_id"),
+    )
+    return result
 
 
 @router.get("/quickbooks/status")
 def quickbooks_status():
     """Connection health — safe to poll, never raises."""
-    return quickbooks_oauth.connection_status()
+    connection = quickbooks_oauth.connection_status()
+    realm_id = connection.get("realm_id") or settings.quickbooks_realm_id
+    try:
+        state = get_sync_state(realm_id) or {}
+    except Exception:  # noqa: BLE001 — preserve the status endpoint contract
+        logger.exception(
+            "operation=quickbooks_status realm_id=%s status=state_read_failed",
+            realm_id,
+        )
+        state = {}
+    result = {
+        **connection,
+        "last_success_at": state.get("last_success_at"),
+        "last_error": state.get("last_error"),
+        "backfill_completed": bool(state.get("backfill_completed_at")),
+    }
+    logger.info(
+        "operation=quickbooks_status realm_id=%s connected=%s "
+        "backfill_completed=%s",
+        realm_id,
+        result.get("connected"),
+        result["backfill_completed"],
+    )
+    return result
 
 
 @router.get("/quickbooks/overview")
 def quickbooks_overview(
     year: int = Query(default_factory=lambda: datetime.now().year),
     since: Optional[str] = Query(None, description="ISO timestamp for the activity feed"),
-    refresh: bool = Query(False, description="Bypass the 5-minute panel cache"),
+    refresh: bool = Query(False, description="Deprecated; snapshots refresh during sync"),
 ):
-    """Every QuickBooks panel the dashboard can render today.
-
-    Each panel degrades independently — one failing report does not blank the page.
-    """
-    if not settings.quickbooks_configured:
-        raise HTTPException(status_code=503, detail="QuickBooks credentials are not configured")
-
-    activity_since = since or f"{datetime.now().year}-{datetime.now().month:02d}-01T00:00:00-07:00"
-    cache_key = f"overview:{year}:{activity_since}"
-    if refresh:
-        _QB_CACHE.pop(cache_key, None)
-
-    def build() -> dict[str, Any]:
-        panels: dict[str, Any] = {"year": year, "errors": {}}
-        jobs = {
-            "company": quickbooks.company_profile,
-            "ar": quickbooks.ar_aging,
-            "ap": quickbooks.ap_aging,
-            "revenue_by_class": lambda: quickbooks.revenue_by_class(year),
-            "by_account_manager": lambda: quickbooks.by_account_manager(year),
-            "client_profitability": lambda: quickbooks.client_profitability(year),
-            "monthly_trend": lambda: quickbooks.monthly_trend(year),
-            "unattached_cost": lambda: quickbooks.unattached_cost(year),
-            "activity": lambda: quickbooks.recent_activity(activity_since),
-            # Phase 1 — cash / billing
-            "cash_collections": lambda: quickbooks.cash_collections(year),
-            "billing_vs_cash": lambda: quickbooks.billing_vs_cash(year),
-            "dso": lambda: quickbooks.dso(year),
-            "aged_ar_detail": quickbooks.aged_ar_detail,
-            # Phase 2 — commitments
-            "purchase_orders": lambda: quickbooks.purchase_orders(year),
-            "expenses_by_vendor": lambda: quickbooks.expenses_by_vendor(year),
-            "bill_payments": lambda: quickbooks.bill_payments(year),
-            # Phase 3 — client book
-            "customers": quickbooks.customers_directory,
-            "sales_by_customer": lambda: quickbooks.sales_by_customer(year),
-            "credit_memos": lambda: quickbooks.credit_memos(year),
-            # Phase 4 — coding / liquidity
-            "class_coverage": lambda: quickbooks.class_coverage(year),
-            "department_coverage": lambda: quickbooks.department_coverage(year),
-            "liquidity": lambda: quickbooks.liquidity(year),
+    """Return the latest persisted panel snapshot without calling Intuit."""
+    realm_id = settings.quickbooks_realm_id
+    state = get_sync_state(realm_id) or {}
+    cache = get_panel_cache(realm_id, year)
+    if cache is None:
+        sync_status = (
+            "missing"
+            if state.get("backfill_completed_at")
+            else "backfill_pending"
+        )
+        logger.warning(
+            "operation=quickbooks_overview realm_id=%s year=%s "
+            "status=%s cache_found=false",
+            realm_id,
+            year,
+            sync_status,
+        )
+        return {
+            "year": year,
+            **dict.fromkeys(_QB_PANEL_KEYS),
+            "errors": {"overview": "no snapshot for year"},
+            "as_of": None,
+            "synced_at": state.get("last_success_at"),
+            "sync_status": sync_status,
         }
-        for name, job in jobs.items():
-            try:
-                panels[name] = job()
-            except Exception as exc:  # noqa: BLE001 — one bad panel shouldn't blank the page
-                logger.warning("[QB] panel %r failed: %s", name, exc)
-                panels[name] = None
-                panels["errors"][name] = str(exc)[:200]
-        panels["generated_at"] = datetime.now().isoformat()
-        return panels
 
-    return _qb_cached(cache_key, build)
+    result = {
+        **(cache.get("payload") or {}),
+        "as_of": cache.get("as_of"),
+        "synced_at": cache.get("computed_at"),
+        "sync_status": (
+            "failed"
+            if state.get("last_error") and state.get("last_success_at")
+            else "ok"
+        ),
+    }
+    logger.info(
+        "operation=quickbooks_overview realm_id=%s year=%s "
+        "status=%s cache_found=true refresh_ignored=%s since_ignored=%s",
+        realm_id,
+        year,
+        result["sync_status"],
+        refresh,
+        since is not None,
+    )
+    return result
 
 
 @router.get("/audit-queue")

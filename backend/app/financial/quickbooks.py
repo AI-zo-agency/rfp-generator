@@ -7,6 +7,7 @@ path — the engagement mandates read-only access to the live company file.
 from __future__ import annotations
 
 import logging
+import time
 import urllib.parse
 from datetime import date, datetime
 from typing import Any
@@ -35,20 +36,37 @@ def _get(path: str, _retried: bool = False) -> dict[str, Any]:
     url = f"{settings.quickbooks_api_base}/v3/company/{settings.quickbooks_realm_id}/{path}"
     url += ("&" if "?" in url else "?") + f"minorversion={settings.quickbooks_minor_version}"
 
-    response = httpx.get(
-        url,
-        headers={
-            "Authorization": f"Bearer {quickbooks_oauth.get_access_token()}",
-            "Accept": "application/json",
-        },
-        timeout=_TIMEOUT,
+    for attempt in range(1, 5):
+        response = httpx.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {quickbooks_oauth.get_access_token()}",
+                "Accept": "application/json",
+            },
+            timeout=_TIMEOUT,
+        )
+        if response.status_code == 401 and not _retried:
+            quickbooks_oauth.get_access_token(force=True)
+            return _get(path, _retried=True)
+        if response.status_code == 429 and attempt < 4:
+            delay = 2 ** attempt
+            logger.warning("operation=_get status=429 attempt=%s", attempt)
+            time.sleep(delay)
+            continue
+        if response.status_code != 200:
+            raise QuickBooksError(f"QuickBooks {response.status_code}: {response.text[:300]}")
+        return response.json()
+    raise QuickBooksError("QuickBooks 429: rate limited after retries")
+
+
+def query_page(sql: str, key: str, startposition: int = 1) -> list[dict[str, Any]]:
+    encoded = urllib.parse.quote(f"{sql} startposition {startposition} maxresults {_PAGE}")
+    rows = _get(f"query?query={encoded}").get("QueryResponse", {}).get(key, []) or []
+    logger.info(
+        "[QB] operation=query_page key=%s startposition=%s rows=%s",
+        key, startposition, len(rows),
     )
-    if response.status_code == 401 and not _retried:
-        quickbooks_oauth.get_access_token(force=True)
-        return _get(path, _retried=True)
-    if response.status_code != 200:
-        raise QuickBooksError(f"QuickBooks {response.status_code}: {response.text[:300]}")
-    return response.json()
+    return rows
 
 
 def query(sql: str, key: str) -> list[dict[str, Any]]:
@@ -56,8 +74,7 @@ def query(sql: str, key: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     position = 1
     while True:
-        encoded = urllib.parse.quote(f"{sql} startposition {position} maxresults {_PAGE}")
-        page = _get(f"query?query={encoded}")["QueryResponse"].get(key, [])
+        page = query_page(sql, key, startposition=position)
         rows.extend(page)
         if len(page) < _PAGE:
             return rows
@@ -69,15 +86,20 @@ def report(name: str, **params: str) -> dict[str, Any]:
     return _get(f"reports/{name}" + (f"?{qs}" if qs else ""))
 
 
-def cdc(entities: list[str], since: str) -> dict[str, int]:
+def cdc_records(entities: list[str], since: str) -> dict[str, list[dict[str, Any]]]:
     payload = _get(f"cdc?entities={','.join(entities)}&changedSince={since}")
-    counts: dict[str, int] = {}
+    out: dict[str, list[dict[str, Any]]] = {e: [] for e in entities}
     for response in payload.get("CDCResponse", []):
         for query_response in response.get("QueryResponse", []):
             for entity, rows in query_response.items():
                 if isinstance(rows, list):
-                    counts[entity] = len(rows)
-    return counts
+                    out.setdefault(entity, []).extend(rows)
+    logger.info("[QB] operation=cdc_records since=%s entities=%s", since, list(out.keys()))
+    return out
+
+
+def cdc(entities: list[str], since: str) -> dict[str, int]:
+    return {k: len(v) for k, v in cdc_records(entities, since).items()}
 
 
 # ── report helpers ───────────────────────────────────────────────────────────

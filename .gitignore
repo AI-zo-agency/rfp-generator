@@ -46,6 +46,10 @@ npm-debug.log*
 # Local architecture / planning docs (keep local only)
 docs/architecture/
 docs/superpowers/
+docs/superpowers/specs/2026-08-13-quickbooks-nightly-sync-design.md
+
+# QuickBooks OAuth token file (legacy local store; production uses qb_oauth_tokens)
+**/quickbooks_token.json
 
 # Impeccable design skill (local context, keep local only)
 PRODUCT.md

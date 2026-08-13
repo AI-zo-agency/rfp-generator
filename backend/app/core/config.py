@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     quickbooks_realm_id: str = ""
     quickbooks_environment: str = "sandbox"
     quickbooks_minor_version: str = "75"
+    quickbooks_cron_secret: str = ""
 
     # Legacy optional — prefer OAuth client id/secret above
     google_service_account_json: Path | None = None

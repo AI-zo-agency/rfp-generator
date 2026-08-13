@@ -8,16 +8,15 @@ later, so persistence is the whole point of this module.
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 import httpx
 
 from app.core.config import settings
+from app.financial import qb_repository
 
 logger = logging.getLogger(__name__)
 
@@ -30,33 +29,18 @@ _access_token: str | None = None
 _access_expires_at: float = 0.0
 
 
-def _token_store_path() -> Path:
-    # ponytail: file store, not a table. Move to Supabase if the API ever runs
-    # multi-instance — two workers rotating the same token will fight.
-    return Path(settings.database_path).parent / "quickbooks_token.json"
-
-
 def _read_refresh_token() -> str:
-    path = _token_store_path()
-    if path.exists():
-        try:
-            stored = json.loads(path.read_text()).get("refresh_token")
-            if stored:
-                return stored
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("QuickBooks token store unreadable, falling back to env: %s", exc)
+    row = qb_repository.get_oauth_tokens(settings.quickbooks_realm_id)
+    if row and row.get("refresh_token"):
+        return str(row["refresh_token"])
     return settings.quickbooks_refresh_token
 
 
 def _write_refresh_token(token: str) -> None:
-    path = _token_store_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"refresh_token": token, "updated_at": time.time()}))
-    except OSError as exc:
-        # Not fatal for this process — the token is still held in memory — but the
-        # next cold start will fall back to a stale seed.
-        logger.error("Could not persist rotated QuickBooks refresh token: %s", exc)
+    qb_repository.upsert_oauth_tokens(
+        settings.quickbooks_realm_id,
+        {"refresh_token": token},
+    )
 
 
 def _basic_auth_header() -> str:

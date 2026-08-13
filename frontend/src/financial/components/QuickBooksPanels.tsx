@@ -16,6 +16,9 @@ type MonthAmt = { month: string; amount: number };
 export interface QuickBooksOverview {
   year: number;
   generated_at: string;
+  as_of?: string;
+  synced_at?: string;
+  sync_status?: "ok" | "failed" | "backfill_pending" | "missing";
   errors: Record<string, string>;
   company: {
     company_name: string;
@@ -1065,12 +1068,11 @@ export function QuickBooksPanels() {
   const [activeSection, setActiveSection] = useState("health");
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const load = async (refresh = false, y = year) => {
+  const load = async (y = year) => {
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams({ year: String(y) });
-      if (refresh) params.set("refresh", "true");
       const res = await fetch(
         `${API_BASE}/api/v1/financials/quickbooks/overview?${params.toString()}`,
       );
@@ -1084,7 +1086,7 @@ export function QuickBooksPanels() {
   };
 
   useEffect(() => {
-    void load(false, year);
+    void load(year);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year]);
 
@@ -1124,7 +1126,7 @@ export function QuickBooksPanels() {
       <div className="qb-ledger">
         <div className="qb-error">
           <p>{error ?? "No QuickBooks data"}</p>
-          <button type="button" onClick={() => void load(true)} className="qb-icon-btn">
+          <button type="button" onClick={() => void load()} className="qb-icon-btn">
             Retry
           </button>
         </div>
@@ -1144,21 +1146,18 @@ export function QuickBooksPanels() {
         <div className="qb-toolbar">
           <div className="qb-live">
             <span aria-hidden className="qb-live-dot" />
-            Live, read-only
+            {data.sync_status === "failed" ? "Sync failed" : "Synced"}
+            {data.synced_at ? (
+              <span className="qb-company">
+                {new Date(data.synced_at).toLocaleString()}
+              </span>
+            ) : null}
             {data.company ? (
               <span className="qb-company">{data.company.legal_name}</span>
             ) : null}
           </div>
           <div className="qb-tools">
             <YearSeg year={year} years={years} onChange={setYear} />
-            <button
-              type="button"
-              onClick={() => void load(true)}
-              className="qb-icon-btn"
-              disabled={loading}
-            >
-              {loading ? "Refreshing…" : "Refresh"}
-            </button>
           </div>
         </div>
 
