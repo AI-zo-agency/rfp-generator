@@ -41,6 +41,8 @@ export interface ProposalPipelineCheckpoint {
   activityDetail?: string | null;
   stepIndex?: number | null;
   stepTotal?: number | null;
+  lastCompletedFulfillStep?: number | null;
+  resumeFulfillStep?: number | null;
   updatedAt: string;
 }
 

@@ -129,10 +129,13 @@ class Settings(BaseSettings):
     quality_gate_claim_batch_chars: int = 24_000
     # Concurrency for the per-section KB retrievals behind Act 1. These are independent,
     # so running them sequentially only added latency.
-    quality_gate_retrieval_concurrency: int = 6
+    quality_gate_retrieval_concurrency: int = 10
     # Rounds of detect -> patch -> re-detect. Rounds 2+ only re-examine sections that
-    # actually changed, so the extra rounds are cheap; keeping 3 preserves accuracy.
+    # actually changed, so extra rounds stay cheap; 3 preserves accuracy.
     quality_gate_max_rounds: int = 3
+    # Parallel claim-verifier batches (Act 1). Independent calls; every section still
+    # reaches the model with its own evidence.
+    quality_gate_verifier_batch_concurrency: int = 3
     # REPETITION_SWEEP_ENABLED — the stage-1 whole-manuscript pass. Default OFF: the
     # pipeline already dedupes at "Remove duplicate sections" (stage 6), "Compact
     # manuscript" (stage 16), and the gate's own repetition detector (stage 18). Its

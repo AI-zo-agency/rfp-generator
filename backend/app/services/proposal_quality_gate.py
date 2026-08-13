@@ -37,6 +37,15 @@ logger = logging.getLogger(__name__)
 
 MAX_ROUNDS = 3
 
+
+def _configured_max_rounds() -> int:
+    raw = getattr(_settings(), "quality_gate_max_rounds", MAX_ROUNDS)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = MAX_ROUNDS
+    return max(1, min(MAX_ROUNDS, value))
+
 # A repair that cuts this much of a section is destroying content, not tightening it.
 REGRESSION_SHRINK_RATIO = 0.75
 
@@ -237,56 +246,65 @@ async def verify_fact_bound_claims(
     flat = [s for batch in batches for s in batch]
     evidence_by_section = dict(await asyncio.gather(*(_guarded(s) for s in flat)))
 
-    verdicts: list[ClaimVerdict] = []
-    for batch in batches:
-        parts: list[str] = []
-        for section in batch:
-            evidence = evidence_by_section.get(section.id, "")
-            parts.append(
-                f"SECTION [{section.id}] {section.title}\n"
-                f"{(section.content or '').strip()[:12_000]}\n\n"
-                f"EVIDENCE FOR [{section.id}]:\n"
-                + (evidence[:8_000] if evidence else "(no evidence retrieved)")
-            )
-        user_content = (
-            "Verify the fact-bound claims in each section below against that "
-            "section's own evidence. Tag every claim with its sectionId.\n\n"
-            + "\n\n---\n\n".join(parts)
-        )
-        try:
-            raw, _ = await run_json_agent(AgentRole.CLAIM_VERIFIER, user_content)
-            claims = raw.get("claims") if isinstance(raw.get("claims"), list) else []
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("gate act1 verifier failed: %s", exc)
-            continue
+    batch_sem = asyncio.Semaphore(
+        max(1, getattr(settings, "quality_gate_verifier_batch_concurrency", 3))
+    )
 
-        valid_ids = {s.id for s in batch}
-        for item in claims:
-            if not isinstance(item, dict):
-                continue
-            sid = str(item.get("sectionId") or "")
-            if sid not in valid_ids:
-                sid = batch[0].id if len(batch) == 1 else sid
-            if not sid:
-                continue
-            status = str(item.get("status") or "unresolved").strip().casefold()
-            if status not in {"verified", "contradicted", "unresolved"}:
-                status = "unresolved"
-            # Retrieval produced nothing for this section, so nothing can be
-            # contradicted by it. Never let an empty KB read as disproof.
-            if not (evidence_by_section.get(sid) or "").strip() and status == "contradicted":
-                status = "unresolved"
-            verdicts.append(
-                ClaimVerdict(
-                    sectionId=sid,
-                    claim=str(item.get("claim") or "")[:600],
-                    status=status,  # type: ignore[arg-type]
-                    evidence=str(item.get("evidence") or "")[:1200],
-                    correctedValue=str(item.get("correctedValue"))
-                    if item.get("correctedValue")
-                    else None,
+    async def _verify_batch(batch: list[Any]) -> list[ClaimVerdict]:
+        async with batch_sem:
+            parts: list[str] = []
+            for section in batch:
+                evidence = evidence_by_section.get(section.id, "")
+                parts.append(
+                    f"SECTION [{section.id}] {section.title}\n"
+                    f"{(section.content or '').strip()[:12_000]}\n\n"
+                    f"EVIDENCE FOR [{section.id}]:\n"
+                    + (evidence[:8_000] if evidence else "(no evidence retrieved)")
                 )
+            user_content = (
+                "Verify the fact-bound claims in each section below against that "
+                "section's own evidence. Tag every claim with its sectionId.\n\n"
+                + "\n\n---\n\n".join(parts)
             )
+            try:
+                raw, _ = await run_json_agent(AgentRole.CLAIM_VERIFIER, user_content)
+                claims = raw.get("claims") if isinstance(raw.get("claims"), list) else []
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("gate act1 verifier failed: %s", exc)
+                return []
+
+            out: list[ClaimVerdict] = []
+            valid_ids = {s.id for s in batch}
+            for item in claims:
+                if not isinstance(item, dict):
+                    continue
+                sid = str(item.get("sectionId") or "")
+                if sid not in valid_ids:
+                    sid = batch[0].id if len(batch) == 1 else sid
+                if not sid:
+                    continue
+                status = str(item.get("status") or "unresolved").strip().casefold()
+                if status not in {"verified", "contradicted", "unresolved"}:
+                    status = "unresolved"
+                # Retrieval produced nothing for this section, so nothing can be
+                # contradicted by it. Never let an empty KB read as disproof.
+                if not (evidence_by_section.get(sid) or "").strip() and status == "contradicted":
+                    status = "unresolved"
+                out.append(
+                    ClaimVerdict(
+                        sectionId=sid,
+                        claim=str(item.get("claim") or "")[:600],
+                        status=status,  # type: ignore[arg-type]
+                        evidence=str(item.get("evidence") or "")[:1200],
+                        correctedValue=str(item.get("correctedValue"))
+                        if item.get("correctedValue")
+                        else None,
+                    )
+                )
+            return out
+
+    nested = await asyncio.gather(*(_verify_batch(batch) for batch in batches))
+    verdicts = [v for group in nested for v in group]
     logger.info(
         "gate act1 verified %d section(s) in %d call(s), %d claim(s)",
         len(flat),
@@ -593,8 +611,13 @@ async def run_quality_gate(
     rfp_text: str,
     ensure_not_stopped: Any = None,
 ) -> tuple[ProposalDraft, QualityGateReport]:
-    """Detect → patch → re-detect, stopping at zero new findings or MAX_ROUNDS."""
+    """Detect → patch → re-detect, stopping at zero new findings or MAX_ROUNDS.
+
+    All three acts always run. Speed comes from concurrent retrieval/verifier batches
+    and incremental re-detection — not from dropping claims, rounds, or tickets.
+    """
     report = QualityGateReport()
+    max_rounds = _configured_max_rounds()
 
     async def _checkpoint() -> None:
         if ensure_not_stopped is not None:
@@ -626,7 +649,7 @@ async def run_quality_gate(
     # actually edited, so re-detection costs a fraction of the first pass.
     changed_last_round: set[str] | None = None
 
-    for round_no in range(1, MAX_ROUNDS + 1):
+    for round_no in range(1, max_rounds + 1):
         await _checkpoint()
         found = await detect_quality_tickets(
             draft=draft, scorecard=report.scorecard, only_sections=changed_last_round
@@ -715,7 +738,7 @@ async def run_quality_gate(
             report.stopped_reason = f"no sections changed in round {round_no}"
             break
     else:
-        report.stopped_reason = f"reached the {MAX_ROUNDS}-round limit"
+        report.stopped_reason = f"reached the {max_rounds}-round limit"
 
     for ticket in report.tickets:
         if ticket.outcome in {"unfixed", "reverted"}:

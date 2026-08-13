@@ -83,6 +83,7 @@ import {
 } from "@/lib/proposal-manual-flags";
 import {
   FULFILL_SCAN_PHASE,
+  FULFILL_SCAN_STEP_LABELS,
   pipelineServerStillWorkingMessage,
   inProgressPhaseLabel,
 } from "@/lib/proposal-pipeline-checkpoint";
@@ -1012,6 +1013,17 @@ function ProposalDraftWorkspaceInner({
     Boolean(pipelineStatus?.canResume) &&
     !pipelineStatus?.isComplete;
 
+  const fulfillResumeStep = research?.pipelineCheckpoint?.resumeFulfillStep ?? null;
+  const canResumeFulfillScan =
+    Boolean(fulfillResumeStep && fulfillResumeStep > 1) &&
+    countSectionsWithContent(outline) > 0;
+  const fulfillResumeLabel =
+    canResumeFulfillScan &&
+    fulfillResumeStep &&
+    fulfillResumeStep <= FULFILL_SCAN_STEP_LABELS.length
+      ? FULFILL_SCAN_STEP_LABELS[fulfillResumeStep - 1]
+      : null;
+
   const serverPipelineActive = Boolean(
     research?.pipelineCheckpoint?.inProgressPhase
   );
@@ -1369,8 +1381,18 @@ function ProposalDraftWorkspaceInner({
     setLiveLatestSectionTitle(null);
     fullProposalAbortRef.current = null;
     fulfillAbortRef.current = null;
+    const resumeFulfillStep =
+      snapshot.research?.pipelineCheckpoint?.resumeFulfillStep ?? null;
+    const resumeLabel =
+      resumeFulfillStep &&
+      resumeFulfillStep >= 1 &&
+      resumeFulfillStep <= FULFILL_SCAN_STEP_LABELS.length
+        ? FULFILL_SCAN_STEP_LABELS[resumeFulfillStep - 1]
+        : null;
     setGenerateNotice(
-      "Stopped — progress saved in the database. Use Continue proposal to resume."
+      resumeLabel
+        ? `Stopped — progress saved. Use Complete & clean draft to resume from step ${resumeFulfillStep} (${resumeLabel}).`
+        : "Stopped — progress saved in the database. Use Continue proposal to resume."
     );
     setGenerateError(null);
   }, [rfp.id, applyOutlineFromServer]);
@@ -1424,25 +1446,36 @@ function ProposalDraftWorkspaceInner({
   }, [rfp.id, isMatchingCaseStudies, anyPipelineRunning]);
 
   const handleFulfillRfpGaps = useCallback(async () => {
-    const scanOk = await confirm({
-      title: "Complete & clean this draft?",
-      description:
-        "Improves this existing proposal in place (does not wipe and regenerate from scratch):\n\n" +
-        "• Add missing closing / submission tabs\n" +
-        "• Align scored sections to the RFP TOC\n" +
-        "• Merge duplicates / cut unrequested, padding, or over-limit sections (stay qualified — keep trust anchors)\n" +
-        "• DQ & gov-policy gate (true disqualifiers only — not Go/No-Go capability noise)\n" +
-        "• Regenerate budget if missing; thorough reconcile + grounding if present\n" +
-        "• Full blocker suite (same as Generate): primary contact, refs, schedule/calendar, certs, case-study titles\n" +
-        "• LLM manuscript-vs-RFP contradiction check + signed-cover PDF designer note\n" +
-        "• KPI repairs, KB fact-check, line-by-line KB grounding (async per section)\n" +
-        "• Drop optional [VERIFY] / [MANUAL FILL] unless this RFP requires them\n" +
-        "• Dedup repeated company info; keep zö voice (no AI-slop expansion)\n" +
-        "• Refresh pre-submit review\n\n" +
-        "Does NOT invent facts, figures, or signature details. A saved version is stored first.",
-      confirmLabel: "Complete & clean",
-      tone: "default",
-    });
+    const scanOk = await confirm(
+      canResumeFulfillScan
+        ? {
+            title: "Resume complete & clean?",
+            description:
+              `Continue from step ${fulfillResumeStep} — ${fulfillResumeLabel}.\n\n` +
+              "Earlier steps are already saved on the draft. The review & quality gate (all 3 acts) and the ending report still run in full.",
+            confirmLabel: "Resume",
+            tone: "default",
+          }
+        : {
+            title: "Complete & clean this draft?",
+            description:
+              "Improves this existing proposal in place (does not wipe and regenerate from scratch):\n\n" +
+              "• Add missing closing / submission tabs\n" +
+              "• Align scored sections to the RFP TOC\n" +
+              "• Merge duplicates / cut unrequested, padding, or over-limit sections (stay qualified — keep trust anchors)\n" +
+              "• DQ & gov-policy gate (true disqualifiers only — not Go/No-Go capability noise)\n" +
+              "• Regenerate budget if missing; thorough reconcile + grounding if present\n" +
+              "• Full blocker suite (same as Generate): primary contact, refs, schedule/calendar, certs, case-study titles\n" +
+              "• LLM manuscript-vs-RFP contradiction check + signed-cover PDF designer note\n" +
+              "• KPI repairs, KB fact-check, line-by-line KB grounding (async per section)\n" +
+              "• Drop optional [VERIFY] / [MANUAL FILL] unless this RFP requires them\n" +
+              "• Dedup repeated company info; keep zö voice (no AI-slop expansion)\n" +
+              "• Refresh pre-submit review\n\n" +
+              "Does NOT invent facts, figures, or signature details. A saved version is stored first.",
+            confirmLabel: "Complete & clean",
+            tone: "default",
+          }
+    );
     if (!scanOk) {
       return;
     }
@@ -1500,7 +1533,7 @@ function ProposalDraftWorkspaceInner({
         setScanSummary(null);
         setScanSummaryExpanded(false);
         setGenerateNotice(
-          "Complete & clean stopped — partial changes may be saved; check Sections → saved version menu."
+          "Complete & clean stopped — progress saved. Use Complete & clean draft to resume from the last step."
         );
         setGenerateError(null);
         return;
@@ -1518,7 +1551,7 @@ function ProposalDraftWorkspaceInner({
       stopScanPoll();
       setIsFulfillingRfpGaps(false);
     }
-  }, [confirm, rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll]);
+  }, [confirm, rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll, canResumeFulfillScan, fulfillResumeStep, fulfillResumeLabel]);
 
   const handleGenerateFullProposal = useCallback(async (options?: {
     startAfterSections1to3?: boolean;
@@ -1530,6 +1563,14 @@ function ProposalDraftWorkspaceInner({
     // startFromCaseStudies = keep Company + Bios, re-extract Our Work, then Phase 2+.
     const startAfterSections1to3 = Boolean(options?.startAfterSections1to3);
     const startFromCaseStudies = Boolean(options?.startFromCaseStudies);
+    if (
+      canResumeFulfillScan &&
+      !startAfterSections1to3 &&
+      !startFromCaseStudies
+    ) {
+      await handleFulfillRfpGaps();
+      return;
+    }
     const hasManuscriptContent = countSectionsWithContent(outline) > 0;
     // Never "resume" an empty outline — that is always a forceRestart generate.
     const shouldResume =
@@ -1821,7 +1862,7 @@ function ProposalDraftWorkspaceInner({
         setFullProposalProgress(null);
       }
     }
-  }, [confirm, rfp, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, handleResearchPoll, applyOutlineFromServer]);
+  }, [confirm, rfp, fullProposalDone, canResumePipeline, canResumeFulfillScan, pipelineStatus, outline, handleLiveDraftUpdate, handleResearchPoll, applyOutlineFromServer, handleFulfillRfpGaps]);
 
   const handleResetOutline = async () => {
     setIsResettingDraft(true);
@@ -2017,6 +2058,7 @@ function ProposalDraftWorkspaceInner({
       }
       return "Completing draft…";
     }
+    if (canResumeFulfillScan) return "Continue complete & clean";
     if (canResumePipeline) return "Continue proposal";
     return "Generate proposal";
   }, [
@@ -2024,6 +2066,7 @@ function ProposalDraftWorkspaceInner({
     serverPipelineActive,
     effectiveFullProposalProgress,
     canResumePipeline,
+    canResumeFulfillScan,
     isFulfillingRfpGaps,
     research?.pipelineCheckpoint?.activityLabel,
     rfpTabProgress,
@@ -2713,7 +2756,9 @@ function ProposalDraftWorkspaceInner({
                 >
                   {isFulfillingRfpGaps
                     ? "Completing draft…"
-                    : "Complete & clean draft"}
+                    : canResumeFulfillScan
+                      ? "Continue complete & clean"
+                      : "Complete & clean draft"}
                 </button>
                 {outline.lastFulfillReport ? (
                   <button

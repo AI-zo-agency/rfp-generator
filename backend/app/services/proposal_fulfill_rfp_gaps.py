@@ -52,6 +52,14 @@ from app.services.proposal_repository import (
 
 logger = logging.getLogger(__name__)
 
+
+class FulfillStepSkip(Exception):
+    """This Complete & clean step already finished before stop — continue later."""
+
+    def __init__(self, step: int) -> None:
+        self.step = step
+        super().__init__(f"skip step {step}")
+
 _REF_DENIAL_RE = re.compile(
     r"(?:rfp|excerpt|solicitation).{0,80}(?:does not|did not|do not)\s+specify.{0,160}"
     r"(?:reference|number of references|institution type)",
@@ -333,6 +341,7 @@ async def run_fulfill_rfp_gaps(
     from app.services.proposal_verify_optional_scrub import run_verify_scrub_only_scan
 
     token = bind_active_rfp(rfp_id)
+    cancelled = False
     try:
         if (mode or "full").strip().lower() in {
             "verify_scrub_only",
@@ -343,11 +352,13 @@ async def run_fulfill_rfp_gaps(
             return await run_verify_scrub_only_scan(rfp_id)
         return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
     except ProposalGenerationCancelled:
+        cancelled = True
         await record_generation_stopped(rfp_id, "fulfill-scan")
         raise
     finally:
         unbind_active_rfp(token)
-        await clear_fulfill_scan_activity(rfp_id)
+        if not cancelled:
+            await clear_fulfill_scan_activity(rfp_id)
 
 
 async def _run_fulfill_rfp_gaps_body(
@@ -384,13 +395,19 @@ async def _run_fulfill_rfp_gaps_body(
             sections=_default_sections(None),
             updatedAt=datetime.now(timezone.utc).isoformat(),
         )
-    draft = push_proposal_snapshot(draft, label="Before Scan RFP")
-    await asave_proposal_draft(draft)
 
     from app.services.proposal_pipeline_checkpoint import (
-        clear_fulfill_scan_activity,
+        complete_fulfill_scan,
+        fulfill_resume_step,
         record_pipeline_activity,
     )
+
+    resume_at = fulfill_resume_step(research)
+    if resume_at <= 1:
+        draft = push_proposal_snapshot(draft, label="Before Scan RFP")
+        await asave_proposal_draft(draft)
+    else:
+        logger.info("Scan RFP resume %s from step %s", rfp_id, resume_at)
 
     FULFILL_STEPS = (
         "Closing & submission tabs",
@@ -419,23 +436,6 @@ async def _run_fulfill_rfp_gaps_body(
 
         await check_generation_cancelled(rfp_id)
 
-    async def _scan_progress(step: int, label: str, detail: str | None = None) -> None:
-        await record_pipeline_activity(
-            rfp_id,
-            label=label,
-            detail=detail,
-            step_index=step,
-            step_total=len(FULFILL_STEPS),
-            in_progress_phase="fulfill-scan",
-        )
-
-    await _scan_progress(
-        1,
-        "Scan RFP: closing & submission",
-        f"Reading {len(rfp_text.strip()):,} chars from uploaded PDF.",
-    )
-    await _ensure_not_stopped()
-
     report: dict[str, Any] = {
         "mode": "full",
         "snapshotSavedAt": draft.snapshots[-1].saved_at if draft.snapshots else None,
@@ -448,67 +448,119 @@ async def _run_fulfill_rfp_gaps_body(
         "submissionNarrativesAdded": [],
         "submissionChecklistExpected": [],
     }
-
-    draft, added, close_logs = await ensure_closing_sections(
-        draft=draft,
-        rfp=rfp,
-        rfp_text=rfp_text,
-    )
-    report["logs"].extend(close_logs)
-    all_closing = detect_closing_components(rfp_text)
-    ids_after = {s.id for s in draft.sections}
-    titles_after = [s.title for s in draft.sections]
-    report["closingDetectedSections"] = [
-        {"id": c.id, "title": c.title} for c in all_closing
-    ]
-    report["closingAlreadyPresent"] = [
-        {"id": c.id, "title": c.title}
-        for c in all_closing
-        if draft_already_covers_component(
-            draft_section_ids=ids_after,
-            draft_titles=titles_after,
-            component=c,
+    added: list[Any] = []
+    if resume_at > 1:
+        prior = dict(draft.last_fulfill_report or {})
+        if prior:
+            logs = list(prior.get("logs") or [])
+            report = {**prior, **report, "logs": logs}
+        report["logs"].append(
+            f"Resume: continuing from step {resume_at} — "
+            f"earlier steps are already saved on the draft; "
+            f"review & quality gate plus the ending report still run in full."
         )
-    ]
-    report["logs"].append(
-        f"Closing package: {len(all_closing)} item(s) in RFP text; "
-        f"{len(added)} new section(s) added; "
-        f"{len(report['closingAlreadyPresent'])} already in proposal (Scan updates those in place, "
-        f"does not duplicate)."
-    )
-    report["logs"].append(
-        f"Scan uses {len(rfp_text.strip()):,} chars from uploaded RFP PDF "
-        f"({pdf_pages or '?'} pages) — not the truncated drafting excerpt."
-    )
+        logger.info("Scan RFP resume %s from step %s", rfp_id, resume_at)
 
-    try:
-        from app.services.proposal_rfp_submission_requirements import (
-            ensure_all_rfp_submission_requirements,
-            merge_deliverables_into_research,
+    def _log_resume_skip(step: int) -> None:
+        label = (
+            FULFILL_STEPS[step - 1]
+            if 1 <= step <= len(FULFILL_STEPS)
+            else f"step {step}"
         )
+        report["logs"].append(f"Resume: skipped '{label}' (already saved).")
+        logger.info("Scan RFP %s resume skip step %s (%s)", rfp_id, step, label)
 
-        draft, deliverables_added, sub_logs, checklist = await ensure_all_rfp_submission_requirements(
+    async def _scan_progress(step: int, label: str, detail: str | None = None) -> None:
+        nonlocal draft
+        # Never skip 17+ — quality gate, pre-submit, and readiness ARE the report.
+        if step < resume_at and step < 17:
+            raise FulfillStepSkip(step)
+        await record_pipeline_activity(
+            rfp_id,
+            label=label,
+            detail=detail,
+            step_index=step,
+            step_total=len(FULFILL_STEPS),
+            in_progress_phase="fulfill-scan",
+        )
+        draft = draft.model_copy(
+            update={
+                "last_fulfill_report": report,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        await asave_proposal_draft(draft)
+
+    if resume_at <= 1:
+        await _scan_progress(
+            1,
+            "Scan RFP: closing & submission",
+            f"Reading {len(rfp_text.strip()):,} chars from uploaded PDF.",
+        )
+        await _ensure_not_stopped()
+
+        draft, added, close_logs = await ensure_closing_sections(
             draft=draft,
             rfp=rfp,
             rfp_text=rfp_text,
-            research=research,
         )
-        report["logs"].extend(sub_logs)
-        report["submissionNarrativesAdded"] = [d.id for d in deliverables_added]
-        report["submissionDeliverablesAdded"] = [
-            {"id": d.id, "title": d.title, "kind": d.kind} for d in deliverables_added
+        report["logs"].extend(close_logs)
+        all_closing = detect_closing_components(rfp_text)
+        ids_after = {s.id for s in draft.sections}
+        titles_after = [s.title for s in draft.sections]
+        report["closingDetectedSections"] = [
+            {"id": c.id, "title": c.title} for c in all_closing
         ]
-        report["submissionChecklistExpected"] = checklist
-        research = merge_deliverables_into_research(research, deliverables_added)
-        if deliverables_added:
-            await asave_proposal_draft(draft)
-            if research:
-                await asave_research_cache(research)
-    except ProposalGenerationCancelled:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Submission narrative pass skipped: %s", exc)
-        report["logs"].append(f"Submission narratives skipped: {exc}")
+        report["closingAlreadyPresent"] = [
+            {"id": c.id, "title": c.title}
+            for c in all_closing
+            if draft_already_covers_component(
+                draft_section_ids=ids_after,
+                draft_titles=titles_after,
+                component=c,
+            )
+        ]
+        report["logs"].append(
+            f"Closing package: {len(all_closing)} item(s) in RFP text; "
+            f"{len(added)} new section(s) added; "
+            f"{len(report['closingAlreadyPresent'])} already in proposal (Scan updates those in place, "
+            f"does not duplicate)."
+        )
+        report["logs"].append(
+            f"Scan uses {len(rfp_text.strip()):,} chars from uploaded RFP PDF "
+            f"({pdf_pages or '?'} pages) — not the truncated drafting excerpt."
+        )
+
+        try:
+            from app.services.proposal_rfp_submission_requirements import (
+                ensure_all_rfp_submission_requirements,
+                merge_deliverables_into_research,
+            )
+
+            draft, deliverables_added, sub_logs, checklist = await ensure_all_rfp_submission_requirements(
+                draft=draft,
+                rfp=rfp,
+                rfp_text=rfp_text,
+                research=research,
+            )
+            report["logs"].extend(sub_logs)
+            report["submissionNarrativesAdded"] = [d.id for d in deliverables_added]
+            report["submissionDeliverablesAdded"] = [
+                {"id": d.id, "title": d.title, "kind": d.kind} for d in deliverables_added
+            ]
+            report["submissionChecklistExpected"] = checklist
+            research = merge_deliverables_into_research(research, deliverables_added)
+            if deliverables_added:
+                await asave_proposal_draft(draft)
+                if research:
+                    await asave_research_cache(research)
+        except ProposalGenerationCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Submission narrative pass skipped: %s", exc)
+            report["logs"].append(f"Submission narratives skipped: {exc}")
+    else:
+        _log_resume_skip(1)
 
     try:
         from app.services.proposal_fulfill_rfp_structure import run_rfp_structure_alignment_pass
@@ -535,6 +587,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("RFP structure alignment skipped: %s", exc)
         report["logs"].append(f"RFP structure scan skipped: {exc}")
@@ -567,6 +621,8 @@ async def _run_fulfill_rfp_gaps_body(
                 await asave_proposal_draft(draft)
         except ProposalGenerationCancelled:
             raise
+        except FulfillStepSkip as skip:
+            _log_resume_skip(skip.step)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Scored stub / case-study swap skipped: %s", exc)
             report["logs"].append(f"Scored stub draft skipped: {exc}")
@@ -585,6 +641,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Fabrication guard skipped: %s", exc)
         report["logs"].append(f"Fabrication guard skipped: {exc}")
@@ -612,6 +670,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scan preflight integrity skipped: %s", exc)
         report["logs"].append(f"Scan preflight integrity skipped: {exc}")
@@ -670,6 +730,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scan fact repairs skipped: %s", exc)
         report["logs"].append(f"Scan fact repairs skipped: {exc}")
@@ -692,6 +754,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Section 3 repair skipped: %s", exc)
         report["logs"].append(f"Section 3 repair skipped: {exc}")
@@ -710,31 +774,34 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Insurance repair skipped: %s", exc)
         report["logs"].append(f"Insurance repair skipped: {exc}")
 
-    report["closingAdded"] = [c.id for c in added]
-    report["closingAddedSections"] = [
-        {"id": c.section_id, "title": c.title} for c in added
-    ]
-    # Also surface narrative qualification sections added from the full RFP scan
-    for d in report.get("submissionDeliverablesAdded") or []:
-        if isinstance(d, dict) and d.get("title"):
-            report["closingAddedSections"].append(
-                {
-                    "id": d.get("id") or d.get("title"),
-                    "title": d["title"],
-                }
-            )
-    report["closingDetected"] = [
-        c.id for c in detect_closing_components(rfp_text)
-    ]
-    research = _merge_closing_into_research_map(research, added)
-    if added:
-        await asave_proposal_draft(draft)
-        if research:
-            await asave_research_cache(research)
+    if resume_at <= 1:
+        report["closingAdded"] = [c.id for c in added]
+        report["closingAddedSections"] = [
+            {"id": c.section_id, "title": c.title} for c in added
+        ]
+        # Also surface narrative qualification sections added from the full RFP scan
+        for d in report.get("submissionDeliverablesAdded") or []:
+            if isinstance(d, dict) and d.get("title"):
+                report["closingAddedSections"].append(
+                    {
+                        "id": d.get("id") or d.get("title"),
+                        "title": d["title"],
+                    }
+                )
+        report["closingDetected"] = [
+            c.id for c in detect_closing_components(rfp_text)
+        ]
+        research = _merge_closing_into_research_map(research, added)
+        if added:
+            await asave_proposal_draft(draft)
+            if research:
+                await asave_research_cache(research)
 
     preserved_ids = fulfill_scan_preserve_bio_and_case_study_ids(draft)
     if preserved_ids:
@@ -827,6 +894,8 @@ async def _run_fulfill_rfp_gaps_body(
         report["disqualificationRiskCount"] = len(report["disqualificationRisks"])
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Coverage orchestrator / DQ gate during Scan RFP skipped: %s", exc)
         report["logs"].append(f"Coverage orchestrator / DQ gate skipped: {exc}")
@@ -870,17 +939,19 @@ async def _run_fulfill_rfp_gaps_body(
             )
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scan RFP dedupe prune skipped: %s", exc)
         report["logs"].append(f"Dedupe prune skipped: {exc}")
 
-    await _scan_progress(
-        6,
-        "Scan RFP: senior editor review",
-        "RFP proposal reviewer — dedupe, cross-refs, coverage gaps; no invented facts.",
-    )
-    await _ensure_not_stopped()
     try:
+        await _scan_progress(
+            6,
+            "Scan RFP: senior editor review",
+            "RFP proposal reviewer — dedupe, cross-refs, coverage gaps; no invented facts.",
+        )
+        await _ensure_not_stopped()
         from app.services.proposal_scan_senior_reviewer import (
             run_complete_scan_senior_reviewer,
         )
@@ -912,6 +983,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Senior reviewer during Scan RFP skipped: %s", exc)
         report["logs"].append(f"Senior reviewer skipped: {exc}")
@@ -949,6 +1022,8 @@ async def _run_fulfill_rfp_gaps_body(
             )
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Business Information hollow fill skipped: %s", exc)
         report["logs"].append(f"Business Information fill skipped: {exc}")
@@ -983,6 +1058,8 @@ async def _run_fulfill_rfp_gaps_body(
                 await asave_research_cache(research)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Budget scan skipped: %s", exc)
         report["logs"].append(f"Budget scan skipped: {exc}")
@@ -1036,6 +1113,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Manuscript consistency repairs skipped: %s", exc)
         report["logs"].append(f"Consistency repairs skipped: {exc}")
@@ -1056,6 +1135,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Truncation repair skipped: %s", exc)
         report["logs"].append(f"Truncation repair skipped: {exc}")
@@ -1090,6 +1171,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Empty subheading collapse skipped: %s", exc)
         report["logs"].append(f"Empty subheading collapse skipped: {exc}")
@@ -1118,6 +1201,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
         except ProposalGenerationCancelled:
             raise
+        except FulfillStepSkip as skip:
+            _log_resume_skip(skip.step)
         except Exception as exc:  # noqa: BLE001
             logger.warning("KPI scan skipped: %s", exc)
             report["logs"].append(f"KPI scan skipped: {exc}")
@@ -1141,6 +1226,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
         except ProposalGenerationCancelled:
             raise
+        except FulfillStepSkip as skip:
+            _log_resume_skip(skip.step)
         except Exception as exc:  # noqa: BLE001
             report["logs"].append(f"KPI deterministic scan skipped: {exc}")
 
@@ -1172,14 +1259,13 @@ async def _run_fulfill_rfp_gaps_body(
             "acknowledge openly rather than implying local history."
         )
 
-    await _scan_progress(
-        11,
-        "Scan RFP: KB fact-check",
-        "Requirements → RFP excerpt → Supermemory per section (smart rewrite when needed).",
-    )
-    await _ensure_not_stopped()
-
     try:
+        await _scan_progress(
+            11,
+            "Scan RFP: KB fact-check",
+            "Requirements → RFP excerpt → Supermemory per section (smart rewrite when needed).",
+        )
+        await _ensure_not_stopped()
         from app.services.proposal_kb_fact_checker import run_kb_fact_check_pass
 
         if research is None:
@@ -1213,6 +1299,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("KB fact-check during Scan RFP skipped: %s", exc)
         report["logs"].append(f"KB fact-check skipped: {exc}")
@@ -1235,6 +1323,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Post fact-check repairs skipped: %s", exc)
         report["logs"].append(f"Post fact-check repairs skipped: {exc}")
@@ -1242,13 +1332,13 @@ async def _run_fulfill_rfp_gaps_body(
     # Fact-check can rewrite Approach/Schedule — run the SAME blocker suite
     # Generate-from-scratch uses (titles, consistency, certs, signed PDF note,
     # LLM manuscript-vs-RFP contradictions).
-    await _scan_progress(
-        12,
-        "Scan RFP: Contradiction check",
-        "LLM manuscript vs verified company facts + vs RFP requirements.",
-    )
-    await _ensure_not_stopped()
     try:
+        await _scan_progress(
+            12,
+            "Scan RFP: Contradiction check",
+            "LLM manuscript vs verified company facts + vs RFP requirements.",
+        )
+        await _ensure_not_stopped()
         from app.services.proposal_blocker_prevention import (
             apply_feedback_blocker_suite,
         )
@@ -1319,19 +1409,21 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("RFP blocker suite / contradiction scan skipped: %s", exc)
         report["logs"].append(f"RFP blocker suite skipped: {exc}")
 
     # Dedicated pass: every section with [VERIFY]/[MANUAL FILL] → RFP scan →
     # remove unless critically required. Never invents.
-    await _scan_progress(
-        13,
-        "Scan RFP: remove optional VERIFY/MANUAL FILL",
-        "Drop placeholders unless RFP-critical; fill from KB verbatim only — never invent.",
-    )
-    await _ensure_not_stopped()
     try:
+        await _scan_progress(
+            13,
+            "Scan RFP: remove optional VERIFY/MANUAL FILL",
+            "Drop placeholders unless RFP-critical; fill from KB verbatim only — never invent.",
+        )
+        await _ensure_not_stopped()
         from app.services.proposal_verify_optional_scrub import (
             count_placeholder_tags,
             count_verify_tags,
@@ -1406,18 +1498,20 @@ async def _run_fulfill_rfp_gaps_body(
             report["logs"].append("Placeholder scrub: no [VERIFY]/[MANUAL FILL] tags found.")
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Optional placeholder scrub during Scan RFP skipped: %s", exc)
         report["logs"].append(f"Placeholder scrub skipped: {exc}")
 
     # Async per-section KB line grounding — confirm claims in DB; never invent.
-    await _scan_progress(
-        14,
-        "Scan RFP: line-by-line KB grounding",
-        "Agent plans queries per section (async) — remove ungrounded claims; no fabrication.",
-    )
-    await _ensure_not_stopped()
     try:
+        await _scan_progress(
+            14,
+            "Scan RFP: line-by-line KB grounding",
+            "Agent plans queries per section (async) — remove ungrounded claims; no fabrication.",
+        )
+        await _ensure_not_stopped()
         from app.services.proposal_scan_line_grounding import (
             run_scan_line_grounding_pass,
         )
@@ -1445,6 +1539,8 @@ async def _run_fulfill_rfp_gaps_body(
             )
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Line grounding during Scan RFP skipped: %s", exc)
         report["logs"].append(f"Line grounding skipped: {exc}")
@@ -1475,6 +1571,8 @@ async def _run_fulfill_rfp_gaps_body(
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Optional claim scrub during Scan RFP skipped: %s", exc)
         report["logs"].append(f"Optional claim scrub skipped: {exc}")
@@ -1539,6 +1637,8 @@ async def _run_fulfill_rfp_gaps_body(
             report["budgetChanged"] = True
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scan RFP final compact skipped: %s", exc)
         report["logs"].append(f"Final compact skipped: {exc}")
@@ -1567,6 +1667,8 @@ async def _run_fulfill_rfp_gaps_body(
                 report["pageLimitNotes"] = hard_fit[:6]
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scan RFP Ralph skipped: %s", exc)
         report["logs"].append(f"Ralph page-fit skipped: {exc}")
@@ -1612,6 +1714,8 @@ async def _run_fulfill_rfp_gaps_body(
             )
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scan RFP quality gate skipped: %s", exc)
         report["logs"].append(f"Quality gate skipped: {exc}")
@@ -1711,6 +1815,8 @@ async def _run_fulfill_rfp_gaps_body(
                 report["humanDecisionGaps"].append(gap)
     except ProposalGenerationCancelled:
         raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scan RFP submission readiness skipped: %s", exc)
         report["logs"].append(f"Submission readiness skipped: {exc}")
@@ -1775,6 +1881,7 @@ async def _run_fulfill_rfp_gaps_body(
     draft = attach_scan_summary_to_latest_before_scan(draft, report)
     await asave_proposal_draft(draft)
     await asave_research_cache(updated_research)
+    await complete_fulfill_scan(rfp_id)
 
     logger.info(
         "Fulfill RFP gaps for %s: closing+%s, issues=%d, ready=%s",

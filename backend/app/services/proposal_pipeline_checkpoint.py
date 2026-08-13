@@ -254,6 +254,8 @@ async def record_pipeline_activity(
     """Update live sub-step text while a phase runs (polled by the UI)."""
     research = await _ensure_research(rfp_id)
     cp = research.pipeline_checkpoint
+    resume_step = step_index if (in_progress_phase or (cp.in_progress_phase if cp else None)) == "fulfill-scan" else None
+    last_done = (step_index - 1) if resume_step and step_index and step_index > 1 else None
     if cp is None:
         cp = ProposalPipelineCheckpoint(
             inProgressPhase=in_progress_phase or "phase-3",
@@ -261,6 +263,8 @@ async def record_pipeline_activity(
             activityDetail=detail[:500] if detail else None,
             stepIndex=step_index,
             stepTotal=step_total,
+            resumeFulfillStep=resume_step,
+            lastCompletedFulfillStep=last_done,
             updatedAt=_now_iso(),
         )
     else:
@@ -273,17 +277,78 @@ async def record_pipeline_activity(
         }
         if in_progress_phase is not None:
             updates["in_progress_phase"] = in_progress_phase
+        if resume_step:
+            updates["resume_fulfill_step"] = resume_step
+            if last_done:
+                updates["last_completed_fulfill_step"] = last_done
         cp = cp.model_copy(update=updates)
     await _save_checkpoint(rfp_id, cp)
 
 
+def fulfill_resume_step(research: ProposalResearchCache | None) -> int:
+    """Step to resume Complete & clean from (1 = start from the beginning)."""
+    if not research or not research.pipeline_checkpoint:
+        return 1
+    cp = research.pipeline_checkpoint
+    for raw in (
+        cp.resume_fulfill_step,
+        cp.step_index if cp.in_progress_phase == "fulfill-scan" else None,
+        (cp.last_completed_fulfill_step + 1) if cp.last_completed_fulfill_step else None,
+    ):
+        if raw is None:
+            continue
+        try:
+            step = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if step >= 1:
+            return step
+    return 1
+
+
+async def complete_fulfill_scan(rfp_id: str) -> None:
+    """Scan finished — drop resume pointer so the next run starts fresh."""
+    research = await aget_research_cache(rfp_id)
+    if not research or not research.pipeline_checkpoint:
+        return
+    cp = research.pipeline_checkpoint
+    await _save_checkpoint(
+        rfp_id,
+        cp.model_copy(
+            update={
+                "in_progress_phase": (
+                    None if cp.in_progress_phase == "fulfill-scan" else cp.in_progress_phase
+                ),
+                "activity_label": None,
+                "activity_detail": None,
+                "step_index": None,
+                "step_total": None,
+                "resume_fulfill_step": None,
+                "last_completed_fulfill_step": None,
+                "updated_at": _now_iso(),
+            }
+        ),
+    )
+
+
 async def clear_fulfill_scan_activity(rfp_id: str) -> None:
-    """Clear transient Scan RFP progress without touching a real pipeline phase."""
+    """Clear live Scan RFP spinner without dropping a stop/resume pointer."""
     research = await aget_research_cache(rfp_id)
     if not research or not research.pipeline_checkpoint:
         return
     cp = research.pipeline_checkpoint
     if cp.in_progress_phase != "fulfill-scan":
+        return
+    if cp.resume_fulfill_step:
+        await _save_checkpoint(
+            rfp_id,
+            cp.model_copy(
+                update={
+                    "in_progress_phase": None,
+                    "updated_at": _now_iso(),
+                }
+            ),
+        )
         return
     await _save_checkpoint(
         rfp_id,
@@ -380,6 +445,44 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
     research = await aget_research_cache(rfp_id)
     prior = research.pipeline_checkpoint if research else None
     active = phase or (prior.in_progress_phase if prior else None) or "phase-3"
+    if active == "fulfill-scan" or (
+        prior is not None
+        and active not in PIPELINE_PHASES
+        and (
+            prior.in_progress_phase == "fulfill-scan"
+            or (prior.resume_fulfill_step or 0) >= 1
+            or (prior.last_completed_fulfill_step or 0) >= 1
+        )
+    ):
+        resume_step = None
+        if prior:
+            resume_step = prior.step_index or prior.resume_fulfill_step
+            if resume_step is None and prior.last_completed_fulfill_step:
+                resume_step = prior.last_completed_fulfill_step + 1
+        checkpoint = ProposalPipelineCheckpoint(
+            lastCompletedPhase=prior.last_completed_phase if prior else None,
+            inProgressPhase=None,
+            lastFailedPhase=prior.last_failed_phase if prior else None,
+            lastError=(
+                "Stopped by user. Progress is saved — use Complete & clean draft "
+                "to resume from the last step."
+            ),
+            resumeFromPhase=prior.resume_from_phase if prior else None,
+            activityLabel=prior.activity_label if prior else None,
+            activityDetail=prior.activity_detail if prior else None,
+            stepIndex=prior.step_index if prior else None,
+            stepTotal=prior.step_total if prior else None,
+            lastCompletedFulfillStep=prior.last_completed_fulfill_step if prior else None,
+            resumeFulfillStep=resume_step,
+            updatedAt=_now_iso(),
+        )
+        await _save_checkpoint(rfp_id, checkpoint)
+        logger.info(
+            "Pipeline checkpoint: %s stopped during fulfill-scan (resume_step=%s)",
+            rfp_id,
+            resume_step,
+        )
+        return
     resume: str | None = None
     if active in PIPELINE_PHASES:
         resume = active
@@ -400,6 +503,8 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
         activityDetail=None,
         stepIndex=None,
         stepTotal=None,
+        lastCompletedFulfillStep=prior.last_completed_fulfill_step if prior else None,
+        resumeFulfillStep=prior.resume_fulfill_step if prior else None,
         updatedAt=_now_iso(),
     )
     await _save_checkpoint(rfp_id, checkpoint)

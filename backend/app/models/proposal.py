@@ -554,6 +554,16 @@ class ProposalPipelineCheckpoint(BaseModel):
     activity_detail: str | None = Field(default=None, alias="activityDetail")
     step_index: int | None = Field(default=None, alias="stepIndex")
     step_total: int | None = Field(default=None, alias="stepTotal")
+    last_completed_fulfill_step: int | None = Field(
+        default=None,
+        alias="lastCompletedFulfillStep",
+        description="Last Complete & clean draft step that finished before stop.",
+    )
+    resume_fulfill_step: int | None = Field(
+        default=None,
+        alias="resumeFulfillStep",
+        description="Complete & clean draft step to resume from after stop.",
+    )
     updated_at: str = Field(alias="updatedAt")
 
 
