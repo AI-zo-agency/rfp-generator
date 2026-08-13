@@ -42,7 +42,7 @@ cd ../backend && python -m app
 |---------|-------------|
 | `npm run dev` | Dev server on port 3001 (Turbopack) |
 | `npm run build` | Production build |
-| `npm run start` | Serve production build on port 3001 |
+| `npm run start` | Serve production build on `$PORT` (defaults to 3001) |
 | `npm run lint` | ESLint |
 
 ## App structure
