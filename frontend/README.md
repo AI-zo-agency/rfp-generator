@@ -28,21 +28,21 @@ BACKEND_URL=http://localhost:8001
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3001](http://localhost:3001).
 
 If RFPs show as **0 opportunities**, the backend is likely stopped. Start it:
 
 ```bash
-cd ../backend && uvicorn app.main:app --reload --port 8001
+cd ../backend && python -m app
 ```
 
 ## Scripts
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Dev server (Turbopack) |
+| `npm run dev` | Dev server on port 3001 (Turbopack) |
 | `npm run build` | Production build |
-| `npm run start` | Serve production build |
+| `npm run start` | Serve production build on `$PORT` (defaults to 3001) |
 | `npm run lint` | ESLint |
 
 ## App structure

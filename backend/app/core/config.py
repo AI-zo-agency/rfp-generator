@@ -16,7 +16,10 @@ class Settings(BaseSettings):
 
     app_name: str = "ZO RFP API"
     port: int = 8001
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    cors_origins: str = (
+        "http://localhost:3001,http://127.0.0.1:3001,"
+        "http://localhost:3000,http://127.0.0.1:3000"
+    )
 
     database_path: Path = _DASHBOARD_ROOT / "data" / "rfps.db"
     pdf_storage_path: Path = _DASHBOARD_ROOT / "storage" / "pdfs"
@@ -34,11 +37,22 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     google_refresh_token: str = ""
 
+    # QuickBooks Online — read-only. The refresh token rotates on use, so the
+    # value here is only the seed; the live one lives in the token store
+    # (see services/quickbooks_oauth.py).
+    quickbooks_client_id: str = ""
+    quickbooks_client_secret: str = ""
+    quickbooks_refresh_token: str = ""
+    quickbooks_realm_id: str = ""
+    quickbooks_environment: str = "sandbox"
+    quickbooks_minor_version: str = "75"
+    quickbooks_cron_secret: str = ""
+
     # Legacy optional — prefer OAuth client id/secret above
     google_service_account_json: Path | None = None
     google_drive_shared_drive_name: str = "RFPs"
 
-    app_url: str = "http://localhost:3000"
+    app_url: str = "http://localhost:3001"
 
     openrouter_api_key: str = ""
     openrouter_model: str = "anthropic/claude-sonnet-4"
@@ -188,6 +202,21 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def quickbooks_api_base(self) -> str:
+        if self.quickbooks_environment.strip().lower() == "production":
+            return "https://quickbooks.api.intuit.com"
+        return "https://sandbox-quickbooks.api.intuit.com"
+
+    @property
+    def quickbooks_configured(self) -> bool:
+        return bool(
+            self.quickbooks_client_id
+            and self.quickbooks_client_secret
+            and self.quickbooks_refresh_token
+            and self.quickbooks_realm_id
+        )
 
 
 settings = Settings()

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { FinancialHeader } from "./FinancialHeader";
 import { TabFade } from "./TabFade";
 import { OutlineTabs } from "@/components/ui/OutlineTabs";
@@ -8,17 +8,19 @@ import { IWorkerTimesheetsTable, TimesheetEntry } from "./IWorkerTimesheetsTable
 import { AiInsightsPanel, AiInsightsData } from "./AiInsightsPanel";
 import { AuditQueueTable, AuditItem } from "./AuditQueueTable";
 import { DataSourcesGrid, DataSource } from "./DataSourcesGrid";
+import { QuickBooksPanels } from "./QuickBooksPanels";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 
 const FINANCIAL_TABS = [
+  { id: "quickbooks", label: "QuickBooks Ledger" },
   { id: "iworker", label: "iWorker Ingestion & Logs" },
   { id: "ai", label: "AI Audit Queue & Insights" },
   { id: "sources", label: "Data Sources Inventory" },
 ];
 
 export function FinancialInsightsClient() {
-  const [activeTab, setActiveTab] = useState<string>("iworker");
+  const [activeTab, setActiveTab] = useState<string>("quickbooks");
   const [loading, setLoading] = useState<boolean>(true);
   const [selectedContractor, setSelectedContractor] = useState<string>("all");
 
@@ -55,7 +57,7 @@ export function FinancialInsightsClient() {
 
   const [isContractorLoading, setIsContractorLoading] = useState<boolean>(false);
 
-  const fetchIworkerData = async (contractorName: string = "all") => {
+  const fetchIworkerData = useCallback(async (contractorName: string = "all") => {
     setIsContractorLoading(true);
     try {
       const savedUrl = localStorage.getItem("zo_iworker_sheet_url") || "";
@@ -73,21 +75,17 @@ export function FinancialInsightsClient() {
     } finally {
       setIsContractorLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    async function loadAllData() {
+    async function loadInitialData() {
       setLoading(true);
       try {
-        const savedUrl = localStorage.getItem("zo_iworker_sheet_url") || "";
-        const iwQuery = savedUrl ? `?sheet_url=${encodeURIComponent(savedUrl)}` : "";
-        const [iwRes, srcRes, audRes] = await Promise.all([
-          fetch(`${API_BASE}/api/v1/financials/iworker-timesheets${iwQuery}`),
+        const [srcRes, audRes] = await Promise.all([
           fetch(`${API_BASE}/api/v1/financials/sources`),
           fetch(`${API_BASE}/api/v1/financials/audit-queue`),
         ]);
 
-        if (iwRes.ok) setIworkerData(await iwRes.json());
         if (srcRes.ok) {
           const sJson = await srcRes.json();
           setSourcesData(sJson.sources || []);
@@ -103,8 +101,14 @@ export function FinancialInsightsClient() {
       }
     }
 
-    loadAllData();
+    loadInitialData();
   }, []);
+
+  // iWorker classification is expensive; wait until that tab is opened.
+  useEffect(() => {
+    if (activeTab !== "iworker" || iworkerData) return;
+    void fetchIworkerData(selectedContractor);
+  }, [activeTab, fetchIworkerData, iworkerData, selectedContractor]);
 
   const handleSelectContractor = (contractorName: string) => {
     setSelectedContractor(contractorName);
@@ -136,6 +140,32 @@ export function FinancialInsightsClient() {
     }
   };
 
+  let iworkerPanel = null;
+  if (isContractorLoading && !iworkerData) {
+    iworkerPanel = (
+      <div className="flex h-96 w-full items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-10 w-10 animate-spin rounded-full border-4 border-[#3C5A56] border-t-transparent"></div>
+          <p className="text-xs text-zo-text-muted font-medium animate-pulse">Loading iWorker timesheets...</p>
+        </div>
+      </div>
+    );
+  } else if (iworkerData) {
+    iworkerPanel = (
+      <IWorkerTimesheetsTable
+        contractor={iworkerData.contractor}
+        source={iworkerData.source}
+        tabs={iworkerData.tabs}
+        selectedContractor={selectedContractor}
+        onSelectContractor={handleSelectContractor}
+        isLoadingContractor={isContractorLoading}
+        summary={iworkerData.summary}
+        weeklyTotals={iworkerData.weekly_totals}
+        timesheets={iworkerData.timesheets}
+      />
+    );
+  }
+
   if (loading) {
     return (
       <div className="flex h-96 w-full items-center justify-center">
@@ -164,21 +194,17 @@ export function FinancialInsightsClient() {
         />
       </div>
 
-      {/* Tab 1: iWorker Ingestion — always mounted, hidden when not active */}
+      {/* Tab 0: QuickBooks ledger — mounted on demand so the ledger isn't read
+          on every page load; the panel does its own fetch and caching. */}
+      {activeTab === "quickbooks" && (
+        <TabFade active>
+          <QuickBooksPanels />
+        </TabFade>
+      )}
+
+      {/* Tab 1: iWorker Ingestion — fetched only when this tab is opened */}
       <TabFade active={activeTab === "iworker"}>
-        {iworkerData && (
-          <IWorkerTimesheetsTable
-            contractor={iworkerData.contractor}
-            source={iworkerData.source}
-            tabs={iworkerData.tabs}
-            selectedContractor={selectedContractor}
-            onSelectContractor={handleSelectContractor}
-            isLoadingContractor={isContractorLoading}
-            summary={iworkerData.summary}
-            weeklyTotals={iworkerData.weekly_totals}
-            timesheets={iworkerData.timesheets}
-          />
-        )}
+        {iworkerPanel}
       </TabFade>
 
       {/* Tab 2: AI Audit Queue & Insights — always mounted, hidden when not active */}

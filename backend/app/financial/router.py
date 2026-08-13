@@ -1,13 +1,17 @@
 import asyncio
+from hmac import compare_digest
 import json
 import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 import logging
 from app.financial import google_sheets, ai_classifier
+from app.financial.qb_repository import get_panel_cache, get_sync_state
+from app.financial.qb_sync import LeaseHeld, run_sync
+from app.services import quickbooks_oauth
 from app.services.llm import chat_json
 from app.core.config import settings
 
@@ -700,6 +704,157 @@ def get_sources_status():
             }
         ]
     }
+
+# ── QuickBooks ────────────────────────────────────────────────────────────────
+_QB_PANEL_KEYS = (
+    "company",
+    "ar",
+    "ap",
+    "revenue_by_class",
+    "by_account_manager",
+    "client_profitability",
+    "monthly_trend",
+    "unattached_cost",
+    "activity",
+    "cash_collections",
+    "billing_vs_cash",
+    "dso",
+    "aged_ar_detail",
+    "purchase_orders",
+    "expenses_by_vendor",
+    "bill_payments",
+    "customers",
+    "sales_by_customer",
+    "credit_memos",
+    "class_coverage",
+    "department_coverage",
+    "liquidity",
+)
+
+
+class QuickBooksSyncBody(BaseModel):
+    mode: str = "auto"
+
+
+def _cron_authorized(secret: str | None) -> bool:
+    expected = settings.quickbooks_cron_secret or ""
+    if not expected or not secret:
+        return False
+    return compare_digest(secret, expected)
+
+
+@router.post("/quickbooks/sync")
+def quickbooks_sync(
+    request: Request,
+    payload: QuickBooksSyncBody | None = None,
+):
+    mode = payload.mode if payload else "auto"
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        logger.warning(
+            "operation=quickbooks_sync mode=%s status=unauthorized",
+            mode,
+        )
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+
+    logger.info("operation=quickbooks_sync mode=%s status=started", mode)
+    try:
+        result = run_sync(mode)
+    except LeaseHeld as exc:
+        logger.warning(
+            "operation=quickbooks_sync mode=%s status=lease_held",
+            mode,
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    logger.info(
+        "operation=quickbooks_sync mode=%s status=completed run_id=%s",
+        result.get("mode", mode),
+        result.get("run_id"),
+    )
+    return result
+
+
+@router.get("/quickbooks/status")
+def quickbooks_status():
+    """Connection health — safe to poll, never raises."""
+    connection = quickbooks_oauth.connection_status()
+    realm_id = connection.get("realm_id") or settings.quickbooks_realm_id
+    try:
+        state = get_sync_state(realm_id) or {}
+    except Exception:  # noqa: BLE001 — preserve the status endpoint contract
+        logger.exception(
+            "operation=quickbooks_status realm_id=%s status=state_read_failed",
+            realm_id,
+        )
+        state = {}
+    result = {
+        **connection,
+        "last_success_at": state.get("last_success_at"),
+        "last_error": state.get("last_error"),
+        "backfill_completed": bool(state.get("backfill_completed_at")),
+    }
+    logger.info(
+        "operation=quickbooks_status realm_id=%s connected=%s "
+        "backfill_completed=%s",
+        realm_id,
+        result.get("connected"),
+        result["backfill_completed"],
+    )
+    return result
+
+
+@router.get("/quickbooks/overview")
+def quickbooks_overview(
+    year: int = Query(default_factory=lambda: datetime.now().year),
+    since: Optional[str] = Query(None, description="ISO timestamp for the activity feed"),
+    refresh: bool = Query(False, description="Deprecated; snapshots refresh during sync"),
+):
+    """Return the latest persisted panel snapshot without calling Intuit."""
+    realm_id = settings.quickbooks_realm_id
+    state = get_sync_state(realm_id) or {}
+    cache = get_panel_cache(realm_id, year)
+    if cache is None:
+        sync_status = (
+            "missing"
+            if state.get("backfill_completed_at")
+            else "backfill_pending"
+        )
+        logger.warning(
+            "operation=quickbooks_overview realm_id=%s year=%s "
+            "status=%s cache_found=false",
+            realm_id,
+            year,
+            sync_status,
+        )
+        return {
+            "year": year,
+            **dict.fromkeys(_QB_PANEL_KEYS),
+            "errors": {"overview": "no snapshot for year"},
+            "as_of": None,
+            "synced_at": state.get("last_success_at"),
+            "sync_status": sync_status,
+        }
+
+    result = {
+        **(cache.get("payload") or {}),
+        "as_of": cache.get("as_of"),
+        "synced_at": cache.get("computed_at"),
+        "sync_status": (
+            "failed"
+            if state.get("last_error") and state.get("last_success_at")
+            else "ok"
+        ),
+    }
+    logger.info(
+        "operation=quickbooks_overview realm_id=%s year=%s "
+        "status=%s cache_found=true refresh_ignored=%s since_ignored=%s",
+        realm_id,
+        year,
+        result["sync_status"],
+        refresh,
+        since is not None,
+    )
+    return result
+
 
 @router.get("/audit-queue")
 def get_audit_queue():

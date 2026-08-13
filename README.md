@@ -35,8 +35,10 @@ python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env        # fill in Supabase, LLM, Supermemory keys
-uvicorn app.main:app --reload --port 8001
+python -m app
 ```
+
+Default port is **8001** (`PORT` in `.env`). Equivalent: `uvicorn app.main:app --reload --port 8001`.
 
 Verify: [http://127.0.0.1:8001/api/v1/health](http://127.0.0.1:8001/api/v1/health) should report `"database": "supabase"`.
 
@@ -49,7 +51,7 @@ cp .env.example .env        # set BACKEND_URL=http://localhost:8001
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Default port is **3001**. Open [http://localhost:3001](http://localhost:3001).
 
 ## Environment variables
 
@@ -88,6 +90,6 @@ Details: [`docs/superpowers/specs/2026-06-25-supabase-postgres-migration-design.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| **0 RFPs** on dashboard | Backend not running | Start `uvicorn` on port 8001 |
+| **0 RFPs** on dashboard | Backend not running | Start with `python -m app` (port 8001) |
 | `backend unavailable: fetch failed` | Wrong `BACKEND_URL` or backend down | Check `frontend/.env` and backend process |
 | PDF won't open | Storage bucket missing or PDF not uploaded | Run PDF migration script or re-upload |
