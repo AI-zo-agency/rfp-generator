@@ -417,3 +417,427 @@ def company_profile() -> dict[str, Any]:
         "start_date": info.get("CompanyStartDate"),
         "sku": next((p.get("Value") for p in info.get("NameValue", []) if p.get("Name") == "OfferingSku"), None),
     }
+
+
+# ── Phase 1–4 insight panels (GET only) ──────────────────────────────────────
+
+_MONTH_LABELS = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+
+
+def _month_index(txn_date: str) -> int | None:
+    try:
+        return datetime.strptime(txn_date[:10], "%Y-%m-%d").month - 1
+    except (ValueError, TypeError):
+        return None
+
+
+def _empty_month_series() -> list[dict[str, Any]]:
+    return [{"month": label, "amount": 0.0} for label in _MONTH_LABELS]
+
+
+def _timed(operation: str, **ctx: Any):
+    """Context manager-ish timing via simple start/end logs."""
+    import time as _time
+
+    class _Timer:
+        def __enter__(self):
+            self.t0 = _time.monotonic()
+            logger.info("[QB] %s start %s", operation, ctx)
+            return self
+
+        def __exit__(self, *exc):
+            ms = int((_time.monotonic() - self.t0) * 1000)
+            logger.info("[QB] %s done duration_ms=%s %s", operation, ms, ctx)
+
+    return _Timer()
+
+
+def cash_collections(year: int) -> dict[str, Any]:
+    """YTD cash received from Payment entities."""
+    with _timed("cash_collections", year=year):
+        payments = query(f"select * from Payment where TxnDate >= '{year}-01-01'", "Payment")
+        by_month = _empty_month_series()
+        by_payer: dict[str, float] = {}
+        total = 0.0
+        for payment in payments:
+            amt = float(payment.get("TotalAmt") or 0)
+            total += amt
+            idx = _month_index(payment.get("TxnDate") or "")
+            if idx is not None:
+                by_month[idx]["amount"] += amt
+            name = (payment.get("CustomerRef") or {}).get("name", "Unknown")
+            by_payer[name] = by_payer.get(name, 0.0) + amt
+        for row in by_month:
+            row["amount"] = round(row["amount"], 2)
+        payers = sorted(by_payer.items(), key=lambda kv: -kv[1])
+        logger.info("[QB] cash_collections rows=%s total=%s", len(payments), round(total, 2))
+        return {
+            "total_collected": round(total, 2),
+            "payment_count": len(payments),
+            "by_month": by_month,
+            "top_payers": [{"customer": n, "amount": round(v, 2)} for n, v in payers[:10]],
+        }
+
+
+def billing_vs_cash(year: int) -> dict[str, Any]:
+    """Invoiced vs collected by month for the year."""
+    with _timed("billing_vs_cash", year=year):
+        invoices = query(f"select * from Invoice where TxnDate >= '{year}-01-01'", "Invoice")
+        payments = query(f"select * from Payment where TxnDate >= '{year}-01-01'", "Payment")
+
+        invoiced_by = [0.0] * 12
+        collected_by = [0.0] * 12
+        invoiced_total = 0.0
+        open_ar = 0.0
+        for inv in invoices:
+            amt = float(inv.get("TotalAmt") or 0)
+            bal = float(inv.get("Balance") or 0)
+            invoiced_total += amt
+            open_ar += bal
+            idx = _month_index(inv.get("TxnDate") or "")
+            if idx is not None:
+                invoiced_by[idx] += amt
+
+        collected_total = 0.0
+        for payment in payments:
+            amt = float(payment.get("TotalAmt") or 0)
+            collected_total += amt
+            idx = _month_index(payment.get("TxnDate") or "")
+            if idx is not None:
+                collected_by[idx] += amt
+
+        by_month = [
+            {
+                "month": _MONTH_LABELS[i],
+                "invoiced": round(invoiced_by[i], 2),
+                "collected": round(collected_by[i], 2),
+            }
+            for i in range(12)
+        ]
+        rate = round(collected_total / invoiced_total * 100, 1) if invoiced_total else 0.0
+        logger.info(
+            "[QB] billing_vs_cash invoices=%s payments=%s invoiced=%s collected=%s",
+            len(invoices), len(payments), round(invoiced_total, 2), round(collected_total, 2),
+        )
+        return {
+            "invoiced_total": round(invoiced_total, 2),
+            "collected_total": round(collected_total, 2),
+            "open_ar": round(open_ar, 2),
+            "collection_rate_pct": rate,
+            "invoice_count": len(invoices),
+            "payment_count": len(payments),
+            "by_month": by_month,
+        }
+
+
+def dso(year: int) -> dict[str, Any]:
+    """Average days-to-pay from Payment→Invoice LinkedTxn links."""
+    with _timed("dso", year=year):
+        invoices = query(f"select * from Invoice where TxnDate >= '{year}-01-01'", "Invoice")
+        payments = query(f"select * from Payment where TxnDate >= '{year}-01-01'", "Payment")
+        by_id = {str(inv.get("Id")): inv for inv in invoices if inv.get("Id") is not None}
+
+        samples: list[tuple[str, int, float]] = []
+        for payment in payments:
+            pay_date = payment.get("TxnDate") or ""
+            customer = (payment.get("CustomerRef") or {}).get("name", "Unknown")
+            for line in payment.get("Line") or []:
+                for link in line.get("LinkedTxn") or []:
+                    if (link.get("TxnType") or "").lower() != "invoice":
+                        continue
+                    inv = by_id.get(str(link.get("TxnId")))
+                    if not inv:
+                        continue
+                    inv_date = inv.get("TxnDate") or ""
+                    try:
+                        days = (
+                            datetime.strptime(pay_date[:10], "%Y-%m-%d").date()
+                            - datetime.strptime(inv_date[:10], "%Y-%m-%d").date()
+                        ).days
+                    except (ValueError, TypeError):
+                        continue
+                    if days < 0:
+                        continue
+                    amt = float(line.get("Amount") or inv.get("TotalAmt") or 0)
+                    samples.append((customer, days, amt))
+
+        if not samples:
+            logger.warning("[QB] dso no linked payment samples year=%s", year)
+            return {"dso_days": None, "sample_size": 0, "slowest_clients": []}
+
+        avg = sum(d for _, d, _ in samples) / len(samples)
+        by_client: dict[str, list[tuple[int, float]]] = {}
+        for customer, days, amt in samples:
+            by_client.setdefault(customer, []).append((days, amt))
+        slowest = []
+        for customer, rows in by_client.items():
+            avg_days = sum(d for d, _ in rows) / len(rows)
+            amount = sum(a for _, a in rows)
+            slowest.append({
+                "client": customer,
+                "avg_days": round(avg_days, 1),
+                "amount": round(amount, 2),
+            })
+        slowest.sort(key=lambda c: -c["avg_days"])
+        logger.info("[QB] dso sample_size=%s dso_days=%s", len(samples), round(avg, 1))
+        return {
+            "dso_days": round(avg, 1),
+            "sample_size": len(samples),
+            "slowest_clients": slowest[:8],
+        }
+
+
+def aged_ar_detail(today: date | None = None) -> dict[str, Any]:
+    """Intuit AgedReceivableDetail — flattened buckets when parseable."""
+    today = today or date.today()
+    with _timed("aged_ar_detail"):
+        payload = report("AgedReceivableDetail", report_date=today.isoformat())
+        # Prefer summary-style totals from column headers when present.
+        columns = _columns(payload)
+        rows = _flatten(payload.get("Rows", {}))
+        # Fall back: return raw column titles + row count for UI to prefer custom ar panel.
+        logger.info("[QB] aged_ar_detail columns=%s rows=%s", len(columns), len(rows))
+        return {
+            "report_date": today.isoformat(),
+            "columns": columns,
+            "row_count": len(rows),
+            "source": "AgedReceivableDetail",
+        }
+
+
+def purchase_orders(year: int) -> dict[str, Any]:
+    """Open and YTD purchase orders (commitments)."""
+    with _timed("purchase_orders", year=year):
+        pos = query("select * from PurchaseOrder", "PurchaseOrder")
+        open_total = 0.0
+        ytd_total = 0.0
+        by_vendor: dict[str, float] = {}
+        open_count = 0
+        ytd_count = 0
+        for po in pos:
+            amt = float(po.get("TotalAmt") or 0)
+            txn = po.get("TxnDate") or ""
+            in_year = txn.startswith(str(year))
+            status = (po.get("POStatus") or "").lower()
+            vendor = (po.get("VendorRef") or {}).get("name", "Unknown")
+            if in_year:
+                ytd_total += amt
+                ytd_count += 1
+            if status in ("", "open"):
+                open_total += amt
+                open_count += 1
+                by_vendor[vendor] = by_vendor.get(vendor, 0.0) + amt
+        vendors = sorted(by_vendor.items(), key=lambda kv: -kv[1])
+        logger.info("[QB] purchase_orders total=%s ytd=%s open=%s", len(pos), ytd_count, open_count)
+        return {
+            "po_count": ytd_count,
+            "open_count": open_count,
+            "open_total": round(open_total, 2),
+            "ytd_total": round(ytd_total, 2),
+            "vendors": [{"vendor": n, "amount": round(v, 2)} for n, v in vendors[:10]],
+        }
+
+
+def expenses_by_vendor(year: int) -> dict[str, Any]:
+    """Vendor spend concentration from ExpensesByVendorSummary."""
+    with _timed("expenses_by_vendor", year=year):
+        payload = report(
+            "ExpensesByVendorSummary",
+            start_date=f"{year}-01-01",
+            end_date=f"{year}-12-31",
+        )
+        vendors: list[dict[str, Any]] = []
+        total = 0.0
+        for row in _flatten(payload.get("Rows", {})):
+            if len(row) < 2 or not row[0] or row[0].strip().upper() in ("TOTAL", "TOTAL EXPENSES"):
+                continue
+            amount = 0.0
+            for cell in reversed(row[1:]):
+                parsed = _money(cell)
+                if parsed or str(cell).strip() in ("0", "0.00"):
+                    amount = parsed
+                    break
+            name = row[0].strip()
+            if name.upper().startswith("TOTAL"):
+                if amount:
+                    total = amount
+                continue
+            vendors.append({"vendor": name, "amount": round(amount, 2)})
+        if not total:
+            total = sum(v["amount"] for v in vendors)
+        vendors.sort(key=lambda v: -v["amount"])
+        top = vendors[:12]
+        top_sum = sum(v["amount"] for v in top[:3])
+        concentration_pct = round(top_sum / total * 100, 1) if total else 0.0
+        logger.info("[QB] expenses_by_vendor vendors=%s total=%s", len(vendors), round(total, 2))
+        return {
+            "total": round(total, 2),
+            "vendor_count": len(vendors),
+            "top3_concentration_pct": concentration_pct,
+            "vendors": top,
+        }
+
+
+def bill_payments(year: int) -> dict[str, Any]:
+    """Cash out via BillPayment."""
+    with _timed("bill_payments", year=year):
+        rows = query(f"select * from BillPayment where TxnDate >= '{year}-01-01'", "BillPayment")
+        by_month = _empty_month_series()
+        total = 0.0
+        for bp in rows:
+            amt = float(bp.get("TotalAmt") or 0)
+            total += amt
+            idx = _month_index(bp.get("TxnDate") or "")
+            if idx is not None:
+                by_month[idx]["amount"] += amt
+        for row in by_month:
+            row["amount"] = round(row["amount"], 2)
+        logger.info("[QB] bill_payments count=%s total=%s", len(rows), round(total, 2))
+        return {
+            "total_paid": round(total, 2),
+            "payment_count": len(rows),
+            "by_month": by_month,
+        }
+
+
+def customers_directory() -> dict[str, Any]:
+    """Active customer list — join keys for future Teamwork mapping."""
+    with _timed("customers_directory"):
+        rows = query("select * from Customer where Active = true", "Customer")
+        customers = [
+            {
+                "id": str(c.get("Id")),
+                "display_name": c.get("DisplayName") or c.get("FullyQualifiedName") or "",
+                "company_name": c.get("CompanyName") or "",
+                "balance": round(float(c.get("Balance") or 0), 2),
+            }
+            for c in rows
+        ]
+        customers.sort(key=lambda c: c["display_name"].lower())
+        logger.info("[QB] customers_directory count=%s", len(customers))
+        return {"count": len(customers), "customers": customers[:200]}
+
+
+def sales_by_customer(year: int) -> dict[str, Any]:
+    """Ranked customer revenue from SalesByCustomer."""
+    with _timed("sales_by_customer", year=year):
+        payload = report(
+            "SalesByCustomer",
+            start_date=f"{year}-01-01",
+            end_date=f"{year}-12-31",
+        )
+        clients: list[dict[str, Any]] = []
+        total = 0.0
+        for row in _flatten(payload.get("Rows", {})):
+            if len(row) < 2 or not row[0]:
+                continue
+            label = row[0].strip()
+            if label.upper() in ("TOTAL", "TOTAL INCOME", ""):
+                if label.upper().startswith("TOTAL"):
+                    total = _money(row[-1]) or total
+                continue
+            amount = _money(row[-1])
+            if not amount:
+                continue
+            clients.append({"client": label, "amount": round(amount, 2)})
+            total += amount
+        clients.sort(key=lambda c: -c["amount"])
+        logger.info("[QB] sales_by_customer clients=%s", len(clients))
+        return {"total": round(total, 2), "clients": clients[:25]}
+
+
+def credit_memos(year: int) -> dict[str, Any]:
+    """Credits / write-downs for the year."""
+    with _timed("credit_memos", year=year):
+        rows = query(f"select * from CreditMemo where TxnDate >= '{year}-01-01'", "CreditMemo")
+        total = 0.0
+        by_client: dict[str, float] = {}
+        for cm in rows:
+            amt = float(cm.get("TotalAmt") or 0)
+            total += amt
+            name = (cm.get("CustomerRef") or {}).get("name", "Unknown")
+            by_client[name] = by_client.get(name, 0.0) + amt
+        ranked = sorted(by_client.items(), key=lambda kv: -kv[1])
+        logger.info("[QB] credit_memos count=%s total=%s", len(rows), round(total, 2))
+        return {
+            "total": round(total, 2),
+            "count": len(rows),
+            "clients": [{"client": n, "amount": round(v, 2)} for n, v in ranked[:10]],
+        }
+
+
+def class_coverage(year: int) -> dict[str, Any]:
+    """Class list for coding coverage (P&L coverage_pct comes from revenue_by_class panel)."""
+    with _timed("class_coverage", year=year):
+        classes = query("select * from Class", "Class")
+        names = [c.get("Name") for c in classes if c.get("Name")]
+        return {
+            "class_count": len(names),
+            "classes": names[:40],
+            # Filled lightly here; UI prefers revenue_by_class.coverage_pct when present.
+            "coverage_pct": 0.0,
+            "unclassified": 0.0,
+            "total": 0.0,
+        }
+
+
+def department_coverage(year: int) -> dict[str, Any]:
+    """Department list for AM coding coverage (income split from by_account_manager)."""
+    with _timed("department_coverage", year=year):
+        deps = query("select * from Department", "Department")
+        return {
+            "department_count": len(deps),
+            "departments": [d.get("Name") for d in deps if d.get("Name")][:40],
+            "overhead_income": 0.0,
+            "overhead_pct": 0.0,
+            "manager_count": len(deps),
+        }
+
+
+def liquidity(year: int, today: date | None = None) -> dict[str, Any]:
+    """Balance sheet cash + cash-flow operating signal."""
+    today = today or date.today()
+    with _timed("liquidity", year=year):
+        bs = report("BalanceSheet", date=today.isoformat())
+        cf = report(
+            "CashFlow",
+            start_date=f"{year}-01-01",
+            end_date=today.isoformat(),
+        )
+        cash = 0.0
+        for row in _flatten(bs.get("Rows", {})):
+            if not row:
+                continue
+            label = row[0].strip().lower()
+            if label in ("total bank accounts", "cash and cash equivalents", "total cash"):
+                cash = _money(row[-1])
+                break
+            if "bank accounts" in label and label.startswith("total"):
+                cash = _money(row[-1])
+                break
+        # Fallback: sum rows that look like checking/savings under assets.
+        if not cash:
+            for row in _flatten(bs.get("Rows", {})):
+                if row and "checking" in row[0].lower():
+                    cash += _money(row[-1])
+
+        net_cash = None
+        for row in _flatten(cf.get("Rows", {})):
+            if not row:
+                continue
+            label = row[0].strip().lower()
+            if "net cash increase" in label or label == "net cash":
+                net_cash = _money(row[-1])
+                break
+            if "net cash provided by operating" in label:
+                net_cash = _money(row[-1])
+
+        logger.info("[QB] liquidity cash=%s net_cash=%s", cash, net_cash)
+        return {
+            "as_of": today.isoformat(),
+            "cash": round(cash, 2),
+            "net_cash_change": round(net_cash, 2) if net_cash is not None else None,
+        }

@@ -16,7 +16,10 @@ class Settings(BaseSettings):
 
     app_name: str = "ZO RFP API"
     port: int = 8001
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    cors_origins: str = (
+        "http://localhost:3001,http://127.0.0.1:3001,"
+        "http://localhost:3000,http://127.0.0.1:3000"
+    )
 
     database_path: Path = _DASHBOARD_ROOT / "data" / "rfps.db"
     pdf_storage_path: Path = _DASHBOARD_ROOT / "storage" / "pdfs"
@@ -48,7 +51,7 @@ class Settings(BaseSettings):
     google_service_account_json: Path | None = None
     google_drive_shared_drive_name: str = "RFPs"
 
-    app_url: str = "http://localhost:3000"
+    app_url: str = "http://localhost:3001"
 
     openrouter_api_key: str = ""
     openrouter_model: str = "anthropic/claude-sonnet-4"

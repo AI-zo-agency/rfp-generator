@@ -755,6 +755,23 @@ def quickbooks_overview(
             "monthly_trend": lambda: quickbooks.monthly_trend(year),
             "unattached_cost": lambda: quickbooks.unattached_cost(year),
             "activity": lambda: quickbooks.recent_activity(activity_since),
+            # Phase 1 — cash / billing
+            "cash_collections": lambda: quickbooks.cash_collections(year),
+            "billing_vs_cash": lambda: quickbooks.billing_vs_cash(year),
+            "dso": lambda: quickbooks.dso(year),
+            "aged_ar_detail": quickbooks.aged_ar_detail,
+            # Phase 2 — commitments
+            "purchase_orders": lambda: quickbooks.purchase_orders(year),
+            "expenses_by_vendor": lambda: quickbooks.expenses_by_vendor(year),
+            "bill_payments": lambda: quickbooks.bill_payments(year),
+            # Phase 3 — client book
+            "customers": quickbooks.customers_directory,
+            "sales_by_customer": lambda: quickbooks.sales_by_customer(year),
+            "credit_memos": lambda: quickbooks.credit_memos(year),
+            # Phase 4 — coding / liquidity
+            "class_coverage": lambda: quickbooks.class_coverage(year),
+            "department_coverage": lambda: quickbooks.department_coverage(year),
+            "liquidity": lambda: quickbooks.liquidity(year),
         }
         for name, job in jobs.items():
             try:
