@@ -529,13 +529,56 @@ async def _fetch_guide_context(
     return combined or "(No 00_Guide_Pricing content in KB — ingest pricing guide.)", sources
 
 
+_NESTED_LINE_ITEM_KEYS = (
+    "lineItems",
+    "line_items",
+    "lineitems",
+    "budgetLineItems",
+    "items",
+    "rows",
+    "phases",
+    "budget",
+    "deliverables",
+)
+
+_VALID_LINE_ITEM_TYPES = {"agency_fee", "client_passthrough", "direct_expense"}
+
+
+def _looks_like_line_item_dict(item: dict[str, Any]) -> bool:
+    keys = set(item)
+    if keys & {"description", "roleTitle", "role", "name", "extended", "rate", "hourlyRate"}:
+        if not (keys & set(_NESTED_LINE_ITEM_KEYS)):
+            return True
+    return False
+
+
+def _collect_line_item_dicts(payload: Any, out: list[dict[str, Any]], *, depth: int = 0) -> None:
+    if depth > 6 or payload is None:
+        return
+    if isinstance(payload, str) and payload.strip().startswith(("{", "[")):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+    if isinstance(payload, list):
+        for row in payload:
+            _collect_line_item_dicts(row, out, depth=depth + 1)
+        return
+    if not isinstance(payload, dict):
+        return
+    if _looks_like_line_item_dict(payload):
+        out.append(payload)
+        return
+    for key in _NESTED_LINE_ITEM_KEYS:
+        if key in payload:
+            _collect_line_item_dicts(payload.get(key), out, depth=depth + 1)
+
+
 def _parse_line_items(raw_items: Any) -> list[BudgetLineItem]:
-    if not isinstance(raw_items, list):
-        return []
+    collected: list[dict[str, Any]] = []
+    _collect_line_item_dicts(raw_items, collected)
     items: list[BudgetLineItem] = []
-    for index, item in enumerate(raw_items):
-        if not isinstance(item, dict):
-            continue
+    for index, item in enumerate(collected):
         description = (
             item.get("description")
             or item.get("roleTitle")
@@ -543,6 +586,9 @@ def _parse_line_items(raw_items: Any) -> list[BudgetLineItem]:
             or item.get("name")
             or "Budget line item"
         )
+        line_type = item.get("lineItemType") or item.get("line_item_type")
+        if str(line_type or "") not in _VALID_LINE_ITEM_TYPES:
+            line_type = "agency_fee"
         try:
             items.append(
                 BudgetLineItem.model_validate(
@@ -557,6 +603,7 @@ def _parse_line_items(raw_items: Any) -> list[BudgetLineItem]:
                         "quantity": item.get("quantity") if item.get("quantity") is not None else item.get("hours"),
                         "extended": item.get("extended") if item.get("extended") is not None else item.get("subtotal"),
                         "unit": item.get("unit") or ("hours" if item.get("hours") else "flat"),
+                        "lineItemType": line_type,
                     }
                 )
             )
@@ -570,13 +617,114 @@ def _line_items_payload_from_raw(raw: Any) -> Any:
         return None
     for key in ("lineItems", "line_items", "lineitems", "budgetLineItems"):
         payload = raw.get(key)
-        if payload:
+        if payload not in (None, "", [], {}):
+            return payload
+    for key in ("phases", "budget", "items", "rows", "deliverables"):
+        payload = raw.get(key)
+        if payload not in (None, "", [], {}):
             return payload
     return None
 
 
 def _parse_line_items_from_raw(raw: Any) -> list[BudgetLineItem]:
-    return _parse_line_items(_line_items_payload_from_raw(raw))
+    return _parse_line_items(_line_items_payload_from_raw(raw) if isinstance(raw, dict) else raw)
+
+
+_FALLBACK_MENU_HINTS = ("1.1", "2.1", "3.1", "5.3", "9.1")
+_FALLBACK_LABELS = (
+    "Discovery",
+    "Strategy",
+    "Creative",
+    "Digital",
+    "Project Management",
+)
+
+
+def skeleton_line_items_from_rate_card(rate_card: Any) -> list[BudgetLineItem]:
+    """Guide-backed rows when the LLM omits lineItems — never invent dollar amounts."""
+    from app.services.pricing_rate_card_builder import bindable_rates
+
+    try:
+        bindable = list(bindable_rates(rate_card) if rate_card is not None else [])
+    except Exception:
+        bindable = list(getattr(rate_card, "rates", None) or [])
+    avg = [
+        r
+        for r in bindable
+        if str(getattr(r, "tier", "") or "").lower() in {"average", "avg", ""}
+    ]
+    pool = avg or bindable
+    picked: list[Any] = []
+    seen: set[str] = set()
+    for hint in _FALLBACK_MENU_HINTS:
+        for rate in pool:
+            rid = str(getattr(rate, "rate_id", "") or "")
+            if getattr(rate, "menu_id", "") == hint and rid not in seen:
+                picked.append(rate)
+                seen.add(rid)
+                break
+    for rate in pool:
+        if len(picked) >= 5:
+            break
+        rid = str(getattr(rate, "rate_id", "") or "")
+        amount = getattr(rate, "amount", None)
+        if rid in seen or amount is None:
+            continue
+        picked.append(rate)
+        seen.add(rid)
+
+    items: list[BudgetLineItem] = []
+    for index, rate in enumerate(picked, start=1):
+        amount = getattr(rate, "amount", None)
+        if amount is None:
+            amount = getattr(rate, "amount_low", None)
+        if amount is None:
+            continue
+        unit_raw = str(getattr(rate, "unit", "fixed") or "fixed")
+        unit = "flat" if unit_raw in {"fixed", "unknown"} else unit_raw
+        menu = str(getattr(rate, "menu_id", "") or "").strip()
+        service = str(getattr(rate, "service", "") or "Guide service").strip()
+        items.append(
+            BudgetLineItem.model_validate(
+                {
+                    "id": f"li-fallback-{index}",
+                    "category": "labor",
+                    "description": f"{menu} {service}".strip(),
+                    "unit": unit if unit in {"flat", "hours", "monthly", "annual", "percent"} else "flat",
+                    "quantity": 1,
+                    "rate": float(amount),
+                    "extended": float(amount),
+                    "lineItemType": "agency_fee",
+                    "sourceRateId": getattr(rate, "rate_id", None),
+                    "rateSource": getattr(rate, "source_doc", None) or "00_Guide_Pricing",
+                    "notes": (
+                        "Skeleton from 00_Guide_Pricing — model omitted lineItems. "
+                        "Refine in Budget before submit."
+                    ),
+                }
+            )
+        )
+    if items:
+        return items
+    for index, label in enumerate(_FALLBACK_LABELS, start=1):
+        items.append(
+            BudgetLineItem.model_validate(
+                {
+                    "id": f"li-fallback-{index}",
+                    "category": "labor",
+                    "description": label,
+                    "unit": "flat",
+                    "quantity": 1,
+                    "lineItemType": "agency_fee",
+                    "isManualFill": True,
+                    "notes": (
+                        "[MANUAL FILL: Sonja — set fee from 00_Guide_Pricing; "
+                        "model omitted line items]"
+                    ),
+                }
+            )
+        )
+    return items
 
 
 _LINE_ITEMS_RETRY_USER = (
@@ -1009,6 +1157,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         )
 
     line_items = _parse_line_items_from_raw(raw)
+    used_skeleton = False
     if not line_items:
         logger.warning(
             "Stage 3 budget returned no lineItems (keys=%s)",
@@ -1030,11 +1179,22 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
                 temperature=0.2,
             )
         line_items = _parse_line_items_from_raw(raw)
+        used_skeleton = False
         if not line_items:
-            raise ProposalError(
-                "Stage 3 budget generation failed: model returned no lineItems after retry. "
-                "Check Stage 2 structural map and 00_Guide_Pricing KB, then re-run Budget.",
-                status_code=502,
+            line_items = skeleton_line_items_from_rate_card(rate_card)
+            used_skeleton = True
+            flags.append(
+                "[PRICING FLAG: Model omitted lineItems after retry — used 00_Guide_Pricing "
+                "skeleton. Refine in Budget before submit.]"
+            )
+            logger.warning(
+                "Stage 3 budget used rate-card skeleton (%d rows) after empty lineItems",
+                len(line_items),
+            )
+            step_trace(
+                "pricing_llm_line_items_skeleton_fallback",
+                rfp_id=rfp_id,
+                rows=len(line_items),
             )
 
     confidence = int(raw.get("confidence") or 0)
@@ -1042,6 +1202,8 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         confidence = min(confidence, 50)
     if guide_text.startswith("(No 00_Guide_Pricing"):
         confidence = min(confidence, 40)
+    if used_skeleton:
+        confidence = min(confidence, 35)
 
     extras = parse_budget_extras(raw)
     from app.services.evidence_trust.rfp_money_constraints import (
