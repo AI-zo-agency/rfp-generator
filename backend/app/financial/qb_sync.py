@@ -135,6 +135,13 @@ def _ingest_reports(realm_id: str, years: list[int], as_of: date, fetched_at: st
         for report_name, hash_params in report_jobs(year, as_of):
             fetch_params = _report_fetch_params(year, as_of, report_name, hash_params)
             try:
+                logger.info(
+                    "operation=ingest_report step=fetch realm_id=%s "
+                    "report_name=%s year=%s",
+                    realm_id,
+                    report_name,
+                    year,
+                )
                 payload = report(report_name, **fetch_params)
             except QuickBooksError as exc:
                 if not _is_report_permission_denied(exc):
@@ -158,7 +165,7 @@ def _ingest_reports(realm_id: str, years: list[int], as_of: date, fetched_at: st
             })
             count += 1
             logger.info(
-                "operation=ingest_report realm_id=%s report_name=%s year=%s",
+                "operation=ingest_report step=stored realm_id=%s report_name=%s year=%s",
                 realm_id,
                 report_name,
                 year,
@@ -336,10 +343,12 @@ def _run_nightly(
         "last_mode": "nightly",
     })
     logger.info(
-        "operation=_run_nightly run_id=%s realm_id=%s cursor=%s",
+        "operation=_run_nightly step=cdc_fetch run_id=%s realm_id=%s cursor=%s "
+        "entities=%s",
         run_id,
         realm_id,
         cursor.isoformat(),
+        ",".join(CDC_ENTITIES),
     )
     _renew_sync_lease(realm_id, owner, stage="cdc")
     changed = cdc_records(CDC_ENTITIES, cursor.isoformat())
@@ -347,13 +356,31 @@ def _run_nightly(
     counts: dict[str, int] = {}
     for entity in CDC_ENTITIES:
         payloads = changed.get(entity) or []
+        logger.info(
+            "operation=_run_nightly step=cdc_upsert run_id=%s entity=%s "
+            "changed_count=%s",
+            run_id,
+            entity,
+            len(payloads),
+        )
         counts[entity] = upsert_entities(realm_id, entity, payloads, synced_at=synced_at)
 
     as_of = started.date()
     year = started.year
+    logger.info(
+        "operation=_run_nightly step=reports run_id=%s year=%s",
+        run_id,
+        year,
+    )
     _renew_sync_lease(realm_id, owner, stage="reports")
     counts["reports"] = _ingest_reports(realm_id, [year], as_of, synced_at)
+    logger.info("operation=_run_nightly step=company_info run_id=%s", run_id)
     _ingest_company_info(realm_id, synced_at)
+    logger.info(
+        "operation=_run_nightly step=panel_cache run_id=%s year=%s",
+        run_id,
+        year,
+    )
     _write_panel_cache(
         realm_id,
         [year],
@@ -362,6 +389,11 @@ def _run_nightly(
         datetime.now(timezone.utc).isoformat(),
     )
     now = datetime.now(timezone.utc).isoformat()
+    logger.info(
+        "operation=_run_nightly step=cursor_advanced run_id=%s cursor=%s",
+        run_id,
+        started.isoformat(),
+    )
     upsert_sync_state(realm_id, {
         "cdc_cursor": started.isoformat(),
         "last_success_at": now,
@@ -369,7 +401,7 @@ def _run_nightly(
         "last_mode": "nightly",
     })
     logger.info(
-        "operation=_run_nightly run_id=%s realm_id=%s status=success",
+        "operation=_run_nightly step=done run_id=%s realm_id=%s status=success",
         run_id,
         realm_id,
     )
@@ -439,7 +471,7 @@ def run_sync(mode: str = "auto") -> dict[str, str]:
             "started_at": started.isoformat(),
         })
         logger.info(
-            "operation=run_sync run_id=%s mode=%s status=running realm_id=%s",
+            "operation=run_sync step=start run_id=%s mode=%s status=running realm_id=%s",
             run_id,
             resolved_mode,
             realm,

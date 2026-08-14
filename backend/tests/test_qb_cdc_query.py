@@ -32,3 +32,18 @@ def test_cdc_records_groups_entities():
         records = qb.cdc_records(["Invoice", "Bill"], "2026-08-01T00:00:00-07:00")
     assert len(records["Invoice"]) == 2
     assert len(records["Bill"]) == 1
+
+
+def test_cdc_encodes_plus_in_changed_since():
+    captured = {}
+
+    def fake_get(path: str, _retried: bool = False):
+        captured["path"] = path
+        return {"CDCResponse": []}
+
+    with patch.object(qb, "_get", side_effect=fake_get):
+        qb.cdc_records(["Invoice"], "2026-08-13T12:53:10.831436+00:00")
+    path = captured["path"]
+    assert "changedSince=" in path
+    assert "+00:00" not in path
+    assert "%2B00" in path or "%2B00%3A00" in path
