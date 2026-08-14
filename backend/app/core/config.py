@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     quickbooks_environment: str = "sandbox"
     quickbooks_minor_version: str = "75"
     quickbooks_cron_secret: str = ""
+    # APScheduler worker (python -m app.scheduler). POSTs into the API; does not
+    # hold QuickBooks or Supabase credentials of its own.
+    scheduler_backend_url: str = "http://127.0.0.1:8001"
+    scheduler_timezone: str = "America/Los_Angeles"
+    scheduler_run_on_start: bool = True
 
     # Legacy optional — prefer OAuth client id/secret above
     google_service_account_json: Path | None = None

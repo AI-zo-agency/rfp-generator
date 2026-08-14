@@ -4,7 +4,7 @@ How ZÖ Agency connects to QuickBooks Online (QBO), which Intuit APIs we call du
 
 **Access model: read-only against QBO.** Every call into the company ledger is an HTTP `GET`. There is no create, update, or delete path against invoices, bills, customers, or any other QBO entity. The only `POST` to Intuit is the OAuth token endpoint (credential refresh), which does not mutate company accounting data.
 
-**Dashboard model: nightly mirror.** The QuickBooks tab does not call Intuit on page load. A cron job POSTs to our backend once per night; the backend pulls from QBO and writes to Supabase. `GET /overview` reads precomputed panel JSON from `qb_panel_cache` only.
+**Dashboard model: nightly mirror.** The QuickBooks tab does not call Intuit on page load. APScheduler POSTs to our backend at 11pm Pacific; the backend pulls from QBO and writes to Supabase. `GET /overview` reads precomputed panel JSON from `qb_panel_cache` only.
 
 ---
 
@@ -28,8 +28,9 @@ QuickBooks remains the source of truth. This app holds a nightly mirror in Supab
                                                                           └──────────▲───────────┘
                                                                                      │
 ┌─────────────────────┐     POST /api/v1/financials/quickbooks/sync       │          │
-│  Railway Cron       │     Header: X-Cron-Secret                         │          │
-│  0 8 * * * UTC      │     Body: {"mode":"auto"}                         │          │
+│  APScheduler        │     Header: X-Cron-Secret                         │          │
+│  23:00 America/     │     Body: {"mode":"auto"}                         │          │
+│  Los_Angeles        │                                                   │          │
 └─────────────────────┘ ────────────────────────────────────────────────►│          │
                                                                            │          │
                                     ┌──────────────────────────────────────┘          │
@@ -332,20 +333,43 @@ On success, returns run metadata including `run_id` and entity counts. On failur
 
 ---
 
-## Railway Cron (Pro)
+## Nightly scheduler (Railway)
 
-Configure on the **existing** backend service — no second Railway service.
+A **third** Railway service, same `backend/` image as the API. Do **not** put a Cron Schedule on the FastAPI service — that would start/stop the web process.
 
-| Setting | Value |
-|---------|-------|
-| Schedule | `0 8 * * *` (UTC) |
-| Method | `POST` |
-| URL | `https://<backend>/api/v1/financials/quickbooks/sync` |
-| Header | `X-Cron-Secret: <same value as QUICKBOOKS_CRON_SECRET env>` |
-| Body | `{"mode":"auto"}` |
-| Timeout | At least **10 minutes** (first backfill can run several minutes) |
+| | |
+|---|---|
+| Root | `backend/` (same Dockerfile) |
+| Start command | `python -m app.scheduler` |
+| Replicas | **1** |
+| Cron Schedule | leave empty (the process stays up; APScheduler is the clock) |
 
-The cron job uses the same env as the web service: all `QUICKBOOKS_*` vars, Supabase credentials, and `QUICKBOOKS_CRON_SECRET`.
+### Scheduler env
+
+| Variable | Value |
+|----------|--------|
+| `SCHEDULER_BACKEND_URL` | Private URL of the API service, e.g. `http://<api-service>.railway.internal:8000` |
+| `QUICKBOOKS_CRON_SECRET` | Same value as the API service |
+| `SCHEDULER_TIMEZONE` | `America/Los_Angeles` |
+
+The scheduler does not need QuickBooks client secrets or Supabase keys.
+
+### Jobs
+
+| Job id | When | Call |
+|--------|------|------|
+| `quickbooks_nightly` | `0 23 * * *` in `America/Los_Angeles` (11pm Pacific, DST-aware) | `POST /api/v1/financials/quickbooks/sync` body `{"mode":"auto"}` |
+
+Timeout is 10 minutes. HTTP 409 (lease held) is logged and skipped. On process start the job runs immediately (`mode=auto`, CDC from `cdc_cursor`); the next run is 23:00 Pacific. Set `SCHEDULER_RUN_ON_START=false` to skip the startup fetch. Add future platforms as rows in `backend/app/scheduler/jobs.py`.
+
+Local:
+
+```bash
+cd backend
+python -m app.scheduler
+```
+
+Points at `SCHEDULER_BACKEND_URL` (default `http://127.0.0.1:8001`). The API must already be running.
 
 ---
 
@@ -371,7 +395,7 @@ curl "$BACKEND_URL/api/v1/financials/quickbooks/status"
 Expect `"backfill_completed": true`.
 
 5. Run `ANALYZE` on all `qb_*` tables in the Supabase SQL editor.
-6. Enable the Railway Cron job with `{"mode":"auto"}` for nightly runs.
+6. Deploy the scheduler service (`python -m app.scheduler`) so nightly `auto` runs at 11pm Pacific.
 
 ---
 
@@ -456,7 +480,8 @@ Unattached cost treats purchases with no `CustomerRef` on expense lines as unatt
 | `backend/app/financial/qb_map.py` | QBO payload → typed row mapping |
 | `backend/app/financial/qb_panels_from_db.py` | Panel builders from mirror |
 | `backend/app/financial/router.py` | `/quickbooks/status`, `/overview`, `/sync` |
-| `backend/app/core/config.py` | QB settings + cron secret |
+| `backend/app/core/config.py` | QB settings + cron secret + scheduler URL |
+| `backend/app/scheduler/` | APScheduler worker; POSTs `/quickbooks/sync` |
 | `backend/supabase/migrations/20260813_quickbooks_mirror.sql` | Mirror schema + indexes |
 | `frontend/src/financial/components/QuickBooksPanels.tsx` | Sectioned ledger dashboard UI |
 

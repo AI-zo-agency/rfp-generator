@@ -87,7 +87,16 @@ def report(name: str, **params: str) -> dict[str, Any]:
 
 
 def cdc_records(entities: list[str], since: str) -> dict[str, list[dict[str, Any]]]:
-    payload = _get(f"cdc?entities={','.join(entities)}&changedSince={since}")
+    qs = urllib.parse.urlencode({
+        "entities": ",".join(entities),
+        "changedSince": since,
+    })
+    logger.info(
+        "operation=cdc_records step=request since=%s entity_count=%s",
+        since,
+        len(entities),
+    )
+    payload = _get(f"cdc?{qs}")
     out: dict[str, list[dict[str, Any]]] = {e: [] for e in entities}
     for response in payload.get("CDCResponse", []):
         for query_response in response.get("QueryResponse", []):

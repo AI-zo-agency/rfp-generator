@@ -79,12 +79,13 @@ python scripts/migrate_pdfs_to_supabase_storage.py
 
 ## Deployment (Railway)
 
-Two services:
+Three services:
 
 1. **Frontend** — root: `frontend/`, env: `BACKEND_URL` only.
-2. **Backend** — root: `backend/`, env: Supabase keys, LLM keys, `CORS_ORIGINS`.
+2. **Backend** — root: `backend/`, start: Dockerfile default (uvicorn). Env: Supabase keys, LLM keys, `CORS_ORIGINS`, QuickBooks vars including `QUICKBOOKS_CRON_SECRET`.
+3. **Scheduler** — root: `backend/`, start command: `python -m app.scheduler`. Env: `SCHEDULER_BACKEND_URL` (API private URL), `QUICKBOOKS_CRON_SECRET` (same as backend), `SCHEDULER_TIMEZONE=America/Los_Angeles`. One replica. Do not enable Railway Cron Schedule on this service.
 
-Details: [`docs/superpowers/specs/2026-06-25-supabase-postgres-migration-design.md`](docs/superpowers/specs/2026-06-25-supabase-postgres-migration-design.md).
+QuickBooks nightly sync fires at 11pm Pacific via APScheduler. Details: [`docs/QUICKBOOKS_INTEGRATION.md`](docs/QUICKBOOKS_INTEGRATION.md).
 
 ## Common issues
 

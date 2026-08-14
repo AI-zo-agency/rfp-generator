@@ -1011,6 +1011,16 @@ def build_overview(
     for name, job in jobs.items():
         try:
             panels[name] = job()
+        except LookupError as exc:
+            logger.warning(
+                "operation=build_overview realm_id=%s year=%s panel=%s "
+                "status=skipped reason=missing_snapshot",
+                realm_id,
+                year,
+                name,
+            )
+            panels[name] = None
+            panels["errors"][name] = str(exc)[:200]
         except Exception as exc:  # noqa: BLE001 — one bad panel shouldn't blank the page
             logger.warning(
                 "operation=build_overview realm_id=%s year=%s panel=%s failed",
