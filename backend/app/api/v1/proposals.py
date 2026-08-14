@@ -11,8 +11,8 @@ from datetime import datetime
 from urllib.parse import quote
 
 from app.models.proposal import (
+    ProposalAgentActivity,
     ProposalDraft,
-    ProposalFulfillGapsResponse,
     ProposalGoogleDocExportResponse,
     ProposalGenerateResponse,
     ProposalPhase4AutoFixResponse,
@@ -21,7 +21,9 @@ from app.models.proposal import (
     ProposalResearchCache,
     ProposalRestoreSnapshotRequest,
     ProposalRestoreSnapshotResponse,
+    ProposalSection,
     ProposalSectionImproveResponse,
+    ProposalSuggestedFix,
     PreSubmitAutoFixRequest,
     SectionImproveRequest,
 )
@@ -99,7 +101,13 @@ async def _enqueue_pipeline_phase(
             ),
         )
 
+    from app.services.proposal_generation_cancel import clear_generation_cancel
     from app.services.proposal_pipeline_checkpoint import record_phase_started
+
+    # A prior Stop leaves an in-memory cancel flag. Starting a new job is an
+    # explicit "run again" — drop the stale flag or the first cancelled-check
+    # kills the work immediately (looks like the scan "just stopped").
+    clear_generation_cancel(rfp_id)
 
     # Mark in-progress before returning so the first poll sees the phase.
     await record_phase_started(rfp_id, phase)
@@ -763,6 +771,49 @@ async def generate_pricing_endpoint(rfp_id: str) -> JSONResponse:
     return await _enqueue_pipeline_phase(rfp_id, "phase-3-5-budget", work)
 
 
+def _section_by_id(draft: ProposalDraft | None, section_id: str) -> ProposalSection | None:
+    if not draft:
+        return None
+    return next((s for s in draft.sections if s.id == section_id), None)
+
+
+def _improve_activity_for_turn(
+    *,
+    prior_draft: ProposalDraft | None,
+    section: ProposalSection,
+    draft: ProposalDraft,
+    draft_changed: bool,
+    assistant_message: str,
+    extra_discrepancies: list[str] | None = None,
+) -> ProposalAgentActivity:
+    from app.services.proposal_chat_activity import build_improve_agent_activity
+
+    prior = _section_by_id(prior_draft, section.id)
+    extra_changes: list[str] = []
+    if prior_draft:
+        before_map = {s.id: s.content or "" for s in prior_draft.sections}
+        other = [
+            s.title
+            for s in draft.sections
+            if s.id != section.id
+            and s.id in before_map
+            and (s.content or "") != before_map[s.id]
+        ]
+        if other:
+            extra_changes.append(
+                "Also updated: " + ", ".join(other[:8]) + ("…" if len(other) > 8 else "")
+            )
+    return build_improve_agent_activity(
+        section_title=section.title,
+        before=prior.content if prior else "",
+        after=section.content or "",
+        draft_changed=draft_changed,
+        assistant_message=assistant_message,
+        extra_changes=extra_changes,
+        extra_discrepancies=extra_discrepancies,
+    )
+
+
 @router.post(
     "/{rfp_id}/proposal/sections/{section_id}/improve",
     response_model=ProposalSectionImproveResponse,
@@ -773,6 +824,9 @@ async def improve_section_endpoint(
     body: SectionImproveRequest,
 ) -> ProposalSectionImproveResponse:
     """Re-query KB with new detailed queries and re-draft one section from user feedback."""
+    from app.services.proposal_repository import aget_proposal_draft, aget_research_cache
+
+    prior_draft = await aget_proposal_draft(rfp_id)
     try:
         section, draft, research, _provider, assistant_message, draft_changed, suggested_fix = (
             await improve_proposal_section(
@@ -791,8 +845,64 @@ async def improve_section_endpoint(
             )
         )
     except ProposalError as exc:
+        # Policy / rewrite checks must recap in chat — never 422 the UI.
+        if exc.status_code in (400, 422) and prior_draft and prior_draft.sections:
+            section = _section_by_id(prior_draft, section_id) or prior_draft.sections[0]
+            research = await aget_research_cache(rfp_id) or ProposalResearchCache(
+                rfpId=rfp_id
+            )
+            note = str(exc).strip() or "Could not complete this instruction."
+            assistant_message = (
+                "I did not change the manuscript. "
+                f"{note}"
+            )
+            activity = _improve_activity_for_turn(
+                prior_draft=prior_draft,
+                section=section,
+                draft=prior_draft,
+                draft_changed=False,
+                assistant_message=assistant_message,
+                extra_discrepancies=[note],
+            )
+            return ProposalSectionImproveResponse(
+                section=section,
+                draft=prior_draft,
+                research=_slim_research(research) or research,
+                assistantMessage=assistant_message,
+                draftChanged=False,
+                suggestedFix=None,
+                agentActivity=activity,
+            )
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
+        logging.getLogger(__name__).exception("Section improve failed for %s", rfp_id)
+        if prior_draft and prior_draft.sections:
+            section = _section_by_id(prior_draft, section_id) or prior_draft.sections[0]
+            research = await aget_research_cache(rfp_id) or ProposalResearchCache(
+                rfpId=rfp_id
+            )
+            note = (
+                "This turn did not finish. The manuscript was left unchanged — "
+                "try again or rephrase the instruction."
+            )
+            assistant_message = note
+            activity = _improve_activity_for_turn(
+                prior_draft=prior_draft,
+                section=section,
+                draft=prior_draft,
+                draft_changed=False,
+                assistant_message=assistant_message,
+                extra_discrepancies=[note],
+            )
+            return ProposalSectionImproveResponse(
+                section=section,
+                draft=prior_draft,
+                research=_slim_research(research) or research,
+                assistantMessage=assistant_message,
+                draftChanged=False,
+                suggestedFix=None,
+                agentActivity=activity,
+            )
         raise HTTPException(
             status_code=502,
             detail=f"Section improve failed: {exc}",
@@ -800,8 +910,6 @@ async def improve_section_endpoint(
 
     suggested_payload = None
     if suggested_fix is not None:
-        from app.models.proposal import ProposalSuggestedFix
-
         suggested_payload = ProposalSuggestedFix(
             sectionId=suggested_fix.section_id,
             instruction=suggested_fix.instruction,
@@ -809,6 +917,13 @@ async def improve_section_endpoint(
             sectionTitle=suggested_fix.section_title,
         )
 
+    activity = _improve_activity_for_turn(
+        prior_draft=prior_draft,
+        section=section,
+        draft=draft,
+        draft_changed=draft_changed,
+        assistant_message=assistant_message,
+    )
     return ProposalSectionImproveResponse(
         section=section,
         draft=draft,
@@ -816,6 +931,7 @@ async def improve_section_endpoint(
         assistantMessage=assistant_message,
         draftChanged=draft_changed,
         suggestedFix=suggested_payload,
+        agentActivity=activity,
     )
 
 
@@ -892,39 +1008,26 @@ async def phase4_finalize_gaps_endpoint(rfp_id: str) -> ProposalPhase4Response:
 
 @router.post(
     "/{rfp_id}/proposal/fulfill-rfp-gaps",
-    response_model=ProposalFulfillGapsResponse,
 )
 async def fulfill_rfp_gaps_endpoint(
     rfp_id: str,
-    request: Request,
     body: PreSubmitAutoFixRequest | None = None,
-) -> ProposalFulfillGapsResponse:
-    """Re-read THIS RFP, add missing closing package sections, patch uncovered gaps."""
-    from app.services.proposal_disconnect_cancel import cancel_generation_on_disconnect
+) -> JSONResponse:
+    """Start Complete & clean in the background; poll GET /proposal until done.
+
+    Must not hold the HTTP request open — proxies return HTML/empty and the
+    client shows “Invalid response from fulfill RFP gaps.” Disconnect must
+    not cancel the job (Stop is POST /stop).
+    """
     from app.services.proposal_fulfill_rfp_gaps import run_fulfill_rfp_gaps
 
     use_llm = body.use_llm if body else True
     mode = (body.mode if body and getattr(body, "mode", None) else None) or "full"
-    try:
-        async with cancel_generation_on_disconnect(rfp_id, request):
-            review, research, draft, fulfill_report = await run_fulfill_rfp_gaps(
-                rfp_id, use_llm=use_llm, mode=mode
-            )
-    except ProposalError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Fulfill RFP gaps failed: {exc}",
-        ) from exc
 
-    slim = _slim_research(research) or research
-    return ProposalFulfillGapsResponse(
-        review=review,
-        research=slim,
-        draft=draft,
-        fulfill_report=fulfill_report,
-    )
+    async def work() -> None:
+        await run_fulfill_rfp_gaps(rfp_id, use_llm=use_llm, mode=mode)
+
+    return await _enqueue_pipeline_phase(rfp_id, "fulfill-scan", work)
 
 
 @router.post(

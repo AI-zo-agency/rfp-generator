@@ -25,7 +25,7 @@ export interface SourceRange {
   end: number;
 }
 
-/** Whole lines the renderer drops entirely. */
+import { humanizeGapTag } from "./gap-tag-humanize";
 const THEMATIC_BREAK = /^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/;
 const CODE_FENCE = /^[ \t]*```/;
 const REFERENCES_ONLY =
@@ -47,6 +47,16 @@ const LINE_PREFIX = /[ \t]*(?:#{1,6}[ \t]+|(?:[-*+]|\d{1,3}[.)])[ \t]+)/y;
 const CITATION = /\*{0,2}\[[ \t]*E\d+(?:[ \t]*[,;][ \t]*E\d+)*[ \t]*\]\*{0,2}/iy;
 const PRICING_FLAG = /\[PRICING FLAG:[^\]]*\]/iy;
 const HTML_COMMENT = /<!--[\s\S]*?-->/y;
+const GAP_TAG =
+  /\[(?:VERIFY|MANUAL FILL|FLAG|DESIGNER NOTE|TBD|INSERT|PLACEHOLDER)[^\]]*\]/iy;
+
+function visibleGapProjection(tag: string): string {
+  if (/^\[(?:VERIFY|MANUAL\s+FILL)/i.test(tag)) {
+    const h = humanizeGapTag(tag);
+    return h.detail ? `${h.title} — ${h.detail}` : h.title;
+  }
+  return tag;
+}
 
 /** Emphasis/code punctuation the renderer eats rather than displays. */
 const MARKUP_CHARS = new Set(["*", "`", "~"]);
@@ -117,6 +127,26 @@ export function projectMarkdown(source: string): MarkdownProjection {
           i += comment[0].length;
           continue;
         }
+        GAP_TAG.lastIndex = i;
+        const gap = GAP_TAG.exec(line);
+        if (gap) {
+          const tag = gap[0];
+          const visible = visibleGapProjection(tag);
+          const tagStart = lineStart + i;
+          const tagEnd = tagStart + tag.length - 1;
+          for (let k = 0; k < visible.length; k += 1) {
+            const ch = visible[k]!;
+            const srcAt = k === visible.length - 1 ? tagEnd : tagStart;
+            if (ch === " " || ch === "\t") {
+              pushSpace(srcAt);
+            } else {
+              chars.push(ch);
+              indices.push(srcAt);
+            }
+          }
+          i += tag.length;
+          continue;
+        }
 
         const char = line[i]!;
         if (MARKUP_CHARS.has(char)) {
@@ -176,17 +206,42 @@ function locate(
 
   let at = projection.text.indexOf(needle);
   if (at < 0) {
-    // Fall back to case-insensitive: CSS text-transform means some browsers
-    // hand back uppercased heading text.
     at = projection.text.toLowerCase().indexOf(needle.toLowerCase());
   }
-  if (at < 0) return null;
+  let endAt = at >= 0 ? at + needle.length - 1 : -1;
+  if (at < 0) {
+    const span = locateByEndpoints(projection.text, needle);
+    if (span) {
+      at = span.start;
+      endAt = span.end;
+    }
+  }
+  if (at < 0 || endAt < at) return null;
 
   const start = projection.indices[at];
-  const end = projection.indices[at + needle.length - 1];
+  const end = projection.indices[Math.min(endAt, projection.indices.length - 1)];
   if (start === undefined || end === undefined) return null;
 
   return balanceEmphasis(source, start, end + 1);
+}
+
+/** Browser table selections are cell\\tcell\\nrow — match first/last distinctive tokens. */
+function locateByEndpoints(
+  haystack: string,
+  needle: string
+): { start: number; end: number } | null {
+  const tokens = needle
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 4);
+  if (tokens.length < 2) return null;
+  const first = tokens[0]!;
+  const last = tokens[tokens.length - 1]!;
+  const start = haystack.indexOf(first);
+  if (start < 0) return null;
+  const lastAt = haystack.indexOf(last, start);
+  if (lastAt < start) return null;
+  return { start, end: lastAt + last.length - 1 };
 }
 
 export interface MarkdownSourceMap {

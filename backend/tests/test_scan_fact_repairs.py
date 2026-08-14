@@ -26,6 +26,50 @@ class ScanFactRepairTests(unittest.TestCase):
         self.assertNotIn("ClientList", cleaned)
         self.assertIn("S-Corp", cleaned)
 
+    def test_scrubs_flag_for_sonja_and_deletion_instructions(self) -> None:
+        text = (
+            "We can staff the work.\n"
+            "[FLAG FOR SONJA: Add Recovery Network of Oregon...]\n"
+            "DELETE THIS SECTION\n"
+            "DELETION NOTICE: drop this tab\n"
+            "Keep this sentence.\n"
+        )
+        cleaned, logs = scrub_leaked_system_fragments(text)
+        self.assertTrue(logs)
+        self.assertNotIn("FLAG FOR SONJA", cleaned)
+        self.assertNotIn("DELETE THIS SECTION", cleaned)
+        self.assertNotIn("DELETION NOTICE", cleaned)
+        self.assertIn("Keep this sentence.", cleaned)
+        self.assertIn("We can staff the work.", cleaned)
+
+    def test_draft_scrub_removes_leaks_from_section_body(self) -> None:
+        from app.services.proposal_scan_fact_repairs import (
+            apply_leaked_fragment_scrub_to_draft,
+        )
+
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="2026-01-01T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="s1",
+                    title="References",
+                    content=(
+                        "Contacts follow.\n"
+                        "[references package removed — unverified]s and s — "
+                        "no verified ClientList/KB match for reference contacts]\n"
+                    ),
+                )
+            ],
+        )
+        updated, logs = apply_leaked_fragment_scrub_to_draft(draft)
+        self.assertTrue(logs)
+        body = updated.sections[0].content or ""
+        self.assertNotIn("FLAG FOR SONJA", body)
+        self.assertNotIn("references package removed", body)
+        self.assertNotIn("ClientList", body)
+        self.assertIn("Contacts follow.", body)
+
     def test_sole_proprietor_replaced(self) -> None:
         text = "Ownership: Sole proprietor Sonja Anderson."
         fixed, logs = repair_sole_proprietor_language(text)

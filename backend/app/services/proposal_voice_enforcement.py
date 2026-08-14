@@ -57,6 +57,8 @@ _STATIC_COVERED_TITLE_RES = (
         re.IGNORECASE,
     ),
     re.compile(r"\bcompany\s+overview\b", re.IGNORECASE),
+    # RFP TOC "Company Background" is Sections 1.1–1.5, not a second essay.
+    re.compile(r"\bcompany\s+background\b", re.IGNORECASE),
     # Section 2 owns full bios — including RFP TOC titles that restate Team Overview
     # with Contract Manager / POC / Personnel Bios/Resumes.
     re.compile(

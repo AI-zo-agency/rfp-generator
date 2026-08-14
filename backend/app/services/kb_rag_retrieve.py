@@ -7,6 +7,7 @@ Full documents are packed when they fit.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -50,19 +51,48 @@ def _question_terms(question: str) -> list[str]:
     return out
 
 
+_BOILERPLATE_PREFIX = (
+    "Find zö agency knowledge-base facts, case studies, and KPIs for a proposal section."
+)
+
+# Identical Supermemory searches during Complete & Clean (same truncated prefix,
+# same pricing-guide fallback) — cache for the process lifetime of a scan.
+_SEARCH_CACHE_MAX = 80
+_search_hit_cache: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+_search_inflight: dict[tuple[Any, ...], asyncio.Future[list[dict[str, Any]]]] = {}
+
+
+def search_head_for_supermemory(question: str, *, max_len: int = 220) -> str:
+    """Distinctive head sent to Supermemory (title/ask first).
+
+    A long boilerplate prefix used to lead every question. v4 truncates around
+    ~80 characters, so every section searched the same string and missed.
+    """
+    q = (question or "").strip()
+    if not q:
+        return ""
+    idx = q.find(_BOILERPLATE_PREFIX)
+    if idx == 0:
+        q = q[len(_BOILERPLATE_PREFIX) :].strip() or q
+    elif idx > 0:
+        q = q[:idx].strip(" .")
+    return q[:max_len].strip(" .")
+
+
 def expand_kb_queries(question: str, *, max_queries: int = 4) -> list[str]:
     """User question plus targeted supplemental queries (budget guide, Oregon clients)."""
     q = (question or "").strip()
     if not q:
         return []
-    q_lower = q.casefold()
-    queries = [q]
+    search = search_head_for_supermemory(q)
+    intent = search.split("Why needed:", 1)[0].casefold()
+    queries = [search]
 
     budget_kw = {"budget", "pricing", "price", "rate", "fee", "cost", "hourly"}
-    if any(kw in q_lower for kw in budget_kw):
+    if any(kw in intent for kw in budget_kw):
         queries.append("zö agency pricing guide rates fees hourly")
 
-    if "oregon" in q_lower:
+    if "oregon" in intent:
         queries.append(
             "Oregon Employment Umatilla Lake Oswego Bend Deschutes proposal budget"
         )
@@ -90,31 +120,31 @@ def build_retrieval_question_from_entry(
     Phase 2 retrieval plans often emit keyword fragments; Supermemory works best
     with one clear question like the manual KB QA loop uses.
     """
-    parts = [
-        "Find zö agency knowledge-base facts, case studies, and KPIs for a proposal section.",
-    ]
+    # Distinctive text MUST lead. Supermemory truncates the query; a boilerplate
+    # prefix made every section search identical and return 0 hits.
+    parts: list[str] = []
     title = (section_title or "").strip()
     if title:
         parts.append(f'Section: "{title}".')
     client = (rfp_client or "").strip()
     if client:
         parts.append(f"RFP client context: {client}.")
-    why = (why_needed or "").strip()
-    if why:
-        parts.append(f"Why needed: {why[:400]}.")
-    assets = [str(a).strip() for a in (required_assets or []) if str(a).strip()][:8]
-    if assets:
-        parts.append("Required proof/assets: " + "; ".join(assets) + ".")
     queries = [str(q).strip() for q in (planner_queries or []) if str(q).strip()]
     if queries:
-        # Prefer the planner's first query when it reads like a full question.
         focus = queries[0]
         if len(focus) >= 24 and " " in focus:
             parts.append(f"Search focus: {focus[:400]}.")
         else:
             parts.append(f"Topics: {', '.join(queries[:3])}.")
+    assets = [str(a).strip() for a in (required_assets or []) if str(a).strip()][:8]
+    if assets:
+        parts.append("Required proof/assets: " + "; ".join(assets) + ".")
+    why = (why_needed or "").strip()
+    if why:
+        parts.append(f"Why needed: {why[:400]}.")
     if section_id:
         parts.append(f"(section id {section_id})")
+    parts.append(_BOILERPLATE_PREFIX)
     parts.append(
         "Prefer 03_CS case studies and won proposal excerpts (06_WON/07_FIN Proposal). "
         "Include strategy, deliverables, and measurable results/KPIs when present. "
@@ -444,6 +474,19 @@ def pack_hit_context(
     return "\n".join(parts).strip()[:max_chars]
 
 
+def _search_cache_key(
+    query: str,
+    *,
+    limit: int,
+    filters: dict[str, Any] | None,
+    threshold: float,
+) -> tuple[Any, ...]:
+    filt = ""
+    if isinstance(filters, dict):
+        filt = str(sorted(filters.items()))
+    return (query.strip(), int(limit), round(float(threshold), 3), filt)
+
+
 async def _search_hits_chunk_first(
     query: str,
     *,
@@ -452,8 +495,44 @@ async def _search_hits_chunk_first(
     threshold: float,
 ) -> list[dict[str, Any]]:
     """Fetch more raw chunks than memory summaries; chunks lead the merged list."""
-    import asyncio
+    from app.services import supermemory
 
+    key = _search_cache_key(query, limit=limit, filters=filters, threshold=threshold)
+    cached = _search_hit_cache.get(key)
+    if cached is not None:
+        logger.info("KB chunk-first search %r: cache hit merged=%d", query[:60], len(cached))
+        return list(cached)
+
+    existing = _search_inflight.get(key)
+    if existing is not None:
+        return list(await existing)
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[list[dict[str, Any]]] = loop.create_future()
+    _search_inflight[key] = fut
+    try:
+        merged = await _search_hits_chunk_first_uncached(
+            query, limit=limit, filters=filters, threshold=threshold
+        )
+        if len(_search_hit_cache) >= _SEARCH_CACHE_MAX:
+            _search_hit_cache.pop(next(iter(_search_hit_cache)))
+        _search_hit_cache[key] = merged
+        fut.set_result(merged)
+        return list(merged)
+    except Exception as exc:
+        fut.set_exception(exc)
+        raise
+    finally:
+        _search_inflight.pop(key, None)
+
+
+async def _search_hits_chunk_first_uncached(
+    query: str,
+    *,
+    limit: int,
+    filters: dict[str, Any] | None,
+    threshold: float,
+) -> list[dict[str, Any]]:
     from app.services import supermemory
 
     active_filters = filters or supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS
@@ -526,7 +605,12 @@ async def retrieve_for_question(
         }
 
     queries = expand_kb_queries(question)
-    logger.info("KB RAG query %r → %d search(es)", question[:80], len(queries))
+    logger.info(
+        "KB RAG query %r → %d search(es) head=%r",
+        question[:80],
+        len(queries),
+        (queries[0][:80] if queries else ""),
+    )
 
     async def _search_one(query: str, thresh: float) -> list[dict[str, Any]]:
         try:

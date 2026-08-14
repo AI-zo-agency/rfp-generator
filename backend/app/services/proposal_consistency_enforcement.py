@@ -228,21 +228,7 @@ def compress_schedule_restating_approach(
             ),
             "Project Approach",
         )
-        stub = (
-            f"## {title}\n\n"
-            f"Delivery calendar for this engagement (dates and checkpoints only — "
-            f"methodology detail lives in **{approach_title}**).\n\n"
-            "| Phase | Timing | Milestone |\n"
-            "| --- | --- | --- |\n"
-            "| Discovery | [VERIFY: week/dates within RFP award→launch window] | Kickoff complete |\n"
-            "| Strategy | [VERIFY: week/dates] | Framework approval |\n"
-            "| Creative / production | [VERIFY: week/dates] | Creative approval |\n"
-            "| Launch / handoff | [VERIFY: must fit RFP mid-contract / launch date] | Launch-ready |\n\n"
-            f"Do not restate the full phase narrative from {approach_title}. "
-            "If the RFP award-to-launch window is shorter than a sequential multi-month "
-            "plan, compress phases, run workstreams in parallel, or explicitly note "
-            "what completes by launch vs post-launch.\n"
-        )
+        stub = _schedule_calendar_stub(title, approach_title, window_weeks=None)
         out.append(section.model_copy(update={"content": stub}))
         compressed += 1
         logger.info(
@@ -309,23 +295,118 @@ def infer_rfp_delivery_window_weeks(rfp_text: str) -> int | None:
     return None
 
 
-def _schedule_calendar_stub(title: str, approach_title: str, window_weeks: int) -> str:
-    return (
-        f"## {title}\n\n"
-        f"Delivery calendar for this engagement (dates and checkpoints only — "
-        f"methodology detail lives in **{approach_title}**).\n\n"
-        f"**RFP constraint:** sequential plans longer than ~{window_weeks} weeks "
-        f"overrun the award→launch window stated in the RFP. Compress phases, run "
-        f"workstreams in parallel, or mark post-launch work explicitly — "
-        f"do not invent a multi-month calendar.\n\n"
-        "| Phase | Timing | Milestone |\n"
-        "| --- | --- | --- |\n"
-        "| Discovery | [VERIFY: week/dates within RFP award→launch window] | Kickoff complete |\n"
-        "| Strategy | [VERIFY: week/dates within RFP window] | Framework approval |\n"
-        "| Creative / production | [VERIFY: week/dates within RFP window] | Creative approval |\n"
-        "| Launch / handoff | [VERIFY: must fit RFP launch / mid-contract date] | Launch-ready |\n\n"
-        "Do not restate Approach methodology paragraphs here.\n"
+_WRITER_LEAK_LINE_RE = re.compile(
+    r"(?im)^\s*(?:do not restate\b.*|"
+    r"\*\*RFP constraint:\*\*.*|"
+    r"delivery calendar for this engagement \(dates and checkpoints only.*)\s*$"
+)
+_EMPTY_TIMING_CELL_RE = re.compile(
+    r"(?im)^\|\s*[^|\n]+\s*\|\s*\|\s*[^|\n]*\|"
+)
+_VERIFY_TIMING_RE = re.compile(r"(?i)\[VERIFY:[^\]]*(?:week|dates|window|launch)[^\]]*\]")
+
+
+def _fmt_week_span(start: int, end: int) -> str:
+    if start >= end:
+        return f"Week {end} after award"
+    return f"Weeks {start}–{end} after award"
+
+
+def _schedule_timing_rows(window_weeks: int | None) -> list[tuple[str, str, str]]:
+    """Four overlapping phases a designer can typeset. Relative weeks, not invented dates."""
+    if window_weeks and window_weeks >= 4:
+        w = int(window_weeks)
+        d_end = max(1, round(w * 0.25))
+        s_end = max(d_end + 1, round(w * 0.50))
+        c_end = max(s_end, round(w * 0.80))
+        return [
+            ("Discovery", _fmt_week_span(1, d_end), "Kickoff complete"),
+            ("Strategy", _fmt_week_span(d_end, s_end), "Framework approval"),
+            ("Creative / production", _fmt_week_span(s_end, c_end), "Creative approval"),
+            (
+                "Launch / handoff",
+                f"Week {w} after award (RFP launch window)",
+                "Launch-ready",
+            ),
+        ]
+    return [
+        ("Discovery", "Starts at award", "Kickoff complete"),
+        ("Strategy", "Overlaps Discovery; locks before creative", "Framework approval"),
+        ("Creative / production", "After framework lock; before launch", "Creative approval"),
+        ("Launch / handoff", "By the RFP launch / go-live date", "Launch-ready"),
+    ]
+
+
+def _schedule_calendar_stub(
+    title: str,
+    approach_title: str,
+    window_weeks: int | None,
+) -> str:
+    rows = _schedule_timing_rows(window_weeks)
+    table = "| Phase | Timing | Milestone |\n| --- | --- | --- |\n" + "".join(
+        f"| {phase} | {timing} | {milestone} |\n" for phase, timing, milestone in rows
     )
+    if window_weeks and window_weeks >= 4:
+        lead = (
+            f"Workstreams overlap so launch lands in the RFP window "
+            f"({window_weeks} weeks from award). Phase method lives in {approach_title}."
+        )
+    else:
+        lead = (
+            f"Timing is weeks from award through the RFP launch date. "
+            f"Phase method lives in {approach_title}."
+        )
+    note = (
+        "[DESIGNER NOTE: Typeset as a 4-row calendar. Columns: Phase | Timing | "
+        "Milestone. Timing is weeks from award — never leave Timing blank.]"
+    )
+    return f"## {title}\n\n{lead}\n\n{table}\n{note}\n"
+
+
+def _schedule_needs_designer_polish(body: str) -> bool:
+    text = body or ""
+    if _WRITER_LEAK_LINE_RE.search(text):
+        return True
+    if _VERIFY_TIMING_RE.search(text):
+        return True
+    if _EMPTY_TIMING_CELL_RE.search(text) and re.search(
+        r"(?i)\|\s*timing\s*\|", text
+    ):
+        return True
+    return False
+
+
+def polish_schedule_tabs_for_designer(
+    sections: list[ProposalSection],
+    *,
+    rfp_text: str = "",
+) -> tuple[list[ProposalSection], list[str]]:
+    """Replace writer-facing calendar stubs with a filled table a designer can layout."""
+    logs: list[str] = []
+    window = infer_rfp_delivery_window_weeks(rfp_text)
+    approach_title = next(
+        (
+            s.title
+            for s in sections
+            if _APPROACH_TITLE_RE.search(s.title or "")
+            and not _SCHEDULE_TITLE_RE.search(s.title or "")
+        ),
+        "Project Approach",
+    )
+    out: list[ProposalSection] = []
+    for section in sections:
+        title = section.title or ""
+        body = section.content or ""
+        if not _SCHEDULE_TITLE_RE.search(title) or not _schedule_needs_designer_polish(body):
+            out.append(section)
+            continue
+        stub = _schedule_calendar_stub(title, approach_title, window)
+        out.append(section.model_copy(update={"content": stub}))
+        logs.append(
+            f"{section.id}: Schedule/Timeline rewritten as a filled calendar "
+            "(no blank Timing cells, no writer instructions)"
+        )
+    return out, logs
 
 
 def scrub_schedule_calendar_overrun(
@@ -368,37 +449,36 @@ def scrub_schedule_calendar_overrun(
             logs.append(
                 f"{section.id}: Schedule claimed Week {max_week} but RFP "
                 f"award→launch window is ~{window} weeks — replaced with "
-                "calendar VERIFY stub (no invented dates)"
+                "a filled week-from-award calendar"
             )
             continue
 
         if _APPROACH_TITLE_RE.search(title):
             # Keep methodology; strip invented week spans that overrun the window.
             cleaned, n_paren = _WEEK_PAREN_RE.subn(
-                "(timing: [VERIFY: fit RFP award→launch window])",
+                f"(timing: within the {window}-week RFP launch window)",
                 body,
             )
             # Bare "Weeks 8-9" / "Week 10" outside parens
             cleaned2, n_range = _WEEK_RANGE_RE.subn(
-                "[VERIFY: timing within RFP award→launch window]",
+                f"within the {window}-week RFP launch window",
                 cleaned,
             )
             cleaned3, n_single = _WEEK_SINGLE_RE.subn(
-                "[VERIFY: timing within RFP award→launch window]",
+                f"within the {window}-week RFP launch window",
                 cleaned2,
             )
             if n_paren + n_range + n_single:
                 banner = (
-                    f"**Calendar note:** This RFP’s award→launch window is about "
-                    f"{window} weeks. Do not treat a sequential {max_week}-week plan "
-                    "as in-window — compress or parallelize; never invent dates.\n\n"
+                    f"Timing fits a {window}-week award-to-launch window "
+                    f"(a sequential {max_week}-week plan does not).\n\n"
                 )
-                if "Calendar note:" not in cleaned3:
+                if "Timing fits a" not in cleaned3:
                     cleaned3 = banner + cleaned3
                 out.append(section.model_copy(update={"content": cleaned3}))
                 logs.append(
                     f"{section.id}: Approach claimed Week {max_week} vs ~{window}-week "
-                    "RFP window — replaced week labels with VERIFY (kept methodology)"
+                    "RFP window — replaced week labels (kept methodology)"
                 )
                 continue
 
@@ -738,6 +818,14 @@ def apply_consistency_enforcement(
         changed = True
         logs.extend(overrun_logs)
         sections = sections3
+
+    sections4, polish_logs = polish_schedule_tabs_for_designer(
+        sections, rfp_text=rfp_text
+    )
+    if polish_logs:
+        changed = True
+        logs.extend(polish_logs)
+        sections = sections4
 
     working = draft.model_copy(update={"sections": sections}) if changed else draft
 

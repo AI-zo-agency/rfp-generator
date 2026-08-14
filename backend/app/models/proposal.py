@@ -785,6 +785,17 @@ class ProposalPhase2Response(BaseModel):
     research: ProposalResearchCache
 
 
+class ProposalAgentActivity(BaseModel):
+    """Live chat recap: what the agent did, what changed, gaps found."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    outcome: str = "ok"
+    steps: list[str] = Field(default_factory=list)
+    changes: list[str] = Field(default_factory=list)
+    discrepancies: list[str] = Field(default_factory=list)
+
+
 class ProposalSuggestedFix(BaseModel):
     """Optional one-click apply payload after an advisory (draft-unchanged) turn."""
 
@@ -807,6 +818,9 @@ class ProposalSectionImproveResponse(BaseModel):
     draft_changed: bool = Field(default=True, alias="draftChanged")
     suggested_fix: ProposalSuggestedFix | None = Field(
         default=None, alias="suggestedFix"
+    )
+    agent_activity: ProposalAgentActivity | None = Field(
+        default=None, alias="agentActivity"
     )
 
 

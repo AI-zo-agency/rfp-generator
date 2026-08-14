@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
 from app.models.rfp import RfpRecord
-from app.services.proposal_common import ProposalError
 from app.services.proposal_manual_flags import (
     MANUAL_FILL_TAG_RE,
     extract_manual_fill_tags,
@@ -193,7 +192,7 @@ def _common_improve_patches(*, draft, research, section_id: str, chat_json):
         patch(
             "app.services.proposal_section_editor._plan_section_improve",
             new=AsyncMock(
-                return_value=("tighten", "tighten this paragraph", ["zö pricing facts"])
+                return_value=("tighten", "tighten this paragraph", ["zö pricing facts"], "edit_open_section")
             ),
         ),
     ):
@@ -310,13 +309,12 @@ class ManualFillGuardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("[MANUAL FILL: wet/digital signature]", section.content)
             self.assertIn("could not resolve", msg.lower())
 
-    async def test_rewrite_dropping_tags_retries_then_errors(self) -> None:
+    async def test_rewrite_dropping_tags_restores_them(self) -> None:
         content = "Intro text.\n\n[MANUAL FILL: attach COI]\n\nClosing."
         calls = {"n": 0}
 
-        async def bad_then_still_bad(messages, **kwargs):
+        async def drops_placeholder(messages, **kwargs):
             calls["n"] += 1
-            # Always drop the placeholder — should fail twice and raise.
             return {"content": "Intro text tightened.\n\nClosing."}, "mock"
 
         draft = _draft(content)
@@ -333,27 +331,27 @@ class ManualFillGuardTests(unittest.IsolatedAsyncioTestCase):
             draft=draft,
             research=research,
             section_id="section-1-who",
-            chat_json=bad_then_still_bad,
+            chat_json=drops_placeholder,
         ):
-            with self.assertRaises(ProposalError) as ctx:
-                await improve_proposal_section(
-                    "rfp-mfill",
-                    "section-1-who",
-                    "tighten this paragraph",
-                    persist=False,
-                )
-            self.assertIn("MANUAL FILL", str(ctx.exception))
-            self.assertGreaterEqual(calls["n"], 2)
+            section, _updated, _r, _p, _msg, changed, _ = await improve_proposal_section(
+                "rfp-mfill",
+                "section-1-who",
+                "tighten this paragraph",
+                persist=False,
+            )
+            self.assertTrue(changed)
+            self.assertIn("[MANUAL FILL: attach COI]", section.content)
+            self.assertGreaterEqual(calls["n"], 1)
 
 
 class ManualFillUnmaskUnitTests(unittest.TestCase):
-    def test_unmask_raises_when_dropped(self) -> None:
-        with self.assertRaises(ProposalError):
-            _unmask_manual_fill_checked(
-                "no placeholders left",
-                ["[MANUAL FILL]"],
-                attempt=1,
-            )
+    def test_unmask_restores_when_dropped(self) -> None:
+        restored = _unmask_manual_fill_checked(
+            "no placeholders left",
+            ["[MANUAL FILL]"],
+            attempt=1,
+        )
+        self.assertIn("[MANUAL FILL]", restored)
 
 
 if __name__ == "__main__":

@@ -404,6 +404,8 @@ def _split_bio_subsections(content: str) -> tuple[str, list[tuple[str, str]]]:
 
 def _kb_query_for_bio_subsection(member: str, heading: str) -> str:
     h = heading.casefold()
+    if "role" in h and "engagement" in h:
+        return f"04_Bio {member} role title years specialization experience zö agency"[:240]
     if "work" in h and "history" in h:
         return f"04_Bio {member} work history employment positions dates zö agency"[:240]
     if "education" in h:
@@ -427,8 +429,11 @@ async def _repair_bio_subsection_block(
     heading: str,
     block: str,
 ) -> tuple[str, int]:
-    """Fill VERIFY tags in one bio subsection only; leave other subsections untouched."""
-    if "[VERIFY:" not in block and not _INSUFFICIENT_EVIDENCE_RE.search(block):
+    """Fill VERIFY tags in one bio subsection; also rewrite Role-on-engagement
+    blurbs so they cannot invent titles or sector specializations.
+    """
+    role_layer = "role" in heading.casefold() and "engagement" in heading.casefold()
+    if "[VERIFY:" not in block and not _INSUFFICIENT_EVIDENCE_RE.search(block) and not role_layer:
         return block, 0
 
     query = _kb_query_for_bio_subsection(member, heading)
@@ -486,7 +491,10 @@ async def _repair_bio_subsection_block(
 async def _fact_check_bio_subsections(
     section: ProposalSection,
 ) -> tuple[ProposalSection, int, list[str]]:
-    """Section 2 bios: only subsections that still contain VERIFY tags."""
+    """Fill VERIFY tags, and always ground Role-on-this-engagement blurbs to 04_Bio.
+
+    Source bio PDF body is not rewritten here; engagement-specific role narrative is.
+    """
     if not section.id.startswith("section-2-bio"):
         return section, 0, []
 
@@ -502,7 +510,12 @@ async def _fact_check_bio_subsections(
         rebuilt.append(preamble)
 
     for heading, block in blocks:
-        if "[VERIFY:" not in block and not _INSUFFICIENT_EVIDENCE_RE.search(block):
+        role_layer = "role" in heading.casefold() and "engagement" in heading.casefold()
+        if (
+            "[VERIFY:" not in block
+            and not _INSUFFICIENT_EVIDENCE_RE.search(block)
+            and not role_layer
+        ):
             rebuilt.append(block)
             continue
         new_block, fills = await _repair_bio_subsection_block(

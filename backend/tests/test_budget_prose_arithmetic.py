@@ -365,5 +365,52 @@ class GroundingCheckPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mismatches, [])
 
 
+class FeeTableVsSubtotalTests(unittest.TestCase):
+    def test_flags_phase_rows_that_do_not_match_stated_subtotal(self) -> None:
+        text = (
+            "**Agency Fee Subtotal: $279,800**\n\n"
+            "## Fee Detail by Phase\n\n"
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| Phase 1 | Discovery | $40,000 |\n"
+            "| Phase 2 | Strategy | $55,000 |\n"
+            "| Phase 5 | Launch | $50,000 |\n"
+            "| Phase 7 | Reporting | $116,300 |\n"
+            "| **Total** | | **$261,300** |\n"
+        )
+        hits = collect_prose_arithmetic_violations(text)
+        self.assertTrue(any("Fee Detail by Phase" in h for h in hits))
+        self.assertTrue(any("261,300" in h and "279,800" in h for h in hits))
+
+    def test_healthy_phase_table_is_clean(self) -> None:
+        text = (
+            "**Professional fees: $145,000**\n"
+            "**Total proposed investment: $145,000**\n\n"
+            "## Fee Detail by Phase\n\n"
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| Phase 1 | Discovery | $70,000 |\n"
+            "| Phase 2 | Strategy | $75,000 |\n"
+            "| **Total** | | **$145,000** |\n"
+        )
+        self.assertEqual(collect_prose_arithmetic_violations(text), [])
+
+    def test_travel_row_in_table_must_be_inside_stated_total(self) -> None:
+        """Neighbor-island travel in the table with a fees-only total is a mismatch."""
+        text = (
+            "**Professional fees: $279,800**\n"
+            "**Total proposed investment: $279,800**\n\n"
+            "| Item | Amount |\n"
+            "| --- | ---: |\n"
+            "| Professional fees | $279,800 |\n"
+            "| Neighbor-Island Travel | $18,000 |\n"
+            "| **Total** | **$279,800** |\n"
+        )
+        hits = collect_prose_arithmetic_violations(text)
+        self.assertTrue(hits)
+        self.assertTrue(any("279,800" in h for h in hits))
+        self.assertTrue(any("18,000" in h or "297,800" in h for h in hits))
+
+
 if __name__ == "__main__":
     unittest.main()

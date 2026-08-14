@@ -357,6 +357,7 @@ async def _post_chat(
     temperature: float = 0.2,
     json_mode: bool = True,
     cache_prefix: str | Sequence[str] | None = None,
+    ttl_1h: bool | None = None,
 ) -> str:
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
@@ -374,7 +375,7 @@ async def _post_chat(
         messages,
         model=model,
         cache_prefix=cache_prefix,
-        ttl_1h=settings.llm_cache_ttl_1h,
+        ttl_1h=settings.llm_cache_ttl_1h if ttl_1h is None else ttl_1h,
         enabled=not settings.llm_disable_prompt_cache,
     )
     body: dict[str, Any] = {
@@ -1505,17 +1506,24 @@ def _salvage_sections_payload(text: str) -> dict[str, Any] | None:
 
 
 def _salvage_simple_content_payload(text: str) -> dict[str, Any] | None:
-    """Recover content field from a single-section payload if LLM JSON is truncated/invalid."""
-    match = re.search(r'"content"\s*:\s*"', text)
-    if not match:
-        return None
-    content_start = match.end()
-    chunk = text[content_start:]
-    content = _extract_json_string_value(chunk, allow_partial=True)
-    if content.strip():
-        # Clean up any trailing closed quotes, braces, brackets
+    """Recover content/replacement from a single-object payload if LLM JSON is invalid.
+
+    Excerpt edits return {"replacement": "..."} and models often put raw markdown
+    table newlines inside the string, which json.loads rejects.
+    """
+    for key in ("replacement", "content"):
+        match = re.search(rf'"{key}"\s*:\s*"', text)
+        if not match:
+            continue
+        content_start = match.end()
+        chunk = text[content_start:]
+        content = _extract_json_string_value(chunk, allow_partial=True)
+        if not content.strip():
+            continue
         clean_content = content.rstrip('}" \t\n\r')
-        payload: dict[str, Any] = {"content": clean_content}
+        payload: dict[str, Any] = {key: clean_content}
+        if key == "replacement":
+            payload["content"] = clean_content
         id_m = re.search(r'"id"\s*:\s*"((?:\\.|[^"\\])*)"', text)
         title_m = re.search(r'"title"\s*:\s*"((?:\\.|[^"\\])*)"', text)
         if id_m:

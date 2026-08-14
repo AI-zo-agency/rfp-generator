@@ -298,9 +298,88 @@ def find_budget_section_index(sections: list[ProposalSection]) -> int | None:
             best_score = score
             best_idx = i
     if best_idx is not None:
+        from app.services.proposal_budget_slots import find_unresolved_budget_slots
+
+        slotted: list[tuple[int, int]] = []
+        for i, section in enumerate(sections):
+            if budget_section_score(section.title) <= 0:
+                continue
+            if find_unresolved_budget_slots(section.content or ""):
+                slotted.append((budget_section_score(section.title), i))
+        if slotted:
+            slotted.sort(reverse=True)
+            return slotted[0][1]
         return best_idx
     return filled_form_idx
 
+
+def _cost_tab_quality_score(section: ProposalSection) -> int:
+    """Higher = keep this Cost/Pricing tab when collapsing duplicates."""
+    from app.services.proposal_budget_slots import find_unresolved_budget_slots
+
+    body = section.content or ""
+    score = 0
+    if find_unresolved_budget_slots(body) or "{{budget." in body:
+        score -= 250
+    money = [
+        float(tok.replace(",", ""))
+        for tok in re.findall(r"\$\s*([\d,]+(?:\.\d{1,2})?)", body)
+        if tok.replace(",", "").replace(".", "", 1).isdigit()
+    ]
+    if any(amt >= 100 for amt in money):
+        score += 120
+    if re.search(r"(?i)fee\s+detail|proposed\s+investment", body):
+        score += 40
+    score += min(len(body) // 100, 50)
+    return score
+
+
+def collapse_duplicate_cost_proposal_tabs(
+    sections: list[ProposalSection],
+) -> tuple[list[ProposalSection], list[str]]:
+    """Keep one narrative Cost/Pricing tab — never a second {{budget.}} shell.
+
+    Scan/senior-editor dedupe treats every Cost Proposal as protected, so Phase 3
+    plus Structure Scan used to ship both 'Cost Proposal using Appendix A…' (real
+    fees) and a later 'Cost Proposal' full of unresolved money slots.
+    Official filled buyer pricing forms are left beside the narrative tab.
+    """
+    from app.services.proposal_outline_dedup import is_pricing_outline_title
+
+    logs: list[str] = []
+    narrative_idxs: list[int] = []
+    for i, section in enumerate(sections):
+        if budget_section_score(section.title) <= 0 and not is_pricing_outline_title(
+            section.title or ""
+        ):
+            continue
+        if section_looks_like_official_pricing_form(section) and official_pricing_form_is_filled(
+            section.content or ""
+        ):
+            continue
+        narrative_idxs.append(i)
+    if len(narrative_idxs) <= 1:
+        return sections, logs
+
+    keep_idx = max(narrative_idxs, key=lambda i: _cost_tab_quality_score(sections[i]))
+    drop_ids = {
+        sections[i].id
+        for i in narrative_idxs
+        if i != keep_idx and sections[i].id
+    }
+    if not drop_ids:
+        return sections, logs
+    kept_title = sections[keep_idx].title or sections[keep_idx].id
+    dropped_titles = [
+        sections[i].title or sections[i].id
+        for i in narrative_idxs
+        if sections[i].id in drop_ids
+    ]
+    logs.append(
+        "Budget: collapsed duplicate Cost/Pricing tab(s) into "
+        f"“{kept_title}” — dropped {', '.join(dropped_titles[:6])}."
+    )
+    return [s for s in sections if s.id not in drop_ids], logs
 
 
 _DOLLAR_RE = re.compile(r"\$[\d,]+(?:\.\d{1,2})?")
@@ -820,6 +899,27 @@ def _sync_qualifying_fee_language(
     return text
 
 
+def _sync_labeled_fee_subtotal(text: str, fees: float) -> str:
+    """Keep 'Agency Fee Subtotal' / 'Professional fees' figures on the table sum.
+
+    Multi-amount phase lists are otherwise left alone (Complete-scan used to
+    rewrite the table and leave the old subtotal in Terms).
+    """
+    if not text or fees <= 0:
+        return text
+    usd = _usd(fees)
+
+    def _repl(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{match.group(2)}{usd}"
+
+    return re.sub(
+        r"(?i)(\*{0,2}(?:agency\s+fee\s+subtotal|professional\s+(?:services\s+)?fees?)"
+        r"\*{0,2})(\s*[:—-]\s*)\$[\d,]+(?:\.\d{2})?",
+        _repl,
+        text,
+    )
+
+
 def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
     """Dedupe travel, sync totals, scrub internal jargon before manuscript render.
 
@@ -897,6 +997,19 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
             updates["scope_summary"] = scope
         if ql != (cleaned.qualifying_language or ""):
             updates["qualifying_language"] = ql
+        synced_scope = _sync_labeled_fee_subtotal(
+            updates.get("scope_summary", cleaned.scope_summary or ""), fees
+        )
+        synced_ql = _sync_labeled_fee_subtotal(
+            updates.get("qualifying_language", cleaned.qualifying_language or ""),
+            fees,
+        )
+        if synced_scope != (updates.get("scope_summary", cleaned.scope_summary or "")):
+            updates["scope_summary"] = synced_scope
+        if synced_ql != (
+            updates.get("qualifying_language", cleaned.qualifying_language or "")
+        ):
+            updates["qualifying_language"] = synced_ql
     opt = (cleaned.option_term_notes or "").strip()
     if opt:
         # Internal jargon only — no topic/keyword rewrites of fee structure.

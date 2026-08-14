@@ -2123,6 +2123,29 @@ async def _run_phase3_drafting_inner(
         for section in merged_sections
     ]
 
+    from app.services.proposal_fulfill_rfp_structure import (
+        apply_rfp_toc_layout,
+        extract_rfp_scored_section_specs,
+        specs_from_intelligence_outline,
+    )
+
+    specs: list = []
+    try:
+        specs = await extract_rfp_scored_section_specs(
+            rfp_source_text or "",
+            rfp_title=rfp.title,
+            existing_section_titles=[s.title for s in merged_sections if s.title],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3 RFP TOC extract skipped: %s", exc)
+    if not specs:
+        specs = specs_from_intelligence_outline(
+            [
+                (m.title or "", m.duplicate_of_static_section or "")
+                for m in research.rfp_sections
+            ],
+            static_titles=[s.title for s in static_sections if s.title],
+        )
     now = datetime.now(timezone.utc).isoformat()
     draft = ProposalDraft(
         rfpId=rfp.id,
@@ -2131,6 +2154,9 @@ async def _run_phase3_drafting_inner(
         generatedAt=now,
         provider=provider,
     )
+    draft, toc_logs = apply_rfp_toc_layout(draft, specs)
+    for line in toc_logs[:8]:
+        logger.info("Phase 3 TOC layout: %s — %s", rfp_id, line)
     from app.services.proposal_integrity_guards import apply_manuscript_integrity_guards
 
     draft, integrity_logs = apply_manuscript_integrity_guards(draft)

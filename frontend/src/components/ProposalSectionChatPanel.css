@@ -115,3 +115,67 @@
   line-height: 1.35;
   color: #6b7280;
 }
+
+.proposal-section-chat-live {
+  margin-top: 0.35rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid rgba(234, 88, 12, 0.22);
+  border-radius: 8px;
+  background: rgba(234, 88, 12, 0.06);
+}
+
+.proposal-section-chat-live-kicker,
+.proposal-section-chat-activity-kicker {
+  margin: 0 0 0.35rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #ea580c;
+}
+
+.proposal-section-chat-live-steps,
+.proposal-section-chat-activity ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: #374151;
+}
+
+.proposal-section-chat-live-step {
+  color: #9ca3af;
+}
+
+.proposal-section-chat-live-step--done {
+  color: #6b7280;
+}
+
+.proposal-section-chat-live-step--active {
+  color: #ea580c;
+  font-weight: 600;
+}
+
+.proposal-section-chat-activity {
+  margin: 0 0 0.65rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid rgba(17, 24, 39, 0.1);
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.proposal-section-chat-activity-label {
+  margin: 0.4rem 0 0.15rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+.proposal-section-chat-activity-none {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #047857;
+  font-weight: 600;
+}

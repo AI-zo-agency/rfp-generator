@@ -171,5 +171,36 @@ class ChatIntentTests(unittest.TestCase):
         self.assertTrue(user_asks_content_risk_repair(msg))
 
 
+class GroundBiosStubOnlyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_section_2_bio_becomes_designer_note_without_llm(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+        from app.services.proposal_capability_bio_grounding import ground_bios_to_kb
+
+        draft = ProposalDraft(
+            rfpId="rfp-bio",
+            updatedAt="2026-08-14T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="section-2-bio-curt-schultz",
+                    title="2.4 — Curt Schultz",
+                    content=(
+                        "### Curt Schultz\n"
+                        "**Role on this engagement:** Team member on this engagement.\n\n"
+                        "Curt Schultz has 30+ years of experience in graphic communications "
+                        "and 18 years of agency ownership with a creative philosophy.\n"
+                    ),
+                )
+            ],
+        )
+        updated, logs = await ground_bios_to_kb(draft, use_llm=True)
+        body = updated.sections[0].content or ""
+        self.assertTrue(logs)
+        self.assertTrue(is_bio_pdf_designer_note(body))
+        self.assertNotIn("30+ years", body)
+        self.assertNotIn("agency ownership", body)
+        self.assertIn("04_Bio_CurtSchultz.pdf", body)
+
+
 if __name__ == "__main__":
     unittest.main()

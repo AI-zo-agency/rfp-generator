@@ -135,7 +135,7 @@ export function DraftSectionEditor({
       return;
     }
     if (!previewRef.current.contains(sel.anchorNode)) return;
-    const text = sel.toString();
+    const text = sel.toString().replace(/\u00a0/g, " ");
     if (text.trim().length < 3) {
       setSelection(null);
       return;
@@ -164,6 +164,7 @@ export function DraftSectionEditor({
       const target = event.target as HTMLElement | null;
       if (!target) return;
       if (target.closest(".proposal-selection-revise-btn")) return;
+      if (target.closest(".proposal-revise-toolbar-btn")) return;
       if (target === textareaRef.current) return;
       if (previewRef.current?.contains(target)) return;
       clearSelection();
@@ -271,6 +272,19 @@ export function DraftSectionEditor({
                   View what changed
                 </button>
               ) : null}
+              <button
+                type="button"
+                disabled={busy || !onOpenRevisionChat}
+                title={
+                  selection
+                    ? "Revise the highlighted passage"
+                    : "Opens chat on this section. Highlight a passage first to revise only that excerpt."
+                }
+                onClick={() => openChat("selection")}
+                className="proposal-revise-toolbar-btn text-[11px] font-semibold text-zo-orange transition-smooth hover:underline disabled:opacity-50"
+              >
+                Revise content
+              </button>
               <button
                 type="button"
                 disabled={busy || !onOpenRevisionChat}

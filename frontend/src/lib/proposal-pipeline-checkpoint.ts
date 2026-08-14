@@ -144,8 +144,8 @@ function phase3SectionContentUsable(content: string | undefined | null): boolean
  * so a stage added on the backend is invisible here until it is added below.
  */
 export const FULFILL_SCAN_STEP_LABELS = [
-  "Closing & submission tabs",
   "RFP structure (all scored sections)",
+  "Closing & submission tabs",
   "Requirement ledger (merge / cut / add)",
   "DQ & gov-policy gate (agentic loop)",
   "Remove duplicate sections",
@@ -156,8 +156,8 @@ export const FULFILL_SCAN_STEP_LABELS = [
   "Contractor KPIs (Section 2.3)",
   "KB fact-check (Supermemory)",
   "RFP contradiction check (LLM)",
-  "Remove optional VERIFY/MANUAL FILL",
   "Line-by-line KB grounding (async)",
+  "Remove optional VERIFY/MANUAL FILL",
   "Compact manuscript (remove duplicates)",
   "Page limit & anti-invention (Ralph)",
   "Review & quality gate (3 acts)",

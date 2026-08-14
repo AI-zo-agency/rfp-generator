@@ -52,12 +52,17 @@ _QUAL_TITLE_HINTS = (
 )
 
 
+COMPANY_BLOCK_HEADER_ID = "rfp-structure-company-block-header"
+
+
 @dataclass
 class RfpSectionSpec:
     rfp_title: str
     required_headings: list[str] = field(default_factory=list)
     instructions: str = ""
     evaluation_weight: str = ""
+    same_ask_as: list[str] = field(default_factory=list)
+    satisfied_by_static_company_block: bool = False
 
 
 def _section_title_cf(title: str) -> str:
@@ -100,11 +105,13 @@ async def extract_rfp_scored_section_specs(
     rfp_text: str,
     *,
     rfp_title: str = "",
+    existing_section_titles: list[str] | None = None,
 ) -> list[RfpSectionSpec]:
     """LLM: scored narrative sections + required internal outline from THIS RFP only."""
     excerpt = submission_documents_excerpt(rfp_text) or rfp_text[:80000]
     bmp_headings = detect_bmp_exhibit_required_headings(rfp_text)
     specs: list[RfpSectionSpec] = []
+    existing_titles = [t for t in (existing_section_titles or []) if t.strip()]
 
     if bmp_headings:
         specs.append(
@@ -128,23 +135,42 @@ async def extract_rfp_scored_section_specs(
                 {
                     "role": "system",
                     "content": (
-                        "Read ONE RFP. List every SCORED NARRATIVE proposal section the evaluator "
-                        "grades (BMP, qualifications, approach, references narrative, etc.).\n"
-                        "For each, give the RFP's required INTERNAL outline (headings, exhibit "
-                        "letters, checklist bullets) — not zö's generic template.\n"
-                        "Do NOT list signed forms-only items.\n"
+                        "Read ONE RFP. Return the proposer's submission sequence IN ORDER — "
+                        "this RFP's TOC / 'proposal shall include' / numbered contents list.\n"
+                        "Use only titles this RFP actually names. Do not invent a default stack "
+                        "(no canned cover-letter / technical / cost sequence).\n"
+                        "If this RFP states an order, the JSON array must match that order.\n"
+                        "Do NOT list evaluation-category labels that duplicate a TOC tab.\n"
+                        "If the TOC already has References, do NOT also emit "
+                        "References & Past Performance.\n"
+                        "zö already keeps static company/team/experience tabs (Sections 1.1–1.5, "
+                        "bios, our work). Those tabs stay as-is — do not ask to rewrite them.\n"
+                        "If a TOC item is the firm's identity already covered by those static tabs, "
+                        "set satisfiedByStaticCompanyBlock true and sameAskAs to the existing tab "
+                        "titles. That item is a header wrap, not a new essay.\n"
+                        "Dynamic tabs are whatever else THIS RFP asks the proposer to submit.\n"
+                        "sameAskAs = existing draft titles that are the SAME ask by meaning — "
+                        "not a keyword synonym list.\n"
                         "Return JSON:\n"
                         '{"sections":[{"rfpTitle":"...","requiredHeadings":["A. ..."],'
-                        '"instructions":"how to align prose","evaluationWeight":"35 pts"}]}'
+                        '"instructions":"how to align prose","evaluationWeight":"35 pts",'
+                        '"sameAskAs":["Who We Are"],'
+                        '"satisfiedByStaticCompanyBlock":false}]}'
                     ),
                 },
                 {
                     "role": "user",
-                    "content": f"RFP: {rfp_title}\n\nExcerpt:\n{excerpt[:45000]}",
+                    "content": (
+                        f"RFP: {rfp_title}\n"
+                        f"Existing draft tabs:\n"
+                        + "\n".join(f"- {t}" for t in existing_titles[:80])
+                        + "\nUse the cached RFP excerpt. Return the JSON object."
+                    ),
                 },
             ],
             max_tokens=3072,
             temperature=0.1,
+            cache_prefix=excerpt[:45000],
         )
         for row in (raw or {}).get("sections") or []:
             if not isinstance(row, dict):
@@ -157,6 +183,28 @@ async def extract_rfp_scored_section_specs(
                 for h in (row.get("requiredHeadings") or [])
                 if str(h).strip()
             ]
+            same_ask = [
+                str(x).strip()
+                for x in (row.get("sameAskAs") or row.get("same_ask_as") or [])
+                if str(x).strip()
+            ]
+            satisfied_static = bool(
+                row.get("satisfiedByStaticCompanyBlock")
+                or row.get("satisfied_by_static_company_block")
+            )
+            instructions = str(row.get("instructions") or "").strip()
+            if not instructions:
+                instructions = "Required in this RFP's submission sequence."
+            candidate = RfpSectionSpec(
+                rfp_title=title,
+                required_headings=headings,
+                instructions=instructions,
+                evaluation_weight=str(row.get("evaluationWeight") or "").strip(),
+                same_ask_as=same_ask,
+                satisfied_by_static_company_block=satisfied_static,
+            )
+            if _spec_is_rfp_title_noise(candidate):
+                continue
             if title.casefold() == "brand marketing plan" and specs:
                 # Merge LLM headings with Exhibit A if richer
                 existing = specs[0]
@@ -166,14 +214,20 @@ async def extract_rfp_scored_section_specs(
                     required_headings=merged,
                     instructions=str(row.get("instructions") or existing.instructions),
                     evaluation_weight=str(row.get("evaluationWeight") or ""),
+                    same_ask_as=list(dict.fromkeys([*existing.same_ask_as, *same_ask])),
+                    satisfied_by_static_company_block=(
+                        existing.satisfied_by_static_company_block or satisfied_static
+                    ),
                 )
                 continue
             specs.append(
                 RfpSectionSpec(
                     rfp_title=title,
                     required_headings=headings,
-                    instructions=str(row.get("instructions") or "").strip(),
+                    instructions=instructions,
                     evaluation_weight=str(row.get("evaluationWeight") or "").strip(),
+                    same_ask_as=same_ask,
+                    satisfied_by_static_company_block=satisfied_static,
                 )
             )
     except Exception as exc:  # noqa: BLE001
@@ -211,27 +265,261 @@ def _spec_is_rfp_title_noise(spec: RfpSectionSpec) -> bool:
         return True
     if title.count(" ") > 14:
         return True
+    # FAQ / web-search residue ("How much does Remodeling Design cost?") is not a TOC tab.
+    if title.endswith("?"):
+        return True
     return False
+
+
+def _is_static_1_3_section(section: ProposalSection) -> bool:
+    """zö company / team / work tabs — keep in place; never rewrite for TOC labels."""
+    sid = section.id or ""
+    return (
+        sid.startswith("section-1-")
+        or sid.startswith("section-2-bio-")
+        or sid.startswith("section-3-work-")
+        or sid in {"section-2-team-overview", "section-3-our-work"}
+    )
+
+
+def _titles_are_same_ask(rfp_title: str, section_title: str, aliases: list[str]) -> bool:
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    if outline_titles_near_duplicate(rfp_title, section_title):
+        return True
+    return any(outline_titles_near_duplicate(alias, section_title) for alias in aliases)
 
 
 def _match_section_for_spec(
     draft: ProposalDraft,
     spec: RfpSectionSpec,
 ) -> ProposalSection | None:
-    want = spec.rfp_title.casefold()
-    want_tokens = {t for t in re.split(r"\W+", want) if len(t) >= 4}
-    best: ProposalSection | None = None
-    best_score = 0
+    """Match by title meaning (outline near-duplicate + LLM sameAskAs), not keyword regex."""
+    aliases = list(spec.same_ask_as or [])
     for section in draft.sections:
-        t = _section_title_cf(section.title)
-        if want in t or t in want:
+        if _titles_are_same_ask(spec.rfp_title, section.title or "", aliases):
             return section
-        tokens = {t for t in re.split(r"\W+", t) if len(t) >= 4}
-        score = len(want_tokens & tokens)
-        if score > best_score:
-            best_score = score
-            best = section
-    return best if best_score >= 2 else None
+    return None
+
+
+def _spec_is_static_company_ask(draft: ProposalDraft, spec: RfpSectionSpec) -> bool:
+    """TOC item already satisfied by Sections 1.1–1.5 / 2 / 3 — header wrap only."""
+    if spec.satisfied_by_static_company_block:
+        return True
+    from app.services.proposal_voice_enforcement import is_duplicate_static_rfp_section
+
+    if is_duplicate_static_rfp_section(spec.rfp_title or ""):
+        return True
+    matched = _match_section_for_spec(draft, spec)
+    return matched is not None and _is_static_1_3_section(matched)
+
+
+def _dedupe_sections_by_id(sections: list[ProposalSection]) -> list[ProposalSection]:
+    """Keep the first row per section id — duplicate ids break the sidebar."""
+    seen: set[str] = set()
+    out: list[ProposalSection] = []
+    for section in sections:
+        sid = section.id or ""
+        if sid and sid in seen:
+            continue
+        if sid:
+            seen.add(sid)
+        out.append(section)
+    return out
+
+
+def drop_duplicate_company_identity_tabs(
+    draft: ProposalDraft,
+    specs: list[RfpSectionSpec],
+) -> tuple[ProposalDraft, list[str]]:
+    """Remove intelligence pointer/essay tabs that duplicate Sections 1.1–1.5."""
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+    from app.services.proposal_voice_enforcement import is_duplicate_static_rfp_section
+
+    logs: list[str] = []
+    wrap_specs = [
+        spec
+        for spec in specs
+        if not _spec_is_rfp_title_noise(spec) and _spec_is_static_company_ask(draft, spec)
+    ]
+    drop_ids: set[str] = set()
+    for section in draft.sections:
+        if _is_static_1_3_section(section):
+            continue
+        if section.id == COMPANY_BLOCK_HEADER_ID:
+            continue
+        title = section.title or ""
+        if is_duplicate_static_rfp_section(title):
+            drop_ids.add(section.id)
+            continue
+        if wrap_specs and any(
+            outline_titles_near_duplicate(spec.rfp_title, title) for spec in wrap_specs
+        ):
+            drop_ids.add(section.id)
+    kept = _dedupe_sections_by_id(
+        [s for s in draft.sections if s.id not in drop_ids]
+    )
+    if kept == list(draft.sections):
+        return draft, logs
+    logs.append(
+        "RFP structure: dropped duplicate company-identity tab(s) — Sections 1.1–1.5 stay."
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": kept, "updated_at": now}), logs
+
+
+def specs_from_intelligence_outline(
+    mapped_titles: list[tuple[str, str]],
+    *,
+    static_titles: list[str] | None = None,
+) -> list[RfpSectionSpec]:
+    """Build TOC specs from Phase 2 maps (title, duplicate_of_static_section)."""
+    static = [t for t in (static_titles or []) if t.strip()]
+    specs: list[RfpSectionSpec] = []
+    for title, dup in mapped_titles:
+        title = (title or "").strip()
+        if not title:
+            continue
+        covered = bool((dup or "").strip())
+        specs.append(
+            RfpSectionSpec(
+                rfp_title=title,
+                instructions="Required in this RFP's submission sequence.",
+                same_ask_as=list(static) if covered else [],
+                satisfied_by_static_company_block=covered,
+            )
+        )
+    return specs
+
+
+def apply_rfp_toc_layout(
+    draft: ProposalDraft,
+    specs: list[RfpSectionSpec],
+) -> tuple[ProposalDraft, list[str]]:
+    """Order intelligence tabs + Company Background header. No prose rewrite."""
+    logs: list[str] = []
+    draft, drop_logs = drop_duplicate_company_identity_tabs(draft, specs)
+    logs.extend(drop_logs)
+    draft, order_logs = order_draft_to_rfp_sequence(draft, specs)
+    logs.extend(order_logs)
+    draft, wrap_logs = ensure_company_block_wrapper_heading(draft, specs)
+    logs.extend(wrap_logs)
+    from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
+
+    collapsed, cost_logs = collapse_duplicate_cost_proposal_tabs(list(draft.sections))
+    if cost_logs:
+        now = datetime.now(timezone.utc).isoformat()
+        draft = draft.model_copy(update={"sections": collapsed, "updated_at": now})
+        logs.extend(cost_logs)
+    return draft, logs
+
+
+def ensure_company_block_wrapper_heading(
+    draft: ProposalDraft,
+    specs: list[RfpSectionSpec],
+) -> tuple[ProposalDraft, list[str]]:
+    """Insert the RFP's company-background title as a header above 1.1–1.5.
+
+    Does not rewrite Who We Are / org / business / certs / insurance.
+    Certifications and insurance stay nested in that block (not duplicated).
+    """
+    logs: list[str] = []
+    sections = _dedupe_sections_by_id(list(draft.sections))
+    if any(s.id == COMPANY_BLOCK_HEADER_ID for s in sections):
+        if sections != list(draft.sections):
+            now = datetime.now(timezone.utc).isoformat()
+            return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+        return draft, logs
+    wrap_spec: RfpSectionSpec | None = None
+    for spec in specs:
+        if _spec_is_rfp_title_noise(spec):
+            continue
+        if _spec_is_static_company_ask(draft, spec):
+            wrap_spec = spec
+            break
+    if wrap_spec is None:
+        if sections != list(draft.sections):
+            now = datetime.now(timezone.utc).isoformat()
+            return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+        return draft, logs
+    first_company = next(
+        (i for i, s in enumerate(sections) if (s.id or "").startswith("section-1-")),
+        None,
+    )
+    if first_company is None:
+        return draft, logs
+    header = ProposalSection(
+        id=COMPANY_BLOCK_HEADER_ID,
+        title=wrap_spec.rfp_title,
+        content=(
+            f"## {wrap_spec.rfp_title}\n\n"
+            "The company background for this submission is Sections 1.1–1.5 below "
+            "(Who We Are through Insurance Information). Team qualifications follow "
+            "in Section 2. Do not duplicate this block elsewhere."
+        ),
+        status="generated",
+        source="generated",
+        mode="write",
+        required=True,
+        word_target=80,
+    )
+    sections.insert(first_company, header)
+    logs.append(
+        f"RFP structure: labeled Sections 1.1–1.5 as “{wrap_spec.rfp_title}” "
+        "(header only — company tabs unchanged)."
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+
+
+def order_draft_to_rfp_sequence(
+    draft: ProposalDraft,
+    specs: list[RfpSectionSpec],
+) -> tuple[ProposalDraft, list[str]]:
+    """Order intelligence / dynamic RFP tabs to the buyer's sequence.
+
+    Sections 1–3 stay where they are (content and titles unchanged).
+    Matching uses outline title meaning + LLM sameAskAs — not keyword regex.
+    """
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    logs: list[str] = []
+    if not specs or not draft.sections:
+        return draft, logs
+    static = [s for s in draft.sections if _is_static_1_3_section(s)]
+    dynamic = [s for s in draft.sections if not _is_static_1_3_section(s)]
+    if not dynamic:
+        return draft, logs
+    working = draft.model_copy(update={"sections": dynamic})
+    used: set[str] = set()
+    ordered: list[ProposalSection] = []
+    renamed = False
+    for spec in specs:
+        if _spec_is_rfp_title_noise(spec):
+            continue
+        if _spec_is_static_company_ask(draft, spec):
+            continue
+        section = _match_section_for_spec(working, spec)
+        if section is None or section.id in used:
+            continue
+        if not outline_titles_near_duplicate(spec.rfp_title, section.title or ""):
+            section = section.model_copy(update={"title": spec.rfp_title})
+            renamed = True
+        ordered.append(section)
+        used.add(section.id)
+    rest_dynamic = [s for s in dynamic if s.id not in used]
+    new_sections = static + ordered + rest_dynamic
+    before_ids = [s.id for s in draft.sections]
+    after_ids = [s.id for s in new_sections]
+    if before_ids == after_ids and not renamed:
+        return draft, logs
+    if ordered:
+        logs.append(
+            "RFP structure: ordered intelligence tabs to the RFP submission sequence: "
+            + " → ".join((s.title or s.id) for s in ordered[:12])
+        )
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": new_sections, "updated_at": now}), logs
 
 
 def _slug_section_id(title: str) -> str:
@@ -262,6 +550,8 @@ def ensure_missing_scored_section_stubs(
         if not spec.required_headings and not spec.instructions and not spec.evaluation_weight:
             continue
         working = draft.model_copy(update={"sections": sections})
+        if _spec_is_static_company_ask(working, spec):
+            continue
         if _match_section_for_spec(working, spec):
             continue
         sid = f"rfp-structure-{_slug_section_id(spec.rfp_title)}"
@@ -322,7 +612,9 @@ async def _reframe_section_to_rfp_spec(
         "criteria — not zö's generic template.\n"
         "Rules:\n"
         "- Use the required headings/outline exactly (markdown ## with RFP labels).\n"
-        "- Preserve verified facts, team names, case studies, and numbers from the current draft.\n"
+        "- Preserve verified facts, team names, and numbers from the current draft.\n"
+        "- Do NOT recopy full case-study narratives or the same example in new words — "
+        "one-line cross-ref to Sample Work / Our Work, then NEW detail only.\n"
         "- Do NOT invent clients, case studies, reference contacts, metrics, or Oceania/Hawaii work.\n"
         "- If evidence is missing, use [VERIFY: …] — never fabricate named engagements.\n"
         "- Fold timeline/phases INTO this section when the RFP expects schedule here (e.g. BMP).\n"
@@ -342,7 +634,6 @@ async def _reframe_section_to_rfp_spec(
         f"Required headings still missing or weak: {', '.join(missing_headings) or spec.required_headings}\n"
         f"Alignment instructions: {spec.instructions}\n"
         f"Evaluation: {spec.evaluation_weight}\n\n"
-        f"RFP excerpt:\n{rfp_excerpt[:35000]}\n\n"
         f"Current section (restructure — keep true facts):\n{stub[:16000]}"
     )
     try:
@@ -350,6 +641,7 @@ async def _reframe_section_to_rfp_spec(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
             max_tokens=8192,
             temperature=0.25,
+            cache_prefix=rfp_excerpt[:35000],
         )
         content = str((raw or {}).get("content") or "").strip()
         note = str((raw or {}).get("designerNote") or (raw or {}).get("designer_note") or "").strip()
@@ -399,7 +691,11 @@ async def run_rfp_structure_alignment_pass(
     human: list[str] = []
     excerpt = submission_documents_excerpt(rfp_text) or rfp_text[:100_000]
 
-    specs = await extract_rfp_scored_section_specs(rfp_text, rfp_title=rfp.title)
+    specs = await extract_rfp_scored_section_specs(
+        rfp_text,
+        rfp_title=rfp.title,
+        existing_section_titles=[s.title for s in draft.sections if s.title],
+    )
     if not specs:
         logs.append("RFP structure: no scored section outline detected in excerpt.")
     else:
@@ -411,18 +707,23 @@ async def run_rfp_structure_alignment_pass(
     )
     logs.extend(stub_logs)
 
+    draft, layout_logs = apply_rfp_toc_layout(draft, specs)
+    logs.extend(layout_logs)
+
     sections = list(draft.sections)
-    changed = bool(stub_logs)
+    changed = bool(stub_logs or layout_logs)
     reframed_ids: set[str] = set()
 
     for spec in specs:
         if _spec_is_rfp_title_noise(spec):
             continue
+        if _spec_is_static_company_ask(draft, spec):
+            continue
         if not spec.required_headings and not spec.instructions:
             continue
         working = draft.model_copy(update={"sections": sections})
         section = _match_section_for_spec(working, spec)
-        if not section or section.id in skip_section_ids:
+        if not section or section.id in skip_section_ids or _is_static_1_3_section(section):
             continue
         if section.id in reframed_ids:
             continue
@@ -446,6 +747,11 @@ async def run_rfp_structure_alignment_pass(
                 )
             continue
         if _VERIFY_STUB_RE.search(body):
+            continue
+        # Complete & Clean must not rewrite a real drafted section just to
+        # restamp headings. Only reframe hollow stubs / generic templates.
+        substantial = len(body.strip()) >= 400 and "[MANUAL FILL:" not in body[:500]
+        if substantial and not generic_only:
             continue
         if missing or generic_only:
             idx = next(i for i, s in enumerate(sections) if s.id == section.id)

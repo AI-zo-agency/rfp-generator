@@ -111,11 +111,6 @@ _SAFE_BUDGET_COMPLETE_RE = re.compile(
     r")\b"
 )
 
-_ZERO_AGENCY_PROSE_RE = re.compile(
-    r"agency\s+(?:revenue|fee|commission).{0,60}\$0(?:\.00)?\b",
-    re.I,
-)
-
 
 def section_is_budget_related(section: ProposalSection) -> bool:
     return budget_section_score(section.title or "") > 0
@@ -454,19 +449,23 @@ def user_asked_reverse_engineered_total(user_message: str) -> bool:
     return False
 
 
-def refuse_noncompliant_budget_edit(user_message: str, new_text: str) -> str | None:
-    """Return a user-facing refusal when option C blocks the edit."""
+def refuse_noncompliant_budget_edit(
+    user_message: str,
+    new_text: str,
+    *,
+    prior_text: str = "",
+) -> str | None:
+    """Return a user-facing refusal when option C blocks the edit.
+
+    $0 agency/commission lines never 422 the chat — leftover zeros surface in
+    the agent recap instead of blocking Improve.
+    """
+    del new_text, prior_text
     if user_asked_reverse_engineered_total(user_message):
         return (
             "That request would reverse-engineer line items to hit a target total. "
             "Per the pricing playbook, each line must trace to the Pricing Guide — "
             "adjust tier or scope instead, or ask Sonja to review a flagged out-of-guide item."
-        )
-    if _ZERO_AGENCY_PROSE_RE.search(new_text or ""):
-        return (
-            "Agency revenue / commission cannot be shown as $0 when the RFP uses fees or commission. "
-            "Use commission rate × pass-through or the canonical budget figures, or "
-            "[VERIFY: Sonja confirm commission rate and annual media estimate]."
         )
     return None
 

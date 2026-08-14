@@ -583,6 +583,17 @@ export function chatBusyStatusLabel(
   return `Working on ${title}…`;
 }
 
+/** Rotating live lines while a chat turn is in flight. */
+export function chatLiveWorkSteps(primary: string | null | undefined): string[] {
+  const head = (primary || "").trim() || "Working on this section…";
+  return [
+    head,
+    "Checking this tab against the RFP and knowledge base…",
+    "Looking for discrepancies (facts, budget, MANUAL FILL)…",
+    "Preparing the recap of what changed…",
+  ];
+}
+
 /** User is asking about the whole draft — not the open tab alone. */
 export function messageLooksProposalWide(message: string): boolean {
   const text = message.trim();

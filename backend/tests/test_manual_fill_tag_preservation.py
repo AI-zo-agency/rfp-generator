@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.proposal_common import ProposalError
 from app.services.proposal_manual_flags import (
     MANUAL_FILL_TAG_RE,
     extract_manual_fill_tags,
@@ -182,15 +181,16 @@ class PreservationComparisonEdgeCases(unittest.TestCase):
 
 
 class RewriteHardFailEdgeCases(unittest.TestCase):
-    def test_unmask_checked_raises_when_placeholders_dropped(self) -> None:
+    def test_unmask_checked_restores_dropped_placeholders(self) -> None:
         originals = ["[MANUAL FILL]", "[MANUAL FILL or N/A]"]
-        with self.assertRaises(ProposalError) as ctx:
-            _unmask_manual_fill_checked(
-                "Model dropped every placeholder",
-                originals,
-                attempt=1,
-            )
-        self.assertIn("MANUAL FILL", str(ctx.exception))
+        restored = _unmask_manual_fill_checked(
+            "Model dropped every placeholder",
+            originals,
+            attempt=1,
+        )
+        self.assertIn("[MANUAL FILL]", restored)
+        self.assertIn("[MANUAL FILL or N/A]", restored)
+        self.assertIn("Model dropped every placeholder", restored)
 
     def test_unmask_checked_succeeds_when_all_placeholders_present(self) -> None:
         originals = ["[MANUAL FILL]", "[MANUAL FILL or N/A]"]
