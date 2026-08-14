@@ -467,6 +467,11 @@ async def run_scan_fact_repairs(
     logs: list[str] = []
     evidence = _evidence_blob(research)
 
+    from app.services.agency_facts import apply_canonical_agency_tenure_to_draft
+
+    draft, tenure_logs = apply_canonical_agency_tenure_to_draft(draft)
+    logs.extend(tenure_logs)
+
     draft, bio_logs = await rebuild_team_bios_from_kb(draft, rfp_text=rfp_text)
     logs.extend(bio_logs)
 
@@ -545,6 +550,7 @@ async def run_scan_fact_repairs(
         return draft, logs
 
     from app.services.proposal_manuscript import strip_internal_flag_tags
+    from app.services.agency_facts import apply_canonical_agency_tenure_to_draft
 
     final_sections: list[ProposalSection] = []
     for section in sections:

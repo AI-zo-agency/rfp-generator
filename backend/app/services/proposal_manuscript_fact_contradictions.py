@@ -357,6 +357,32 @@ async def run_manuscript_fact_contradiction_pass(
                 )
                 continue
         if finding.severity != "minor":
+            from app.services.agency_facts import (
+                enforce_agency_tenure,
+                ticket_is_agency_tenure,
+            )
+
+            tenure_blob = (
+                f"{finding.manuscript_contradiction} {finding.verified_fact} "
+                f"{finding.rewrite_instruction}"
+            )
+            if ticket_is_agency_tenure(tenure_blob):
+                body = sections[idx].content or ""
+                fixed = enforce_agency_tenure(body)
+                if fixed != body:
+                    sections[idx] = sections[idx].model_copy(update={"content": fixed})
+                    result.rewrites_applied += 1
+                    fixed_ids.add(finding.section_id)
+                    result.logs.append(
+                        f"{finding.section_id}: FIXED agency tenure from companyfacts "
+                        "(no VERIFY banner)"
+                    )
+                    continue
+                result.logs.append(
+                    f"{finding.section_id}: tenure already canonical — skipped VERIFY banner"
+                )
+                fixed_ids.add(finding.section_id)
+                continue
             sections[idx] = _append_verify_note(sections[idx], finding)
             result.verify_tags_added += 1
             result.logs.append(

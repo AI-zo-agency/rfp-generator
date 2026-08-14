@@ -583,6 +583,17 @@ async def _patch_section(
     fact does not reach the model at all unless retrieval produced something to assert
     from.
     """
+    from app.services.agency_facts import enforce_agency_tenure, ticket_is_agency_tenure
+
+    ticket_blob = " ".join(
+        str(x or "") for x in (ticket.message, ticket.guidance, ticket.code)
+    )
+    if ticket_is_agency_tenure(ticket_blob):
+        return (
+            enforce_agency_tenure(content),
+            "canonical agency tenure — no MANUAL FILL banner",
+        )
+
     from app.services.proposal_langchain_agents import AgentRole, run_tool_json_agent
     from app.services.proposal_section_kb_evidence import (
         fetch_packed_section_kb_evidence,

@@ -229,6 +229,30 @@ class GateLoopTests(unittest.IsolatedAsyncioTestCase):
         for ticket in report.tickets:
             self.assertIn(ticket.outcome, {"fixed", "manual_fill", "reverted", "unfixed"})
 
+    async def test_tenure_without_kb_rewrites_years_instead_of_banner(self):
+        ticket = GateTicket(
+            sectionId="section-1-who-we-are",
+            code="fact.tenure",
+            detector="consistency",
+            message="Draft says 12 years of experience; companyfacts is 13",
+            guidance="Use 13 years",
+            requiresEvidence=True,
+        )
+        after, note = await gate._patch_section(
+            rfp=_rfp(),
+            section_id="section-1-who-we-are",
+            section_title="Who We Are",
+            content=(
+                "zö agency combines 12 years of experience with strategy "
+                "and storytelling to guide purpose-driven brands."
+            ),
+            ticket=ticket,
+            packed_evidence="",
+        )
+        self.assertIn("13 years of experience", after)
+        self.assertNotIn("MANUAL FILL", after)
+        self.assertIn("canonical agency tenure", note)
+
 
 if __name__ == "__main__":
     unittest.main()

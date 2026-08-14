@@ -1737,6 +1737,12 @@ async def _run_fulfill_rfp_gaps_body(
                 f"{sum(1 for t in gate_report.tickets if t.outcome == 'manual_fill')} to manual fill, "
                 f"stopped because {gate_report.stopped_reason}"
             )
+            from app.services.agency_facts import apply_canonical_agency_tenure_to_draft
+
+            draft, tenure_logs = apply_canonical_agency_tenure_to_draft(draft)
+            if tenure_logs:
+                report["logs"].extend(tenure_logs)
+                await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
     except FulfillStepSkip as skip:

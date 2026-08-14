@@ -460,6 +460,42 @@ async def run_scan_coverage_orchestrator(
         if dq.changed:
             await asave_proposal_draft(draft)
 
+        try:
+            from app.services.proposal_rfp_compulsory_content import (
+                audit_draft_against_rfp_compulsory_content,
+                merge_compulsory_gap_stubs,
+            )
+
+            shortfalls = await audit_draft_against_rfp_compulsory_content(
+                draft, rfp_text
+            )
+            if shortfalls:
+                draft, stub_logs = merge_compulsory_gap_stubs(draft, shortfalls)
+                dq.draft = draft
+                dq.research = research
+                if stub_logs:
+                    dq.changed = True
+                for item in shortfalls:
+                    if item.ask.pass_fail:
+                        dq.disqualification_risks.append(item.message)
+                    dq.human_decision_gaps.append(item.message)
+                    dq.logs.append(f"compulsory-content: {item.message}")
+                seen_r = set()
+                uniq: list[str] = []
+                for risk in dq.disqualification_risks:
+                    key = risk.casefold()
+                    if key in seen_r:
+                        continue
+                    seen_r.add(key)
+                    uniq.append(risk)
+                dq.disqualification_risks = uniq
+                logs.extend(dq.logs[-len(shortfalls) :])
+                if dq.changed:
+                    await asave_proposal_draft(draft)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Compulsory content audit skipped: %s", exc)
+            logs.append(f"compulsory-content audit skipped: {exc}")
+
         if pass_idx >= _MAX_ORCHESTRATOR_PASSES:
             break
         if not _ledger_needs_second_pass(ledger_result, ledger_draft_logs):
