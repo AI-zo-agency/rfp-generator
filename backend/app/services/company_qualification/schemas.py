@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CapabilityTierItem(BaseModel):
@@ -51,6 +51,11 @@ class BusinessRegistration(BaseModel):
     ein: str | None = None
     state_ids: list[StateRegistration] = Field(default_factory=list, alias="stateIds")
 
+    @field_validator("state_ids", mode="before")
+    @classmethod
+    def _null_state_ids_to_empty(cls, value: object) -> object:
+        return [] if value is None else value
+
 
 class Department(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -95,6 +100,19 @@ class CompanyTruth(BaseModel):
     certifications: list[Certification] = Field(default_factory=list)
     insurance: list[InsuranceCoverage] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "departments",
+        "capabilities",
+        "certifications",
+        "insurance",
+        "sources",
+        mode="before",
+    )
+    @classmethod
+    def _null_lists_to_empty(cls, value: object) -> object:
+        """LLM extraction uses null for missing facts; lists must be arrays."""
+        return [] if value is None else value
 
 
 class ProposalContext(BaseModel):

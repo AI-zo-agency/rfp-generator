@@ -15,6 +15,7 @@ from app.services.company_qualification.agents.team_selection import (
 )
 from app.services.company_qualification.schemas import (
     CapabilityTierItem,
+    CompanyTruth,
     PrioritizedCapabilities,
     ProposalContext,
     RequiredTeamRole,
@@ -75,6 +76,26 @@ class CompanyQualificationTests(unittest.TestCase):
         )
         self.assertEqual(ctx.industry, "Municipality")
         self.assertEqual(ctx.project_complexity, "medium")
+
+    def test_company_truth_null_lists_become_empty(self) -> None:
+        truth = CompanyTruth.model_validate(
+            {
+                "legalName": "zö agency",
+                "dba": "zö",
+                "founded": "2008",
+                "ownership": "Woman-owned",
+                "departments": None,
+                "capabilities": None,
+                "certifications": None,
+                "insurance": None,
+                "sources": None,
+            }
+        )
+        self.assertEqual(truth.insurance, [])
+        self.assertEqual(truth.certifications, [])
+        self.assertEqual(truth.capabilities, [])
+        self.assertEqual(truth.departments, [])
+        self.assertEqual(truth.sources, [])
 
     def test_section1_content_budget_schema(self) -> None:
         budget = Section1ContentBudget(budgets=list(DEFAULT_BUDGETS))

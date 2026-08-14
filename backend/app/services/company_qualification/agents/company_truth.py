@@ -76,7 +76,8 @@ async def run_company_truth_agent(
                     "Return ONE complete JSON object (no markdown fences). "
                     "Finish every string and brace — output must be valid JSON end-to-end.\n"
                     "Keep lists short: ≤10 capabilities, ≤6 certs, ≤5 departments, ≤5 insurance.\n"
-                    "Missing facts → null.\n"
+                    "Missing scalar facts → null. Missing lists (departments, capabilities, "
+                    "certifications, insurance, sources) → [] never null.\n"
                     f"Schema:\n{schema}"
                 ),
             },
