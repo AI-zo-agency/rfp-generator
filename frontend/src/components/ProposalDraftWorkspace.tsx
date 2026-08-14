@@ -1348,8 +1348,9 @@ function ProposalDraftWorkspaceInner({
     } catch {
       // Still stop UI even if stop request fails (e.g. offline).
     }
+    let snapshot: Awaited<ReturnType<typeof fetchProposalDraft>> | null = null;
     try {
-      const snapshot = await fetchProposalDraft(rfp.id);
+      snapshot = await fetchProposalDraft(rfp.id);
       if (snapshot.draft) {
         applyOutlineFromServer(snapshot.draft);
       }
@@ -1382,7 +1383,7 @@ function ProposalDraftWorkspaceInner({
     fullProposalAbortRef.current = null;
     fulfillAbortRef.current = null;
     const resumeFulfillStep =
-      snapshot.research?.pipelineCheckpoint?.resumeFulfillStep ?? null;
+      snapshot?.research?.pipelineCheckpoint?.resumeFulfillStep ?? null;
     const resumeLabel =
       resumeFulfillStep &&
       resumeFulfillStep >= 1 &&
