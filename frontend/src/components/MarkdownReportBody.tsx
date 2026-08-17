@@ -355,14 +355,14 @@ function parseBlocks(body: string): Block[] {
         const headers = parseTableRow(dataLines[0]);
         const rows = dataLines.slice(1).map(parseTableRow);
         const sanitized = sanitizeTableBlock(headers, rows, tableLines);
-        if ("type" in sanitized && sanitized.type === "raw") {
-          blocks.push({ type: "table_raw", lines: sanitized.lines });
-        } else {
+        if ("headers" in sanitized) {
           blocks.push({
             type: "table",
             headers: sanitized.headers,
             rows: sanitized.rows,
           });
+        } else {
+          blocks.push({ type: "table_raw", lines: sanitized.lines });
         }
       }
       continue;
