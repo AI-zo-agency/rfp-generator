@@ -178,54 +178,50 @@ export function FinancialInsightsClient() {
   }
 
   return (
-    <div className="space-y-8 sm:space-y-10">
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
       <FinancialHeader
         title="Financial & Margin Auditor"
         subtitle="Reconciliation, margin tracking, and human-reviewed audit queue. Integrated with live iWorker Google Sheets timesheets."
+        trailing={
+          <OutlineTabs
+            tabs={FINANCIAL_TABS}
+            activeTab={activeTab}
+            onChange={(id) => setActiveTab(id)}
+            accentColor="#3C5A56"
+            compact
+          />
+        }
       />
 
-      {/* Navigation Tabs — always left-aligned */}
-      <div className="flex justify-start">
-        <OutlineTabs
-          tabs={FINANCIAL_TABS}
-          activeTab={activeTab}
-          onChange={(id) => setActiveTab(id)}
-          accentColor="#3C5A56"
-        />
-      </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {activeTab === "quickbooks" && (
+          <TabFade active className="min-h-0 flex-1 overflow-clip">
+            <QuickBooksPanels />
+          </TabFade>
+        )}
 
-      {/* Tab 0: QuickBooks ledger — mounted on demand so the ledger isn't read
-          on every page load; the panel does its own fetch and caching. */}
-      {activeTab === "quickbooks" && (
-        <TabFade active>
-          <QuickBooksPanels />
+        <TabFade active={activeTab === "iworker"} className="min-h-0 flex-1 overflow-auto">
+          {iworkerPanel}
         </TabFade>
-      )}
 
-      {/* Tab 1: iWorker Ingestion — fetched only when this tab is opened */}
-      <TabFade active={activeTab === "iworker"}>
-        {iworkerPanel}
-      </TabFade>
+        <TabFade active={activeTab === "ai"} className="min-h-0 flex-1 overflow-auto">
+          <div className="space-y-8">
+            <AiInsightsPanel
+              onFetchAiInsights={handleFetchAiInsights}
+              persistedInsights={aiInsights}
+              onInsightsGenerated={setAiInsights}
+            />
+            <AuditQueueTable
+              initialAuditItems={auditItems}
+              onResolveItem={handleResolveAuditItem}
+            />
+          </div>
+        </TabFade>
 
-      {/* Tab 2: AI Audit Queue & Insights — always mounted, hidden when not active */}
-      <TabFade active={activeTab === "ai"}>
-        <div className="space-y-8">
-          <AiInsightsPanel
-            onFetchAiInsights={handleFetchAiInsights}
-            persistedInsights={aiInsights}
-            onInsightsGenerated={setAiInsights}
-          />
-          <AuditQueueTable
-            initialAuditItems={auditItems}
-            onResolveItem={handleResolveAuditItem}
-          />
-        </div>
-      </TabFade>
-
-      {/* Tab 3: Connected Data Sources — always mounted, hidden when not active */}
-      <TabFade active={activeTab === "sources"}>
-        <DataSourcesGrid sources={sourcesData} />
-      </TabFade>
+        <TabFade active={activeTab === "sources"} className="min-h-0 flex-1 overflow-auto">
+          <DataSourcesGrid sources={sourcesData} />
+        </TabFade>
+      </div>
     </div>
   );
 }

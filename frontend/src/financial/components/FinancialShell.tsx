@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ZoLogo } from "@/components/ZoLogo";
 import { IconSwitch } from "@/components/ui/icons";
+import "./QuickBooksLedger.css";
 
 export function FinancialShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -18,6 +19,11 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
       setIsAuthenticated(true);
     }
   }, [router]);
+
+  useEffect(() => {
+    document.documentElement.classList.add("fin-lock");
+    return () => document.documentElement.classList.remove("fin-lock");
+  }, []);
 
   const handleLogout = () => {
     localStorage.removeItem("auth_token");
@@ -39,8 +45,8 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="shell-app flex min-h-dvh flex-col">
-      <header className="shell-header sticky top-0 z-30 flex flex-wrap items-center justify-between gap-4 border-b px-6 py-4 backdrop-blur-xl md:px-10">
+    <div className="shell-app flex h-dvh max-h-dvh flex-col overflow-clip">
+      <header className="shell-header z-30 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-5 py-2.5 md:px-8">
         <div className="flex items-center gap-4">
           <Link href="/choose" className="flex items-center gap-3">
             <ZoLogo size="compact" />
@@ -61,8 +67,8 @@ export function FinancialShell({ children }: { children: React.ReactNode }) {
         </div>
       </header>
 
-      <main className="min-h-0 flex-1 overflow-auto">
-        <div className="mx-auto max-w-[1480px] px-4 py-6 sm:px-6 sm:py-8 md:px-10 md:py-10 lg:px-12">
+      <main className="flex min-h-0 flex-1 flex-col overflow-clip">
+        <div className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col px-5 pt-3 pb-3 sm:px-6 md:px-8">
           {children}
         </div>
       </main>

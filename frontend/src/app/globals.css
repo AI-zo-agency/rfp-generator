@@ -73,9 +73,56 @@
   --foreground: var(--zo-text);
 }
 
+/* ── shadcn/ui token bridge ──
+   shadcn components speak `bg-card`, `text-muted-foreground`, etc.
+   These alias onto the zö tokens above so both themes follow automatically. */
+:root,
+[data-theme="light"],
+[data-theme="dark"] {
+  --card: var(--zo-card-bg);
+  --card-foreground: var(--zo-text);
+  --popover: var(--zo-card-bg);
+  --popover-foreground: var(--zo-text);
+  --primary: var(--zo-teal);
+  --primary-foreground: #ffffff;
+  --secondary: var(--zo-surface);
+  --secondary-foreground: var(--zo-text);
+  --muted: var(--zo-surface);
+  --muted-foreground: var(--zo-text-muted);
+  --accent: var(--zo-surface-hover);
+  --accent-foreground: var(--zo-text);
+  --destructive: var(--zo-danger);
+  --destructive-foreground: #ffffff;
+  --border: var(--zo-border);
+  --input: var(--zo-border);
+  --ring: var(--zo-teal);
+  --radius: 12px;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
   --color-zo-primary: var(--zo-primary);
   --color-zo-black: var(--zo-black);
   --color-zo-white: var(--zo-white);

@@ -463,7 +463,7 @@ Unattached cost treats purchases with no `CustomerRef` on expense lines as unatt
 - Component: `QuickBooksPanels` fetches  
   `{BACKEND}/api/v1/financials/quickbooks/overview?year={year}`
 - **Synced stamp:** shows `synced_at` and `sync_status` from the overview response. No Refresh control.
-- **Sectioned Operate UI:** sticky section nav → Health strip → Cash → Receivables → Payables → Revenue → Clients → Costs → Activity footnote
+- **Sectioned Operate UI:** sticky section nav → Health strip → Cash → Open (Who owes us / What we owe side by side) → Revenue → Clients → Costs → Activity footnote
 - Year selector in the header; progressive disclosure (“Show all”) on long lists
 - New overview keys degrade independently via `errors` without blanking the page
 
