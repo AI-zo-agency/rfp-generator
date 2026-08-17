@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   chatBusyStatusLabel,
+  chatLiveWorkSteps,
   messageIsInPlaceBioEdit,
   messageLooksChatQuestion,
   messageLooksOutlineStructure,
@@ -43,6 +44,12 @@ describe("chatBusyStatusLabel", () => {
         sameSectionPinned: true,
       })
     ).toBe("Improving Who We Are…");
+  });
+
+  it("rotates live work steps from the primary status line", () => {
+    const steps = chatLiveWorkSteps("Improving Cost Proposal…");
+    expect(steps[0]).toBe("Improving Cost Proposal…");
+    expect(steps.some((s) => /discrepanc/i.test(s))).toBe(true);
   });
 
   it("detects question-shaped messages", () => {

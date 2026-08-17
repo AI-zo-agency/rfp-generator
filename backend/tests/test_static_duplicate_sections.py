@@ -21,6 +21,9 @@ class StaticDuplicateSectionTests(unittest.TestCase):
     def test_who_we_are_is_duplicate(self) -> None:
         self.assertTrue(is_duplicate_static_rfp_section("Who We Are"))
 
+    def test_company_background_is_duplicate(self) -> None:
+        self.assertTrue(is_duplicate_static_rfp_section("Company Background"))
+
     def test_sample_work_portfolio_is_kept(self) -> None:
         self.assertFalse(
             is_duplicate_static_rfp_section(

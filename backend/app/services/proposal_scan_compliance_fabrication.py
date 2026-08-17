@@ -199,36 +199,35 @@ async def _rebuild_bio_stub(
     rfp_text: str,
 ) -> tuple[str, list[str]] | None:
     from app.services.proposal_bio_stub import (
+        expected_bio_pdf_filename,
         is_bio_pdf_designer_note,
         resolve_bio_pdf_filename,
         rfp_requires_inline_bios,
         stub_from_extraction,
     )
-    from app.services.proposal_sections_graph import (
-        _extract_member_bio_facts,
-        _fetch_member_bio_kb,
-    )
+    from app.services.proposal_sections_graph import _fetch_member_bio_kb
 
     inline_required = rfp_requires_inline_bios(rfp_text)
     body = section.content or ""
     if is_bio_pdf_designer_note(body) and not inline_required:
         return None
 
-    try:
-        kb_text, sources = await _fetch_member_bio_kb(member)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Bio KB fetch failed for %s: %s", member, exc)
-        return None
-
-    kb_available = bool(
-        (kb_text or "").strip()
-        and not kb_text.startswith("(Supermemory")
-        and len(kb_text) >= 200
-    )
-    pdf_name = resolve_bio_pdf_filename(member, sources)
+    pdf_name = expected_bio_pdf_filename(member)
+    kb_text = ""
+    kb_available = True
     extracted: dict = {}
-    if inline_required and kb_available:
-        extracted = await _extract_member_bio_facts(member, kb_text)
+    if inline_required:
+        try:
+            kb_text, sources = await _fetch_member_bio_kb(member)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Bio KB fetch failed for %s: %s", member, exc)
+            kb_text, sources = "", []
+        kb_available = bool(
+            (kb_text or "").strip()
+            and not kb_text.startswith("(Supermemory")
+            and len(kb_text) >= 200
+        )
+        pdf_name = resolve_bio_pdf_filename(member, sources)
 
     new_content = stub_from_extraction(
         member=member,

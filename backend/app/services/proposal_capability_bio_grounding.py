@@ -489,72 +489,25 @@ async def ground_bios_to_kb(
     rfp_id: str = "",
     use_llm: bool = True,
 ) -> tuple[ProposalDraft, list[str]]:
-    """Align bio years/specializations to 04_Bio KB — restore verified prose, never empty."""
+    """Section 2 bios → designer-note stub. Never LLM-rewrite 04_Bio into the manuscript."""
+    del rfp_id, use_llm  # bios are stub-only; capability LLM is a separate pass
+    from app.services.proposal_bio_stub import (
+        expected_bio_pdf_filename,
+        format_bio_stub_content,
+        is_bio_pdf_designer_note,
+        rfp_requires_inline_bios,
+    )
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
-    from app.services.proposal_scan_compliance_fabrication import bio_narrative_ungrounded
-    from app.services.proposal_sections_graph import _fetch_member_bio_kb
 
     logs: list[str] = []
     sections: list[ProposalSection] = []
     changed = False
+    inline_required = rfp_requires_inline_bios(rfp_text)
 
     for section in draft.sections:
         sid = section.id or ""
-        if not is_personnel_bio_section(section):
+        if not sid.startswith("section-2-bio-") or sid.endswith("placeholder"):
             sections.append(section)
-            continue
-
-        # Combined Experience-of-Personnel tabs: one rewrite with packed bios.
-        if not sid.startswith("section-2-bio-"):
-            packed = await pack_04_bio_kb_for_section(section)
-            if not packed.strip() or not use_llm or not llm.is_configured():
-                sections.append(section)
-                continue
-            people = named_people_in_section(section)
-            role_only = [
-                name
-                for name in people
-                if bio_block_is_role_only(section.content or "", name)
-            ]
-            body = section.content or ""
-            needs = (
-                bool(role_only)
-                or bio_years_inflated_vs_kb(body, packed)
-                or bio_adds_ungrounded_specialization(body, packed)
-                or bool(re.search(r"\[E\d+", body, re.I))
-            )
-            if not needs:
-                sections.append(section)
-                continue
-            user = (
-                f"People in this section: {', '.join(people) or '(parse names from draft)'}\n"
-                f"People missing a supporting paragraph (restore from KB): "
-                f"{', '.join(role_only) or 'none'}\n\n"
-                f"04_Bio KB (authoritative — write ONLY from this):\n{packed[:20_000]}\n\n"
-                f"Current section:\n{(section.content or '')[:12_000]}"
-            )
-            updated, did, notes = await _llm_rewrite(
-                section,
-                system=_PERSONNEL_SECTION_SYSTEM,
-                user=user,
-                node_name=f"bio_kb_ground_personnel:{sid}",
-                rfp_id=rfp_id,
-            )
-            if did:
-                from app.services.proposal_manuscript import (
-                    scrub_client_facing_section_artifacts,
-                )
-
-                cleaned = scrub_client_facing_section_artifacts(updated.content or "")
-                updated = updated.model_copy(update={"content": cleaned})
-                changed = True
-                sections.append(updated)
-                logs.append(
-                    f"{section.title or sid}: grounded personnel bios to 04_Bio KB"
-                    + (f" — {notes}" if notes else "")
-                )
-            else:
-                sections.append(section)
             continue
 
         member = _member_name_from_bio_section(section.title or "")
@@ -563,64 +516,24 @@ async def ground_bios_to_kb(
             continue
 
         body = section.content or ""
-        try:
-            kb_text, _sources = await _fetch_member_bio_kb(member)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Bio KB fetch failed for %s: %s", member, exc)
+        if is_bio_pdf_designer_note(body) and not inline_required:
             sections.append(section)
             continue
 
-        kb_ok = bool(
-            (kb_text or "").strip()
-            and not kb_text.startswith("(Supermemory")
-            and len(kb_text) >= 80
+        pdf = expected_bio_pdf_filename(member)
+        stub = format_bio_stub_content(
+            member=member,
+            role="",
+            pdf_filename=pdf,
+            kb_available=True,
+            inline_required=False,
         )
-        if not kb_ok:
-            sections.append(section)
-            continue
-
-        new_body, year_logs = align_bio_years_deterministically(body, kb_text)
-        section_logs = list(year_logs)
-        needs_llm = (
-            bio_years_inflated_vs_kb(new_body, kb_text)
-            or bio_adds_ungrounded_specialization(new_body, kb_text)
-            or bio_narrative_ungrounded(new_body, kb_text)
-            or bio_block_is_role_only(new_body, member)
-        )
-
-        current = section.model_copy(update={"content": new_body}) if new_body != body else section
-
-        if needs_llm and use_llm and llm.is_configured():
-            user = (
-                f"Person: {member}\n"
-                f"RFP context note: {(rfp_text or '')[:1500]}\n\n"
-                f"04_Bio KB (authoritative):\n{kb_text[:12_000]}\n\n"
-                f"Current bio draft:\n{(current.content or '')[:8_000]}"
-            )
-            updated, did, notes = await _llm_rewrite(
-                current,
-                system=_BIO_GROUND_SYSTEM,
-                user=user,
-                node_name=f"bio_kb_ground:{sid}",
-                rfp_id=rfp_id,
-            )
-            if did:
-                from app.services.proposal_manuscript import (
-                    scrub_client_facing_section_artifacts,
-                )
-
-                cleaned = scrub_client_facing_section_artifacts(updated.content or "")
-                current = updated.model_copy(update={"content": cleaned})
-                section_logs.append(
-                    f"Grounded {member} bio to 04_Bio KB"
-                    + (f" — {notes}" if notes else "")
-                )
-
-        if current.content != body:
+        if stub.strip() != body.strip():
             changed = True
-            sections.append(current)
-            for line in section_logs:
-                logs.append(f"{section.title or sid}: {line}")
+            logs.append(
+                f"{section.title or sid}: designer-note stub ({pdf}) — no LLM bio rewrite"
+            )
+            sections.append(section.model_copy(update={"content": stub}))
         else:
             sections.append(section)
 

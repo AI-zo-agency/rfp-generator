@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from typing import Any
 
 # Verified company fact (Z'Onion Creative Group LLC / zö agency).
 AGENCY_FOUNDED_DATE = date(2013, 8, 21)
@@ -121,4 +122,93 @@ def enforce_agency_tenure(text: str, as_of: date | None = None) -> str:
         out,
         flags=re.IGNORECASE,
     )
+    # Who We Are voice: "zö agency combines 12 years of experience with strategy"
+    # Only rewrite years-of-experience in a sentence that is about the agency,
+    # never a named specialist bio ("Shawn has 12 years of WordPress…").
+    def _agency_sentence_years(sentence: str) -> str:
+        if not re.search(
+            r"(?i)\b(?:zö|zo)\s+agency\b|\b(?:our|the)\s+agency\b|\bwe\s+combin",
+            sentence,
+        ):
+            return sentence
+        return re.sub(
+            r"\b\d+\s+years?\s+of\s+experience\b",
+            f"{years} years of experience",
+            sentence,
+            flags=re.IGNORECASE,
+        )
+
+    out = re.sub(
+        r"[^.!?\n]+(?:[.!?]+|\n+|$)",
+        lambda m: _agency_sentence_years(m.group(0)),
+        out,
+    )
     return out
+
+
+_TENURE_AUDITOR_TAG_RE = re.compile(
+    r"\n*\s*\[(?:MANUAL\s+FILL|VERIFY):[^\]]*"
+    r"(?:years?\s+of\s+(?:lived\s+)?experience|years?\s+in\s+operation|"
+    r"founded|tenure|resolve fact contradiction[^\]]*(?:year|founded|tenure))"
+    r"[^\]]*\]",
+    re.IGNORECASE,
+)
+
+
+def strip_tenure_auditor_tags(text: str) -> str:
+    """Drop Complete & Clean banners about years — canonical tenure already applies."""
+    if not text:
+        return text
+    cleaned = _TENURE_AUDITOR_TAG_RE.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def apply_canonical_agency_tenure_to_draft(draft: Any) -> tuple[Any, list[str]]:
+    """Lock Sections 1.1 / 1.3 (and agency-voice tenure elsewhere) to companyfacts years."""
+    logs: list[str] = []
+    sections = []
+    changed = False
+    for section in getattr(draft, "sections", []) or []:
+        body = getattr(section, "content", None) or ""
+        sid = getattr(section, "id", "") or ""
+        title = (getattr(section, "title", "") or "").casefold()
+        is_company_tab = sid in {
+            "section-1-who-we-are",
+            "section-1-business-info",
+        } or "who we are" in title or "business information" in title
+        if not body.strip() or (
+            not is_company_tab and "zö" not in body.casefold() and "zo agency" not in body.casefold()
+        ):
+            sections.append(section)
+            continue
+        updated = enforce_agency_tenure(body)
+        if is_company_tab:
+            updated = strip_tenure_auditor_tags(updated)
+            updated = enforce_agency_tenure(updated)
+        if updated != body:
+            changed = True
+            sections.append(section.model_copy(update={"content": updated}))
+            logs.append(f"{getattr(section, 'title', sid) or sid}: canonical agency tenure")
+        else:
+            sections.append(section)
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs
+
+
+def ticket_is_agency_tenure(text: str) -> bool:
+    blob = (text or "").casefold()
+    if not blob:
+        return False
+    return any(
+        token in blob
+        for token in (
+            "years of experience",
+            "years in operation",
+            "lived experience",
+            "founded",
+            "tenure",
+            "years as zö",
+            "years as zo",
+        )
+    )

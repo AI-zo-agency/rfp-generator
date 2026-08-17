@@ -210,12 +210,33 @@ async def _retrieve_evidence(section: Any) -> tuple[str, str]:
         return section.id, ""
 
 
+async def _retrieve_evidence_map(
+    draft: ProposalDraft, *, only_sections: set[str] | None
+) -> dict[str, str]:
+    import asyncio
+
+    settings = _settings()
+    targets = sections_to_examine(draft, changed=only_sections)
+    if not targets:
+        return {}
+    semaphore = asyncio.Semaphore(
+        max(1, getattr(settings, "quality_gate_retrieval_concurrency", 6))
+    )
+
+    async def _guarded(section: Any) -> tuple[str, str]:
+        async with semaphore:
+            return await _retrieve_evidence(section)
+
+    return dict(await asyncio.gather(*(_guarded(s) for s in targets)))
+
+
 async def verify_fact_bound_claims(
     *,
     rfp_id: str,
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
     only_sections: set[str] | None = None,
+    evidence_by_section: dict[str, str] | None = None,
 ) -> list[ClaimVerdict]:
     """Act 1 — check every fact-bound claim against the KB, three-state.
 
@@ -234,17 +255,12 @@ async def verify_fact_bound_claims(
     if not batches:
         return []
 
-    # Retrievals are independent; running them sequentially only added latency.
-    semaphore = asyncio.Semaphore(
-        max(1, getattr(settings, "quality_gate_retrieval_concurrency", 6))
-    )
-
-    async def _guarded(section: Any) -> tuple[str, str]:
-        async with semaphore:
-            return await _retrieve_evidence(section)
-
-    flat = [s for batch in batches for s in batch]
-    evidence_by_section = dict(await asyncio.gather(*(_guarded(s) for s in flat)))
+    if evidence_by_section is None:
+        evidence_by_section = await _retrieve_evidence_map(
+            draft, only_sections=only_sections
+        )
+    else:
+        evidence_by_section = dict(evidence_by_section)
 
     batch_sem = asyncio.Semaphore(
         max(1, getattr(settings, "quality_gate_verifier_batch_concurrency", 3))
@@ -307,7 +323,7 @@ async def verify_fact_bound_claims(
     verdicts = [v for group in nested for v in group]
     logger.info(
         "gate act1 verified %d section(s) in %d call(s), %d claim(s)",
-        len(flat),
+        len(targets),
         len(batches),
         len(verdicts),
     )
@@ -507,6 +523,13 @@ async def sweep_repetition(
             section = sections.get(str(sid))
             if section is None or not (section.content or "").strip():
                 continue
+            from app.services.proposal_budget_content import section_is_budgetish
+
+            if section_is_budgetish(section):
+                logs.append(
+                    f"Repetition sweep: kept {section.title} unchanged (budget tab frozen)"
+                )
+                continue
             ticket = GateTicket(
                 sectionId=section.id,
                 code="repetition.sweep",
@@ -552,6 +575,7 @@ async def _patch_section(
     section_title: str,
     content: str,
     ticket: GateTicket,
+    packed_evidence: str = "",
 ) -> tuple[str, str]:
     """Retrieve, then patch. Returns (new_content, note).
 
@@ -559,14 +583,25 @@ async def _patch_section(
     fact does not reach the model at all unless retrieval produced something to assert
     from.
     """
+    from app.services.agency_facts import enforce_agency_tenure, ticket_is_agency_tenure
+
+    ticket_blob = " ".join(
+        str(x or "") for x in (ticket.message, ticket.guidance, ticket.code)
+    )
+    if ticket_is_agency_tenure(ticket_blob):
+        return (
+            enforce_agency_tenure(content),
+            "canonical agency tenure — no MANUAL FILL banner",
+        )
+
     from app.services.proposal_langchain_agents import AgentRole, run_tool_json_agent
     from app.services.proposal_section_kb_evidence import (
         fetch_packed_section_kb_evidence,
         inject_packed_evidence_into_instruction,
     )
 
-    evidence = ""
-    if ticket.requires_evidence:
+    evidence = (packed_evidence or "").strip()
+    if ticket.requires_evidence and not evidence:
         try:
             evidence, _sources = await fetch_packed_section_kb_evidence(
                 section_title=section_title,
@@ -576,6 +611,8 @@ async def _patch_section(
         except Exception as exc:  # noqa: BLE001
             logger.warning("gate repair retrieval failed %s: %s", section_id, exc)
             evidence = ""
+    elif ticket.requires_evidence and evidence:
+        logger.info("gate repair reuse packed evidence section=%s", section_id)
 
     if not may_write_claim(requires_evidence=ticket.requires_evidence, evidence=evidence):
         return _manual_fill_text(content, ticket), "no evidence — emitted MANUAL FILL"
@@ -624,8 +661,12 @@ async def run_quality_gate(
             await ensure_not_stopped()
 
     await _checkpoint()
+    evidence_map = await _retrieve_evidence_map(draft, only_sections=None)
     report.claims = await verify_fact_bound_claims(
-        rfp_id=rfp.id, draft=draft, research=research
+        rfp_id=rfp.id,
+        draft=draft,
+        research=research,
+        evidence_by_section=evidence_map,
     )
     # Act 1 completes before Act 2 begins: judging persuasiveness first risks keeping a
     # case study because of an invented metric.
@@ -672,6 +713,14 @@ async def run_quality_gate(
                 report.tickets.append(ticket)
                 continue
 
+            from app.services.proposal_budget_content import section_is_budgetish
+
+            if section_is_budgetish(section):
+                ticket.outcome = "unfixed"
+                ticket.detail = "budget tab is frozen — Complete & Clean must not rewrite fees"
+                report.tickets.append(ticket)
+                continue
+
             before = section.content or ""
             try:
                 after, note = await _patch_section(
@@ -680,6 +729,7 @@ async def run_quality_gate(
                     section_title=section.title or "",
                     content=before,
                     ticket=ticket,
+                    packed_evidence=evidence_map.get(section.id, ""),
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("gate patch failed %s/%s: %s", section.id, ticket.code, exc)

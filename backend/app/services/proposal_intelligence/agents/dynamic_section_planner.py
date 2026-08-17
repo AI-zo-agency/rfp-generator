@@ -19,10 +19,17 @@ _SYSTEM = """Dynamic Section Planner. Decide which proposal sections must be gen
 FOR THIS RFP ONLY — read the RFP TOC / submission instructions in the excerpt.
 
 Rules:
-- zö static Sections 1–3 (company / team / experience) are ALWAYS drafted first; every section
-  AFTER that must come ONLY from THIS RFP's TOC, submission checklist, evaluation criteria,
-  and required forms — read the full excerpt including mid-document forms (references tables,
-  vendor questionnaire, pricing/quotation forms).
+- zö static Sections 1–3 (company / team / experience) are ALWAYS drafted first and keep
+  their existing titles (Who We Are, Organizational Structure, Business Information,
+  Certifications, Insurance, bios, our work). Do not rename or merge them in the outline.
+- Every section AFTER that must come ONLY from THIS RFP's TOC, submission checklist,
+  evaluation criteria, and required forms — read the full excerpt including mid-document
+  forms (references tables, vendor questionnaire, pricing/quotation forms).
+- Emit those RFP-varying (intelligence) tabs IN THIS RFP's stated order only —
+  copy the buyer's TOC / "shall submit" sequence. Do not apply a default
+  cover-letter / technical / cost stack. Omit any package this RFP does not name.
+  Company identity in the TOC is already Sections 1.1–1.5 — do NOT outline a
+  second company-background essay tab.
 - Include a section ONLY if the RFP (or its evaluation criteria) clearly asks for it.
 - Do NOT invent a default "Methodology" / "Timeline" / "Budget" stack.
 - Prefer the RFP's numbered outline when present (including nested 4, 4.1, 4.2).

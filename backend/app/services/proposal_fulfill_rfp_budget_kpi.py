@@ -10,6 +10,7 @@ from typing import Any
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
 from app.models.rfp import RfpRecord
 from app.services.proposal_budget_content import (
+    budget_section_score,
     find_budget_section_index,
     official_pricing_form_is_filled,
     render_budget_markdown,
@@ -151,6 +152,10 @@ def manuscript_cost_section_is_hollow(content: str) -> bool:
     text = (content or "").strip()
     if not text:
         return True
+    from app.services.proposal_budget_slots import find_unresolved_budget_slots
+
+    if find_unresolved_budget_slots(text):
+        return True
     upper = text.upper()
     if "[MANUAL FILL" in upper and "$" not in text:
         return True
@@ -208,6 +213,73 @@ def fill_pricing_form_contact_placeholders(
     if email:
         text = _CONTACT_EMAIL_PLACEHOLDER_RE.sub(email, text)
     return text
+
+
+def restore_unresolved_budget_token_tabs(
+    draft: ProposalDraft,
+    budget: object | None,
+    *,
+    rfp_text: str = "",
+) -> tuple[ProposalDraft, list[str]]:
+    """Replace leftover {{budget.*}} Cost/Pricing cells from the canonical fee ledger.
+
+    Writers invent slot names (brand_development, media_placements) that are not
+    money-slot keys. The Budget step can still go green on a sibling fee table
+    while Cost Proposal stays as raw templates.
+    """
+    from app.services.proposal_budget_slots import (
+        find_unresolved_budget_slots,
+        render_budget_slots,
+    )
+
+    logs: list[str] = []
+    if budget is None:
+        return draft, logs
+    markdown: str | None = None
+    sections = list(draft.sections)
+    changed = False
+    for idx, section in enumerate(sections):
+        body = section.content or ""
+        if "{{budget." not in body:
+            continue
+        filled, _unresolved = render_budget_slots(body, budget)  # type: ignore[arg-type]
+        leftover = find_unresolved_budget_slots(filled)
+        if leftover and budget_section_score(section.title) > 0:
+            if markdown is None:
+                markdown = render_budget_markdown(budget, rfp_text=rfp_text)  # type: ignore[arg-type]
+            filled = markdown
+        if filled != body:
+            sections[idx] = section.model_copy(
+                update={"content": filled, "status": "generated"}
+            )
+            changed = True
+            logs.append(
+                f"Budget: filled unresolved money slots in “{section.title or section.id}”."
+            )
+    if not changed:
+        return draft, logs
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+
+
+def _apply_unresolved_budget_slot_restore(
+    draft: ProposalDraft,
+    research: ProposalResearchCache,
+    *,
+    rfp_text: str,
+    logs: list[str],
+    meta: dict[str, Any],
+) -> ProposalDraft:
+    draft, slot_logs = restore_unresolved_budget_token_tabs(
+        draft, research.budget, rfp_text=rfp_text
+    )
+    logs.extend(slot_logs)
+    if slot_logs:
+        meta["budgetChanged"] = True
+        notes = list(meta.get("budgetRepairedNotes") or [])
+        notes.append("filled unresolved {{budget.*}} tokens from the fee ledger")
+        meta["budgetRepairedNotes"] = notes
+    return draft
 
 
 def budget_manuscript_needs_restore(
@@ -341,6 +413,19 @@ async def run_fulfill_budget_scan(
         "budgetEscalationNotes": [],
     }
 
+    from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
+
+    collapsed, cost_logs = collapse_duplicate_cost_proposal_tabs(list(draft.sections))
+    if cost_logs:
+        draft = draft.model_copy(
+            update={
+                "sections": collapsed,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        logs.extend(cost_logs)
+        meta["budgetChanged"] = True
+
     if manuscript_budget_is_missing(draft, research):
         logs.append(
             "Budget: pricing model missing professional fee line items — "
@@ -376,6 +461,74 @@ async def run_fulfill_budget_scan(
         )
         meta["budgetStatus"] = "needs_human"
         meta["budgetEscalationNotes"] = ["no pricing model available"]
+        return draft, research, logs, meta
+
+    sections_preview = list(draft.sections)
+    idx_preview = find_budget_section_index(sections_preview)
+    preview = sections_preview[idx_preview].content if idx_preview is not None else ""
+    preview_official = bool(
+        idx_preview is not None
+        and section_looks_like_official_pricing_form(sections_preview[idx_preview])
+        and official_pricing_form_is_filled(preview or "")
+    )
+    preview_broken = bool(
+        idx_preview is not None and collect_prose_arithmetic_violations(preview or "")
+    )
+    # Generated budgets that already add up must not be re-reconciled / re-rendered.
+    # Complete & Clean was rewriting a correct fee table, dropping a phase row,
+    # and leaving the old Agency Fee Subtotal in the prose.
+    if (
+        not meta["budgetRegenerated"]
+        and idx_preview is not None
+        and not manuscript_cost_section_is_hollow(preview or "")
+        and not preview_broken
+        and not budget_manuscript_needs_restore(preview or "", research.budget)
+    ):
+        logs.append(
+            "Budget: fee table already adds up — Complete & Clean left Pricing/Budget "
+            "unchanged (no editor rewrite, no re-render)."
+        )
+        meta["budgetStatus"] = "ok"
+        if preview_official:
+            cleaned = strip_non_budget_handoffs_from_pricing(preview or "")
+            locks = research.manuscript_locks if research else None
+            contact_name = (locks.primary_contact_name if locks else "") or ""
+            cleaned = fill_pricing_form_contact_placeholders(
+                cleaned, contact_name=contact_name, contact_email=""
+            )
+            if cleaned != (preview or "").strip():
+                sections_preview[idx_preview] = sections_preview[idx_preview].model_copy(
+                    update={"content": cleaned, "status": "generated"}
+                )
+                draft = draft.model_copy(
+                    update={
+                        "sections": sections_preview,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                meta["budgetChanged"] = True
+                logs.append(
+                    "Budget: preserved official Pricing Form — cleaned handoff tags / "
+                    "filled contact placeholders (no re-render)."
+                )
+        excerpt = evaluation_and_kpi_excerpt(rfp_text)
+        facts = await extract_rfp_scoring_facts_llm(excerpt or rfp_text[:60_000])
+        idx2 = find_budget_section_index(draft.sections)
+        if idx2 is not None and not section_looks_like_official_pricing_form(
+            draft.sections[idx2]
+        ):
+            draft, patch_logs = patch_budget_section_for_rfp(
+                draft, rfp_text=rfp_text, facts=facts
+            )
+            logs.extend(patch_logs)
+            if patch_logs:
+                meta["budgetChanged"] = True
+        draft = _apply_unresolved_budget_slot_restore(
+            draft, research, rfp_text=rfp_text, logs=logs, meta=meta
+        )
+        _fail_closed_if_budget_still_hollow(
+            draft=draft, research=research, logs=logs, meta=meta
+        )
         return draft, research, logs, meta
 
     # Reuse the rate card already persisted on the research cache so the Scan RFP
@@ -418,10 +571,18 @@ async def run_fulfill_budget_scan(
         and section_looks_like_official_pricing_form(target)
         and official_pricing_form_is_filled(before or "")
     )
+    prose_broken = bool(
+        idx is not None and collect_prose_arithmetic_violations(before or "")
+    )
+    if prose_broken:
+        logs.append(
+            "Budget: arithmetic mismatch — rewriting Budget tab from the canonical "
+            "fee ledger so the table, subtotal, and total match."
+        )
 
-    # Official RFQ pricing forms: never wipe with render_budget_markdown. Only
-    # strip wrongful contact-lock tags and fill [Contact Name]/[Contact Email].
-    if is_filled_official_form and idx is not None:
+    # Official RFQ pricing forms: never wipe with render_budget_markdown UNLESS
+    # the form's own arithmetic is broken — then fall through and rebuild.
+    if is_filled_official_form and idx is not None and not prose_broken:
         cleaned = strip_non_budget_handoffs_from_pricing(before or "")
         locks = research.manuscript_locks if research else None
         contact_name = (locks.primary_contact_name if locks else "") or ""
@@ -464,14 +625,14 @@ async def run_fulfill_budget_scan(
             logs.extend(patch_logs)
             if patch_logs:
                 meta["budgetChanged"] = True
+        draft = _apply_unresolved_budget_slot_restore(
+            draft, research, rfp_text=rfp_text, logs=logs, meta=meta
+        )
         _fail_closed_if_budget_still_hollow(
             draft=draft, research=research, logs=logs, meta=meta
         )
         return draft, research, logs, meta
 
-    prose_broken = bool(
-        idx is not None and collect_prose_arithmetic_violations(before or "")
-    )
     hollow = idx is None or manuscript_cost_section_is_hollow(before or "")
     polluted = idx is not None and budget_manuscript_needs_restore(before or "", budget)
     stale_tab = manuscript_budget_tab_stale(draft, research)
@@ -504,7 +665,7 @@ async def run_fulfill_budget_scan(
                 if meta["budgetStatus"] == "ok":
                     meta["budgetStatus"] = "repaired"
                     meta["budgetRepairedNotes"].append(
-                        "refreshed Budget & Pricing manuscript table"
+                        "rewrote Budget tab so fee table, subtotal, and total match"
                         + (" (restored polluted pricing tab)" if polluted else "")
                     )
         else:
@@ -610,6 +771,9 @@ async def run_fulfill_budget_scan(
             logger.warning("Budget grounding during Scan RFP skipped: %s", exc)
             logs.append(f"Budget: grounding check skipped ({exc}).")
 
+    draft = _apply_unresolved_budget_slot_restore(
+        draft, research, rfp_text=rfp_text, logs=logs, meta=meta
+    )
     _fail_closed_if_budget_still_hollow(
         draft=draft, research=research, logs=logs, meta=meta
     )

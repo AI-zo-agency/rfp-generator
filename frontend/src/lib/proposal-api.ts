@@ -461,7 +461,8 @@ type ProposalJobStatus = {
 
 async function startProposalPhaseJob(
   path: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { body?: string }
 ): Promise<
   | { mode: "async"; alreadyRunning: boolean }
   | {
@@ -475,8 +476,12 @@ async function startProposalPhaseJob(
   throwIfAborted(signal);
   const init: RequestInit = {
     method: "POST",
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      ...(options?.body ? { "Content-Type": "application/json" } : {}),
+    },
     cache: "no-store",
+    body: options?.body,
   };
   const timers: AbortSignal[] = [AbortSignal.timeout(PHASE_START_TIMEOUT_MS)];
   if (signal) timers.push(signal);
@@ -635,6 +640,74 @@ async function waitForProposalPhase(
   }
 
   throw new Error(`Timed out waiting for ${phase} to finish.`);
+}
+
+const FULFILL_POLL_MAX_MS = 90 * 60 * 1000;
+
+async function waitForFulfillScan(
+  rfpId: string,
+  signal?: AbortSignal
+): Promise<{
+  draft: ProposalOutline | null;
+  research: ProposalResearch | null;
+}> {
+  const deadline = Date.now() + FULFILL_POLL_MAX_MS;
+  let observedRunning = false;
+  const startedWall = Date.now();
+
+  while (Date.now() < deadline) {
+    throwIfAborted(signal);
+
+    const snapshot = await fetchProposalDraft(rfpId);
+    const cp = snapshot.research?.pipelineCheckpoint;
+    const job = await fetchProposalJobStatus(rfpId);
+
+    if (cp?.inProgressPhase === FULFILL_SCAN_PHASE) {
+      observedRunning = true;
+    }
+    if (job?.jobType === FULFILL_SCAN_PHASE && job.status === "running") {
+      observedRunning = true;
+    }
+
+    if (job?.jobType === FULFILL_SCAN_PHASE) {
+      if (job.status === "cancelled") {
+        throw new DOMException(
+          job.error ?? "Proposal generation stopped",
+          "AbortError"
+        );
+      }
+      if (job.status === "failed") {
+        throw new Error(job.error ?? "Complete & clean failed");
+      }
+      if (job.status === "completed" && cp?.inProgressPhase !== FULFILL_SCAN_PHASE) {
+        return { draft: snapshot.draft, research: snapshot.research };
+      }
+    }
+
+    if (observedRunning && cp?.inProgressPhase !== FULFILL_SCAN_PHASE) {
+      if (cp?.lastFailedPhase === FULFILL_SCAN_PHASE) {
+        const err = cp.lastError ?? "Complete & clean failed";
+        if (/stopped|cancel/i.test(err)) {
+          throw new DOMException(err, "AbortError");
+        }
+        throw new Error(err);
+      }
+      return { draft: snapshot.draft, research: snapshot.research };
+    }
+
+    if (!observedRunning && Date.now() - startedWall > 90_000) {
+      if (snapshot.draft?.lastFulfillReport) {
+        return { draft: snapshot.draft, research: snapshot.research };
+      }
+      throw new Error(
+        "Timed out waiting for Complete & clean to start. Check that the backend is running."
+      );
+    }
+
+    await sleep(STAGE_POLL_INTERVAL_MS);
+  }
+
+  throw new Error("Timed out waiting for Complete & clean to finish.");
 }
 
 async function runProposalPhaseAsync(
@@ -1637,67 +1710,70 @@ export async function runFulfillRfpGaps(
     unverifiedClaimsCount?: number;
   };
 }> {
-  const res = await fetch(`/api/rfps/${rfpId}/proposal/fulfill-rfp-gaps`, {
-    ...proposalPostInit(options?.signal),
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({
-      useLlm: options?.useLlm ?? true,
-      mode: options?.mode ?? "full",
-    }),
+  const body = JSON.stringify({
+    useLlm: options?.useLlm ?? true,
+    mode: options?.mode ?? "full",
   });
-  const text = await res.text();
-  let data: {
-    detail?: string;
-    review?: PreSubmitReview;
-    research?: ProposalResearch;
-    draft?: ApiProposalDraft;
-    fulfillReport?: {
-      mode?: string;
-      sectionsScanned?: number;
-      verifyTagsRemoved?: number;
-      verifyTagsKept?: number;
-      closingDetected?: string[];
-      closingDetectedSections?: Array<{ id: string; title: string }>;
-      closingAlreadyPresent?: Array<{ id: string; title: string }>;
-      inPlaceFixCount?: number;
-      closingAdded?: string[];
-      closingAddedSections?: Array<{ id: string; title: string }>;
-      submissionNarrativesAdded?: string[];
-      submissionDeliverablesAdded?: Array<{
-        id: string;
-        title: string;
-        kind?: string;
-      }>;
-      logs?: string[];
-      humanDecisionGaps?: string[];
-      ledgerAdditionsApplied?: number;
-      ledgerAdditionsSectionTitles?: string[];
-      ledgerMergesApplied?: number;
-      ledgerMergesSectionTitles?: string[];
-      ledgerCutsApplied?: number;
-      ledgerCutsSectionTitles?: string[];
-      truncatedSectionsCount?: number;
-      truncatedSectionTitles?: string[];
-      unverifiedClaimsCount?: number;
+  throwIfAborted(options?.signal);
+  await clearProposalGenerationStop(rfpId);
+  const started = await startProposalPhaseJob(
+    `/api/rfps/${rfpId}/proposal/fulfill-rfp-gaps`,
+    options?.signal,
+    { body }
+  );
+  if (started.mode === "sync") {
+    if (!started.review || !started.research || !started.draft) {
+      throw new Error("Incomplete fulfill RFP gaps response");
+    }
+    return {
+      review: started.review,
+      research: started.research,
+      draft: apiDraftToOutline(started.draft),
+      fulfillReport: {},
     };
-  };
-  try {
-    data = text.trim() ? JSON.parse(text) : {};
-  } catch {
-    throw new Error("Invalid response from fulfill RFP gaps.");
   }
-  if (!res.ok) {
-    throwIfProposalStopped(res, data);
-    throw new Error(data.detail ?? "Fulfill RFP gaps failed");
-  }
-  if (!data.review || !data.research || !data.draft) {
+  const waited = await waitForFulfillScan(rfpId, options?.signal);
+  if (!waited.draft || !waited.research) {
     throw new Error("Incomplete fulfill RFP gaps response");
   }
+  const review: PreSubmitReview = waited.research.presubmitReview ?? {
+    rfpId,
+    issues: [],
+    complianceChecklist: [],
+    summary: "",
+    readyToSubmit: false,
+    scannedAt: new Date().toISOString(),
+  };
+  const fulfillReport = (waited.draft.lastFulfillReport ?? {}) as {
+    mode?: string;
+    sectionsScanned?: number;
+    verifyTagsRemoved?: number;
+    verifyTagsKept?: number;
+    closingDetected?: string[];
+    closingDetectedSections?: Array<{ id: string; title: string }>;
+    closingAlreadyPresent?: Array<{ id: string; title: string }>;
+    inPlaceFixCount?: number;
+    closingAdded?: string[];
+    closingAddedSections?: Array<{ id: string; title: string }>;
+    submissionNarrativesAdded?: string[];
+    submissionDeliverablesAdded?: Array<{ id: string; title: string; kind?: string }>;
+    logs?: string[];
+    humanDecisionGaps?: string[];
+    ledgerAdditionsApplied?: number;
+    ledgerAdditionsSectionTitles?: string[];
+    ledgerMergesApplied?: number;
+    ledgerMergesSectionTitles?: string[];
+    ledgerCutsApplied?: number;
+    ledgerCutsSectionTitles?: string[];
+    truncatedSectionsCount?: number;
+    truncatedSectionTitles?: string[];
+    unverifiedClaimsCount?: number;
+  };
   return {
-    review: data.review,
-    research: data.research,
-    draft: apiDraftToOutline(data.draft),
-    fulfillReport: data.fulfillReport ?? {},
+    review,
+    research: waited.research,
+    draft: waited.draft,
+    fulfillReport,
   };
 }
 
@@ -1854,6 +1930,12 @@ export async function improveProposalSection(
     summary: string;
     sectionTitle?: string;
   } | null;
+  agentActivity: {
+    outcome: string;
+    steps: string[];
+    changes: string[];
+    discrepancies: string[];
+  } | null;
 }> {
   const res = await fetch(
     `/api/rfps/${rfpId}/proposal/sections/${sectionId}/improve`,
@@ -1902,6 +1984,12 @@ export async function improveProposalSection(
       summary?: string;
       sectionTitle?: string;
     } | null;
+    agentActivity?: {
+      outcome?: string;
+      steps?: string[];
+      changes?: string[];
+      discrepancies?: string[];
+    } | null;
   };
   try {
     data = text.trim() ? JSON.parse(text) : {};
@@ -1928,6 +2016,22 @@ export async function improveProposalSection(
           sectionTitle: rawFix.sectionTitle,
         }
       : null;
+  const rawActivity = data.agentActivity;
+  const agentActivity =
+    rawActivity && typeof rawActivity === "object"
+      ? {
+          outcome: String(rawActivity.outcome || "ok"),
+          steps: Array.isArray(rawActivity.steps)
+            ? rawActivity.steps.filter((s): s is string => typeof s === "string")
+            : [],
+          changes: Array.isArray(rawActivity.changes)
+            ? rawActivity.changes.filter((s): s is string => typeof s === "string")
+            : [],
+          discrepancies: Array.isArray(rawActivity.discrepancies)
+            ? rawActivity.discrepancies.filter((s): s is string => typeof s === "string")
+            : [],
+        }
+      : null;
   return {
     section: data.section,
     draft: apiDraftToOutline(data.draft),
@@ -1937,6 +2041,7 @@ export async function improveProposalSection(
       `Updated ${data.section.title}. Review the draft above.`,
     draftChanged: data.draftChanged !== false,
     suggestedFix,
+    agentActivity,
   };
 }
 

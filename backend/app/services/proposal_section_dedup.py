@@ -466,6 +466,76 @@ def _is_protected_scan_section(section: Any) -> bool:
     return False
 
 
+def collapse_title_near_duplicate_sections(
+    sections: list[Any],
+) -> tuple[list[Any], list[str]]:
+    """Keep one tab when titles are the same ask — including protected References twins.
+
+    Scan historically skipped any title containing 'reference' / 'experience', so
+    'References' and 'References & Past Performance' both survived and the writer
+    restated the same examples in each. Title-near-dup collapse is the exception.
+    """
+    from app.services.proposal_outline_dedup import (
+        normalize_outline_title,
+        outline_titles_near_duplicate,
+    )
+
+    drop_ids: set[str] = set()
+    dropped_labels: list[str] = []
+    indexed = [
+        (idx, section)
+        for idx, section in enumerate(sections)
+        if _section_id(section) and not _is_static_cq_section_id(_section_id(section))
+    ]
+    canon_budget_id = _canonical_budget_section_id(sections)
+
+    for i, (idx_a, sec_a) in enumerate(indexed):
+        sid_a = _section_id(sec_a)
+        if sid_a in drop_ids or sid_a == canon_budget_id or _is_protected_budget_section(sec_a):
+            continue
+        title_a = _section_title(sec_a)
+        for idx_b, sec_b in indexed[i + 1 :]:
+            sid_b = _section_id(sec_b)
+            if sid_b in drop_ids or sid_b == canon_budget_id or _is_protected_budget_section(sec_b):
+                continue
+            title_b = _section_title(sec_b)
+            if not outline_titles_near_duplicate(title_a, title_b, threshold=0.55):
+                continue
+            pts_a = _section_eval_points(sec_a)
+            pts_b = _section_eval_points(sec_b)
+            wc_a = word_count(_section_content(sec_a))
+            wc_b = word_count(_section_content(sec_b))
+            drop_b = _prefer_drop_b(
+                pts_a=pts_a,
+                pts_b=pts_b,
+                idx_a=idx_a,
+                idx_b=idx_b,
+                wc_a=wc_a,
+                wc_b=wc_b,
+            )
+            # Prefer the fuller RFP-phrased title when scores/length tie-break is weak.
+            if wc_a == wc_b and pts_a == pts_b:
+                drop_b = len(normalize_outline_title(title_b)) <= len(
+                    normalize_outline_title(title_a)
+                )
+            if drop_b:
+                drop_ids.add(sid_b)
+                dropped_labels.append(
+                    f"{title_b} (title near-duplicate of {title_a})"
+                )
+            else:
+                drop_ids.add(sid_a)
+                dropped_labels.append(
+                    f"{title_a} (title near-duplicate of {title_b})"
+                )
+                break
+
+    if not drop_ids:
+        return sections, []
+    kept = [s for s in sections if _section_id(s) not in drop_ids]
+    return kept, dropped_labels
+
+
 def prune_near_duplicate_sections(
     sections: list[Any],
     *,
@@ -678,6 +748,17 @@ def dedupe_manuscript_for_scan(
     sections, n = compress_duplicate_case_study_sections(list(sections))
     if n:
         logs.append(f"Compressed {n} case-study rewrite(s)")
+    try:
+        from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
+
+        typed = [s for s in sections if hasattr(s, "title")]
+        if len(typed) == len(sections):
+            sections, cost_logs = collapse_duplicate_cost_proposal_tabs(typed)
+            logs.extend(cost_logs)
+    except Exception:  # noqa: BLE001
+        pass
+    sections, title_dups = collapse_title_near_duplicate_sections(sections)
+    logs.extend(title_dups)
     # Mega parents first so pairwise prune sees the dedicated siblings cleanly.
     sections, removed = remove_aggregate_restatement_sections(sections)
     logs.extend(removed)

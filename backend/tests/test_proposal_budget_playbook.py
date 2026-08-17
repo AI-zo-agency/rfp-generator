@@ -68,6 +68,30 @@ class ReverseEngineerGuardTests(unittest.TestCase):
             refuse_noncompliant_budget_edit("what to add here?", "…references…")
         )
 
+    def test_zero_commission_line_allowed_when_fees_are_present(self) -> None:
+        prose = (
+            "Professional fees: $50,000.\n"
+            "Agency commission on media placements: $0.00 (client pass-through at net)."
+        )
+        self.assertIsNone(refuse_noncompliant_budget_edit("fill the media table", prose))
+
+    def test_zero_agency_only_does_not_422_chat(self) -> None:
+        self.assertIsNone(
+            refuse_noncompliant_budget_edit(
+                "fill budget",
+                "Agency revenue is $0.00 for this engagement.",
+            )
+        )
+
+    def test_zero_agency_not_refused_when_prior_tab_already_has_fees(self) -> None:
+        self.assertIsNone(
+            refuse_noncompliant_budget_edit(
+                "Improve this section",
+                "Agency commission on media: $0.00.",
+                prior_text="Professional fees: $50,000. Total proposed investment: $50,000.",
+            )
+        )
+
     def test_affirmative_reverse_engineer_ask_is_refused(self) -> None:
         self.assertTrue(
             user_asked_reverse_engineered_total(

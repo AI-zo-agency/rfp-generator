@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { improveProposalSection } from "@/lib/proposal-api";
 import {
   chatBusyStatusLabel,
+  chatLiveWorkSteps,
   messageLooksOutlineStructure,
   messageLooksProposalWide,
   pinnedSectionConflictsWithMessage,
@@ -22,6 +23,13 @@ export interface SectionChatSuggestedFix {
   sectionTitle?: string;
 }
 
+export interface SectionChatAgentActivity {
+  outcome: string;
+  steps: string[];
+  changes: string[];
+  discrepancies: string[];
+}
+
 export interface SectionChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -31,6 +39,7 @@ export interface SectionChatMessage {
   suggestedFix?: SectionChatSuggestedFix | null;
   /** After Apply the fix succeeds or is dismissed. */
   suggestedFixApplied?: boolean;
+  agentActivity?: SectionChatAgentActivity | null;
 }
 
 export interface SectionChatReference {
@@ -70,6 +79,7 @@ const QUICK_PROMPTS = [
 ];
 
 const SECTION_PIN_LABEL = "Improve this section";
+const REVISE_PIN_LABEL = "Revise content";
 
 export function buildSectionPinReference(
   section: OutlineSection,
@@ -105,6 +115,7 @@ export function ProposalSectionChatPanel({
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusLine, setStatusLine] = useState<string | null>(null);
+  const [liveStepIndex, setLiveStepIndex] = useState(0);
   const [pendingApply, setPendingApply] = useState<{
     messageId: string;
     fix: SectionChatSuggestedFix;
@@ -116,7 +127,18 @@ export function ProposalSectionChatPanel({
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, isRunning]);
+  }, [messages, isRunning, liveStepIndex]);
+
+  useEffect(() => {
+    if (!isRunning) {
+      setLiveStepIndex(0);
+      return;
+    }
+    const id = window.setInterval(() => {
+      setLiveStepIndex((n) => n + 1);
+    }, 2200);
+    return () => window.clearInterval(id);
+  }, [isRunning]);
 
   useEffect(() => {
     if (reference?.text) {
@@ -274,6 +296,7 @@ export function ProposalSectionChatPanel({
             draftUnchanged: !result.draftChanged,
             suggestedFix:
               !result.draftChanged && result.suggestedFix ? result.suggestedFix : null,
+            agentActivity: result.agentActivity,
           },
         ]);
 
@@ -310,10 +333,20 @@ export function ProposalSectionChatPanel({
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Chat request failed";
-        setError(detail);
         onMessagesChange([
           ...nextMessages,
-          { id: `e-${Date.now()}`, role: "assistant", content: `Error: ${detail}` },
+          {
+            id: `e-${Date.now()}`,
+            role: "assistant",
+            content: detail,
+            draftUnchanged: true,
+            agentActivity: {
+              outcome: "needs_review",
+              steps: ["Tried to run your instruction"],
+              changes: ["No manuscript text was changed."],
+              discrepancies: [detail],
+            },
+          },
         ]);
       } finally {
         setIsRunning(false);
@@ -404,6 +437,7 @@ export function ProposalSectionChatPanel({
             role: "assistant",
             content: result.assistantMessage,
             draftUnchanged: !result.draftChanged,
+            agentActivity: result.agentActivity,
           },
         ]);
 
@@ -436,10 +470,20 @@ export function ProposalSectionChatPanel({
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Apply fix failed";
-        setError(detail);
         onMessagesChange([
           ...nextMessages,
-          { id: `e-${Date.now()}`, role: "assistant", content: `Error: ${detail}` },
+          {
+            id: `e-${Date.now()}`,
+            role: "assistant",
+            content: detail,
+            draftUnchanged: true,
+            agentActivity: {
+              outcome: "needs_review",
+              steps: ["Tried to apply the suggested fix"],
+              changes: ["No manuscript text was changed."],
+              discrepancies: [detail],
+            },
+          },
         ]);
       } finally {
         setIsRunning(false);
@@ -473,6 +517,14 @@ export function ProposalSectionChatPanel({
       buildSectionPinReference(viewingSection, viewingSection.content || "")
     );
     setInput("Improve this section for the RFP.");
+  };
+
+  const pinReviseSection = () => {
+    if (!viewingSection || disabled || isRunning) return;
+    onSetReference(
+      buildSectionPinReference(viewingSection, viewingSection.content || "")
+    );
+    setInput("Revise this section.");
   };
 
   return (
@@ -512,6 +564,9 @@ export function ProposalSectionChatPanel({
                 <>
                   {msg.draftUnchanged ? (
                     <p className="proposal-section-chat-draft-badge">DRAFT UNCHANGED</p>
+                  ) : null}
+                  {msg.agentActivity ? (
+                    <AgentActivityCard activity={msg.agentActivity} />
                   ) : null}
                   <MarkdownReportBody body={msg.content} variant="chat" />
                   {msg.suggestedFix && !msg.suggestedFixApplied ? (
@@ -616,9 +671,10 @@ export function ProposalSectionChatPanel({
           ))
         )}
         {isRunning ? (
-          <p className="text-sm font-medium text-zo-orange">
-            {statusLine ?? "Scanning RFP + proposal…"}
-          </p>
+          <ChatLiveTicker
+            statusLine={statusLine}
+            stepIndex={liveStepIndex}
+          />
         ) : null}
       </div>
 
@@ -674,14 +730,24 @@ export function ProposalSectionChatPanel({
 
         <div className="proposal-section-chat-quick custom-scrollbar">
           {viewingSection ? (
-            <button
-              type="button"
-              disabled={disabled || isRunning}
-              onClick={pinViewingSection}
-              className="proposal-section-chat-quick-btn proposal-section-chat-quick-btn--primary"
-            >
-              {SECTION_PIN_LABEL}
-            </button>
+            <>
+              <button
+                type="button"
+                disabled={disabled || isRunning}
+                onClick={pinReviseSection}
+                className="proposal-section-chat-quick-btn proposal-section-chat-quick-btn--primary"
+              >
+                {REVISE_PIN_LABEL}
+              </button>
+              <button
+                type="button"
+                disabled={disabled || isRunning}
+                onClick={pinViewingSection}
+                className="proposal-section-chat-quick-btn proposal-section-chat-quick-btn--primary"
+              >
+                {SECTION_PIN_LABEL}
+              </button>
+            </>
           ) : null}
           {QUICK_PROMPTS.map((prompt) => (
             <button
@@ -697,5 +763,83 @@ export function ProposalSectionChatPanel({
         </div>
       </div>
     </aside>
+  );
+}
+
+function ChatLiveTicker({
+  statusLine,
+  stepIndex,
+}: {
+  statusLine: string | null;
+  stepIndex: number;
+}) {
+  const steps = chatLiveWorkSteps(statusLine);
+  const active = stepIndex % steps.length;
+  return (
+    <div className="proposal-section-chat-live" role="status" aria-live="polite">
+      <p className="proposal-section-chat-live-kicker">Agent working</p>
+      <ul className="proposal-section-chat-live-steps">
+        {steps.map((step, i) => (
+          <li
+            key={step}
+            className={
+              i === active
+                ? "proposal-section-chat-live-step proposal-section-chat-live-step--active"
+                : i < active
+                  ? "proposal-section-chat-live-step proposal-section-chat-live-step--done"
+                  : "proposal-section-chat-live-step"
+            }
+          >
+            {step}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function AgentActivityCard({ activity }: { activity: SectionChatAgentActivity }) {
+  const discrepancies = activity.discrepancies.filter(Boolean);
+  const none = discrepancies.length === 0;
+  return (
+    <div className="proposal-section-chat-activity">
+      <p className="proposal-section-chat-activity-kicker">
+        {activity.outcome === "needs_review"
+          ? "Recap — needs review"
+          : activity.outcome === "unchanged"
+            ? "Recap — no manuscript change"
+            : "Recap"}
+      </p>
+      {activity.steps.length > 0 ? (
+        <>
+          <p className="proposal-section-chat-activity-label">What I did</p>
+          <ul>
+            {activity.steps.map((s) => (
+              <li key={s}>{s}</li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      {activity.changes.length > 0 ? (
+        <>
+          <p className="proposal-section-chat-activity-label">Changes</p>
+          <ul>
+            {activity.changes.map((s) => (
+              <li key={s}>{s}</li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      <p className="proposal-section-chat-activity-label">Discrepancies</p>
+      {none ? (
+        <p className="proposal-section-chat-activity-none">None found</p>
+      ) : (
+        <ul>
+          {discrepancies.map((s) => (
+            <li key={s}>{s}</li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

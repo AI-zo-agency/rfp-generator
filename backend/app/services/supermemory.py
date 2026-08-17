@@ -24,6 +24,8 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 _DOC_LIST_CACHE_TTL_SECONDS = 60.0
+_DOC_CONTENT_CACHE_MAX = 48
+_doc_content_cache: dict[str, str] = {}
 _doc_list_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 # v4 hybrid search does not match type=knowledge_base filters; exclude intake RFP docs instead.
@@ -241,9 +243,18 @@ async def get_document_content(
     custom_id: str | None = None,
 ) -> str:
     """Fetch full indexed document text (all chunks) via v3 GET — search often returns one chunk only."""
+    key = (custom_id or document_id or "").strip()
+    if key:
+        cached = _doc_content_cache.get(key)
+        if cached is not None:
+            return cached
     data = await get_document(document_id=document_id, custom_id=custom_id)
-    content = data.get("content") or data.get("text") or ""
-    return str(content).strip()
+    content = str(data.get("content") or data.get("text") or "").strip()
+    if key and content:
+        if len(_doc_content_cache) >= _DOC_CONTENT_CACHE_MAX:
+            _doc_content_cache.pop(next(iter(_doc_content_cache)))
+        _doc_content_cache[key] = content
+    return content
 
 
 async def find_document_by_file_name(file_name: str) -> dict[str, Any] | None:

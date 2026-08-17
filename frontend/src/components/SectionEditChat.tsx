@@ -78,10 +78,9 @@ export function SectionEditChat({
       } catch (err) {
         const detail =
           err instanceof Error ? err.message : "Section improve failed";
-        setError(detail);
         setMessages((prev) => [
           ...prev,
-          { id: `e-${Date.now()}`, role: "assistant", content: `Error: ${detail}` },
+          { id: `e-${Date.now()}`, role: "assistant", content: detail },
         ]);
       } finally {
         setIsRunning(false);

@@ -256,6 +256,32 @@ class OutlineDedupTests(unittest.TestCase):
         self.assertTrue(len(added) >= 1)
 
 
+    def test_references_vs_references_and_past_performance_are_near_dups(self) -> None:
+        self.assertTrue(
+            outline_titles_near_duplicate(
+                "References — At least three references for similar engagements",
+                "References & Past Performance",
+            )
+        )
+        kept, dropped = filter_lean_outline_sections(
+            [
+                {
+                    "id": "20",
+                    "title": "References — At least three references for similar engagements",
+                    "required": True,
+                },
+                {
+                    "id": "27",
+                    "title": "References & Past Performance",
+                    "required": True,
+                },
+            ],
+            rfp_context="references past performance sample work",
+        )
+        titles = [s["title"] for s in kept]
+        self.assertEqual(len([t for t in titles if "Reference" in t]), 1, msg=titles)
+        self.assertTrue(any("near-duplicate" in d for d in dropped))
+
     def test_structural_head_label_merges_siblings(self) -> None:
         """Same head before — merges without topic-specific regex."""
         self.assertTrue(

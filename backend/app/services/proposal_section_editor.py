@@ -110,18 +110,23 @@ def _mask_manual_fill_for_rewrite(text: str) -> tuple[str, list[str]]:
 
 
 def _unmask_manual_fill_checked(output: str, originals: list[str], *, attempt: int) -> str:
-    """Restore masked MANUAL FILL tags; raise if the model dropped any placeholder."""
+    """Restore masked MANUAL FILL tags. Never 422 — splice dropped tags back in.
+
+    Chat Improve used to fail twice with "removed protected MANUAL FILL tag(s)"
+    whenever the model omitted «MFILL_N». Hand-off tags stay in the draft instead.
+    """
+    del attempt
     if not originals:
-        return output
+        return output or ""
+    text = unmask_manual_fill_tags(output or "", originals)
     missing = missing_manual_fill_placeholders(output or "", originals)
     if missing:
-        raise ProposalError(
-            "Rewrite dropped protected MANUAL FILL tag(s): "
-            + ", ".join(missing[:4])
-            + f" (attempt {attempt})",
-            status_code=422,
+        logger.warning(
+            "Rewrite omitted %s MANUAL FILL tag(s) — restored at end of section",
+            len(missing),
         )
-    return unmask_manual_fill_tags(output, originals)
+        text = (text.rstrip() + "\n\n" + "\n".join(missing)).strip()
+    return text
 
 logger = logging.getLogger(__name__)
 
@@ -3312,6 +3317,7 @@ Rules:
 6. Keep markdown structure inside the excerpt (lists, table rows) if the selection had them.
 7. NEVER insert citation markers like [E1], [E14], or **[E3]** into the excerpt.
 8. Return ONLY JSON: {"replacement": "revised excerpt text only"}
+   - Escape line breaks inside the string as \\n (required for markdown tables).
    - If the user asks to REMOVE / DELETE / DROP the selected span: prefer {"replacement": ""}.
      After the delete, the section MUST still read grammatically (capitalize sentence starts;
      no orphaned mid-phrase stubs). If empty deletion would leave a broken join given the
@@ -4490,16 +4496,28 @@ async def _improve_section_selection(
                 f"Copy every «MFILL_N» through unchanged.\n\n{user_block}"
             )
 
-        raw, provider = await llm.chat_json(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_block},
-            ],
-            max_tokens=2048 if not lean else 1200,
-            temperature=0.25,
-            node_name="chat_excerpt_edit",
-            tier="light" if lean else "heavy",
-        )
+        table_excerpt = (masked_excerpt or "").count("|") >= 4
+        sel_max_tokens = 4096 if table_excerpt else (2048 if not lean else 1200)
+        try:
+            raw, provider = await llm.chat_json(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_block},
+                ],
+                max_tokens=sel_max_tokens,
+                temperature=0.25,
+                node_name="chat_excerpt_edit",
+                tier="light" if lean else "heavy",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Selection edit LLM failed attempt %d: %s",
+                attempt,
+                str(exc)[:240],
+            )
+            if attempt < 2:
+                continue
+            raise
         raw = raw if isinstance(raw, dict) else {}
         # Empty string is valid when deleting the span — do not .strip() away intent
         # before checking the key; treat missing key as empty only for remove asks.
@@ -4536,16 +4554,18 @@ async def _improve_section_selection(
                 str(exc)[:200],
             )
             if attempt >= 2:
-                raise ProposalError(
-                    "Rewrite removed protected [MANUAL FILL] tag(s) twice. "
-                    "Ask to fill those tags explicitly with a real value or KB fact, "
-                    "or edit a span that does not include them.",
-                    status_code=422,
-                ) from exc
+                if replacement and mfill_originals:
+                    replacement = _unmask_manual_fill_checked(
+                        replacement, mfill_originals, attempt=attempt
+                    )
+                last_mfill_error = None
+                break
     if last_mfill_error and not replacement and not allow_remove:
         raise last_mfill_error
 
-    refusal = refuse_noncompliant_budget_edit(ask_for_compliance, replacement)
+    refusal = refuse_noncompliant_budget_edit(
+        ask_for_compliance, replacement, prior_text=excerpt
+    )
     if refusal:
         raise ProposalError(refusal, status_code=422)
 
@@ -4932,7 +4952,9 @@ async def _redraft_rfp_section(
         )
 
         refusal = refuse_noncompliant_budget_edit(
-            (compliance_user_message or user_message), content
+            (compliance_user_message or user_message),
+            content,
+            prior_text=original_content,
         )
         if refusal:
             raise ProposalError(refusal, status_code=422)
@@ -4979,12 +5001,10 @@ async def _redraft_rfp_section(
                 str(exc)[:200],
             )
             if attempt >= 2:
-                raise ProposalError(
-                    "Rewrite removed protected [MANUAL FILL] tag(s) twice. "
-                    "Ask to fill those tags explicitly with a real value or KB fact, "
-                    "or edit a span that does not include them.",
-                    status_code=422,
-                ) from exc
+                content = _unmask_manual_fill_checked(
+                    content, mfill_originals, attempt=attempt
+                )
+                break
 
     if bio_kb.strip():
         content, _ = _apply_bio_work_history_kb_fill(section, content, bio_kb)
@@ -5098,24 +5118,10 @@ async def _improve_static_section(
             title=section.title,
             register="narrative",
         )
-        try:
-            content = _unmask_manual_fill_checked(
-                content, mfill_originals, attempt=attempt
-            )
-            break
-        except ProposalError as exc:
-            logger.warning(
-                "Static rewrite MANUAL FILL preserve failed attempt %d: %s",
-                attempt,
-                str(exc)[:200],
-            )
-            if attempt >= 2:
-                raise ProposalError(
-                    "Rewrite removed protected [MANUAL FILL] tag(s) twice. "
-                    "Ask to fill those tags explicitly with a real value or KB fact, "
-                    "or edit a span that does not include them.",
-                    status_code=422,
-                ) from exc
+        content = _unmask_manual_fill_checked(
+            content, mfill_originals, attempt=attempt
+        )
+        break
 
     # Prefer deterministic KB fill for remaining VERIFY tags after rewrite
     bio_kb = await _bio_kb_context_for_section(
@@ -6648,6 +6654,61 @@ async def improve_proposal_section(
     if not section:
         raise ProposalError(f"Section {section_id} not found in draft.", status_code=404)
     before_section = section.model_copy()
+
+    if should_apply_budget_playbook(section, raw_user_message):
+        from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
+        from app.services.proposal_fulfill_rfp_budget_kpi import (
+            restore_unresolved_budget_token_tabs,
+        )
+
+        collapsed, cost_logs = collapse_duplicate_cost_proposal_tabs(list(draft.sections))
+        if cost_logs:
+            draft = draft.model_copy(
+                update={
+                    "sections": collapsed,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        slot_logs: list[str] = []
+        if research and research.budget:
+            draft, slot_logs = restore_unresolved_budget_token_tabs(
+                draft, research.budget, rfp_text=rfp_context
+            )
+        still = _find_draft_section(draft, section_id)
+        merged_away = still is None
+        if still is None:
+            from app.services.proposal_budget_content import find_budget_section_index
+
+            idx = find_budget_section_index(draft.sections)
+            still = draft.sections[idx] if idx is not None else draft.sections[0]
+        open_changed = merged_away or (
+            (still.id == before_section.id)
+            and (still.content or "") != (before_section.content or "")
+        )
+        if (cost_logs or slot_logs) and persist and research is not None:
+            await _persist_section_improve_draft(
+                draft, research, section_title=still.title
+            )
+        if open_changed:
+            detail = "; ".join([*cost_logs, *slot_logs][:4]) or (
+                "Synced Cost/Pricing from the fee ledger."
+            )
+            provider = _provider_name()
+            return _improve_outcome(
+                still,
+                draft,
+                research
+                or ProposalResearchCache(
+                    rfpId=rfp_id,
+                    updatedAt=datetime.now(timezone.utc).isoformat(),
+                    provider=provider,
+                ),
+                provider,
+                f"Updated **{still.title}** from the existing budget "
+                f"(no second Cost Proposal). {detail}",
+                True,
+            )
+        section = still
 
     if apply_fix:
         working, updated_draft, research, provider, reply, changed = (

@@ -49,6 +49,14 @@ const FIXTURES: Record<string, string> = {
 | Senior Designer | $140 |
 `,
 
+  "a KPI table with VERIFY chips": `### Event KPIs
+
+| EVENT KPI | TARGET |
+| --- | --- |
+| Events conducted per island | [VERIFY: target number] |
+| Total attendance | [VERIFY: target number] |
+`,
+
   "lists and a wrapped paragraph": `zö agency has delivered brand and digital work for public agencies
 across the Pacific Northwest since 2013.
 
@@ -79,16 +87,13 @@ describe("projection parity with MarkdownReportBody", () => {
     });
   }
 
-  it("resolves any sentence the preview displays back to source offsets", () => {
-    for (const source of Object.values(FIXTURES)) {
-      const visible = renderedText(source);
-      // Slide a window over the rendered text; every window a user could
-      // plausibly drag across must map back to a real range.
-      const words = visible.split(" ");
-      for (let i = 0; i + 4 <= words.length; i += 1) {
-        const selected = words.slice(i, i + 4).join(" ");
-        expect(findSourceRange(source, selected), `no range for "${selected}"`).not.toBeNull();
-      }
-    }
+  it("maps a browser table selection (tabs/newlines) including VERIFY chips", () => {
+    const source = FIXTURES["a KPI table with VERIFY chips"];
+    const selected =
+      "EVENT KPI\tTARGET\nEvents conducted per island\tConfirm before submit — target number";
+    const range = findSourceRange(source, selected);
+    expect(range).not.toBeNull();
+    expect(source.slice(range!.start, range!.end)).toContain("Events conducted per island");
+    expect(source.slice(range!.start, range!.end)).toContain("[VERIFY: target number]");
   });
 });

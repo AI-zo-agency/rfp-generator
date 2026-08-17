@@ -83,9 +83,12 @@ class ScheduleApproachDedupeTests(unittest.TestCase):
         out, n = compress_schedule_restating_approach([approach, schedule])
         self.assertEqual(n, 1)
         sched = next(s for s in out if s.id == "schedule")
-        self.assertIn("methodology detail lives", sched.content or "")
-        self.assertIn("RFP award→launch", sched.content or "")
-        self.assertNotIn("Weeks 1-2", sched.content or "")
+        self.assertIn("| Phase | Timing | Milestone |", sched.content or "")
+        self.assertIn("Kickoff complete", sched.content or "")
+        self.assertNotIn("[VERIFY:", sched.content or "")
+        self.assertNotIn("Do not restate", sched.content or "")
+        self.assertNotIn("Stakeholder meetings.", sched.content or "")
+        self.assertNotIn("Week 10", sched.content or "")
 
 
 class CalendarOverrunTests(unittest.TestCase):
@@ -118,8 +121,10 @@ class CalendarOverrunTests(unittest.TestCase):
         out, logs = scrub_schedule_calendar_overrun([schedule], rfp_text=rfp)
         self.assertTrue(logs)
         body = out[0].content or ""
-        self.assertIn("RFP constraint", body)
-        self.assertIn("[VERIFY:", body)
+        self.assertIn("| Phase | Timing | Milestone |", body)
+        self.assertIn("after award", body)
+        self.assertNotIn("[VERIFY:", body)
+        self.assertNotIn("Do not restate", body)
         self.assertNotIn("Week 10", body)
 
     def test_scrubs_approach_week_labels_keeps_methodology(self) -> None:
@@ -140,9 +145,41 @@ class CalendarOverrunTests(unittest.TestCase):
         self.assertTrue(logs)
         body = out[0].content or ""
         self.assertIn("performance measurement plans", body)
-        self.assertIn("[VERIFY: fit RFP award→launch window]", body)
+        self.assertIn("3-week RFP launch window", body)
+        self.assertNotIn("[VERIFY:", body)
         self.assertNotIn("Weeks 8-9", body)
         self.assertNotIn("Week 10", body)
+
+
+class DesignerCalendarPolishTests(unittest.TestCase):
+    def test_fills_blank_timing_and_strips_writer_instructions(self) -> None:
+        from app.services.proposal_consistency_enforcement import (
+            polish_schedule_tabs_for_designer,
+        )
+
+        schedule = ProposalSection(
+            id="timeline",
+            title="24. Timeline & Schedule",
+            content=(
+                "## calendar.\n\n"
+                "| Phase | Timing | Milestone |\n"
+                "| --- | --- | --- |\n"
+                "| Discovery |  | Kickoff complete |\n"
+                "| Strategy |  | Framework approval |\n"
+                "| Creative/production |  | Creative approval |\n"
+                "| Launch/handoff |  | Launch-ready |\n\n"
+                "Do not restate Approach methodology paragraphs here.\n"
+            ),
+            status="generated",
+        )
+        out, logs = polish_schedule_tabs_for_designer([schedule], rfp_text="")
+        self.assertTrue(logs)
+        body = out[0].content or ""
+        self.assertNotIn("Do not restate", body)
+        self.assertNotIn("[VERIFY:", body)
+        self.assertIn("Starts at award", body)
+        self.assertIn("[DESIGNER NOTE:", body)
+        self.assertNotRegex(body, r"(?m)^\|\s*Discovery\s*\|\s*\|")
 
 
 class EndToEndConsistencyTests(unittest.TestCase):

@@ -34,7 +34,7 @@ export const PIPELINE_PHASE_LABELS: Record<PipelinePhase, string> = {
 export interface ProposalPipelineCheckpoint {
   lastCompletedPhase?: PipelinePhase | null;
   inProgressPhase?: PipelineInProgressPhase | null;
-  lastFailedPhase?: PipelinePhase | null;
+  lastFailedPhase?: PipelineInProgressPhase | null;
   lastError?: string | null;
   resumeFromPhase?: PipelinePhase | null;
   activityLabel?: string | null;
@@ -144,8 +144,8 @@ function phase3SectionContentUsable(content: string | undefined | null): boolean
  * so a stage added on the backend is invisible here until it is added below.
  */
 export const FULFILL_SCAN_STEP_LABELS = [
-  "Closing & submission tabs",
   "RFP structure (all scored sections)",
+  "Closing & submission tabs",
   "Requirement ledger (merge / cut / add)",
   "DQ & gov-policy gate (agentic loop)",
   "Remove duplicate sections",
@@ -156,8 +156,8 @@ export const FULFILL_SCAN_STEP_LABELS = [
   "Contractor KPIs (Section 2.3)",
   "KB fact-check (Supermemory)",
   "RFP contradiction check (LLM)",
-  "Remove optional VERIFY/MANUAL FILL",
   "Line-by-line KB grounding (async)",
+  "Remove optional VERIFY/MANUAL FILL",
   "Compact manuscript (remove duplicates)",
   "Page limit & anti-invention (Ralph)",
   "Review & quality gate (3 acts)",
@@ -180,7 +180,7 @@ export interface ProposalPipelineStatus {
   isComplete: boolean;
   canResume: boolean;
   lastCompletedPhase?: PipelinePhase | null;
-  lastFailedPhase?: PipelinePhase | null;
+  lastFailedPhase?: PipelineInProgressPhase | null;
   lastError?: string | null;
   inProgressPhase?: PipelineInProgressPhase | null;
   phaseLabels: Record<string, string>;
@@ -336,8 +336,12 @@ export function resolveResumePhase(
   }
 
   const cp = research?.pipelineCheckpoint;
-  if (cp?.lastFailedPhase && PIPELINE_PHASE_ORDER.includes(cp.lastFailedPhase)) {
-    if (cp.lastFailedPhase === "phase-3-6-self-edit") {
+  if (
+    cp?.lastFailedPhase &&
+    (PIPELINE_PHASE_ORDER as readonly string[]).includes(cp.lastFailedPhase)
+  ) {
+    const failed = cp.lastFailedPhase as PipelinePhase;
+    if (failed === "phase-3-6-self-edit") {
       const err = (cp.lastError ?? "").toLowerCase();
       if (
         (err.includes("verify") || err.includes("placeholder")) &&
@@ -346,7 +350,7 @@ export function resolveResumePhase(
         return "phase-3-5-budget";
       }
     }
-    return cp.lastFailedPhase;
+    return failed;
   }
   if (cp?.inProgressPhase && PIPELINE_PHASE_ORDER.includes(cp.inProgressPhase as PipelinePhase)) {
     return cp.inProgressPhase as PipelinePhase;
@@ -417,8 +421,9 @@ export function buildPipelineStatus(
     (cp?.resumeFromPhase && PIPELINE_PHASE_ORDER.includes(cp.resumeFromPhase)
       ? cp.resumeFromPhase
       : null) ??
-    (cp?.lastFailedPhase && PIPELINE_PHASE_ORDER.includes(cp.lastFailedPhase)
-      ? cp.lastFailedPhase
+    (cp?.lastFailedPhase &&
+    (PIPELINE_PHASE_ORDER as readonly string[]).includes(cp.lastFailedPhase)
+      ? (cp.lastFailedPhase as PipelinePhase)
       : null) ??
     (cp?.inProgressPhase &&
     PIPELINE_PHASE_ORDER.includes(cp.inProgressPhase as PipelinePhase)
@@ -511,11 +516,11 @@ export function normalizeCheckpointForDisplay(
       return research;
     }
     if (cpAge !== null && cpAge >= IN_PROGRESS_STALE_MS) {
-      const failed = PIPELINE_PHASE_ORDER.includes(
+      const failed: PipelineInProgressPhase = PIPELINE_PHASE_ORDER.includes(
         cp.inProgressPhase as PipelinePhase
       )
         ? (cp.inProgressPhase as PipelinePhase)
-        : cp.lastFailedPhase ?? "phase-3";
+        : cp.lastFailedPhase ?? cp.inProgressPhase ?? "phase-3";
       return {
         ...research,
         pipelineCheckpoint: {
@@ -550,7 +555,9 @@ export function pipelineResumeMessage(
     return `${options.blocker} Resume from ${label}.`;
   }
   if (status.lastFailedPhase) {
-    const failed = PIPELINE_PHASE_LABELS[status.lastFailedPhase];
+    const failed =
+      PIPELINE_PHASE_LABELS[status.lastFailedPhase as PipelinePhase] ??
+      inProgressPhaseLabel(status.lastFailedPhase);
     return `Stopped at ${failed}${status.lastError ? ` (${status.lastError.slice(0, 120)})` : ""}. Resume to retry.`;
   }
   if (status.resumeFromPhase === "complete") {

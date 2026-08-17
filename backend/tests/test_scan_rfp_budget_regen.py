@@ -295,10 +295,235 @@ class HealthyBudgetLeftAloneTests(unittest.TestCase):
         self.assertEqual(out_draft.sections[0].content, healthy)
         self.assertTrue(
             any(
-                "left unchanged" in line or "official Pricing Form" in line
+                "left unchanged" in line
+                or "already adds up" in line
+                or "official Pricing Form" in line
                 for line in logs
             )
         )
+
+    def test_complete_and_clean_does_not_rewrite_accurate_fee_table(self) -> None:
+        rfp_id = "rfp-accurate-fees"
+        healthy = (
+            "## Proposed Investment\n\n"
+            "**Professional fees: $279,800**\n"
+            "**Total proposed investment: $279,800**\n\n"
+            "## Fee Detail by Phase\n\n"
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| Phase 1 | Discovery | $40,000 |\n"
+            "| Phase 2 | Strategy | $55,000 |\n"
+            "| Phase 3 | Creative | $70,000 |\n"
+            "| Phase 4 | Production | $60,000 |\n"
+            "| Phase 5 | Launch | $54,800 |\n"
+            "| **Total** | | **$279,800** |\n"
+        )
+        budget = ProposalBudget(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            lineItems=[
+                BudgetLineItem(
+                    id="L1",
+                    description="Discovery",
+                    category="Phase 1",
+                    extended=40_000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="L2",
+                    description="Strategy",
+                    category="Phase 2",
+                    extended=55_000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="L3",
+                    description="Creative",
+                    category="Phase 3",
+                    extended=70_000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="L4",
+                    description="Production",
+                    category="Phase 4",
+                    extended=60_000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="L5",
+                    description="Launch",
+                    category="Phase 5",
+                    extended=54_800,
+                    lineItemType="agency_fee",
+                ),
+            ],
+            lumpSumTotal=279_800,
+            agencyRevenueEstimate=279_800,
+            agencyFeeSubtotal=279_800,
+            totalClientInvoicing=279_800,
+        )
+        draft = ProposalDraft(
+            rfpId=rfp_id,
+            sections=[
+                ProposalSection(
+                    id="section-budget-pricing",
+                    title="Budget & Cost Efficiency",
+                    content=healthy,
+                    status="generated",
+                )
+            ],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=budget,
+        )
+        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
+        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
+
+        def _editor_must_not_run(_budget, **_kw):
+            raise AssertionError("editor must not rewrite an accurate fee table")
+
+        with patch.object(
+            scan_mod,
+            "run_budget_editor_pass",
+            side_effect=_editor_must_not_run,
+        ), patch.object(
+            scan_mod,
+            "extract_rfp_scoring_facts_llm",
+            new=AsyncMock(return_value=RfpScoringFacts()),
+        ):
+            out_draft, out_research, logs, meta = asyncio.run(
+                run_fulfill_budget_scan(
+                    rfp_id=rfp_id,
+                    rfp=_rfp(rfp_id),
+                    draft=draft,
+                    research=research,
+                    rfp_text="Cost is 20% of score. Submit a fee table.",
+                    use_llm=False,
+                    skip_section_ids=set(),
+                )
+            )
+
+        self.assertEqual(out_draft.sections[0].content, healthy)
+        self.assertEqual(out_research.budget.agency_fee_subtotal, 279_800)
+        self.assertFalse(meta.get("budgetRegenerated"))
+        self.assertTrue(any("already adds up" in line for line in logs))
+
+    def test_mismatch_rewrites_budget_tab_from_canonical_ledger(self) -> None:
+        rfp_id = "rfp-mismatch-fees"
+        broken = (
+            "## Proposed Investment\n\n"
+            "**Professional fees: $279,800**\n"
+            "**Agency Fee Subtotal: $279,800**\n"
+            "**Total proposed investment: $279,800**\n\n"
+            "## Fee Detail by Phase\n\n"
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| Phase 1 | Discovery | $40,000 |\n"
+            "| Phase 2 | Strategy | $55,000 |\n"
+            "| Phase 5 | Launch | $50,000 |\n"
+            "| Phase 7 | Reporting | $116,300 |\n"
+            "| **Total** | | **$261,300** |\n"
+        )
+        budget = ProposalBudget(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            lineItems=[
+                BudgetLineItem(
+                    id="L1",
+                    description="Discovery",
+                    category="Phase 1",
+                    extended=40_000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="L2",
+                    description="Strategy",
+                    category="Phase 2",
+                    extended=55_000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="L3",
+                    description="Creative",
+                    category="Phase 3",
+                    extended=70_000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="L4",
+                    description="Production",
+                    category="Phase 4",
+                    extended=60_000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="L5",
+                    description="Launch",
+                    category="Phase 5",
+                    extended=54_800,
+                    lineItemType="agency_fee",
+                ),
+            ],
+            lumpSumTotal=279_800,
+            agencyRevenueEstimate=279_800,
+            agencyFeeSubtotal=279_800,
+            totalClientInvoicing=279_800,
+        )
+        draft = ProposalDraft(
+            rfpId=rfp_id,
+            sections=[
+                ProposalSection(
+                    id="section-budget-pricing",
+                    title="Budget & Cost Efficiency",
+                    content=broken,
+                    status="generated",
+                )
+            ],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=budget,
+        )
+        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
+        from app.services.proposal_budget_sync import collect_prose_arithmetic_violations
+        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
+
+        self.assertTrue(collect_prose_arithmetic_violations(broken))
+
+        with patch.object(
+            scan_mod,
+            "run_budget_editor_pass",
+            side_effect=lambda b, **_kw: b,
+        ), patch.object(
+            scan_mod,
+            "extract_rfp_scoring_facts_llm",
+            new=AsyncMock(return_value=RfpScoringFacts()),
+        ):
+            out_draft, _research, logs, meta = asyncio.run(
+                run_fulfill_budget_scan(
+                    rfp_id=rfp_id,
+                    rfp=_rfp(rfp_id),
+                    draft=draft,
+                    research=research,
+                    rfp_text="Cost is 20% of score. Submit a fee table.",
+                    use_llm=False,
+                    skip_section_ids=set(),
+                )
+            )
+
+        fixed = out_draft.sections[0].content or ""
+        self.assertNotEqual(fixed, broken)
+        self.assertTrue(any("arithmetic mismatch" in line for line in logs))
+        self.assertTrue(meta.get("budgetChanged"))
+        self.assertEqual(collect_prose_arithmetic_violations(fixed), [])
+        self.assertIn("$279,800", fixed)
+        self.assertNotIn("$261,300", fixed)
 
     def test_second_scan_restores_pricing_polluted_by_contact_lock_tag(self) -> None:
         from app.services.proposal_fulfill_rfp_budget_kpi import (
@@ -637,6 +862,154 @@ class FailClosedTravelOnlyBudgetTests(unittest.TestCase):
 
         self.assertEqual(meta["budgetStatus"], "needs_human")
         self.assertTrue(any("FAIL CLOSED" in line for line in logs))
+
+
+class UnresolvedBudgetTokensTests(unittest.TestCase):
+    def test_custom_budget_slots_count_as_hollow(self) -> None:
+        body = (
+            "| Category | Investment |\n"
+            "| --- | --- |\n"
+            "| Brand | {{budget.brand_development}} |\n"
+            "| Media | {{budget.media_placements}} |\n"
+        )
+        self.assertTrue(manuscript_cost_section_is_hollow(body))
+
+    def test_cost_proposal_slots_rewritten_when_sibling_fee_table_is_healthy(self) -> None:
+        rfp_id = "rfp-slots"
+        healthy = (
+            "## Proposed Investment\n\n"
+            "**Professional fees: $50,000**\n"
+            "**Total proposed investment: $50,000**\n\n"
+            "| Phase | Amount |\n"
+            "| --- | ---: |\n"
+            "| Strategy | $50,000 |\n"
+        )
+        slotted = (
+            "| Category | Investment |\n"
+            "| --- | --- |\n"
+            "| Brand development | {{budget.brand_development}} |\n"
+            "| Media placements | {{budget.media_placements}} |\n"
+        )
+        budget = ProposalBudget(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            lineItems=[
+                BudgetLineItem(
+                    id="L1",
+                    description="Strategy",
+                    category="Labor",
+                    extended=50_000,
+                    lineItemType="agency_fee",
+                )
+            ],
+            lumpSumTotal=50_000,
+            agencyRevenueEstimate=50_000,
+            agencyFeeSubtotal=50_000,
+            totalClientInvoicing=50_000,
+        )
+        draft = ProposalDraft(
+            rfpId=rfp_id,
+            sections=[
+                ProposalSection(
+                    id="section-budget-pricing",
+                    title="Budget & Pricing",
+                    content=healthy,
+                    status="generated",
+                ),
+                ProposalSection(
+                    id="rfp-cost",
+                    title="Cost Proposal",
+                    content=slotted,
+                    status="generated",
+                ),
+            ],
+            updatedAt="2026-08-05T00:00:00+00:00",
+        )
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt="2026-08-05T00:00:00+00:00",
+            budget=budget,
+        )
+        import app.services.proposal_fulfill_rfp_budget_kpi as scan_mod
+        from app.services.proposal_fulfill_rfp_accuracy import RfpScoringFacts
+
+        with patch.object(
+            scan_mod,
+            "run_budget_editor_pass",
+            side_effect=lambda b, **_kw: b,
+        ), patch.object(
+            scan_mod,
+            "extract_rfp_scoring_facts_llm",
+            new=AsyncMock(return_value=RfpScoringFacts()),
+        ), patch.object(
+            scan_mod,
+            "_regen_budget_via_phase_3_5",
+            new=AsyncMock(side_effect=AssertionError("must not regen")),
+        ):
+            out_draft, _research, _logs, meta = asyncio.run(
+                run_fulfill_budget_scan(
+                    rfp_id=rfp_id,
+                    rfp=_rfp(rfp_id),
+                    draft=draft,
+                    research=research,
+                    rfp_text="Submit a Cost Proposal with the itemized budget.",
+                    use_llm=False,
+                    skip_section_ids=set(),
+                )
+            )
+
+        self.assertEqual(len(out_draft.sections), 1)
+        cost = out_draft.sections[0]
+        self.assertNotIn("{{budget.", cost.content or "")
+        self.assertIn("$50,000", cost.content or "")
+        self.assertTrue(meta.get("budgetChanged"))
+
+
+class CollapseDuplicateCostTabsTests(unittest.TestCase):
+    def test_keeps_fee_table_drops_slot_shell(self) -> None:
+        from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
+
+        healthy = (
+            "## Fee Detail by Phase\n\n"
+            "| Phase | Amount |\n"
+            "| --- | ---: |\n"
+            "| Strategy | $50,000 |\n"
+        )
+        slotted = (
+            "| Channel | Oahu |\n"
+            "| --- | --- |\n"
+            "| Digital | {{budget.media_oahu_digital}} |\n"
+        )
+        sections = [
+            ProposalSection(
+                id="rfp-cost-appendix",
+                title=(
+                    "Cost Proposal using Appendix A with itemized pricing for all "
+                    "services, estimated quantities, budget"
+                ),
+                content=healthy,
+            ),
+            ProposalSection(
+                id="rfp-cost",
+                title="Cost Proposal",
+                content=slotted,
+            ),
+        ]
+        kept, logs = collapse_duplicate_cost_proposal_tabs(sections)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0].id, "rfp-cost-appendix")
+        self.assertIn("$50,000", kept[0].content or "")
+        self.assertTrue(any("collapsed duplicate" in x.casefold() for x in logs))
+
+    def test_pricing_titles_are_the_same_ask(self) -> None:
+        from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+        self.assertTrue(
+            outline_titles_near_duplicate(
+                "Cost Proposal",
+                "Cost Proposal using Appendix A with itemized pricing for all services",
+            )
+        )
 
 
 if __name__ == "__main__":

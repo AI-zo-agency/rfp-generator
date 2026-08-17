@@ -70,10 +70,10 @@ class Settings(BaseSettings):
     # of re-sent prompt prefixes to ~0.1x without changing what the model sees.
     # Kill switch first — if caching ever misbehaves, this restores prior behaviour.
     llm_disable_prompt_cache: bool = False
-    # 5-minute ephemeral TTL by default (write costs 1.25x base input). Set true for
-    # a 1-hour TTL (write costs 2x) when a run stalls between phases long enough to
-    # lose the cache; only worth it if the call log shows writes without reads.
-    llm_cache_ttl_1h: bool = False
+    # 1-hour TTL (write 2x base). Complete & clean / generate re-send the same RFP
+    # prefix across many calls; 5-minute ephemeral expires between steps and
+    # re-bills full input. Cached reads are ~0.1x — this is the 70% cost cut.
+    llm_cache_ttl_1h: bool = True
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash-exp"

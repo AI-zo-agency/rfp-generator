@@ -320,7 +320,8 @@ def collect_deterministic_budget_mismatches(
 _PROSE_LABEL_VALUE = r"\*{0,2}\s*:\s*\*{0,2}\s*(\$[\d,]+(?:\.\d{2})?)"
 
 _PROSE_FEE_RE = re.compile(
-    r"(?i)\*{0,2}(?:Professional\s+(?:services\s+)?fees?|Total\s+agency\s+fees?)"
+    r"(?i)\*{0,2}(?:Professional\s+(?:services\s+)?fees?|Total\s+agency\s+fees?|"
+    r"Agency\s+Fee\s+Subtotal)"
     + _PROSE_LABEL_VALUE
 )
 _PROSE_DIRECT_RE = re.compile(
@@ -338,6 +339,100 @@ _PROSE_PASSTHROUGH_RE = re.compile(
 
 def _money(token: str) -> float:
     return float(token.replace("$", "").replace(",", ""))
+
+
+def _fee_detail_row_sum(markdown: str) -> float | None:
+    """Sum Amount cells in Fee Detail by Phase, excluding Total / Direct rows."""
+    match = re.search(
+        r"(?is)#{1,3}\s*(?:Fee\s+Detail(?:\s+by\s+Phase)?|Supporting\s+Fee\s+Detail)\b"
+        r"(.*?)(?=\n#{1,3}\s+|\Z)",
+        markdown or "",
+    )
+    if not match:
+        return None
+    total = 0.0
+    rows = 0
+    for line in match.group(1).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        if re.search(r"(?i)\|\s*:?---", stripped):
+            continue
+        if re.search(r"(?i)\bamount\b", stripped) and re.search(
+            r"(?i)\b(phase|deliverable)\b", stripped
+        ):
+            continue
+        if re.search(
+            r"(?i)\*\*\s*total\b|\bgrand\s+total\b|\bdirect\s+expenses\b|"
+            r"pass-?through|\bmedia\s+(?:buy|placement|spend)\b|"
+            r"travel\s*/\s*reimbursables",
+            stripped,
+        ):
+            continue
+        amounts = re.findall(r"\$[\d,]+(?:\.\d{2})?", stripped)
+        if not amounts:
+            continue
+        total += _money(amounts[-1])
+        rows += 1
+    if rows == 0:
+        return None
+    return round(total, 2)
+
+
+def _markdown_table_blocks(markdown: str) -> list[list[str]]:
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in (markdown or "").splitlines():
+        if line.strip().startswith("|"):
+            current.append(line)
+            continue
+        if current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _table_row_is_summary(line: str) -> bool:
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    label = (cells[0] if cells else "").replace("*", "").strip().casefold()
+    if not label:
+        return False
+    if label in {"total", "grand total"}:
+        return True
+    if "subtotal" in label:
+        return True
+    return label.startswith("total ")
+
+
+def _iter_markdown_table_sums(
+    markdown: str,
+) -> list[tuple[float | None, float | None]]:
+    """(line-item sum excluding totals, table's own Total row) per markdown table."""
+    out: list[tuple[float | None, float | None]] = []
+    for block in _markdown_table_blocks(markdown):
+        line_sum = 0.0
+        n = 0
+        stated: float | None = None
+        for stripped in (line.strip() for line in block):
+            if re.search(r"(?i)\|\s*:?---", stripped):
+                continue
+            if re.search(r"(?i)\bamount\b", stripped) and re.search(
+                r"(?i)\b(phase|deliverable|item|description)\b", stripped
+            ):
+                continue
+            amounts = re.findall(r"\$[\d,]+(?:\.\d{2})?", stripped)
+            if not amounts:
+                continue
+            value = _money(amounts[-1])
+            if _table_row_is_summary(stripped):
+                stated = value
+                continue
+            line_sum += value
+            n += 1
+        out.append((round(line_sum, 2) if n else None, stated))
+    return out
 
 
 def collect_prose_arithmetic_violations(markdown: str) -> list[str]:
@@ -368,6 +463,34 @@ def collect_prose_arithmetic_violations(markdown: str) -> list[str]:
                 f"+ pass-through ${passthrough:,.0f} = ${expected:,.0f}, but the stated total "
                 f"is ${total:,.0f}."
             )
+
+    table_sum = _fee_detail_row_sum(text)
+    if table_sum is not None and fee_m:
+        tol = max(1.0, fee * 0.005)
+        if abs(table_sum - fee) > tol:
+            violations.append(
+                f"Fee Detail by Phase rows sum to ${table_sum:,.0f}, but the stated "
+                f"agency fee / professional-fee figure is ${fee:,.0f}."
+            )
+
+    for line_sum, table_total in _iter_markdown_table_sums(text):
+        if line_sum is None:
+            continue
+        if table_total is not None:
+            tol = max(1.0, table_total * 0.005)
+            if abs(line_sum - table_total) > tol:
+                violations.append(
+                    f"Budget table line items sum to ${line_sum:,.0f}, but the table "
+                    f"total row is ${table_total:,.0f}."
+                )
+        elif total_m:
+            stated = _money(total_m.group(1))
+            tol = max(1.0, stated * 0.005)
+            if abs(line_sum - stated) > tol:
+                violations.append(
+                    f"Budget table line items sum to ${line_sum:,.0f}, but the stated "
+                    f"total is ${stated:,.0f}."
+                )
 
     # A parenthetical that restates the whole total only omits something when the
     # total actually HAS more than one component. Fee-only, travel-only and

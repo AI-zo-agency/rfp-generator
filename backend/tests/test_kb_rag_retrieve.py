@@ -37,6 +37,35 @@ class BuildRetrievalQuestionTests(unittest.TestCase):
         self.assertIn("Island County", q)
 
 
+class SearchHeadTests(unittest.TestCase):
+    def test_section_title_leads_supermemory_query(self) -> None:
+        from app.services.kb_rag_retrieve import (
+            _BOILERPLATE_PREFIX,
+            build_retrieval_question_from_entry,
+            expand_kb_queries,
+            search_head_for_supermemory,
+        )
+
+        q = build_retrieval_question_from_entry(
+            section_title="2.1 — Sonja Anderson",
+            why_needed="Leads accounts. Mentions project rates and hourly staff in passing.",
+        )
+        self.assertLess(q.index("Sonja Anderson"), q.index(_BOILERPLATE_PREFIX))
+        head = search_head_for_supermemory(q)
+        self.assertIn("Sonja Anderson", head)
+        self.assertNotIn("Find zö agency knowledge-base facts", head)
+        queries = expand_kb_queries(q)
+        self.assertTrue(queries)
+        self.assertIn("Sonja", queries[0])
+        self.assertFalse(any("pricing guide" in item for item in queries))
+
+    def test_cost_tab_still_adds_pricing_guide(self) -> None:
+        from app.services.kb_rag_retrieve import expand_kb_queries
+
+        queries = expand_kb_queries('Section: "Cost Proposal".')
+        self.assertTrue(any("pricing guide" in item for item in queries))
+
+
 class ContextBlocksTests(unittest.TestCase):
     def test_context_blocks_to_hits(self) -> None:
         from app.services.kb_rag_retrieve import context_blocks_to_hits

@@ -66,7 +66,9 @@ def manuscript_sections_for_export(sections: list["ProposalSection"]) -> list["P
         if not (section.content or "").strip():
             continue
         out.append(section)
-    return sorted(out, key=manuscript_rank)
+    # Workspace order is the reading order (static 1–3 stay grouped; intelligence
+    # tabs follow the RFP sequence). Do not re-rank and bury Cover Letter / Cost.
+    return out
 
 
 def strip_evidence_citation_markers(text: str) -> str:

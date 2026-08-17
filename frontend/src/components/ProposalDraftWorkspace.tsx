@@ -834,7 +834,7 @@ function ProposalDraftWorkspaceInner({
     // Never autosave the empty default shell while the initial GET is still in flight —
     // that race was wiping full Supabase manuscripts (snapshots survived, live draft did not).
     if (draftLoadState !== "ready") return;
-    if (isFullProposalRunning) return; // never overwrite backend partials mid-generation
+    if (isFullProposalRunning || isFulfillingRfpGaps) return; // never overwrite backend partials mid-generation / scan
     if (skipNextSaveRef.current) {
       skipNextSaveRef.current = false;
       return;
@@ -848,7 +848,7 @@ function ProposalDraftWorkspaceInner({
       void saveProposalDraft(rfp.id, outline);
     }, 800);
     return () => clearTimeout(timer);
-  }, [outline, rfp.id, hydrated, research, isFullProposalRunning, draftLoadState]);
+  }, [outline, rfp.id, hydrated, research, isFullProposalRunning, isFulfillingRfpGaps, draftLoadState]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -1460,19 +1460,15 @@ function ProposalDraftWorkspaceInner({
         : {
             title: "Complete & clean this draft?",
             description:
-              "Improves this existing proposal in place (does not wipe and regenerate from scratch):\n\n" +
-              "• Add missing closing / submission tabs\n" +
-              "• Align scored sections to the RFP TOC\n" +
-              "• Merge duplicates / cut unrequested, padding, or over-limit sections (stay qualified — keep trust anchors)\n" +
-              "• DQ & gov-policy gate (true disqualifiers only — not Go/No-Go capability noise)\n" +
-              "• Regenerate budget if missing; thorough reconcile + grounding if present\n" +
-              "• Full blocker suite (same as Generate): primary contact, refs, schedule/calendar, certs, case-study titles\n" +
-              "• LLM manuscript-vs-RFP contradiction check + signed-cover PDF designer note\n" +
-              "• KPI repairs, KB fact-check, line-by-line KB grounding (async per section)\n" +
-              "• Drop optional [VERIFY] / [MANUAL FILL] unless this RFP requires them\n" +
-              "• Dedup repeated company info; keep zö voice (no AI-slop expansion)\n" +
-              "• Refresh pre-submit review\n\n" +
-              "Does NOT invent facts, figures, or signature details. A saved version is stored first.",
+              "Improves this existing proposal in place — it does not wipe good sections or regenerate from scratch.\n\n" +
+              "Keeps Sections 1–3 and any drafted tab that already stands up. Frozen when already correct: fee tables that add up, bios, case studies.\n\n" +
+              "Then it only adds or orders what the RFP still needs:\n" +
+              "• Intelligence tabs in THIS RFP's submission order (whatever the buyer listed — not a fixed Cover Letter/Cost stack)\n" +
+              "• If the RFP names company identity as its own TOC item, add a header around 1.1–1.5 — no second company essay\n" +
+              "• Missing closing / submission tabs\n" +
+              "• Budget rewrite only if the table does not add up\n" +
+              "• Fact/KB grounding, DQ gate, pre-submit review\n\n" +
+              "Does not invent facts, figures, or signatures. A saved version is stored first.",
             confirmLabel: "Complete & clean",
             tone: "default",
           }
@@ -1502,12 +1498,6 @@ function ProposalDraftWorkspaceInner({
       setPresubmitReview(review);
       setResearch(updatedResearch);
       applyOutlineFromServer({
-        ...draft,
-        lastFulfillReport:
-          (fulfillReport as Record<string, unknown>) ??
-          draft.lastFulfillReport,
-      });
-      await saveProposalDraft(rfp.id, {
         ...draft,
         lastFulfillReport:
           (fulfillReport as Record<string, unknown>) ??
@@ -2753,7 +2743,7 @@ function ProposalDraftWorkspaceInner({
                     !outline.sections.some((s) => s.content.trim())
                   }
                   className="zo-btn !py-2 !px-3 !text-sm disabled:opacity-40"
-                  title="Improve this draft in place: remove duplicate/restated tabs, add missing RFP pieces, regenerate budget if hollow"
+                  title="Improve this draft in place. Does not rewrite Sections 1–3, healthy budgets, bios, or finished tabs."
                 >
                   {isFulfillingRfpGaps
                     ? "Completing draft…"

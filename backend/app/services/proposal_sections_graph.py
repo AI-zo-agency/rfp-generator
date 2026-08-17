@@ -2841,8 +2841,17 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
         if isinstance(raw_services, list):
             services_requested = [str(s).strip() for s in raw_services if str(s).strip()]
 
-    # Canonical resolver — same logic as Match studies button (strong → closest, min 2).
+    # Canonical resolver — same logic as Match studies (strong → closest, RFP min).
     from app.services.proposal_case_study_match import resolve_case_study_selection
+    from app.services.proposal_rfp_compulsory_content import (
+        required_case_study_minimum,
+        stated_case_study_minimum,
+    )
+
+    rfp_ctx = state.get("rfp_context") or ""
+    required_studies = await required_case_study_minimum(rfp_ctx)
+    rfp_stated_studies = await stated_case_study_minimum(rfp_ctx)
+    study_cap = max(5, required_studies)
 
     selected_studies: list[str] = []
     if prefetched.get("titles"):
@@ -2852,7 +2861,7 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
             len(selected_studies),
         )
 
-    if not selected_studies:
+    if not selected_studies or len(selected_studies) < required_studies:
         try:
             resolved = await resolve_case_study_selection(
                 rfp_client=rfp_client,
@@ -2861,8 +2870,8 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                 rfp_id=state.get("rfp_id"),
                 rfp_context=state.get("rfp_context") or "",
                 services_requested=services_requested,
-                min_count=2,
-                max_count=5,
+                min_count=required_studies,
+                max_count=study_cap,
                 fetch_full_text=True,
             )
             selected_studies = resolved.titles
@@ -2878,7 +2887,9 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Section 3 case study resolver failed (%s)", str(exc)[:160])
 
-    selected_studies = list(dict.fromkeys(s.strip() for s in selected_studies if s.strip()))[:5]
+    selected_studies = list(dict.fromkeys(s.strip() for s in selected_studies if s.strip()))[
+        :study_cap
+    ]
 
     from app.services.proposal_case_study_eligibility import (
         is_eligible_section3_case_study_title,
@@ -2892,7 +2903,7 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
             rfp_title=str(state.get("rfp_title") or ""),
             rfp_sector=str(state.get("rfp_sector") or ""),
         )
-    ][:5]
+    ][:study_cap]
 
     new_sections: list[dict[str, Any]] = []
     kb_sources = case_sources
@@ -2985,6 +2996,44 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
             
         new_sections.append(section)
         await _emit_partial(state, _merge_section_list(existing, new_sections))
+
+    if rfp_stated_studies and len(new_sections) < rfp_stated_studies:
+        from app.services.proposal_rfp_compulsory_content import (
+            CompulsoryContentAsk,
+            CompulsoryShortfall,
+            shortfall_stub_section,
+        )
+
+        stub = shortfall_stub_section(
+            CompulsoryShortfall(
+                ask=CompulsoryContentAsk(
+                    kind="case_studies",
+                    minimum=rfp_stated_studies,
+                    rfp_quote="",
+                    pass_fail=True,
+                ),
+                found=len(new_sections),
+                message="",
+            )
+        )
+        logger.warning(
+            "Section 3: RFP requires %d case studies; drafted %d — gap stub added",
+            rfp_stated_studies,
+            len(new_sections),
+        )
+        new_sections.append(
+            _section_payload(
+                section_id=str(stub["id"]),
+                title=str(stub["title"]),
+                mode="write",
+                word_target=80,
+                page_limit=state.get("page_limit"),
+                page_ratio=0.02,
+                designer_note_default="RFP minimum similar-work count — do not invent a case study.",
+                raw={"content": stub["content"], "kbRefs": []},
+                kb_sources=kb_sources,
+            )
+        )
 
     return {
         "sections": _merge_section_list(existing, new_sections),

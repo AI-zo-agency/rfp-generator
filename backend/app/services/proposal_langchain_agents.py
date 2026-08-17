@@ -108,8 +108,11 @@ CRITICAL TOOL SPLIT:
 - Buyer requirements (reference format, scoring, methodology demands, forms) = search_rfp_requirements.
 
 Rules:
-1. Call tools until you have enough facts — do not stop after one search.
-2. Remove [VERIFY] stubs when evidence supports real prose. Cite [E#] when using corpus IDs provided.
+1. If the user message already includes a PACKED KB EVIDENCE block, patch from that
+   block. Do not call search tools again for the same facts unless the block is empty
+   or clearly about a different person/topic than this section.
+2. Otherwise call tools until you have enough facts — do not stop after one search.
+3. Remove [VERIFY] stubs when evidence supports real prose. Cite [E#] when using corpus IDs provided.
 3. First person we/our in narrative sections — never "The Vendor". Never use "we" as a possessive ("of we", "across we").
 4. Use ONLY verified KB and RFP facts. Do not invent clients, contacts, or metrics.
 5. Address every RFP requirement listed for this section.

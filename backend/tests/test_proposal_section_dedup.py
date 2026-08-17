@@ -7,6 +7,7 @@ import unittest
 from app.models.proposal import ProposalSection
 from app.services.proposal_section_dedup import (
     ANTI_DUPLICATION_RULES,
+    collapse_title_near_duplicate_sections,
     dedupe_manuscript_for_scan,
     format_prior_sections_block,
     prune_near_duplicate_sections,
@@ -241,6 +242,26 @@ class SectionDedupTests(unittest.TestCase):
         kept_ids = {s.id for s in kept}
         self.assertIn("rfp-req-forms", kept_ids)
         self.assertIn("ledger-comp-1", kept_ids)
+
+    def test_collapse_references_and_past_performance_twin(self) -> None:
+        body = (
+            "Oregon Recovery Network multicultural campaign and McMinnville Library "
+            "bilingual programming as comparable public-sector communications work. "
+        ) * 8
+        sections = [
+            _sec(
+                "s20",
+                "References — At least three references for similar engagements",
+                body,
+            ),
+            _sec("s27", "References & Past Performance", body + " Extra sentence."),
+            _sec("s19", "Cost Proposal — Pricing models", "Fee table and narrative. " * 20),
+        ]
+        kept, dropped = collapse_title_near_duplicate_sections(sections)
+        titles = [s.title for s in kept]
+        self.assertEqual(len([t for t in titles if "Reference" in t]), 1, msg=titles)
+        self.assertTrue(any("near-duplicate" in d for d in dropped))
+        self.assertTrue(any("Cost Proposal" in t for t in titles))
 
 
 if __name__ == "__main__":

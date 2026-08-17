@@ -127,6 +127,18 @@ def outline_titles_near_duplicate(a: str, b: str, *, threshold: float = 0.72) ->
         # stripping parentheticals (Cover Letter (1 page) vs Cover Letter — …).
         if (a_sep and b_sep) or len(ha.split()) >= 2:
             return True
+    # "References — three contacts" vs "References & Past Performance":
+    # shorter head is a token prefix of the longer head (same opening ask).
+    if ha and hb:
+        ha_toks, hb_toks = ha.split(), hb.split()
+        if ha_toks and hb_toks:
+            shorter, longer = (
+                (ha_toks, hb_toks)
+                if len(ha_toks) <= len(hb_toks)
+                else (hb_toks, ha_toks)
+            )
+            if longer[: len(shorter)] == shorter:
+                return True
     if na in nb or nb in na:
         return True
     ta, tb = outline_title_tokens(a), outline_title_tokens(b)

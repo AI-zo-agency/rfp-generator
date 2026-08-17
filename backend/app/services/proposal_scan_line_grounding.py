@@ -295,13 +295,27 @@ async def run_scan_line_grounding_pass(
 ) -> tuple[ProposalDraft, LineGroundReport]:
     """Async per-section KB verification for Complete & Clean. Never invents."""
     del research  # reserved for future mapped-requirement focus
+    from app.services.proposal_budget_content import section_is_budgetish
+    from app.services.proposal_consistency_enforcement import (
+        polish_schedule_tabs_for_designer,
+    )
+
     report = LineGroundReport()
+    polished, polish_logs = polish_schedule_tabs_for_designer(
+        list(draft.sections), rfp_text=rfp_text
+    )
+    if polish_logs:
+        draft = draft.model_copy(update={"sections": polished})
+        report.logs.extend(polish_logs)
+
     sections = list(draft.sections)
     company_excerpt = _canonical_company_excerpt(sections)
     work: list[tuple[int, ProposalSection]] = []
     for idx, section in enumerate(sections):
         body = section.content or ""
         if is_dead_section(body):
+            continue
+        if section_is_budgetish(section):
             continue
         if len(body.strip()) < MIN_SECTION_CHARS and count_placeholder_tags(body) <= 0:
             continue

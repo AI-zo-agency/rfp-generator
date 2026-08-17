@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 
 from app.services.company_qualification.schemas import (
     EvidenceCandidate,
@@ -63,24 +62,6 @@ def _prefer_fit_ranked(
         if len(out) >= limit:
             break
     return out
-
-
-def _min_case_studies_for_rfp(rfp_context: str, proposal_context: ProposalContext) -> int:
-    """RFP portfolio language → at least 2; otherwise still prefer 2 when available."""
-    blob = " ".join(
-        [
-            " ".join(proposal_context.services_requested or []),
-            proposal_context.summary or "",
-            (rfp_context or "")[:6000],
-        ]
-    ).casefold()
-    if re.search(
-        r"\b(minimum\s+(?:of\s+)?two|at\s+least\s+two|sample\s+work\s+portfolio|"
-        r"two\s+recent\s+campaigns|two\s+case\s+stud)\b",
-        blob,
-    ):
-        return 2
-    return 2
 
 
 def _infer_services_claim(proposal_context: ProposalContext, rfp_context: str) -> str:
@@ -156,10 +137,11 @@ async def _fit_rank_case_studies(
     rfp_title: str = "",
     rfp_id: str | None = None,
 ) -> tuple[list[str], CaseStudyFitReport | None, str]:
-    """Same resolver as Match studies — strong fits, then closest 03_CS, min 2."""
+    """Same resolver as Match studies — strong fits, then closest 03_CS, RFP min."""
     from app.services.proposal_case_study_match import resolve_case_study_selection
+    from app.services.proposal_rfp_compulsory_content import required_case_study_minimum
 
-    min_studies = _min_case_studies_for_rfp(rfp_context, proposal_context)
+    min_studies = await required_case_study_minimum(rfp_context)
     try:
         resolved = await resolve_case_study_selection(
             rfp_client=rfp_client,
@@ -169,7 +151,7 @@ async def _fit_rank_case_studies(
             rfp_context=rfp_context,
             services_requested=list(proposal_context.services_requested or []),
             min_count=min_studies,
-            max_count=5,
+            max_count=max(5, min_studies),
             fetch_full_text=True,
         )
     except Exception as exc:  # noqa: BLE001 - fit is advisory; never block Section 3
@@ -251,10 +233,6 @@ async def run_evidence_selection_agent(
             "evidence_trust_gate",
         )
 
-    min_studies = _min_case_studies_for_rfp(rfp_context, proposal_context)
-
-    # Prefer capability-fit ranking so Section 3 proves what the RFP asks for —
-    # not the first/strongest titles sitting in the retrieval catalog.
     fit_titles, _fit_report, match_quality = await _fit_rank_case_studies(
         proposal_context=proposal_context,
         rfp_context=rfp_context,
@@ -263,7 +241,9 @@ async def run_evidence_selection_agent(
         rfp_title=rfp_title,
         rfp_id=rfp_id,
     )
-    fit_selected = _prefer_fit_ranked(fit_titles, filtered, limit=5)
+    fit_selected = _prefer_fit_ranked(
+        fit_titles, filtered, limit=max(5, len(fit_titles) or 2)
+    )
     if fit_selected:
         rationale = (
             "RFP capability strong fit"

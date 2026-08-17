@@ -410,8 +410,8 @@ async def _run_fulfill_rfp_gaps_body(
         logger.info("Scan RFP resume %s from step %s", rfp_id, resume_at)
 
     FULFILL_STEPS = (
-        "Closing & submission tabs",
         "RFP structure (all scored sections)",
+        "Closing & submission tabs",
         "Requirement ledger (merge / cut / add)",
         "DQ & gov-policy gate (agentic loop)",
         "Remove duplicate sections",
@@ -422,8 +422,8 @@ async def _run_fulfill_rfp_gaps_body(
         "Contractor KPIs (Section 2.3)",
         "KB fact-check (Supermemory)",
         "RFP contradiction check (LLM)",
-        "Remove optional VERIFY/MANUAL FILL",
         "Line-by-line KB grounding (async)",
+        "Remove optional VERIFY/MANUAL FILL",
         "Compact manuscript (remove duplicates)",
         "Page limit & anti-invention (Ralph)",
         "Review & quality gate (3 acts)",
@@ -491,11 +491,43 @@ async def _run_fulfill_rfp_gaps_body(
         )
         await asave_proposal_draft(draft)
 
-    if resume_at <= 1:
+    try:
+        from app.services.proposal_fulfill_rfp_structure import run_rfp_structure_alignment_pass
+
         await _scan_progress(
             1,
+            "Scan RFP: structure & scored sections",
+            "Establish THIS RFP's TOC first. Order intelligence tabs. "
+            "Header-wrap company identity when the RFP names it. Do not rewrite Sections 1–3.",
+        )
+        await _ensure_not_stopped()
+        preserved_pre = fulfill_scan_preserve_bio_and_case_study_ids(draft)
+        draft, struct_logs, struct_human = await run_rfp_structure_alignment_pass(
+            draft=draft,
+            rfp=rfp,
+            rfp_text=rfp_text,
+            research=research,
+            skip_section_ids=preserved_pre,
+            use_llm=use_llm,
+        )
+        report["logs"].extend(struct_logs)
+        report["structureScan"] = struct_logs
+        report["humanDecisionGaps"].extend(struct_human)
+        if struct_logs:
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("RFP structure alignment skipped: %s", exc)
+        report["logs"].append(f"RFP structure scan skipped: {exc}")
+
+    try:
+        await _scan_progress(
+            2,
             "Scan RFP: closing & submission",
-            f"Reading {len(rfp_text.strip()):,} chars from uploaded PDF.",
+            f"Fill gaps against the RFP TOC. Reading {len(rfp_text.strip()):,} chars from uploaded PDF.",
         )
         await _ensure_not_stopped()
 
@@ -559,39 +591,13 @@ async def _run_fulfill_rfp_gaps_body(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Submission narrative pass skipped: %s", exc)
             report["logs"].append(f"Submission narratives skipped: {exc}")
-    else:
-        _log_resume_skip(1)
-
-    try:
-        from app.services.proposal_fulfill_rfp_structure import run_rfp_structure_alignment_pass
-
-        await _scan_progress(
-            2,
-            "Scan RFP: structure & scored sections",
-            "Exhibit A / TOC / criteria — reframe BMP, qualifications, approach per RFP.",
-        )
-        await _ensure_not_stopped()
-        preserved_pre = fulfill_scan_preserve_bio_and_case_study_ids(draft)
-        draft, struct_logs, struct_human = await run_rfp_structure_alignment_pass(
-            draft=draft,
-            rfp=rfp,
-            rfp_text=rfp_text,
-            research=research,
-            skip_section_ids=preserved_pre,
-            use_llm=use_llm,
-        )
-        report["logs"].extend(struct_logs)
-        report["structureScan"] = struct_logs
-        report["humanDecisionGaps"].extend(struct_human)
-        if struct_logs:
-            await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
     except FulfillStepSkip as skip:
         _log_resume_skip(skip.step)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("RFP structure alignment skipped: %s", exc)
-        report["logs"].append(f"RFP structure scan skipped: {exc}")
+        logger.warning("Closing & submission skipped: %s", exc)
+        report["logs"].append(f"Closing & submission skipped: {exc}")
 
     if use_llm:
         try:
@@ -682,7 +688,7 @@ async def _run_fulfill_rfp_gaps_body(
         await _scan_progress(
             2,
             "Scan RFP: fact repairs",
-            "Rebuild bios from 04_Bio KB; scrub false vendor-registration / insurance "
+            "Attach 04_Bio PDFs via designer note; scrub false vendor-registration / insurance "
             "Compliant certifications, bio/org-chart conflicts, unverified carriers.",
         )
         await _ensure_not_stopped()
@@ -806,7 +812,9 @@ async def _run_fulfill_rfp_gaps_body(
     preserved_ids = fulfill_scan_preserve_bio_and_case_study_ids(draft)
     if preserved_ids:
         report["logs"].append(
-            f"Preserved {len(preserved_ids)} team bio / case study section(s) from LLM rewrite."
+            f"Preserved {len(preserved_ids)} team bio / case study section(s) from full LLM rewrite "
+            "(04_Bio PDFs / case-study bodies). Role-on-this-engagement blurbs still go through "
+            "KB fact-check and line grounding."
         )
 
     try:
@@ -1415,11 +1423,84 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("RFP blocker suite / contradiction scan skipped: %s", exc)
         report["logs"].append(f"RFP blocker suite skipped: {exc}")
 
+    # Async per-section KB line grounding — confirm claims in DB; never invent.
+    try:
+        await _scan_progress(
+            13,
+            "Scan RFP: line-by-line KB grounding",
+            "Agent plans queries per section (async) — remove ungrounded claims; no fabrication.",
+        )
+        await _ensure_not_stopped()
+        from app.services.proposal_scan_line_grounding import (
+            run_scan_line_grounding_pass,
+        )
+
+        draft, ground_report = await run_scan_line_grounding_pass(
+            draft,
+            rfp=rfp,
+            rfp_text=rfp_text,
+            research=research,
+        )
+        report["lineGrounding"] = {
+            "sectionsChecked": ground_report.sections_checked,
+            "sectionsChanged": ground_report.sections_changed,
+            "queriesRun": ground_report.queries_run,
+            "logs": ground_report.logs[:40],
+        }
+        if ground_report.logs:
+            for line in ground_report.logs[:20]:
+                report["logs"].append(f"Line ground: {line}")
+            await asave_proposal_draft(draft)
+        else:
+            report["logs"].append(
+                f"Line ground: checked {ground_report.sections_checked} section(s); "
+                f"{ground_report.queries_run} KB queries."
+            )
+    except ProposalGenerationCancelled:
+        raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Line grounding during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"Line grounding skipped: {exc}")
+
+    try:
+        from app.services.evidence_trust.load_client_list import load_client_list_registry
+        from app.services.proposal_fulfill_fabrication_guard import (
+            repair_fabricated_qualifications_async,
+        )
+        from app.services.proposal_rfp_optional_claim_scrub import (
+            apply_optional_claim_scrub_to_draft,
+        )
+
+        # Warm ClientList cache, then correct unsupported claims BEFORE stripping flags.
+        client_registry = await load_client_list_registry()
+        draft, fab_again, _fab_h = await repair_fabricated_qualifications_async(
+            draft, research
+        )
+        if fab_again:
+            report["logs"].extend(f"claim-correct: {line}" for line in fab_again[:12])
+        draft, claim_logs = apply_optional_claim_scrub_to_draft(
+            draft, rfp_text=rfp_text, registry=client_registry
+        )
+        if claim_logs:
+            report["logs"].extend(f"optional-claim scrub: {line}" for line in claim_logs[:20])
+            await asave_proposal_draft(draft)
+        elif fab_again:
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Optional claim scrub during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"Optional claim scrub skipped: {exc}")
+
     # Dedicated pass: every section with [VERIFY]/[MANUAL FILL] → RFP scan →
     # remove unless critically required. Never invents.
     try:
         await _scan_progress(
-            13,
+            14,
             "Scan RFP: remove optional VERIFY/MANUAL FILL",
             "Drop placeholders unless RFP-critical; fill from KB verbatim only — never invent.",
         )
@@ -1503,79 +1584,6 @@ async def _run_fulfill_rfp_gaps_body(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Optional placeholder scrub during Scan RFP skipped: %s", exc)
         report["logs"].append(f"Placeholder scrub skipped: {exc}")
-
-    # Async per-section KB line grounding — confirm claims in DB; never invent.
-    try:
-        await _scan_progress(
-            14,
-            "Scan RFP: line-by-line KB grounding",
-            "Agent plans queries per section (async) — remove ungrounded claims; no fabrication.",
-        )
-        await _ensure_not_stopped()
-        from app.services.proposal_scan_line_grounding import (
-            run_scan_line_grounding_pass,
-        )
-
-        draft, ground_report = await run_scan_line_grounding_pass(
-            draft,
-            rfp=rfp,
-            rfp_text=rfp_text,
-            research=research,
-        )
-        report["lineGrounding"] = {
-            "sectionsChecked": ground_report.sections_checked,
-            "sectionsChanged": ground_report.sections_changed,
-            "queriesRun": ground_report.queries_run,
-            "logs": ground_report.logs[:40],
-        }
-        if ground_report.logs:
-            for line in ground_report.logs[:20]:
-                report["logs"].append(f"Line ground: {line}")
-            await asave_proposal_draft(draft)
-        else:
-            report["logs"].append(
-                f"Line ground: checked {ground_report.sections_checked} section(s); "
-                f"{ground_report.queries_run} KB queries."
-            )
-    except ProposalGenerationCancelled:
-        raise
-    except FulfillStepSkip as skip:
-        _log_resume_skip(skip.step)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Line grounding during Scan RFP skipped: %s", exc)
-        report["logs"].append(f"Line grounding skipped: {exc}")
-
-    try:
-        from app.services.evidence_trust.load_client_list import load_client_list_registry
-        from app.services.proposal_fulfill_fabrication_guard import (
-            repair_fabricated_qualifications_async,
-        )
-        from app.services.proposal_rfp_optional_claim_scrub import (
-            apply_optional_claim_scrub_to_draft,
-        )
-
-        # Warm ClientList cache, then correct unsupported claims BEFORE stripping flags.
-        client_registry = await load_client_list_registry()
-        draft, fab_again, _fab_h = await repair_fabricated_qualifications_async(
-            draft, research
-        )
-        if fab_again:
-            report["logs"].extend(f"claim-correct: {line}" for line in fab_again[:12])
-        draft, claim_logs = apply_optional_claim_scrub_to_draft(
-            draft, rfp_text=rfp_text, registry=client_registry
-        )
-        if claim_logs:
-            report["logs"].extend(f"optional-claim scrub: {line}" for line in claim_logs[:20])
-            await asave_proposal_draft(draft)
-        elif fab_again:
-            await asave_proposal_draft(draft)
-    except ProposalGenerationCancelled:
-        raise
-    except FulfillStepSkip as skip:
-        _log_resume_skip(skip.step)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Optional claim scrub during Scan RFP skipped: %s", exc)
-        report["logs"].append(f"Optional claim scrub skipped: {exc}")
 
     try:
         from app.services.proposal_section_dedup import dedupe_manuscript_for_scan
@@ -1673,6 +1681,22 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Scan RFP Ralph skipped: %s", exc)
         report["logs"].append(f"Ralph page-fit skipped: {exc}")
 
+    try:
+        from app.services.proposal_scan_fact_repairs import (
+            apply_leaked_fragment_scrub_to_draft,
+        )
+
+        draft, leak_logs = apply_leaked_fragment_scrub_to_draft(draft)
+        if leak_logs:
+            await asave_proposal_draft(draft)
+            report["logs"].extend(f"Leak scrub: {line}" for line in leak_logs[:16])
+            report["leakedArtifactsRemoved"] = len(leak_logs)
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as extra:  # noqa: BLE001
+        logger.warning("Leak scrub before quality gate skipped: %s", extra)
+        report["logs"].append(f"Leak scrub skipped: {extra}")
+
     # Stage 17 — the review agent. Runs before pre-submit refresh so the existing
     # pre-submit pass still has the last word and reports on the gate's edits rather
     # than a stale draft.
@@ -1680,7 +1704,8 @@ async def _run_fulfill_rfp_gaps_body(
     await _scan_progress(
         17,
         "Scan RFP: review & quality gate",
-        "Verify every fact-bound claim, score against RFP criteria, then cut slop and repetition.",
+        "Verify every fact-bound claim, score against RFP criteria, then cut slop and repetition. "
+        "Leaked editor/system strings already stripped.",
     )
     try:
         await _ensure_not_stopped()
@@ -1712,6 +1737,12 @@ async def _run_fulfill_rfp_gaps_body(
                 f"{sum(1 for t in gate_report.tickets if t.outcome == 'manual_fill')} to manual fill, "
                 f"stopped because {gate_report.stopped_reason}"
             )
+            from app.services.agency_facts import apply_canonical_agency_tenure_to_draft
+
+            draft, tenure_logs = apply_canonical_agency_tenure_to_draft(draft)
+            if tenure_logs:
+                report["logs"].extend(tenure_logs)
+                await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
     except FulfillStepSkip as skip:

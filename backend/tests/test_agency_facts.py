@@ -25,3 +25,30 @@ def test_enforce_aligns_who_we_are_and_business_info() -> None:
     assert "12 years" not in fixed_who
     assert "Years in Operation | 13" in fixed_biz
     assert "August 21, 2013" in fixed_biz
+
+
+def test_enforce_combines_years_of_experience_agency_voice() -> None:
+    who = (
+        "zö agency combines 12 years of experience with strategy and storytelling "
+        "to guide purpose-driven brands."
+    )
+    fixed = enforce_agency_tenure(who, as_of=date(2026, 8, 14))
+    assert "13 years of experience" in fixed
+    assert "12 years" not in fixed
+
+
+def test_enforce_does_not_rewrite_specialist_bio_years() -> None:
+    bio = "Shawn has 12 years of WordPress development experience specializing in civic sites."
+    assert enforce_agency_tenure(bio, as_of=date(2026, 8, 14)) == bio
+
+
+def test_strips_complete_scan_tenure_banners() -> None:
+    from app.services.agency_facts import strip_tenure_auditor_tags
+
+    text = (
+        "zö agency combines 13 years of experience with strategy.\n\n"
+        "[MANUAL FILL: Confirm 12 vs 13 years of experience]\n"
+    )
+    cleaned = strip_tenure_auditor_tags(text)
+    assert "MANUAL FILL" not in cleaned
+    assert "13 years" in cleaned

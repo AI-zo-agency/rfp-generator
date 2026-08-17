@@ -14,22 +14,85 @@ from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSe
 
 logger = logging.getLogger(__name__)
 
-_LEAK_FRAGMENT_RES: tuple[re.Pattern[str], ...] = (
-    re.compile(
-        r"(?is)\n*\s*s\s*—\s*no verified ClientList[^\]]*\]\s*",
-    ),
-    re.compile(r"(?is)\[FLAG(?:\s+FOR\b)?[^\]]*\]"),
-    re.compile(r"(?is)\[references package removed[^\]]*\]"),
-    re.compile(
-        r"(?is)\[VERIFY:\s*references[^\]]*no verified ClientList[^\]]*\]",
-    ),
-    re.compile(
-        r"(?is)Previous draft contained unverified reference contacts[^\n]*\n?",
-    ),
-    re.compile(
-        r"(?is)\[VERIFY:\s*[^\]]*do not invent names or emails[^\]]*\]\s*",
-    ),
+# Client-facing leaks — matched as literal line/bracket text, not regex.
+_LEAK_LINE_MARKERS = (
+    "delete this section",
+    "deletion notice",
+    "no verified clientlist",
+    "previous draft contained unverified reference",
+    "references package removed",
+    "do not invent names or emails",
 )
+
+
+def _collapse_blank_lines(text: str) -> str:
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+    while ", ," in text:
+        text = text.replace(", ,", ",")
+    while ",," in text:
+        text = text.replace(",,", ",")
+    return text
+
+
+def _bracket_span_is_leak(inner: str) -> bool:
+    cf = inner.strip().casefold()
+    if cf.startswith("flag for") or cf.startswith("flag:") or cf.startswith("pricing flag"):
+        return True
+    if cf.startswith("delete this section") or cf.startswith("deletion notice"):
+        return True
+    if cf.startswith("references package removed"):
+        return True
+    if "no verified clientlist" in cf:
+        return True
+    if "do not invent names or emails" in cf:
+        return True
+    return False
+
+
+def _strip_leaked_bracket_spans(text: str) -> tuple[str, bool]:
+    changed = False
+    pieces: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        start = text.find("[", i)
+        if start < 0:
+            pieces.append(text[i:])
+            break
+        end = text.find("]", start + 1)
+        if end < 0:
+            pieces.append(text[i:])
+            break
+        if _bracket_span_is_leak(text[start + 1 : end]):
+            pieces.append(text[i:start])
+            i = end + 1
+            changed = True
+            continue
+        pieces.append(text[i : end + 1])
+        i = end + 1
+    return "".join(pieces), changed
+
+
+def _drop_leaked_lines(text: str) -> tuple[str, bool]:
+    changed = False
+    kept: list[str] = []
+    for line in text.splitlines(keepends=True):
+        body = line.strip().casefold()
+        if not body:
+            kept.append(line)
+            continue
+        if any(marker in body for marker in _LEAK_LINE_MARKERS):
+            changed = True
+            continue
+        if body.startswith("s and s") or body.startswith("s — no verified") or body.startswith(
+            "s - no verified"
+        ):
+            changed = True
+            continue
+        kept.append(line)
+    return "".join(kept), changed
+
 
 _SOLE_PROPRIETOR_RE = re.compile(
     r"(?i)\bOwnership:\s*Sole proprietor\s+Sonja Anderson\b",
@@ -74,13 +137,38 @@ def _evidence_blob(research: ProposalResearchCache | None) -> str:
 def scrub_leaked_system_fragments(content: str) -> tuple[str, list[str]]:
     text = content or ""
     logs: list[str] = []
-    for pattern in _LEAK_FRAGMENT_RES:
-        if pattern.search(text):
-            text = pattern.sub("\n", text)
-            logs.append("Removed leaked internal/system fragment")
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r",\s*,", ",", text)
-    return text.strip() + ("\n" if content.endswith("\n") else ""), logs
+    text, dropped = _drop_leaked_lines(text)
+    if dropped:
+        logs.append("Removed leaked internal/system fragment")
+    text, stripped = _strip_leaked_bracket_spans(text)
+    if stripped:
+        logs.append("Removed leaked internal/system fragment")
+    text = _collapse_blank_lines(text)
+    if not logs:
+        return content or "", []
+    suffix = "\n" if (content or "").endswith("\n") else ""
+    return text.strip() + suffix, logs
+
+
+def apply_leaked_fragment_scrub_to_draft(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """Strip leaked editor/system strings from every tab (client-facing body)."""
+    logs: list[str] = []
+    sections: list[ProposalSection] = []
+    changed = False
+    for section in draft.sections:
+        body = section.content or ""
+        cleaned, leak_logs = scrub_leaked_system_fragments(body)
+        if leak_logs and cleaned != body:
+            changed = True
+            sections.append(section.model_copy(update={"content": cleaned}))
+            logs.append(f"{section.title or section.id}: {leak_logs[0]}")
+        else:
+            sections.append(section)
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs
 
 
 def repair_sole_proprietor_language(content: str) -> tuple[str, list[str]]:
@@ -272,21 +360,20 @@ async def rebuild_team_bios_from_kb(
 ) -> tuple[ProposalDraft, list[str]]:
     """Replace dumped resumes with the designer-note stub (attach 04_Bio PDF)."""
     from app.services.proposal_bio_stub import (
+        expected_bio_pdf_filename,
         is_bio_pdf_designer_note,
         resolve_bio_pdf_filename,
         rfp_requires_inline_bios,
         stub_from_extraction,
     )
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
-    from app.services.proposal_sections_graph import (
-        _extract_member_bio_facts,
-        _fetch_member_bio_kb,
-    )
+    from app.services.proposal_sections_graph import _fetch_member_bio_kb
 
     logs: list[str] = []
     sections: list[ProposalSection] = []
     changed = False
     inline_required = rfp_requires_inline_bios(rfp_text)
+    org_roles = parse_org_chart_roles(draft)
 
     for section in draft.sections:
         sid = section.id or ""
@@ -303,7 +390,6 @@ async def rebuild_team_bios_from_kb(
             continue
 
         org_role = ""
-        org_roles = parse_org_chart_roles(draft)
         key = member.casefold()
         org_role = org_roles.get(key, "")
         if not org_role:
@@ -313,22 +399,23 @@ async def rebuild_team_bios_from_kb(
                     org_role = role
                     break
 
-        try:
-            kb_text, sources = await _fetch_member_bio_kb(member)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Bio KB fetch failed for %s: %s", member, exc)
-            sections.append(section)
-            continue
-
-        kb_available = bool(
-            (kb_text or "").strip()
-            and not kb_text.startswith("(Supermemory")
-            and len(kb_text) >= 200
-        )
-        pdf_name = resolve_bio_pdf_filename(member, sources)
+        pdf_name = expected_bio_pdf_filename(member)
+        kb_text = ""
+        kb_available = True
         extracted: dict = {}
-        if inline_required and kb_available:
-            extracted = await _extract_member_bio_facts(member, kb_text)
+        if inline_required:
+            try:
+                kb_text, sources = await _fetch_member_bio_kb(member)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Bio KB fetch failed for %s: %s", member, exc)
+                kb_text, sources = "", []
+            kb_available = bool(
+                (kb_text or "").strip()
+                and not kb_text.startswith("(Supermemory")
+                and len(kb_text) >= 200
+            )
+            pdf_name = resolve_bio_pdf_filename(member, sources)
+            # Verbatim bullets from KB text only — never an LLM bio rewrite.
 
         new_content = stub_from_extraction(
             member=member,
@@ -379,6 +466,11 @@ async def run_scan_fact_repairs(
     """Run all deterministic scan repairs — no LLM invention."""
     logs: list[str] = []
     evidence = _evidence_blob(research)
+
+    from app.services.agency_facts import apply_canonical_agency_tenure_to_draft
+
+    draft, tenure_logs = apply_canonical_agency_tenure_to_draft(draft)
+    logs.extend(tenure_logs)
 
     draft, bio_logs = await rebuild_team_bios_from_kb(draft, rfp_text=rfp_text)
     logs.extend(bio_logs)
@@ -458,6 +550,7 @@ async def run_scan_fact_repairs(
         return draft, logs
 
     from app.services.proposal_manuscript import strip_internal_flag_tags
+    from app.services.agency_facts import apply_canonical_agency_tenure_to_draft
 
     final_sections: list[ProposalSection] = []
     for section in sections:

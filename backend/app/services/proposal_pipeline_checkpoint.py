@@ -33,6 +33,7 @@ PHASE_LABELS: dict[str, str] = {
     "phase-3-6-self-edit": "Senior editor polish",
     "phase-3-5-budget": "Budget build",
     "phase-4-review": "Pre-submit review",
+    "fulfill-scan": "Complete & clean draft",
     "complete": "Complete",
 }
 
@@ -236,8 +237,32 @@ async def record_phase_started(rfp_id: str, phase: str) -> None:
         activityDetail=activity_detail,
         stepIndex=step_index,
         stepTotal=step_total,
+        resumeFulfillStep=(
+            prior.resume_fulfill_step
+            if phase == "fulfill-scan" and prior
+            else None
+        ),
+        lastCompletedFulfillStep=(
+            prior.last_completed_fulfill_step
+            if phase == "fulfill-scan" and prior
+            else None
+        ),
         updatedAt=_now_iso(),
     )
+    if (
+        phase == "fulfill-scan"
+        and prior
+        and (checkpoint.resume_fulfill_step or 0) > 1
+    ):
+        # Keep the UI on the saved step instead of flashing 1/19 while skips run.
+        checkpoint = checkpoint.model_copy(
+            update={
+                "step_index": checkpoint.resume_fulfill_step,
+                "step_total": prior.step_total or 19,
+                "activity_label": prior.activity_label or activity_label,
+                "activity_detail": "Resuming Complete & clean from the saved step.",
+            }
+        )
     await _save_checkpoint(rfp_id, checkpoint)
     logger.info("Pipeline checkpoint: %s started %s", rfp_id, phase)
 
@@ -373,6 +398,12 @@ def _next_phase_after(completed_phase: str) -> str:
 
 
 async def record_phase_completed(rfp_id: str, phase: str) -> None:
+    if phase == "fulfill-scan":
+        # Not a Generate pipeline phase — must not stamp lastCompletedPhase or
+        # resumeFromPhase would jump back to Sections 1–3.
+        await complete_fulfill_scan(rfp_id)
+        return
+
     if phase == "sections-1-3":
         from app.services.proposal_repository import aget_proposal_draft
 
