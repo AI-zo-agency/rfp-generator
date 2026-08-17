@@ -443,7 +443,7 @@ class ChatStructureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(plan)
 
 
-class AddCaseStudyHeuristicTests(unittest.TestCase):
+class AddCaseStudyHeuristicTests(unittest.IsolatedAsyncioTestCase):
     def test_add_rno_in_case_studies_does_not_replace_previous_experience(self) -> None:
         from app.services.proposal_chat_structure import (
             _heuristic_add_case_study_plan,
@@ -545,6 +545,42 @@ class AddCaseStudyHeuristicTests(unittest.TestCase):
         self.assertEqual(plan.action, "add_sections")
         self.assertEqual(plan.additions[0].case_study_name, "City of Umatilla")
         self.assertEqual(plan.additions[0].kind, "case_study")
+
+    async def test_unnamed_add_plan_adds_instead_of_asking_which_client(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.proposal_chat_structure import plan_chat_structure_action
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec(
+                    "section-3-work-hillsboro",
+                    "3.1 — Hillsboro Public Library Messaging",
+                    "hillsboro",
+                ),
+            ],
+            updatedAt="2026-08-17T00:00:00+00:00",
+        )
+        with patch(
+            "app.services.proposal_chat_structure._next_unused_kb_case_study_name",
+            new=AsyncMock(return_value="City of Umatilla"),
+        ), patch(
+            "app.services.proposal_chat_structure._structure_plan_llm_once",
+            new=AsyncMock(side_effect=AssertionError("LLM should not run")),
+        ):
+            plan = await plan_chat_structure_action(
+                draft=draft,
+                user_message="can we add one case study section?",
+                focus_section_id="section-budget",
+                rfp_title="Denver Health",
+                rfp_client="Denver Health",
+                rfp_context="",
+                chat_intent="structure",
+            )
+        self.assertEqual(plan.action, "add_sections")
+        self.assertEqual(plan.additions[0].case_study_name, "City of Umatilla")
+        self.assertNotEqual(plan.action, "clarify")
 
 
 class AddBioHeuristicTests(unittest.TestCase):

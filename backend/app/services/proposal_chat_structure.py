@@ -888,8 +888,9 @@ _ADD_CASE_STUDY_INTENT_RE = re.compile(
     # Shared ADD_VERBS: this alternation previously listed only add|include while
     # the one above listed add|include|put|insert|create, so "create a new case
     # study for Bend" matched neither.
-    r"(?:" + verb_alternation(ADD_VERBS) + r")\s+(?:a\s+)?(?:new\s+)?"
-    r"(?:case\s*stud(?:y|ies))\b"
+    r"(?:" + verb_alternation(ADD_VERBS) + r")\s+(?:a\s+|one\s+|another\s+)?"
+    r"(?:new\s+)?"
+    r"(?:case\s*stud(?:y|ies))(?:\s+section|\s+tab)?"
     r"|"
     r"\bcase\s*stud(?:y|ies)\b.{0,40}\b(?:add|include|insert)\b",
 )
@@ -1716,25 +1717,71 @@ def _heuristic_add_case_study_plan(
                 "RFP relevance (no duplicate tab)."
             ),
         )
+    return _plan_add_named_case_study(draft, name)
+
+
+def unused_case_study_name_from_sources(
+    draft: ProposalDraft,
+    sources: list[str],
+) -> str | None:
+    """First eligible 03_CS filename that is not already an Our Work tab."""
+    from app.services.proposal_case_study_eligibility import (
+        is_eligible_section3_case_study_title,
+    )
+    from app.services.proposal_case_study_fit import case_study_display_name
+
+    for src in sources:
+        if not is_eligible_section3_case_study_title(src):
+            continue
+        name = case_study_display_name(src)
+        if not name or name.casefold() in {"case study", "unknown"}:
+            continue
+        if _case_study_already_present(draft, name):
+            continue
+        return name
+    return None
+
+
+def _plan_add_named_case_study(draft: ProposalDraft, name: str) -> StructurePlan:
     cases = _case_study_sections(draft.sections)
     after = cases[-1].id if cases else None
-    logger.info("Case-study ADD heuristic: %s (after=%s)", name, after)
+    label = (name or "").strip() or "Case study"
+    logger.info("Case-study ADD: %s (after=%s)", label, after)
     return StructurePlan(
         action="add_sections",
         additions=[
             StructureAddition(
                 kind="case_study",
-                title=f"3.x — {name}",
-                caseStudyName=name,
+                title=f"3.x — {label}",
+                caseStudyName=label,
                 insertAfterSectionId=after,
                 draftHint=(
-                    f"Draft full case study for {name} from 03_CS KB — "
+                    f"Draft full case study for {label} from 03_CS KB — "
                     "challenge, approach, results, why relevant to this RFP."
                 ),
             )
         ],
-        assistantNote=f"Adding **{name}** as a new Our Work / case study tab.",
+        assistantNote=f"Adding **{label}** as a new Our Work / case study tab.",
     )
+
+
+async def _next_unused_kb_case_study_name(draft: ProposalDraft) -> str | None:
+    from app.services import supermemory
+
+    if not supermemory.is_configured():
+        return None
+    try:
+        docs = await supermemory.list_container_memories(limit=1000)
+    except supermemory.SupermemoryError as exc:
+        logger.warning("KB case-study list failed: %s", exc)
+        return None
+    sources: list[str] = []
+    for doc in docs:
+        meta = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        file_name = str(meta.get("fileName") or doc.get("title") or "").strip()
+        if file_name:
+            sources.append(file_name)
+    return unused_case_study_name_from_sources(draft, sources)
 
 
 def _coerce_add_case_study_plan(
@@ -1858,14 +1905,17 @@ async def plan_chat_structure_action(
     if stub_plan is not None:
         return stub_plan
 
-    # Unnamed "add another case study" — ask which KB client before an LLM call
-    # that often times out mid-reload / during Continue Proposal.
+    # Unnamed "add a case study" — add the next unused 03_CS tab. Clarify only
+    # when the KB has no leftover eligible study.
     msg_cf = user_message.casefold()
     if (
         "case stud" in msg_cf
         and any(w in msg_cf for w in ("add", "create", "another", "more", "include"))
         and not _extract_case_study_name_from_add_message(user_message)
     ):
+        picked = await _next_unused_kb_case_study_name(draft)
+        if picked:
+            return _plan_add_named_case_study(draft, picked)
         existing = [
             (s.title or "").strip()
             for s in draft.sections
@@ -1934,6 +1984,9 @@ async def plan_chat_structure_action(
             if "case stud" in msg_cf and any(
                 w in msg_cf for w in ("add", "create", "another", "more", "include")
             ):
+                picked = await _next_unused_kb_case_study_name(draft)
+                if picked:
+                    return _plan_add_named_case_study(draft, picked)
                 existing = [
                     (s.title or "").strip()
                     for s in draft.sections
