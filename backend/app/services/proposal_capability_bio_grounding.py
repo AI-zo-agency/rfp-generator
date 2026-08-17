@@ -175,9 +175,16 @@ def is_who_we_are_section(section: ProposalSection) -> bool:
     return is_company_identity_title(section.title or "")
 
 
+def is_our_work_section(section: ProposalSection) -> bool:
+    sid = (section.id or "").casefold()
+    return sid.startswith("section-3-")
+
+
 def is_named_person_bio_tab(section: ProposalSection) -> bool:
     sid = (section.id or "")
     if sid.startswith("section-1-") or is_who_we_are_section(section):
+        return False
+    if is_our_work_section(section):
         return False
     if sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
         return True
@@ -187,6 +194,8 @@ def is_named_person_bio_tab(section: ProposalSection) -> bool:
 def is_personnel_bio_section(section: ProposalSection) -> bool:
     sid = (section.id or "").casefold()
     if sid.startswith("section-1-") or is_who_we_are_section(section):
+        return False
+    if is_our_work_section(section):
         return False
     if sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
         return True
@@ -694,6 +703,8 @@ async def ground_bios_to_kb(
     Never LLM-rewrite resumes into the manuscript. Capabilities stay in their
     own tabs and are grounded separately. Who We Are / Section 1 identity cards
     are written by the Section 1 brand-voice path — never stubbed as 04_Bio PDFs.
+    Our Work / Section 3 case-study cards are never bios, even when the title is
+    two Title-Case words (Municipality Summaries).
     """
     del rfp_id, use_llm, rfp_text
     from app.services.proposal_bio_stub import (
@@ -711,11 +722,11 @@ async def ground_bios_to_kb(
     org_roles = parse_org_chart_roles(draft)
 
     for section in draft.sections:
-        sid = section.id or ""
-        if sid.startswith("section-1-") or is_who_we_are_section(section):
+        if not is_named_person_bio_tab(section):
             sections.append(section)
             continue
 
+        sid = section.id or ""
         member = person_name_from_tab_title(section.title or "")
         if not member and sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
             member = _member_name_from_bio_section(section.title or "")

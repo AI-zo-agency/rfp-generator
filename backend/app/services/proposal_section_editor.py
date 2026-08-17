@@ -283,11 +283,15 @@ def _should_skip_structure_planner(
         return False
     # Add/delete sidebar tabs always go through the structure planner — even when
     # Improve is pinned or the classifier guessed single_edit.
-    if chat_intent == "structure" or is_add_section_intent(user_message):
+    if is_add_section_intent(user_message):
+        return False
+    # "Improve this section" is a content rewrite on the open tab — never outline
+    # clarify, even if the classifier guessed structure.
+    if user_points_at_open_section(user_message):
+        return True
+    if chat_intent == "structure":
         return False
     if selection_mode or apply_fix or improve_section_pinned:
-        return True
-    if user_points_at_open_section(user_message):
         return True
     from app.services.proposal_section_kb_evidence import user_asks_kb_fetch_or_fill
     from app.services.proposal_verify_optional_scrub import (
@@ -1055,7 +1059,13 @@ async def _apply_suggested_fix_to_section(
 ) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache, str, str, bool]:
     """One-click Apply the fix — rewrite from prior audit context, no KB re-plan."""
     prior_content = section.content or ""
-    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(prior_content)
+    from app.services.proposal_bio_stub import (
+        MISPLACED_BIO_STUB_REWRITE_NOTE,
+        prior_content_for_rewrite,
+    )
+
+    rewrite_body = prior_content_for_rewrite(section.id, prior_content)
+    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(rewrite_body)
     prior_chat = _format_apply_fix_prior_context(conversation_history)
 
     user_content = (
@@ -1063,6 +1073,8 @@ async def _apply_suggested_fix_to_section(
         f"Client: {rfp.client}\n\n"
         f"Apply instruction:\n{instruction.strip()}\n\n"
     )
+    if not rewrite_body.strip() and prior_content.strip():
+        user_content += f"{MISPLACED_BIO_STUB_REWRITE_NOTE}\n\n"
     if prior_chat:
         user_content += (
             "Prior chat (verified audit — use facts cited here; do not invent):\n"
@@ -1268,6 +1280,7 @@ def decide_chat_route(
     user_message: str,
     selection_mode: bool,
     conversation_history: list[dict[str, str]] | None = None,
+    improve_pinned: bool = False,
 ) -> ChatRoute:
     """Decide advisory vs edit for one chat turn.
 
@@ -1277,6 +1290,8 @@ def decide_chat_route(
 
     * a pinned excerpt edits unless the turn reads as a question about it —
       highlighting text scopes the ask, it does not authorise a rewrite;
+    * Improve full section binds the open tab the same way: questions are
+      answered, change requests rewrite THAT tab, never "which section?";
     * a structure ask (add/delete a section) always mutates, overriding even a
       classifier that said "advisory";
     * the LLM classifier decides next, because it reads the whole manuscript;
@@ -1305,14 +1320,43 @@ def decide_chat_route(
         ):
             return ChatRoute(advisory=True, reason="selection_question")
         return ChatRoute(advisory=False, reason="selection_edit")
-    if chat_intent == "structure":
-        return ChatRoute(advisory=False, reason="classifier_structure")
+
+    if improve_pinned:
+        from app.services.proposal_chat_structure import is_add_section_intent
+
+        # New sidebar tab still goes through the outline planner.
+        if is_add_section_intent(user_message):
+            return ChatRoute(advisory=False, reason="structure_ask")
+        # Questions about THIS tab: answer, do not rewrite, do not ask which section.
+        if _is_verification_only_ask(user_message):
+            return ChatRoute(advisory=True, reason="improve_pin_verify_ask")
+        if _is_informational_only_ask(user_message):
+            return ChatRoute(advisory=True, reason="improve_pin_informational_ask")
+        if _selection_ask_is_advisory(
+            user_message, conversation_history=conversation_history
+        ):
+            return ChatRoute(advisory=True, reason="improve_pin_question")
+        # Change request / default "Improve this section for the RFP." → rewrite this tab.
+        return ChatRoute(advisory=False, reason="improve_pin_edit")
+
+    from app.services.proposal_chat_structure import is_add_section_intent
+
+    if chat_intent == "structure" or is_add_section_intent(user_message):
+        return ChatRoute(
+            advisory=False,
+            reason="structure_ask" if is_add_section_intent(user_message) else "classifier_structure",
+        )
     # Fact-check / fabricated-values asks must never rewrite — even when the
     # classifier guesses single_edit because the open tab looks like a target.
     if _is_verification_only_ask(user_message):
         return ChatRoute(advisory=True, reason="verify_ask")
     if _is_informational_only_ask(user_message):
         return ChatRoute(advisory=True, reason="informational_ask")
+    # "Improve this section" is a bound-tab rewrite, not a whole-proposal Q&A.
+    if user_points_at_open_section(user_message) and _wants_section_edit(
+        user_message, conversation_history=conversation_history
+    ):
+        return ChatRoute(advisory=False, reason="open_tab_edit")
     if chat_intent == "advisory":
         return ChatRoute(advisory=True, reason="classifier_advisory")
     if chat_intent in {"single_edit", "multi_patch"}:
@@ -1817,6 +1861,8 @@ def _advisory_target_binding(
         "If the user said 'section N', they mean this sidebar tab. Do NOT describe "
         "Understanding / tourism-context / evaluation-criterion sections unless "
         "THIS tab's title is that topic.\n"
+        "The user is already on this tab. Do not ask which section to work on. "
+        "Answer questions about this tab, or describe the edit for this tab only.\n"
     )
 
 
@@ -4814,18 +4860,28 @@ async def _redraft_rfp_section(
     original_content = (section.content or "").strip()
     prior_for_agent, full_rewrite = prior_content_for_redraft(section)
     rewrite_note = ""
+    from app.services.proposal_bio_stub import (
+        MISPLACED_BIO_STUB_REWRITE_NOTE,
+        prior_content_for_rewrite,
+    )
+
+    if original_content and not prior_for_agent.strip():
+        rewrite_note = f"\n\nIMPORTANT: {MISPLACED_BIO_STUB_REWRITE_NOTE}\n"
     bio_kb = await _bio_kb_context_for_section(
         section, user_message=user_message or compliance_user_message or ""
     )
     if full_rewrite:
         rewrite_note = (
-            "\n\nIMPORTANT: Prior draft is below the word target or not marked generated. "
+            rewrite_note
+            + "\n\nIMPORTANT: Prior draft is below the word target or not marked generated. "
             "Write the COMPLETE section for every listed requirement from evidence and KB tools. "
             "Do not return stubs, error text, or unchanged placeholder content.\n"
         )
 
     # Protect MANUAL FILL tags in the prior draft from incidental rewrite.
-    source_for_tags = prior_content or original_content
+    source_for_tags = prior_for_agent or prior_content_for_rewrite(
+        section.id, prior_content or original_content
+    )
     from app.services.proposal_manuscript_locks import (
         kpi_weave_instruction,
         strip_kpi_lock_manual_fills,
@@ -5090,7 +5146,13 @@ async def _improve_static_section(
     )
 
     prior = section.content or ""
-    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(prior)
+    from app.services.proposal_bio_stub import (
+        MISPLACED_BIO_STUB_REWRITE_NOTE,
+        prior_content_for_rewrite,
+    )
+
+    rewrite_body = prior_content_for_rewrite(section.id, prior)
+    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(rewrite_body)
     system_prompt = STATIC_SECTION_REDRAFT_PROMPT
     if mfill_originals:
         system_prompt = f"{STATIC_SECTION_REDRAFT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
@@ -5099,12 +5161,18 @@ async def _improve_static_section(
     provider = _provider_name()
     raw: dict[str, Any] = {}
     for attempt in (1, 2):
+        misplaced = (
+            f"{MISPLACED_BIO_STUB_REWRITE_NOTE}\n\n"
+            if prior.strip() and not rewrite_body.strip()
+            else ""
+        )
         user_content = (
             f"BRAND VOICE (mandatory — maintain throughout; do not genericize):\n{voice_block}\n\n"
             f"Section: {section.title}\n"
             f"Mode: {section.mode}\n"
             f"Client: {rfp.client}\n"
             f"Sector: {rfp.sector}\n"
+            f"{misplaced}"
             f"User request:\n{user_message}\n\n"
             f"Previous content (preserve zö voice while improving — fill gaps from KB):\n"
             f"{masked_prior[:9000]}\n\n"
@@ -6489,6 +6557,17 @@ async def improve_proposal_section(
     # matched the stanza's own edit verbs and turned every question into an edit.
     raw_user_message = user_message.strip()
 
+    from app.services.proposal_chat_ops import chat_ask_is_proposal_wide
+
+    # Improve pin / "this section" binds the open tab. Don't dump the whole
+    # manuscript into advisory — that made the model ask "which section?".
+    if (
+        (improve_section_pinned or user_points_at_open_section(raw_user_message))
+        and not chat_ask_is_proposal_wide(raw_user_message)
+        and not selection_mode
+    ):
+        proposal_wide = False
+
     research = await aget_research_cache(rfp_id)
 
     # Shared Evidence Gate: decide KB vs write (same policy as drafting / repair).
@@ -6717,22 +6796,16 @@ async def improve_proposal_section(
             chat_intent, scope_reason = coerce_chat_intent_for_scope(
                 chat_intent, raw_user_message
             )
-            # Improve pin = edit THIS tab — unless the user clearly wants a NEW
-            # sidebar section/tab (including "add one more section for case studies").
+            # Improve pin binds THIS tab. Questions stay advisory; change
+            # requests rewrite this tab. Only a clear add-tab ask leaves the pin.
             if chat_intent == "structure" or is_add_section_intent(raw_user_message):
                 if chat_intent != "structure":
                     chat_intent = "structure"
                 intent_degraded = bool(intent_info.get("degraded"))
                 scope_reason = "add_section_overrides_improve_pin"
             else:
-                chat_intent = "single_edit"
-                intent_info = {
-                    "intent": "single_edit",
-                    "primarySectionId": section_id,
-                    "degraded": False,
-                }
+                intent_degraded = bool(intent_info.get("degraded"))
                 scope_reason = "improve_section_pinned"
-                intent_degraded = False
         else:
             intent_info = await classify_chat_edit_intent(
                 user_message=raw_user_message,
@@ -6773,6 +6846,28 @@ async def improve_proposal_section(
                 section_id,
             )
 
+        from app.services.proposal_chat_structure import (
+            is_add_section_intent,
+            is_bio_resume_attachment_intent,
+        )
+
+        if (
+            user_points_at_open_section(raw_user_message)
+            and _wants_section_edit(raw_user_message)
+            and not _selection_ask_is_advisory(
+                raw_user_message, conversation_history=conversation_history
+            )
+            and not is_add_section_intent(raw_user_message)
+            and not is_bio_resume_attachment_intent(raw_user_message)
+        ):
+            chat_intent = "single_edit"
+            intent_info["intent"] = "single_edit"
+            intent_info.setdefault("primarySectionId", section_id)
+            logger.info(
+                "chat intent forced to single_edit (this section) section_id=%s",
+                section_id,
+            )
+
         if apply_fix:
             logger.info(
                 "chat intent forced to single_edit (apply_fix) section_id=%s",
@@ -6782,10 +6877,7 @@ async def improve_proposal_section(
         # For multi_patch, do NOT remap to one named section — the plan spans many.
         # For single_edit / default, named titles + LLM primary beat the open tab.
         # Exception: "… here / this section" stays on the open tab (budget table insert).
-        stay_on_open = user_points_at_open_section(raw_user_message) and (
-            user_asks_insert_budget_table(raw_user_message)
-            or user_asks_section_budget_fill(raw_user_message)
-        )
+        stay_on_open = user_points_at_open_section(raw_user_message)
         if chat_intent != "multi_patch" and not stay_on_open and not apply_fix and not improve_section_pinned:
             primary = intent_info.get("primarySectionId")
             default_sec = _find_draft_section(draft, section_id)
@@ -6996,6 +7088,7 @@ async def improve_proposal_section(
 
     if (
         not selection_mode
+        and not improve_section_pinned
         and chat_intent not in {"multi_patch", "single_edit"}
         and chat_intent != "structure"
         and _message_needs_case_study_clarify(raw_user_message)
@@ -7033,14 +7126,13 @@ async def improve_proposal_section(
     # keyword advisory regex — the model already decided the user wants edits.
     if apply_fix:
         route = ChatRoute(advisory=False, reason="apply_fix")
-    elif improve_section_pinned and chat_intent != "structure":
-        route = ChatRoute(advisory=False, reason="improve_section_pinned")
     else:
         route = decide_chat_route(
             chat_intent=chat_intent,
             user_message=raw_user_message,
             selection_mode=bool(selection_mode),
             conversation_history=conversation_history,
+            improve_pinned=bool(improve_section_pinned),
         )
     logger.info("chat route=%s reason=%s", "advisory" if route.advisory else "edit", route.reason)
     if route.advisory:
@@ -7172,10 +7264,7 @@ async def improve_proposal_section(
             if structure_plan.edit_section_id:
                 section_id = structure_plan.edit_section_id
 
-            stay_on_open = user_points_at_open_section(raw_user_message) and (
-                user_asks_insert_budget_table(raw_user_message)
-                or user_asks_section_budget_fill(raw_user_message)
-            )
+            stay_on_open = user_points_at_open_section(raw_user_message)
             if not stay_on_open and not apply_fix:
                 section_id = _remap_chat_section_if_explicit(
                     draft, raw_user_message, section_id

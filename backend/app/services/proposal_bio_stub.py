@@ -32,7 +32,16 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "budget",
         "business",
         "campaign",
+        "case",
         "certifications",
+        "city",
+        "clients",
+        "county",
+        "digital",
+        "employment",
+        "example",
+        "examples",
+        "government",
         "closing",
         "company",
         "cover",
@@ -47,18 +56,30 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "insurance",
         "letter",
         "methodology",
+        "municipal",
+        "municipality",
+        "municapility",
         "of",
         "organizational",
         "our",
         "overview",
+        "past",
+        "performance",
+        "portfolio",
         "pricing",
         "promise",
         "qualifications",
         "references",
+        "sample",
+        "samples",
         "scope",
         "strategy",
         "structure",
+        "studies",
+        "study",
         "submission",
+        "summaries",
+        "summary",
         "team",
         "terms",
         "that",
@@ -66,6 +87,7 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "this",
         "timeline",
         "to",
+        "travel",
         "we",
         "who",
         "with",
@@ -80,7 +102,7 @@ def is_company_identity_title(title: str) -> bool:
 
 
 def is_plausible_person_name(label: str) -> bool:
-    """First Last (or First Middle Last). Rejects 'Who We Are' / 'Our Work'."""
+    """First Last (or First Middle Last). Rejects Who We Are / Our Work / Municipality Summaries."""
     raw = (label or "").strip()
     if not raw or is_company_identity_title(raw):
         return False
@@ -152,6 +174,22 @@ def is_bio_stub_section(section_id: str, content: str | None = None) -> bool:
     if content is None:
         return True
     return is_bio_pdf_designer_note(content) or not (content or "").strip()
+
+
+def prior_content_for_rewrite(section_id: str, content: str) -> str:
+    """Body to show the rewriter. Misplaced bio-PDF stubs on Our Work are empty."""
+    body = content or ""
+    sid = section_id or ""
+    if is_bio_pdf_designer_note(body) and not sid.startswith("section-2-bio-"):
+        return ""
+    return body
+
+
+MISPLACED_BIO_STUB_REWRITE_NOTE = (
+    "Current body is a misplaced 04_Bio designer-note stub. Discard it. "
+    "This tab is not a team bio. Write Our Work / case-study content from 03_CS "
+    "and the RFP ask. Do not keep a bio PDF handoff or Role-on-this-engagement line."
+)
 
 
 def extract_engagement_role(content: str) -> str:
