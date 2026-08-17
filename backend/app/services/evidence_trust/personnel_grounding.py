@@ -23,8 +23,8 @@ KNOWN_FABRICATED_PERSONNEL: tuple[str, ...] = (
     "Ben Edwards",
     "Erica Schultz",
     "Morgan Nivan",
-    "Marcelle Benevides",
     "Olajide Ojoeyemi",
+    "Murilo Mendes",
 )
 
 # Documented zö leads commonly cited in Go/No-Go (bios / MasterTemplate).
@@ -43,6 +43,9 @@ DOCUMENTED_TEAM_PERSONNEL: tuple[str, ...] = (
     "Sarah Eichhorn",
     "Nicole Anderson",
     "Vishal Nihlani",
+    "Marcelle Benevides",
+    "Kelvin Kiruthu",
+    "Miguel Perez",
 )
 
 _FABRICATED_BY_KEY: dict[str, str] = {

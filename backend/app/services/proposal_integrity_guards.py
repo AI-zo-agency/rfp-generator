@@ -10,7 +10,12 @@ import logging
 import re
 from typing import Any
 
-from app.models.proposal import ProposalBudget, ProposalDraft, ProposalResearchCache
+from app.models.proposal import (
+    ProposalBudget,
+    ProposalDraft,
+    ProposalResearchCache,
+    ProposalSection,
+)
 from app.services.proposal_manuscript import strip_internal_flag_tags
 
 logger = logging.getLogger(__name__)
@@ -907,6 +912,53 @@ _CASE_STUDY_PERCENT_CLAIM_RE = re.compile(
     r"(?:increased|grew|up)\s+(?:by\s+)?\d{1,3}(?:\.\d+)?\s*%"
     r")"
 )
+_CASE_STUDY_VOLUME_METRIC_RE = re.compile(
+    r"(?i)"
+    r"("
+    r"[\d,]{3,}\s+impressions?"
+    r"|"
+    r"[\d,]{2,}\s+clicks?"
+    r"|"
+    r"\d+(?:\.\d+)?\s*%\s*CTR"
+    r"|"
+    r"CTR\s+(?:of\s+)?\d+(?:\.\d+)?\s*%"
+    r"|"
+    r"click[- ]through\s+rate\s+(?:of\s+)?\d+(?:\.\d+)?\s*%"
+    r")"
+)
+
+
+def _metric_numbers_in_source(claim: str, src: str) -> bool:
+    nums = re.findall(r"[\d,]+(?:\.\d+)?", claim or "")
+    if not nums:
+        return False
+    src_compact = (src or "").replace(",", "")
+    for n in nums:
+        compact = n.replace(",", "")
+        if not compact:
+            continue
+        if n in src or compact in src_compact:
+            continue
+        return False
+    return True
+
+
+def _percent_in_source(claim: str, src: str) -> bool:
+    nums = re.findall(r"\d{1,3}(?:\.\d+)?", claim)
+    for n in nums:
+        if re.search(rf"{re.escape(n)}\s*%", src):
+            return True
+    return False
+
+
+def _sentence_has_ungrounded_cs_metric(sent: str, src: str) -> bool:
+    for match in _CASE_STUDY_VOLUME_METRIC_RE.finditer(sent):
+        if not _metric_numbers_in_source(match.group(0), src):
+            return True
+    for match in _CASE_STUDY_PERCENT_CLAIM_RE.finditer(sent):
+        if not _percent_in_source(match.group(0), src):
+            return True
+    return False
 
 
 def scrub_ungrounded_case_study_percent_metrics(
@@ -914,10 +966,9 @@ def scrub_ungrounded_case_study_percent_metrics(
     *,
     source_text: str = "",
 ) -> tuple[str, list[str]]:
-    """Remove invented outcome % claims when they are absent from case-study KB source.
+    """Remove invented outcome % / volume claims when they are absent from case-study KB.
 
-    Requires ``source_text`` — without a source we do not guess which % are real
-    (verified fundraising/membership figures must survive).
+    Requires ``source_text`` — without a source we do not guess which figures are real.
     """
     text = content or ""
     src = (source_text or "").strip()
@@ -925,22 +976,64 @@ def scrub_ungrounded_case_study_percent_metrics(
         return text, []
     logs: list[str] = []
 
-    def _keep(match: re.Match[str]) -> str:
-        claim = match.group(0)
-        nums = re.findall(r"\d{1,3}(?:\.\d+)?", claim)
-        for n in nums:
-            if re.search(rf"{re.escape(n)}\s*%", src):
-                return claim
-        logs.append(f"Removed ungrounded case-study metric: {claim[:80]}")
-        return ""
+    chunks = re.split(r"(?<=[.!?])(\s+)", text)
+    rebuilt: list[str] = []
+    i = 0
+    while i < len(chunks):
+        chunk = chunks[i]
+        sep = chunks[i + 1] if i + 1 < len(chunks) else ""
+        if _sentence_has_ungrounded_cs_metric(chunk, src):
+            logs.append(f"Removed ungrounded case-study metric: {chunk.strip()[:80]}")
+            i += 2
+            continue
+        rebuilt.append(chunk)
+        if sep:
+            rebuilt.append(sep)
+        i += 2
 
-    cleaned = _CASE_STUDY_PERCENT_CLAIM_RE.sub(_keep, text)
+    cleaned = "".join(rebuilt)
     cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     cleaned = re.sub(r"  +", " ", cleaned)
     if logs:
         logger.info("case_study_metric_scrub removed=%d", len(logs))
     return cleaned, logs
+
+
+def apply_case_study_metric_scrub_to_draft(
+    draft: ProposalDraft,
+    *,
+    source_text: str,
+) -> tuple[ProposalDraft, list[str]]:
+    """Strip invented impressions/clicks/CTR/% lift when those numbers are not in KB."""
+    src = (source_text or "").strip()
+    if not draft.sections or not src:
+        return draft, []
+    logs: list[str] = []
+    sections: list[ProposalSection] = []
+    changed = False
+    for section in draft.sections:
+        body = section.content or ""
+        if not (
+            _CASE_STUDY_VOLUME_METRIC_RE.search(body)
+            or _CASE_STUDY_PERCENT_CLAIM_RE.search(body)
+        ):
+            sections.append(section)
+            continue
+        cleaned, section_logs = scrub_ungrounded_case_study_percent_metrics(
+            body, source_text=src
+        )
+        if section_logs:
+            changed = True
+            logs.extend(
+                f"{section.title or section.id}: {line}" for line in section_logs
+            )
+            sections.append(section.model_copy(update={"content": cleaned}))
+        else:
+            sections.append(section)
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs
 
 
 def case_study_fidelity_ok(source_text: str, written: str) -> tuple[bool, str]:

@@ -5451,7 +5451,12 @@ async def _apply_budget_section_canonical_refresh(
             False,
         )
 
-    budget = normalize_fixed_pricing_narrative(canonical, rfp_text=rfp_text)
+    from app.services.proposal_budget_validation import reconcile_proposal_budget
+
+    budget = reconcile_proposal_budget(canonical, rfp_context=rfp_text)
+    budget = normalize_fixed_pricing_narrative(budget, rfp_text=rfp_text)
+    now = datetime.now(timezone.utc).isoformat()
+    research = research.model_copy(update={"budget": budget, "updatedAt": now})
     content = render_budget_markdown(budget, rfp_text=rfp_text)
     working = section.model_copy(update={"content": content, "status": "generated"})
     merged = [working if s.id == section_id else s for s in draft.sections]
@@ -5469,6 +5474,7 @@ async def _apply_budget_section_canonical_refresh(
 
     figs = canonical_budget_summary_figures(budget)
     n_items = len(budget.line_items or [])
+    cap = budget.rfp_budget_cap or budget.rfp_media_or_program_envelope
     reply = (
         f"**{section.title}** — refreshed from the canonical Stage 3.5 fee ledger "
         f"(${figs['total']:,.2f} total; {n_items} line item(s)). "
@@ -5476,6 +5482,18 @@ async def _apply_budget_section_canonical_refresh(
         "hourly rates or rewrite the fee table. For a full pricing rebuild, ask to "
         "**rebuild Cost Proposal from the pricing guide**."
     )
+    if cap is not None and float(cap) > 0:
+        total = float(figs.get("total") or 0)
+        if total <= float(cap) + 0.01:
+            reply += (
+                f" Bid total is at or under the RFP available-funds cap "
+                f"(${float(cap):,.2f})."
+            )
+        else:
+            reply += (
+                f" WARNING: bid total still exceeds the RFP cap "
+                f"(${float(cap):,.2f}) — rebuild Cost Proposal."
+            )
     if reply_hint.strip():
         reply = f"{reply}\n\n{reply_hint.strip()}"
     return working, updated_draft, research, provider, reply, True

@@ -88,8 +88,10 @@ def apply_zero_fabrication_guards(
         return draft, report
 
     from app.services.proposal_integrity_guards import (
+        apply_case_study_metric_scrub_to_draft,
         apply_manuscript_integrity_guards,
         apply_reference_contact_evidence_guard,
+        _research_evidence_blob,
     )
 
     draft, integrity_logs = apply_manuscript_integrity_guards(draft)
@@ -168,6 +170,30 @@ def apply_zero_fabrication_guards(
         logger.warning("%s cert claim scrub skipped: %s", label, exc)
 
     try:
+        from app.services.proposal_fulfill_rfp_repairs import (
+            apply_deterministic_roster_fixes,
+        )
+
+        sections: list = []
+        roster_changed = False
+        for section in draft.sections:
+            body = section.content or ""
+            fixed, roster_logs = apply_deterministic_roster_fixes(
+                body, identity_only=True
+            )
+            if roster_logs:
+                roster_changed = True
+                for line in roster_logs:
+                    report.logs.append(f"{label}: roster — {line}")
+                sections.append(section.model_copy(update={"content": fixed}))
+            else:
+                sections.append(section)
+        if roster_changed:
+            draft = draft.model_copy(update={"sections": sections})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s roster fixes skipped: %s", label, exc)
+
+    try:
         from app.services.evidence_trust.personnel_grounding import (
             scrub_fabricated_personnel_from_draft,
         )
@@ -177,6 +203,17 @@ def apply_zero_fabrication_guards(
             report.logs.append(f"{label}: personnel — {line}")
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s fabricated personnel scrub skipped: %s", label, exc)
+
+    try:
+        cs_source = _research_evidence_blob(research)
+        if cs_source.strip():
+            draft, metric_logs = apply_case_study_metric_scrub_to_draft(
+                draft, source_text=cs_source
+            )
+            for line in metric_logs:
+                report.logs.append(f"{label}: case-study metrics — {line}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s case-study metric scrub skipped: %s", label, exc)
 
     conflicts = detect_contradictory_phase_tables(draft)
     report.phase_table_conflicts = conflicts
@@ -239,6 +276,15 @@ async def apply_zero_fabrication_guards_before_persist(
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s forms attachments integrity skipped: %s", label, exc)
+
+    try:
+        from app.services.proposal_capability_bio_grounding import ground_bios_to_kb
+
+        draft, bio_logs = await ground_bios_to_kb(draft, rfp_text=rfp_text, use_llm=False)
+        for line in bio_logs:
+            report.logs.append(f"{label}: bio stub — {line}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s bio designer-note stub skipped: %s", label, exc)
 
     return draft, report
 

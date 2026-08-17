@@ -208,12 +208,12 @@ def extract_rfp_hard_facts(text: str) -> dict[str, Any]:
                 f"{format_money(value)} — vendor/small-business eligibility context (NOT contract value): {snippet}"
             )
             continue
-        if value >= 100_000 and _CEILING_CONTEXT_RE.search(window):
+        if _CEILING_CONTEXT_RE.search(window) and value > 0:
             snippet = re.sub(r"\s+", " ", window).strip()
             if len(snippet) > 180:
                 snippet = snippet[:177] + "…"
             contract_lines.append(f"{format_money(value)} — context: {snippet}")
-        elif value >= 10_000:
+        elif value > 0:
             other_dollars.append(display.strip())
 
     contract_lines = list(dict.fromkeys(contract_lines))[:12]

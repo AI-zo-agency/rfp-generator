@@ -95,6 +95,24 @@ class ZeroFabricationGuardTests(unittest.TestCase):
         joined = " ".join(report.logs)
         self.assertIn("personnel", joined.casefold())
 
+    def test_roster_replaces_murilo_with_marcelle(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-test",
+            updatedAt="2026-01-01T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="org",
+                    title="1.2 — Organizational Structure",
+                    content="Kelvin Kiruthu Senior Graphic Designer Murilo Mendes Graphic Designer",
+                ),
+            ],
+        )
+        updated, report = apply_zero_fabrication_guards(draft, label="test")
+        body = updated.sections[0].content or ""
+        self.assertNotIn("Murilo Mendes", body)
+        self.assertIn("Marcelle Benevides", body)
+        self.assertTrue(any("roster" in line.casefold() for line in report.logs))
+
 
 if __name__ == "__main__":
     unittest.main()

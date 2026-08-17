@@ -63,17 +63,16 @@ IS a contradiction (flag these):
   healthcare, retail, or otherwise do not demonstrate the claimed capability.
   Rewrite the framing to match the actual studies shown, or flag VERIFY for
   better portfolio selections.
-- INVENTED SPECIALIST ROLES: team org charts naming dedicated specialist titles
-  (e.g. dedicated accessibility lead, QA lead) when Section 2 bios do not include
-  a matching named person — rewrite to real roster names / generalist coverage /
-  [MANUAL FILL: subcontractor] rather than phantom specialists.
+- INVENTED CASE-STUDY METRICS: impressions, clicks, CTR, or % lift in a campaign
+  write-up when the 03_CS / case-study KB excerpt does not contain those numbers.
+  Rewrite to qualitative outcomes from the source or [VERIFY] — never keep invented KPIs.
 
 NOT a contradiction (do NOT flag):
 - RFP-specific project staffing (named roles on THIS engagement — Section 2 bios)
 - [VERIFY] / [MANUAL FILL] tags already flagging uncertainty
-- Case-study client metrics (project-specific, not agency-wide)
 - Budget/fees/dollar amounts (handled elsewhere)
 - Duplication of Who We Are in other tabs (Senior Editor handles dedupe)
+- Case-study metrics whose exact figures appear in the 03_CS source for that study
 
 NEVER invent replacement numbers. When fixing team size, use the companyfacts
 value exactly OR remove the invented claim and state team size per verified facts.

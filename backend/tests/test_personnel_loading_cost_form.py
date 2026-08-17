@@ -160,6 +160,35 @@ class CaseStudyMetricScrubTests(unittest.TestCase):
         self.assertTrue(logs)
         self.assertNotIn("22%", cleaned)
 
+    def test_removes_impressions_clicks_ctr_absent_from_source(self) -> None:
+        prose = (
+            "Oregon Employment Department campaign.\n\n"
+            "Campaign generated 392,346 impressions and 568 clicks in October "
+            "2025 with a 0.14% CTR.\n\n"
+            "The contract was renewed three consecutive times."
+        )
+        source = (
+            "03_CS Oregon Employment Department. Qualitative KPIs consistently "
+            "crush industry standards. Contract renewed three consecutive times."
+        )
+        cleaned, logs = scrub_ungrounded_case_study_percent_metrics(
+            prose, source_text=source
+        )
+        self.assertTrue(logs)
+        self.assertNotIn("392,346", cleaned)
+        self.assertNotIn("568 clicks", cleaned)
+        self.assertNotIn("0.14%", cleaned)
+        self.assertIn("renewed three consecutive times", cleaned)
+
+    def test_keeps_volume_metrics_present_in_source(self) -> None:
+        prose = "Campaign generated 392,346 impressions in October 2025."
+        source = "The flight delivered 392,346 impressions in October 2025."
+        cleaned, logs = scrub_ungrounded_case_study_percent_metrics(
+            prose, source_text=source
+        )
+        self.assertFalse(logs)
+        self.assertIn("392,346 impressions", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,12 +5,14 @@ from __future__ import annotations
 import unittest
 
 from app.services.proposal_capability_bio_grounding import (
+    align_bio_education_deterministically,
     align_bio_years_deterministically,
     bio_adds_ungrounded_specialization,
     bio_block_is_role_only,
     bio_years_inflated_vs_kb,
     is_personnel_bio_section,
     named_people_in_section,
+    person_name_from_tab_title,
     section_asserts_past_proven_capability,
     section_or_instruction_needs_bio_kb,
 )
@@ -57,6 +59,68 @@ class BioYearGroundingTests(unittest.TestCase):
         draft = "Sonja brings Management 30 years and Creative 20 years."
         kb = "Management: 30 years. Creative: 20 years. Horizon Broadcasting 2004."
         self.assertFalse(bio_years_inflated_vs_kb(draft, kb))
+
+
+class BioEducationGroundingTests(unittest.TestCase):
+    def test_invented_degree_replaced_from_04_bio(self) -> None:
+        draft = (
+            "Sonja holds a Bachelor of Microbiology from Federal University of "
+            "Oye Ekiti. She leads the agency."
+        )
+        kb = (
+            "Sonja Anderson, Agency Director.\n"
+            "Education:\n"
+            "Associate of Arts, Grays Harbor College\n\n"
+            "Work History:\n"
+            "zö agency — Agency Director."
+        )
+        fixed, logs = align_bio_education_deterministically(
+            draft, kb, member="Sonja Anderson"
+        )
+        self.assertTrue(logs)
+        self.assertNotIn("Oye Ekiti", fixed)
+        self.assertNotIn("Microbiology", fixed)
+        self.assertIn("Grays Harbor", fixed)
+        self.assertIn("leads the agency", fixed)
+
+    def test_named_rfp_tab_is_personnel_bio(self) -> None:
+        from app.models.proposal import ProposalSection
+
+        section = ProposalSection(
+            id="rfp-sec-7",
+            title="2.2 — Sonja Anderson",
+            content="Sonja holds a Bachelor of Microbiology from Federal University of Oye Ekiti.",
+        )
+        self.assertEqual(person_name_from_tab_title(section.title), "Sonja Anderson")
+        self.assertTrue(is_personnel_bio_section(section))
+        self.assertIn("Sonja Anderson", named_people_in_section(section))
+
+    def test_org_structure_tab_is_not_a_person(self) -> None:
+        self.assertEqual(
+            person_name_from_tab_title("1.2 — Organizational Structure"),
+            "",
+        )
+
+    def test_who_we_are_is_company_narrative_not_a_person(self) -> None:
+        from app.models.proposal import ProposalSection
+        from app.services.proposal_bio_stub import is_plausible_person_name
+        from app.services.proposal_capability_bio_grounding import (
+            is_named_person_bio_tab,
+            is_who_we_are_section,
+        )
+
+        self.assertEqual(person_name_from_tab_title("1.1 — Who We Are"), "")
+        self.assertEqual(person_name_from_tab_title("Who We Are"), "")
+        self.assertFalse(is_plausible_person_name("Who We Are"))
+        self.assertFalse(is_plausible_person_name("Our Work"))
+        section = ProposalSection(
+            id="section-1-who-we-are",
+            title="1.1 — Who We Are",
+            content="Role on this engagement: Team member on this engagement",
+        )
+        self.assertTrue(is_who_we_are_section(section))
+        self.assertFalse(is_named_person_bio_tab(section))
+        self.assertFalse(is_personnel_bio_section(section))
 
 
 class PersonnelSectionBioTests(unittest.TestCase):
@@ -282,6 +346,144 @@ class GroundBiosStubOnlyTests(unittest.IsolatedAsyncioTestCase):
         body = (updated.sections[0].content if updated else "") or ""
         self.assertTrue(is_bio_pdf_designer_note(body))
         self.assertNotIn("5 YEARS WITH ZÖ", body)
+
+
+    async def test_named_rfp_bio_tab_becomes_designer_note(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+        from app.services.proposal_capability_bio_grounding import ground_bios_to_kb
+
+        draft = ProposalDraft(
+            rfpId="rfp-dh",
+            updatedAt="2026-08-17T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="rfp-sec-7",
+                    title="2.2 — Sonja Anderson",
+                    content=(
+                        "Sonja holds a Bachelor of Microbiology from Federal "
+                        "University of Oye Ekiti. She leads the agency."
+                    ),
+                )
+            ],
+        )
+        updated, logs = await ground_bios_to_kb(
+            draft,
+            rfp_text="Bios must be included inline in the proposal body.",
+            use_llm=True,
+        )
+        body = updated.sections[0].content or ""
+        self.assertTrue(logs)
+        self.assertTrue(is_bio_pdf_designer_note(body))
+        self.assertNotIn("Oye Ekiti", body)
+        self.assertIn("04_Bio_SonjaAnderson.pdf", body)
+
+    async def test_ground_bios_keeps_who_we_are_prose(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+        from app.services.proposal_capability_bio_grounding import ground_bios_to_kb
+
+        prose = (
+            "We are more than an agency — we are your strongest advocate and an "
+            "extension of your team. zö means family, kindred, clan, community.\n\n"
+            "## Our Promise\n\n"
+            "Excellence is a guarantee, not a goal. We meet deadlines and budgets "
+            "with full transparency."
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-who",
+            updatedAt="2026-08-17T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="section-1-who-we-are",
+                    title="1.1 — Who We Are",
+                    content=prose,
+                )
+            ],
+        )
+        updated, logs = await ground_bios_to_kb(draft, rfp_text="Denver Health RFP")
+        self.assertEqual(updated.sections[0].content, prose)
+        self.assertFalse(is_bio_pdf_designer_note(updated.sections[0].content or ""))
+        self.assertFalse(any("designer-note stub" in line for line in logs))
+
+    async def test_ground_bios_does_not_touch_who_we_are(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_capability_bio_grounding import ground_bios_to_kb
+
+        prose = (
+            "We are more than an agency — we are your strongest advocate.\n\n"
+            "## Our Promise\n\nExcellence is a guarantee, not a goal."
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-who",
+            updatedAt="2026-08-17T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="section-1-who-we-are",
+                    title="1.1 — Who We Are",
+                    content=prose,
+                ),
+                ProposalSection(
+                    id="section-2-bio-sonja-anderson",
+                    title="2.2 — Sonja Anderson",
+                    content="Sonja invented a microbiology degree.",
+                ),
+            ],
+        )
+        updated, logs = await ground_bios_to_kb(draft)
+        self.assertEqual(updated.sections[0].content, prose)
+        self.assertTrue(any("04_Bio_SonjaAnderson.pdf" in line for line in logs))
+        self.assertIn("04_Bio_SonjaAnderson.pdf", updated.sections[1].content or "")
+
+    async def test_fetch_member_bio_kb_skips_who_we_are(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.proposal_sections_graph import _fetch_member_bio_kb
+
+        with patch(
+            "app.services.supermemory.search_document_chunks",
+            new=AsyncMock(side_effect=AssertionError("no 04_Bio search for Who We Are")),
+        ), patch(
+            "app.services.supermemory.find_document_by_file_name",
+            new=AsyncMock(side_effect=AssertionError("no 04_Bio lookup for Who We Are")),
+        ):
+            text, sources = await _fetch_member_bio_kb("Who We Are")
+        self.assertEqual(text, "")
+        self.assertEqual(sources, [])
+
+    async def test_aligns_education_on_named_rfp_tab(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_capability_bio_grounding import align_named_bios_to_kb
+
+        draft = ProposalDraft(
+            rfpId="rfp-dh",
+            updatedAt="2026-08-17T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="rfp-sec-7",
+                    title="2.2 — Sonja Anderson",
+                    content=(
+                        "Sonja holds a Bachelor of Microbiology from Federal "
+                        "University of Oye Ekiti. She leads the agency."
+                    ),
+                )
+            ],
+        )
+        kb = (
+            "Sonja Anderson, Agency Director.\nEducation:\n"
+            "Associate of Arts, Grays Harbor College\n"
+        )
+        with patch(
+            "app.services.proposal_sections_graph._fetch_member_bio_kb",
+            new=AsyncMock(return_value=(kb, ["04_Bio_SonjaAnderson.pdf"])),
+        ):
+            updated, logs = await align_named_bios_to_kb(draft)
+        body = updated.sections[0].content or ""
+        self.assertTrue(logs)
+        self.assertNotIn("Oye Ekiti", body)
+        self.assertIn("Grays Harbor", body)
 
 
 if __name__ == "__main__":

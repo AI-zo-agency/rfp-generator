@@ -1328,8 +1328,53 @@ def _salvage_company_truth_payload(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _escape_raw_controls_in_json_strings(text: str) -> str:
+    """Turn raw newlines/tabs inside JSON strings into escapes so json.loads can run.
+
+    Claude often emits ```json fences and then puts real line breaks inside
+    \"summary\" / \"replacement\" values. That is invalid JSON even when the
+    object is otherwise complete.
+    """
+    out: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            out.append(ch)
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            out.append(ch)
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            continue
+        if in_string:
+            if ch == "\n":
+                out.append("\\n")
+                continue
+            if ch == "\r":
+                continue
+            if ch == "\t":
+                out.append("\\t")
+                continue
+            if ord(ch) < 32:
+                out.append(f"\\u{ord(ch):04x}")
+                continue
+        out.append(ch)
+    return "".join(out)
+
+
 def _try_parse_json_object(text: str) -> dict[str, Any] | None:
-    for candidate in (text, _close_truncated_json(text)):
+    escaped = _escape_raw_controls_in_json_strings(text)
+    for candidate in (
+        text,
+        escaped,
+        _close_truncated_json(text),
+        _close_truncated_json(escaped),
+    ):
         try:
             parsed = json.loads(candidate)
         except json.JSONDecodeError:
@@ -1563,16 +1608,17 @@ def _salvage_section1_budgets_payload(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _salvage_recommendations_payload(text: str) -> dict[str, Any] | None:
-    """Recover complete recommendation objects from a truncated editorial-review JSON."""
-    start = text.find('"recommendations"')
+def _salvage_object_array_payload(text: str, key: str) -> list[dict[str, Any]] | None:
+    """Recover complete objects from a truncated JSON array field."""
+    needle = f'"{key}"'
+    start = text.find(needle)
     if start == -1:
         return None
     bracket = text.find("[", start)
     if bracket == -1:
         return None
 
-    recs: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     i = bracket + 1
     n = len(text)
     while i < n:
@@ -1608,16 +1654,47 @@ def _salvage_recommendations_payload(text: str) -> dict[str, Any] | None:
                         break
             j += 1
         if not closed:
+            # Last object was cut off — try to close it.
+            snippet = _escape_raw_controls_in_json_strings(text[obj_start:])
+            parsed = _try_parse_json_object(snippet)
+            if isinstance(parsed, dict) and parsed:
+                items.append(parsed)
             break
+        blob = _escape_raw_controls_in_json_strings(text[obj_start:j])
         try:
-            recs.append(json.loads(text[obj_start:j]))
+            obj = json.loads(blob)
         except json.JSONDecodeError:
-            pass
+            obj = _try_parse_json_object(blob)
+        if isinstance(obj, dict):
+            items.append(obj)
         i = j
+    return items
 
-    if recs:
-        return {"recommendations": recs}
-    return None
+
+def _salvage_issues_payload(text: str) -> dict[str, Any] | None:
+    """Recover forms-audit {issues: [...]} when Claude fences or truncates JSON."""
+    if not re.search(r'"issues"\s*:', text):
+        return None
+    looks_like_audit = bool(
+        re.search(r'\{\s*"issues"\s*:', text)
+        or '"verbatimQuote"' in text
+        or '"verbatim_quote"' in text
+        or '"fixAction"' in text
+    )
+    if not looks_like_audit:
+        return None
+    items = _salvage_object_array_payload(text, "issues")
+    if items is None:
+        return None
+    return {"issues": items}
+
+
+def _salvage_recommendations_payload(text: str) -> dict[str, Any] | None:
+    """Recover complete recommendation objects from a truncated editorial-review JSON."""
+    items = _salvage_object_array_payload(text, "recommendations")
+    if not items:
+        return None
+    return {"recommendations": items}
 
 
 def _parse_json_response(raw: str) -> dict[str, Any]:
@@ -1639,6 +1716,7 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
             (_salvage_section1_budgets_payload, "section-1 budget(s)"),
             (_salvage_company_truth_payload, "company truth field(s)"),
             (_salvage_sections_payload, "section(s)"),
+            (_salvage_issues_payload, "forms-audit issue(s)"),
             (_salvage_recommendations_payload, "recommendation(s)"),
             (_salvage_simple_content_payload, "simple content"),
             (_salvage_budget_payload, "budget field(s)"),
@@ -1648,6 +1726,7 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
                 count = len(
                     salvaged.get("sections")
                     or salvaged.get("recommendations")
+                    or salvaged.get("issues")
                     or salvaged.get("lineItems")
                     or salvaged.get("budgets")
                     or salvaged.get("primary")

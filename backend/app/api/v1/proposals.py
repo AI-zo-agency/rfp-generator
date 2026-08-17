@@ -779,6 +779,42 @@ def _section_by_id(draft: ProposalDraft | None, section_id: str) -> ProposalSect
     return next((s for s in draft.sections if s.id == section_id), None)
 
 
+async def _salvage_draft_after_improve_failure(
+    rfp_id: str,
+    *,
+    prior_draft: ProposalDraft,
+    research: ProposalResearchCache,
+) -> tuple[ProposalDraft, bool, list[str]]:
+    """If chat/LLM dies, still persist roster + bio designer-note stubs."""
+    from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
+    from app.services.proposal_zero_fabrication import (
+        apply_zero_fabrication_guards_before_persist,
+    )
+
+    rfp_text = ""
+    try:
+        from app.services.proposal_common import load_rfp_for_proposal
+
+        rfp_text = load_rfp_for_proposal(rfp_id)[2] or ""
+    except Exception:  # noqa: BLE001
+        rfp_text = ""
+
+    current = await aget_proposal_draft(rfp_id) or prior_draft
+    before = tuple((s.id, s.content or "") for s in (prior_draft.sections or []))
+    repaired, report = await apply_zero_fabrication_guards_before_persist(
+        current,
+        research=research,
+        budget=research.budget if research else None,
+        rfp_text=rfp_text,
+        label="chat-failure-salvage",
+    )
+    after = tuple((s.id, s.content or "") for s in (repaired.sections or []))
+    changed = after != before
+    if changed:
+        await asave_proposal_draft(repaired)
+    return repaired, changed, list(report.logs)
+
+
 def _improve_activity_for_turn(
     *,
     prior_draft: ProposalDraft | None,
@@ -849,29 +885,37 @@ async def improve_section_endpoint(
     except ProposalError as exc:
         # Policy / rewrite checks must recap in chat — never 422 the UI.
         if exc.status_code in (400, 422) and prior_draft and prior_draft.sections:
-            section = _section_by_id(prior_draft, section_id) or prior_draft.sections[0]
             research = await aget_research_cache(rfp_id) or ProposalResearchCache(
                 rfpId=rfp_id
             )
-            note = str(exc).strip() or "Could not complete this instruction."
-            assistant_message = (
-                "I did not change the manuscript. "
-                f"{note}"
+            draft, draft_changed, salvage_logs = await _salvage_draft_after_improve_failure(
+                rfp_id, prior_draft=prior_draft, research=research
             )
+            section = _section_by_id(draft, section_id) or draft.sections[0]
+            note = str(exc).strip() or "Could not complete this instruction."
+            if draft_changed:
+                assistant_message = (
+                    f"{note} Applied deterministic roster/bio stubs so invented "
+                    "names and resume dumps are not left in the manuscript."
+                )
+            else:
+                assistant_message = f"I did not change the manuscript. {note}"
+            extra = [note]
+            extra.extend(salvage_logs[:6])
             activity = _improve_activity_for_turn(
                 prior_draft=prior_draft,
                 section=section,
-                draft=prior_draft,
-                draft_changed=False,
+                draft=draft,
+                draft_changed=draft_changed,
                 assistant_message=assistant_message,
-                extra_discrepancies=[note],
+                extra_discrepancies=extra,
             )
             return ProposalSectionImproveResponse(
                 section=section,
-                draft=prior_draft,
+                draft=draft,
                 research=_slim_research(research) or research,
                 assistantMessage=assistant_message,
-                draftChanged=False,
+                draftChanged=draft_changed,
                 suggestedFix=None,
                 agentActivity=activity,
             )
@@ -879,29 +923,39 @@ async def improve_section_endpoint(
     except Exception as exc:
         logging.getLogger(__name__).exception("Section improve failed for %s", rfp_id)
         if prior_draft and prior_draft.sections:
-            section = _section_by_id(prior_draft, section_id) or prior_draft.sections[0]
             research = await aget_research_cache(rfp_id) or ProposalResearchCache(
                 rfpId=rfp_id
             )
-            note = (
-                "This turn did not finish. The manuscript was left unchanged — "
-                "try again or rephrase the instruction."
+            draft, draft_changed, salvage_logs = await _salvage_draft_after_improve_failure(
+                rfp_id, prior_draft=prior_draft, research=research
             )
-            assistant_message = note
+            section = _section_by_id(draft, section_id) or draft.sections[0]
+            if draft_changed:
+                note = (
+                    "The rewrite did not finish, but fabricated roster names and "
+                    "in-manuscript bios were replaced with designer-note PDF stubs."
+                )
+            else:
+                note = (
+                    "This turn did not finish. The manuscript was left unchanged — "
+                    "try again or rephrase the instruction."
+                )
+            extra = [note]
+            extra.extend(salvage_logs[:6])
             activity = _improve_activity_for_turn(
                 prior_draft=prior_draft,
                 section=section,
-                draft=prior_draft,
-                draft_changed=False,
-                assistant_message=assistant_message,
-                extra_discrepancies=[note],
+                draft=draft,
+                draft_changed=draft_changed,
+                assistant_message=note,
+                extra_discrepancies=extra,
             )
             return ProposalSectionImproveResponse(
                 section=section,
-                draft=prior_draft,
+                draft=draft,
                 research=_slim_research(research) or research,
-                assistantMessage=assistant_message,
-                draftChanged=False,
+                assistantMessage=note,
+                draftChanged=draft_changed,
                 suggestedFix=None,
                 agentActivity=activity,
             )

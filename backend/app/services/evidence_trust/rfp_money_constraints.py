@@ -24,11 +24,24 @@ CONSTRAINT_PROGRAM_OR_MEDIA_ENVELOPE = "program_or_media_envelope"
 
 _HARD_FEE_CONTEXT_RE = re.compile(
     r"(?:fixed[\s-]?price|not\s+to\s+exceed|NTE|"
-    r"maximum\s+(?:contract|compensation|budget|fee)|"
-    r"total\s+(?:contract|project|award)\s+(?:value|amount|budget)|"
+    r"do\s+not\s+(?:exceed|go\s+above)|shall\s+not\s+exceed|cannot\s+exceed|"
+    r"must\s+not\s+exceed|may\s+not\s+exceed|"
+    r"maximum\s+(?:contract|compensation|budget|fee|available)|"
+    r"available\s+funds|"
+    r"total\s+(?:contract|project|award|available)\s+(?:value|amount|budget)|"
     r"contract\s+value|compensation\s+shall\s+not|"
-    r"budget\s+(?:of|is|shall)\b|"
+    r"budget\s+(?:of|is|shall|not\s+to\s+exceed)\b|"
+    r"year\s*(?:1|one)\s+budget|"
     r"ceiling\s+of|price\s+ceiling)",
+    re.I,
+)
+
+_YEAR1_CONTEXT_RE = re.compile(
+    r"year\s*(?:1|one)|first\s+year|initial\s+(?:term|year)|yr\.?\s*1\b",
+    re.I,
+)
+_LATER_YEAR_CONTEXT_RE = re.compile(
+    r"year\s*(?:2|3|two|three)|yr\.?\s*[23]\b|option\s+year|years?\s*2\s*[–\-]\s*3",
     re.I,
 )
 
@@ -101,6 +114,36 @@ def _parse_money_groups(amount: str, suffix: str | None) -> float | None:
     return money_to_number(amount, suffix)
 
 
+def _nearest_year_kind(text: str, amount_start: int, amount_end: int) -> str:
+    """Bind a dollar span to the closest year marker ('year1' | 'later' | '').
+
+    Wide context windows often contain both Year 1 and Years 2–3. The nearest
+    marker wins so a later-year figure cannot become the Year 1 bid ceiling.
+    """
+    window_start = max(0, amount_start - 80)
+    window_end = min(len(text), amount_end + 40)
+    snippet = text[window_start:window_end]
+    rel_start = amount_start - window_start
+    rel_end = amount_end - window_start
+
+    def _dist(match: re.Match[str]) -> int:
+        if match.end() <= rel_start:
+            return rel_start - match.end()
+        if match.start() >= rel_end:
+            return match.start() - rel_end
+        return 0
+
+    y1 = [_dist(m) for m in _YEAR1_CONTEXT_RE.finditer(snippet)]
+    later = [_dist(m) for m in _LATER_YEAR_CONTEXT_RE.finditer(snippet)]
+    best_y1 = min(y1) if y1 else None
+    best_later = min(later) if later else None
+    if best_later is not None and (best_y1 is None or best_later < best_y1):
+        return "later"
+    if best_y1 is not None:
+        return "year1"
+    return ""
+
+
 def extract_rfp_money_constraints(text: str) -> list[RfpMoneyConstraint]:
     """Deterministic RFP money authority candidates from full RFP body."""
     body = text or ""
@@ -112,9 +155,6 @@ def extract_rfp_money_constraints(text: str) -> list[RfpMoneyConstraint]:
 
     def _add(amount: float, kind: str, excerpt: str, confidence: str = "high") -> None:
         if amount <= 0:
-            return
-        # Tiny amounts are almost never contract authority.
-        if amount < 5_000:
             return
         key = (kind, round(amount, 2))
         if key in seen:
@@ -165,13 +205,16 @@ def extract_rfp_money_constraints(text: str) -> list[RfpMoneyConstraint]:
 
     for match in _MONEY_RE.finditer(body):
         amount = _parse_money_groups(match.group(1), match.group(2))
-        if amount is None or amount < 100_000:
+        if amount is None:
             continue
         start, end = match.start(), match.end()
         window = body[max(0, start - 120) : min(len(body), end + 80)]
         if _ELIGIBILITY_DOLLAR_CONTEXT_RE.search(window):
             continue
         if not _HARD_FEE_CONTEXT_RE.search(window):
+            continue
+        # Year 2/3 option dollars are not the Year 1 bid ceiling.
+        if _nearest_year_kind(body, start, end) == "later":
             continue
         # Prefer not double-counting media envelopes as hard NTE when topic is media.
         if _PROGRAM_MEDIA_TOPIC_RE.search(window):
@@ -183,6 +226,27 @@ def extract_rfp_money_constraints(text: str) -> list[RfpMoneyConstraint]:
             )
             continue
         _add(amount, CONSTRAINT_HARD_FEE_NTE, _window_excerpt(body, start, end))
+
+    from app.services.evidence_trust.rfp_hard_facts import _YEAR_BUDGET_RE
+
+    for match in _YEAR_BUDGET_RE.finditer(body):
+        snippet = match.group(0)
+        if not _YEAR1_CONTEXT_RE.search(snippet):
+            continue
+        if _LATER_YEAR_CONTEXT_RE.search(snippet):
+            continue
+        amount = _parse_money_groups(match.group(1), None)
+        if amount is None:
+            continue
+        start, end = match.start(), match.end()
+        window = body[max(0, start - 40) : min(len(body), end + 40)]
+        if _ELIGIBILITY_DOLLAR_CONTEXT_RE.search(window):
+            continue
+        _add(
+            amount,
+            CONSTRAINT_HARD_FEE_NTE,
+            _window_excerpt(body, start, end),
+        )
 
     logger.info(
         "rfp_money_constraints extracted count=%s kinds=%s",
@@ -198,6 +262,27 @@ def primary_hard_fee_nte(
     hard = [c for c in constraints if c.kind == CONSTRAINT_HARD_FEE_NTE]
     if not hard:
         return None
+
+    def _kind(constraint: RfpMoneyConstraint) -> str:
+        excerpt = constraint.excerpt or ""
+        # Excerpts are short; locate the dollar then bind to the nearest year marker.
+        money = _USD_AMOUNT_RE.search(excerpt)
+        if money:
+            return _nearest_year_kind(excerpt, money.start(), money.end())
+        y1 = bool(_YEAR1_CONTEXT_RE.search(excerpt))
+        later = bool(_LATER_YEAR_CONTEXT_RE.search(excerpt))
+        if later and not y1:
+            return "later"
+        if y1 and not later:
+            return "year1"
+        return ""
+
+    year1 = [c for c in hard if _kind(c) == "year1"]
+    if year1:
+        return min(year1, key=lambda c: c.amount)
+    unyeared = [c for c in hard if _kind(c) != "later"]
+    if unyeared:
+        return min(unyeared, key=lambda c: c.amount)
     return min(hard, key=lambda c: c.amount)
 
 

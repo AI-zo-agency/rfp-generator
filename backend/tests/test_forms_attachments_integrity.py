@@ -137,7 +137,7 @@ class FormsAttachmentsIntegrityTests(unittest.IsolatedAsyncioTestCase):
             ]
         }
         with patch(
-            "app.services.proposal_forms_attachments_integrity.llm.chat_json",
+            "app.services.proposal_forms_attachments_integrity.llm.chat_json_soft",
             new_callable=AsyncMock,
             return_value=(payload, "test"),
         ) as mock_json:

@@ -666,6 +666,11 @@ async def _bio_stub_kb_inputs(
 
 async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
     """Assemble bio from 04_Bio_{Name}.pdf, section RAG, and Master Template fallback."""
+    from app.services.proposal_bio_stub import is_plausible_person_name
+
+    if not is_plausible_person_name(member):
+        logger.info("Skip 04_Bio fetch for non-person label %r", member)
+        return "", []
     if not supermemory.is_configured():
         return "(Supermemory not configured.)", []
 

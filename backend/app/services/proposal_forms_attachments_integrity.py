@@ -34,7 +34,11 @@ Flag when:
 Do NOT invent new dollar amounts, carrier names, NAIC numbers, or contacts.
 Replacements must be honest: MANUAL FILL / pending when the fact is unverified.
 
-Return JSON only:
+Return compact JSON only — no markdown fences, no commentary.
+Keep each summary under 120 characters. Escape quotes and put no raw newlines
+inside strings.
+
+Return JSON:
 {
   "issues": [
     {
@@ -216,7 +220,7 @@ async def audit_and_repair_forms_attachments(
         f"{_reference_facts(draft)}\n"
     )
     try:
-        raw, _provider = await llm.chat_json(
+        raw, _provider = await llm.chat_json_soft(
             [
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": user[:24_000]},
@@ -227,6 +231,9 @@ async def audit_and_repair_forms_attachments(
         )
     except Exception:
         logger.exception("forms_attachments_integrity LLM audit failed")
+        return FormsIntegrityResult(content=body)
+
+    if not raw:
         return FormsIntegrityResult(content=body)
 
     findings = _findings_from_payload(raw)

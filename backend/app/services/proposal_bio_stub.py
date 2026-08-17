@@ -10,6 +10,96 @@ _BIO_PDF_DESIGNER_NOTE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_COMPANY_IDENTITY_TITLE_RE = re.compile(
+    r"(?is)\b(?:"
+    r"who\s+we\s+are|"
+    r"our\s+promise|"
+    r"about\s+(?:us|zö|the\s+(?:firm|company|agency))|"
+    r"(?:company|firm|agency)\s+overview|"
+    r"company\s+history"
+    r")\b"
+)
+
+# Title-case function / section words — never a person named "Who We Are".
+_PERSON_NAME_STOP_WORDS = frozenset(
+    {
+        "about",
+        "agency",
+        "and",
+        "approach",
+        "are",
+        "attachments",
+        "budget",
+        "business",
+        "campaign",
+        "certifications",
+        "closing",
+        "company",
+        "cover",
+        "evaluation",
+        "firm",
+        "for",
+        "forms",
+        "from",
+        "history",
+        "identification",
+        "information",
+        "insurance",
+        "letter",
+        "methodology",
+        "of",
+        "organizational",
+        "our",
+        "overview",
+        "pricing",
+        "promise",
+        "qualifications",
+        "references",
+        "scope",
+        "strategy",
+        "structure",
+        "submission",
+        "team",
+        "terms",
+        "that",
+        "the",
+        "this",
+        "timeline",
+        "to",
+        "we",
+        "who",
+        "with",
+        "work",
+    }
+)
+
+
+def is_company_identity_title(title: str) -> bool:
+    """True for Who We Are / About Us / company overview — never a bio tab."""
+    return bool(_COMPANY_IDENTITY_TITLE_RE.search(title or ""))
+
+
+def is_plausible_person_name(label: str) -> bool:
+    """First Last (or First Middle Last). Rejects 'Who We Are' / 'Our Work'."""
+    raw = (label or "").strip()
+    if not raw or is_company_identity_title(raw):
+        return False
+    if "—" in raw:
+        raw = raw.split("—", 1)[1].strip()
+    elif " - " in raw:
+        raw = raw.split(" - ", 1)[1].strip()
+    raw = re.sub(r"^[\d.]+\s*", "", raw).strip()
+    if is_company_identity_title(raw):
+        return False
+    parts = [p for p in raw.split() if p]
+    if not (2 <= len(parts) <= 3):
+        return False
+    if any(p.casefold() in _PERSON_NAME_STOP_WORDS for p in parts):
+        return False
+    if not all(re.match(r"^[A-Z][a-zA-Z'\-]+$", p) for p in parts):
+        return False
+    return True
+
 _INLINE_BIO_REQUIRED_RE = re.compile(
     r"(?is)"
     r"(?:"
