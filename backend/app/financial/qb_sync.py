@@ -68,8 +68,9 @@ def report_jobs(year: int, as_of: date) -> list[tuple[str, dict[str, str]]]:
         }),
         ("CustomerIncome", {"start_date": start, "end_date": end}),
         ("AgedReceivableDetail", {"report_date": end}),
-        ("ExpensesByVendorSummary", {"start_date": start, "end_date": end}),
-        ("SalesByCustomer", {"start_date": start, "end_date": end}),
+        # Intuit report IDs, not QBO UI titles. Wrong IDs 5020 with element=ReportName.
+        ("VendorExpenses", {"start_date": start, "end_date": end}),
+        ("CustomerSales", {"start_date": start, "end_date": end}),
         ("BalanceSheet", {"date": end}),
         ("CashFlow", {"start_date": start, "end_date": end}),
     ]
@@ -129,10 +130,19 @@ def _is_report_permission_denied(exc: BaseException) -> bool:
     return "5020" in text or "Permission Denied" in text
 
 
-def _ingest_reports(realm_id: str, years: list[int], as_of: date, fetched_at: str) -> int:
+def _ingest_reports(
+    realm_id: str,
+    years: list[int],
+    as_of: date,
+    fetched_at: str,
+    *,
+    only: frozenset[str] | None = None,
+) -> int:
     count = 0
     for year in years:
         for report_name, hash_params in report_jobs(year, as_of):
+            if only is not None and report_name not in only:
+                continue
             fetch_params = _report_fetch_params(year, as_of, report_name, hash_params)
             try:
                 logger.info(
@@ -170,6 +180,13 @@ def _ingest_reports(realm_id: str, years: list[int], as_of: date, fetched_at: st
                 report_name,
                 year,
             )
+    logger.info(
+        "operation=ingest_reports realm_id=%s years=%s stored=%s only=%s",
+        realm_id,
+        ",".join(str(year) for year in years),
+        count,
+        ",".join(sorted(only)) if only else "all",
+    )
     return count
 
 

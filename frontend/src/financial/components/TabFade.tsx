@@ -5,11 +5,12 @@ import { useEffect, useRef } from "react";
 interface TabFadeProps {
   active: boolean;
   children: React.ReactNode;
+  className?: string;
 }
 
 /** Plays a quick native fade+rise the moment a tab becomes active — never
  * remounts children, so each tab's own filters/expanded rows persist. */
-export function TabFade({ active, children }: TabFadeProps) {
+export function TabFade({ active, children, className = "" }: TabFadeProps) {
   const ref = useRef<HTMLDivElement>(null);
   const wasActive = useRef(active);
 
@@ -27,7 +28,7 @@ export function TabFade({ active, children }: TabFadeProps) {
   }, [active]);
 
   return (
-    <div ref={ref} className={active ? "block" : "hidden"}>
+    <div ref={ref} className={active ? `flex min-h-0 flex-1 flex-col ${className}` : "hidden"}>
       {children}
     </div>
   );

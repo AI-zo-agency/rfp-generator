@@ -19,6 +19,7 @@ from app.financial.quickbooks import (
     _empty_month_series,
     _find_row,
     _flatten,
+    _is_report_total_label,
     _money,
     _month_index,
 )
@@ -186,6 +187,21 @@ def _snapshot_payload(
     if not isinstance(payload, dict):
         raise LookupError(f"{report_name} snapshot payload missing for year {year}")
     return payload
+
+
+def _first_snapshot_payload(
+    realm_id: str,
+    year: int,
+    params: dict[str, str],
+    *report_names: str,
+) -> dict[str, Any]:
+    last_error: LookupError | None = None
+    for report_name in report_names:
+        try:
+            return _snapshot_payload(realm_id, report_name, year, params)
+        except LookupError as exc:
+            last_error = exc
+    raise last_error or LookupError(f"missing snapshot for year {year}")
 
 
 # ── entity panels ────────────────────────────────────────────────────────────
@@ -813,6 +829,53 @@ def monthly_trend(realm_id: str, year: int) -> dict[str, Any]:
     }
 
 
+def _row_total(payload: dict[str, Any], label: str) -> float | None:
+    row = _find_row(payload, label)
+    if not row:
+        return None
+    return round(_money(row[-1]), 2)
+
+
+def pl_summary(realm_id: str, year: int) -> dict[str, Any]:
+    """Year P&L headlines from the Month snapshot Total column — not a P&L page."""
+    payload = _snapshot_payload(
+        realm_id,
+        "ProfitAndLoss",
+        year,
+        {
+            "start_date": _year_start(year),
+            "end_date": _year_end(year),
+            "summarize_column_by": "Month",
+        },
+    )
+    income = _row_total(payload, "Total Income")
+    cost_of_services = _row_total(payload, "Total Cost of Goods Sold")
+    gross_profit = _row_total(payload, "Gross Profit")
+    if gross_profit is None and income is not None and cost_of_services is not None:
+        gross_profit = round(income - cost_of_services, 2)
+    gross_margin_pct = (
+        round(gross_profit / income * 100, 1)
+        if gross_profit is not None and income
+        else None
+    )
+    net_income = _row_total(payload, "Net Income")
+    logger.info(
+        "operation=pl_summary realm_id=%s year=%s income=%s gross_profit=%s net_income=%s",
+        realm_id,
+        year,
+        income,
+        gross_profit,
+        net_income,
+    )
+    return {
+        "income": income,
+        "cost_of_services": cost_of_services,
+        "gross_profit": gross_profit,
+        "gross_margin_pct": gross_margin_pct,
+        "net_income": net_income,
+    }
+
+
 def aged_ar_detail(realm_id: str, year: int, *, as_of: date) -> dict[str, Any]:
     payload = _snapshot_payload(
         realm_id,
@@ -837,17 +900,26 @@ def aged_ar_detail(realm_id: str, year: int, *, as_of: date) -> dict[str, Any]:
     }
 
 
-def expenses_by_vendor(realm_id: str, year: int) -> dict[str, Any]:
-    payload = _snapshot_payload(
-        realm_id,
-        "ExpensesByVendorSummary",
-        year,
-        {"start_date": _year_start(year), "end_date": _year_end(year)},
-    )
-    vendors: list[dict[str, Any]] = []
+def _vendor_concentration(by_vendor: dict[str, float]) -> dict[str, Any]:
+    ranked = sorted(by_vendor.items(), key=lambda kv: -kv[1])
+    total = sum(amount for _, amount in ranked)
+    top = ranked[:12]
+    top_sum = sum(amount for _, amount in top[:3])
+    return {
+        "total": round(total, 2),
+        "vendor_count": len(ranked),
+        "top3_concentration_pct": round(top_sum / total * 100, 1) if total else 0.0,
+        "vendors": [
+            {"vendor": name, "amount": round(amount, 2)} for name, amount in top
+        ],
+    }
+
+
+def _expenses_from_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    vendors: dict[str, float] = {}
     total = 0.0
     for row in _flatten(payload.get("Rows", {})):
-        if len(row) < 2 or not row[0] or row[0].strip().upper() in ("TOTAL", "TOTAL EXPENSES"):
+        if len(row) < 2 or not row[0]:
             continue
         amount = 0.0
         for cell in reversed(row[1:]):
@@ -856,39 +928,68 @@ def expenses_by_vendor(realm_id: str, year: int) -> dict[str, Any]:
                 amount = parsed
                 break
         name = row[0].strip()
-        if name.upper().startswith("TOTAL"):
+        if _is_report_total_label(name):
             if amount:
                 total = amount
             continue
-        vendors.append({"vendor": name, "amount": round(amount, 2)})
-    if not total:
-        total = sum(v["amount"] for v in vendors)
-    vendors.sort(key=lambda v: -v["amount"])
-    top = vendors[:12]
-    top_sum = sum(v["amount"] for v in top[:3])
-    concentration_pct = round(top_sum / total * 100, 1) if total else 0.0
+        vendors[name] = vendors.get(name, 0.0) + amount
+    result = _vendor_concentration(vendors)
+    if total:
+        result["total"] = round(total, 2)
+    return result
+
+
+def _expenses_from_entities(realm_id: str, year: int) -> dict[str, Any]:
+    start = _year_start(year)
+    by_vendor: dict[str, float] = {}
+    for row in list_bills(realm_id, txn_date__gte=start):
+        name = row.get("vendor_name") or "Unknown"
+        by_vendor[name] = by_vendor.get(name, 0.0) + _amount(row)
+    for row in list_purchases(realm_id, txn_date__gte=start):
+        name = row.get("vendor_name") or "Unknown"
+        by_vendor[name] = by_vendor.get(name, 0.0) + _amount(row)
+    result = _vendor_concentration(by_vendor)
     logger.info(
-        "operation=expenses_by_vendor realm_id=%s year=%s vendor_count=%s total=%s",
+        "operation=expenses_by_vendor source=entities realm_id=%s year=%s "
+        "vendor_count=%s total=%s",
         realm_id,
         year,
-        len(vendors),
-        round(total, 2),
+        result["vendor_count"],
+        result["total"],
     )
-    return {
-        "total": round(total, 2),
-        "vendor_count": len(vendors),
-        "top3_concentration_pct": concentration_pct,
-        "vendors": top,
-    }
+    return result
 
 
-def sales_by_customer(realm_id: str, year: int) -> dict[str, Any]:
-    payload = _snapshot_payload(
+def expenses_by_vendor(realm_id: str, year: int) -> dict[str, Any]:
+    try:
+        payload = _first_snapshot_payload(
+            realm_id,
+            year,
+            {"start_date": _year_start(year), "end_date": _year_end(year)},
+            "VendorExpenses",
+            "ExpensesByVendorSummary",
+        )
+    except LookupError:
+        logger.warning(
+            "operation=expenses_by_vendor realm_id=%s year=%s "
+            "status=fallback source=entities reason=missing_snapshot",
+            realm_id,
+            year,
+        )
+        return _expenses_from_entities(realm_id, year)
+    result = _expenses_from_snapshot(payload)
+    logger.info(
+        "operation=expenses_by_vendor source=snapshot realm_id=%s year=%s "
+        "vendor_count=%s total=%s",
         realm_id,
-        "SalesByCustomer",
         year,
-        {"start_date": _year_start(year), "end_date": _year_end(year)},
+        result["vendor_count"],
+        result["total"],
     )
+    return result
+
+
+def _sales_from_sales_report(payload: dict[str, Any]) -> dict[str, Any]:
     clients: list[dict[str, Any]] = []
     total = 0.0
     for row in _flatten(payload.get("Rows", {})):
@@ -905,13 +1006,93 @@ def sales_by_customer(realm_id: str, year: int) -> dict[str, Any]:
         clients.append({"client": label, "amount": round(amount, 2)})
         total += amount
     clients.sort(key=lambda c: -c["amount"])
+    return {"total": round(total, 2), "clients": clients[:25]}
+
+
+def _sales_from_customer_income(payload: dict[str, Any]) -> dict[str, Any]:
+    clients: list[dict[str, Any]] = []
+    total = 0.0
+    for row in _flatten(payload.get("Rows", {})):
+        if len(row) < 2 or not row[0]:
+            continue
+        label = row[0].strip()
+        if label.upper() in ("TOTAL", "TOTAL INCOME", ""):
+            continue
+        amount = _money(row[1]) if len(row) > 1 else 0.0
+        if not amount:
+            continue
+        clients.append({"client": label, "amount": round(amount, 2)})
+        total += amount
+    clients.sort(key=lambda c: -c["amount"])
+    return {"total": round(total, 2), "clients": clients[:25]}
+
+
+def _sales_from_invoices(realm_id: str, year: int) -> dict[str, Any]:
+    by_client: dict[str, float] = {}
+    for invoice in list_invoices(realm_id, txn_date__gte=_year_start(year)):
+        name = invoice.get("customer_name") or "Unknown"
+        by_client[name] = by_client.get(name, 0.0) + _amount(invoice)
+    ranked = sorted(by_client.items(), key=lambda kv: -kv[1])
+    total = sum(amount for _, amount in ranked)
     logger.info(
-        "operation=sales_by_customer realm_id=%s year=%s client_count=%s",
+        "operation=sales_by_customer source=invoices realm_id=%s year=%s "
+        "client_count=%s total=%s",
         realm_id,
         year,
-        len(clients),
+        len(ranked),
+        round(total, 2),
     )
-    return {"total": round(total, 2), "clients": clients[:25]}
+    return {
+        "total": round(total, 2),
+        "clients": [
+            {"client": name, "amount": round(amount, 2)} for name, amount in ranked[:25]
+        ],
+    }
+
+
+def sales_by_customer(realm_id: str, year: int) -> dict[str, Any]:
+    try:
+        payload = _first_snapshot_payload(
+            realm_id,
+            year,
+            {"start_date": _year_start(year), "end_date": _year_end(year)},
+            "CustomerSales",
+            "SalesByCustomer",
+        )
+    except LookupError:
+        try:
+            payload = _snapshot_payload(
+                realm_id,
+                "CustomerIncome",
+                year,
+                {"start_date": _year_start(year), "end_date": _year_end(year)},
+            )
+        except LookupError:
+            logger.warning(
+                "operation=sales_by_customer realm_id=%s year=%s "
+                "status=fallback source=invoices reason=missing_snapshot",
+                realm_id,
+                year,
+            )
+            return _sales_from_invoices(realm_id, year)
+        result = _sales_from_customer_income(payload)
+        logger.warning(
+            "operation=sales_by_customer realm_id=%s year=%s "
+            "status=fallback source=CustomerIncome client_count=%s",
+            realm_id,
+            year,
+            len(result["clients"]),
+        )
+        return result
+    result = _sales_from_sales_report(payload)
+    logger.info(
+        "operation=sales_by_customer source=snapshot realm_id=%s year=%s "
+        "client_count=%s",
+        realm_id,
+        year,
+        len(result["clients"]),
+    )
+    return result
 
 
 def liquidity(realm_id: str, year: int, *, as_of: date) -> dict[str, Any]:
@@ -992,6 +1173,7 @@ def build_overview(
         "by_account_manager": lambda: by_account_manager(realm_id, year),
         "client_profitability": lambda: client_profitability(realm_id, year),
         "monthly_trend": lambda: monthly_trend(realm_id, year),
+        "pl_summary": lambda: pl_summary(realm_id, year),
         "unattached_cost": lambda: unattached_cost(realm_id, year),
         "activity": lambda: count_activity(realm_id, activity_since),
         "cash_collections": lambda: cash_collections(realm_id, year),

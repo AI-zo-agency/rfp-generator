@@ -714,6 +714,7 @@ _QB_PANEL_KEYS = (
     "by_account_manager",
     "client_profitability",
     "monthly_trend",
+    "pl_summary",
     "unattached_cost",
     "activity",
     "cash_collections",

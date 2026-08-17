@@ -1,879 +1,881 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Info } from "lucide-react";
-import { FadeIn } from "@/components/ui/FadeIn";
+/**
+ * The QuickBooks ledger.
+ *
+ * Reading order is the design: the first screen states the position, then what
+ * needs a decision, then the one trend worth a chart. Everything else is a tab
+ * away — present, but not competing for the same glance.
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip as RTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { ArrowRight, RefreshCw } from "lucide-react";
+import type { ColumnDef } from "@tanstack/react-table";
+
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { AnimatedNumber } from "./AnimatedNumber";
+import { AgingBar, DataTable, Empty, Figure, Note, Panel, compact, usd } from "./qb-ui";
+import { deriveSignals, type Signal } from "../lib/qb-signals";
+import type { QuickBooksOverview } from "../types/quickbooks";
 import "./QuickBooksLedger.css";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 
-/* ── types ─────────────────────────────────────────────────────────────── */
-
-type Bucket = { label: string; amount: number; count?: number; pct?: number };
-type MonthAmt = { month: string; amount: number };
-
-export interface QuickBooksOverview {
-  year: number;
-  generated_at: string;
-  as_of?: string;
-  synced_at?: string;
-  sync_status?: "ok" | "failed" | "backfill_pending" | "missing";
-  errors: Record<string, string>;
-  company: {
-    company_name: string;
-    legal_name: string;
-    city: string;
-    state: string;
-    sku: string;
-  } | null;
-  ar: {
-    total: number;
-    invoice_count: number;
-    overdue_total: number;
-    buckets: Bucket[];
-    clients: { client: string; amount: number; invoices: number; oldest_days: number }[];
-  } | null;
-  ap: {
-    total: number;
-    bill_count: number;
-    buckets: Bucket[];
-    vendors: { vendor: string; amount: number }[];
-  } | null;
-  revenue_by_class: {
-    matrix: { parent: string; segment: string; amount: number }[];
-    parents: string[];
-    segments: string[];
-    unclassified: number;
-    total: number;
-    coverage_pct: number;
-  } | null;
-  by_account_manager: {
-    managers: { manager: string; income: number; net: number; is_overhead: boolean }[];
-  } | null;
-  client_profitability: {
-    clients: {
-      client: string;
-      income: number;
-      expense: number;
-      net: number;
-      margin_pct: number | null;
-    }[];
-    attributed_expense: number;
-  } | null;
-  monthly_trend: {
-    months: MonthAmt[];
-    total: number;
-    peak: number;
-    last_booked_month: string | null;
-  } | null;
-  unattached_cost: {
-    purchase_count: number;
-    purchase_total: number;
-    unattached_count: number;
-    unattached_pct: number;
-    cost_of_service_unattached: number;
-    accounts: { account: string; amount: number; is_cost_of_service: boolean }[];
-  } | null;
-  activity: {
-    since: string;
-    total: number;
-    entities: { entity: string; changed: number }[];
-  } | null;
-  cash_collections: {
-    total_collected: number;
-    payment_count: number;
-    by_month: MonthAmt[];
-    top_payers: { customer: string; amount: number }[];
-  } | null;
-  billing_vs_cash: {
-    invoiced_total: number;
-    collected_total: number;
-    open_ar: number;
-    collection_rate_pct: number;
-    invoice_count: number;
-    payment_count: number;
-    by_month: { month: string; invoiced: number; collected: number }[];
-  } | null;
-  dso: {
-    dso_days: number | null;
-    sample_size: number;
-    slowest_clients: { client: string; avg_days: number; amount: number }[];
-  } | null;
-  aged_ar_detail: {
-    report_date: string;
-    columns: string[];
-    row_count: number;
-    source: string;
-  } | null;
-  purchase_orders: {
-    po_count: number;
-    open_count: number;
-    open_total: number;
-    ytd_total: number;
-    vendors: { vendor: string; amount: number }[];
-  } | null;
-  expenses_by_vendor: {
-    total: number;
-    vendor_count: number;
-    top3_concentration_pct: number;
-    vendors: { vendor: string; amount: number }[];
-  } | null;
-  bill_payments: {
-    total_paid: number;
-    payment_count: number;
-    by_month: MonthAmt[];
-  } | null;
-  customers: {
-    count: number;
-    customers: { id: string; display_name: string; company_name: string; balance: number }[];
-  } | null;
-  sales_by_customer: {
-    total: number;
-    clients: { client: string; amount: number }[];
-  } | null;
-  credit_memos: {
-    total: number;
-    count: number;
-    clients: { client: string; amount: number }[];
-  } | null;
-  class_coverage: {
-    class_count: number;
-    classes: string[];
-    coverage_pct: number;
-    unclassified: number;
-    total: number;
-  } | null;
-  department_coverage: {
-    department_count: number;
-    departments: string[];
-    overhead_income: number;
-    overhead_pct: number;
-    manager_count: number;
-  } | null;
-  liquidity: {
-    as_of: string;
-    cash: number;
-    net_cash_change: number | null;
-  } | null;
-}
-
-const SECTIONS = [
-  { id: "health", label: "Health" },
-  { id: "cash", label: "Cash" },
-  { id: "receivables", label: "Receivables" },
-  { id: "payables", label: "Payables" },
+const VIEWS = [
+  { id: "today", label: "Position" },
+  { id: "open", label: "Open" },
   { id: "revenue", label: "Revenue" },
   { id: "clients", label: "Clients" },
   { id: "costs", label: "Costs" },
-  { id: "activity", label: "Activity" },
 ] as const;
 
-/* ── formatting ────────────────────────────────────────────────────────── */
+/* ── chart chrome ──────────────────────────────────────────────────────── */
 
-const usd = (n: number, digits = 0) =>
-  n.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  });
+const AXIS = {
+  tickLine: false,
+  axisLine: false,
+  tick: { fill: "var(--zo-text-muted)", fontSize: 11 },
+} as const;
 
-const grouped = (n: number) =>
-  Math.round(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
-
-const compact = (n: number) =>
-  n >= 1000 ? `$${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : usd(n);
-
-const AGE_TONE: Record<string, string> = {
-  "Not yet due": "var(--zo-teal)",
-  "1-30 days": "var(--zo-olive)",
-  "31-60 days": "var(--zo-yellow)",
-  "61-90 days": "var(--zo-orange-soft)",
-  "90+ days": "var(--zo-danger)",
-};
-
-/* ── shared chrome ─────────────────────────────────────────────────────── */
-
-function Section({
-  id,
-  title,
-  hint,
-  children,
+function ChartTooltip({
+  active,
+  payload,
+  label,
 }: {
-  id: string;
-  title: string;
-  hint?: string;
-  children: React.ReactNode;
+  active?: boolean;
+  payload?: { name?: string; value?: number; color?: string; dataKey?: string }[];
+  label?: string;
 }) {
+  if (!active || !payload?.length) return null;
   return (
-    <section id={id} className="qb-section">
-      <div className="qb-section-head">
-        <h2>{title}</h2>
-        {hint ? <span className="qb-hint">{hint}</span> : null}
-      </div>
-      {children}
-    </section>
+    <div className="qb-charttip">
+      <p className="qb-charttip-title">{label}</p>
+      {payload.map((p) => (
+        <p key={p.dataKey} className="qb-charttip-row">
+          <span className="qb-swatch" style={{ background: p.color }} aria-hidden />
+          <span>{p.name}</span>
+          <strong>{usd(p.value ?? 0)}</strong>
+        </p>
+      ))}
+    </div>
   );
 }
 
-function Widget({ children, padded = true }: { children: React.ReactNode; padded?: boolean }) {
-  return <div className={`qb-widget${padded ? " qb-widget-pad" : ""}`}>{children}</div>;
+/** Months after the last booked one are noise, not zeroes worth plotting. */
+function trimTrailing<T>(rows: T[], hasValue: (row: T) => boolean) {
+  let last = -1;
+  rows.forEach((row, i) => {
+    if (hasValue(row)) last = i;
+  });
+  return last >= 0 ? rows.slice(0, last + 1) : rows;
 }
 
-function Kicker({ children }: { children: React.ReactNode }) {
-  return <p className="qb-kicker">{children}</p>;
-}
+/* ── position ──────────────────────────────────────────────────────────── */
 
-function Empty({ what }: { what: string }) {
-  return <p className="qb-empty">{what}</p>;
-}
-
-function ShowMoreList<T>({
-  items,
-  initial = 6,
-  head,
-  render,
+function MoneyLine({
+  data,
+  net,
 }: {
-  items: T[];
-  initial?: number;
-  head?: React.ReactNode;
-  render: (item: T, index: number) => React.ReactNode;
+  data: QuickBooksOverview;
+  net: number;
 }) {
-  const [open, setOpen] = useState(false);
-  const visible = open ? items : items.slice(0, initial);
+  const money = (v: number) => (
+    <AnimatedNumber
+      value={v}
+      prefix={v < 0 ? "-$" : "$"}
+      format={(n) => Math.round(Math.abs(n)).toLocaleString("en-US")}
+    />
+  );
+  const cash = data.liquidity;
+  const trend = data.monthly_trend;
+  const pl = data.pl_summary;
+
   return (
-    <div>
-      {head}
-      <ul className="qb-group">{visible.map(render)}</ul>
-      {items.length > initial ? (
-        <button type="button" onClick={() => setOpen((v) => !v)} className="qb-more">
-          {open ? "Show less" : `Show all ${items.length}`}
-        </button>
+    <div className="qb-moneyline">
+      {cash ? (
+        <Figure
+          label="Cash on hand"
+          size="lg"
+          metric="cash"
+          value={money(cash.cash)}
+          sub={
+            cash.net_cash_change != null
+              ? `${cash.net_cash_change >= 0 ? "+" : "−"}${compact(Math.abs(cash.net_cash_change))} this year`
+              : undefined
+          }
+        />
+      ) : null}
+      <Figure
+        label="Owed to zö"
+        size="lg"
+        metric="ar"
+        value={money(data.ar?.total ?? 0)}
+        tone={data.ar?.overdue_total ? "out" : undefined}
+        sub={
+          data.ar
+            ? data.ar.overdue_total > 0
+              ? `${compact(data.ar.overdue_total)} overdue`
+              : `${data.ar.invoice_count} open invoices`
+            : undefined
+        }
+      />
+      <Figure
+        label="zö owes"
+        size="lg"
+        metric="ap"
+        value={money(data.ap?.total ?? 0)}
+        sub={data.ap ? `${data.ap.bill_count} open bills` : undefined}
+      />
+      <Figure
+        label="Net position"
+        size="lg"
+        metric="net"
+        value={money(net)}
+        tone={net < 0 ? "warn" : undefined}
+        sub={net >= 0 ? "Receivables cover payables" : "Payables exceed receivables"}
+      />
+      <Figure
+        label={`Booked ${data.year}`}
+        size="lg"
+        metric="booked"
+        value={money(trend?.total ?? 0)}
+        sub={trend?.last_booked_month ? `Through ${trend.last_booked_month}` : undefined}
+      />
+      {typeof pl?.gross_profit === "number" ? (
+        <Figure
+          label="Gross margin"
+          size="lg"
+          metric="margin"
+          value={money(pl.gross_profit)}
+          sub={
+            pl.gross_margin_pct != null
+              ? `${pl.gross_margin_pct}% of booked`
+              : undefined
+          }
+        />
+      ) : null}
+      {typeof pl?.net_income === "number" ? (
+        <Figure
+          label="Net income"
+          size="lg"
+          metric="income"
+          value={money(pl.net_income)}
+          tone={pl.net_income < 0 ? "warn" : undefined}
+          sub="What the books closed to"
+        />
       ) : null}
     </div>
   );
 }
 
-function InfoTip({ label, children }: { label: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(false);
-  const [pinned, setPinned] = useState(false);
-  const delayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wrapRef = useRef<HTMLSpanElement>(null);
-
-  const cancel = () => {
-    if (delayRef.current) {
-      clearTimeout(delayRef.current);
-      delayRef.current = null;
-    }
-  };
-
-  const show = () => {
-    cancel();
-    delayRef.current = setTimeout(() => setOpen(true), 140);
-  };
-
-  const hide = () => {
-    cancel();
-    if (!pinned) setOpen(false);
-  };
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      setPinned(false);
-      setOpen(false);
-    };
-    const onPointer = (e: PointerEvent) => {
-      if (wrapRef.current?.contains(e.target as Node)) return;
-      setPinned(false);
-      setOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("pointerdown", onPointer);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("pointerdown", onPointer);
-    };
-  }, [open]);
-
-  useEffect(() => () => cancel(), []);
-
-  return (
-    <span
-      ref={wrapRef}
-      className="qb-help"
-      onPointerEnter={show}
-      onPointerLeave={hide}
-    >
-      <button
-        type="button"
-        className="qb-help-btn"
-        aria-label={label}
-        aria-expanded={open}
-        aria-controls="qb-lag-help"
-        onClick={() => {
-          cancel();
-          if (pinned) {
-            setPinned(false);
-            setOpen(false);
-          } else {
-            setPinned(true);
-            setOpen(true);
-          }
-        }}
-      >
-        <Info size={13} strokeWidth={2.25} aria-hidden />
-      </button>
-      <span
-        id="qb-lag-help"
-        role="tooltip"
-        className="qb-help-pop"
-        data-open={open ? "true" : "false"}
-        hidden={!open}
-      >
-        {children}
-      </span>
-    </span>
-  );
-}
-
-function SectionNav({ active }: { active: string }) {
-  const trackRef = useRef<HTMLDivElement>(null);
-  const linkRefs = useRef<Map<string, HTMLAnchorElement>>(new Map());
-  const [thumb, setThumb] = useState({ x: 0, w: 0 });
-
-  const measure = useCallback(() => {
-    const track = trackRef.current;
-    const el = linkRefs.current.get(active);
-    if (!track || !el) return;
-    const tr = track.getBoundingClientRect();
-    const er = el.getBoundingClientRect();
-    setThumb({ x: er.left - tr.left + track.scrollLeft, w: er.width });
-  }, [active]);
-
-  useLayoutEffect(() => {
-    measure();
-    const track = trackRef.current;
-    if (!track) return;
-    const ro = new ResizeObserver(measure);
-    ro.observe(track);
-    track.addEventListener("scroll", measure, { passive: true });
-    return () => {
-      ro.disconnect();
-      track.removeEventListener("scroll", measure);
-    };
-  }, [measure]);
-
-  return (
-    <nav aria-label="Ledger sections" className="qb-nav">
-      <div ref={trackRef} className="qb-nav-track">
-        <span
-          aria-hidden
-          className="qb-nav-thumb"
-          style={{
-            width: thumb.w,
-            transform: `translateX(${thumb.x}px)`,
-            opacity: thumb.w ? 1 : 0,
-          }}
-        />
-        {SECTIONS.map((s) => (
-          <a
-            key={s.id}
-            href={`#${s.id}`}
-            data-active={active === s.id}
-            ref={(node) => {
-              if (node) linkRefs.current.set(s.id, node);
-              else linkRefs.current.delete(s.id);
-            }}
-            onClick={(e) => {
-              e.preventDefault();
-              document.getElementById(s.id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-            }}
-          >
-            {s.label}
-          </a>
-        ))}
-      </div>
-    </nav>
-  );
-}
-
-function YearSeg({
-  year,
-  years,
-  onChange,
-}: {
-  year: number;
-  years: number[];
-  onChange: (y: number) => void;
-}) {
-  const idx = Math.max(0, years.indexOf(year));
-  return (
-    <div
-      className="qb-seg"
-      role="radiogroup"
-      aria-label="Year"
-      tabIndex={0}
-      style={{ ["--qb-years" as string]: String(years.length) }}
-      onKeyDown={(e) => {
-        if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
-        e.preventDefault();
-        const next = idx + (e.key === "ArrowRight" ? 1 : -1);
-        if (next >= 0 && next < years.length) onChange(years[next]);
-      }}
-    >
-      <span
-        aria-hidden
-        className="qb-seg-thumb"
-        style={{ width: `calc((100% - 6px) / ${years.length})`, transform: `translateX(${idx * 100}%)` }}
-      />
-      {years.map((y) => (
-        <button
-          key={y}
-          type="button"
-          role="radio"
-          tabIndex={-1}
-          aria-checked={y === year}
-          onClick={() => onChange(y)}
-        >
-          {y}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function HealthStrip({
-  ar,
-  ap,
-  net,
-  booked,
-  year,
-  lastBooked,
-  liquidity,
-}: {
-  ar: number;
-  ap: number;
-  net: number;
-  booked: number;
-  year: number;
-  lastBooked?: string | null;
-  liquidity: QuickBooksOverview["liquidity"];
-}) {
-  const metrics: { label: string; value: number; tone: string; sub?: string }[] = [
-    { label: "Owed to zö", value: ar, tone: "qb-tone-out" },
-    { label: "zö owes", value: ap, tone: "qb-tone-due" },
-    {
-      label: "Net position",
-      value: net,
-      tone: net >= 0 ? "qb-tone-ok" : "qb-tone-warn",
-    },
-    {
-      label: `Booked ${year}`,
-      value: booked,
-      tone: "",
-      sub: lastBooked ? `Through ${lastBooked}` : undefined,
-    },
-  ];
-  if (liquidity && (liquidity.cash || liquidity.net_cash_change != null)) {
-    metrics.push({
-      label: "Cash on hand",
-      value: liquidity.cash,
-      tone: "qb-tone-in",
-      sub:
-        liquidity.net_cash_change != null
-          ? `YTD change ${usd(liquidity.net_cash_change)}`
-          : undefined,
-    });
+function Attention({ signals, onGo }: { signals: Signal[]; onGo: (view: string) => void }) {
+  if (!signals.length) {
+    return (
+      <Panel title="Needs attention">
+        <p className="qb-allclear">
+          Nothing is off. Receivables are current, cost is attributed to clients, and
+          collections are keeping pace with billing.
+        </p>
+      </Panel>
+    );
   }
 
   return (
-    <div className="qb-widget qb-health" style={{ ["--qb-cols" as string]: String(metrics.length) }}>
-      {metrics.map((m) => (
-        <div key={m.label} className="qb-metric">
-          <span className="qb-metric-label">{m.label}</span>
-          <AnimatedNumber
-            value={m.value}
-            prefix={m.value < 0 ? "-$" : "$"}
-            format={(n) => grouped(Math.abs(n))}
-            className={`qb-metric-value ${m.tone}`}
-          />
-          {m.sub ? <span className="qb-metric-sub">{m.sub}</span> : null}
-        </div>
-      ))}
-    </div>
+    <Panel
+      title="Needs attention"
+      meta={`${signals.length} ${signals.length === 1 ? "item" : "items"}`}
+    >
+      <ul className="qb-signals">
+        {signals.map((s) => (
+          <li key={s.id} data-severity={s.severity}>
+            <span className="qb-signal-dot" aria-hidden />
+            <div className="qb-signal-body">
+              <p className="qb-signal-head">
+                {s.headline}
+                <span className="qb-sr">, severity {s.severity}</span>
+              </p>
+              {s.detail ? <p className="qb-signal-detail">{s.detail}</p> : null}
+            </div>
+            {s.figure ? <span className="qb-signal-figure">{s.figure}</span> : null}
+            {s.goTo ? (
+              <button type="button" className="qb-signal-go" onClick={() => onGo(s.goTo!)}>
+                <span>{VIEWS.find((v) => v.id === s.goTo)?.label ?? "Detail"}</span>
+                <ArrowRight size={13} strokeWidth={2.25} aria-hidden />
+              </button>
+            ) : (
+              <span />
+            )}
+          </li>
+        ))}
+      </ul>
+    </Panel>
   );
 }
+
+function CashChart({ bvc }: { bvc: NonNullable<QuickBooksOverview["billing_vs_cash"]> }) {
+  const rows = useMemo(
+    () => trimTrailing(bvc.by_month, (r) => r.invoiced > 0 || r.collected > 0),
+    [bvc.by_month],
+  );
+
+  return (
+    <Panel
+      title="Billed against collected"
+      meta={`${Math.round(bvc.collection_rate_pct)}% collected · ${compact(bvc.open_ar)} still open`}
+    >
+      <div className="qb-legend">
+        <span>
+          <span className="qb-swatch" style={{ background: "var(--zo-orange)" }} aria-hidden />
+          Invoiced
+        </span>
+        <span>
+          <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+          Collected
+        </span>
+      </div>
+      <ResponsiveContainer width="100%" height={230}>
+        <BarChart
+          data={rows}
+          margin={{ top: 4, right: 4, bottom: 0, left: -12 }}
+          barGap={3}
+          barCategoryGap="32%"
+        >
+          <CartesianGrid vertical={false} stroke="var(--zo-border)" />
+          <XAxis dataKey="month" {...AXIS} />
+          <YAxis {...AXIS} width={54} tickFormatter={(v: number) => compact(v)} />
+          <RTooltip
+            cursor={{ fill: "var(--zo-surface)" }}
+            content={<ChartTooltip />}
+          />
+          <Bar dataKey="invoiced" name="Invoiced" fill="var(--zo-orange)" radius={[3, 3, 0, 0]} maxBarSize={26} isAnimationActive={false} />
+          <Bar dataKey="collected" name="Collected" fill="var(--zo-teal)" radius={[3, 3, 0, 0]} maxBarSize={26} isAnimationActive={false} />
+        </BarChart>
+      </ResponsiveContainer>
+    </Panel>
+  );
+}
+
+/* ── clients ───────────────────────────────────────────────────────────── */
+
+interface ClientRow {
+  client: string;
+  income: number;
+  cost: number;
+  net: number;
+  margin: number | null;
+  collected: number;
+  avgDays: number | null;
+  open: number;
+}
+
+/**
+ * Profitability, sales, collections, payment lag and open balance used to be
+ * four separate ranked lists that never lined up. One row per client instead.
+ */
+function buildClientRows(data: QuickBooksOverview): ClientRow[] {
+  const rows = new Map<string, ClientRow>();
+  const at = (name: string) => {
+    let row = rows.get(name);
+    if (!row) {
+      row = { client: name, income: 0, cost: 0, net: 0, margin: null, collected: 0, avgDays: null, open: 0 };
+      rows.set(name, row);
+    }
+    return row;
+  };
+
+  data.client_profitability?.clients.forEach((c) => {
+    const row = at(c.client);
+    row.income = c.income;
+    row.cost = c.expense;
+    row.net = c.net;
+    row.margin = c.margin_pct;
+  });
+  data.sales_by_customer?.clients.forEach((c) => {
+    const row = at(c.client);
+    if (!row.income) row.income = c.amount;
+  });
+  data.cash_collections?.top_payers.forEach((p) => {
+    at(p.customer).collected = p.amount;
+  });
+  data.dso?.slowest_clients.forEach((c) => {
+    at(c.client).avgDays = c.avg_days;
+  });
+  data.ar?.clients.forEach((c) => {
+    at(c.client).open = c.amount;
+  });
+
+  return [...rows.values()];
+}
+
+const money = (v: number) => (v ? compact(v) : "—");
+
+const CLIENT_COLUMNS: ColumnDef<ClientRow, unknown>[] = [
+  {
+    accessorKey: "client",
+    header: "Client",
+    cell: (ctx) => <span className="qb-name">{ctx.getValue<string>()}</span>,
+  },
+  { accessorKey: "income", header: "Income", meta: { numeric: true }, cell: (c) => money(c.getValue<number>()) },
+  { accessorKey: "cost", header: "Cost", meta: { numeric: true }, cell: (c) => money(c.getValue<number>()) },
+  { accessorKey: "net", header: "Net", meta: { numeric: true }, cell: (c) => money(c.getValue<number>()) },
+  {
+    accessorKey: "collected",
+    header: "Collected",
+    meta: { numeric: true },
+    cell: (c) => money(c.getValue<number>()),
+  },
+  {
+    accessorKey: "open",
+    header: "Open",
+    meta: { numeric: true },
+    cell: (c) => {
+      const v = c.getValue<number>();
+      return v ? <span className="qb-tone-out">{compact(v)}</span> : "—";
+    },
+  },
+  {
+    accessorKey: "avgDays",
+    header: "Pays in",
+    meta: { numeric: true },
+    cell: (c) => {
+      const v = c.getValue<number | null>();
+      return v == null ? "—" : `${Math.round(v)}d`;
+    },
+  },
+];
+
+/* ── container ─────────────────────────────────────────────────────────── */
 
 function LedgerSkeleton() {
   return (
-    <div className="qb-skel" aria-busy="true" aria-label="Reading the ledger">
-      <div className="qb-skel-bar" />
-      <div className="qb-skel-block" />
-      <div className="qb-skel-block" style={{ height: 220 }} />
-      <div className="qb-skel-block" style={{ height: 160 }} />
+    <div className="qb-skel" aria-busy="true" aria-live="polite" aria-label="Reading the ledger">
+      <div className="qb-skel-block" style={{ height: 88 }} />
+      <div className="qb-two">
+        <div className="qb-skel-block" style={{ height: 280 }} />
+        <div className="qb-skel-block" style={{ height: 280 }} />
+      </div>
     </div>
   );
 }
 
-/* ── charts ────────────────────────────────────────────────────────────── */
-
-function TrendChart({ months, peak }: { months: MonthAmt[]; peak: number }) {
-  const W = 760;
-  const H = 190;
-  const pad = { l: 4, r: 4, t: 14, b: 24 };
-  const innerW = W - pad.l - pad.r;
-  const innerH = H - pad.t - pad.b;
-  const slot = innerW / Math.max(months.length, 1);
-  const barW = Math.min(slot * 0.56, 42);
-  const lastBooked = months.reduce((acc, m, i) => (m.amount > 0 ? i : acc), -1);
-
+function isAbortError(err: unknown) {
   return (
-    <div className="qb-scroll">
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        role="img"
-        aria-label="Booked revenue by month"
-        className="h-auto w-full min-w-[560px]"
-      >
-        {[0.25, 0.5, 0.75, 1].map((f) => (
-          <line
-            key={f}
-            x1={pad.l}
-            x2={W - pad.r}
-            y1={pad.t + innerH * (1 - f)}
-            y2={pad.t + innerH * (1 - f)}
-            stroke="var(--zo-border)"
-            strokeWidth="1"
-          />
-        ))}
-        {months.map((m, i) => {
-          const h = peak ? (m.amount / peak) * innerH : 0;
-          const x = pad.l + slot * i + (slot - barW) / 2;
-          const y = pad.t + innerH - h;
-          const isLast = i === lastBooked;
-          const empty = m.amount === 0;
-          return (
-            <g key={m.month}>
-              {empty ? (
-                <rect
-                  x={x}
-                  y={pad.t + innerH - 3}
-                  width={barW}
-                  height={3}
-                  rx={1.5}
-                  fill="var(--zo-border)"
-                />
-              ) : (
-                <rect
-                  x={x}
-                  y={y}
-                  width={barW}
-                  height={Math.max(h, 2)}
-                  rx={3}
-                  fill={isLast ? "var(--zo-orange)" : "var(--zo-teal)"}
-                  opacity={isLast ? 1 : 0.82}
-                />
-              )}
-              {isLast ? (
-                <text
-                  x={x + barW / 2}
-                  y={y - 5}
-                  textAnchor="middle"
-                  className="fill-[var(--zo-orange)]"
-                  style={{ fontSize: 11, fontWeight: 700 }}
-                >
-                  {compact(m.amount)}
-                </text>
-              ) : null}
-              <text
-                x={x + barW / 2}
-                y={H - 7}
-                textAnchor="middle"
-                className="fill-[var(--zo-text-muted)]"
-                style={{ fontSize: 10 }}
-              >
-                {m.month.split(" ")[0]}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
-    </div>
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && err.name === "AbortError")
   );
 }
 
-function DualMonthChart({
-  rows,
-}: {
-  rows: { month: string; invoiced: number; collected: number }[];
-}) {
-  const peak = Math.max(...rows.flatMap((r) => [r.invoiced, r.collected]), 1);
-  const W = 760;
-  const H = 188;
-  const pad = { l: 4, r: 4, t: 16, b: 26 };
-  const innerW = W - pad.l - pad.r;
-  const innerH = H - pad.t - pad.b;
-  const slot = innerW / Math.max(rows.length, 1);
-  const barW = Math.min(slot * 0.3, 16);
+export function QuickBooksPanels() {
+  const currentYear = new Date().getFullYear();
+  const years = [currentYear, currentYear - 1, currentYear - 2];
+  const [year, setYear] = useState(currentYear);
+  const [view, setView] = useState<string>("today");
+  const [data, setData] = useState<QuickBooksOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
-  const plotRef = useRef<HTMLDivElement>(null);
-  const delayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const coolRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const instantRef = useRef(false);
-  const openRef = useRef(false);
-
-  const [tip, setTip] = useState<{
-    index: number;
-    series: "invoiced" | "collected" | null;
-    x: number;
-  } | null>(null);
-  const [open, setOpen] = useState(false);
-  const [instant, setInstant] = useState(false);
-
-  const place = useCallback(
-    (index: number, series: "invoiced" | "collected" | null, el: Element, nextInstant: boolean) => {
-      const plot = plotRef.current;
-      if (!plot) return;
-      const pb = plot.getBoundingClientRect();
-      const rb = el.getBoundingClientRect();
-      const x = Math.min(
-        Math.max(rb.left + rb.width / 2 - pb.left + plot.scrollLeft, 96),
-        Math.max(plot.scrollWidth - 96, 96),
+  const load = useCallback(async (y: number) => {
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setLoading(true);
+    setError(null);
+    // Drop the previous year immediately so stale totals cannot linger
+    // while the overview request is in flight.
+    setData(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/v1/financials/quickbooks/overview?year=${y}`,
+        { signal: ac.signal },
       );
-      setInstant(nextInstant);
-      setTip({ index, series, x });
-      setOpen(true);
-      openRef.current = true;
-      instantRef.current = true;
-    },
-    [],
-  );
-
-  const queue = useCallback(
-    (index: number, series: "invoiced" | "collected" | null, el: Element) => {
-      if (delayRef.current) {
-        clearTimeout(delayRef.current);
-        delayRef.current = null;
-      }
-      if (openRef.current || instantRef.current) {
-        place(index, series, el, true);
-        return;
-      }
-      delayRef.current = setTimeout(() => {
-        place(index, series, el, false);
-      }, 140);
-    },
-    [place],
-  );
-
-  const dismiss = useCallback(() => {
-    if (delayRef.current) {
-      clearTimeout(delayRef.current);
-      delayRef.current = null;
+      if (!res.ok) throw new Error(`QuickBooks returned ${res.status}`);
+      const payload = (await res.json()) as QuickBooksOverview;
+      if (ac.signal.aborted) return;
+      setData(payload);
+    } catch (err) {
+      if (isAbortError(err) || ac.signal.aborted) return;
+      setError(err instanceof Error ? err.message : "Could not reach QuickBooks");
+    } finally {
+      if (!ac.signal.aborted) setLoading(false);
     }
-    openRef.current = false;
-    setOpen(false);
-    if (coolRef.current) clearTimeout(coolRef.current);
-    coolRef.current = setTimeout(() => {
-      instantRef.current = false;
-    }, 400);
   }, []);
 
   useEffect(() => {
-    return () => {
-      if (delayRef.current) clearTimeout(delayRef.current);
-      if (coolRef.current) clearTimeout(coolRef.current);
-    };
-  }, []);
+    void load(year);
+    return () => abortRef.current?.abort();
+  }, [load, year]);
 
-  const active = open && tip ? tip.index : null;
-  const row = tip ? rows[tip.index] : null;
+  const net = (data?.ar?.total ?? 0) - (data?.ap?.total ?? 0);
+  const signals = useMemo(() => (data ? deriveSignals(data) : []), [data]);
+  const clientRows = useMemo(() => (data ? buildClientRows(data) : []), [data]);
+  const trend = data?.monthly_trend;
+  const rc = data?.revenue_by_class;
+  const am = data?.by_account_manager;
+  // The matrix is built from revenue_by_class, so its own coverage is the one
+  // that describes what's on screen. class_coverage is the fallback.
+  const coverage = rc?.coverage_pct ?? data?.class_coverage?.coverage_pct;
+  const managers = am?.managers.filter((m) => !m.is_overhead && m.income > 0) ?? [];
+  const managerMax = Math.max(...managers.map((m) => m.income), 1);
+  const bookedRows = trend ? trimTrailing(trend.months, (m) => m.amount > 0) : [];
+  const syncFailed = !loading && data?.sync_status === "failed";
+  let syncLabel = "Synced";
+  if (loading) syncLabel = `Reading ${year}…`;
+  else if (syncFailed) syncLabel = "Sync failed";
 
   return (
-    <div className="qb-chart">
-      <div className="qb-legend">
-        <span>
-          <span className="qb-mark" style={{ background: "var(--zo-orange)" }} />
-          <span>Invoiced</span>
-        </span>
-        <span>
-          <span className="qb-mark" style={{ background: "var(--zo-teal)" }} />
-          <span>Collected</span>
-        </span>
-      </div>
-      <div
-        ref={plotRef}
-        className={`qb-plot${open ? " is-scrubbing" : ""}`}
-        onPointerLeave={dismiss}
-        onScroll={dismiss}
-      >
-        <svg
-          viewBox={`0 0 ${W} ${H}`}
-          role="group"
-          aria-label="Invoiced versus collected by month. Hover a bar for the amount."
-          className="h-auto w-full min-w-[560px]"
-        >
-          {[0.25, 0.5, 0.75, 1].map((f) => (
-            <line
-              key={f}
-              x1={pad.l}
-              x2={W - pad.r}
-              y1={pad.t + innerH * (1 - f)}
-              y2={pad.t + innerH * (1 - f)}
-              stroke="var(--zo-border)"
-              strokeWidth="1"
-            />
-          ))}
-          {rows.map((r, i) => {
-            const base = pad.l + slot * i + slot / 2;
-            const ih = (r.invoiced / peak) * innerH;
-            const ch = (r.collected / peak) * innerH;
-            return (
-              <g
-                key={r.month}
-                data-month={r.month}
-                className={active === i ? "is-on" : undefined}
-              >
-                <rect
-                  x={base - slot / 2 + 3}
-                  y={pad.t - 2}
-                  width={Math.max(slot - 6, 8)}
-                  height={innerH + 4}
-                  rx={8}
-                  fill="var(--zo-text)"
-                  opacity={active === i ? 0.045 : 0}
-                  pointerEvents="none"
-                />
-                <rect
-                  data-hit
-                  x={base - slot / 2}
-                  y={pad.t}
-                  width={slot}
-                  height={innerH + pad.b}
-                  fill="transparent"
-                  onPointerEnter={(e) => queue(i, null, e.currentTarget)}
-                />
-                <rect
-                  data-bar
-                  x={base - barW - 2}
-                  y={pad.t + innerH - ih}
-                  width={barW}
-                  height={Math.max(ih, r.invoiced ? 2 : 0)}
-                  rx={3}
-                  fill="var(--zo-orange)"
-                  onPointerEnter={(e) => queue(i, "invoiced", e.currentTarget)}
-                />
-                <rect
-                  data-bar
-                  x={base + 2}
-                  y={pad.t + innerH - ch}
-                  width={barW}
-                  height={Math.max(ch, r.collected ? 2 : 0)}
-                  rx={3}
-                  fill="var(--zo-teal)"
-                  onPointerEnter={(e) => queue(i, "collected", e.currentTarget)}
-                />
-                <text
-                  x={base}
-                  y={H - 6}
-                  textAnchor="middle"
-                  pointerEvents="none"
-                  className="fill-[var(--zo-text-muted)]"
-                  style={{ fontSize: 11, fontWeight: 500 }}
-                >
-                  {r.month}
-                </text>
-              </g>
-            );
-          })}
-        </svg>
-        <div
-          role="tooltip"
-          className="qb-tip"
-          data-open={open ? "true" : "false"}
-          data-instant={instant ? "true" : "false"}
-          aria-hidden={open ? undefined : true}
-          style={{ left: tip?.x ?? 0 }}
-        >
-          {row ? (
+    <TooltipProvider delayDuration={120}>
+      <div className="qb-ledger" aria-busy={loading || undefined}>
+        <div className="qb-toolbar">
+          <p className="qb-sync" data-failed={syncFailed ? "true" : undefined}>
+            <span className="qb-sync-dot" data-busy={loading ? "true" : undefined} aria-hidden />
+            {syncLabel}
+            {!loading && data?.synced_at ? (
+              <span className="qb-sync-meta">{new Date(data.synced_at).toLocaleString()}</span>
+            ) : null}
+            {!loading && data?.company ? (
+              <span className="qb-sync-meta">{data.company.legal_name}</span>
+            ) : null}
+            {!loading && data?.activity ? (
+              <span className="qb-sync-meta">{data.activity.total} ledger changes</span>
+            ) : null}
+          </p>
+          <ToggleGroup
+            type="single"
+            value={String(year)}
+            onValueChange={(v) => v && setYear(Number(v))}
+            className="qb-years"
+            aria-label="Fiscal year"
+            aria-busy={loading || undefined}
+          >
+            {years.map((y) => (
+              <ToggleGroupItem key={y} value={String(y)} aria-label={String(y)}>
+                {y}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+        </div>
+
+        <Tabs value={view} onValueChange={setView} className="qb-tabs">
+          <TabsList className="qb-tablist">
+            {VIEWS.map((v) => (
+              <TabsTrigger key={v.id} value={v.id}>
+                {v.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+
+          {loading ? <LedgerSkeleton /> : null}
+          {!loading && (error || !data) ? (
+            <div className="qb-error">
+              <p>{error ?? "No QuickBooks data"}</p>
+              <button type="button" onClick={() => void load(year)} className="qb-retry">
+                <RefreshCw size={13} strokeWidth={2.25} aria-hidden /> Try again
+              </button>
+            </div>
+          ) : null}
+          {!loading && data ? (
             <>
-              <p className="qb-tip-title">{row.month}</p>
-              <div className="qb-tip-row" data-on={tip?.series === "invoiced" ? "true" : "false"}>
-                <span className="qb-mark" style={{ background: "var(--zo-orange)" }} />
-                <span>Invoiced</span>
-                <strong>{usd(row.invoiced)}</strong>
-              </div>
-              <div className="qb-tip-row" data-on={tip?.series === "collected" ? "true" : "false"}>
-                <span className="qb-mark" style={{ background: "var(--zo-teal)" }} />
-                <span>Collected</span>
-                <strong>{usd(row.collected)}</strong>
-              </div>
+          {/* ── position ── */}
+          <TabsContent value="today" className="qb-view">
+            <MoneyLine data={data} net={net} />
+            <Attention signals={signals} onGo={setView} />
+            {data.billing_vs_cash ? (
+              <CashChart bvc={data.billing_vs_cash} />
+            ) : (
+              <Panel title="Billed against collected">
+                <Empty>Billing and collection history is unavailable for {data.year}.</Empty>
+              </Panel>
+            )}
+          </TabsContent>
+
+          {/* ── open ── */}
+          <TabsContent value="open" className="qb-view">
+            <div className="qb-two">
+              <Panel
+                title="Who owes zö"
+                meta={data.ar ? `${usd(data.ar.total)} across ${data.ar.invoice_count} invoices` : undefined}
+              >
+                {data.ar ? (
+                  <>
+                    <AgingBar buckets={data.ar.buckets} />
+                    <DataTable
+                      data={data.ar.clients}
+                      pageSize={8}
+                      initialSort="amount"
+                      empty="No open receivables."
+                      columns={[
+                        {
+                          accessorKey: "client",
+                          header: "Client",
+                          cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
+                        },
+                        {
+                          accessorKey: "oldest_days",
+                          header: "Oldest",
+                          meta: { numeric: true },
+                          cell: (c) => {
+                            const d = c.getValue<number>();
+                            return <span className={d > 60 ? "qb-tone-bad" : undefined}>{d}d</span>;
+                          },
+                        },
+                        {
+                          accessorKey: "invoices",
+                          header: "Invoices",
+                          meta: { numeric: true },
+                        },
+                        {
+                          accessorKey: "amount",
+                          header: "Open",
+                          meta: { numeric: true },
+                          cell: (c) => usd(c.getValue<number>()),
+                        },
+                      ]}
+                    />
+                  </>
+                ) : (
+                  <Empty>No open receivables.</Empty>
+                )}
+              </Panel>
+
+              <Panel
+                title="What zö owes"
+                meta={data.ap ? `${usd(data.ap.total)} across ${data.ap.bill_count} bills` : undefined}
+              >
+                {data.ap ? (
+                  <>
+                    <AgingBar buckets={data.ap.buckets} />
+                    <DataTable
+                      data={data.ap.vendors}
+                      pageSize={8}
+                      initialSort="amount"
+                      empty="No open payables."
+                      columns={[
+                        {
+                          accessorKey: "vendor",
+                          header: "Vendor",
+                          cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
+                        },
+                        {
+                          accessorKey: "amount",
+                          header: "Open",
+                          meta: { numeric: true },
+                          cell: (c) => usd(c.getValue<number>()),
+                        },
+                      ]}
+                    />
+                  </>
+                ) : (
+                  <Empty>No open payables.</Empty>
+                )}
+              </Panel>
+            </div>
+          </TabsContent>
+
+          {/* ── revenue ── */}
+          <TabsContent value="revenue" className="qb-view">
+            <Panel
+              title={`Booked income, ${data.year}`}
+              meta={trend ? usd(trend.total) : undefined}
+            >
+              {bookedRows.length ? (
+                <ResponsiveContainer width="100%" height={210}>
+                  <BarChart data={bookedRows} margin={{ top: 4, right: 4, bottom: 0, left: -12 }}>
+                    <CartesianGrid vertical={false} stroke="var(--zo-border)" />
+                    <XAxis dataKey="month" {...AXIS} />
+                    <YAxis {...AXIS} width={54} tickFormatter={(v: number) => compact(v)} />
+                    <RTooltip cursor={{ fill: "var(--zo-surface)" }} content={<ChartTooltip />} />
+                    <Bar
+                      dataKey="amount"
+                      name="Booked"
+                      fill="var(--zo-teal)"
+                      radius={[3, 3, 0, 0]}
+                      maxBarSize={38}
+                      isAnimationActive={false}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <Empty>No income booked in {data.year} yet.</Empty>
+              )}
+              {trend?.last_booked_month ? (
+                <Note>
+                  {trend.last_booked_month} is the most recent booked month and may still be
+                  filling in.
+                </Note>
+              ) : null}
+            </Panel>
+
+            <div className="qb-two">
+              <Panel
+                title="By segment"
+                meta={coverage != null ? `${Math.round(coverage)}% classified` : undefined}
+              >
+                {rc?.matrix?.length ? (
+                  <SegmentMatrix rc={rc} />
+                ) : (
+                  <Empty>No segment split recorded for {data.year}.</Empty>
+                )}
+              </Panel>
+
+              <Panel
+                title="By account manager"
+                meta={managers.length ? `${managers.length} managers` : undefined}
+              >
+                {managers.length ? (
+                  <ul className="qb-bars">
+                    {managers.map((m) => (
+                      <li key={m.manager}>
+                        <span className="qb-name">{m.manager}</span>
+                        <span className="qb-bar-track" aria-hidden>
+                          <span style={{ width: `${(m.income / managerMax) * 100}%` }} />
+                        </span>
+                        <span className="qb-num">{compact(m.income)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <Empty>Income isn&apos;t split by account manager.</Empty>
+                )}
+              </Panel>
+            </div>
+          </TabsContent>
+
+          {/* ── clients ── */}
+          <TabsContent value="clients" className="qb-view">
+            <Panel
+              title="Every client, one row"
+              meta={`${clientRows.length} clients`}
+              action={
+                data.client_profitability ? (
+                  <span className="qb-caveat">
+                    Only {compact(data.client_profitability.attributed_expense)} of cost is
+                    tagged to a client, so margins read high
+                  </span>
+                ) : null
+              }
+            >
+              <DataTable
+                data={clientRows}
+                columns={CLIENT_COLUMNS}
+                initialSort="income"
+                pageSize={12}
+                empty="No client activity recorded."
+              />
+            </Panel>
+
+            <div className="qb-two">
+              <Panel
+                title="Credits & adjustments"
+                meta={data.credit_memos?.count ? `${data.credit_memos.count} memos` : undefined}
+              >
+                {data.credit_memos?.count ? (
+                  <>
+                    <Figure label="Issued this year" value={usd(data.credit_memos.total)} />
+                    <DataTable
+                      data={data.credit_memos.clients}
+                      pageSize={5}
+                      initialSort="amount"
+                      columns={[
+                        {
+                          accessorKey: "client",
+                          header: "Client",
+                          cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
+                        },
+                        {
+                          accessorKey: "amount",
+                          header: "Credited",
+                          meta: { numeric: true },
+                          cell: (c) => usd(c.getValue<number>()),
+                        },
+                      ]}
+                    />
+                  </>
+                ) : (
+                  <Empty>No credit memos issued in {data.year}.</Empty>
+                )}
+              </Panel>
+
+              <Panel title="Collection speed">
+                {data.dso?.dso_days != null ? (
+                  <>
+                    <Figure
+                      label="Average time to get paid"
+                      size="lg"
+                      value={
+                        <>
+                          {data.dso.dso_days}
+                          <span className="qb-unit">days</span>
+                        </>
+                      }
+                      sub={`Across ${data.dso.sample_size.toLocaleString()} invoice payments`}
+                    />
+                    {data.customers ? (
+                      <Note>
+                        {data.customers.count} active customers in QuickBooks, keyed and ready
+                        to join against Teamwork.
+                      </Note>
+                    ) : null}
+                  </>
+                ) : (
+                  <Empty>
+                    Too few payments are linked back to invoices to measure this.
+                  </Empty>
+                )}
+              </Panel>
+            </div>
+          </TabsContent>
+
+          {/* ── costs ── */}
+          <TabsContent value="costs" className="qb-view">
+            <Panel
+              title="Cost with no client attached"
+              meta={
+                data.unattached_cost
+                  ? `${data.unattached_cost.unattached_count.toLocaleString()} of ${data.unattached_cost.purchase_count.toLocaleString()} purchases`
+                  : undefined
+              }
+            >
+              {data.unattached_cost ? (
+                <>
+                  <Figure
+                    label="Billable cost with nowhere to land"
+                    size="lg"
+                    tone="out"
+                    value={usd(data.unattached_cost.cost_of_service_unattached)}
+                    sub={`${Math.round(data.unattached_cost.unattached_pct)}% of purchases are untagged`}
+                  />
+                  <DataTable
+                    data={data.unattached_cost.accounts}
+                    pageSize={6}
+                    initialSort="amount"
+                    columns={[
+                      {
+                        accessorKey: "account",
+                        header: "Account",
+                        cell: (c) => (
+                          <>
+                            <span className="qb-name">{c.getValue<string>()}</span>
+                            {c.row.original.is_cost_of_service ? (
+                              <span className="qb-tag">billable</span>
+                            ) : null}
+                          </>
+                        ),
+                      },
+                      {
+                        accessorKey: "amount",
+                        header: "Amount",
+                        meta: { numeric: true },
+                        cell: (c) => usd(c.getValue<number>()),
+                      },
+                    ]}
+                  />
+                </>
+              ) : (
+                <Empty>Purchase attribution is unavailable.</Empty>
+              )}
+            </Panel>
+
+            <div className="qb-two">
+              <Panel
+                title="Spend by vendor"
+                meta={
+                  data.expenses_by_vendor
+                    ? `${usd(data.expenses_by_vendor.total)} across ${data.expenses_by_vendor.vendor_count} vendors`
+                    : undefined
+                }
+              >
+                {data.expenses_by_vendor?.vendors?.length ? (
+                  <DataTable
+                    data={data.expenses_by_vendor.vendors}
+                    pageSize={8}
+                    initialSort="amount"
+                    columns={[
+                      {
+                        accessorKey: "vendor",
+                        header: "Vendor",
+                        cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
+                      },
+                      {
+                        accessorKey: "amount",
+                        header: "Spend",
+                        meta: { numeric: true },
+                        cell: (c) => usd(c.getValue<number>()),
+                      },
+                    ]}
+                  />
+                ) : (
+                  <Empty>Vendor spend is unavailable.</Empty>
+                )}
+              </Panel>
+
+              <Panel
+                title="Committed and paid"
+                meta={data.purchase_orders ? `${data.purchase_orders.open_count} open POs` : undefined}
+              >
+                <div className="qb-pair">
+                  {data.purchase_orders ? (
+                    <Figure
+                      label="Open purchase orders"
+                      value={usd(data.purchase_orders.open_total)}
+                      sub={`${usd(data.purchase_orders.ytd_total)} ordered this year`}
+                    />
+                  ) : null}
+                  {data.bill_payments ? (
+                    <Figure
+                      label="Bills paid"
+                      value={usd(data.bill_payments.total_paid)}
+                      sub={`${data.bill_payments.payment_count} payments`}
+                    />
+                  ) : null}
+                </div>
+                {data.purchase_orders?.vendors?.length ? (
+                  <DataTable
+                    data={data.purchase_orders.vendors}
+                    pageSize={5}
+                    initialSort="amount"
+                    columns={[
+                      {
+                        accessorKey: "vendor",
+                        header: "Vendor",
+                        cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
+                      },
+                      {
+                        accessorKey: "amount",
+                        header: "Ordered",
+                        meta: { numeric: true },
+                        cell: (c) => usd(c.getValue<number>()),
+                      },
+                    ]}
+                  />
+                ) : (
+                  <Empty>No purchase orders on file.</Empty>
+                )}
+              </Panel>
+            </div>
+          </TabsContent>
             </>
           ) : null}
-        </div>
+        </Tabs>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }
 
-/* ── section bodies ────────────────────────────────────────────────────── */
+/* ── segment matrix ────────────────────────────────────────────────────── */
 
-function ArBody({ ar }: { ar: NonNullable<QuickBooksOverview["ar"]> }) {
-  const total = ar.total || 1;
-  const aged = ar.buckets.filter((b) => b.amount > 0);
-  return (
-    <div className="qb-split">
-      <Widget>
-        <Kicker>By age</Kicker>
-        <div className="qb-age-bar">
-          {aged.map((b) => (
-            <span
-              key={b.label}
-              title={`${b.label} — ${usd(b.amount)}`}
-              style={{
-                width: `${(b.amount / total) * 100}%`,
-                background: AGE_TONE[b.label],
-              }}
-            />
-          ))}
-        </div>
-        <div className="qb-age-legend">
-          {aged.map((b) => (
-            <div key={b.label} className="qb-age-item">
-              <span aria-hidden className="qb-swatch" style={{ background: AGE_TONE[b.label] }} />
-              <span className="qb-name">{b.label}</span>
-              <span className="qb-amt">{usd(b.amount)}</span>
-            </div>
-          ))}
-        </div>
-      </Widget>
-      <Widget>
-        <Kicker>Who owes it</Kicker>
-        <ShowMoreList
-          items={ar.clients}
-          initial={6}
-          render={(c) => (
-            <li key={c.client}>
-              <span className="qb-name" title={c.client}>
-                {c.client}
-              </span>
-              {c.oldest_days > 30 ? <span className="qb-pill">{c.oldest_days}d</span> : null}
-              <span className="qb-amt">{usd(c.amount)}</span>
-            </li>
-          )}
-        />
-      </Widget>
-    </div>
-  );
-}
-
-function ClassPanel({ rc }: { rc: NonNullable<QuickBooksOverview["revenue_by_class"]> }) {
-  if (!Array.isArray(rc.matrix) || rc.matrix.length === 0) {
-    return <Empty what="No segment split yet." />;
-  }
+function SegmentMatrix({ rc }: { rc: NonNullable<QuickBooksOverview["revenue_by_class"]> }) {
   const max = Math.max(...rc.matrix.map((c) => c.amount), 1);
   const cell = (parent: string, segment: string) =>
     rc.matrix.find((c) => c.parent === parent && c.segment === segment);
@@ -884,7 +886,9 @@ function ClassPanel({ rc }: { rc: NonNullable<QuickBooksOverview["revenue_by_cla
         <table className="qb-matrix">
           <thead>
             <tr>
-              <th scope="col" />
+              <th scope="col">
+                <span className="qb-sr">Line of business</span>
+              </th>
               {rc.segments.map((s) => (
                 <th key={s} scope="col">
                   {s}
@@ -895,16 +899,17 @@ function ClassPanel({ rc }: { rc: NonNullable<QuickBooksOverview["revenue_by_cla
           <tbody>
             {rc.parents.map((p) => (
               <tr key={p}>
-                <td>{p.replace(/ Revenue$/, "")}</td>
+                <th scope="row">{p.replace(/ Revenue$/, "")}</th>
                 {rc.segments.map((s) => {
                   const c = cell(p, s);
-                  const amt = c?.amount ?? 0;
-                  const heat = amt / max;
+                  const heat = (c?.amount ?? 0) / max;
                   return (
                     <td
                       key={`${p}-${s}`}
                       style={{
-                        background: `color-mix(in srgb, var(--zo-teal) ${Math.round(heat * 22)}%, var(--zo-surface))`,
+                        // Capped so the darkest cell still holds 4.5:1 against
+                        // the body colour — no white-on-mid-tone flip.
+                        background: `color-mix(in srgb, var(--zo-teal) ${Math.round(8 + heat * 38)}%, var(--zo-card-bg))`,
                       }}
                     >
                       {c ? compact(c.amount) : "—"}
@@ -917,652 +922,8 @@ function ClassPanel({ rc }: { rc: NonNullable<QuickBooksOverview["revenue_by_cla
         </table>
       </div>
       {rc.unclassified > 0 ? (
-        <p className="qb-note">
-          {usd(rc.unclassified)} unclassified · {rc.coverage_pct}% of income has a segment.
-        </p>
+        <Note>{usd(rc.unclassified)} of income has no segment assigned.</Note>
       ) : null}
     </>
-  );
-}
-
-function ManagerPanel({
-  am,
-}: {
-  am: NonNullable<QuickBooksOverview["by_account_manager"]>;
-}) {
-  const owners = am.managers.filter((m) => !m.is_overhead && m.income > 0);
-  const overhead = am.managers.find((m) => m.is_overhead);
-  const incomeTotal = am.managers.reduce((s, m) => s + m.income, 0);
-  const overheadPct =
-    overhead && incomeTotal ? Math.round((overhead.income / incomeTotal) * 1000) / 10 : 0;
-  const max = Math.max(...owners.map((m) => m.income), 1);
-  return (
-    <div>
-      <p className="qb-note" style={{ marginTop: 0, marginBottom: 8 }}>
-        {owners.length} account managers
-        {overheadPct > 0 ? ` · ${overheadPct}% income in Not Specified` : ""}
-      </p>
-      {owners.length === 0 ? (
-        <Empty what="No account-manager split." />
-      ) : (
-        <ul className="qb-bars">
-          {owners.map((m) => (
-            <li key={m.manager}>
-              <div className="qb-bar-head">
-                <span className="qb-name">{m.manager}</span>
-                <span>{usd(m.income)}</span>
-              </div>
-              <div className="qb-bar-track">
-                <div className="qb-bar-fill" style={{ width: `${(m.income / max) * 100}%` }} />
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function lagKind(days: number, avg: number): "hot" | "warm" | "ok" {
-  if (days >= Math.max(avg * 1.75, 40)) return "hot";
-  if (days > avg) return "warm";
-  return "ok";
-}
-
-function CollectionLagBody({
-  days,
-  sampleSize,
-  clients,
-}: {
-  days: number;
-  sampleSize: number;
-  clients: { client: string; avg_days: number; amount: number }[];
-}) {
-  const maxDays = Math.max(...clients.map((c) => c.avg_days), 1);
-  return (
-    <>
-      <div className="qb-dso-hero">
-        <strong>{days}</strong>
-        <span>days to get paid</span>
-      </div>
-      <p className="qb-note" style={{ marginTop: 0 }}>
-        Average across {sampleSize.toLocaleString()} invoice payments this year
-      </p>
-      {clients.length ? (
-        <>
-          <p className="qb-list-label">Slowest to pay</p>
-          <ShowMoreList
-            items={clients}
-            initial={5}
-            head={
-              <div className="qb-cols" aria-hidden>
-                <span>Client</span>
-                <span>Days</span>
-                <span>Paid</span>
-              </div>
-            }
-            render={(c) => {
-              const kind = lagKind(c.avg_days, days);
-              return (
-                <li key={c.client} className="qb-lag">
-                  <span className="qb-name" title={c.client}>
-                    {c.client}
-                  </span>
-                  <span className={`qb-days qb-lag-${kind}`}>{c.avg_days}d</span>
-                  <span className="qb-amt">{compact(c.amount)}</span>
-                  <span className="qb-share" aria-hidden>
-                    <span
-                      className={`qb-lag-${kind}`}
-                      style={{ width: `${Math.max((c.avg_days / maxDays) * 100, 4)}%` }}
-                    />
-                  </span>
-                </li>
-              );
-            }}
-          />
-        </>
-      ) : null}
-    </>
-  );
-}
-
-function TopPayersBody({
-  payers,
-}: {
-  payers: { customer: string; amount: number }[];
-}) {
-  const max = Math.max(...payers.map((p) => p.amount), 1);
-  return (
-    <ShowMoreList
-      items={payers}
-      initial={6}
-      head={
-        <div className="qb-cols qb-cols-2" aria-hidden>
-          <span>Client</span>
-          <span>Paid</span>
-        </div>
-      }
-      render={(p) => (
-        <li key={p.customer} className="qb-rank">
-          <span className="qb-name" title={p.customer}>
-            {p.customer}
-          </span>
-          <span className="qb-amt">{usd(p.amount)}</span>
-          <span className="qb-share" aria-hidden>
-            <span style={{ width: `${Math.max((p.amount / max) * 100, 4)}%` }} />
-          </span>
-        </li>
-      )}
-    />
-  );
-}
-
-/* ── container ─────────────────────────────────────────────────────────── */
-
-export function QuickBooksPanels() {
-  const currentYear = new Date().getFullYear();
-  const [year, setYear] = useState(currentYear);
-  const [data, setData] = useState<QuickBooksOverview | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [activeSection, setActiveSection] = useState("health");
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  const load = async (y = year) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams({ year: String(y) });
-      const res = await fetch(
-        `${API_BASE}/api/v1/financials/quickbooks/overview?${params.toString()}`,
-      );
-      if (!res.ok) throw new Error(`QuickBooks returned ${res.status}`);
-      setData(await res.json());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not reach QuickBooks");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void load(year);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year]);
-
-  useEffect(() => {
-    const nodes = SECTIONS.map((s) => document.getElementById(s.id)).filter(
-      Boolean,
-    ) as HTMLElement[];
-    if (!nodes.length) return;
-    const obs = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
-        if (visible[0]?.target?.id) setActiveSection(visible[0].target.id);
-      },
-      { rootMargin: "-20% 0px -55% 0px", threshold: [0.1, 0.4, 0.7] },
-    );
-    nodes.forEach((n) => obs.observe(n));
-    return () => obs.disconnect();
-  }, [data]);
-
-  const net = useMemo(
-    () => (data?.ar?.total ?? 0) - (data?.ap?.total ?? 0),
-    [data?.ar?.total, data?.ap?.total],
-  );
-
-  if (loading && !data) {
-    return (
-      <div className="qb-ledger">
-        <LedgerSkeleton />
-      </div>
-    );
-  }
-
-  if (error || !data) {
-    return (
-      <div className="qb-ledger">
-        <div className="qb-error">
-          <p>{error ?? "No QuickBooks data"}</p>
-          <button type="button" onClick={() => void load()} className="qb-icon-btn">
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  const trend = data.monthly_trend;
-  const err = data.errors ?? {};
-  const years = [currentYear, currentYear - 1, currentYear - 2];
-  const classifiedPct =
-    data.class_coverage?.coverage_pct ?? data.revenue_by_class?.coverage_pct;
-
-  return (
-    <FadeIn>
-      <div ref={rootRef} className="qb-ledger">
-        <div className="qb-toolbar">
-          <div className="qb-live">
-            <span aria-hidden className="qb-live-dot" />
-            {data.sync_status === "failed" ? "Sync failed" : "Synced"}
-            {data.synced_at ? (
-              <span className="qb-company">
-                {new Date(data.synced_at).toLocaleString()}
-              </span>
-            ) : null}
-            {data.company ? (
-              <span className="qb-company">{data.company.legal_name}</span>
-            ) : null}
-          </div>
-          <div className="qb-tools">
-            <YearSeg year={year} years={years} onChange={setYear} />
-          </div>
-        </div>
-
-        <SectionNav active={activeSection} />
-
-        <Section id="health" title="Where we stand">
-          <HealthStrip
-            ar={data.ar?.total ?? 0}
-            ap={data.ap?.total ?? 0}
-            net={net}
-            booked={trend?.total ?? 0}
-            year={data.year}
-            lastBooked={trend?.last_booked_month}
-            liquidity={data.liquidity}
-          />
-          {err.ar || err.ap || err.liquidity ? (
-            <p className="qb-fail">Some health metrics did not load.</p>
-          ) : null}
-        </Section>
-
-        <Section id="cash" title="Are we collecting?" hint={`${data.year}`}>
-          {data.billing_vs_cash || data.cash_collections || data.dso ? (
-            <div className="qb-stack">
-              {data.billing_vs_cash ? (
-                <Widget padded={false}>
-                  <div className="qb-cash-grid">
-                    <div className="qb-cash-cell">
-                      <span className="qb-metric-label">Invoiced</span>
-                      <strong>{usd(data.billing_vs_cash.invoiced_total)}</strong>
-                    </div>
-                    <div className="qb-cash-cell">
-                      <span className="qb-metric-label">Collected</span>
-                      <strong className="qb-tone-in">
-                        {usd(data.billing_vs_cash.collected_total)}
-                      </strong>
-                    </div>
-                    <div className="qb-cash-cell">
-                      <span className="qb-metric-label">Still open</span>
-                      <strong className="qb-tone-out">
-                        {usd(data.billing_vs_cash.open_ar)}
-                      </strong>
-                    </div>
-                    <div className="qb-cash-cell">
-                      <span className="qb-metric-label">Collection rate</span>
-                      <strong>{data.billing_vs_cash.collection_rate_pct}%</strong>
-                    </div>
-                  </div>
-                  <div className="qb-chart-pad">
-                    <DualMonthChart rows={data.billing_vs_cash.by_month} />
-                  </div>
-                </Widget>
-              ) : err.billing_vs_cash ? (
-                <Widget>
-                  <Empty what="Billing vs cash unavailable." />
-                </Widget>
-              ) : null}
-
-              <div className="qb-split">
-                <Widget>
-                  <div className="qb-kicker-row">
-                    <div className="qb-kicker">
-                      Collection lag
-                      <InfoTip label="What collection lag means">
-                        Average days between sending an invoice and receiving the
-                        payment that closed it. Built from this year’s payments that
-                        QuickBooks linked back to an invoice. Lower means customers
-                        are paying faster.
-                      </InfoTip>
-                    </div>
-                  </div>
-                  {data.dso ? (
-                    data.dso.dso_days != null ? (
-                      <CollectionLagBody
-                        days={data.dso.dso_days}
-                        sampleSize={data.dso.sample_size}
-                        clients={data.dso.slowest_clients}
-                      />
-                    ) : (
-                      <Empty what="Not enough payments are linked to invoices to measure this." />
-                    )
-                  ) : (
-                    <Empty what="Collection lag unavailable." />
-                  )}
-                </Widget>
-                <Widget>
-                  <Kicker>Top payers</Kicker>
-                  {data.cash_collections?.top_payers?.length ? (
-                    <TopPayersBody payers={data.cash_collections.top_payers} />
-                  ) : (
-                    <Empty what="No payments recorded this year." />
-                  )}
-                </Widget>
-              </div>
-            </div>
-          ) : (
-            <Widget>
-              <Empty what="Cash insights unavailable — check the QuickBooks connection." />
-            </Widget>
-          )}
-        </Section>
-
-        <Section id="receivables" title="Who owes us">
-          {data.ar ? (
-            <ArBody ar={data.ar} />
-          ) : (
-            <Widget>
-              <Empty what="No open receivables." />
-            </Widget>
-          )}
-        </Section>
-
-        <Section id="payables" title="What we owe">
-          {data.ap ? (
-            <div className="qb-split">
-              <Widget>
-                <Kicker>By age</Kicker>
-                <ul className="qb-group">
-                  {data.ap.buckets
-                    .filter((b) => b.amount > 0)
-                    .map((b) => (
-                      <li key={b.label}>
-                        <span
-                          aria-hidden
-                          className="qb-swatch"
-                          style={{ background: AGE_TONE[b.label] }}
-                        />
-                        <span className="qb-name">{b.label}</span>
-                        <span className="qb-amt">{usd(b.amount)}</span>
-                      </li>
-                    ))}
-                </ul>
-              </Widget>
-              <Widget>
-                <Kicker>Vendors</Kicker>
-                <ShowMoreList
-                  items={data.ap.vendors}
-                  initial={7}
-                  render={(v) => (
-                    <li key={v.vendor}>
-                      <span className="qb-name">{v.vendor}</span>
-                      <span className="qb-amt">{usd(v.amount)}</span>
-                    </li>
-                  )}
-                />
-              </Widget>
-            </div>
-          ) : (
-            <Widget>
-              <Empty what="No open payables." />
-            </Widget>
-          )}
-        </Section>
-
-        <Section id="revenue" title="How revenue is composed" hint={`${data.year}`}>
-          <div className="qb-stack">
-            <Widget>
-              <Kicker>Booked by month</Kicker>
-              {trend ? (
-                <TrendChart months={trend.months} peak={trend.peak} />
-              ) : (
-                <Empty what="Monthly trend unavailable." />
-              )}
-            </Widget>
-            <div className="qb-split">
-              <Widget>
-                <div className="qb-kicker-row">
-                  <Kicker>By segment</Kicker>
-                  {classifiedPct != null ? (
-                    <span className="qb-hint">{classifiedPct}% classified</span>
-                  ) : null}
-                </div>
-                {data.revenue_by_class ? (
-                  <ClassPanel rc={data.revenue_by_class} />
-                ) : (
-                  <Empty what="Segment split unavailable." />
-                )}
-              </Widget>
-              <Widget>
-                <Kicker>By account manager</Kicker>
-                {data.by_account_manager ? (
-                  <ManagerPanel am={data.by_account_manager} />
-                ) : (
-                  <Empty what="Account manager split unavailable." />
-                )}
-              </Widget>
-            </div>
-          </div>
-        </Section>
-
-        <Section id="clients" title="Which clients carry the book">
-          <div className="qb-split">
-            <Widget>
-              <Kicker>Profitability</Kicker>
-              {data.client_profitability ? (
-                <>
-                  <div className="qb-scroll">
-                    <table className="qb-table">
-                      <thead>
-                        <tr>
-                          <th>Client</th>
-                          <th>Income</th>
-                          <th>Cost</th>
-                          <th>Net</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {data.client_profitability.clients.slice(0, 9).map((c) => (
-                          <tr key={c.client}>
-                            <td title={c.client}>{c.client}</td>
-                            <td>{compact(c.income)}</td>
-                            <td>{c.expense ? compact(c.expense) : "—"}</td>
-                            <td>{compact(c.net)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <p className="qb-note">
-                    Only {usd(data.client_profitability.attributed_expense)} of cost is
-                    tagged to a client, so margins read high.
-                  </p>
-                </>
-              ) : (
-                <Empty what="Client profitability unavailable." />
-              )}
-            </Widget>
-            <div className="qb-stack">
-              <Widget>
-                <Kicker>Sales by customer</Kicker>
-                {data.sales_by_customer?.clients?.length ? (
-                  <ShowMoreList
-                    items={data.sales_by_customer.clients}
-                    initial={8}
-                    render={(c) => (
-                      <li key={c.client}>
-                        <span className="qb-name">{c.client}</span>
-                        <span className="qb-amt">{compact(c.amount)}</span>
-                      </li>
-                    )}
-                  />
-                ) : (
-                  <Empty what="Sales by customer unavailable." />
-                )}
-              </Widget>
-              <Widget>
-                <Kicker>Credits & adjustments</Kicker>
-                {data.credit_memos ? (
-                  data.credit_memos.count > 0 ? (
-                    <>
-                      <p className="qb-hero-line">
-                        <strong>{usd(data.credit_memos.total)}</strong>
-                        <span>across {data.credit_memos.count} memos</span>
-                      </p>
-                      <ShowMoreList
-                        items={data.credit_memos.clients}
-                        initial={5}
-                        render={(c) => (
-                          <li key={c.client}>
-                            <span className="qb-name">{c.client}</span>
-                            <span className="qb-amt">{compact(c.amount)}</span>
-                          </li>
-                        )}
-                      />
-                    </>
-                  ) : (
-                    <Empty what="No credit memos this year." />
-                  )
-                ) : (
-                  <Empty what="Credit memos unavailable." />
-                )}
-                {data.customers ? (
-                  <p className="qb-note">
-                    {data.customers.count} active customers in QuickBooks (join keys
-                    ready for Teamwork).
-                  </p>
-                ) : null}
-              </Widget>
-            </div>
-          </div>
-        </Section>
-
-        <Section id="costs" title="Unattributed & committed spend">
-          <div className="qb-stack">
-            {data.unattached_cost ? (
-              <Widget>
-                <Kicker>Cost with no client</Kicker>
-                <p className="qb-unattached">
-                  {usd(data.unattached_cost.cost_of_service_unattached)}
-                </p>
-                <p className="qb-note">
-                  Cost of services with no client ·{" "}
-                  {data.unattached_cost.unattached_count.toLocaleString()} of{" "}
-                  {data.unattached_cost.purchase_count.toLocaleString()} purchases (
-                  {data.unattached_cost.unattached_pct}%)
-                </p>
-                <ShowMoreList
-                  items={data.unattached_cost.accounts}
-                  initial={6}
-                  render={(a) => (
-                    <li key={a.account}>
-                      <span className="qb-name">{a.account}</span>
-                      {a.is_cost_of_service ? (
-                        <span className="qb-pill">billable</span>
-                      ) : null}
-                      <span className="qb-amt">{compact(a.amount)}</span>
-                    </li>
-                  )}
-                />
-              </Widget>
-            ) : (
-              <Widget>
-                <Empty what="Unattached cost unavailable." />
-              </Widget>
-            )}
-
-            <div className="qb-split">
-              <Widget>
-                <Kicker>Open purchase orders</Kicker>
-                {data.purchase_orders ? (
-                  <>
-                    <p className="qb-hero-line">
-                      <strong>{usd(data.purchase_orders.open_total)}</strong>
-                      <span>open · {data.purchase_orders.open_count} POs</span>
-                    </p>
-                    <ShowMoreList
-                      items={data.purchase_orders.vendors}
-                      initial={6}
-                      render={(v) => (
-                        <li key={v.vendor}>
-                          <span className="qb-name">{v.vendor}</span>
-                          <span className="qb-amt">{compact(v.amount)}</span>
-                        </li>
-                      )}
-                    />
-                  </>
-                ) : (
-                  <Empty what="No purchase orders (or unavailable)." />
-                )}
-              </Widget>
-              <Widget>
-                <Kicker>Spend by vendor</Kicker>
-                {data.expenses_by_vendor ? (
-                  <>
-                    <p className="qb-note" style={{ marginTop: 0 }}>
-                      Top 3 = {data.expenses_by_vendor.top3_concentration_pct}% of{" "}
-                      {usd(data.expenses_by_vendor.total)}
-                    </p>
-                    <ShowMoreList
-                      items={data.expenses_by_vendor.vendors}
-                      initial={8}
-                      render={(v) => (
-                        <li key={v.vendor}>
-                          <span className="qb-name">{v.vendor}</span>
-                          <span className="qb-amt">{compact(v.amount)}</span>
-                        </li>
-                      )}
-                    />
-                  </>
-                ) : (
-                  <Empty what="Vendor expenses unavailable." />
-                )}
-              </Widget>
-            </div>
-
-            {data.bill_payments ? (
-              <Widget>
-                <Kicker>Bills paid</Kicker>
-                <p className="qb-hero-line" style={{ marginBottom: 0 }}>
-                  <strong>{usd(data.bill_payments.total_paid)}</strong>
-                  <span>{data.bill_payments.payment_count} payments</span>
-                </p>
-              </Widget>
-            ) : null}
-          </div>
-        </Section>
-
-        <Section id="activity" title="Recent ledger changes">
-          {data.activity ? (
-            <Widget>
-              <div className="qb-activity">
-                <span className="qb-chip">
-                  <strong>{data.activity.total}</strong>
-                  <span>changes</span>
-                </span>
-                {data.activity.entities.map((e) => (
-                  <span key={e.entity} className="qb-chip">
-                    <strong>{e.changed}</strong>
-                    <span>{e.entity}</span>
-                  </span>
-                ))}
-              </div>
-            </Widget>
-          ) : (
-            <Widget>
-              <Empty what="Activity feed unavailable." />
-            </Widget>
-          )}
-        </Section>
-
-        {Object.keys(err).length > 0 ? (
-          <p className="qb-fail">
-            Some panels did not load: {Object.keys(err).join(", ")}.
-          </p>
-        ) : null}
-      </div>
-    </FadeIn>
   );
 }

@@ -20,9 +20,9 @@ The OAuth token was valid. Invoice, Bill, Payment, and other Query calls succeed
 
 ## Which report
 
-The connected company already 5020s on `ExpensesByVendorSummary` in the live ledger. Other reports (P&L, CustomerIncome, and similar) have been succeeding.
+The connected company 5020s on invalid report IDs such as `ExpensesByVendorSummary`. Other reports (P&L, CustomerIncome, and similar) have been succeeding.
 
-The first backfill run did not log the report name before aborting. Treat `ExpensesByVendorSummary` as the known case. If another report name 5020s, the same skip path applies.
+The first backfill run did not log the report name before aborting. A later live check showed `SalesByCustomer` and `ExpensesByVendorSummary` 5020 because those are not Intuit report IDs; the QBO UI titles map to `CustomerSales` and `VendorExpenses`. Wrong IDs also return 5020 with `element=ReportName`. If a correctly named report 5020s, the same skip path applies.
 
 ## Why Intuit returns 5020
 
@@ -44,7 +44,7 @@ Other report errors still fail the run. Entity ingest, remaining reports, compan
 
 `qb_panels_from_db` already degrades missing snapshots: the panel lands in overview `errors` and the rest of the ledger still renders.
 
-If `ExpensesByVendorSummary` is skipped, the Expenses by vendor panel is empty / error for that year. No snapshot row is written for that `(report_name, year, params_hash)`.
+If `VendorExpenses` is skipped, the Expenses by vendor panel is empty / error for that year unless the entity fallback fills it. No snapshot row is written for that `(report_name, year, params_hash)`.
 
 `/quickbooks/status.last_error` can still show the old 5020 until a sync finishes successfully.
 

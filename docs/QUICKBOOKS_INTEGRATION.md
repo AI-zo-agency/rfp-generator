@@ -210,6 +210,7 @@ Backfill uses `TxnDate >= 2024-01-01` for transaction entities. Customer, Class,
 | Revenue by class | `ProfitAndLoss` | `start_date={year}-01-01`, `end_date={year}-12-31`, `summarize_column_by=Classes` | Column titles + “Total Income” row → Project/Recurring × Government/Private matrix |
 | By account manager | `ProfitAndLoss` | same dates, `summarize_column_by=Departments` | “Total Income” and “Net Income” per department column |
 | Monthly trend | `ProfitAndLoss` | same dates, `summarize_column_by=Month` | “Total Income” per month column |
+| Position P&L headlines | `ProfitAndLoss` | same Month snapshot (no extra Intuit call) | Total-column “Total Income”, “Total Cost of Goods Sold”, “Gross Profit”, “Net Income”. There is no P&L page. |
 | Client profitability | `CustomerIncome` | `start_date={year}-01-01`, `end_date={year}-12-31` | Per-customer income / expense / net (top 20 by income) |
 
 Empty optional params are omitted from the query string. Snapshots are stored in `qb_report_snapshots` (latest per `report_name`, `year`, `params_hash`).
@@ -412,6 +413,7 @@ At **sync time**, panels are built from mirror rows and report snapshots (via `q
 | By account manager | `qb_report_snapshots` | Report: ProfitAndLoss by Departments |
 | Client profitability | `qb_report_snapshots` | Report: CustomerIncome |
 | Monthly trend | `qb_report_snapshots` | Report: ProfitAndLoss by Month |
+| Position Gross margin / Net income | `qb_report_snapshots` (`pl_summary`) | Same ProfitAndLoss by Month snapshot; Total column only. Not a P&L page. |
 | Unattached cost | `qb_purchases`, `qb_purchase_lines` | Query: Purchase from year start |
 | Recent activity | entity `qbo_updated_at` counts | CDC (nightly ingest) |
 | Cash collections | `qb_payments` | Query: Payment from year start |
@@ -419,10 +421,10 @@ At **sync time**, panels are built from mirror rows and report snapshots (via `q
 | DSO | `qb_txn_links` | Linked Payment → Invoice |
 | Aged AR detail | `qb_report_snapshots` | Report: AgedReceivableDetail |
 | Purchase orders | `qb_purchase_orders` | Query: PurchaseOrder |
-| Expenses by vendor | `qb_report_snapshots` | Report: ExpensesByVendorSummary |
+| Expenses by vendor | `qb_report_snapshots` | Report: VendorExpenses |
 | Bill payments | `qb_bill_payments` | Query: BillPayment from year start |
 | Customers | `qb_customers` | Query: active Customer |
-| Sales by customer | `qb_report_snapshots` | Report: SalesByCustomer |
+| Sales by customer | `qb_report_snapshots` | Report: CustomerSales |
 | Credit memos | `qb_credit_memos` | Query: CreditMemo from year start |
 | Class / department coverage | `qb_classes`, `qb_departments` + P&L | Query + P&L |
 | Liquidity | `qb_report_snapshots` | Report: BalanceSheet, CashFlow |
@@ -463,7 +465,7 @@ Unattached cost treats purchases with no `CustomerRef` on expense lines as unatt
 - Component: `QuickBooksPanels` fetches  
   `{BACKEND}/api/v1/financials/quickbooks/overview?year={year}`
 - **Synced stamp:** shows `synced_at` and `sync_status` from the overview response. No Refresh control.
-- **Sectioned Operate UI:** sticky section nav → Health strip → Cash → Receivables → Payables → Revenue → Clients → Costs → Activity footnote
+- **Sectioned Operate UI:** sticky section nav → Health strip → Cash → Open (Who owes us / What we owe side by side) → Revenue → Clients → Costs → Activity footnote
 - Year selector in the header; progressive disclosure (“Show all”) on long lists
 - New overview keys degrade independently via `errors` without blanking the page
 
@@ -496,8 +498,8 @@ Unattached cost treats purchases with no `CustomerRef` on expense lines as unatt
 | 3 | `GET` | `…/reports/ProfitAndLoss` | `start_date`, `end_date`, `summarize_column_by` | Nested P&amp;L columns/rows |
 | 4 | `GET` | `…/reports/CustomerIncome` | `start_date`, `end_date` | Nested customer income rows |
 | 5 | `GET` | `…/reports/AgedReceivableDetail` | `report_date` | Nested AR detail |
-| 6 | `GET` | `…/reports/ExpensesByVendorSummary` | `start_date`, `end_date` | Vendor expense rows |
-| 7 | `GET` | `…/reports/SalesByCustomer` | `start_date`, `end_date` | Customer sales rows |
+| 6 | `GET` | `…/reports/VendorExpenses` | `start_date`, `end_date` | Vendor expense rows |
+| 7 | `GET` | `…/reports/CustomerSales` | `start_date`, `end_date` | Customer sales rows |
 | 8 | `GET` | `…/reports/BalanceSheet` | `date` | Balance sheet rows |
 | 9 | `GET` | `…/reports/CashFlow` | `start_date`, `end_date` | Cash flow rows |
 | 10 | `GET` | `…/cdc` | `entities`, `changedSince` | Changed-entity lists |

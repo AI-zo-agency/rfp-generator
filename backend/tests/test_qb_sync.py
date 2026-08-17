@@ -201,6 +201,14 @@ def test_as_of_report_hashes_are_stable_across_days():
     assert aged == params_hash({"report_date": "2026-12-31"})
 
 
+def test_report_jobs_use_intuit_report_ids_not_ui_titles():
+    names = {name for name, _params in qb_sync.report_jobs(2026, date(2026, 8, 17))}
+    assert "CustomerSales" in names
+    assert "VendorExpenses" in names
+    assert "SalesByCustomer" not in names
+    assert "ExpensesByVendorSummary" not in names
+
+
 def test_ingest_historical_year_fetches_year_end_not_today(monkeypatch):
     fetched = []
     monkeypatch.setattr(
@@ -216,6 +224,31 @@ def test_ingest_historical_year_fetches_year_end_not_today(monkeypatch):
     assert by_name["AgedReceivableDetail"]["report_date"] == "2024-12-31"
     assert by_name["BalanceSheet"]["date"] == "2024-12-31"
     assert by_name["CashFlow"]["end_date"] == "2024-12-31"
+
+
+def test_ingest_reports_can_limit_to_named_reports(monkeypatch):
+    fetched = []
+    monkeypatch.setattr(
+        qb_sync,
+        "report",
+        lambda name, **params: fetched.append(name) or {},
+    )
+    monkeypatch.setattr(qb_sync, "upsert_report_snapshot", lambda row: None)
+
+    count = qb_sync._ingest_reports(
+        "r1",
+        [2024, 2025],
+        date(2026, 8, 17),
+        "now",
+        only=frozenset({"CustomerSales", "VendorExpenses"}),
+    )
+    assert count == 4
+    assert fetched == [
+        "VendorExpenses",
+        "CustomerSales",
+        "VendorExpenses",
+        "CustomerSales",
+    ]
 
 
 def test_ingest_current_year_fetches_as_of_but_hashes_year_end(monkeypatch):
@@ -439,7 +472,7 @@ def test_ingest_skips_permission_denied_reports(monkeypatch):
     snapshots = []
 
     def fake_report(name, **params):
-        if name == "ExpensesByVendorSummary":
+        if name == "VendorExpenses":
             raise QuickBooksError(
                 'QuickBooks 400: {"Fault":{"Error":[{"Message":'
                 '"Permission Denied Error","code":"5020","element":"ReportName"}]}}'
@@ -451,7 +484,8 @@ def test_ingest_skips_permission_denied_reports(monkeypatch):
 
     count = qb_sync._ingest_reports("r1", [2026], date(2026, 8, 13), "now")
     names = {row["report_name"] for row in snapshots}
-    assert "ExpensesByVendorSummary" not in names
+    assert "VendorExpenses" not in names
+    assert "CustomerSales" in names
     assert "ProfitAndLoss" in names
     assert "CustomerIncome" in names
     assert count == len(snapshots)
