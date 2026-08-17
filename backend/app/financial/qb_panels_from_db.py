@@ -19,6 +19,7 @@ from app.financial.quickbooks import (
     _empty_month_series,
     _find_row,
     _flatten,
+    _is_report_total_label,
     _money,
     _month_index,
 )
@@ -186,6 +187,21 @@ def _snapshot_payload(
     if not isinstance(payload, dict):
         raise LookupError(f"{report_name} snapshot payload missing for year {year}")
     return payload
+
+
+def _first_snapshot_payload(
+    realm_id: str,
+    year: int,
+    params: dict[str, str],
+    *report_names: str,
+) -> dict[str, Any]:
+    last_error: LookupError | None = None
+    for report_name in report_names:
+        try:
+            return _snapshot_payload(realm_id, report_name, year, params)
+        except LookupError as exc:
+            last_error = exc
+    raise last_error or LookupError(f"missing snapshot for year {year}")
 
 
 # ── entity panels ────────────────────────────────────────────────────────────
@@ -813,6 +829,53 @@ def monthly_trend(realm_id: str, year: int) -> dict[str, Any]:
     }
 
 
+def _row_total(payload: dict[str, Any], label: str) -> float | None:
+    row = _find_row(payload, label)
+    if not row:
+        return None
+    return round(_money(row[-1]), 2)
+
+
+def pl_summary(realm_id: str, year: int) -> dict[str, Any]:
+    """Year P&L headlines from the Month snapshot Total column — not a P&L page."""
+    payload = _snapshot_payload(
+        realm_id,
+        "ProfitAndLoss",
+        year,
+        {
+            "start_date": _year_start(year),
+            "end_date": _year_end(year),
+            "summarize_column_by": "Month",
+        },
+    )
+    income = _row_total(payload, "Total Income")
+    cost_of_services = _row_total(payload, "Total Cost of Goods Sold")
+    gross_profit = _row_total(payload, "Gross Profit")
+    if gross_profit is None and income is not None and cost_of_services is not None:
+        gross_profit = round(income - cost_of_services, 2)
+    gross_margin_pct = (
+        round(gross_profit / income * 100, 1)
+        if gross_profit is not None and income
+        else None
+    )
+    net_income = _row_total(payload, "Net Income")
+    logger.info(
+        "operation=pl_summary realm_id=%s year=%s income=%s gross_profit=%s net_income=%s",
+        realm_id,
+        year,
+        income,
+        gross_profit,
+        net_income,
+    )
+    return {
+        "income": income,
+        "cost_of_services": cost_of_services,
+        "gross_profit": gross_profit,
+        "gross_margin_pct": gross_margin_pct,
+        "net_income": net_income,
+    }
+
+
 def aged_ar_detail(realm_id: str, year: int, *, as_of: date) -> dict[str, Any]:
     payload = _snapshot_payload(
         realm_id,
@@ -856,7 +919,7 @@ def _expenses_from_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     vendors: dict[str, float] = {}
     total = 0.0
     for row in _flatten(payload.get("Rows", {})):
-        if len(row) < 2 or not row[0] or row[0].strip().upper() in ("TOTAL", "TOTAL EXPENSES"):
+        if len(row) < 2 or not row[0]:
             continue
         amount = 0.0
         for cell in reversed(row[1:]):
@@ -865,7 +928,7 @@ def _expenses_from_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                 amount = parsed
                 break
         name = row[0].strip()
-        if name.upper().startswith("TOTAL"):
+        if _is_report_total_label(name):
             if amount:
                 total = amount
             continue
@@ -899,11 +962,12 @@ def _expenses_from_entities(realm_id: str, year: int) -> dict[str, Any]:
 
 def expenses_by_vendor(realm_id: str, year: int) -> dict[str, Any]:
     try:
-        payload = _snapshot_payload(
+        payload = _first_snapshot_payload(
             realm_id,
-            "ExpensesByVendorSummary",
             year,
             {"start_date": _year_start(year), "end_date": _year_end(year)},
+            "VendorExpenses",
+            "ExpensesByVendorSummary",
         )
     except LookupError:
         logger.warning(
@@ -988,11 +1052,12 @@ def _sales_from_invoices(realm_id: str, year: int) -> dict[str, Any]:
 
 def sales_by_customer(realm_id: str, year: int) -> dict[str, Any]:
     try:
-        payload = _snapshot_payload(
+        payload = _first_snapshot_payload(
             realm_id,
-            "SalesByCustomer",
             year,
             {"start_date": _year_start(year), "end_date": _year_end(year)},
+            "CustomerSales",
+            "SalesByCustomer",
         )
     except LookupError:
         try:
@@ -1108,6 +1173,7 @@ def build_overview(
         "by_account_manager": lambda: by_account_manager(realm_id, year),
         "client_profitability": lambda: client_profitability(realm_id, year),
         "monthly_trend": lambda: monthly_trend(realm_id, year),
+        "pl_summary": lambda: pl_summary(realm_id, year),
         "unattached_cost": lambda: unattached_cost(realm_id, year),
         "activity": lambda: count_activity(realm_id, activity_since),
         "cash_collections": lambda: cash_collections(realm_id, year),

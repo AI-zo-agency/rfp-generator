@@ -55,6 +55,13 @@ export interface QuickBooksOverview {
     peak: number;
     last_booked_month: string | null;
   } | null;
+  pl_summary: {
+    income: number | null;
+    cost_of_services: number | null;
+    gross_profit: number | null;
+    gross_margin_pct: number | null;
+    net_income: number | null;
+  } | null;
   unattached_cost: {
     purchase_count: number;
     purchase_total: number;

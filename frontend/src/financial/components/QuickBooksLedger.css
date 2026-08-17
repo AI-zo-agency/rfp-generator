@@ -1,6 +1,6 @@
 /* QuickBooks ledger — Operate chrome.
-   Tokens stay zö. The work here is hierarchy: one plane, one accent per
-   direction of money, and alignment doing the job nine bar charts used to. */
+   Tokens stay zö. Position figures each carry a category hue so cash, claims,
+   position, and P&L scan apart. Tone still wins when a number is unhealthy. */
 
 html.fin-lock,
 html.fin-lock body {
@@ -56,6 +56,17 @@ html.fin-lock body {
   height: 6px;
   border-radius: 50%;
   background: var(--zo-teal);
+}
+
+.qb-sync-dot[data-busy="true"] {
+  background: var(--zo-text-muted);
+  animation: qb-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes qb-pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .qb-sync[data-failed="true"] .qb-sync-dot {
@@ -282,20 +293,27 @@ html.fin-lock body {
 /* ── figures ───────────────────────────────────────────────────────────── */
 
 .qb-moneyline {
+  /* Category hues, not a rainbow: brand teal/orange plus cool inks and the
+     olive/umber side of the palette. Similar weight so no figure shouts. */
+  --qb-fig-cash: var(--zo-teal);
+  --qb-fig-ar: var(--zo-orange);
+  --qb-fig-ap: #2a5f8a;
+  --qb-fig-net: #5b3d7a;
+  --qb-fig-booked: #0e6b63;
+  --qb-fig-margin: #5c5618;
+  --qb-fig-income: #8a4a12;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
-  overflow: hidden;
-  border: 1px solid var(--zo-border);
-  border-radius: 14px;
-  background: var(--zo-card-bg);
+  gap: 10px;
 }
 
-/* Dividers ride on the cells rather than on a gap, so a part-full last row
-   after wrapping stays white instead of showing a block of border colour.
-   The outermost edges are clipped by the container's overflow. */
+/* Separate tiles (Stripe/Mercury KPI row): hue wash + hairline, no drop
+   shadow — seven stacked shadows next to the panels below would shout. */
 .qb-moneyline > .qb-figure {
-  padding: 15px 18px 16px;
-  box-shadow: -1px 0 0 var(--zo-border), 0 -1px 0 var(--zo-border);
+  padding: 14px 15px 15px;
+  border: 1px solid color-mix(in srgb, var(--qb-fig-hue) 20%, var(--zo-border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--qb-fig-hue) 8%, var(--zo-card-bg));
 }
 
 .qb-figure {
@@ -303,6 +321,25 @@ html.fin-lock body {
   min-width: 0;
   flex-direction: column;
   gap: 5px;
+}
+
+.qb-figure-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 1.15em;
+}
+
+.qb-figure-icon {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--qb-fig-hue, var(--zo-text-muted));
+  background: color-mix(in srgb, var(--qb-fig-hue, var(--zo-text)) 14%, var(--zo-card-bg));
 }
 
 .qb-figure-label {
@@ -328,15 +365,51 @@ html.fin-lock body {
   font-size: 15px;
 }
 
-.qb-figure-value[data-tone="in"] {
+.qb-figure[data-metric="cash"] {
+  --qb-fig-hue: var(--qb-fig-cash);
+}
+
+.qb-figure[data-metric="ar"] {
+  --qb-fig-hue: var(--qb-fig-ar);
+}
+
+.qb-figure[data-metric="ap"] {
+  --qb-fig-hue: var(--qb-fig-ap);
+}
+
+.qb-figure[data-metric="net"] {
+  --qb-fig-hue: var(--qb-fig-net);
+}
+
+.qb-figure[data-metric="booked"] {
+  --qb-fig-hue: var(--qb-fig-booked);
+}
+
+.qb-figure[data-metric="margin"] {
+  --qb-fig-hue: var(--qb-fig-margin);
+}
+
+.qb-figure[data-metric="income"] {
+  --qb-fig-hue: var(--qb-fig-income);
+}
+
+.qb-figure[data-metric] .qb-figure-value {
+  color: var(--qb-fig-hue);
+}
+
+.qb-figure:has(.qb-figure-value[data-tone="warn"]) {
+  --qb-fig-hue: var(--zo-danger);
+}
+
+.qb-figure .qb-figure-value[data-tone="in"] {
   color: var(--zo-teal);
 }
 
-.qb-figure-value[data-tone="out"] {
+.qb-figure .qb-figure-value[data-tone="out"] {
   color: var(--zo-orange);
 }
 
-.qb-figure-value[data-tone="warn"] {
+.qb-figure .qb-figure-value[data-tone="warn"] {
   color: var(--zo-danger);
 }
 
@@ -858,7 +931,8 @@ table.qb-table {
 
 @media (prefers-reduced-motion: reduce) {
   .qb-skel-line,
-  .qb-skel-block {
+  .qb-skel-block,
+  .qb-sync-dot[data-busy="true"] {
     animation: none;
   }
 }

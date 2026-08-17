@@ -102,6 +102,8 @@ def test_build_overview_missing_snapshot_sets_error(monkeypatch):
     )
     assert out["revenue_by_class"] is None
     assert "revenue_by_class" in out["errors"]
+    assert out["pl_summary"] is None
+    assert "pl_summary" in out["errors"]
     assert out["ar"] is not None
     assert out["sales_by_customer"] is not None
     assert "sales_by_customer" not in out["errors"]
@@ -124,8 +126,8 @@ def test_sales_by_customer_falls_back_to_customer_income():
     }
 
     def fake_snapshot(_realm, report_name, _year, _params):
-        if report_name == "SalesByCustomer":
-            raise LookupError("missing SalesByCustomer")
+        if report_name in ("CustomerSales", "SalesByCustomer"):
+            raise LookupError(f"missing {report_name}")
         if report_name == "CustomerIncome":
             return income
         raise LookupError(report_name)
@@ -135,6 +137,29 @@ def test_sales_by_customer_falls_back_to_customer_income():
     assert result["clients"][0]["client"] == "Acme"
     assert result["clients"][0]["amount"] == 1200.0
     assert result["total"] == 1200.0
+
+
+def test_sales_by_customer_prefers_customer_sales_snapshot():
+    sales = {
+        "Rows": {
+            "Row": [{
+                "ColData": [
+                    {"value": "Acme"},
+                    {"value": "900.00"},
+                ]
+            }]
+        }
+    }
+
+    def fake_snapshot(_realm, report_name, _year, _params):
+        if report_name == "CustomerSales":
+            return sales
+        raise LookupError(report_name)
+
+    with patch.object(panels, "_snapshot_payload", side_effect=fake_snapshot):
+        result = panels.sales_by_customer("r1", 2026)
+    assert result["clients"][0] == {"client": "Acme", "amount": 900.0}
+    assert result["total"] == 900.0
 
 
 def test_sales_by_customer_falls_back_to_invoices():
@@ -155,6 +180,29 @@ def test_sales_by_customer_falls_back_to_invoices():
     assert result["total"] == 1250.0
 
 
+def test_expenses_by_vendor_prefers_vendor_expenses_snapshot():
+    expenses = {
+        "Rows": {
+            "Row": [{
+                "ColData": [
+                    {"value": "Paper Co"},
+                    {"value": "125.00"},
+                ]
+            }]
+        }
+    }
+
+    def fake_snapshot(_realm, report_name, _year, _params):
+        if report_name == "VendorExpenses":
+            return expenses
+        raise LookupError(report_name)
+
+    with patch.object(panels, "_snapshot_payload", side_effect=fake_snapshot):
+        result = panels.expenses_by_vendor("r1", 2026)
+    assert result["vendors"][0] == {"vendor": "Paper Co", "amount": 125.0}
+    assert result["total"] == 125.0
+
+
 def test_expenses_by_vendor_falls_back_to_bills_and_purchases():
     bills = [{"vendor_name": "Paper Co", "total_amt": 300}]
     purchases = [
@@ -173,3 +221,91 @@ def test_expenses_by_vendor_falls_back_to_bills_and_purchases():
     assert result["vendors"][1] == {"vendor": "Ink LLC", "amount": 200.0}
     assert result["total"] == 550.0
     assert result["top3_concentration_pct"] == 100.0
+
+
+def test_expenses_from_snapshot_keeps_totally_promotional_and_report_total():
+    payload = {
+        "Rows": {
+            "Row": [
+                {"ColData": [{"value": "Paper Co"}, {"value": "100.00"}]},
+                {"ColData": [{"value": "Totally Promotional"}, {"value": "324.00"}]},
+                {"ColData": [{"value": "TOTAL"}, {"value": "917357.51"}]},
+            ]
+        }
+    }
+    result = panels._expenses_from_snapshot(payload)
+    assert result["total"] == 917357.51
+    vendors = {row["vendor"]: row["amount"] for row in result["vendors"]}
+    assert vendors["Totally Promotional"] == 324.0
+    assert vendors["Paper Co"] == 100.0
+    assert result["vendor_count"] == 2
+
+
+def test_pl_summary_reads_total_column_not_month():
+    payload = {
+        "Rows": {
+            "Row": [
+                {"ColData": [
+                    {"value": "Total Income"},
+                    {"value": "100.00"},
+                    {"value": "1000.00"},
+                ]},
+                {"ColData": [
+                    {"value": "Total Cost of Goods Sold"},
+                    {"value": "40.00"},
+                    {"value": "400.00"},
+                ]},
+                {"ColData": [
+                    {"value": "Gross Profit"},
+                    {"value": "60.00"},
+                    {"value": "600.00"},
+                ]},
+                {"ColData": [
+                    {"value": "Net Income"},
+                    {"value": "10.00"},
+                    {"value": "130.00"},
+                ]},
+            ]
+        }
+    }
+    with patch.object(panels, "_snapshot_payload", return_value=payload):
+        result = panels.pl_summary("r1", 2026)
+    assert result["income"] == 1000.0
+    assert result["cost_of_services"] == 400.0
+    assert result["gross_profit"] == 600.0
+    assert result["gross_margin_pct"] == 60.0
+    assert result["net_income"] == 130.0
+
+
+def test_pl_summary_gross_profit_falls_back_to_income_minus_cogs():
+    payload = {
+        "Rows": {
+            "Row": [
+                {"ColData": [{"value": "Total Income"}, {"value": "1000.00"}]},
+                {"ColData": [{"value": "Total Cost of Goods Sold"}, {"value": "400.00"}]},
+                {"ColData": [{"value": "Net Income"}, {"value": "130.00"}]},
+            ]
+        }
+    }
+    with patch.object(panels, "_snapshot_payload", return_value=payload):
+        result = panels.pl_summary("r1", 2026)
+    assert result["gross_profit"] == 600.0
+    assert result["gross_margin_pct"] == 60.0
+    assert result["net_income"] == 130.0
+
+
+def test_pl_summary_missing_net_income_is_none():
+    payload = {
+        "Rows": {
+            "Row": [
+                {"ColData": [{"value": "Total Income"}, {"value": "1000.00"}]},
+                {"ColData": [{"value": "Total Cost of Goods Sold"}, {"value": "400.00"}]},
+                {"ColData": [{"value": "Gross Profit"}, {"value": "600.00"}]},
+            ]
+        }
+    }
+    with patch.object(panels, "_snapshot_payload", return_value=payload):
+        result = panels.pl_summary("r1", 2026)
+    assert result["net_income"] is None
+    assert result["income"] == 1000.0
+    assert result["gross_profit"] == 600.0

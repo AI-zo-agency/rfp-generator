@@ -135,6 +135,11 @@ def _money(value: Any) -> float:
         return 0.0
 
 
+def _is_report_total_label(name: str) -> bool:
+    label = name.strip().upper()
+    return label == "TOTAL" or label.startswith("TOTAL ")
+
+
 def _columns(payload: dict[str, Any]) -> list[str]:
     return [c.get("ColTitle", "") for c in payload.get("Columns", {}).get("Column", [])]
 
@@ -673,17 +678,17 @@ def purchase_orders(year: int) -> dict[str, Any]:
 
 
 def expenses_by_vendor(year: int) -> dict[str, Any]:
-    """Vendor spend concentration from ExpensesByVendorSummary."""
+    """Vendor spend concentration from VendorExpenses."""
     with _timed("expenses_by_vendor", year=year):
         payload = report(
-            "ExpensesByVendorSummary",
+            "VendorExpenses",
             start_date=f"{year}-01-01",
             end_date=f"{year}-12-31",
         )
         vendors: list[dict[str, Any]] = []
         total = 0.0
         for row in _flatten(payload.get("Rows", {})):
-            if len(row) < 2 or not row[0] or row[0].strip().upper() in ("TOTAL", "TOTAL EXPENSES"):
+            if len(row) < 2 or not row[0]:
                 continue
             amount = 0.0
             for cell in reversed(row[1:]):
@@ -692,7 +697,7 @@ def expenses_by_vendor(year: int) -> dict[str, Any]:
                     amount = parsed
                     break
             name = row[0].strip()
-            if name.upper().startswith("TOTAL"):
+            if _is_report_total_label(name):
                 if amount:
                     total = amount
                 continue
@@ -753,10 +758,10 @@ def customers_directory() -> dict[str, Any]:
 
 
 def sales_by_customer(year: int) -> dict[str, Any]:
-    """Ranked customer revenue from SalesByCustomer."""
+    """Ranked customer revenue from CustomerSales."""
     with _timed("sales_by_customer", year=year):
         payload = report(
-            "SalesByCustomer",
+            "CustomerSales",
             start_date=f"{year}-01-01",
             end_date=f"{year}-12-31",
         )

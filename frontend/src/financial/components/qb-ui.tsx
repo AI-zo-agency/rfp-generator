@@ -18,7 +18,19 @@ import {
   type RowData,
   type SortingState,
 } from "@tanstack/react-table";
-import { ChevronDown, ChevronUp, ChevronsUpDown } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  ChevronsUpDown,
+  CircleDollarSign,
+  HandCoins,
+  Percent,
+  Receipt,
+  Scale,
+  TrendingUp,
+  Wallet,
+  type LucideIcon,
+} from "lucide-react";
 import {
   Table,
   TableBody,
@@ -90,23 +102,49 @@ export function Note({ children }: { children: ReactNode }) {
   return <p className="qb-note">{children}</p>;
 }
 
-/** A single figure. Tone is reserved for money that is moving the wrong way. */
+type FigureMetric = "cash" | "ar" | "ap" | "net" | "booked" | "margin" | "income";
+
+const METRIC_ICON: Record<FigureMetric, LucideIcon> = {
+  cash: Wallet,
+  ar: HandCoins,
+  ap: Receipt,
+  net: Scale,
+  booked: TrendingUp,
+  margin: Percent,
+  income: CircleDollarSign,
+};
+
+/**
+ * A single figure. `metric` colors Position totals by what the number is
+ * and adds a Lucide mark so the row scans like a Stripe/Mercury KPI strip.
+ * `tone` still overrides when the number is moving the wrong way.
+ */
 export function Figure({
   label,
   value,
   sub,
   tone,
+  metric,
   size = "md",
 }: {
   label: string;
   value: ReactNode;
   sub?: ReactNode;
   tone?: "in" | "out" | "warn";
+  metric?: FigureMetric;
   size?: "sm" | "md" | "lg";
 }) {
+  const Icon = metric ? METRIC_ICON[metric] : null;
   return (
-    <div className="qb-figure" data-size={size}>
-      <span className="qb-figure-label">{label}</span>
+    <div className="qb-figure" data-size={size} data-metric={metric}>
+      <span className="qb-figure-head">
+        <span className="qb-figure-label">{label}</span>
+        {Icon ? (
+          <span className="qb-figure-icon" aria-hidden>
+            <Icon size={14} strokeWidth={2.25} />
+          </span>
+        ) : null}
+      </span>
       <span className="qb-figure-value" data-tone={tone}>
         {value}
       </span>

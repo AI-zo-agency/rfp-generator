@@ -8,7 +8,7 @@
  * away — present, but not competing for the same glance.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -99,6 +99,7 @@ function MoneyLine({
   );
   const cash = data.liquidity;
   const trend = data.monthly_trend;
+  const pl = data.pl_summary;
 
   return (
     <div className="qb-moneyline">
@@ -106,6 +107,7 @@ function MoneyLine({
         <Figure
           label="Cash on hand"
           size="lg"
+          metric="cash"
           value={money(cash.cash)}
           sub={
             cash.net_cash_change != null
@@ -117,6 +119,7 @@ function MoneyLine({
       <Figure
         label="Owed to zö"
         size="lg"
+        metric="ar"
         value={money(data.ar?.total ?? 0)}
         tone={data.ar?.overdue_total ? "out" : undefined}
         sub={
@@ -130,12 +133,14 @@ function MoneyLine({
       <Figure
         label="zö owes"
         size="lg"
+        metric="ap"
         value={money(data.ap?.total ?? 0)}
         sub={data.ap ? `${data.ap.bill_count} open bills` : undefined}
       />
       <Figure
         label="Net position"
         size="lg"
+        metric="net"
         value={money(net)}
         tone={net < 0 ? "warn" : undefined}
         sub={net >= 0 ? "Receivables cover payables" : "Payables exceed receivables"}
@@ -143,9 +148,33 @@ function MoneyLine({
       <Figure
         label={`Booked ${data.year}`}
         size="lg"
+        metric="booked"
         value={money(trend?.total ?? 0)}
         sub={trend?.last_booked_month ? `Through ${trend.last_booked_month}` : undefined}
       />
+      {typeof pl?.gross_profit === "number" ? (
+        <Figure
+          label="Gross margin"
+          size="lg"
+          metric="margin"
+          value={money(pl.gross_profit)}
+          sub={
+            pl.gross_margin_pct != null
+              ? `${pl.gross_margin_pct}% of booked`
+              : undefined
+          }
+        />
+      ) : null}
+      {typeof pl?.net_income === "number" ? (
+        <Figure
+          label="Net income"
+          size="lg"
+          metric="income"
+          value={money(pl.net_income)}
+          tone={pl.net_income < 0 ? "warn" : undefined}
+          sub="What the books closed to"
+        />
+      ) : null}
     </div>
   );
 }
@@ -328,87 +357,97 @@ const CLIENT_COLUMNS: ColumnDef<ClientRow, unknown>[] = [
 
 /* ── container ─────────────────────────────────────────────────────────── */
 
+function LedgerSkeleton() {
+  return (
+    <div className="qb-skel" aria-busy="true" aria-live="polite" aria-label="Reading the ledger">
+      <div className="qb-skel-block" style={{ height: 88 }} />
+      <div className="qb-two">
+        <div className="qb-skel-block" style={{ height: 280 }} />
+        <div className="qb-skel-block" style={{ height: 280 }} />
+      </div>
+    </div>
+  );
+}
+
+function isAbortError(err: unknown) {
+  return (
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && err.name === "AbortError")
+  );
+}
+
 export function QuickBooksPanels() {
   const currentYear = new Date().getFullYear();
+  const years = [currentYear, currentYear - 1, currentYear - 2];
   const [year, setYear] = useState(currentYear);
   const [view, setView] = useState<string>("today");
   const [data, setData] = useState<QuickBooksOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async (y: number) => {
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     setLoading(true);
     setError(null);
+    // Drop the previous year immediately so stale totals cannot linger
+    // while the overview request is in flight.
+    setData(null);
     try {
       const res = await fetch(
         `${API_BASE}/api/v1/financials/quickbooks/overview?year=${y}`,
+        { signal: ac.signal },
       );
       if (!res.ok) throw new Error(`QuickBooks returned ${res.status}`);
-      setData(await res.json());
+      const payload = (await res.json()) as QuickBooksOverview;
+      if (ac.signal.aborted) return;
+      setData(payload);
     } catch (err) {
+      if (isAbortError(err) || ac.signal.aborted) return;
       setError(err instanceof Error ? err.message : "Could not reach QuickBooks");
     } finally {
-      setLoading(false);
+      if (!ac.signal.aborted) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void load(year);
+    return () => abortRef.current?.abort();
   }, [load, year]);
 
   const net = (data?.ar?.total ?? 0) - (data?.ap?.total ?? 0);
   const signals = useMemo(() => (data ? deriveSignals(data) : []), [data]);
   const clientRows = useMemo(() => (data ? buildClientRows(data) : []), [data]);
-
-  if (loading && !data) {
-    return (
-      <div className="qb-ledger">
-        <div className="qb-skel" aria-busy="true" aria-label="Reading the ledger">
-          <div className="qb-skel-line" />
-          <div className="qb-skel-block" style={{ height: 88 }} />
-          <div className="qb-skel-block" style={{ height: 190 }} />
-          <div className="qb-skel-block" style={{ height: 260 }} />
-        </div>
-      </div>
-    );
-  }
-
-  if (error || !data) {
-    return (
-      <div className="qb-ledger">
-        <div className="qb-error">
-          <p>{error ?? "No QuickBooks data"}</p>
-          <button type="button" onClick={() => void load(year)} className="qb-retry">
-            <RefreshCw size={13} strokeWidth={2.25} aria-hidden /> Try again
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  const years = [currentYear, currentYear - 1, currentYear - 2];
-  const trend = data.monthly_trend;
-  const rc = data.revenue_by_class;
-  const am = data.by_account_manager;
+  const trend = data?.monthly_trend;
+  const rc = data?.revenue_by_class;
+  const am = data?.by_account_manager;
   // The matrix is built from revenue_by_class, so its own coverage is the one
   // that describes what's on screen. class_coverage is the fallback.
-  const coverage = rc?.coverage_pct ?? data.class_coverage?.coverage_pct;
+  const coverage = rc?.coverage_pct ?? data?.class_coverage?.coverage_pct;
   const managers = am?.managers.filter((m) => !m.is_overhead && m.income > 0) ?? [];
   const managerMax = Math.max(...managers.map((m) => m.income), 1);
   const bookedRows = trend ? trimTrailing(trend.months, (m) => m.amount > 0) : [];
+  const syncFailed = !loading && data?.sync_status === "failed";
+  let syncLabel = "Synced";
+  if (loading) syncLabel = `Reading ${year}…`;
+  else if (syncFailed) syncLabel = "Sync failed";
 
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="qb-ledger">
+      <div className="qb-ledger" aria-busy={loading || undefined}>
         <div className="qb-toolbar">
-          <p className="qb-sync" data-failed={data.sync_status === "failed" ? "true" : undefined}>
-            <span className="qb-sync-dot" aria-hidden />
-            {data.sync_status === "failed" ? "Sync failed" : "Synced"}
-            {data.synced_at ? (
+          <p className="qb-sync" data-failed={syncFailed ? "true" : undefined}>
+            <span className="qb-sync-dot" data-busy={loading ? "true" : undefined} aria-hidden />
+            {syncLabel}
+            {!loading && data?.synced_at ? (
               <span className="qb-sync-meta">{new Date(data.synced_at).toLocaleString()}</span>
             ) : null}
-            {data.company ? <span className="qb-sync-meta">{data.company.legal_name}</span> : null}
-            {data.activity ? (
+            {!loading && data?.company ? (
+              <span className="qb-sync-meta">{data.company.legal_name}</span>
+            ) : null}
+            {!loading && data?.activity ? (
               <span className="qb-sync-meta">{data.activity.total} ledger changes</span>
             ) : null}
           </p>
@@ -418,6 +457,7 @@ export function QuickBooksPanels() {
             onValueChange={(v) => v && setYear(Number(v))}
             className="qb-years"
             aria-label="Fiscal year"
+            aria-busy={loading || undefined}
           >
             {years.map((y) => (
               <ToggleGroupItem key={y} value={String(y)} aria-label={String(y)}>
@@ -436,6 +476,17 @@ export function QuickBooksPanels() {
             ))}
           </TabsList>
 
+          {loading ? <LedgerSkeleton /> : null}
+          {!loading && (error || !data) ? (
+            <div className="qb-error">
+              <p>{error ?? "No QuickBooks data"}</p>
+              <button type="button" onClick={() => void load(year)} className="qb-retry">
+                <RefreshCw size={13} strokeWidth={2.25} aria-hidden /> Try again
+              </button>
+            </div>
+          ) : null}
+          {!loading && data ? (
+            <>
           {/* ── position ── */}
           <TabsContent value="today" className="qb-view">
             <MoneyLine data={data} net={net} />
@@ -814,6 +865,8 @@ export function QuickBooksPanels() {
               </Panel>
             </div>
           </TabsContent>
+            </>
+          ) : null}
         </Tabs>
       </div>
     </TooltipProvider>
