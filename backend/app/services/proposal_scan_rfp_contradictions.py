@@ -100,9 +100,11 @@ def _manuscript_digest(draft: ProposalDraft, *, max_chars: int = 28_000) -> str:
         body = (section.content or "").strip()
         if not body:
             continue
+        sid = section.id or ""
+        body_cap = 400 if sid.startswith("section-2-bio-") else 2200
         block = (
             f"### id={section.id} | {section.title}\n"
-            f"{body[:2200]}\n"
+            f"{body[:body_cap]}\n"
         )
         if used + len(block) > max_chars:
             break

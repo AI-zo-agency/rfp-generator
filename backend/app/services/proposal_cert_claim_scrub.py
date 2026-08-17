@@ -15,6 +15,65 @@ from app.services.proposal_hallucination_detector import VERIFIED_CERTIFICATIONS
 
 logger = logging.getLogger(__name__)
 
+# Agency-level certs we may state when publicly verifiable (companyfacts / B Lab registry).
+PUBLICLY_VERIFIABLE_AGENCY_CERTS = frozenset(
+    {*(c.upper() for c in VERIFIED_CERTIFICATIONS), "B CORPORATION", "B CORP"}
+)
+
+# Diversity program designations zö does not hold as separate certs (WBENC/WOSB are verified).
+_DIVERSITY_FABRICATED_RES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"\bMinority\s+Business\s+Enterprise\b(?:\s*\([^)]*\))?",
+            re.I,
+        ),
+        "mbe",
+    ),
+    (
+        re.compile(r"\b(?:certified\s+)?MBE\b(?:\s+certification)?", re.I),
+        "mbe",
+    ),
+    (
+        re.compile(
+            r"\bDisadvantaged\s+Business\s+Enterprise\b(?:\s*\([^)]*\))?",
+            re.I,
+        ),
+        "dbe",
+    ),
+    (
+        re.compile(r"\b(?:certified\s+)?DBE\b(?:\s+certification)?", re.I),
+        "dbe",
+    ),
+    (
+        re.compile(
+            r"\b(?:certified\s+)?Veterans?\s+Business\s+Enterprise\b(?:\s*\([^)]*\))?",
+            re.I,
+        ),
+        "vbe",
+    ),
+]
+
+# Standalone WBE designation — not the WBENC certificate id (WBE-####).
+_STANDALONE_WBE_RE = re.compile(
+    r"(?<![A-Z/])"
+    r"(?:Women['']?s?\s+Business\s+Enterprise\s*\(\s*WBE\s*\)"
+    r"|(?<!WBENC\s)\bWBE\b(?!\-\d{3,}))"
+    r"(?![A-Z/])",
+    re.I,
+)
+
+# Marketing / platform badges not on the verified agency cert list.
+_UNVERIFIED_MARKETING_CERT_RES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"1\s*%\s*for\s*the\s*Planet(?:\s+membership)?", re.I),
+        "one_percent_planet",
+    ),
+    (
+        re.compile(r"LinkedIn\s+Gold(?:[- ]Certified)?(?:\s+status)?", re.I),
+        "linkedin_gold",
+    ),
+]
+
 # Phrases that must never appear as agency-level certifications (individual or invented).
 _FABRICATED_OR_INDIVIDUAL_CERT_RES: list[tuple[re.Pattern[str], str]] = [
     (
@@ -93,6 +152,83 @@ def _is_verified_agency_cert_mention(text: str) -> bool:
     return any(cert in upper for cert in VERIFIED_CERTIFICATIONS)
 
 
+def user_asks_cert_claim_scrub(text: str) -> bool:
+    """True when chat should deterministically remove fabricated / unverified certs."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if re.search(
+        r"(?is)\b(?:remove|delete|strip|drop|eliminate)\b.{0,80}\b"
+        r"(?:MBE|WBE|DBE|false\s+certif|fabricated\s+certif|unverified\s+certif|"
+        r"certifications?\s+that\s+do\s+not\s+exist)",
+        raw,
+    ):
+        return True
+    if re.search(
+        r"(?is)\b(?:MBE|WBE|DBE)\b.{0,60}\b"
+        r"(?:do\s+not\s+exist|not\s+in\s+(?:the\s+)?KB|false|fabricated|remove|delete)",
+        raw,
+    ):
+        return True
+    if re.search(
+        r"(?is)\bretain\s+only\b.{0,80}\b(?:WBENC|WOSB|B\s+Corp)",
+        raw,
+    ):
+        return True
+    return False
+
+
+def _segment_has_fabricated_cert(segment: str) -> bool:
+    seg = segment or ""
+    upper = seg.upper()
+    if "WBENC" in upper and re.search(r"WBE-\d", seg, re.I):
+        return False
+    for pattern, _code in _DIVERSITY_FABRICATED_RES:
+        if pattern.search(seg):
+            return True
+    if _STANDALONE_WBE_RE.search(seg):
+        return True
+    for pattern, _code in _UNVERIFIED_MARKETING_CERT_RES:
+        if pattern.search(seg):
+            return True
+    return False
+
+
+def _scrub_cert_enumeration(text: str) -> tuple[str, list[str]]:
+    """Drop semicolon-separated cert list items that are fabricated or unverified."""
+    if ";" not in text and "," not in text:
+        return text, []
+    logs: list[str] = []
+    delimiter = ";" if ";" in text else ","
+    parts = [p.strip() for p in re.split(rf"\s*{re.escape(delimiter)}\s*", text)]
+    kept: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if _segment_has_fabricated_cert(part):
+            logs.append(f"dropped cert list item: {part[:60]}")
+            continue
+        kept.append(part)
+    if kept == parts:
+        return text, []
+    rebuilt = f"{delimiter} ".join(kept)
+    return rebuilt, logs
+
+
+def _clean_cert_punctuation(text: str) -> str:
+    out = text
+    out = re.sub(r"\s*;\s*;\s*", "; ", out)
+    out = re.sub(r"\(\s*;\s*", "(", out)
+    out = re.sub(r"\s*;\s*\)", ")", out)
+    out = re.sub(r"\s*,\s*,\s*", ", ", out)
+    out = re.sub(r",\s*and\s*\.", ".", out)
+    out = re.sub(r",\s*and\s*,", ",", out)
+    out = re.sub(r"\s+,\s+\.", ".", out)
+    out = re.sub(r"\|\s*\|", "| |", out)
+    out = re.sub(r"  +", " ", out)
+    return out
+
+
 def scrub_section_cert_claims(section: ProposalSection) -> tuple[ProposalSection, list[str]]:
     """Remove fabricated cert strings and soften agency-wide platform overclaims."""
     body = section.content or ""
@@ -144,6 +280,40 @@ def scrub_section_cert_claims(section: ProposalSection) -> tuple[ProposalSection
         if n:
             updated = updated2
             logs.append(f"rewrote agency-overclaim cert ({code})")
+
+    for pattern, code in _DIVERSITY_FABRICATED_RES:
+        if not pattern.search(updated):
+            continue
+        before = updated
+        updated = pattern.sub("", updated)
+        if updated != before:
+            logs.append(f"removed fabricated diversity cert ({code})")
+
+    if _STANDALONE_WBE_RE.search(updated):
+        before = updated
+        updated = _STANDALONE_WBE_RE.sub("", updated)
+        if updated != before:
+            logs.append("removed standalone WBE designation")
+
+    for pattern, code in _UNVERIFIED_MARKETING_CERT_RES:
+        if not pattern.search(updated):
+            continue
+        before = updated
+        updated = pattern.sub("", updated)
+        if updated != before:
+            logs.append(f"removed unverified marketing cert ({code})")
+
+    if re.search(r"certif", updated, re.I):
+        lines_out: list[str] = []
+        for line in updated.split("\n"):
+            scrubbed_line, line_logs = _scrub_cert_enumeration(line)
+            if line_logs:
+                logs.extend(line_logs)
+                line = scrubbed_line
+            lines_out.append(line)
+        updated = "\n".join(lines_out)
+
+    updated = _clean_cert_punctuation(updated)
 
     # Do not strip verified WBENC/WOSB agency certs.
     if updated == body:

@@ -28,9 +28,11 @@ import unittest
 from app.models.proposal import RfpSectionMap
 from app.models.requirement_ledger import LedgerRequirement, RequirementLedger
 from app.services.proposal_closing_package import (
-    _CLOSING_CATALOG,
     detect_closing_components,
+    requirement_to_closing_component,
 )
+from app.services.proposal_closing_ledger import ClosingRequirement, ledger_from_fixture
+
 from app.services.proposal_intelligence.assembler import (
     DuplicateOwnerResolution,
     resolve_duplicate_owners,
@@ -283,47 +285,60 @@ class DegradeGracefullyTests(unittest.TestCase):
 
 
 class ExemplarAgreementGuardTests(unittest.TestCase):
-    """exemplar_agreement must carry the same non-restatement guard its
-    sibling insurance_attachments already has (proposal_closing_package.py:187-190)."""
+    """Insurance / agreement closing rows must defer to Section 1.5."""
 
-    def _base_instructions(self, comp_id: str) -> str:
-        for row in _CLOSING_CATALOG:
-            if row[0] == comp_id:
-                return row[5]
-        raise AssertionError(f"{comp_id} missing from catalog")
-
-    def test_exemplar_agreement_catalog_entry_carries_the_guard(self) -> None:
-        instructions = self._base_instructions("exemplar_agreement").lower()
+    def test_exemplar_agreement_gets_the_guard(self) -> None:
+        comp = requirement_to_closing_component(
+            ClosingRequirement(
+                id="exemplar_agreement",
+                title="Contract / Agreement Acknowledgment",
+                kind="form",
+                draftInstructions="Acknowledge the exemplar agreement.",
+            )
+        )
+        instructions = comp.draft_instructions.lower()
         self.assertIn("do not restate", instructions)
         self.assertIn("limits", instructions)
         self.assertIn("carriers", instructions)
 
-    def test_insurance_attachments_guard_is_unchanged(self) -> None:
-        instructions = self._base_instructions("insurance_attachments").lower()
+    def test_insurance_attachments_gets_the_guard(self) -> None:
+        comp = requirement_to_closing_component(
+            ClosingRequirement(
+                id="insurance_attachments",
+                title="Required Submission Attachments — Document Checklist",
+                kind="attachment",
+                draftInstructions="Checklist of documents to return.",
+            )
+        )
+        instructions = comp.draft_instructions.lower()
         self.assertIn("do not restate", instructions)
-        self.assertIn("limits, carriers", instructions)
+        self.assertIn("limits", instructions)
+        self.assertIn("carriers", instructions)
 
 
 class EndToEndThreeSurfacesProofTests(unittest.TestCase):
-    """The actual observed defect: an RFP that triggers both closing
-    components simultaneously. Section 1.5 (a static template, not text
-    this repo generates) is the sole owner; both closing components must
-    now defer to it instead of restating limits/carriers/coverage types."""
+    """Both insurance surfaces defer to Section 1.5 when present on the ledger."""
 
-    def test_rfp_triggering_both_components_gets_the_guard_on_both(self) -> None:
-        text = """
-        Required submission documents:
-        - Acknowledgement of Addenda
-        - Certificate of Insurance with Additional Insured
-        - Form W-9
-        - Exhibit A pricing schedule
-        - Authorized signature of officer who can legally bind the firm
-        Proposer must acknowledge all addenda.
-        Proposer must sign and return the exemplar agreement included as
-        Exhibit B, noting any exceptions to the standard consulting
-        agreement.
-        """
-        comps = {c.id: c for c in detect_closing_components(text)}
+    def test_rfp_ledger_rows_get_the_guard_on_both(self) -> None:
+        ledger = ledger_from_fixture(
+            [
+                {
+                    "id": "insurance_attachments",
+                    "title": "Required Submission Attachments",
+                    "kind": "attachment",
+                    "draftInstructions": "Checklist: COI, W-9.",
+                },
+                {
+                    "id": "exemplar_agreement",
+                    "title": "Contract / Agreement Acknowledgment",
+                    "kind": "form",
+                    "draftInstructions": "Acknowledge exemplar agreement.",
+                },
+            ]
+        )
+        comps = {
+            c.id: c for c in detect_closing_components("ignored", ledger=ledger)
+        }
         self.assertIn("insurance_attachments", comps)
         self.assertIn("exemplar_agreement", comps)
 

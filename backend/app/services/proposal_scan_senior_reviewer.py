@@ -89,6 +89,22 @@ async def run_complete_scan_senior_reviewer(
     )
 
     report = ScanReviewerReport()
+    from app.services.proposal_senior_editor_coverage import (
+        apply_senior_editor_section_coverage_audit,
+    )
+
+    draft, coverage_audit_logs, mechanical_coverage = (
+        await apply_senior_editor_section_coverage_audit(
+            draft,
+            research=research,
+            rfp_text=rfp_text or "",
+            rfp_title=rfp.title or "",
+        )
+    )
+    if coverage_audit_logs:
+        for line in coverage_audit_logs[:16]:
+            report.logs.append(f"coverage-audit: {line}")
+
     digest = _manuscript_digest_for_senior_editor(draft)
     req_map = _requirements_by_section(draft, research)
 
@@ -104,6 +120,13 @@ async def run_complete_scan_senior_reviewer(
     report.coverage_gaps = _gaps_from_tickets(
         list(tickets.get("coverageTickets") or []), kind="coverage"
     )
+    if mechanical_coverage:
+        mech_gaps = _gaps_from_tickets(mechanical_coverage, kind="coverage")
+        seen = set(report.coverage_gaps)
+        for gap in mech_gaps:
+            if gap not in seen:
+                report.coverage_gaps.append(gap)
+                seen.add(gap)
     report.compliance_gaps = _gaps_from_tickets(
         list(tickets.get("complianceTickets") or []), kind="compliance"
     )
@@ -152,5 +175,5 @@ async def run_complete_scan_senior_reviewer(
             f"Senior reviewer: {len(report.compliance_gaps)} compliance gap(s) flagged."
         )
 
-    del rfp_text  # reserved for future RFP excerpt in digest
+    del rfp_text  # used for mechanical coverage audit + future digest excerpt
     return draft, research, report

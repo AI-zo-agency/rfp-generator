@@ -459,6 +459,14 @@ type ProposalJobStatus = {
   finishedAt?: string | null;
 };
 
+export type { ProposalJobStatus };
+
+export async function getProposalJobStatus(
+  rfpId: string
+): Promise<ProposalJobStatus | null> {
+  return fetchProposalJobStatus(rfpId);
+}
+
 async function startProposalPhaseJob(
   path: string,
   signal?: AbortSignal,
@@ -708,6 +716,17 @@ async function waitForFulfillScan(
   }
 
   throw new Error("Timed out waiting for Complete & clean to finish.");
+}
+
+/** Poll until an in-flight Complete & clean job finishes (no POST — reconnect only). */
+export async function pollFulfillScanCompletion(
+  rfpId: string,
+  signal?: AbortSignal
+): Promise<{
+  draft: ProposalOutline | null;
+  research: ProposalResearch | null;
+}> {
+  return waitForFulfillScan(rfpId, signal);
 }
 
 async function runProposalPhaseAsync(

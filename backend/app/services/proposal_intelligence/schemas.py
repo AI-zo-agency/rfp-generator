@@ -390,6 +390,13 @@ class OutlineSection(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     # Stamped from evaluation criteria before lean filter so scored tabs survive.
     evaluation_weight: float | None = Field(default=None, alias="evaluationWeight")
+    # Agent-stamped: never drop for hard-cap / lean filler hygiene.
+    protect_from_cap: bool = Field(default=False, alias="protectFromCap")
+    # Agent-stamped instrument kind for near-dup + protect (not title synonym regex).
+    # cost | form | disclosure | references | narrative | null
+    submission_instrument: str | None = Field(
+        default=None, alias="submissionInstrument"
+    )
 
 
 class ProposalOutline(BaseModel):

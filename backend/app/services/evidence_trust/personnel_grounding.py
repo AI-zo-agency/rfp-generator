@@ -10,6 +10,10 @@ cited source (MasterTemplate naming Curt Schultz does not evidence Brittany).
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.models.proposal import ProposalDraft
 
 # Names already observed as LLM inventions (docs + live Go/No-Go / proposal runs).
 # Keep lowercase keys for matching; display uses canonical Title Case.
@@ -175,3 +179,54 @@ def personnel_claim_failure(
             "cannot Verified a staffing claim without roster evidence"
         )
     return None
+
+
+_PERSONNEL_MANUAL_FILL = (
+    "[MANUAL FILL: Sonja — assign verified team member; fabricated name removed]"
+)
+
+
+def scrub_fabricated_personnel_from_draft(
+    draft: "ProposalDraft",
+) -> tuple["ProposalDraft", list[str]]:
+    """Remove known invented team members from every manuscript section."""
+    from app.models.proposal import ProposalDraft, ProposalSection
+    from datetime import datetime, timezone
+
+    if not draft.sections:
+        return draft, []
+
+    pattern = fabricated_personnel_regex()
+    logs: list[str] = []
+    sections: list[ProposalSection] = []
+    changed = False
+
+    for section in draft.sections:
+        content = section.content or ""
+        found = find_known_fabricated_names(content)
+        if not found:
+            sections.append(section)
+            continue
+        new_content = pattern.sub(_PERSONNEL_MANUAL_FILL, content)
+        if new_content != content:
+            changed = True
+            who = ", ".join(found[:3])
+            logs.append(
+                f"{section.title or section.id}: removed fabricated personnel ({who})"
+            )
+            sections.append(section.model_copy(update={"content": new_content}))
+        else:
+            sections.append(section)
+
+    if not changed:
+        return draft, logs
+
+    return (
+        draft.model_copy(
+            update={
+                "sections": sections,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        logs,
+    )

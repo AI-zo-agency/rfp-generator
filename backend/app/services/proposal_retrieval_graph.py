@@ -220,13 +220,22 @@ async def _analyze_rfp(state: RetrievalGraphState) -> dict[str, Any]:
                     len(dropped),
                     dropped[:12],
                 )
+            from app.services.proposal_closing_ledger import get_or_extract_closing_ledger
             from app.services.proposal_outline_dedup import (
                 merge_closing_components_into_outline,
             )
+            from app.services.proposal_repository import aget_research_cache
 
+            rfp_id = str(state.get("rfp_id") or "")
+            research = await aget_research_cache(rfp_id) if rfp_id else None
+            closing_ledger, _research = await get_or_extract_closing_ledger(
+                state.get("rfp_context") or "",
+                research=research,
+            )
             merged, closing_added = merge_closing_components_into_outline(
                 sections,
                 rfp_context=state.get("rfp_context") or "",
+                ledger=closing_ledger,
             )
             # Convert OutlineSection objects back to dicts for retrieval state.
             sections = []

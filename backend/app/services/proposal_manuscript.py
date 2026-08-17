@@ -267,19 +267,37 @@ def collapse_empty_subheadings(text: str) -> str:
     lines = text.split("\n")
     keep = [True] * len(lines)
 
+    def _heading_level(line: str) -> int:
+        match = _MD_HEADING_LINE_RE.match(line)
+        if match:
+            hashes = re.match(r"^\s*(#{1,6})\s+", line)
+            return len(hashes.group(1)) if hashes else 2
+        return 6
+
     def _is_heading(idx: int) -> bool:
         if not (0 <= idx < len(lines)):
             return False
         if _MD_HEADING_LINE_RE.match(lines[idx]):
             return True
-        # Bold-only title line (**Team Qualifications Summary**) with no other text.
-        return bool(re.match(r"^\s*\*\*[^*]+\*\*\s*$", lines[idx]))
+        # Bold-only title line (**Team Qualifications Summary**) — not money rows.
+        match = re.match(r"^\s*\*\*([^*]+)\*\*\s*$", lines[idx])
+        if not match:
+            return False
+        inner = match.group(1).strip()
+        if ":" in inner or "$" in inner:
+            return False
+        return True
 
     def _has_body_before_next_heading(start: int) -> bool:
         j = start + 1
+        start_level = _heading_level(lines[start])
         while j < len(lines):
             if _is_heading(j):
-                return False
+                # Nested headings (### under ##) do not make the parent empty.
+                if _heading_level(lines[j]) <= start_level:
+                    return False
+                j += 1
+                continue
             body = lines[j].strip()
             if not body:
                 j += 1

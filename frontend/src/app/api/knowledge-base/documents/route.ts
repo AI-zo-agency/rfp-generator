@@ -33,13 +33,29 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
+    const contentType = request.headers.get("content-type") ?? "";
+    // Forward raw multipart bytes — re-wrapping FormData breaks undici (422 missing fields).
+    const body = Buffer.from(await request.arrayBuffer());
     const response = await longRunningFetch(`${BACKEND_URL}/api/v1/knowledge-base/documents`, {
       method: "POST",
-      body: formData,
+      body,
+      headers: {
+        "Content-Type": contentType || "multipart/form-data",
+      },
       cache: "no-store",
     });
-    const data = await response.json();
+    const text = await response.text();
+    let data: unknown = {};
+    if (text.trim()) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        return NextResponse.json(
+          { error: "Invalid JSON from backend" },
+          { status: 502 }
+        );
+      }
+    }
     return NextResponse.json(data, { status: response.status });
   } catch (error) {
     const message =

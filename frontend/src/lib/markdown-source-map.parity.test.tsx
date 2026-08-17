@@ -78,6 +78,18 @@ across the Pacific Northwest since 2013.
 
 > All work is performed in-house.
 `,
+
+  "a timeline table with spaced letter headers": `### Year 1 Timeline
+
+| P | H | A | S | E | Key |
+| --- | --- | --- | --- | --- | --- |
+| Foundation | Research | Week 2 | Deliverable | Buffer |
+`,
+
+  "inline timeline table on one line": `### Year 1 Timeline
+
+| Phase | Key Activities | Timing | | --- | --- | --- | | Foundation | Research weeks 2–25 | Week 2–25 |
+`,
 };
 
 describe("projection parity with MarkdownReportBody", () => {

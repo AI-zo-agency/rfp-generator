@@ -69,7 +69,7 @@ class QuoteGroundingTests(unittest.TestCase):
 
 class AdjudicationTests(unittest.TestCase):
     def _rows(self, assessments):
-        _body, sources = build_adjudication_payload(REQS, HITS)
+        _body, sources, _full = build_adjudication_payload(REQS, HITS)
         rows, rejected, _recoverable = rows_from_assessments(REQS, assessments, sources)
         return rows, rejected
 
@@ -123,7 +123,7 @@ class AdjudicationTests(unittest.TestCase):
         )
         cms = next(r for r in rows if r.requirement == "CMS implementation")
         self.assertEqual(cms.status, "gap")
-        _body, sources = build_adjudication_payload(REQS, HITS)
+        _body, sources, _full = build_adjudication_payload(REQS, HITS)
         upgraded = apply_gap_recover_assessments(
             rows,
             recoverable={"CMS implementation"},
@@ -215,7 +215,7 @@ class AdjudicationTests(unittest.TestCase):
         self.assertEqual(len(rows), len(REQS))
 
     def test_payload_includes_every_requirement(self) -> None:
-        body, sources = build_adjudication_payload(REQS, HITS)
+        body, sources, _full = build_adjudication_payload(REQS, HITS)
         for requirement in REQS:
             self.assertIn(requirement.requirement, body)
         self.assertEqual(set(sources), {r.requirement for r in REQS})
@@ -248,13 +248,13 @@ class SharedEvidencePoolTests(unittest.TestCase):
     }
 
     def test_bio_from_another_requirement_is_citable(self) -> None:
-        _body, sources = build_adjudication_payload(
+        _body, sources, _full = build_adjudication_payload(
             self.REQS, self.HITS, all_hits=[SHAWN, self.ORG]
         )
         self.assertIn("04_Bio_ShawnDiCriscio.pdf", sources["CMS implementation"])
 
     def test_cross_requirement_citation_now_validates(self) -> None:
-        _body, sources = build_adjudication_payload(
+        _body, sources, _full = build_adjudication_payload(
             self.REQS, self.HITS, all_hits=[SHAWN, self.ORG]
         )
         rows, rejected, _rec = rows_from_assessments(
@@ -275,7 +275,7 @@ class SharedEvidencePoolTests(unittest.TestCase):
 
     def test_without_shared_pool_the_same_claim_fails(self) -> None:
         """Confirms the isolation really was the cause."""
-        _body, sources = build_adjudication_payload(self.REQS, self.HITS)
+        _body, sources, _full = build_adjudication_payload(self.REQS, self.HITS)
         rows, rejected, _rec = rows_from_assessments(
             self.REQS,
             [
@@ -293,7 +293,7 @@ class SharedEvidencePoolTests(unittest.TestCase):
         self.assertEqual(len(rejected), 1)
 
     def test_own_hits_still_come_first(self) -> None:
-        _body, sources = build_adjudication_payload(
+        _body, sources, _full = build_adjudication_payload(
             self.REQS, self.HITS, all_hits=[SHAWN, self.ORG]
         )
         self.assertEqual(
@@ -319,7 +319,7 @@ class NonCapabilitySourceTests(unittest.TestCase):
                            isCore=True)]
 
     def test_pricing_guide_cannot_evidence_capability(self) -> None:
-        _b, sources = build_adjudication_payload(
+        _b, sources, _full = build_adjudication_payload(
             self.REQS, {"Discovery and stakeholder engagement": [self.GUIDE]}
         )
         rows, rejected, _rec = rows_from_assessments(
@@ -379,7 +379,7 @@ class EvidenceStateTests(unittest.TestCase):
     )
 
     def _rows(self, assessment):
-        _b, sources = build_adjudication_payload(
+        _b, sources, _full = build_adjudication_payload(
             self.REQS, {"Programming and development": [self.CURT]}
         )
         return rows_from_assessments(self.REQS, [assessment], sources)[0]
@@ -444,7 +444,7 @@ class LongDocumentWindowingTests(unittest.TestCase):
         self.assertNotIn("Shawn DiCriscio", head)
 
     def test_buried_evidence_is_shown_to_the_model(self) -> None:
-        body, sources = build_adjudication_payload(
+        body, sources, _full = build_adjudication_payload(
             self.REQS, {"WordPress website development": [self.ROSTER]}
         )
         self.assertIn("Shawn DiCriscio", body)
@@ -456,7 +456,7 @@ class LongDocumentWindowingTests(unittest.TestCase):
         )
 
     def test_quote_from_buried_evidence_validates(self) -> None:
-        _b, sources = build_adjudication_payload(
+        _b, sources, _full = build_adjudication_payload(
             self.REQS, {"WordPress website development": [self.ROSTER]}
         )
         rows, rejected, _rec = rows_from_assessments(
@@ -468,6 +468,34 @@ class LongDocumentWindowingTests(unittest.TestCase):
                 "quote": "Shawn DiCriscio, Web Developer. Specializes in WordPress.",
             }],
             sources,
+        )
+        self.assertEqual(rows[0].status, "verified")
+        self.assertEqual(rejected, [])
+
+
+class FullDocumentQuoteGroundingTests(unittest.TestCase):
+    """Quotes buried past the excerpt window must still verify against full text."""
+
+    def test_quote_outside_excerpt_survives_with_full_sources(self) -> None:
+        tail = (
+            "Television advertisement production and broadcast placement across "
+            "Maricopa County media markets."
+        )
+        pad = "Introduction and cover letter. " * 200
+        maricopa = _hit("06_WON_MaricopaCounty_Proposal_2025.pdf", pad + tail)
+        reqs = [RfpRequirement(requirement="Media buying and placement execution", isCore=True)]
+        hits = {"Media buying and placement execution": [maricopa]}
+        _body, sources, full_sources = build_adjudication_payload(reqs, hits)
+        rows, rejected, _rec = rows_from_assessments(
+            reqs,
+            [{
+                "requirement": "Media buying and placement execution",
+                "status": "verified",
+                "kbSource": "06_WON_MaricopaCounty_Proposal_2025.pdf",
+                "quote": tail,
+            }],
+            sources,
+            full_sources=full_sources,
         )
         self.assertEqual(rows[0].status, "verified")
         self.assertEqual(rejected, [])

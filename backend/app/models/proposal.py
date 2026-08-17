@@ -620,6 +620,14 @@ class ProposalResearchCache(BaseModel):
             "emitted, not just against research.rfp_sections."
         ),
     )
+    closing_requirement_ledger: dict[str, Any] | None = Field(
+        default=None,
+        alias="closingRequirementLedger",
+        description=(
+            "Cached ClosingRequirementLedger for THIS RFP (forms/attachments/"
+            "disclosures). Avoids re-extracting on every Scan/fulfill step."
+        ),
+    )
     questions: list[ResearchQuestion] = Field(default_factory=list)
     brand_voice: ProposalBrandVoice | None = Field(default=None, alias="brandVoice")
     evidence_corpus: list[EvidenceItem] = Field(default_factory=list, alias="evidenceCorpus")

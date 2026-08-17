@@ -14,17 +14,75 @@ _BUDGET_TITLE_PATTERN = re.compile(
     re.I,
 )
 
-_BLENDED_FORM_RE = re.compile(
-    r"(?:pricing\s+proposal\s+form|cost\s+proposal\s+form|schedule\s+of\s+fees)"
-    r"|hourly.{0,80}monthly.{0,80}annual"
-    r"|annual\s*=\s*monthly",
+# Assistive windowing for role-label scrape when budgetFormat is already
+# personnel_loading — NOT Cost-format authority (pricing agent owns that).
+_PERSONNEL_LOADING_WINDOW_RE = re.compile(
+    r"(?:"
+    r"hourly\s+rate(?:s)?\s+(?:for|by|across|table|schedule|form)"
+    r"|rate(?:s)?\s+(?:for|by)\s+(?:each\s+)?(?:labor\s+)?(?:categor(?:y|ies)|role(?:s)?|position(?:s)?)"
+    r"|fully[\s-]?burdened\s+hourly"
+    r"|personnel[\s-]?loading"
+    r"|labor[\s-]?categor(?:y|ies).{0,60}hourly"
+    r"|year[\s-]*(?:2|3|two|three).{0,80}(?:percent|%|increase|escalat)"
+    r"|(?:percent|%)\s+(?:increase|escalat).{0,80}year[\s-]*(?:2|3|two|three)"
+    r"|proposed\s+hourly\s+rates?\s+for\s+the\s+following\s+roles?"
+    r")",
     re.I | re.S,
 )
 
+_ROLE_TABLE_LINE_RE = re.compile(
+    r"(?m)^\s*(?:\d+[.)]\s*|[A-Z][.)]\s*|[-•*]\s*)?"
+    r"([A-Z][A-Za-z0-9/ &\-]{2,60})"
+    r"(?:\s*(?:hourly\s+rate|/hr|/hour))?\s*$"
+)
 
-def rfp_wants_blended_pricing_form(rfp_text: str) -> bool:
-    """True when THIS RFP's pricing deliverable is a 3-field blended rate form."""
-    return bool(_BLENDED_FORM_RE.search(rfp_text or ""))
+
+def extract_rfp_labor_role_labels(rfp_text: str, *, max_roles: int = 12) -> list[str]:
+    """Best-effort role names from an hourly-rate table / role list in the RFP.
+
+    Only used when rendering an already-chosen ``personnel_loading`` budget —
+    never to decide budgetFormat.
+    """
+    text = rfp_text or ""
+    if not text.strip():
+        return []
+    # Prefer a window around hourly-rate / labor-category language.
+    windows: list[str] = []
+    for m in _PERSONNEL_LOADING_WINDOW_RE.finditer(text):
+        start = max(0, m.start() - 200)
+        end = min(len(text), m.end() + 2500)
+        windows.append(text[start:end])
+    blob = "\n".join(windows) if windows else text[:12_000]
+    skip = {
+        "hourly rate",
+        "hourly rates",
+        "labor category",
+        "labor categories",
+        "cost proposal",
+        "pricing proposal",
+        "year 1",
+        "year 2",
+        "year 3",
+        "total",
+        "description",
+        "position",
+        "role",
+        "title",
+    }
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _ROLE_TABLE_LINE_RE.finditer(blob):
+        label = re.sub(r"\s+", " ", m.group(1)).strip(" -:|")
+        key = label.casefold()
+        if len(label) < 3 or key in skip or key in seen:
+            continue
+        if label.casefold().startswith(("provide", "submit", "include", "the ")):
+            continue
+        seen.add(key)
+        out.append(label)
+        if len(out) >= max_roles:
+            break
+    return out
 
 
 def _usd(value: float | None) -> str:
@@ -144,7 +202,7 @@ def render_pricing_proposal_form_markdown(
 ) -> str:
     if rfp_forbids_quotation_form_changes(rfp_text):
         return render_verbatim_quotation_form_markdown(budget)
-    if rfp_wants_blended_pricing_form(rfp_text):
+    if (budget.budget_format or "").casefold() == "blended_rate_form":
         return render_verbatim_quotation_form_markdown(budget)
     hourly, monthly, annual, notes = derive_blended_form_rates(budget)
     lines = [
@@ -169,6 +227,88 @@ def render_pricing_proposal_form_markdown(
             "Pricing Proposal Form before export.]"
         )
         lines.append("")
+    return "\n".join(lines)
+
+
+def _hourly_rate_from_line(item: BudgetLineItem) -> float | None:
+    unit = (item.unit or "").casefold()
+    if item.rate is not None and unit in {"hour", "hours", "hr", "hrs", ""}:
+        return float(item.rate)
+    if item.rate is not None and unit in {"flat", "fixed"} and item.quantity == 1:
+        # Flat one-off is not an hourly rate.
+        return None
+    if item.rate is not None and "hour" in unit:
+        return float(item.rate)
+    return None
+
+
+def render_personnel_loading_form_markdown(
+    budget: ProposalBudget,
+    *,
+    rfp_text: str = "",
+) -> str:
+    """RFP-required Role | Hourly Rate | Year-2 % | Year-3 % table.
+
+    Never invent missing role rates — MANUAL FILL when the guide/build has no hourly.
+    """
+    roles = extract_rfp_labor_role_labels(rfp_text)
+    # Fall back to line-item role titles / descriptions when RFP parse is thin.
+    if len(roles) < 3:
+        for item in budget.line_items:
+            label = (item.role_title or item.description or "").strip()
+            if not label:
+                continue
+            key = label.casefold()
+            if key not in {r.casefold() for r in roles}:
+                roles.append(label.split("—")[0].split("-")[0].strip()[:60])
+            if len(roles) >= 12:
+                break
+
+    yoy = (budget.option_term_notes or "").strip()
+    y2 = y3 = None
+    m2 = re.search(r"year[\s-]*2[^%]{0,40}?(\d+(?:\.\d+)?)\s*%", yoy, re.I)
+    m3 = re.search(r"year[\s-]*3[^%]{0,40}?(\d+(?:\.\d+)?)\s*%", yoy, re.I)
+    if m2:
+        y2 = m2.group(1)
+    if m3:
+        y3 = m3.group(1)
+
+    lines = [
+        "## Cost Proposal — Hourly Rate Schedule",
+        "",
+        "This table answers the RFP's scored Cost / hourly-rate instrument "
+        "(labor categories with Year-2 / Year-3 percentage increases). "
+        "Do not substitute a fixed-fee retainer for this form.",
+        "",
+        "| Role / Labor Category | Year-1 Hourly Rate | Year-2 % Increase | Year-3 % Increase |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+
+    used_ids: set[str] = set()
+    for role in roles or ["[MANUAL FILL: role from RFP hourly table]"]:
+        rate_val: float | None = None
+        role_cf = role.casefold()
+        for item in budget.line_items:
+            if item.id in used_ids:
+                continue
+            blob = f"{item.role_title or ''} {item.description or ''}".casefold()
+            if role_cf and (role_cf in blob or any(t in blob for t in role_cf.split() if len(t) > 3)):
+                rate_val = _hourly_rate_from_line(item)
+                if rate_val is None and item.rate is not None and (item.unit or "").casefold() in {
+                    "hour",
+                    "hours",
+                    "hr",
+                    "hrs",
+                }:
+                    rate_val = float(item.rate)
+                used_ids.add(item.id)
+                break
+        rate_cell = _usd(rate_val) if rate_val is not None else "—"
+        y2_cell = f"{y2}%" if y2 else "—"
+        y3_cell = f"{y3}%" if y3 else "—"
+        lines.append(f"| {role} | {rate_cell} | {y2_cell} | {y3_cell} |")
+
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -863,6 +1003,13 @@ def _rewrite_investment_sentence(
     return clause
 
 
+def _sync_year1_investment_phrase(text: str, total: float) -> str:
+    """Keep 'Year 1 investment of $X' on the canonical client total."""
+    if not text or total <= 0:
+        return text
+    return _YEAR1_INVESTMENT_RE.sub(lambda m: f"{m.group(1)}{_usd(total)}", text)
+
+
 def _sync_qualifying_fee_language(
     qualifying: str,
     *,
@@ -890,6 +1037,7 @@ def _sync_qualifying_fee_language(
         text,
         count=1,
     )
+    text = _sync_year1_investment_phrase(text, total)
     # Single stale grand-total left in Terms (e.g. only $240,000 appears) → sync.
     text = _sync_narrative_total(
         text,
@@ -897,6 +1045,333 @@ def _sync_qualifying_fee_language(
         protect=[direct] if direct > 0 else None,
     )
     return text
+
+
+_QL_TITLE_RE = re.compile(
+    r"(?im)^\s*(?:#{1,4}\s+|\*\*)?"
+    r"(Investment Framing|Scope Protection|Reimbursable Expenses|"
+    r"Reimbursables|Revision Rounds)"
+    r"(?:\*\*)?\s*:?\s*$"
+)
+_QL_ALLOCATION_RE = re.compile(
+    r"(?i)"
+    r"(?:\*\*)?"
+    r"(?P<label>[A-Z][A-Za-z0-9 &'/,\-]{2,72}?)"
+    r"(?:\*\*)?"
+    r"\s*(?::|—+|-+|account(?:s)?\s+for|is|,)?\s*"
+    r"(?P<pct>\d{1,3}(?:\.\d+)?)\s*%"
+    r"\s*\(\s*(?P<amt>\$[\d,]+(?:\.\d{2})?)\s*\)"
+    r"(?P<note>[^.]{0,160})?"
+)
+_QL_ALLOCATION_PCT_FIRST_RE = re.compile(
+    r"(?i)"
+    r"(?P<pct>\d{1,3}(?:\.\d+)?)\s*%"
+    r"\s+(?:allocated\s+)?to\s+"
+    r"(?P<label>[A-Za-z][A-Za-z0-9 &'/,\-]{2,72}?)"
+    r"\s*\(\s*(?P<amt>\$[\d,]+(?:\.\d{2})?)"
+    r"(?P<note>[^)]{0,160})?\)"
+)
+_QL_SKIP_LABEL_RE = re.compile(
+    r"(?i)^(the|our|a|an|this|year|total|combined total|proposed)\b"
+)
+_QL_STACKED_BULLET_RE = re.compile(r"(?m)^(?:\s*[-*]\s+){2,}")
+_YEAR1_INVESTMENT_RE = re.compile(
+    r"(?i)((?:the\s+)?year\s*1\s+investment\s+of\s+)\$[\d,]+(?:\.\d{2})?"
+)
+
+
+def format_qualifying_language_for_client(
+    text: str,
+    *,
+    line_items: list | None = None,
+    total: float | None = None,
+) -> str:
+    """Turn Terms walls of dollars/percentages into headings, tables, and bullets."""
+    raw = _unstick_stacked_bullets(text or "").strip()
+    if total and float(total) > 0:
+        raw = _sync_year1_investment_phrase(raw, float(total))
+    if not raw:
+        return raw
+    ledger_table = _mix_table_from_line_items(line_items, total)
+    if _qualifying_language_already_scannable(raw) and not ledger_table:
+        return raw
+    parts: list[str] = []
+    for title, body in _split_qualifying_blocks(raw):
+        use_ledger = bool(
+            ledger_table
+            and (not title or title.casefold().startswith("investment"))
+        )
+        parts.append(
+            _format_qualifying_block(
+                title,
+                body,
+                ledger_table=ledger_table if use_ledger else None,
+            )
+        )
+    return "\n\n".join(p for p in parts if p.strip()) or raw
+
+
+def reformat_budget_terms_in_markdown(content: str) -> str:
+    """Rewrite a persisted ## Terms wall into tables + bullets without changing numbers."""
+    text = content or ""
+    match = re.search(r"(?im)^##\s+Terms\s*$", text)
+    if not match:
+        if re.search(r"(?i)investment framing", text) and "%" in text and "$" in text:
+            return format_qualifying_language_for_client(text)
+        return text
+    start = match.end()
+    next_h = re.search(r"(?im)^##\s+\S", text[start:])
+    end = start + next_h.start() if next_h else len(text)
+    body = text[start:end].strip()
+    formatted = format_qualifying_language_for_client(body)
+    if formatted.strip() == body:
+        return text
+    suffix = text[end:]
+    joiner = "\n\n" if suffix.strip() else "\n"
+    return text[:start] + "\n\n" + formatted + joiner + suffix
+
+
+def _unstick_stacked_bullets(text: str) -> str:
+    """`- - - sentence` from repeated format passes → `- sentence`."""
+    return _QL_STACKED_BULLET_RE.sub("- ", text or "")
+
+
+def _has_inline_mix_sentence(text: str) -> bool:
+    blob = text or ""
+    pct_first = len(_QL_ALLOCATION_PCT_FIRST_RE.findall(blob))
+    label_first = len(_QL_ALLOCATION_RE.findall(blob))
+    return (pct_first + label_first) >= 2
+
+
+def _qualifying_language_already_scannable(text: str) -> bool:
+    if _QL_STACKED_BULLET_RE.search(text or ""):
+        return False
+    if _has_inline_mix_sentence(text) and not re.search(
+        r"(?im)^\s*\|\s*Component\s*\|", text or ""
+    ):
+        return False
+    has_table = bool(re.search(r"(?m)^\s*\|.+\|\s*$", text))
+    has_bullets = bool(re.search(r"(?m)^\s*[-*]\s+\S", text))
+    paragraphs = []
+    for block in re.split(r"\n\s*\n", text or ""):
+        cleaned = "\n".join(
+            ln for ln in block.splitlines() if not ln.strip().startswith("|")
+        ).strip()
+        if cleaned:
+            paragraphs.append(cleaned)
+    longest = max((len(p) for p in paragraphs), default=0)
+    return (has_table or has_bullets) and longest <= 360
+
+
+def _split_qualifying_blocks(text: str) -> list[tuple[str, str]]:
+    matches = list(_QL_TITLE_RE.finditer(text))
+    if not matches:
+        return [("", text.strip())]
+    blocks: list[tuple[str, str]] = []
+    preamble = text[: matches[0].start()].strip()
+    if preamble:
+        blocks.append(("", preamble))
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        blocks.append((match.group(1).strip(), text[start:end].strip()))
+    return blocks
+
+
+def _format_qualifying_block(
+    title: str,
+    body: str,
+    *,
+    ledger_table: str | None = None,
+) -> str:
+    heading = f"### {title}" if title else ""
+    extracted, leftover = _extract_allocation_table(body)
+    if extracted or ledger_table:
+        leftover = _drop_percent_money_sentences(leftover)
+        leftover = _drop_extraction_debris(leftover)
+        if ledger_table:
+            leftover = _drop_dollar_sentences(leftover)
+            year1 = _YEAR1_INVESTMENT_RE.search(body)
+            if year1 and "$" not in leftover:
+                leftover = (
+                    f"- {year1.group(0)} reflects the scope as understood at proposal stage.\n"
+                    f"{leftover}"
+                ).strip()
+    table_md = ledger_table or extracted
+    lead = _prose_to_qualifying_bullets(leftover)
+    chunks = [heading, lead, table_md]
+    return "\n\n".join(c for c in chunks if c.strip())
+
+
+def _allocation_rows_from_text(text: str) -> list[tuple[str, str, str, str, str]]:
+    """(full_match, label, pct, amt, note) from either mix syntax."""
+    rows: list[tuple[str, str, str, str, str]] = []
+    for match in _QL_ALLOCATION_PCT_FIRST_RE.finditer(text or ""):
+        label = re.sub(r"\s+", " ", match.group("label") or "").strip(" :—-,")
+        if len(label.split()) > 10 or _QL_SKIP_LABEL_RE.search(label):
+            continue
+        note = re.sub(r"\s+", " ", (match.group("note") or "").strip(" :—-,."))
+        rows.append(
+            (
+                match.group(0),
+                label,
+                f"{match.group('pct')}%",
+                match.group("amt"),
+                note,
+            )
+        )
+    for match in _QL_ALLOCATION_RE.finditer(text or ""):
+        label = re.sub(r"\s+", " ", match.group("label") or "").strip(" :—-,")
+        if len(label.split()) > 10 or _QL_SKIP_LABEL_RE.search(label):
+            continue
+        note = re.sub(r"\s+", " ", (match.group("note") or "").strip(" :—-,."))
+        rows.append(
+            (
+                match.group(0),
+                label,
+                f"{match.group('pct')}%",
+                match.group("amt"),
+                note,
+            )
+        )
+    return rows
+
+
+def _extract_allocation_table(text: str) -> tuple[str, str]:
+    rows = _allocation_rows_from_text(text)
+    leftover = text
+    seen: set[str] = set()
+    unique: list[tuple[str, str, str, str]] = []
+    for full, label, pct, amt, note in rows:
+        leftover = leftover.replace(full, " ", 1)
+        key = label.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((label, pct, amt, note))
+    leftover = re.sub(r"[ \t]{2,}", " ", leftover)
+    leftover = re.sub(r"\s+\.", ".", leftover)
+    leftover = re.sub(r"\.{2,}", ".", leftover)
+    leftover = re.sub(r"\n{3,}", "\n\n", leftover).strip(" \t\n.")
+    leftover = leftover.strip()
+    if len(unique) < 2:
+        return "", text
+    return _allocation_table_markdown(unique), leftover
+
+
+def _allocation_table_markdown(rows: list[tuple[str, str, str, str]]) -> str:
+    lines = [
+        "| Component | Share | Amount | Notes |",
+        "| --- | ---: | ---: | --- |",
+    ]
+    for label, pct, amt, note in rows:
+        lines.append(f"| {label} | {pct} | {amt} | {note} |")
+    return "\n".join(lines)
+
+
+def _mix_table_from_line_items(line_items: list | None, total: float | None) -> str:
+    if not line_items or not total or float(total) <= 0:
+        return ""
+    rows: list[tuple[str, str, str, str]] = []
+    used_labels: set[str] = set()
+    for item in line_items:
+        amount = getattr(item, "extended", None)
+        if not isinstance(amount, (int, float)) or float(amount) <= 0:
+            continue
+        phase, desc = _client_line_label(item)
+        label = (phase or desc or "Fees").strip()
+        key = label.casefold()
+        if key in used_labels:
+            short = re.split(r"\s+[—\-]\s+", desc or "", maxsplit=1)[0].strip()
+            if short and short.casefold() not in used_labels:
+                label = short[:48]
+                key = label.casefold()
+        used_labels.add(key)
+        share = int(round(100.0 * float(amount) / float(total)))
+        rows.append((label, f"{share}%", _usd(float(amount)), ""))
+    if len(rows) < 2:
+        return ""
+    return _allocation_table_markdown(rows)
+
+
+def _iter_qualifying_units(text: str) -> list[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    if re.search(r"(?m)^\s*[-*]\s+\S", raw):
+        units: list[str] = []
+        for line in raw.splitlines():
+            item = re.sub(r"^(?:\s*[-*]\s+)+", "", line).strip()
+            if item:
+                units.append(item)
+        return units
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw) if s.strip()]
+
+
+def _drop_percent_money_sentences(text: str) -> str:
+    kept = [
+        unit
+        for unit in _iter_qualifying_units(text)
+        if not ("%" in unit and "$" in unit)
+    ]
+    return _units_to_leftover(text, kept)
+
+
+def _drop_dollar_sentences(text: str) -> str:
+    kept = [unit for unit in _iter_qualifying_units(text) if "$" not in unit]
+    return _units_to_leftover(text, kept)
+
+
+def _drop_extraction_debris(text: str) -> str:
+    kept = []
+    for unit in _iter_qualifying_units(text):
+        if re.search(r"(?:,\s*){2,}", unit) or re.search(r"\bwith\s*,", unit):
+            continue
+        if re.search(r"\b(?:and|with)\s*[.,]\s*$", unit):
+            continue
+        kept.append(unit)
+    return _units_to_leftover(text, kept)
+
+
+def _units_to_leftover(original: str, units: list[str]) -> str:
+    if not units:
+        return ""
+    if re.search(r"(?m)^\s*[-*]\s+\S", original or ""):
+        return "\n".join(
+            u if u.startswith(("- ", "* ")) else f"- {u}" for u in units
+        )
+    return " ".join(units)
+
+
+def _prose_to_qualifying_bullets(text: str) -> str:
+    raw = _unstick_stacked_bullets(text or "").strip()
+    if not raw:
+        return ""
+    if re.search(r"(?m)^\s*[-*]\s+\S", raw):
+        lines: list[str] = []
+        for line in raw.splitlines():
+            item = re.sub(r"^(?:\s*[-*]\s+)+", "", line).strip()
+            if not item:
+                continue
+            if item.startswith("|"):
+                continue
+            if not item.endswith((".", "!", "?")):
+                item += "."
+            lines.append(f"- {item}")
+        return "\n".join(lines)
+    blob = re.sub(r"\s+", " ", raw).strip()
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", blob) if s.strip()]
+    if len(sentences) <= 1 and len(blob) <= 240:
+        return blob
+    out: list[str] = []
+    for sentence in sentences:
+        item = re.sub(r"^(?:\s*[-*]\s+)+", "", sentence).strip()
+        if not item:
+            continue
+        if not item.endswith((".", "!", "?")):
+            item += "."
+        out.append(f"- {item}")
+    return "\n".join(out)
 
 
 def _sync_labeled_fee_subtotal(text: str, fees: float) -> str:
@@ -917,6 +1392,130 @@ def _sync_labeled_fee_subtotal(text: str, fees: float) -> str:
         r"\*{0,2})(\s*[:—-]\s*)\$[\d,]+(?:\.\d{2})?",
         _repl,
         text,
+    )
+
+
+_MENU_ID_PREFIX_RE = re.compile(r"^\d+\.\d+\s+")
+_GUIDE_MENU_PHASE: dict[int, str] = {
+    1: "Discovery & Research",
+    2: "Strategy",
+    3: "Creative",
+    4: "Digital",
+    5: "Content & Social",
+    6: "Media",
+    7: "Production",
+    8: "Analytics",
+    9: "Project Management",
+}
+
+
+def _scrub_internal_budget_jargon(text: str) -> str:
+    """Remove KB / internal pricing references from client-facing budget prose."""
+    if not text:
+        return text
+    out = text
+    out = re.sub(r"00[_\s-]?Guide[_\s-]?Pricing", "zö agency fee schedule", out, flags=re.I)
+    out = re.sub(
+        r"(?i)Rates follow zö'?s Industry (?:Low|Average|High) pricing guide[^\n.]*\.?\s*",
+        "",
+        out,
+    )
+    out = re.sub(
+        r"(?i)(?:per|from|using)\s+zö agency fee schedule(?:\s*\([^)]*\))?",
+        "",
+        out,
+    )
+    out = re.sub(
+        r"(?i)Industry (?:Low|Average|High)(?:\s+tier)?",
+        "published",
+        out,
+    )
+    out = re.sub(
+        r"(?is)\*?Rates are fully burdened agency work rates[^*]*\*?\s*",
+        "",
+        out,
+    )
+    # Footnote prose only — never strip intentional [MANUAL FILL: …] handoff tags.
+    out = re.sub(
+        r"(?i)\bblank cells are MANUAL FILL[^\n.]*\.?\s*",
+        "",
+        out,
+    )
+    out = re.sub(r"(?i)\bSonja\b", "agency leadership", out)
+    out = re.sub(r"(?i)agency commission revenue", "professional fees", out)
+    out = re.sub(r"(?i)\(base year\)", "", out)
+    out = re.sub(r"(?i), not agency revenue", "", out)
+    out = re.sub(r"(?i)not agency revenue", "not professional fees", out)
+    out = re.sub(r"\[PRICING FLAG:[^\]]+\]", "", out, flags=re.I)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def _client_deliverable_label(description: str) -> str:
+    """Strip internal menu ids — keep human deliverable names only."""
+    desc = (description or "").strip()
+    desc = _MENU_ID_PREFIX_RE.sub("", desc).strip()
+    return desc or "Professional services"
+
+
+def _client_phase_from_deliverable(description: str, *, fallback: str = "Professional Services") -> str:
+    match = re.match(r"^(\d+)\.", (description or "").strip())
+    if match:
+        return _GUIDE_MENU_PHASE.get(int(match.group(1)), fallback)
+    return fallback
+
+
+def _professional_zo_budget_framing(*, client_name: str = "") -> str:
+    buyer = client_name.strip() or "the client"
+    return (
+        f"zö agency proposes transparent, fixed project fees for this engagement with {buyer}. "
+        "Fees reflect the scope described in this proposal; reimbursable travel is billed at cost "
+        "with prior approval."
+    )
+
+
+def _professional_zo_budget_terms() -> str:
+    return (
+        "### Investment Framing\n\n"
+        "- zö agency prices this work as defined project phases with clear deliverables "
+        "and predictable totals aligned to the RFP pricing table.\n\n"
+        "### Scope Protection\n\n"
+        "- Fees reflect the scope at proposal stage.\n"
+        "- Material scope changes are documented and approved in writing before additional fees apply.\n\n"
+        "### Reimbursables\n\n"
+        "- Approved travel and pass-through costs are billed at cost with prior written approval."
+    )
+
+
+def normalize_fixed_pricing_narrative(
+    budget: ProposalBudget,
+    *,
+    rfp_text: str = "",
+) -> ProposalBudget:
+    """Drop hourly-table prose when the RFP requires a fixed Pricing Table."""
+    from app.services.proposal_budget_format_judge import rfp_indicates_fixed_pricing_table
+
+    if (budget.budget_format or "").casefold() != "phased":
+        return budget
+    if not rfp_indicates_fixed_pricing_table(rfp_text):
+        return budget
+    ql = _scrub_internal_budget_jargon(budget.qualifying_language or "")
+    scope = _scrub_internal_budget_jargon(budget.scope_summary or "")
+    if not ql.strip() or any(
+        token in (budget.qualifying_language or "").casefold()
+        for token in ("hourly", "00_guide", "pricing guide", "industry low", "industry average")
+    ):
+        ql = _professional_zo_budget_terms()
+    if not scope.strip() or any(
+        token in (budget.scope_summary or "").casefold()
+        for token in ("hourly", "00_guide", "pricing guide", "industry low", "industry average")
+    ):
+        scope = _professional_zo_budget_framing()
+    return budget.model_copy(
+        update={
+            "qualifying_language": ql[:2000],
+            "scope_summary": scope[:2000],
+        }
     )
 
 
@@ -989,7 +1588,7 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
             cleaned.qualifying_language or "",
             fees=fees,
             direct=reimbursables,
-            total=agency_revenue if agency_revenue > 0 else display_total,
+            total=display_total,
         )
         ql = _scrub_unverified_benchmark_clients(ql)
         scope = _scrub_unverified_benchmark_clients(scope)
@@ -1010,11 +1609,22 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
             updates.get("qualifying_language", cleaned.qualifying_language or "")
         ):
             updates["qualifying_language"] = synced_ql
+        formatted_ql = format_qualifying_language_for_client(
+            updates.get("qualifying_language", cleaned.qualifying_language or ""),
+            line_items=list(cleaned.line_items or []),
+            total=display_total,
+        )
+        if formatted_ql != (
+            updates.get("qualifying_language", cleaned.qualifying_language or "")
+        ):
+            updates["qualifying_language"] = formatted_ql
     opt = (cleaned.option_term_notes or "").strip()
     if opt:
         # Internal jargon only — no topic/keyword rewrites of fee structure.
         opt2 = opt.replace("agency revenue estimate", "proposed fees")
         opt2 = opt2.replace("Agency revenue estimate", "Proposed fees")
+        opt2 = re.sub(r"(?i)agency commission revenue", "professional fees", opt2)
+        opt2 = re.sub(r"(?i)not agency revenue", "not professional fees", opt2)
         if agency_revenue > 0 and len(_parse_dollar_amounts(opt2)) == 1:
             opt2 = _sync_narrative_total(
                 opt2,
@@ -1027,8 +1637,31 @@ def prepare_budget_for_client_display(budget: ProposalBudget) -> ProposalBudget:
         if opt2 != opt:
             updates["option_term_notes"] = opt2
     if not updates:
+        cleaned = cleaned.model_copy(
+            update={
+                "scope_summary": _scrub_internal_budget_jargon(cleaned.scope_summary or ""),
+                "qualifying_language": _scrub_internal_budget_jargon(
+                    cleaned.qualifying_language or ""
+                ),
+                "option_term_notes": _scrub_internal_budget_jargon(
+                    cleaned.option_term_notes or ""
+                ),
+            }
+        )
         return cleaned
-    return cleaned.model_copy(update=updates)
+    cleaned = cleaned.model_copy(update=updates)
+    cleaned = cleaned.model_copy(
+        update={
+            "scope_summary": _scrub_internal_budget_jargon(cleaned.scope_summary or ""),
+            "qualifying_language": _scrub_internal_budget_jargon(
+                cleaned.qualifying_language or ""
+            ),
+            "option_term_notes": _scrub_internal_budget_jargon(
+                cleaned.option_term_notes or ""
+            ),
+        }
+    )
+    return cleaned
 
 
 def _client_line_label(item: BudgetLineItem) -> tuple[str, str]:
@@ -1038,6 +1671,9 @@ def _client_line_label(item: BudgetLineItem) -> tuple[str, str]:
     keyword-guessing the description.
     """
     desc = (item.description or "").strip()
+    if desc.startswith("[MANUAL FILL"):
+        phase = _phase_label_for_line(item)
+        return phase, desc
     # Strip internal source footnotes without keyword topic matching.
     if "*(Source:" in desc or "* (Source:" in desc:
         cut = desc.find("*(Source:")
@@ -1045,9 +1681,10 @@ def _client_line_label(item: BudgetLineItem) -> tuple[str, str]:
             cut = desc.find("* (Source:")
         if cut >= 0:
             desc = desc[:cut].strip().rstrip("*").strip()
+    desc = _client_deliverable_label(desc)
     cat = (item.category or "").strip() or "Fees"
 
-    phase = _phase_label_for_line(item)
+    phase = _client_phase_from_deliverable(item.description or "", fallback=_phase_label_for_line(item))
     generic = not desc or desc.casefold() in {
         "budget line item",
         "labor",
@@ -1103,10 +1740,16 @@ def render_budget_markdown(
     budget = prepare_budget_for_client_display(budget)
     lines: list[str] = []
     fmt = (budget.budget_format or "").casefold()
-    wants_form = fmt == "blended_rate_form" or rfp_wants_blended_pricing_form(rfp_text)
+    wants_personnel = fmt == "personnel_loading"
+    wants_form = not wants_personnel and fmt == "blended_rate_form"
     strict_form = wants_form and rfp_forbids_quotation_form_changes(rfp_text)
 
-    if wants_form:
+    if wants_personnel:
+        lines.append(
+            render_personnel_loading_form_markdown(budget, rfp_text=rfp_text).rstrip()
+        )
+        lines.append("")
+    elif wants_form:
         lines.append(
             render_pricing_proposal_form_markdown(budget, rfp_text=rfp_text).rstrip()
         )
@@ -1127,11 +1770,10 @@ def render_budget_markdown(
                 f"**Client media pass-through (net): {_usd(passthrough)}**"
             )
         lines.append(f"**Total proposed investment: {_usd(total)}**")
-        if budget.pricing_tier:
-            lines.append(
-                f"Rates follow zö's Industry {budget.pricing_tier} pricing guide "
-                f"for comparable municipal / education marketing engagements."
-            )
+        lines.append(
+            "zö agency structures fees as transparent project phases aligned to the scope "
+            "outlined in this proposal."
+        )
         if passthrough > 0:
             lines.append(
                 "Media placements billed as client pass-through at net — "
@@ -1148,10 +1790,12 @@ def render_budget_markdown(
         lines.append(scope)
         lines.append("")
 
-    ql = (budget.qualifying_language or "").strip()
+    ql = format_qualifying_language_for_client(
+        (budget.qualifying_language or "").strip(),
+        line_items=list(budget.line_items or []),
+        total=total,
+    )
     if ql:
-        if len(ql) > 1600:
-            ql = ql[:1600].rsplit(".", 1)[0].strip() + "."
         if strict_form:
             lines.append(
                 "> Supporting terms only — not part of the official Pricing/Quotation form."
@@ -1162,7 +1806,7 @@ def render_budget_markdown(
         lines.append(ql)
         lines.append("")
 
-    if budget.line_items:
+    if budget.line_items and not wants_personnel:
         heading = (
             "## Fee Detail by Phase" if not wants_form else "## Supporting Fee Detail"
         )
@@ -1190,6 +1834,8 @@ def render_budget_markdown(
     if opt:
         opt2 = opt.replace("agency revenue estimate", "proposed fees")
         opt2 = opt2.replace("Agency revenue estimate", "Proposed fees")
+        opt2 = re.sub(r"(?i)agency commission revenue", "professional fees", opt2)
+        opt2 = re.sub(r"(?i)not agency revenue", "not professional fees", opt2)
         # Incomplete fragments (one short line, one dollar) confuse reviewers — omit.
         amounts = _parse_dollar_amounts(opt2)
         if len(opt2) < 160 and len(amounts) <= 1:
@@ -1201,7 +1847,11 @@ def render_budget_markdown(
             lines.append(opt2)
             lines.append("")
 
-    return "\n".join(lines).strip() + "\n"
+    rendered = "\n".join(lines).strip() + "\n"
+    from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
+
+    rendered = scrub_client_facing_section_artifacts(rendered)
+    return _scrub_internal_budget_jargon(rendered) + "\n"
 
 
 def render_embedded_budget_table_markdown(budget: ProposalBudget) -> str:
@@ -1226,11 +1876,6 @@ def render_embedded_budget_table_markdown(budget: ProposalBudget) -> str:
         lines.append(f"**Client media pass-through (net):** {_usd(passthrough)}")
     if total is not None:
         lines.append(f"**Total proposed investment:** {_usd(total)}")
-    if budget.pricing_tier:
-        lines.append(
-            f"Rates follow zö's Industry **{budget.pricing_tier}** pricing guide "
-            "for comparable municipal marketing engagements."
-        )
     lines.append("")
     if budget.line_items:
         lines.append("### Fee Detail by Phase")
@@ -1251,7 +1896,11 @@ def render_embedded_budget_table_markdown(budget: ProposalBudget) -> str:
         grand = round(subtotal + direct, 2)
         lines.append(f"| **Total** | | **{_usd(grand)}** |")
         lines.append("")
-    return "\n".join(lines).strip() + "\n"
+    rendered = "\n".join(lines).strip() + "\n"
+    from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
+
+    rendered = scrub_client_facing_section_artifacts(rendered)
+    return _scrub_internal_budget_jargon(rendered) + "\n"
 
 
 _EXISTING_BUDGET_BLOCK_RE = re.compile(
@@ -1578,13 +2227,18 @@ def reshape_budget_for_rfp_form(
     *,
     rfp_text: str,
 ) -> ProposalDraft | None:
-    """If THIS RFP wants a 3-rate form, rewrite Budget to lead with that form.
+    """Rewrite Budget to lead with the pricing agent's budgetFormat instrument.
 
-    Never overwrite an already-filled official RFQ / Quotation pricing form tab —
-    that is how Complete & Clean wiped DuPage contact fields into [Contact Name].
+    Supports blended 3-rate forms and multi-role personnel_loading hourly tables.
+    Never overwrite an already-filled official RFQ / Quotation pricing form tab.
     """
-    if not budget or not rfp_wants_blended_pricing_form(rfp_text):
+    if not budget:
         return None
+    fmt = (budget.budget_format or "").casefold()
+    if fmt not in {"personnel_loading", "blended_rate_form"}:
+        return None
+    wants_personnel = fmt == "personnel_loading"
+    wants_blended = fmt == "blended_rate_form"
     idx = find_budget_section_index(draft.sections)
     if idx is None:
         return None
@@ -1593,26 +2247,45 @@ def reshape_budget_for_rfp_form(
         target.content or ""
     ):
         return None
-    updated_budget = budget.model_copy(update={"budget_format": "blended_rate_form"})
-    content = render_budget_markdown(updated_budget, rfp_text=rfp_text)
+    content = render_budget_markdown(budget, rfp_text=rfp_text)
     sections = list(draft.sections)
     sections[idx] = sections[idx].model_copy(
         update={"content": content, "status": "generated"}
     )
-    form_md = render_pricing_proposal_form_markdown(updated_budget, rfp_text=rfp_text)
-    for i, section in enumerate(sections):
-        title = (section.title or "").casefold()
-        if section.id == "rfp-closing-pricing-form" or "pricing proposal form" in title:
-            if section_looks_like_official_pricing_form(section) and official_pricing_form_is_filled(
-                section.content or ""
-            ):
-                continue
-            sections[i] = section.model_copy(
-                update={"content": form_md, "status": "generated"}
-            )
-            break
+    if wants_blended and not wants_personnel:
+        form_md = render_pricing_proposal_form_markdown(budget, rfp_text=rfp_text)
+        for i, section in enumerate(sections):
+            title = (section.title or "").casefold()
+            if section.id == "rfp-closing-pricing-form" or "pricing proposal form" in title:
+                if section_looks_like_official_pricing_form(section) and official_pricing_form_is_filled(
+                    section.content or ""
+                ):
+                    continue
+                sections[i] = section.model_copy(
+                    update={"content": form_md, "status": "generated"}
+                )
+                break
     now = datetime.now(timezone.utc).isoformat()
     return draft.model_copy(update={"sections": sections, "updated_at": now})
+
+
+def apply_rfp_required_budget_instrument(
+    draft: ProposalDraft,
+    budget: ProposalBudget,
+    *,
+    rfp_text: str,
+) -> tuple[ProposalDraft, ProposalBudget, bool]:
+    """Render Cost Proposal from the pricing agent's budgetFormat (Generate + Scan).
+
+    Returns (draft, budget, changed). Does not override format via RFP synonym regex.
+    """
+    fmt = (budget.budget_format or "").casefold()
+    if fmt not in {"personnel_loading", "blended_rate_form"}:
+        return draft, budget, False
+    reshaped = reshape_budget_for_rfp_form(draft, budget, rfp_text=rfp_text)
+    if reshaped is None:
+        return draft, budget, False
+    return reshaped, budget, True
 
 
 async def incorporate_budget_into_draft(
@@ -1631,6 +2304,7 @@ async def incorporate_budget_into_draft(
     if not draft:
         return None
 
+    budget = normalize_fixed_pricing_narrative(budget, rfp_text=rfp_text)
     content = render_budget_markdown(budget, rfp_text=rfp_text)
     now = datetime.now(timezone.utc).isoformat()
     sections = list(draft.sections)

@@ -614,6 +614,52 @@ def derive_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | 
     return max(0, min(5, int((earned / possible) * 5 + 0.5)))
 
 
+def calibrate_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | None:
+    """Raise understated technical scores when KB proof is strong but uneven.
+
+    Raw ratio scoring can land at 2/5 when several core craft rows are verified
+    (campaign case studies, media bios) while evaluation-only sub-asks stay gap.
+    The rubric calls for ~3/5 when craft is evidenced with real gaps, and ~4/5
+    when multiple delivery rows align with the RFP's core scope.
+    """
+    base = derive_technical_capability_score(rows)
+    if base is None:
+        return None
+
+    craft_cores = [
+        row
+        for row in rows
+        if row.is_core
+        and (row.category or "service").casefold() in _TECHNICAL_SCORE_CATEGORIES
+    ]
+    if not craft_cores:
+        return base
+
+    verified = sum(1 for row in craft_cores if row.status == "verified")
+    partial = sum(1 for row in craft_cores if row.status == "partial")
+    evidenced = verified + partial
+    ratio = evidenced / len(craft_cores)
+
+    service_verified = sum(
+        1
+        for row in craft_cores
+        if row.status == "verified"
+        and (row.category or "service").casefold() in {"service", "technical"}
+    )
+
+    floor = base
+    if ratio >= 0.4 and verified >= 2:
+        floor = max(floor, 3)
+    if service_verified >= 2 and ratio >= 0.35:
+        floor = max(floor, 3)
+    if ratio >= 0.55 and verified >= 3:
+        floor = max(floor, 4)
+    if service_verified >= 3 and ratio >= 0.45:
+        floor = max(floor, 4)
+
+    return max(0, min(5, floor))
+
+
 def derive_resource_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | None:
     """Score 0-5 from role / logistics evidence (staffing, presence, assignments)."""
     if not rows:

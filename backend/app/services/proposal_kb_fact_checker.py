@@ -429,11 +429,8 @@ async def _repair_bio_subsection_block(
     heading: str,
     block: str,
 ) -> tuple[str, int]:
-    """Fill VERIFY tags in one bio subsection; also rewrite Role-on-engagement
-    blurbs so they cannot invent titles or sector specializations.
-    """
-    role_layer = "role" in heading.casefold() and "engagement" in heading.casefold()
-    if "[VERIFY:" not in block and not _INSUFFICIENT_EVIDENCE_RE.search(block) and not role_layer:
+    """Fill VERIFY tags in one bio subsection. Do not LLM-expand Role lines from 04_Bio."""
+    if "[VERIFY:" not in block and not _INSUFFICIENT_EVIDENCE_RE.search(block):
         return block, 0
 
     query = _kb_query_for_bio_subsection(member, heading)
@@ -491,10 +488,7 @@ async def _repair_bio_subsection_block(
 async def _fact_check_bio_subsections(
     section: ProposalSection,
 ) -> tuple[ProposalSection, int, list[str]]:
-    """Fill VERIFY tags, and always ground Role-on-this-engagement blurbs to 04_Bio.
-
-    Source bio PDF body is not rewritten here; engagement-specific role narrative is.
-    """
+    """Fill VERIFY tags in bio subsections. Do not fetch 04_Bio to expand Role lines."""
     if not section.id.startswith("section-2-bio"):
         return section, 0, []
 
@@ -510,12 +504,7 @@ async def _fact_check_bio_subsections(
         rebuilt.append(preamble)
 
     for heading, block in blocks:
-        role_layer = "role" in heading.casefold() and "engagement" in heading.casefold()
-        if (
-            "[VERIFY:" not in block
-            and not _INSUFFICIENT_EVIDENCE_RE.search(block)
-            and not role_layer
-        ):
+        if "[VERIFY:" not in block and not _INSUFFICIENT_EVIDENCE_RE.search(block):
             rebuilt.append(block)
             continue
         new_block, fills = await _repair_bio_subsection_block(
@@ -1021,6 +1010,17 @@ async def _fact_check_one_section(
     """Fact-check a single section; returns section + per-section report deltas."""
     report = FactCheckReport(sections_checked=1)
     current = section
+    from app.services.proposal_bio_stub import skip_inline_bio_expansion
+
+    if (
+        (current.id or "").startswith("section-2-bio")
+        and current.id != "section-2-bio-placeholder"
+        and skip_inline_bio_expansion(rfp_context or "")
+    ):
+        report.logs.append(
+            f"{section.title}: skipped KB fact-check (designer-note bio stub)"
+        )
+        return current, report
     mapped = _resolve_mapped_section(section, research)
     requirements = _requirements_for_section(section, mapped)
     retrieval_focus = list(mapped.retrieval_focus) if mapped else []

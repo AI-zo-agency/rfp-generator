@@ -103,8 +103,16 @@ PHASE 3 — Map every RFP deliverable to a Pricing Guide line item as a PHASE / 
   (RFP §6.2 Item 1)"). NEVER use bare "Strategy Lead — Name" as the only description.
 - category = phase name (Discovery / Strategy / Tactical Plan / Roadmap / etc.)
 - namedPerson / roleTitle are optional staffing notes — not a substitute for the deliverable label.
-- Prefer budgetFormat=phased (or service_menu) unless THIS RFP explicitly requires personnel_loading
-  hours tables or a blended_rate_form.
+- Prefer budgetFormat=phased (or service_menu) UNLESS THIS RFP explicitly requires:
+  (a) personnel_loading — hourly rates BY ROLE / labor category (often with Year-2 / Year-3 % increases), OR
+  (b) blended_rate_form — a single hourly / monthly / annual block.
+- When THIS RFP asks for a role-by-role hourly table, budgetFormat MUST be personnel_loading.
+  Emit one agency_fee lineItem per RFP-named role with unit=hours (quantity may be 1 for rate display),
+  rate = guide labor-category hourly, roleTitle = exact RFP role label. Put Year-2 / Year-3 % in
+  optionTermNotes (e.g. "Year-2 increase: 3%. Year-3 increase: 3%."). Do NOT substitute a
+  fixed-fee / monthly retainer phase table for that instrument — evaluators score the hourly table.
+- budgetFormat is AUTHORITATIVE for the manuscript Cost section. Downstream renderers will not
+  second-guess it with keyword scans — choose the format that matches THIS RFP's scored instrument.
 - One guide line → one lineItem. rateSource cites the menu id + tier (e.g. "1.1 — Average").
 
 Category 01 — Discovery & Research
@@ -292,15 +300,17 @@ PHASE 6 — Client-facing copy (MUST be short and clear for the buyer):
   (+ directExpensesTotal if used). Never cite a second conflicting dollar total.
 - No internal jargon (no "guide line", "Sonja", "00_Guide_Pricing", "agency revenue estimate",
   "double-count").
-- qualifyingLanguage: four SHORT blocks (2–3 sentences each) — Investment Framing, Scope Protection,
-  Reimbursables, Revision Rounds. Plain English a procurement officer can skim in under a minute.
+- qualifyingLanguage: four SHORT markdown blocks — ### Investment Framing, ### Scope Protection,
+  ### Reimbursable Expenses, ### Revision Rounds. Each block: 1–2 bullets OR a mix table
+  (| Component | Share | Amount | Notes |). NEVER one wall paragraph of percentages and dollars.
+  Plain English a procurement officer can skim in under a minute.
 - rfpBudgetNotes: optional one short paragraph OR empty — never a multi-page methodology essay.
 - lineItem descriptions: phase + deliverable tied to RFP items. Put guide citations in rateSource only.
 - Do NOT write long "build-out" prose that re-explains every math step in the section narrative.
 - optionTermNotes: client language only ("proposed fees") — never "agency revenue estimate".
 
-PHASE 6b — qualifyingLanguage MUST include all four blocks (short form):
-Investment Framing, Scope Protection, Reimbursable Expenses, Revision Rounds (use KB guide wording when present).
+PHASE 6b — qualifyingLanguage MUST include all four blocks as markdown headings + bullets/tables
+(not one paragraph): Investment Framing, Scope Protection, Reimbursable Expenses, Revision Rounds.
 qualifyingLanguage MUST use the SAME pricingTier selected in PHASE 2 — never mention a different tier as "baseline."
 
 MATH (mandatory — verify before returning):
@@ -638,6 +648,116 @@ _FALLBACK_LABELS = (
     "Digital",
     "Project Management",
 )
+
+
+def _personnel_loading_missing_bindable_hourly(
+    budget: ProposalBudget,
+    rate_card: Any | None,
+) -> bool:
+    """True when personnel_loading has role rows but no guide hourly rates to bind."""
+    if (budget.budget_format or "").casefold() != "personnel_loading":
+        return False
+    from app.services.pricing_rate_card_builder import bindable_rates
+
+    hourly_card = [
+        r for r in bindable_rates(rate_card or None) if getattr(r, "unit", "") == "hour"
+    ]
+    if hourly_card:
+        return False
+    labor_lines = [
+        item
+        for item in budget.line_items
+        if (item.role_title or "").strip()
+        or (item.unit or "").casefold() in {"hour", "hours", "hr", "hrs"}
+    ]
+    if not labor_lines:
+        return False
+    return all(
+        (item.rate is None or float(item.rate or 0) <= 0)
+        and (item.extended is None or float(item.extended or 0) <= 0)
+        for item in labor_lines
+    )
+
+
+def coerce_budget_to_phased_from_guide(
+    budget: ProposalBudget,
+    rate_card: Any | None,
+    *,
+    rfp_text: str = "",
+    reason: str = "",
+) -> tuple[ProposalBudget, list[str]]:
+    """Rebuild as phased fixed fees when hourly personnel_loading cannot be grounded."""
+    from app.models.pricing_rate_card import PricingRateCard
+    from app.services.proposal_budget_content import _professional_zo_budget_terms
+    from app.services.proposal_budget_format_judge import rfp_indicates_fixed_pricing_table
+    from app.services.proposal_budget_validation import infer_line_item_type
+
+    logs: list[str] = []
+    fmt = (budget.budget_format or "phased").casefold()
+    labor_stubs = [
+        item
+        for item in budget.line_items
+        if (item.role_title or "").strip()
+        or (item.unit or "").casefold() in {"hour", "hours", "hr", "hrs"}
+    ]
+    all_labor_unpriced = bool(labor_stubs) and all(
+        (item.rate is None or float(item.rate or 0) <= 0)
+        and (item.extended is None or float(item.extended or 0) <= 0)
+        for item in labor_stubs
+    )
+    needs_phased = all_labor_unpriced and (
+        fmt == "personnel_loading"
+        or rfp_indicates_fixed_pricing_table(rfp_text)
+        or _personnel_loading_missing_bindable_hourly(budget, rate_card)
+    )
+    if not needs_phased:
+        return budget, logs
+
+    card = rate_card if isinstance(rate_card, PricingRateCard) else None
+    skeleton = skeleton_line_items_from_rate_card(card)
+    if not skeleton:
+        logs.append("Budget coerce skipped — no guide-backed skeleton line items.")
+        return budget, logs
+
+    direct_lines = [
+        item
+        for item in budget.line_items
+        if infer_line_item_type(item) in {"direct_expense", "client_passthrough"}
+        and float(item.extended or item.rate or 0) > 0
+    ]
+
+    flags = list(budget.pricing_flags or [])
+    detail = reason or (
+        "RFP fixed Pricing Table / no hourly rates in 00_Guide_Pricing"
+    )
+    flag = (
+        "[PRICING FLAG: Cost instrument rebuilt as phased fixed fees from "
+        f"00_Guide_Pricing — {detail}.]"
+    )
+    if flag not in flags:
+        flags.append(flag)
+
+    scope = (
+        f"zö agency proposes transparent, fixed project fees structured for this "
+        f"engagement. Complete the official Pricing Table attachment per RFP Section VI."
+    )
+
+    qualifying = _professional_zo_budget_terms()
+
+    logs.append(
+        "Budget: coerced personnel_loading → phased fixed fees from 00_Guide_Pricing."
+    )
+    return budget.model_copy(
+        update={
+            "budget_format": "phased",
+            "line_items": [*skeleton, *direct_lines],
+            "pricing_flags": flags,
+            "scope_summary": scope[:2000],
+            "qualifying_language": qualifying[:2000],
+            "option_term_notes": "",
+            "fee_structure": "fixed phased fees",
+        }
+    ), logs
 
 
 def skeleton_line_items_from_rate_card(rate_card: Any) -> list[BudgetLineItem]:
@@ -1096,6 +1216,15 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             "plain fee names — no long math essays or internal Sonja/guide jargon in narrative fields.",
         ]
     )
+    from app.services.proposal_budget_format_judge import rfp_indicates_fixed_pricing_table
+
+    if rfp_indicates_fixed_pricing_table(rfp_context):
+        user_content += (
+            "\n\n=== FIXED PRICING INSTRUMENT (deterministic) ===\n"
+            "This RFP requires FIXED pricing via Pricing Table / Cost Proposal attachment — "
+            "NOT a scored hourly labor-category table. Use budgetFormat=phased with "
+            "project/deliverable line items priced from 00_Guide_Pricing tier ranges."
+        )
 
     messages = [
         {"role": "system", "content": STAGE3_BUDGET_PROMPT},
@@ -1210,6 +1339,28 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         apply_constraints_to_budget_fields,
         extract_rfp_money_constraints,
     )
+    forced_format = str(raw.get("budgetFormat") or "phased")
+    try:
+        from app.services.proposal_budget_format_judge import (
+            align_budget_format_to_judgment,
+            judge_rfp_budget_format,
+        )
+
+        judgment = await judge_rfp_budget_format(rfp_context)
+        aligned, changed = align_budget_format_to_judgment(forced_format, judgment)
+        if changed:
+            logger.info(
+                "Pricing budgetFormat judged %s → %s (%s)",
+                forced_format,
+                aligned,
+                judgment.reason[:120],
+            )
+            forced_format = aligned
+            flags.append(
+                f"[PRICING FLAG: Cost instrument aligned to RFP judge → {aligned}]"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Budget format judge skipped during pricing for %s: %s", rfp_id, exc)
 
     money_constraints = extract_rfp_money_constraints(rfp_context)
     budget = ProposalBudget(
@@ -1218,7 +1369,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         rfpBudgetNotes=str(raw.get("rfpBudgetNotes") or "")[:4000],
         feeStructure=str(raw.get("feeStructure") or ""),
         pricingTier=str(raw.get("pricingTier") or "Average"),
-        budgetFormat=str(raw.get("budgetFormat") or "phased"),
+        budgetFormat=forced_format,
         formHourlyRate=(
             float(raw["formHourlyRate"])
             if isinstance(raw.get("formHourlyRate"), (int, float))
@@ -1310,6 +1461,19 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         rate_card=rate_card,
     )
 
+    budget, coerce_logs = coerce_budget_to_phased_from_guide(
+        budget, rate_card, rfp_text=rfp_context
+    )
+    for line in coerce_logs:
+        logger.info("Pricing coerce for %s: %s", rfp_id, line)
+    if coerce_logs:
+        budget = run_budget_editor_pass(
+            budget,
+            rfp_sections=prior_research.rfp_sections if prior_research else [],
+            rfp_context=rfp_context,
+            rate_card=rate_card,
+        )
+
     # Phase 3.5a — adversarial grounding audit (RFP requirement + guide SKU per line).
     grounding_rows, audit_flags = await _run_budget_grounding_audit(
         rfp_title=rfp.title,
@@ -1340,9 +1504,13 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         **summarize_budget(budget),
     )
 
-    from app.services.proposal_budget_content import prepare_budget_for_client_display
+    from app.services.proposal_budget_content import (
+        normalize_fixed_pricing_narrative,
+        prepare_budget_for_client_display,
+    )
 
     budget = prepare_budget_for_client_display(budget)
+    budget = normalize_fixed_pricing_narrative(budget, rfp_text=rfp_context)
 
     revenue = float(budget.agency_revenue_estimate or 0)
     if revenue <= 0 and (

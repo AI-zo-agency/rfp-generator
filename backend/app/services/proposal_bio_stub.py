@@ -64,6 +64,26 @@ def is_bio_stub_section(section_id: str, content: str | None = None) -> bool:
     return is_bio_pdf_designer_note(content) or not (content or "").strip()
 
 
+def extract_engagement_role(content: str) -> str:
+    """One-line Role-on-this-engagement from a bio tab. Drops dumped resume prose."""
+    match = re.search(
+        r"(?im)^\*\*Role on this engagement:\*\*\s*(.+)$",
+        content or "",
+    )
+    if not match:
+        return ""
+    role = match.group(1).strip()
+    parts = re.split(r"(?<=\w)[.;]\s+", role, maxsplit=1)
+    if len(parts) == 2 and 0 < len(parts[0]) <= 80:
+        role = parts[0].strip()
+    return role[:160]
+
+
+def skip_inline_bio_expansion(rfp_text: str) -> bool:
+    """True when Generate must not fetch/rewrite 04_Bio into the manuscript."""
+    return not rfp_requires_inline_bios(rfp_text or "")
+
+
 def rfp_requires_inline_bios(rfp_text: str) -> bool:
     """Conservative: default False (PDF/attachment OK). True only on clear inline asks."""
     text = rfp_text or ""

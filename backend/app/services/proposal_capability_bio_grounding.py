@@ -66,24 +66,17 @@ Rules:
 Return JSON: {"content": "...", "changed": true/false, "notes": "one line"}
 """
 
-_BIO_GROUND_SYSTEM = """You fix ONE team bio so it matches the 04_Bio KB source ONLY.
+_BIO_GROUND_SYSTEM = """You fix ONE team bio tab. Default is a designer-note stub,
+not a rewritten resume.
 
 Rules:
-- Years of experience: use ONLY numbers stated in the KB. Never inflate
-  (e.g. KB says 10 years → draft must not say 12). If KB says 12 years, keep 12.
-- If KB lists skill categories (Management 30 years, Creative 20 years), keep that
-  breakdown — do NOT paraphrase as a larger total "marketing industry experience"
-  that invents a career-span total the KB does not state.
-- Sector specialization (government, municipal, enterprise integration, accessibility
-  compliance, etc.): keep ONLY if the KB uses that language. Otherwise omit it.
-- NEVER leave a named person with only a Role line. If the 04_Bio KB has facts,
-  write 2–4 client-facing sentences using ONLY those facts (years, tools, markets
-  the KB actually names). Never invent government/municipal/enterprise-integration
-  specialization the KB does not state. If the KB is empty for that person, keep
-  the Role line and add [VERIFY: restore bio from 04_Bio] — do not invent years.
+- Unless the user/RFP requires inline resumes, keep ### Name, **Role on this
+  engagement** (one line), and [DESIGNER NOTE: Insert approved bio PDF — 04_Bio_*.pdf].
+  Do NOT paste Work History, Key Accounts, years tables, or 04_Bio PDF body.
+- Years / specialization: never inflate or invent. If any prose remains, numbers
+  must match 04_Bio exactly.
 - Keep **Role on this engagement** if present. Do not invent clients, awards, or
   citation markers like [E3].
-- Do not replace a bio with a designer-note stub when KB text is available.
 Return JSON: {"content": "...", "changed": true/false, "notes": "one line"}
 """
 
@@ -493,16 +486,17 @@ async def ground_bios_to_kb(
     del rfp_id, use_llm  # bios are stub-only; capability LLM is a separate pass
     from app.services.proposal_bio_stub import (
         expected_bio_pdf_filename,
+        extract_engagement_role,
         format_bio_stub_content,
-        is_bio_pdf_designer_note,
-        rfp_requires_inline_bios,
+        skip_inline_bio_expansion,
     )
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
 
     logs: list[str] = []
     sections: list[ProposalSection] = []
     changed = False
-    inline_required = rfp_requires_inline_bios(rfp_text)
+    if not skip_inline_bio_expansion(rfp_text):
+        return draft, logs
 
     for section in draft.sections:
         sid = section.id or ""
@@ -516,14 +510,10 @@ async def ground_bios_to_kb(
             continue
 
         body = section.content or ""
-        if is_bio_pdf_designer_note(body) and not inline_required:
-            sections.append(section)
-            continue
-
         pdf = expected_bio_pdf_filename(member)
         stub = format_bio_stub_content(
             member=member,
-            role="",
+            role=extract_engagement_role(body),
             pdf_filename=pdf,
             kb_available=True,
             inline_required=False,
@@ -540,6 +530,37 @@ async def ground_bios_to_kb(
     if not changed:
         return draft, logs
     return draft.model_copy(update={"sections": sections}), logs
+
+
+async def persist_collapsed_bio_stubs(
+    rfp_id: str,
+    *,
+    draft: ProposalDraft | None = None,
+    rfp_text: str = "",
+) -> tuple[ProposalDraft | None, list[str]]:
+    """Cheap no-LLM collapse of Section 2 resume dumps → designer-note stubs.
+
+    Safe on Continue Proposal / phase start / pipeline end. Does not fetch 04_Bio.
+    """
+    from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
+
+    current = draft
+    if current is None:
+        current = await aget_proposal_draft(rfp_id)
+    if current is None:
+        return None, []
+    text = rfp_text or ""
+    if not text.strip():
+        try:
+            from app.services.proposal_common import load_rfp_for_proposal
+
+            text = load_rfp_for_proposal(rfp_id)[2] or ""
+        except Exception:  # noqa: BLE001
+            text = ""
+    updated, logs = await ground_bios_to_kb(current, rfp_text=text, use_llm=False)
+    if logs:
+        await asave_proposal_draft(updated)
+    return updated, logs
 
 
 async def run_capability_bio_grounding(

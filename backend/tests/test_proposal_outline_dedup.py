@@ -7,10 +7,10 @@ import unittest
 from app.services.proposal_outline_dedup import (
     filter_lean_outline_sections,
     is_generic_filler_outline_title,
-    is_important_or_closing_outline_title,
     is_pricing_outline_title,
     merge_closing_components_into_outline,
     outline_titles_near_duplicate,
+    section_protect_from_cap,
 )
 
 
@@ -20,6 +20,22 @@ class OutlineDedupTests(unittest.TestCase):
             outline_titles_near_duplicate(
                 "Technical Approach",
                 "Technical Approach & Methodology",
+            )
+        )
+
+    def test_hourly_cost_not_near_dup_of_phased_budget(self) -> None:
+        self.assertFalse(
+            outline_titles_near_duplicate(
+                "Cost Proposal — Hourly Rates by Labor Category",
+                "Budget & Pricing",
+                instrument_a="cost",
+                instrument_b="narrative",
+            )
+        )
+        self.assertTrue(
+            outline_titles_near_duplicate(
+                "Cost Proposal — Hourly Rates by Labor Category",
+                "Budget & Pricing",
             )
         )
 
@@ -39,7 +55,15 @@ class OutlineDedupTests(unittest.TestCase):
         self.assertFalse(
             is_generic_filler_outline_title("Sample Work Portfolio — Public Awareness")
         )
-        self.assertTrue(is_important_or_closing_outline_title("Offeror Commitment & Closing Statement"))
+        self.assertTrue(
+            section_protect_from_cap(
+                {
+                    "title": "Offeror Commitment & Closing Statement",
+                    "protectFromCap": True,
+                    "submissionInstrument": "form",
+                }
+            )
+        )
 
     def test_filter_drops_static_and_near_dups(self) -> None:
         sections = [
@@ -228,22 +252,32 @@ class OutlineDedupTests(unittest.TestCase):
         )
 
     def test_merge_closing_adds_only_what_the_rfp_requires(self) -> None:
-        """Deliberate change: no unrequested commitment/closing section.
+        """Ledger authority: only fixture rows are added (no forced commitment)."""
+        from app.services.proposal_closing_ledger import ledger_from_fixture
 
-        This RFP asks for references and addenda acknowledgement. It never asks
-        for a closing statement, so the outline must not gain one — under a page
-        limit that section displaces content the RFP does require.
-        """
         sections = [
             {"id": "rfp-sec-1", "title": "Technical Approach & Scope of Work", "required": True},
         ]
-        rfp = (
-            "Provide three customer references with phone and email.\n"
-            "Proposer must acknowledge all addenda.\n"
+        ledger = ledger_from_fixture(
+            [
+                {
+                    "id": "references",
+                    "title": "References",
+                    "kind": "form",
+                    "sectionId": "rfp-closing-references",
+                },
+                {
+                    "id": "addenda_acknowledgement",
+                    "title": "Acknowledgement of Addenda",
+                    "kind": "form",
+                    "sectionId": "rfp-closing-addenda",
+                },
+            ]
         )
         merged, added = merge_closing_components_into_outline(
             sections,
-            rfp_context=rfp,
+            rfp_context="Provide three customer references. Proposer must acknowledge all addenda.",
+            ledger=ledger,
         )
         titles = [
             (s.title if hasattr(s, "title") else s.get("title")) for s in merged
@@ -362,6 +396,36 @@ class OutlineDedupTests(unittest.TestCase):
         titles = {s.title for s in kept}
         self.assertIn("References Form", titles)
         self.assertIn("Technical Approach & Methodology", titles)
+
+    def test_hard_cap_never_drops_cost_instrument(self) -> None:
+        from app.services.proposal_outline_dedup import enforce_outline_section_cap
+        from app.services.proposal_intelligence.schemas import OutlineSection
+
+        sections = [
+            OutlineSection(id=f"s{i}", title=f"Filler Narrative Tab {i}", order=i)
+            for i in range(1, 12)
+        ]
+        sections[0] = OutlineSection(
+            id="cost",
+            title="Cost Proposal — Hourly Rate Schedule",
+            order=1,
+            required=True,
+            protectFromCap=True,
+            submissionInstrument="cost",
+        )
+        sections[1] = OutlineSection(
+            id="ai",
+            title="Generative AI Disclosure",
+            order=2,
+            required=True,
+            protectFromCap=True,
+            submissionInstrument="disclosure",
+        )
+        kept, dropped = enforce_outline_section_cap(sections, 8)
+        titles = {s.title for s in kept}
+        self.assertIn("Cost Proposal — Hourly Rate Schedule", titles)
+        self.assertIn("Generative AI Disclosure", titles)
+        self.assertTrue(any("Filler" in d for d in dropped))
 
     def test_stamp_ignores_single_token_overlap(self) -> None:
         from app.services.proposal_outline_dedup import stamp_outline_evaluation_weights

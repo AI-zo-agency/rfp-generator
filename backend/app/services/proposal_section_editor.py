@@ -76,8 +76,10 @@ from app.services.proposal_budget_playbook import (
 )
 from app.services.proposal_budget_content import (
     budget_section_score,
+    canonical_budget_summary_figures,
     fill_section_budget_verify_from_canonical,
     insert_budget_table_into_section,
+    normalize_fixed_pricing_narrative,
     reconcile_draft_budget_summaries,
     render_budget_markdown,
     render_embedded_budget_table_markdown,
@@ -4044,10 +4046,25 @@ async def _bio_kb_context_for_section(
     user_message: str = "",
 ) -> str:
     """Authoritative 04_Bio PDF text for team bios and Experience of Personnel tabs."""
+    from app.services.proposal_bio_stub import is_bio_pdf_designer_note
     from app.services.proposal_capability_bio_grounding import (
         is_personnel_bio_section,
         pack_04_bio_kb_for_section,
     )
+
+    wants_full_bio = bool(
+        re.search(
+            r"\b(resume|full bio|inline bio|work history|key accounts)\b",
+            user_message or "",
+            re.I,
+        )
+    )
+    if (
+        (section.id or "").startswith("section-2-bio")
+        and is_bio_pdf_designer_note(section.content or "")
+        and not wants_full_bio
+    ):
+        return ""
 
     if is_personnel_bio_section(section):
         packed = await pack_04_bio_kb_for_section(
@@ -5157,8 +5174,18 @@ async def _persist_section_improve_draft(
     section_title: str,
 ) -> ProposalDraft:
     """Save improved manuscript + an After snapshot so versions keep chat content."""
-    to_save = push_after_section_edit_snapshot(
+    from app.services.proposal_zero_fabrication import (
+        apply_zero_fabrication_guards_before_persist,
+    )
+
+    guarded, _report = await apply_zero_fabrication_guards_before_persist(
         updated_draft,
+        research=research,
+        budget=research.budget if research else None,
+        label="chat-persist",
+    )
+    to_save = push_after_section_edit_snapshot(
+        guarded,
         section_title=section_title,
     )
     await asave_proposal_draft(to_save)
@@ -5370,6 +5397,413 @@ async def _try_budget_summary_reconcile(
     return focus, updated_draft, research, provider, reply, True
 
 
+def _budget_section_chat_would_freeform_edit(
+    *,
+    chat_intent: str,
+    user_message: str,
+    conversation_history: list[dict[str, str]] | None,
+) -> bool:
+    if chat_intent in {"single_edit", "multi_patch"}:
+        return True
+    if chat_intent in {"advisory", "structure"}:
+        return False
+    return _wants_section_edit(user_message, conversation_history=conversation_history)
+
+
+async def _apply_budget_section_canonical_refresh(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    rfp_text: str,
+    persist: bool,
+    reply_hint: str = "",
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+]:
+    provider = _provider_name()
+    if research is None:
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+    canonical = research.budget if research else None
+    if canonical is None or not (canonical.line_items or []):
+        return (
+            section,
+            draft,
+            research,
+            provider,
+            (
+                f"**{section.title}** — I can't refresh fees yet because there is no "
+                "canonical Stage 3.5 budget. Run **Budget build** or ask to rebuild "
+                "Cost Proposal from the pricing guide first."
+            ),
+            False,
+        )
+
+    budget = normalize_fixed_pricing_narrative(canonical, rfp_text=rfp_text)
+    content = render_budget_markdown(budget, rfp_text=rfp_text)
+    working = section.model_copy(update={"content": content, "status": "generated"})
+    merged = [working if s.id == section_id else s for s in draft.sections]
+    now = datetime.now(timezone.utc).isoformat()
+    updated_draft = draft.model_copy(
+        update={"sections": merged, "updated_at": now, "provider": provider}
+    )
+    if persist:
+        updated_draft = await _persist_section_improve_draft(
+            updated_draft,
+            research,
+            section_title=section.title,
+        )
+        working = _find_draft_section(updated_draft, section_id) or working
+
+    figs = canonical_budget_summary_figures(budget)
+    n_items = len(budget.line_items or [])
+    reply = (
+        f"**{section.title}** — refreshed from the canonical Stage 3.5 fee ledger "
+        f"(${figs['total']:,.2f} total; {n_items} line item(s)). "
+        "Cost Proposal is rendered from verified phase fees — chat does not invent "
+        "hourly rates or rewrite the fee table. For a full pricing rebuild, ask to "
+        "**rebuild Cost Proposal from the pricing guide**."
+    )
+    if reply_hint.strip():
+        reply = f"{reply}\n\n{reply_hint.strip()}"
+    return working, updated_draft, research, provider, reply, True
+
+
+def _budget_manual_fill_tags(
+    section: ProposalSection,
+    research: ProposalResearchCache | None,
+) -> list:
+    from app.services.proposal_manual_flags import extract_manual_fill_tags
+
+    seen: set[str] = set()
+    tags = []
+    for blob in (section.content or "",):
+        for tag in extract_manual_fill_tags(blob):
+            if tag.text not in seen:
+                seen.add(tag.text)
+                tags.append(tag)
+    budget = research.budget if research else None
+    if budget is not None:
+        for item in budget.line_items or []:
+            for field in (item.description or "", item.notes or ""):
+                for tag in extract_manual_fill_tags(field):
+                    if tag.text not in seen:
+                        seen.add(tag.text)
+                        tags.append(tag)
+    return tags
+
+
+async def _try_budget_manual_fill_handoff(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    rfp_context: str,
+    rfp_text: str,
+    persist: bool,
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+] | None:
+    """Resolve or honestly surface confirm-before-submit MANUAL FILL rows on Cost tabs."""
+    from app.services.proposal_manual_flags import (
+        is_manual_fill_request,
+        user_asks_submit_handoff_fill,
+    )
+
+    ask = (user_message or "").strip()
+    if not section_is_budget_related(section):
+        return None
+    if not (is_manual_fill_request(ask) or user_asks_submit_handoff_fill(ask)):
+        return None
+
+    tags = _budget_manual_fill_tags(section, research)
+    if not tags:
+        return None
+
+    mfill = await _try_manual_fill_resolution(
+        rfp_id=rfp_id,
+        section=section,
+        section_id=section_id,
+        draft=draft,
+        research=research,
+        user_message=ask,
+        rfp_context=rfp_context,
+        persist=False,
+    )
+    if mfill is not None:
+        working, updated_draft, research, provider, reply, changed = mfill
+        if changed:
+            if persist:
+                updated_draft = await _persist_section_improve_draft(
+                    updated_draft,
+                    research,
+                    section_title=section.title,
+                )
+                working = _find_draft_section(updated_draft, section_id) or working
+            return working, updated_draft, research, provider, reply, True
+
+    # Could not invent values — re-render fee table with handoff tags intact.
+    refresh = await _apply_budget_section_canonical_refresh(
+        rfp_id=rfp_id,
+        section=section,
+        section_id=section_id,
+        draft=draft,
+        research=research,
+        user_message=ask,
+        rfp_text=rfp_text,
+        persist=persist,
+        reply_hint="",
+    )
+    working, updated_draft, research, provider, _, changed = refresh
+    open_tags = [t.text for t in _budget_manual_fill_tags(working, research)]
+    reply = (
+        f"**{section.title}** — {len(open_tags)} confirm-before-submit item(s) still "
+        "need Sonja / KB before submission (not invented):\n"
+        + "\n".join(f"- {tag}" for tag in open_tags[:8])
+    )
+    if len(open_tags) > 8:
+        reply += f"\n- …and {len(open_tags) - 8} more"
+    reply += (
+        "\n\nProvide the value in chat or add the fact to Supermemory — "
+        "I will not invent media base or commission dollars."
+    )
+    return working, updated_draft, research, provider, reply, changed
+
+
+async def _try_budget_section_canonical_refresh(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    chat_intent: str,
+    conversation_history: list[dict[str, str]] | None,
+    rfp_text: str,
+    persist: bool,
+    selection_mode: bool,
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+] | None:
+    """Re-render Cost / Budget tabs from Stage 3.5 — never freeform LLM fee invention."""
+    if selection_mode or not section_is_budget_related(section):
+        return None
+    ask = (user_message or "").strip()
+    if user_asks_budget_rebuild(ask) or user_asks_global_cost_rebuild(ask):
+        return None
+    if user_asks_budget_summary_reconcile(ask):
+        return None
+    if user_asked_reverse_engineered_total(ask):
+        return None
+    from app.services.proposal_manual_flags import (
+        extract_manual_fill_tags,
+        is_manual_fill_request,
+        user_asks_submit_handoff_fill,
+    )
+
+    if is_manual_fill_request(ask) or user_asks_submit_handoff_fill(ask):
+        return None
+    if extract_manual_fill_tags(section.content or ""):
+        return None
+    if not _budget_section_chat_would_freeform_edit(
+        chat_intent=chat_intent,
+        user_message=ask,
+        conversation_history=conversation_history,
+    ):
+        return None
+
+    hint = ""
+    if ask:
+        hint = (
+            f"*(Your ask: “{ask[:160]}” — applied as a canonical fee-table refresh, "
+            "not a free rewrite.)*"
+        )
+    return await _apply_budget_section_canonical_refresh(
+        rfp_id=rfp_id,
+        section=section,
+        section_id=section_id,
+        draft=draft,
+        research=research,
+        user_message=ask,
+        rfp_text=rfp_text,
+        persist=persist,
+        reply_hint=hint,
+    )
+
+
+async def _try_forms_attachments_integrity_repair(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    persist: bool,
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+] | None:
+    """Audit + repair all forms-table status claims against the manuscript in one pass."""
+    from app.services.proposal_forms_attachments_integrity import (
+        audit_and_repair_forms_attachments,
+        format_forms_integrity_reply,
+        section_is_forms_attachments,
+    )
+
+    if not section_is_forms_attachments(section):
+        return None
+    if not _wants_section_edit(user_message or ""):
+        return None
+
+    provider = _provider_name()
+    if research is None:
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+
+    result = await audit_and_repair_forms_attachments(
+        section.content or "",
+        draft=draft,
+        research=research,
+    )
+
+    if not result.findings and not result.changed:
+        return (
+            section,
+            draft,
+            research,
+            provider,
+            format_forms_integrity_reply(result, section_title=section.title or ""),
+            False,
+        )
+
+    working = section.model_copy(
+        update={"content": result.content, "status": "generated"}
+    )
+    merged = [working if s.id == section_id else s for s in draft.sections]
+    now = datetime.now(timezone.utc).isoformat()
+    updated_draft = draft.model_copy(
+        update={"sections": merged, "updated_at": now, "provider": provider}
+    )
+    if persist:
+        updated_draft = await _persist_section_improve_draft(
+            updated_draft,
+            research,
+            section_title=section.title,
+        )
+        working = _find_draft_section(updated_draft, section_id) or working
+
+    reply = format_forms_integrity_reply(result, section_title=section.title or "")
+    return working, updated_draft, research, provider, reply, result.changed
+
+
+async def _try_section_cert_claim_scrub(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    persist: bool,
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+] | None:
+    """Deterministic cert scrub when user asks to remove false/unverified certifications."""
+    from app.services.proposal_cert_claim_scrub import (
+        scrub_section_cert_claims,
+        user_asks_cert_claim_scrub,
+    )
+
+    ask = (user_message or "").strip()
+    if not user_asks_cert_claim_scrub(ask):
+        return None
+
+    provider = _provider_name()
+    if research is None:
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+
+    scrubbed, logs = scrub_section_cert_claims(section)
+    if not logs and (scrubbed.content or "") == (section.content or ""):
+        return (
+            section,
+            draft,
+            research,
+            provider,
+            (
+                f"**{section.title}** — reviewed certification claims against the verified "
+                "agency list (WBENC, WOSB, publicly verifiable B Corp). No MBE/DBE/standalone "
+                "WBE or unverified badges remain to remove."
+            ),
+            False,
+        )
+
+    working = scrubbed.model_copy(update={"status": "generated"})
+    merged = [working if s.id == section_id else s for s in draft.sections]
+    now = datetime.now(timezone.utc).isoformat()
+    updated_draft = draft.model_copy(
+        update={"sections": merged, "updated_at": now, "provider": provider}
+    )
+    if persist:
+        updated_draft = await _persist_section_improve_draft(
+            updated_draft,
+            research,
+            section_title=section.title,
+        )
+        working = _find_draft_section(updated_draft, section_id) or working
+
+    reply = (
+        f"**{section.title}** — removed fabricated / unverified certification claims "
+        f"({len(logs)} change(s)). Kept only verified agency credentials: WBENC/WOSB and "
+        "publicly verifiable B Corp where present. "
+        + "; ".join(logs[:4])
+        + ("…" if len(logs) > 4 else "")
+    )
+    return working, updated_draft, research, provider, reply, True
+
+
 async def _try_section_budget_table_insert(
     *,
     rfp_id: str,
@@ -5395,8 +5829,24 @@ async def _try_section_budget_table_insert(
     if not user_asks_insert_budget_table(ask):
         return None
     if section_is_budget_related(section):
-        # Cost Proposal tab → Stage 3.5 path handles full rebuilds.
-        return None
+        from app.services.go_no_go_service import combine_rfp_text
+        from app.services.proposal_common import load_rfp_for_proposal
+
+        _, content_info, rfp_ctx = load_rfp_for_proposal(rfp_id)
+        rfp_body = combine_rfp_text(content_info.description, content_info.pdf_text)
+        return await _apply_budget_section_canonical_refresh(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=ask,
+            rfp_text=rfp_body or rfp_ctx or "",
+            persist=persist,
+            reply_hint=(
+                "Inserted/refreshed the fee table from the canonical Stage 3.5 budget."
+            ),
+        )
 
     provider = _provider_name()
     if research is None:
@@ -6053,6 +6503,59 @@ async def improve_proposal_section(
     except Exception as exc:  # noqa: BLE001
         logger.warning("section_chat_evidence_gate failed rfp_id=%s: %s", rfp_id, exc)
 
+    # Structural merge: keep one tab's body under another title, delete orphan duplicate.
+    from app.services.proposal_section_merge import (
+        apply_section_merge,
+        format_merge_reply,
+        plan_section_merge,
+    )
+
+    merge_plan = plan_section_merge(
+        draft,
+        raw_user_message,
+        open_section_id=section_id,
+    )
+    if merge_plan is not None and not selection_mode:
+        provider = _provider_name()
+        if research is None:
+            research = ProposalResearchCache(
+                rfpId=rfp_id,
+                updatedAt=datetime.now(timezone.utc).isoformat(),
+                provider=provider,
+            )
+        updated_draft, focus, merge_logs = apply_section_merge(draft, merge_plan)
+        from app.services.proposal_forms_attachments_integrity import (
+            audit_and_repair_forms_attachments,
+            section_is_forms_attachments,
+        )
+
+        if section_is_forms_attachments(focus):
+            forms_fix = await audit_and_repair_forms_attachments(
+                focus.content or "",
+                draft=updated_draft,
+                research=research,
+            )
+            if forms_fix.changed:
+                focus = focus.model_copy(update={"content": forms_fix.content})
+                updated_draft = updated_draft.model_copy(
+                    update={
+                        "sections": [
+                            focus if s.id == focus.id else s
+                            for s in updated_draft.sections
+                        ]
+                    }
+                )
+                merge_logs.extend(forms_fix.fix_logs)
+        if persist:
+            updated_draft = await _persist_section_improve_draft(
+                updated_draft,
+                research,
+                section_title=focus.title,
+            )
+            focus = _find_draft_section(updated_draft, focus.id) or focus
+        reply = format_merge_reply(merge_logs, focus_title=focus.title or "")
+        return _improve_outcome(focus, updated_draft, research, provider, reply, True)
+
     # Powerful chat ops: duplicate audit / fabrication purge (content → RFP → KB)
     from app.services.proposal_chat_ops import classify_chat_op, run_chat_ops
 
@@ -6375,6 +6878,28 @@ async def improve_proposal_section(
                 )
                 if offer_form_fill is not None:
                     return (*offer_form_fill, None)
+                forms_integrity = await _try_forms_attachments_integrity_repair(
+                    rfp_id=rfp_id,
+                    section=early_section,
+                    section_id=section_id,
+                    draft=draft,
+                    research=research,
+                    user_message=raw_user_message,
+                    persist=persist,
+                )
+                if forms_integrity is not None:
+                    return (*forms_integrity, None)
+                cert_scrub = await _try_section_cert_claim_scrub(
+                    rfp_id=rfp_id,
+                    section=early_section,
+                    section_id=section_id,
+                    draft=draft,
+                    research=research,
+                    user_message=raw_user_message,
+                    persist=persist,
+                )
+                if cert_scrub is not None:
+                    return (*cert_scrub, None)
 
         if chat_intent == "multi_patch":
             from app.services.proposal_chat_content_repair import (
@@ -6883,6 +7408,66 @@ async def improve_proposal_section(
         )
         if offer_form_fill is not None:
             return (*offer_form_fill, None)
+
+    if not selection_mode:
+        forms_integrity = await _try_forms_attachments_integrity_repair(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=latest_user_ask,
+            persist=persist,
+        )
+        if forms_integrity is not None:
+            return (*forms_integrity, None)
+
+    if not selection_mode:
+        cert_scrub = await _try_section_cert_claim_scrub(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=latest_user_ask,
+            persist=persist,
+        )
+        if cert_scrub is not None:
+            return (*cert_scrub, None)
+
+    if not selection_mode:
+        from app.services.go_no_go_service import combine_rfp_text
+
+        budget_handoff = await _try_budget_manual_fill_handoff(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=latest_user_ask,
+            rfp_context=rfp_context or "",
+            rfp_text=combine_rfp_text(_content.description, _content.pdf_text),
+            persist=persist,
+        )
+        if budget_handoff is not None:
+            return (*budget_handoff, None)
+
+    if not selection_mode:
+        canon_refresh = await _try_budget_section_canonical_refresh(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=latest_user_ask,
+            chat_intent=chat_intent,
+            conversation_history=conversation_history,
+            rfp_text=rfp_context or "",
+            persist=persist,
+            selection_mode=selection_mode,
+        )
+        if canon_refresh is not None:
+            return (*canon_refresh, None)
 
     # Budget/fee edits on the Cost Proposal tab: Stage 3.5 agent.
     # Never steal a case-study "fill budget part" / "implement table here" ask.
@@ -8218,6 +8803,51 @@ async def improve_proposal_section(
             "kb_refs": [],
         }
     )
+    if re.search(
+        r"certif|forms.*attach|supplier\s+diversity",
+        f"{updated_section.title or ''}\n{updated_section.content or ''}",
+        re.I,
+    ):
+        from app.services.proposal_cert_claim_scrub import scrub_section_cert_claims
+
+        cert_scrubbed, cert_logs = scrub_section_cert_claims(updated_section)
+        if cert_logs:
+            updated_section = cert_scrubbed.model_copy(
+                update={
+                    "content": scrub_client_facing_section_artifacts(
+                        cert_scrubbed.content or ""
+                    )
+                }
+            )
+            logger.info(
+                "post_llm_cert_scrub section_id=%s logs=%s",
+                section_id,
+                cert_logs,
+            )
+    from app.services.proposal_forms_attachments_integrity import (
+        audit_and_repair_forms_attachments,
+        section_is_forms_attachments,
+    )
+
+    if section_is_forms_attachments(updated_section):
+        forms_result = await audit_and_repair_forms_attachments(
+            updated_section.content or "",
+            draft=draft,
+            research=research,
+        )
+        if forms_result.changed:
+            updated_section = updated_section.model_copy(
+                update={
+                    "content": scrub_client_facing_section_artifacts(
+                        forms_result.content
+                    )
+                }
+            )
+            logger.info(
+                "post_llm_forms_integrity section_id=%s fixes=%s",
+                section_id,
+                forms_result.fix_logs,
+            )
     # Case-study body swapped (e.g. Umatilla → San Leandro) must update the sidebar title.
     updated_section = sync_case_study_title_from_content(updated_section)
     try:

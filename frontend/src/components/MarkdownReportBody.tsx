@@ -3,6 +3,7 @@ import { humanizeGapTag, isManualFillTag } from "@/lib/gap-tag-humanize";
 type Block =
   | { type: "heading"; level: number; text: string }
   | { type: "table"; headers: string[]; rows: string[][] }
+  | { type: "table_raw"; lines: string[] }
   | { type: "list"; ordered: boolean; items: string[] }
   | { type: "paragraph"; text: string }
   | { type: "designer_note"; text: string }
@@ -182,8 +183,138 @@ function parseTableRow(line: string): string[] {
     .map((cell) => cell.trim());
 }
 
+function normalizeTableRows(headers: string[], rows: string[][]): string[][] {
+  const colCount = Math.max(headers.length, 1);
+  return rows.map((row) => {
+    if (row.length === colCount) {
+      return row;
+    }
+    if (row.length < colCount) {
+      return [...row, ...Array(colCount - row.length).fill("")];
+    }
+    const head = row.slice(0, colCount - 1);
+    head.push(row.slice(colCount - 1).join(" | "));
+    return head;
+  });
+}
+
+/** "P H A S E" spacing from bad LLM exports → "PHASE". */
+function normalizeTableCellLabel(text: string): string {
+  const t = (text || "").trim();
+  if (!t) return t;
+  const parts = t.split(/\s+/).filter(Boolean);
+  if (parts.length >= 3 && parts.every((p) => p.length === 1)) {
+    return parts.join("");
+  }
+  return t;
+}
+
+function TableRawFallback({ lines }: { lines: string[] }) {
+  return (
+    <div className="my-4 overflow-x-auto rounded-xl border border-zo-border bg-white p-4">
+      <pre className="m-0 whitespace-pre-wrap font-sans text-[13px] leading-relaxed text-foreground">
+        {lines.join("\n")}
+      </pre>
+    </div>
+  );
+}
+
+function ProposalTable({
+  headers,
+  rows,
+  compact,
+  highlights,
+  blockIndex,
+}: {
+  headers: string[];
+  rows: string[][];
+  compact: boolean;
+  highlights: string[];
+  blockIndex: number;
+}) {
+  const cellPad = compact ? "px-3 py-2.5" : "px-4 py-3";
+  const headPad = compact ? "px-3 py-2" : "px-4 py-2.5";
+  const textSize = compact ? "text-sm" : "text-[13px]";
+  return (
+    <div className="my-4 overflow-x-auto rounded-xl border border-zo-border bg-white">
+      <table className={`w-full min-w-[480px] border-collapse text-left ${textSize}`}>
+        <thead>
+          <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-xs uppercase tracking-wide text-zo-text-muted">
+            {headers.map((header, headerIndex) => (
+              <th
+                key={`${blockIndex}-h-${headerIndex}`}
+                className={`min-w-[5.5rem] max-w-[22rem] align-top whitespace-normal ${headPad} font-bold`}
+              >
+                {renderInline(header, highlights)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr
+              key={rowIndex}
+              className="border-b border-zo-border/60 align-top last:border-0"
+            >
+              {row.map((cell, cellIndex) => (
+                <td
+                  key={cellIndex}
+                  className={`min-w-[5.5rem] max-w-[22rem] align-top whitespace-normal ${cellPad} ${
+                    compact ? "text-zo-text-secondary" : ""
+                  }`}
+                >
+                  {renderInline(cell, highlights)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function sanitizeTableBlock(
+  headers: string[],
+  rows: string[][],
+  rawLines: string[]
+): { headers: string[]; rows: string[][] } | { type: "raw"; lines: string[] } {
+  const h = headers.map(normalizeTableCellLabel);
+  const r = rows.map((row) => row.map(normalizeTableCellLabel));
+
+  const singleCharCols = h.filter((c) => c.length === 1).length;
+  const tooManyCols = h.length > 12;
+  const spacedLetterHeader =
+    h.length >= 4 &&
+    singleCharCols / h.length > 0.45 &&
+    h.filter((c) => c.length === 1).join("").length >= 3;
+
+  if (tooManyCols || spacedLetterHeader) {
+    return { type: "raw", lines: rawLines };
+  }
+
+  return { headers: h, rows: normalizeTableRows(h, r) };
+}
+
+function expandInlineTableLines(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed.includes("|")) return line;
+      const pipes = trimmed.match(/\|/g)?.length ?? 0;
+      // LLM often emits header + separator + rows on one line — split row boundaries.
+      if (pipes < 6) return line;
+      let expanded = trimmed.replace(/\|\s*\|(?=\s*[-:–—])/g, "|\n|");
+      expanded = expanded.replace(/\|\s+(?=\|)/g, "|\n|");
+      return expanded;
+    })
+    .join("\n");
+}
+
 function parseBlocks(body: string): Block[] {
-  const lines = body.replace(/\r\n/g, "\n").split("\n");
+  const normalized = expandInlineTableLines(body.replace(/\r\n/g, "\n"));
+  const lines = normalized.split("\n");
   const blocks: Block[] = [];
   let index = 0;
 
@@ -223,7 +354,16 @@ function parseBlocks(body: string): Block[] {
       if (dataLines.length > 0) {
         const headers = parseTableRow(dataLines[0]);
         const rows = dataLines.slice(1).map(parseTableRow);
-        blocks.push({ type: "table", headers, rows });
+        const sanitized = sanitizeTableBlock(headers, rows, tableLines);
+        if ("type" in sanitized && sanitized.type === "raw") {
+          blocks.push({ type: "table_raw", lines: sanitized.lines });
+        } else {
+          blocks.push({
+            type: "table",
+            headers: sanitized.headers,
+            rows: sanitized.rows,
+          });
+        }
       }
       continue;
     }
@@ -424,32 +564,20 @@ export function MarkdownReportBody({
             return <h4 key={index}>{renderInline(block.text, highlights)}</h4>;
           }
 
+          if (block.type === "table_raw") {
+            return <TableRawFallback key={index} lines={block.lines} />;
+          }
+
           if (block.type === "table") {
             return (
-              <div key={index} className="my-4 overflow-x-auto rounded-xl border border-zo-border bg-white">
-                <table className="w-full min-w-[520px] text-left text-[13px]">
-                  <thead>
-                    <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-xs uppercase tracking-wide text-zo-text-muted">
-                      {block.headers.map((header, headerIndex) => (
-                        <th key={`${index}-h-${headerIndex}`} className="px-4 py-2.5 font-bold">
-                          {renderInline(header, highlights)}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {block.rows.map((row, rowIndex) => (
-                      <tr key={rowIndex} className="border-b border-zo-border/60 align-top last:border-0">
-                        {row.map((cell, cellIndex) => (
-                          <td key={cellIndex} className="px-4 py-3">
-                            {renderInline(cell, highlights)}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <ProposalTable
+                key={index}
+                blockIndex={index}
+                headers={block.headers}
+                rows={block.rows}
+                compact={false}
+                highlights={highlights}
+              />
             );
           }
 
@@ -522,38 +650,20 @@ export function MarkdownReportBody({
           );
         }
 
+        if (block.type === "table_raw") {
+          return <TableRawFallback key={index} lines={block.lines} />;
+        }
+
         if (block.type === "table") {
           return (
-            <div key={index} className="overflow-x-auto rounded-lg border border-zo-border">
-              <table className="w-full min-w-[520px] text-left text-sm">
-                <thead>
-                  <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-xs uppercase tracking-wide text-zo-text-muted">
-                    {block.headers.map((header, headerIndex) => (
-                      <th key={`${index}-h-${headerIndex}`} className="px-3 py-2 font-bold">
-                        {renderInline(header, highlights)}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {block.rows.map((row, rowIndex) => (
-                    <tr
-                      key={rowIndex}
-                      className="border-b border-zo-border/60 align-top last:border-0"
-                    >
-                      {row.map((cell, cellIndex) => (
-                        <td
-                          key={cellIndex}
-                          className="px-3 py-2.5 text-zo-text-secondary"
-                        >
-                          {renderInline(cell, highlights)}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <ProposalTable
+              key={index}
+              blockIndex={index}
+              headers={block.headers}
+              rows={block.rows}
+              compact
+              highlights={highlights}
+            />
           );
         }
 

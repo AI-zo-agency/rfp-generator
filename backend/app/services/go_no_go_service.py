@@ -41,6 +41,7 @@ from app.services.go_no_go_capability import (
     coherent_dimension_cap,
     derive_resource_capability_score,
     derive_technical_capability_score,
+    calibrate_technical_capability_score,
     gap_matrix_from_requirements,
     reconcile_narrative,
     upsert_capability_section,
@@ -2119,7 +2120,7 @@ async def _adjudicate_capabilities(
     if not requirements:
         return []
 
-    body, sources = build_adjudication_payload(
+    body, sources, full_sources = build_adjudication_payload(
         requirements, hits_by_requirement, all_hits
     )
     if not body.strip():
@@ -2171,7 +2172,7 @@ async def _adjudicate_capabilities(
         )
 
     rows, rejected, recoverable = rows_from_assessments(
-        requirements, assessments, sources
+        requirements, assessments, sources, full_sources=full_sources
     )
 
     # Second LLM pass: semantic re-check of gaps that still have retrieved docs.
@@ -2183,7 +2184,9 @@ async def _adjudicate_capabilities(
         and sources.get(getattr(r, "requirement", "") or "")
     ]
     if gap_with_docs:
-        recover_body = build_gap_recover_payload(gap_with_docs, sources)
+        recover_body = build_gap_recover_payload(
+            gap_with_docs, sources, full_sources=full_sources
+        )
         if recover_body.strip():
             try:
                 raw2, provider2 = await llm.chat_json(
@@ -2207,6 +2210,7 @@ async def _adjudicate_capabilities(
                         assessments=assessments2,
                         sources=sources,
                         requirements=requirements,
+                        full_sources=full_sources,
                     )
                     logger.info(
                         "capability gap recover for %s via %s: %d candidate(s)",
@@ -2331,7 +2335,7 @@ def _enforce_capability_evidence(
             gaps.append(gap)
 
     core_gaps = unverified_core_requirements(validated)
-    derived = derive_technical_capability_score(validated)
+    derived = calibrate_technical_capability_score(validated)
     derived_resource = derive_resource_capability_score(validated)
 
     matrix = [row.model_copy() for row in analysis.decision_matrix]
@@ -2544,7 +2548,7 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
     requirements_brief = _format_rfp_requirements_brief(
         rfp_requirements, capability_rows
     )
-    derived_tech = derive_technical_capability_score(capability_rows)
+    derived_tech = calibrate_technical_capability_score(capability_rows)
     tech_hint = (
         f"Derived Technical Capability from RFP requirement evidence: {derived_tech}/5. "
         "Set decisionMatrix Technical Capability Match to this value (or within ±0 only if "

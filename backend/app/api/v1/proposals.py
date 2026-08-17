@@ -586,9 +586,11 @@ async def match_case_studies_endpoint(rfp_id: str) -> dict[str, object]:
 async def stop_proposal_generation_endpoint(rfp_id: str) -> dict[str, object]:
     """Request cooperative stop — ends current LLM/Supermemory work and saves checkpoint."""
     from app.services.proposal_generation_cancel import request_generation_cancel
+    from app.services.proposal_job_runner import cancel_proposal_job
     from app.services.proposal_pipeline_checkpoint import record_generation_stopped
 
     request_generation_cancel(rfp_id)
+    await cancel_proposal_job(rfp_id)
     research = await aget_research_cache(rfp_id)
     phase = None
     if research and research.pipeline_checkpoint:

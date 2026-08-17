@@ -411,6 +411,25 @@ class FeeTableVsSubtotalTests(unittest.TestCase):
         self.assertTrue(any("279,800" in h for h in hits))
         self.assertTrue(any("18,000" in h or "297,800" in h for h in hits))
 
+    def test_media_placement_in_deliverable_does_not_drop_fee_rows(self) -> None:
+        text = (
+            "**Professional fees: $33,081**\n"
+            "**Client media pass-through (net): $40,540**\n"
+            "**Total proposed investment: $73,621**\n\n"
+            "## Fee Detail by Phase\n\n"
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| Strategy | Campaign plan with effective media placement guidance | $5,500 |\n"
+            "| Media Planning & Placement | Placed media buys; 85% to media placements ($40,540) | $40,540 |\n"
+            "| Media Planning & Placement | Agency commission | $6,081 |\n"
+            "| Account & Project Management | monthly media placement accuracy reports | $7,500 |\n"
+            "| Measurement & Reporting | Evaluation | $1,500 |\n"
+            "| Discovery & Research | Formative research | $6,000 |\n"
+            "| Brand Identity & Creative | Creative assets | $6,500 |\n"
+            "| **Total** | | **$73,621** |\n"
+        )
+        self.assertEqual(collect_prose_arithmetic_violations(text), [])
+
 
 if __name__ == "__main__":
     unittest.main()

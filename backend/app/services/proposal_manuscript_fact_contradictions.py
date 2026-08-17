@@ -275,6 +275,7 @@ async def run_manuscript_fact_contradiction_pass(
     *,
     rfp: RfpRecord,
     use_llm: bool = True,
+    only_rewrite_section_ids: frozenset[str] | None = None,
 ) -> ManuscriptFactContradictionResult:
     """LLM scan for internal + KB verified-fact contradictions across all sections."""
     result = ManuscriptFactContradictionResult(draft=draft)
@@ -336,10 +337,27 @@ async def run_manuscript_fact_contradiction_pass(
     fixed_ids: set[str] = set()
 
     for finding in findings:
+        if (
+            only_rewrite_section_ids is not None
+            and finding.section_id not in only_rewrite_section_ids
+        ):
+            result.logs.append(
+                f"{finding.section_id}: skipped fact-contradiction rewrite "
+                "(outside scoped track)"
+            )
+            continue
         idx = by_id.get(finding.section_id)
         if idx is None:
             continue
         section = sections[idx]
+        if (
+            (section.id or "").startswith("section-2-bio-")
+            and section.id != "section-2-bio-placeholder"
+        ):
+            result.logs.append(
+                f"{finding.section_id}: skipped fact-contradiction rewrite on bio stub"
+            )
+            continue
         if finding.severity in {"critical", "major"}:
             updated, changed, notes = await _rewrite_section_for_fact_contradiction(
                 section,

@@ -202,5 +202,87 @@ class GroundBiosStubOnlyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("04_Bio_CurtSchultz.pdf", body)
 
 
+    async def test_collapses_resume_dump_even_with_designer_note(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+        from app.services.proposal_capability_bio_grounding import ground_bios_to_kb
+
+        dump = (
+            "### Ella Lindau\n"
+            "**Role on this engagement:** Account and Operations Manager\n\n"
+            "ACCOUNT AND OPERATIONS MANAGER | 5 YEARS WITH ZÖ AGENCY\n\n"
+            "Ella Lindau oversees account operations and has led complex "
+            "client programs across healthcare and government.\n\n"
+            "[DESIGNER NOTE: Insert approved bio PDF — 04_Bio_EllaLindau.pdf. "
+            "Do not rewrite Key Accounts or work history in-manuscript.]\n"
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-bio",
+            updatedAt="2026-08-17T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="section-2-bio-ella-lindau",
+                    title="2.3 — Ella Lindau",
+                    content=dump,
+                )
+            ],
+        )
+        updated, logs = await ground_bios_to_kb(draft, use_llm=True)
+        body = updated.sections[0].content or ""
+        self.assertTrue(logs)
+        self.assertTrue(is_bio_pdf_designer_note(body))
+        self.assertIn("Account and Operations Manager", body)
+        self.assertNotIn("5 YEARS WITH ZÖ", body)
+        self.assertNotIn("healthcare and government", body)
+
+
+    async def test_persist_collapsed_bio_stubs_saves_without_llm(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+        from app.services.proposal_capability_bio_grounding import persist_collapsed_bio_stubs
+
+        dump = (
+            "### Ella Lindau\n"
+            "**Role on this engagement:** Account and Operations Manager\n\n"
+            "ACCOUNT AND OPERATIONS MANAGER | 5 YEARS WITH ZÖ AGENCY\n"
+            "Ella Lindau oversees account operations across healthcare.\n"
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-continue",
+            updatedAt="2026-08-17T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="section-2-bio-ella-lindau",
+                    title="2.3 — Ella Lindau",
+                    content=dump,
+                )
+            ],
+        )
+        saved: list[ProposalDraft] = []
+
+        async def _save(d: ProposalDraft) -> None:
+            saved.append(d)
+
+        with patch(
+            "app.services.proposal_repository.asave_proposal_draft",
+            new=AsyncMock(side_effect=_save),
+        ), patch(
+            "app.services.llm.chat_json",
+            new=AsyncMock(side_effect=AssertionError("no LLM for bio collapse")),
+        ):
+            updated, logs = await persist_collapsed_bio_stubs(
+                "rfp-continue",
+                draft=draft,
+                rfp_text="Describe qualifications.",
+            )
+        self.assertTrue(logs)
+        self.assertTrue(saved)
+        body = (updated.sections[0].content if updated else "") or ""
+        self.assertTrue(is_bio_pdf_designer_note(body))
+        self.assertNotIn("5 YEARS WITH ZÖ", body)
+
+
 if __name__ == "__main__":
     unittest.main()

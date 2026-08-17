@@ -15,7 +15,6 @@ from app.services.proposal_budget_content import (
     official_pricing_form_is_filled,
     render_budget_markdown,
     reshape_budget_for_rfp_form,
-    rfp_wants_blended_pricing_form,
     section_looks_like_official_pricing_form,
 )
 from app.services.proposal_budget_editor import run_budget_editor_pass
@@ -691,11 +690,16 @@ async def run_fulfill_budget_scan(
             "Budget: manuscript already matches reconciled totals — left Pricing/Budget tab unchanged."
         )
 
-    if needs_manuscript_refresh and rfp_wants_blended_pricing_form(rfp_text):
+    if needs_manuscript_refresh and (budget.budget_format or "").casefold() in {
+        "blended_rate_form",
+        "personnel_loading",
+    }:
         reshaped = reshape_budget_for_rfp_form(draft, budget, rfp_text=rfp_text)
         if reshaped is not None:
             draft = reshaped
-            logs.append("Budget: aligned to RFP Pricing Proposal Form (hourly / monthly / annual).")
+            logs.append(
+                f"Budget: aligned manuscript to agent budgetFormat={budget.budget_format}."
+            )
             meta["budgetChanged"] = True
 
     excerpt = evaluation_and_kpi_excerpt(rfp_text)

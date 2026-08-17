@@ -892,6 +892,57 @@ def scrub_case_study_overbuild(content: str) -> tuple[str, list[str]]:
     return cleaned, logs
 
 
+_CASE_STUDY_PERCENT_CLAIM_RE = re.compile(
+    r"(?i)"
+    r"("
+    r"(?:increased|boosted|grew|improved|raised|drove|lifted)\s+"
+    r"(?:[\w\s/-]{0,40}?)?"
+    r"(?:by|to)\s+"
+    r"\d{1,3}(?:\.\d+)?\s*%"
+    r"|"
+    r"\d{1,3}(?:\.\d+)?\s*%\s+"
+    r"(?:increase|growth|lift|improvement|rise)\b"
+    r"|"
+    r"(?:bookings?|revenue|engagement|traffic|conversions?|donations?|membership)\s+"
+    r"(?:increased|grew|up)\s+(?:by\s+)?\d{1,3}(?:\.\d+)?\s*%"
+    r")"
+)
+
+
+def scrub_ungrounded_case_study_percent_metrics(
+    content: str,
+    *,
+    source_text: str = "",
+) -> tuple[str, list[str]]:
+    """Remove invented outcome % claims when they are absent from case-study KB source.
+
+    Requires ``source_text`` — without a source we do not guess which % are real
+    (verified fundraising/membership figures must survive).
+    """
+    text = content or ""
+    src = (source_text or "").strip()
+    if not text.strip() or not src:
+        return text, []
+    logs: list[str] = []
+
+    def _keep(match: re.Match[str]) -> str:
+        claim = match.group(0)
+        nums = re.findall(r"\d{1,3}(?:\.\d+)?", claim)
+        for n in nums:
+            if re.search(rf"{re.escape(n)}\s*%", src):
+                return claim
+        logs.append(f"Removed ungrounded case-study metric: {claim[:80]}")
+        return ""
+
+    cleaned = _CASE_STUDY_PERCENT_CLAIM_RE.sub(_keep, text)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    cleaned = re.sub(r"  +", " ", cleaned)
+    if logs:
+        logger.info("case_study_metric_scrub removed=%d", len(logs))
+    return cleaned, logs
+
+
 def case_study_fidelity_ok(source_text: str, written: str) -> tuple[bool, str]:
     """Heuristic: write-up must keep real project identity from the source.
 

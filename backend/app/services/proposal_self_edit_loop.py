@@ -1076,6 +1076,16 @@ async def run_self_edit_loop(
     except ProposalError:
         raise ProposalError("RFP not found for self-edit.", status_code=404) from None
 
+    from app.services.proposal_capability_bio_grounding import persist_collapsed_bio_stubs
+
+    collapsed, bio_logs = await persist_collapsed_bio_stubs(
+        rfp_id, draft=draft, rfp_text=rfp_context or ""
+    )
+    if collapsed is not None:
+        draft = collapsed
+    for line in bio_logs[:8]:
+        logger.info("Self-edit bio stub collapse %s: %s", rfp_id, line)
+
     suite = await apply_feedback_blocker_suite(
         draft,
         rfp=rfp,
@@ -1238,6 +1248,31 @@ async def run_self_edit_loop(
     }
     verify_mid = sum(count_verify_tags(s.content or "") for s in draft.sections)
 
+    from app.services.proposal_senior_editor_coverage import (
+        apply_senior_editor_section_coverage_audit,
+    )
+
+    draft, coverage_audit_logs, mechanical_coverage = (
+        await apply_senior_editor_section_coverage_audit(
+            draft,
+            research=research,
+            rfp_text=rfp_context or "",
+            rfp_title=rfp.title or "",
+        )
+    )
+    if coverage_audit_logs:
+        await asave_proposal_draft(draft)
+        for line in coverage_audit_logs[:16]:
+            report.section_logs.append({"section": "coverage-audit", "detail": line})
+            logger.info("Senior editor coverage audit %s: %s", rfp_id, line)
+        step_trace(
+            "senior_editor_coverage_audit",
+            rfp_id=rfp_id,
+            log_count=len(coverage_audit_logs),
+            mechanical_coverage=len(mechanical_coverage),
+            samples=coverage_audit_logs[:10],
+        )
+
     ticket_coro = senior_editor_emit_tickets(
         rfp_client=rfp.client,
         rfp_title=rfp.title,
@@ -1260,6 +1295,20 @@ async def run_self_edit_loop(
     from app.services.proposal_manuscript_compact import merge_compact_tickets
 
     tickets = merge_compact_tickets(tickets, draft)
+
+    if mechanical_coverage:
+        existing = list(tickets.get("coverageTickets") or [])
+        seen_ids = {
+            str(t.get("sectionId") or "").strip()
+            for t in existing
+            if isinstance(t, dict)
+        }
+        for ticket in mechanical_coverage:
+            sid = str(ticket.get("sectionId") or "").strip()
+            if sid and sid not in seen_ids:
+                existing.append(ticket)
+                seen_ids.add(sid)
+        tickets["coverageTickets"] = existing
 
     if scrub_logs:
         draft = draft.model_copy(
@@ -1561,4 +1610,11 @@ async def run_self_edit_loop(
         report.sections_improved,
         report.stopped_reason,
     )
+    collapsed, bio_logs = await persist_collapsed_bio_stubs(
+        rfp_id, draft=draft, rfp_text=rfp_context or ""
+    )
+    if collapsed is not None:
+        draft = collapsed
+    for line in bio_logs[:8]:
+        logger.info("Self-edit end bio stub %s: %s", rfp_id, line)
     return draft, research, report

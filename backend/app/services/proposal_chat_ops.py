@@ -161,6 +161,11 @@ def classify_chat_op(user_message: str) -> ChatOpKind:
     text = (user_message or "").strip()
     if not text:
         return "none"
+    from app.services.proposal_section_merge import user_asks_structural_section_merge
+
+    # Explicit merge/delete duplicate tab — structure op, not duplicate audit.
+    if user_asks_structural_section_merge(text):
+        return "none"
     from app.services.proposal_chat_content_repair import user_asks_content_risk_repair
 
     # "check rfp what to add in that" / "revise this section" — single-tab only.

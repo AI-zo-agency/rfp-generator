@@ -54,6 +54,36 @@ _QUAL_TITLE_HINTS = (
 
 COMPANY_BLOCK_HEADER_ID = "rfp-structure-company-block-header"
 
+_POINTER_DELEGATION_RE = re.compile(
+    r"company background for this submission is sections?\s*1\.1",
+    re.IGNORECASE,
+)
+
+
+def is_pointer_only_company_delegation(content: str) -> bool:
+    """True when a tab is only a cross-ref to Sections 1–3 — not a real RFP answer."""
+    t = (content or "").strip()
+    if not t:
+        return True
+    if _POINTER_DELEGATION_RE.search(t):
+        return True
+    if "do not duplicate this block elsewhere" in t.casefold():
+        return True
+    if "covered in sections 1" in t.casefold() and len(t) < 450:
+        return True
+    if "sections 1.1–1.5 below" in t.casefold() and len(t) < 450:
+        return True
+    return False
+
+
+def _section_has_substantive_body(section: ProposalSection) -> bool:
+    from app.services.proposal_section_quality import word_count
+
+    body = (section.content or "").strip()
+    if not body or is_pointer_only_company_delegation(body):
+        return False
+    return word_count(body) >= 60
+
 
 @dataclass
 class RfpSectionSpec:
@@ -145,9 +175,12 @@ async def extract_rfp_scored_section_specs(
                         "References & Past Performance.\n"
                         "zö already keeps static company/team/experience tabs (Sections 1.1–1.5, "
                         "bios, our work). Those tabs stay as-is — do not ask to rewrite them.\n"
-                        "If a TOC item is the firm's identity already covered by those static tabs, "
-                        "set satisfiedByStaticCompanyBlock true and sameAskAs to the existing tab "
-                        "titles. That item is a header wrap, not a new essay.\n"
+                        "If a TOC item is ONLY the firm's identity block (Company Background, "
+                        "Business Information) already in 1.1–1.5, set satisfiedByStaticCompanyBlock "
+                        "true — that is a header label only.\n"
+                        "If a TOC item is a scored narrative (Background and Experience, "
+                        "Qualifications and Experience, Firm Experience), set "
+                        "satisfiedByStaticCompanyBlock false — evaluators need a full tab.\n"
                         "Dynamic tabs are whatever else THIS RFP asks the proposer to submit.\n"
                         "sameAskAs = existing draft titles that are the SAME ask by meaning — "
                         "not a keyword synonym list.\n"
@@ -348,6 +381,8 @@ def drop_duplicate_company_identity_tabs(
             continue
         if section.id == COMPANY_BLOCK_HEADER_ID:
             continue
+        if _section_has_substantive_body(section):
+            continue
         title = section.title or ""
         if is_duplicate_static_rfp_section(title):
             drop_ids.add(section.id)
@@ -404,6 +439,8 @@ def apply_rfp_toc_layout(
     logs.extend(order_logs)
     draft, wrap_logs = ensure_company_block_wrapper_heading(draft, specs)
     logs.extend(wrap_logs)
+    draft, pointer_logs = repair_pointer_only_rfp_sections(draft)
+    logs.extend(pointer_logs)
     from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
 
     collapsed, cost_logs = collapse_duplicate_cost_proposal_tabs(list(draft.sections))
@@ -453,21 +490,52 @@ def ensure_company_block_wrapper_heading(
         title=wrap_spec.rfp_title,
         content=(
             f"## {wrap_spec.rfp_title}\n\n"
-            "The company background for this submission is Sections 1.1–1.5 below "
-            "(Who We Are through Insurance Information). Team qualifications follow "
-            "in Section 2. Do not duplicate this block elsewhere."
+            "[DESIGNER NOTE: Sections 1.1–1.5 follow immediately below — "
+            "this header matches the RFP TOC label only.]"
         ),
         status="generated",
         source="generated",
         mode="write",
         required=True,
-        word_target=80,
+        word_target=40,
     )
     sections.insert(first_company, header)
     logs.append(
         f"RFP structure: labeled Sections 1.1–1.5 as “{wrap_spec.rfp_title}” "
         "(header only — company tabs unchanged)."
     )
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+
+
+def repair_pointer_only_rfp_sections(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """Replace cross-ref-only RFP tabs with draftable stubs — evaluators need substance."""
+    logs: list[str] = []
+    sections: list[ProposalSection] = []
+    changed = False
+    for section in draft.sections:
+        if _is_static_1_3_section(section) or section.id == COMPANY_BLOCK_HEADER_ID:
+            sections.append(section)
+            continue
+        body = (section.content or "").strip()
+        if not is_pointer_only_company_delegation(body):
+            sections.append(section)
+            continue
+        title = (section.title or "this section").strip()
+        replacement = (
+            f"## {title}\n\n"
+            f"[MANUAL FILL: Draft full «{title}» for this RFP. Cover every scored ask "
+            "in the RFP for this tab — firm background, relevant experience, and proof. "
+            "One brief cross-reference to Section 1 or 2 is fine; this tab must stand alone "
+            "for evaluators and may be long.]"
+        )
+        sections.append(section.model_copy(update={"content": replacement, "status": "generated"}))
+        logs.append(f"RFP structure: replaced pointer-only tab “{title}” with draft stub")
+        changed = True
+    if not changed:
+        return draft, logs
     now = datetime.now(timezone.utc).isoformat()
     return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 

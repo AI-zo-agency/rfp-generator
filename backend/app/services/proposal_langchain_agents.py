@@ -76,8 +76,11 @@ Your ONLY jobs for ONE pass over the proposal:
    compactFormatTicket: rewrite to short lead + tables/bullets + [DESIGNER NOTE] for
    layout. COMPLETE coverage is mandatory — compress FORMAT, never drop RFP asks. Skip
    form/checklist/MANUAL FILL tabs and canon Budget/Pricing / static Sections 1–3 / bio cards.
-3. RFP COVERAGE — For each mapped RFP requirement, check whether the manuscript covers it.
-   If unmet, emit a coverageTicket with unmetRequirements and a rewriteBrief for the writer.
+3. RFP COVERAGE — For EACH tab in the RFP outline / submission sequence, verify the manuscript
+   includes a matching section with substantive content (not empty, not pointer-only cross-refs
+   like "see Sections 1.1–1.5 below", not a one-line stub). If unmet, emit a coverageTicket with
+   unmetRequirements and a rewriteBrief for the writer. Proposals may be long — never recommend
+   deleting required TOC tabs to save pages.
 4. GOV / BUYER COMPLIANCE — Flag missing mandatory public-sector items THIS RFP demands
    (addenda ack, non-collusion, insurance/COI, W-9, authorized signature, pricing form,
    MCCS/state terms, validity period, tax-exempt handling, required exhibits). Emit a

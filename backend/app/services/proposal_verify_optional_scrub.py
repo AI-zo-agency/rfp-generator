@@ -27,8 +27,23 @@ _SELECTION_CRITICAL_ASK_RE = re.compile(
     r"w-?9\b|sam\.?gov|duns\b|uei\b|"
     r"reference\s+contact|references?\s+(?:with\s+)?(?:phone|email|contact)|"
     r"staffing\s+hours|percent\s*time|percent-time|%\s*time|"
-    r"gross-?receipts|not[- ]to[- ]exceed|hard\s+cap|budget\s+ceiling"
+    r"gross-?receipts|not[- ]to[- ]exceed|hard\s+cap|budget\s+ceiling|"
+    r"estimated\s+cost|estimated\s+fee|hourly\s+rate|billing\s+rate|"
+    r"unit\s+rate|labor\s+rate|dollar\s+amount|fee\s+amount|"
+    r"pass-?through|commission\s+rate"
     r")\b",
+)
+
+# Dollar/rate gaps must stay visible — never blank a cost cell.
+_MONEY_OR_RATE_ASK_RE = re.compile(
+    r"(?i)\b("
+    r"estimated\s+cost|estimated\s+fee|hourly\s+rate|billing\s+rate|"
+    r"unit\s+rate|labor\s+rate|fully[\s-]?burdened|"
+    r"dollar\s+amount|fee\s+amount|extended\s+amount|"
+    r"pass-?through|commission(?:\s+rate)?|"
+    r"not[- ]to[- ]exceed|hard\s+cap|budget\s+ceiling"
+    r")\b"
+    r"|\$\s*/\s*hr"
 )
 
 # Internal audit / nicety tags — never selection-critical; always strip.
@@ -141,6 +156,8 @@ def strip_verify_tags_not_required_by_rfp(
         if _ALWAYS_REMOVE_VERIFY_ASK_RE.search(ask):
             removed += 1
             return ""
+        if _MONEY_OR_RATE_ASK_RE.search(ask):
+            return match.group(0)
         if _SELECTION_CRITICAL_ASK_RE.search(ask) and _rfp_mandates_placeholder_ask(
             ask, rfp_cf
         ):
@@ -282,6 +299,10 @@ def _rfp_mandates_placeholder_ask(ask: str, rfp_cf: str) -> bool:
         topic_needles.extend(
             ["not to exceed", "nte", "budget ceiling", "gross receipts", "hard cap"]
         )
+    if _MONEY_OR_RATE_ASK_RE.search(ask_cf):
+        topic_needles.extend(
+            ["cost", "budget", "price", "pricing", "fee", "rate", "subcontractor"]
+        )
     if topic_needles:
         return any(n in rfp_cf for n in topic_needles)
     tokens = [
@@ -356,6 +377,8 @@ def strip_manual_fill_tags_not_required_by_rfp(
         if _ALWAYS_REMOVE_VERIFY_ASK_RE.search(ask_for_rules):
             removed += 1
             return ""
+        if _MONEY_OR_RATE_ASK_RE.search(ask_for_rules) or _MONEY_OR_RATE_ASK_RE.search(ask):
+            return tag
         if _SELECTION_CRITICAL_ASK_RE.search(ask_for_rules) and _rfp_mandates_placeholder_ask(
             ask_for_rules, rfp_cf
         ):
@@ -370,6 +393,79 @@ def strip_manual_fill_tags_not_required_by_rfp(
     return out.strip() if body.strip() else out, removed
 
 
+_EMPTY_COST_FILL = "[MANUAL FILL: estimated cost — confirm before submission]"
+_MONEY_HEADER_RE = re.compile(
+    r"(?i)\b(estimated\s+cost|cost|fee|price|pricing|rate|amount|investment)\b|\$"
+)
+_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:\-–—]+\|[\s|:\-–—]+\|?\s*$")
+
+
+def _md_table_cells(line: str) -> list[str]:
+    return [c.strip() for c in (line or "").strip().strip("|").split("|")]
+
+
+def restore_empty_money_table_cells(content: str) -> tuple[str, int]:
+    """Put a visible MANUAL FILL back in blank cost/fee/rate table cells."""
+    lines = (content or "").splitlines()
+    if not lines:
+        return content or "", 0
+    out: list[str] = []
+    restored = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if "|" not in line or _TABLE_SEP_RE.match(line):
+            out.append(line)
+            index += 1
+            continue
+        block = [line]
+        cursor = index + 1
+        while cursor < len(lines) and "|" in lines[cursor]:
+            block.append(lines[cursor])
+            cursor += 1
+        data = [row for row in block if not _TABLE_SEP_RE.match(row)]
+        if len(data) < 2:
+            out.extend(block)
+            index = cursor
+            continue
+        headers = _md_table_cells(data[0])
+        money_cols = [
+            i for i, h in enumerate(headers) if h and _MONEY_HEADER_RE.search(h)
+        ]
+        if not money_cols:
+            out.extend(block)
+            index = cursor
+            continue
+        rebuilt: list[str] = []
+        header_seen = False
+        for row in block:
+            if _TABLE_SEP_RE.match(row) or not header_seen:
+                if not _TABLE_SEP_RE.match(row):
+                    header_seen = True
+                rebuilt.append(row)
+                continue
+            cells = _md_table_cells(row)
+            changed = False
+            for col in money_cols:
+                if col >= len(cells):
+                    continue
+                cell = cells[col].strip()
+                if cell and cell not in {"—", "-", "–"}:
+                    continue
+                if "[MANUAL FILL" in cell.upper() or "[VERIFY" in cell.upper():
+                    continue
+                cells[col] = _EMPTY_COST_FILL
+                changed = True
+                restored += 1
+            if changed:
+                rebuilt.append("| " + " | ".join(cells) + " |")
+            else:
+                rebuilt.append(row)
+        out.extend(rebuilt)
+        index = cursor
+    return "\n".join(out), restored
+
+
 def strip_placeholder_tags_not_required_by_rfp(
     content: str,
     rfp_text: str,
@@ -377,6 +473,7 @@ def strip_placeholder_tags_not_required_by_rfp(
     """Strip optional [VERIFY] and [MANUAL FILL] unless RFP-critical. Never invents."""
     body, v_removed = strip_verify_tags_not_required_by_rfp(content, rfp_text)
     body, m_removed = strip_manual_fill_tags_not_required_by_rfp(body, rfp_text)
+    body, _restored = restore_empty_money_table_cells(body)
     return body, v_removed + m_removed
 
 
@@ -562,11 +659,15 @@ async def scrub_optional_verify_tags(
         "operations' asks; redundant company-info asks already covered in Who We Are / 1.3.\n"
         "3. IF KB does NOT answer it — REMOVE the tag and rewrite the sentence/row/cell so the "
         "section still reads cleanly, WITHOUT inventing. Prefer clean prose over placeholders.\n"
+        "   EXCEPTION — MONEY: never remove estimated cost, rates, fees, or dollar amounts and "
+        "leave a blank table cell. If KB has no number, KEEP "
+        "[MANUAL FILL: estimated cost — confirm before submission]. Empty cost cells hide the gap.\n"
         "4. KEEP a short [VERIFY: brief field] or [MANUAL FILL: Owner — field] ONLY when ALL "
         "are true: (a) the RFP EXPLICITLY mandates that exact fact for compliance or scored "
         "evaluation (FEIN, COI limits, required reference phone/email, E-Verify, affidavit, "
-        "bonding, required %time when scored), (b) neither KB nor RFP already supplies it, "
-        "(c) keeping it materially helps win / avoid DQ. If unsure → REMOVE.\n"
+        "bonding, required %time when scored, estimated cost / rates / fees), (b) neither KB nor "
+        "RFP already supplies it, (c) keeping it materially helps win / avoid DQ. "
+        "Money placeholders: if unsure → KEEP.\n"
         "5. NEVER invent facts — no names, phones, emails, rates, certs, clients, or wins.\n"
         "6. Never leave empty brackets like [] or bare [VERIFY] / [MANUAL FILL].\n"
         "7. Preserve useful tables/structure; only change what placeholders force. Do not "
