@@ -1,19 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ColumnDef } from "@tanstack/react-table";
 import { RefreshCw } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { DataTable, Figure, Note, Panel } from "./qb-ui";
-import { billablePct, buildSignals, daysUntil, hoursLabel, type SectionId } from "../lib/teamwork-derive";
+import { Figure, Note } from "./qb-ui";
+import { billablePct, buildSignals, daysUntil, type SectionId } from "../lib/teamwork-derive";
 import { TeamworkAttention } from "./teamwork/TeamworkAttention";
 import { TeamworkProjects } from "./teamwork/TeamworkProjects";
 import { TeamworkWork } from "./teamwork/TeamworkWork";
-import type {
-  TeamworkOverview,
-  TeamworkPerson,
-  TeamworkTimeBucket,
-} from "../types/teamwork";
+import { TeamworkTime } from "./teamwork/TeamworkTime";
+import type { TeamworkOverview } from "../types/teamwork";
 import "./QuickBooksLedger.css";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
@@ -87,36 +83,6 @@ export function TeamworkPanels() {
     void load();
     return () => abortRef.current?.abort();
   }, [load]);
-
-  const timeCols = useMemo<ColumnDef<TeamworkTimeBucket, unknown>[]>(
-    () => [
-      {
-        accessorKey: "name",
-        header: "Name",
-        cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
-      },
-      {
-        accessorKey: "minutes",
-        header: "Hours",
-        meta: { numeric: true },
-        cell: (c) => hoursLabel(c.getValue<number>()),
-      },
-    ],
-    [],
-  );
-
-  const peopleCols = useMemo<ColumnDef<TeamworkPerson, unknown>[]>(
-    () => [
-      {
-        accessorKey: "name",
-        header: "Person",
-        cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
-      },
-      { accessorKey: "title", header: "Title", cell: (c) => c.getValue<string | null>() || "—" },
-      { accessorKey: "email", header: "Email" },
-    ],
-    [],
-  );
 
   const errorEntries = Object.entries(data?.errors || {});
   const notConfigured = data && !data.connected && Boolean(data.errors.config || data.errors.auth);
@@ -251,35 +217,7 @@ export function TeamworkPanels() {
             </div>
 
             <div id="teamwork-time" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <Panel title="Time by person" meta={hoursLabel(data.time.total_minutes)}>
-                  <DataTable
-                    data={data.time.by_person}
-                    columns={timeCols}
-                    initialSort="minutes"
-                    pageSize={8}
-                    empty="No time logged this month."
-                  />
-                </Panel>
-                <Panel title="Time by project" meta={hoursLabel(data.time.total_minutes)}>
-                  <DataTable
-                    data={data.time.by_project}
-                    columns={timeCols}
-                    initialSort="minutes"
-                    pageSize={8}
-                    empty="No time logged this month."
-                  />
-                </Panel>
-              </div>
-
-              <Panel title="People" meta={`${data.people.length} owner-company users`}>
-                <DataTable
-                  data={data.people}
-                  columns={peopleCols}
-                  pageSize={12}
-                  empty="No owner-company people returned."
-                />
-              </Panel>
+              <TeamworkTime data={data} />
             </div>
           </div>
         ) : null}
