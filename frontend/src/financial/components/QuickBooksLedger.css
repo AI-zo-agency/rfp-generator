@@ -1024,3 +1024,218 @@ table.qb-table {
     transition: none;
   }
 }
+
+/* ── status marks ──────────────────────────────────────────────────────── */
+
+.qb-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--zo-surface);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--zo-text-secondary);
+  white-space: nowrap;
+}
+
+.qb-pill::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.qb-pill[data-tone="good"] {
+  background: color-mix(in srgb, var(--zo-success) 12%, var(--zo-card-bg));
+  color: var(--zo-success);
+}
+
+.qb-pill[data-tone="warn"] {
+  background: color-mix(in srgb, var(--zo-orange) 14%, var(--zo-card-bg));
+  color: var(--zo-orange);
+}
+
+.qb-pill[data-tone="bad"] {
+  background: color-mix(in srgb, var(--zo-danger) 12%, var(--zo-card-bg));
+  color: var(--zo-danger);
+}
+
+.qb-pill[data-tone="muted"] {
+  color: var(--zo-text-muted);
+}
+
+.qb-minibar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 96px;
+}
+
+.qb-minibar .qb-bar-track {
+  flex: 1 1 auto;
+  min-width: 44px;
+}
+
+.qb-minibar[data-tone="warn"] .qb-bar-track > span {
+  background: var(--zo-orange);
+}
+
+.qb-minibar[data-tone="bad"] .qb-bar-track > span {
+  background: var(--zo-danger);
+}
+
+.qb-minibar-value {
+  min-width: 34px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--zo-text-secondary);
+}
+
+.qb-due {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--zo-text-secondary);
+  white-space: nowrap;
+}
+
+.qb-due[data-tone="late"] {
+  color: var(--zo-danger);
+  font-weight: 600;
+}
+
+.qb-due[data-tone="soon"] {
+  color: var(--zo-orange);
+  font-weight: 600;
+}
+
+.qb-due[data-tone="none"] {
+  color: var(--zo-text-muted);
+}
+
+/* ── filter chips ──────────────────────────────────────────────────────── */
+
+.qb-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.qb-chips button {
+  padding: 4px 11px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--zo-surface);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--zo-text-secondary);
+  cursor: pointer;
+  transition:
+    background-color 140ms var(--qb-ease),
+    color 140ms var(--qb-ease);
+}
+
+.qb-chips button:hover:not([data-state="on"]) {
+  color: var(--zo-text);
+}
+
+.qb-chips button[data-state="on"] {
+  background: var(--zo-teal);
+  color: #fff;
+}
+
+.qb-chips button:focus-visible {
+  outline: 2px solid var(--zo-teal);
+  outline-offset: 2px;
+}
+
+.qb-chips-count {
+  margin-left: 5px;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── expandable rows ───────────────────────────────────────────────────── */
+
+.qb-table tbody tr[data-expandable="true"] {
+  cursor: pointer;
+}
+
+.qb-table tbody tr[data-expandable="true"]:focus-visible {
+  outline: 2px solid var(--zo-teal);
+  outline-offset: -2px;
+}
+
+.qb-table tbody tr[data-open="true"] {
+  background: var(--zo-surface);
+}
+
+.qb-table tbody tr.qb-drillrow:hover {
+  background: transparent;
+}
+
+.qb-table tbody tr.qb-drillrow > td {
+  padding: 0 0 10px;
+}
+
+.qb-drill {
+  padding: 12px 14px 14px;
+  border-radius: 8px;
+  background: var(--zo-surface);
+}
+
+.qb-drill-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.qb-drill h4 {
+  margin: 0 0 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--zo-text-muted);
+}
+
+.qb-drill ul {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.qb-drill li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.qb-drill-empty {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--zo-text-muted);
+}
+
+.qb-drill-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--zo-teal);
+}
+
+.qb-drill-link:hover {
+  text-decoration: underline;
+}

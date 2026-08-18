@@ -8,7 +8,7 @@
  * weight, and whitespace.
  */
 
-import { useState, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -153,6 +153,96 @@ export function Figure({
   );
 }
 
+/* ── status marks ──────────────────────────────────────────────────────── */
+
+/**
+ * A status word that reads as a status. Replaces plain-text cells like
+ * "At risk", which scan identically to every other word in the table.
+ */
+export function Pill({
+  label,
+  tone = "neutral",
+}: {
+  label: string;
+  tone?: "good" | "warn" | "bad" | "muted" | "neutral";
+}) {
+  return (
+    <span className="qb-pill" data-tone={tone === "neutral" ? undefined : tone}>
+      {label}
+    </span>
+  );
+}
+
+/** A proportion inside a table cell, so a column of them scans as a shape. */
+export function MiniBar({
+  value,
+  max,
+  label,
+  tone,
+}: {
+  value: number;
+  max: number;
+  label: string;
+  tone?: "warn" | "bad";
+}) {
+  const pct = max > 0 ? Math.min(100, Math.max(0, (value / max) * 100)) : 0;
+  return (
+    <span className="qb-minibar" data-tone={tone}>
+      <span className="qb-bar-track" aria-hidden>
+        <span style={{ width: `${pct}%` }} />
+      </span>
+      <span className="qb-minibar-value">{label}</span>
+    </span>
+  );
+}
+
+/** A due date as urgency rather than as a calendar date. */
+export function DueChip({
+  label,
+  tone,
+}: {
+  label: string;
+  tone: "late" | "soon" | "later" | "none";
+}) {
+  return (
+    <span className="qb-due" data-tone={tone}>
+      {label}
+    </span>
+  );
+}
+
+/** Segmented filter row. Replaces "Show N more" as a table's primary navigation. */
+export function FilterChips<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+}: {
+  options: { id: T; label: string; count?: number }[];
+  value: T;
+  onChange: (id: T) => void;
+  label: string;
+}) {
+  return (
+    <div className="qb-chips" role="group" aria-label={label}>
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          data-state={option.id === value ? "on" : undefined}
+          aria-pressed={option.id === value}
+          onClick={() => onChange(option.id)}
+        >
+          {option.label}
+          {option.count === undefined ? null : (
+            <span className="qb-chips-count">{option.count}</span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /* ── aging ─────────────────────────────────────────────────────────────── */
 
 /**
@@ -222,6 +312,7 @@ export function DataTable<T>({
   initialSort,
   pageSize,
   empty = "Nothing here yet.",
+  renderSubRow,
 }: {
   data: T[];
   columns: ColumnDef<T, unknown>[];
@@ -230,11 +321,14 @@ export function DataTable<T>({
   /** Rows shown before "Show all". Omit to show everything. */
   pageSize?: number;
   empty?: string;
+  /** When provided, rows expand on click to show this content. One at a time. */
+  renderSubRow?: (row: T) => ReactNode;
 }) {
   const [sorting, setSorting] = useState<SortingState>(
     initialSort ? [{ id: initialSort, desc: true }] : [],
   );
   const [expanded, setExpanded] = useState(false);
+  const [openRow, setOpenRow] = useState<string | null>(null);
 
   const table = useReactTable({
     data,
@@ -289,18 +383,46 @@ export function DataTable<T>({
           ))}
         </TableHeader>
         <TableBody>
-          {visible.map((row) => (
-            <TableRow key={row.id}>
-              {row.getVisibleCells().map((cell) => (
-                <TableCell
-                  key={cell.id}
-                  data-numeric={cell.column.columnDef.meta?.numeric ? "true" : undefined}
+          {visible.map((row) => {
+            const isOpen = openRow === row.id;
+            const toggle = () => setOpenRow((current) => (current === row.id ? null : row.id));
+            return (
+              <Fragment key={row.id}>
+                <TableRow
+                  data-expandable={renderSubRow ? "true" : undefined}
+                  data-open={isOpen ? "true" : undefined}
+                  aria-expanded={renderSubRow ? isOpen : undefined}
+                  tabIndex={renderSubRow ? 0 : undefined}
+                  onClick={renderSubRow ? toggle : undefined}
+                  onKeyDown={
+                    renderSubRow
+                      ? (event) => {
+                          if (event.key !== "Enter" && event.key !== " ") return;
+                          event.preventDefault();
+                          toggle();
+                        }
+                      : undefined
+                  }
                 >
-                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                </TableCell>
-              ))}
-            </TableRow>
-          ))}
+                  {row.getVisibleCells().map((cell) => (
+                    <TableCell
+                      key={cell.id}
+                      data-numeric={cell.column.columnDef.meta?.numeric ? "true" : undefined}
+                    >
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </TableCell>
+                  ))}
+                </TableRow>
+                {renderSubRow && isOpen ? (
+                  <TableRow className="qb-drillrow">
+                    <TableCell colSpan={row.getVisibleCells().length}>
+                      {renderSubRow(row.original)}
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+              </Fragment>
+            );
+          })}
         </TableBody>
       </Table>
       {hidden > 0 || expanded ? (
