@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     scheduler_timezone: str = "America/Los_Angeles"
     scheduler_run_on_start: bool = True
 
+    # Teamwork.com — read-only V3 API. Basic auth is API_KEY with an empty password.
+    # Never expose these to the frontend.
+    teamwork_base_url: str = ""
+    teamwork_api_key: str = ""
+
     # Legacy optional — prefer OAuth client id/secret above
     google_service_account_json: Path | None = None
     google_drive_shared_drive_name: str = "RFPs"
@@ -200,6 +205,11 @@ class Settings(BaseSettings):
             text = text[1:-1].strip()
         return text
 
+    @field_validator("teamwork_base_url", "teamwork_api_key")
+    @classmethod
+    def strip_teamwork_str(cls, value: str) -> str:
+        return (value or "").strip()
+
     @property
     def resolved_container_tag(self) -> str:
         if self.supermemory_container_tag != "zo-agency" or not self.supermemory_container_tags:
@@ -225,6 +235,10 @@ class Settings(BaseSettings):
             and self.quickbooks_refresh_token
             and self.quickbooks_realm_id
         )
+
+    @property
+    def teamwork_configured(self) -> bool:
+        return bool(self.teamwork_base_url.strip() and self.teamwork_api_key.strip())
 
 
 settings = Settings()

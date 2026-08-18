@@ -17,11 +17,13 @@ AI-assisted RFP pipeline for zö agency: sync opportunities, run Go/No-Go analys
 Browser → Next.js (frontend) → FastAPI (backend) → Supabase Postgres + Storage
                                               └→ Supermemory (KB search)
                                               └→ Fireworks / OpenRouter (LLM)
+                                              └→ Teamwork.com (projects, tasks, time; API key on backend only)
 ```
 
 - **Frontend** never holds database credentials. It calls the backend via `BACKEND_URL`.
 - **Backend** is the sole writer to Supabase (Postgres for RFPs/proposals, Storage for PDFs).
 - **Supermemory** powers knowledge-base retrieval for Go/No-Go and proposal generation.
+- **Teamwork** is read-only from the backend. See [`docs/TEAMWORK_INTEGRATION.md`](docs/TEAMWORK_INTEGRATION.md).
 
 ## Local development
 
@@ -59,6 +61,7 @@ Default port is **3001**. Open [http://localhost:3001](http://localhost:3001).
 |---------|------|----------|
 | Backend | `backend/.env` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, LLM keys (`FIREWORKS_API_KEY` or `OPENROUTER_API_KEY`), `SUPERMEMORY_API_KEY` |
 | Frontend | `frontend/.env` | `BACKEND_URL` |
+| Teamwork (optional) | `backend/.env` | `TEAMWORK_BASE_URL`, `TEAMWORK_API_KEY` |
 
 See `.env.example` in each folder for the full list.
 

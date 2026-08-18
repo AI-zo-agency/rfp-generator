@@ -24,6 +24,19 @@ def test_build_scheduler_registers_quickbooks_job():
     assert "23" in str(job.trigger)
 
 
+def test_build_scheduler_registers_teamwork_job():
+    scheduler = build_scheduler(
+        _settings(
+            scheduler_backend_url="http://127.0.0.1:8001",
+            scheduler_timezone="America/Los_Angeles",
+            quickbooks_cron_secret="s3cret",
+        )
+    )
+    job = scheduler.get_job("teamwork_nightly")
+    assert job is not None
+    assert "22" in str(job.trigger) or "45" in str(job.trigger)
+
+
 def test_first_run_is_now_when_run_on_start():
     pacific = ZoneInfo("America/Los_Angeles")
     now = datetime(2026, 8, 14, 12, 39, tzinfo=pacific)
@@ -64,6 +77,17 @@ def test_quickbooks_job_is_11pm_pacific():
     assert job.timezone == "America/Los_Angeles"
     assert job.method == "POST"
     assert job.path == "/api/v1/financials/quickbooks/sync"
+    assert job.body == {"mode": "auto"}
+    assert job.timeout_seconds == 600
+
+
+def test_teamwork_job_is_staggered_before_quickbooks():
+    job = scheduler_jobs.job_by_id("teamwork_nightly")
+    assert job is not None
+    assert job.cron == "45 22 * * *"
+    assert job.timezone == "America/Los_Angeles"
+    assert job.method == "POST"
+    assert job.path == "/api/v1/financials/teamwork/sync"
     assert job.body == {"mode": "auto"}
     assert job.timeout_seconds == 600
 

@@ -2,25 +2,24 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { FinancialHeader } from "./FinancialHeader";
+import {
+  FINANCIAL_TABS,
+  FinancialNavSidebar,
+  type FinancialTabId,
+} from "./FinancialNavSidebar";
 import { TabFade } from "./TabFade";
-import { OutlineTabs } from "@/components/ui/OutlineTabs";
 import { IWorkerTimesheetsTable, TimesheetEntry } from "./IWorkerTimesheetsTable";
 import { AiInsightsPanel, AiInsightsData } from "./AiInsightsPanel";
 import { AuditQueueTable, AuditItem } from "./AuditQueueTable";
 import { DataSourcesGrid, DataSource } from "./DataSourcesGrid";
 import { QuickBooksPanels } from "./QuickBooksPanels";
+import { TeamworkPanels } from "./TeamworkPanels";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 
-const FINANCIAL_TABS = [
-  { id: "quickbooks", label: "QuickBooks Ledger" },
-  { id: "iworker", label: "iWorker Ingestion & Logs" },
-  { id: "ai", label: "AI Audit Queue & Insights" },
-  { id: "sources", label: "Data Sources Inventory" },
-];
-
 export function FinancialInsightsClient() {
-  const [activeTab, setActiveTab] = useState<string>("quickbooks");
+  const [activeTab, setActiveTab] = useState<FinancialTabId>("quickbooks");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [selectedContractor, setSelectedContractor] = useState<string>("all");
 
@@ -166,61 +165,88 @@ export function FinancialInsightsClient() {
     );
   }
 
-  if (loading) {
-    return (
-      <div className="flex h-96 w-full items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-10 w-10 animate-spin rounded-full border-4 border-[#3C5A56] border-t-transparent"></div>
-          <p className="text-xs text-zo-text-muted font-medium animate-pulse">Loading Financial Insights...</p>
-        </div>
-      </div>
-    );
-  }
+  const activeNav = FINANCIAL_TABS.find((tab) => tab.id === activeTab) ?? FINANCIAL_TABS[0];
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <FinancialHeader
-        title="Financial & Margin Auditor"
-        subtitle="Reconciliation, margin tracking, and human-reviewed audit queue. Integrated with live iWorker Google Sheets timesheets."
-        trailing={
-          <OutlineTabs
-            tabs={FINANCIAL_TABS}
-            activeTab={activeTab}
-            onChange={(id) => setActiveTab(id)}
-            accentColor="#3C5A56"
-            compact
-          />
-        }
+    <div className="flex h-full min-h-0 min-w-0 flex-1">
+      <FinancialNavSidebar
+        activeTab={activeTab}
+        onChange={setActiveTab}
+        mobileOpen={mobileNavOpen}
+        onMobileOpenChange={setMobileNavOpen}
       />
 
-      <div className="flex min-h-0 flex-1 flex-col">
-        {activeTab === "quickbooks" && (
-          <TabFade active className="min-h-0 flex-1 overflow-clip">
-            <QuickBooksPanels />
-          </TabFade>
-        )}
+      <div className="mx-auto flex min-h-0 min-w-0 w-full max-w-[1600px] flex-1 flex-col gap-3 px-5 pt-3 pb-3 sm:px-6 md:px-8">
+        <FinancialHeader
+          title={activeNav.label}
+          subtitle={activeNav.hint}
+          onOpenNav={() => setMobileNavOpen(true)}
+        />
 
-        <TabFade active={activeTab === "iworker"} className="min-h-0 flex-1 overflow-auto">
-          {iworkerPanel}
-        </TabFade>
-
-        <TabFade active={activeTab === "ai"} className="min-h-0 flex-1 overflow-auto">
-          <div className="space-y-8">
-            <AiInsightsPanel
-              onFetchAiInsights={handleFetchAiInsights}
-              persistedInsights={aiInsights}
-              onInsightsGenerated={setAiInsights}
-            />
-            <AuditQueueTable
-              initialAuditItems={auditItems}
-              onResolveItem={handleResolveAuditItem}
-            />
+        {loading ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <div className="flex flex-col items-center gap-3">
+              <div className="h-10 w-10 animate-spin rounded-full border-4 border-[#3C5A56] border-t-transparent" />
+              <p className="text-xs font-medium text-zo-text-muted animate-pulse">Loading Financial Insights...</p>
+            </div>
           </div>
-        </TabFade>
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col">
+            {activeTab === "quickbooks" ? (
+              <TabFade
+                active
+                className="min-h-0 flex-1 overflow-clip"
+                id="financial-panel-quickbooks"
+              >
+                <QuickBooksPanels />
+              </TabFade>
+            ) : null}
 
-        <TabFade active={activeTab === "sources"} className="min-h-0 flex-1 overflow-auto">
-          <DataSourcesGrid sources={sourcesData} />
-        </TabFade>
+            {activeTab === "teamwork" ? (
+              <TabFade
+                active
+                className="min-h-0 flex-1 overflow-clip"
+                id="financial-panel-teamwork"
+              >
+                <TeamworkPanels />
+              </TabFade>
+            ) : null}
+
+            <TabFade
+              active={activeTab === "iworker"}
+              className="min-h-0 flex-1 overflow-auto"
+              id="financial-panel-iworker"
+            >
+              {iworkerPanel}
+            </TabFade>
+
+            <TabFade
+              active={activeTab === "ai"}
+              className="min-h-0 flex-1 overflow-auto"
+              id="financial-panel-ai"
+            >
+              <div className="space-y-8">
+                <AiInsightsPanel
+                  onFetchAiInsights={handleFetchAiInsights}
+                  persistedInsights={aiInsights}
+                  onInsightsGenerated={setAiInsights}
+                />
+                <AuditQueueTable
+                  initialAuditItems={auditItems}
+                  onResolveItem={handleResolveAuditItem}
+                />
+              </div>
+            </TabFade>
+
+            <TabFade
+              active={activeTab === "sources"}
+              className="min-h-0 flex-1 overflow-auto"
+              id="financial-panel-sources"
+            >
+              <DataSourcesGrid sources={sourcesData} />
+            </TabFade>
+          </div>
+        )}
       </div>
     </div>
   );

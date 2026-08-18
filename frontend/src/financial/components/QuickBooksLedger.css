@@ -978,3 +978,49 @@ table.qb-table {
   outline: 2px solid var(--zo-teal);
   outline-offset: 2px;
 }
+
+/* Financial section rail — second to the workspace top bar. */
+.fin-rail {
+  background: #eef1ee;
+  overscroll-behavior: contain;
+}
+
+.fin-rail[data-collapsed="true"] {
+  background: #e8ebe8;
+}
+
+.fin-rail-toggle {
+  color: #2f3f3e;
+}
+
+.fin-rail-copy {
+  overflow: hidden;
+  white-space: nowrap;
+  max-width: 12.75rem;
+  opacity: 1;
+  transition: opacity var(--duration-fast) var(--ease-smooth),
+    max-width var(--duration-smooth) var(--ease-smooth);
+}
+
+.fin-rail[data-collapsed="true"] .fin-rail-copy {
+  max-width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Keep the Sources label’s height so icons do not jump when the rail collapses. */
+.fin-rail.sidebar-shell[data-collapsed="true"] .sidebar-section-label {
+  max-height: none;
+  margin-bottom: 0.375rem;
+  overflow: hidden;
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fin-rail,
+  .fin-rail-copy,
+  .fin-rail-item,
+  .fin-rail-toggle {
+    transition: none;
+  }
+}

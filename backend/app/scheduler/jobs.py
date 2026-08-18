@@ -19,6 +19,14 @@ class ScheduledJob:
 
 JOBS: tuple[ScheduledJob, ...] = (
     ScheduledJob(
+        id="teamwork_nightly",
+        path="/api/v1/financials/teamwork/sync",
+        cron="45 22 * * *",
+        timezone="America/Los_Angeles",
+        body={"mode": "auto"},
+        timeout_seconds=600,
+    ),
+    ScheduledJob(
         id="quickbooks_nightly",
         path="/api/v1/financials/quickbooks/sync",
         cron="0 23 * * *",
