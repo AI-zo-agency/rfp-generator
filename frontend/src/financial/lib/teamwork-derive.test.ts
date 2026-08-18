@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   billablePct,
+  buildSignals,
+  buildWorkload,
   daysUntil,
   describeDue,
+  filterProjects,
   hoursLabel,
+  nameList,
   projectUrl,
   taskUrl,
   toUTCDay,
+  workByProject,
 } from "./teamwork-derive";
+import type { TeamworkOverview } from "../types/teamwork";
 
 const TODAY = "2026-08-18";
 
@@ -116,5 +122,254 @@ describe("deep links", () => {
   it("returns null when the base url or id is missing", () => {
     expect(projectUrl(null, "10")).toBeNull();
     expect(taskUrl("https://zo.teamwork.com", "")).toBeNull();
+  });
+});
+
+function overview(patch: Partial<TeamworkOverview> = {}): TeamworkOverview {
+  return {
+    connected: true,
+    base_url: "https://zo.teamwork.com",
+    cache_ttl_seconds: 0,
+    errors: {},
+    summary: {
+      project_count: 0,
+      overdue_task_count: 0,
+      upcoming_task_count: 0,
+      late_milestone_count: 0,
+      hours_this_month: 0,
+      people_count: 0,
+    },
+    projects: [],
+    overdue_tasks: [],
+    upcoming_tasks: [],
+    milestones: [],
+    people: [],
+    time: {
+      period_start: "2026-08-01",
+      period_end: "2026-08-18",
+      total_minutes: 0,
+      billable_minutes: 0,
+      by_person: [],
+      by_project: [],
+    },
+    ...patch,
+  };
+}
+
+function project(patch: Partial<TeamworkOverview["projects"][number]> = {}) {
+  return {
+    id: "10",
+    name: "Oakdale",
+    status: "active",
+    health: "ok" as const,
+    company_name: "City of Oakdale",
+    due_date: "2026-09-30",
+    tasks_open: 4,
+    tasks_completed: 1,
+    tasks_overdue: 0,
+    progress_pct: 20,
+    ...patch,
+  };
+}
+
+function task(patch: Partial<TeamworkOverview["overdue_tasks"][number]> = {}) {
+  return {
+    id: "50",
+    name: "Homepage copy",
+    status: "new",
+    due_date: "2026-08-11",
+    project_id: "10",
+    project_name: "Oakdale",
+    assignees: ["Sonja Anderson"],
+    ...patch,
+  };
+}
+
+describe("nameList", () => {
+  it("joins up to three names", () => {
+    expect(nameList(["A", "B", "C"])).toBe("A, B, C");
+  });
+
+  it("summarizes the overflow", () => {
+    expect(nameList(["A", "B", "C", "D", "E"])).toBe("A, B, C +2 more");
+  });
+});
+
+describe("buildSignals", () => {
+  it("returns nothing when everything is healthy", () => {
+    expect(buildSignals(overview({ projects: [project()] }), TODAY)).toEqual([]);
+  });
+
+  it("flags projects marked at risk", () => {
+    const signals = buildSignals(
+      overview({ projects: [project({ health: "bad", name: "Riverside" })] }),
+      TODAY,
+    );
+    const risk = signals.find((s) => s.id === "projects-at-risk");
+    expect(risk?.severity).toBe("critical");
+    expect(risk?.headline).toBe("1 project flagged at risk");
+    expect(risk?.detail).toBe("Riverside");
+  });
+
+  it("flags overdue tasks with no assignee", () => {
+    const signals = buildSignals(
+      overview({ overdue_tasks: [task({ assignees: [] }), task({ id: "51", assignees: ["Ray"] })] }),
+      TODAY,
+    );
+    const unassigned = signals.find((s) => s.id === "overdue-unassigned");
+    expect(unassigned?.severity).toBe("critical");
+    expect(unassigned?.figure).toBe("1");
+  });
+
+  it("reports the oldest overdue task and escalates past two weeks", () => {
+    const signals = buildSignals(
+      overview({
+        overdue_tasks: [task({ due_date: "2026-08-16" }), task({ id: "51", due_date: "2026-07-20" })],
+      }),
+      TODAY,
+    );
+    const oldest = signals.find((s) => s.id === "oldest-overdue");
+    expect(oldest?.headline).toBe("Oldest overdue task is 29 days late");
+    expect(oldest?.severity).toBe("critical");
+  });
+
+  it("flags projects past their due date that are not complete", () => {
+    const signals = buildSignals(
+      overview({ projects: [project({ due_date: "2026-08-01", progress_pct: 60 })] }),
+      TODAY,
+    );
+    expect(signals.some((s) => s.id === "projects-past-due")).toBe(true);
+  });
+
+  it("does not flag a completed project that is past its due date", () => {
+    const signals = buildSignals(
+      overview({ projects: [project({ due_date: "2026-08-01", progress_pct: 100 })] }),
+      TODAY,
+    );
+    expect(signals.some((s) => s.id === "projects-past-due")).toBe(false);
+  });
+
+  it("sorts critical ahead of warn", () => {
+    const signals = buildSignals(
+      overview({
+        projects: [project({ health: "bad" }), project({ id: "11", due_date: "2026-08-01", progress_pct: 10 })],
+        milestones: [
+          { id: "3", name: "Launch", status: "late", project_id: "10", project_name: "Oakdale", due_date: "2026-08-10", progress_pct: 40 },
+        ],
+      }),
+      TODAY,
+    );
+    expect(signals[0].severity).toBe("critical");
+    expect(signals.at(-1)?.severity).toBe("warn");
+  });
+});
+
+describe("workByProject", () => {
+  it("groups tasks and milestones under their project id", () => {
+    const grouped = workByProject(
+      overview({
+        overdue_tasks: [task()],
+        upcoming_tasks: [task({ id: "51", due_date: "2026-08-25" })],
+        milestones: [
+          { id: "3", name: "Launch", status: "late", project_id: "10", project_name: "Oakdale", due_date: "2026-08-10", progress_pct: 40 },
+        ],
+      }),
+    );
+    expect(grouped.get("10")?.overdue).toHaveLength(1);
+    expect(grouped.get("10")?.upcoming).toHaveLength(1);
+    expect(grouped.get("10")?.milestones).toHaveLength(1);
+  });
+
+  it("has no entry for a project with nothing in either bucket", () => {
+    expect(workByProject(overview({ projects: [project()] })).get("10")).toBeUndefined();
+  });
+});
+
+describe("filterProjects", () => {
+  const projects = [
+    project({ id: "1", health: "bad" }),
+    project({ id: "2", tasks_overdue: 3 }),
+    project({ id: "3", due_date: "2026-08-25" }),
+    project({ id: "4", due_date: "2026-12-01" }),
+  ];
+
+  it("returns everything for all", () => {
+    expect(filterProjects(projects, "all", TODAY)).toHaveLength(4);
+  });
+
+  it("filters to at-risk health", () => {
+    expect(filterProjects(projects, "risk", TODAY).map((p) => p.id)).toEqual(["1"]);
+  });
+
+  it("filters to projects carrying overdue tasks", () => {
+    expect(filterProjects(projects, "overdue", TODAY).map((p) => p.id)).toEqual(["2"]);
+  });
+
+  it("filters to projects due within fourteen days", () => {
+    expect(filterProjects(projects, "soon", TODAY).map((p) => p.id)).toEqual(["3"]);
+  });
+});
+
+describe("buildWorkload", () => {
+  it("joins people, task counts, and logged time by name", () => {
+    const rows = buildWorkload(
+      overview({
+        people: [{ id: "7", name: "Sonja Anderson", email: "sonja@zo.com", title: "PM", company_name: "zö" }],
+        overdue_tasks: [task({ assignees: ["Sonja Anderson"] })],
+        upcoming_tasks: [task({ id: "51", assignees: ["Sonja Anderson"] })],
+        time: {
+          period_start: "2026-08-01",
+          period_end: "2026-08-18",
+          total_minutes: 120,
+          billable_minutes: 90,
+          by_person: [{ id: "7", name: "sonja anderson", minutes: 120, billable_minutes: 90 }],
+          by_project: [],
+        },
+      }),
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      name: "Sonja Anderson",
+      title: "PM",
+      overdue: 1,
+      upcoming: 1,
+      minutes: 120,
+      billableMinutes: 90,
+    });
+  });
+
+  it("includes an assignee who is not in the people directory", () => {
+    const rows = buildWorkload(overview({ overdue_tasks: [task({ assignees: ["Contractor Ray"] })] }));
+    expect(rows.map((r) => r.name)).toEqual(["Contractor Ray"]);
+  });
+
+  it("defaults billable minutes to zero when the cache predates the split", () => {
+    const rows = buildWorkload(
+      overview({
+        time: {
+          period_start: "2026-08-01",
+          period_end: "2026-08-18",
+          total_minutes: 60,
+          billable_minutes: 0,
+          by_person: [{ id: "7", name: "Sonja Anderson", minutes: 60 }],
+          by_project: [],
+        },
+      }),
+    );
+    expect(rows[0].billableMinutes).toBe(0);
+  });
+
+  it("sorts the most overdue person first", () => {
+    const rows = buildWorkload(
+      overview({
+        overdue_tasks: [
+          task({ assignees: ["Ray"] }),
+          task({ id: "51", assignees: ["Ray"] }),
+          task({ id: "52", assignees: ["Sonja"] }),
+        ],
+      }),
+    );
+    expect(rows.map((r) => r.name)).toEqual(["Ray", "Sonja"]);
   });
 });
