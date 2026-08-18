@@ -4,12 +4,15 @@ import { useEffect, useMemo, useState } from "react";
 import type { ManualFillFlag } from "@/lib/proposal-manual-flags";
 import {
   buildOutlineSectionTree,
+  buildRfpTabDisplayNumbers,
   groupContainsSection,
+  sectionListLabel,
   type OutlineTreeGroup,
 } from "@/lib/proposal-outline-tree";
 import {
   classifySectionHealth,
   deadSectionLabel,
+  isManuscriptSectionDrafted,
 } from "@/lib/proposal-section-health";
 import type { OutlineSection } from "@/types/proposal";
 import type { SectionRevisionRecord } from "./DraftSectionEditor";
@@ -63,20 +66,6 @@ interface ProposalSectionTreeProps {
   onDeleteSection?: (sectionId: string) => void;
 }
 
-function sectionListLabel(
-  section: OutlineSection,
-  manuscriptIndexById: Map<string, number>,
-): string {
-  const title = (section.title || "").trim();
-  // Already numbered like "3.1 — Deschutes" or "2.2 — Gil"
-  if (/^\d+(\.\d+)?\s*[—\-–.:]/.test(title) || /^\d+\.\d+/.test(title)) {
-    return title;
-  }
-  const n = manuscriptIndexById.get(section.id);
-  if (n == null) return title;
-  return `${n}. ${title}`;
-}
-
 function SectionRow({
   section,
   depth,
@@ -108,10 +97,16 @@ function SectionRow({
   // trim() check counted that as drafted, so failed sections showed a ticked
   // checkbox and "Draft has content" while holding no draft at all.
   const health = classifySectionHealth(section.content);
-  const hasContent = health === null;
-  const needsAttention = flagCount > 0 || hasRevision || health !== null;
+  const hasContent = isManuscriptSectionDrafted(section);
+  const needsAttention = flagCount > 0 || hasRevision || !hasContent;
+  let draftHint = "Heading only — not drafted yet";
+  if (hasContent) {
+    draftHint = "Draft has content";
+  } else if (health) {
+    draftHint = deadSectionLabel(health);
+  }
   const titleHint = [
-    hasContent ? "Draft has content" : deadSectionLabel(health),
+    draftHint,
     flagCount > 0 ? `${flagCount} fill-in tag(s)` : "",
     hasRevision
       ? "Section updated — double-click title area in review for changes"
@@ -178,7 +173,7 @@ function SectionGroup({
   manualFillFlags,
   sectionRevisions,
   canDelete,
-  manuscriptIndexById,
+  rfpTabNumberById,
   sectionButtonRefs,
   collapsed,
   onToggle,
@@ -192,7 +187,7 @@ function SectionGroup({
   manualFillFlags: ManualFillFlag[];
   sectionRevisions: Record<string, SectionRevisionRecord>;
   canDelete: boolean;
-  manuscriptIndexById: Map<string, number>;
+  rfpTabNumberById: Map<string, number>;
   sectionButtonRefs: React.MutableRefObject<Map<string, HTMLButtonElement>>;
   collapsed: boolean;
   onToggle: () => void;
@@ -240,7 +235,7 @@ function SectionGroup({
               flagCount={sectionManualFillCount(section.id, manualFillFlags)}
               hasRevision={Boolean(sectionRevisions[section.id])}
               canDelete={canDelete}
-              listLabel={sectionListLabel(section, manuscriptIndexById)}
+              listLabel={sectionListLabel(section, rfpTabNumberById)}
               sectionButtonRefs={sectionButtonRefs}
               onSelectSection={onSelectSection}
               onOpenRevision={onOpenRevision}
@@ -255,7 +250,6 @@ function SectionGroup({
 
 export function ProposalSectionTree({
   sections,
-  manuscriptIndexById,
   selectedSectionId,
   highlightedSectionId,
   manualFillFlags,
@@ -266,6 +260,10 @@ export function ProposalSectionTree({
   onDeleteSection,
 }: ProposalSectionTreeProps) {
   const tree = useMemo(() => buildOutlineSectionTree(sections), [sections]);
+  const rfpTabNumberById = useMemo(
+    () => buildRfpTabDisplayNumbers(sections),
+    [sections],
+  );
   const canDelete = sections.length > 1;
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
     () => new Set(),
@@ -298,7 +296,7 @@ export function ProposalSectionTree({
             manualFillFlags={manualFillFlags}
             sectionRevisions={sectionRevisions}
             canDelete={canDelete}
-            manuscriptIndexById={manuscriptIndexById}
+            rfpTabNumberById={rfpTabNumberById}
             sectionButtonRefs={sectionButtonRefs}
             collapsed={collapsedGroups.has(node.id)}
             onToggle={() =>
@@ -323,7 +321,7 @@ export function ProposalSectionTree({
             flagCount={sectionManualFillCount(node.section.id, manualFillFlags)}
             hasRevision={Boolean(sectionRevisions[node.section.id])}
             canDelete={canDelete}
-            listLabel={sectionListLabel(node.section, manuscriptIndexById)}
+            listLabel={sectionListLabel(node.section, rfpTabNumberById)}
             sectionButtonRefs={sectionButtonRefs}
             onSelectSection={onSelectSection}
             onOpenRevision={onOpenRevision}

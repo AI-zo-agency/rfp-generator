@@ -403,5 +403,72 @@ class VerificationFactsRankingTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(block.index("connect@"), block.index("hello@"))
 
 
+class StaffingVerifyUses04BioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verify_staffing_packs_bio_even_when_hybrid_empty(self) -> None:
+        """Chat QA must fetch 04_Bio; it must not say 'no bio' while the PDF exists.
+
+        Generate still keeps designer-note stubs — this only injects the PDF into
+        the verify prompt, not the manuscript.
+        """
+        from app.models.proposal import ProposalSection
+        from app.models.rfp import RfpRecord
+
+        captured: dict[str, str] = {}
+
+        async def fake_chat(messages, **kwargs):
+            captured["user"] = messages[-1]["content"]
+            return {"reply": "ok"}, "stub"
+
+        async def fake_plan(**kwargs):
+            return ["staffing plan letitia hopper"]
+
+        async def fake_pack(section, **kwargs):
+            return (
+                "### Letitia Hopper (04_Bio_LetitiaHopper.pdf)\n"
+                "Letitia Hopper is Digital Media Strategist. Media planning and "
+                "vendor negotiation.\n"
+            )
+
+        section = ProposalSection(
+            id="rfp-staffing",
+            title="Staffing Plan and Project Infrastructure",
+            content=(
+                "Letitia Hopper, Digital Media Strategist, Manages media planning, "
+                "vendor negotiation, added-value securing, and placement monitoring."
+            ),
+            mode="write",
+            word_target=400,
+        )
+        rfp = RfpRecord(
+            id="r1", title="Media", client="City", sector="Government",
+            source="manual", dueDate="2026-09-01", receivedDate="2026-08-01",
+            lastActivity="2026-08-01", lastActivityNote="t",
+        )
+        with (
+            patch.object(editor, "chat_json_with_repair", side_effect=fake_chat),
+            patch.object(editor, "_plan_verification_kb_queries", side_effect=fake_plan),
+            patch.object(editor, "_verification_facts_block", return_value=""),
+            patch.object(editor, "_fetch_kb_blob_for_selection", return_value=("", "")),
+            patch(
+                "app.services.proposal_capability_bio_grounding.pack_04_bio_kb_for_section",
+                side_effect=fake_pack,
+            ),
+        ):
+            await editor._section_chat_advisory_reply(
+                section=section,
+                rfp=rfp,
+                rfp_context="",
+                user_message="can you cross verify if this is true?",
+                conversation_history=[],
+                selection_text=section.content,
+                requirements_block="",
+            )
+        prompt = captured["user"]
+        self.assertIn("04_Bio_LetitiaHopper.pdf", prompt)
+        self.assertIn("these PDFs ARE in the knowledge base", prompt)
+        self.assertNotIn("no matching verified fact", prompt.casefold())
+        self.assertNotIn("### Drew Stone", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,38 @@ _pipeline_phase: ContextVar[str] = ContextVar("pipeline_phase", default="")
 _pipeline_step: ContextVar[str] = ContextVar("pipeline_step", default="")
 _pipeline_rfp_id: ContextVar[str] = ContextVar("pipeline_rfp_id", default="")
 
+
+def get_pipeline_run_id() -> str:
+    return _pipeline_run_id.get() or ""
+
+
+def get_pipeline_phase() -> str:
+    return _pipeline_phase.get() or ""
+
+
+def get_pipeline_step() -> str:
+    return _pipeline_step.get() or ""
+
+
+def get_pipeline_rfp_id() -> str:
+    return _pipeline_rfp_id.get() or ""
+
+
+def resolve_pipeline_node_name(explicit: str | None = None) -> str:
+    """Best node label for cost logging when a call site omits node_name."""
+    name = (explicit or "").strip()
+    if name:
+        return name
+    step = get_pipeline_step()
+    phase = get_pipeline_phase()
+    if step and phase:
+        return f"{phase}:{step}"
+    if step:
+        return step
+    if phase:
+        return phase
+    return "unknown"
+
 _VERIFY_RE = re.compile(r"\[VERIFY:", re.I)
 _DRAFT_FAILED_RE = re.compile(
     r"section drafting failed|needs manual regeneration|writer returned empty prose",

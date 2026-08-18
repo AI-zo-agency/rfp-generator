@@ -349,11 +349,20 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
     clear_go_no_go_analysis(rfp_id)
 
     async def _run() -> None:
+        import uuid
+
+        from app.services.llm_call_context import llm_call_context
+
         try:
             current = get_rfp(rfp_id)
             if not current:
                 raise GoNoGoError("RFP not found", status_code=404)
-            analysis = await analyze_rfp(current)
+            with llm_call_context(
+                rfp_id=rfp_id,
+                run_id=str(uuid.uuid4()),
+                node_name="go_no_go",
+            ):
+                analysis = await analyze_rfp(current)
             updated = save_go_no_go_analysis(rfp_id, analysis)
             if not updated:
                 raise GoNoGoError("RFP not found after save", status_code=404)

@@ -13,6 +13,7 @@ YOU MUST NEVER:
 2. Cite specific numbers unless they appear VERBATIM in the evidence corpus with [E#] citation
 3. Use team member names that are not in approved bio files (04_Bio_*.pdf)
 4. Add certifications not explicitly listed in 01_companyfacts_verified
+4b. Claim the agency is registered / qualified / authorized to conduct business in a state that is not on the 01_companyfacts / Section 1.3 State Registrations list (e.g. asserting Maryland when the verified list is Oregon, Washington, Texas, Colorado, California). That is a checkable legal fact — use [MANUAL FILL: Sonja — confirm foreign qualification] or omit it. Never invent a filing.
 5. Transfer metrics from one client project to describe agency-wide capabilities
 6. Round or approximate numbers - use exact figures from KB or use [VERIFY: specific field]
 7. Spell names incorrectly (check exact spelling in bio file names)

@@ -532,9 +532,47 @@ def _hit_file_name(hit: dict[str, Any]) -> str:
 
 def _is_member_bio_file_hit(hit: dict[str, Any], member: str) -> bool:
     """True when hit is from this person's 04_Bio_* PDF (not proposals/case studies)."""
+    from app.services.proposal_bio_stub import bio_filename_matches_member
+
     file_name = _hit_file_name(hit)
     expected = f"04_Bio_{_bio_file_slug(member)}.pdf".casefold()
-    return file_name.strip().casefold() == expected
+    if file_name.strip().casefold() == expected:
+        return True
+    return bio_filename_matches_member(file_name, member)
+
+
+async def _find_member_bio_document(member: str) -> dict[str, Any] | None:
+    """Exact 04_Bio_FirstLast.pdf, then any 04_Bio file whose name contains the person."""
+    from app.services.proposal_bio_stub import (
+        bio_filename_matches_member,
+        expected_bio_pdf_filename,
+    )
+
+    candidates = [
+        f"04_Bio_{_bio_file_slug(member)}.pdf",
+        expected_bio_pdf_filename(member),
+    ]
+    seen: set[str] = set()
+    for name in candidates:
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            doc = await supermemory.find_document_by_file_name(name)
+        except supermemory.SupermemoryError:
+            doc = None
+        if doc:
+            return doc
+    try:
+        docs = await supermemory.list_all_container_documents()
+    except supermemory.SupermemoryError:
+        return None
+    for doc in docs or []:
+        file_name = _hit_file_name(doc)
+        if bio_filename_matches_member(file_name, member):
+            return doc
+    return None
 
 
 def _prefer_full_bio_text(full_text: str, search_text: str) -> str:
@@ -674,14 +712,13 @@ async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
     if not supermemory.is_configured():
         return "(Supermemory not configured.)", []
 
-    slug = _bio_file_slug(member)
-    target_file = f"04_Bio_{slug}.pdf"
     sources: list[str] = []
     full_text = ""
 
     # 1) Authoritative full document by filename (not fuzzy RFP-mixed search).
+    #    Also accept 04_Bio_First_Last.pdf / "04_Bio_First Last.pdf" variants.
     try:
-        doc = await supermemory.find_document_by_file_name(target_file)
+        doc = await _find_member_bio_document(member)
         if doc:
             custom_id = supermemory.document_fetch_key(doc)
             if custom_id:

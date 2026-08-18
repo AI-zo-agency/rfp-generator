@@ -170,6 +170,17 @@ def apply_zero_fabrication_guards(
         logger.warning("%s cert claim scrub skipped: %s", label, exc)
 
     try:
+        from app.services.proposal_state_registration_guard import (
+            scrub_unverified_state_registration_claims,
+        )
+
+        draft, reg_logs = scrub_unverified_state_registration_claims(draft, research)
+        for line in reg_logs:
+            report.logs.append(f"{label}: state registration — {line}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s state registration guard skipped: %s", label, exc)
+
+    try:
         from app.services.proposal_fulfill_rfp_repairs import (
             apply_deterministic_roster_fixes,
         )

@@ -29,6 +29,25 @@ from app.services.proposal_section_quality import word_count
 
 logger = logging.getLogger(__name__)
 
+
+async def _append_personnel_04_bio(section: ProposalSection, kb_context: str) -> str:
+    """QA/Complete Scan: attach real 04_Bio text. Do not write it into the manuscript."""
+    from app.services.proposal_capability_bio_grounding import (
+        is_personnel_bio_section,
+        pack_04_bio_kb_for_section,
+    )
+
+    if not is_personnel_bio_section(section):
+        return kb_context
+    packed = await pack_04_bio_kb_for_section(section)
+    if not packed.strip():
+        return kb_context
+    header = (
+        "04_Bio (verify named staff against this; do NOT dump full resumes into "
+        "the manuscript; Section 2 designer-note stubs stay stubs):\n"
+    )
+    return f"{header}{packed}\n\n{kb_context}"
+
 # Cap concurrent section fact-checks / KB queries (I/O bound; avoid rate-limit storms).
 FACT_CHECK_SECTION_PARALLEL = 4
 FACT_CHECK_KB_QUERY_PARALLEL = 4
@@ -1100,6 +1119,7 @@ async def _fact_check_one_section(
             rfp=rfp,
             mapped=mapped,
         )
+        kb_context = await _append_personnel_04_bio(current, kb_context)
         if _is_whole_section_draft_stub(current.content or "") and not kb_context.strip():
             logger.info(
                 "KB fact-check: skipping stub repair for %s — no KB evidence found",
@@ -1138,6 +1158,7 @@ async def _fact_check_one_section(
             kb_context, sources = await _kb_blob_for_section(
                 current, rfp, mapped=mapped
             )
+        kb_context = await _append_personnel_04_bio(current, kb_context)
 
     if kb_context:
         new_body, fills = _replace_verify_tags_from_blob(

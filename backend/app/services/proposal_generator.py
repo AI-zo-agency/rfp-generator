@@ -2263,7 +2263,7 @@ async def _run_phase3_drafting_inner(
             rfp=rfp,
             research=research,
             rfp_text=rfp_source_text or "",
-            use_llm_contradiction=not app_settings.fast_proposal_generation,
+            use_llm_contradiction=False,
         )
         draft = suite.draft
         for line in suite.logs[:16]:
@@ -2397,7 +2397,11 @@ async def run_phase3_6_self_edit(rfp_id: str):
     """Phase 3.6: senior-editor self-edit loop (section-wise KB repair)."""
     with pipeline_phase("phase-3-6-self-edit", rfp_id=rfp_id):
         await _collapse_bio_stubs(rfp_id, log_label="Phase 3.6 start bio stub")
-        draft, research, report = await run_self_edit_loop(rfp_id)
+        draft, research, report = await run_self_edit_loop(
+            rfp_id,
+            lean=True,
+            skip_blocker_preflight=True,
+        )
         collapsed = await _collapse_bio_stubs(
             rfp_id,
             draft=draft,
@@ -2875,7 +2879,7 @@ async def _run_phase3_5_budget_inner(
 
 
 async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, ProposalResearchCache]:
-    """Stage 4: audit → optional adversarial repair → pre-submit + ending report."""
+    """Stage 4: fill leftover required stubs → optional adversarial repair → pre-submit audit."""
     rfp = get_rfp(rfp_id)
     if not rfp:
         raise ProposalError("RFP not found", status_code=404)
@@ -2894,7 +2898,80 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
     extra_issues: list = []
     await _collapse_bio_stubs(rfp_id, draft=draft, log_label="Phase 4 start bio stub")
     draft = await aget_proposal_draft(rfp_id) or draft
-    if app_settings.adversarial_repair_loop:
+
+    from app.services.proposal_draft_structure_stubs import (
+        draft_rfp_structure_stubs,
+        section_needs_presubmit_fill,
+    )
+    from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
+
+    unfilled = [
+        s.title or s.id
+        for s in draft.sections
+        if section_needs_presubmit_fill(s)
+    ]
+    if unfilled:
+        await record_pipeline_activity(
+            rfp_id,
+            label="Pre-submit: Fill leftover required tabs",
+            detail=(
+                "One draft pass each — "
+                + ", ".join(unfilled[:6])
+                + ("…" if len(unfilled) > 6 else "")
+            ),
+            step_index=0,
+            step_total=1,
+            in_progress_phase="phase-4-review",
+        )
+        draft, stub_logs = await draft_rfp_structure_stubs(
+            draft, rfp_id=rfp_id, rfp=rfp, max_sections=8
+        )
+        if stub_logs:
+            await asave_proposal_draft(draft)
+            for line in stub_logs[:12]:
+                logger.info("Phase 4 stub fill %s: %s", rfp_id, line)
+            from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
+
+            research = await aget_research_cache(rfp_id) or research
+            draft, zf_report = apply_zero_fabrication_guards(
+                draft,
+                research=research,
+                budget=research.budget if research else None,
+                rfp_text="",
+                label="phase4-stub-fill",
+            )
+            if zf_report.logs:
+                await asave_proposal_draft(draft)
+            step_trace(
+                "phase4_stub_fill",
+                rfp_id=rfp_id,
+                filled=len(stub_logs),
+                samples=stub_logs[:8],
+            )
+
+    still_unfilled = [
+        s.title or s.id
+        for s in draft.sections
+        if section_needs_presubmit_fill(s)
+    ]
+    # Only skip repair/auditor LLM when shells are still empty — if fill landed,
+    # continue into adversarial + full audit.
+    skip_adversarial = bool(still_unfilled)
+    if skip_adversarial:
+        logger.info(
+            "Phase 4 skipping adversarial repair for %s — leftover-tab fill first "
+            "(had=%s remaining=%s)",
+            rfp_id,
+            unfilled[:6],
+            still_unfilled[:6],
+        )
+        step_trace(
+            "adversarial_repair_skipped",
+            rfp_id=rfp_id,
+            reason="leftover_required_tabs_fill",
+            remaining=still_unfilled[:8],
+        )
+    elif app_settings.adversarial_repair_loop:
         with pipeline_phase("adversarial-repair", rfp_id=rfp_id):
             draft, research, _audit, repair_report = await run_adversarial_repair_loop(
                 rfp=rfp,
@@ -3013,6 +3090,7 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         rfp=rfp,
         draft=draft,
         research=research,
+        use_llm=not still_unfilled,
     )
     # Preserve repair report if the audit attach path returned a copy without it.
     if (

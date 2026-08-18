@@ -53,11 +53,15 @@ _MECHANICAL_EXACT = frozenset(
         "chat_structure_split",
         "chat_manuscript_intent",
         "chat_manuscript_fix_plan",
+        # Understands a chat edit and plans KB queries — does not write prose.
+        "section_improve_plan",
         "fee_slot_fill_plan",
         # Phase-2 intelligence planners.
         "retrieval_planner",
         "dynamic_section",
         "section_strategy",
+        "execution_plan",
+        "writing_briefs",
         # Requirement-ledger ADD (Task 10) — plans KB queries for a
         # newly-added section stub before drafting it.
         "ledger_add_query_planner",
@@ -86,10 +90,14 @@ _QUALITY_EXACT = frozenset(
         "money_intelligence_pass_a",
         "money_intelligence_pass_b",
         "rfp_understanding",
+        "opportunity_extract",
+        "strategy_delivery",
         "capability_adjudicator",
         # Picks the KB queries behind an excerpt revision — if it targets the
         # wrong facts, the rewriter has nothing true to say.
         "chat_selection_kb_plan",
+        # Answers the user in section chat — correctness of the reply matters.
+        "section_chat_advisory",
         # Requirement-ledger ADD (Task 10) — drafts client-facing prose for a
         # section that had no draft content at all; a client reads this.
         "ledger_add_section_draft",

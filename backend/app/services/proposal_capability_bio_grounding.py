@@ -226,6 +226,11 @@ def section_or_instruction_needs_bio_kb(
     )
 
 
+_NAME_COMMA_ROLE_RE = re.compile(
+    r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z'\-]+){1,2})\s*,\s+[A-Z]"
+)
+
+
 def named_people_in_section(
     section: ProposalSection,
     *,
@@ -233,37 +238,53 @@ def named_people_in_section(
 ) -> list[str]:
     """Heading names in a personnel / bio tab (First Last).
 
-    Also picks up names the user mentioned (e.g. \"Shawn DiCriscio … resume\")
-    and headings like \"### Shawn DiCriscio, Senior Web Developer\".
+    Also picks up names the user mentioned (e.g. \"Shawn DiCriscio … resume\"),
+    headings like \"### Shawn DiCriscio, Senior Web Developer\", and staffing
+    prose like \"Letitia Hopper, Digital Media Strategist, …\".
     """
+    from app.services.proposal_bio_stub import is_plausible_person_name
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
 
     names: list[str] = []
+    skip = {
+        "role on this engagement",
+        "team qualifications summary",
+        "senior web developer",
+        "creative director",
+        "account director",
+    }
+
+    def _add(name: str) -> None:
+        cleaned = (name or "").strip()
+        if not cleaned or cleaned.casefold() in skip:
+            return
+        if not is_plausible_person_name(cleaned):
+            return
+        if cleaned not in names:
+            names.append(cleaned)
+
     sid = section.id or ""
     from_title = person_name_from_tab_title(section.title or "")
     if from_title:
-        names.append(from_title)
+        _add(from_title)
     elif sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
         member = _member_name_from_bio_section(section.title or "")
         if member:
-            names.append(member)
+            _add(member)
     blob = f"{section.title or ''}\n{section.content or ''}"
     for match in _PERSON_HEADING_RE.finditer(blob):
-        name = match.group(1).strip()
-        if name.casefold() in {
-            "role on this engagement",
-            "team qualifications summary",
-            "senior web developer",
-            "creative director",
-            "account director",
-        }:
-            continue
-        if name not in names:
-            names.append(name)
+        _add(match.group(1).strip())
+
+    content = section.content or ""
+    # Staffing / team paragraphs: "Letitia Hopper, Digital Media Strategist, …"
+    # — not a markdown heading, so heading parse misses them.
+    for match in _NAME_COMMA_ROLE_RE.finditer(f"{content}\n{user_message or ''}"):
+        cand = match.group(1).strip()
+        if is_plausible_person_name(cand):
+            _add(cand)
 
     # User named a person — include even when heading parse missed commas/titles.
     msg = (user_message or "").strip()
-    content = section.content or ""
     if msg and content:
         content_cf = content.casefold()
         # Prefer people already present in the draft body (any heading style).
@@ -274,18 +295,14 @@ def named_people_in_section(
             content,
         ):
             name = match.group(1).strip()
-            if name.casefold() in {
-                "role on this engagement",
-                "team qualifications summary",
-            }:
+            if name.casefold() in skip:
                 continue
             # Message mentions this person (case-insensitive).
-            if name.casefold() in msg.casefold() and name not in names:
-                names.append(name)
+            if name.casefold() in msg.casefold():
+                _add(name)
             elif (
                 name.split()[0].casefold() in msg.casefold()
                 and len(name.split()) >= 2
-                and name not in names
                 and name.casefold() in content_cf
             ):
                 # "shawn" alone → Shawn DiCriscio when unique in section
@@ -298,8 +315,59 @@ def named_people_in_section(
                     )
                 ]
                 if len({h.casefold() for h in first_hits}) == 1:
-                    names.append(name)
+                    _add(name)
+        for match in _PERSON_NAME_IN_TEXT_RE.finditer(msg):
+            cand = match.group(1).strip()
+            if is_plausible_person_name(cand) and cand.casefold() in content_cf:
+                _add(cand)
+            elif is_plausible_person_name(cand):
+                _add(cand)
     return names
+
+
+def named_people_in_text(text: str) -> list[str]:
+    """First Last names in a pin / chat ask (not the whole staffing roster)."""
+    from app.services.proposal_bio_stub import is_plausible_person_name
+
+    names: list[str] = []
+    blob = text or ""
+    for match in _NAME_COMMA_ROLE_RE.finditer(blob):
+        cand = match.group(1).strip()
+        if is_plausible_person_name(cand) and cand not in names:
+            names.append(cand)
+    for match in _PERSON_NAME_IN_TEXT_RE.finditer(blob):
+        cand = match.group(1).strip()
+        if is_plausible_person_name(cand) and cand not in names:
+            names.append(cand)
+    return names
+
+
+def people_for_bio_pack(
+    section: ProposalSection,
+    *,
+    user_message: str = "",
+    excerpt: str = "",
+) -> list[str]:
+    """People whose 04_Bio to fetch for this turn.
+
+    A pinned Letitia paragraph must not pull Ron/Curt/every teammate on the tab.
+    Fall back to the full tab roster only when the ask does not name anyone.
+    """
+    focus_blob = f"{excerpt or ''}\n{user_message or ''}"
+    focused = named_people_in_text(focus_blob)
+    if not focused:
+        return named_people_in_section(section, user_message=user_message)
+    roster = {
+        n.casefold()
+        for n in named_people_in_section(section, user_message=focus_blob)
+    }
+    content_cf = f"{section.content or ''}\n{excerpt or ''}".casefold()
+    kept: list[str] = []
+    for name in focused:
+        if name.casefold() in roster or name.casefold() in content_cf:
+            if name not in kept:
+                kept.append(name)
+    return kept or named_people_in_section(section, user_message=user_message)
 
 
 def bio_block_is_role_only(content: str, member: str) -> bool:
@@ -680,7 +748,9 @@ async def _lookup_approved_bio_pdf(member: str) -> tuple[str, bool]:
 
         if not supermemory.is_configured():
             return expected, True
-        doc = await supermemory.find_document_by_file_name(expected)
+        from app.services.proposal_sections_graph import _find_member_bio_document
+
+        doc = await _find_member_bio_document(member)
         if not doc:
             return expected, False
         meta = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}

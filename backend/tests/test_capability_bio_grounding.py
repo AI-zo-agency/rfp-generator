@@ -196,6 +196,20 @@ class PersonnelSectionBioTests(unittest.TestCase):
         )
         self.assertIn("Shawn DiCriscio", named_people_in_section(section))
 
+    def test_staffing_prose_name_comma_role_is_a_person(self) -> None:
+        from app.models.proposal import ProposalSection
+
+        section = ProposalSection(
+            id="rfp-staffing",
+            title="Staffing Plan and Project Infrastructure",
+            content=(
+                "Letitia Hopper, Digital Media Strategist, Manages media planning, "
+                "vendor negotiation, added-value securing, and placement monitoring."
+            ),
+        )
+        self.assertTrue(is_personnel_bio_section(section))
+        self.assertIn("Letitia Hopper", named_people_in_section(section))
+
     def test_user_message_names_person_when_heading_odd(self) -> None:
         from app.models.proposal import ProposalSection
 

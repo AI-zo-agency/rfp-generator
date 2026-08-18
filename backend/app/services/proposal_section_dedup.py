@@ -242,6 +242,154 @@ def compress_duplicate_case_study_sections(
     return out, compressed
 
 
+def _pointer_for_home(title: str) -> str:
+    home = (title or "the overlapping section").strip()
+    return (
+        f"See **{home}** for this narrative (already covered there — "
+        "not restated here)."
+    )
+
+
+def _replace_shared_paragraphs(body: str, shared: list[str], pointer: str) -> str:
+    new = body
+    for para in shared:
+        plain = _plain_for_match(para)
+        if len(plain) < 80:
+            continue
+        if plain in new:
+            new = new.replace(plain, "", 1)
+    new = re.sub(r"\n{3,}", "\n\n", new).strip()
+    if not new:
+        return pointer
+    if pointer not in new:
+        new = f"{pointer}\n\n{new}"
+    return new.strip()
+
+
+def _shared_paragraphs(source: str, target: str, *, min_len: int = 80) -> list[str]:
+    shared: list[str] = []
+    for para in _distinctive_paragraphs(source, min_len=min_len):
+        plain = _plain_for_match(para)
+        if len(plain) >= min_len and plain in (target or ""):
+            shared.append(para)
+    return shared
+
+
+def trim_overlapping_section_prose(
+    sections: list[Any],
+) -> tuple[list[Any], list[str]]:
+    """Keep every TOC tab. Strip copied paragraphs; leave a one-line cross-ref.
+
+    Mechanical only — no LLM. Never blanks a tab. Never deletes a heading.
+    """
+    from app.models.proposal import ProposalSection
+
+    logs: list[str] = []
+    working: list[Any] = list(sections)
+    index_by_id = {
+        _section_id(section): i
+        for i, section in enumerate(working)
+        if _section_id(section)
+    }
+
+    def _set(section: Any) -> None:
+        sid = _section_id(section)
+        idx = index_by_id.get(sid)
+        if idx is not None:
+            working[idx] = section
+
+    owners: list[tuple[str, str, list[str]]] = []
+    for section in working:
+        sid = _section_id(section)
+        if not _is_static_cq_section_id(sid) or sid.endswith("placeholder"):
+            continue
+        paras = _distinctive_paragraphs(_section_content(section), min_len=80)
+        if paras:
+            owners.append((sid, _section_title(section), paras))
+
+    for section in list(working):
+        if not isinstance(section, ProposalSection):
+            continue
+        sid = section.id or ""
+        if _is_static_cq_section_id(sid) or _is_protected_budget_section(section):
+            continue
+        body = section.content or ""
+        if not body.strip():
+            continue
+        new = body
+        hits = 0
+        home_title = ""
+        for _oid, otitle, paras in owners:
+            shared = [p for p in paras if _plain_for_match(p) in new]
+            if not shared:
+                continue
+            home_title = otitle
+            new = _replace_shared_paragraphs(new, shared, _pointer_for_home(otitle))
+            hits += len(shared)
+        if hits and new != body:
+            if word_count(new) < 20:
+                new = _pointer_for_home(home_title or "Sections 1–3")
+            _set(section.model_copy(update={"content": new}))
+            logs.append(
+                f"{section.title or sid}: trimmed {hits} restated 1–3 paragraph(s)"
+            )
+
+    candidates: list[tuple[int, Any]] = []
+    for idx, section in enumerate(working):
+        sid = _section_id(section)
+        body = _section_content(section).strip()
+        if not sid or _is_static_cq_section_id(sid):
+            continue
+        if _is_protected_budget_section(section):
+            continue
+        if word_count(body) < 25:
+            continue
+        candidates.append((idx, section))
+
+    for i, (idx_a, _sec_a_orig) in enumerate(candidates):
+        for idx_b, _sec_b_orig in candidates[i + 1 :]:
+            sec_a = working[idx_a]
+            body_a = _section_content(sec_a)
+            sec_b = working[idx_b]
+            body_b = _section_content(sec_b)
+            shared_in_b = _shared_paragraphs(body_a, body_b)
+            shared_in_a = _shared_paragraphs(body_b, body_a)
+            if not shared_in_a and not shared_in_b:
+                continue
+            pts_a = _section_eval_points(sec_a)
+            pts_b = _section_eval_points(sec_b)
+            trim_b = _prefer_drop_b(
+                pts_a=pts_a,
+                pts_b=pts_b,
+                idx_a=idx_a,
+                idx_b=idx_b,
+                wc_a=word_count(body_a),
+                wc_b=word_count(body_b),
+            )
+            if trim_b and shared_in_b and isinstance(sec_b, ProposalSection):
+                pointer = _pointer_for_home(_section_title(sec_a))
+                new = _replace_shared_paragraphs(body_b, shared_in_b, pointer)
+                if word_count(new) < 20:
+                    new = pointer
+                _set(sec_b.model_copy(update={"content": new}))
+                logs.append(
+                    f"{_section_title(sec_b)}: trimmed {len(shared_in_b)} "
+                    f"paragraph(s) already in {_section_title(sec_a)}"
+                )
+            elif (not trim_b) and shared_in_a and isinstance(sec_a, ProposalSection):
+                pointer = _pointer_for_home(_section_title(sec_b))
+                new = _replace_shared_paragraphs(body_a, shared_in_a, pointer)
+                if word_count(new) < 20:
+                    new = pointer
+                _set(sec_a.model_copy(update={"content": new}))
+                logs.append(
+                    f"{_section_title(sec_a)}: trimmed {len(shared_in_a)} "
+                    f"paragraph(s) already in {_section_title(sec_b)}"
+                )
+
+    return working, logs
+
+
 _CONTENT_STOPWORDS = {
     "that",
     "this",
@@ -740,30 +888,38 @@ def remove_aggregate_restatement_sections(
 
 def dedupe_manuscript_for_scan(
     sections: list[Any],
+    *,
+    drop_clone_tabs: bool = True,
 ) -> tuple[list[Any], list[str]]:
-    """Scan-RFP dedupe: compress case studies → prune clones → drop mega restates."""
+    """Manuscript compact: compress restates; optionally prune clone tabs.
+
+    ``drop_clone_tabs=False`` (senior editor) keeps every TOC heading and only
+    trims copied paragraphs (case-study rewrites, identity forms, overlap).
+    """
     from app.models.proposal import ProposalDraft
 
     logs: list[str] = []
     sections, n = compress_duplicate_case_study_sections(list(sections))
     if n:
         logs.append(f"Compressed {n} case-study rewrite(s)")
-    try:
-        from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
+    if drop_clone_tabs:
+        try:
+            from app.services.proposal_budget_content import collapse_duplicate_cost_proposal_tabs
 
-        typed = [s for s in sections if hasattr(s, "title")]
-        if len(typed) == len(sections):
-            sections, cost_logs = collapse_duplicate_cost_proposal_tabs(typed)
-            logs.extend(cost_logs)
-    except Exception:  # noqa: BLE001
-        pass
-    sections, title_dups = collapse_title_near_duplicate_sections(sections)
-    logs.extend(title_dups)
-    # Mega parents first so pairwise prune sees the dedicated siblings cleanly.
-    sections, removed = remove_aggregate_restatement_sections(sections)
-    logs.extend(removed)
-    sections, pruned = prune_near_duplicate_sections(sections)
-    logs.extend(pruned)
+            typed = [s for s in sections if hasattr(s, "title")]
+            if len(typed) == len(sections):
+                sections, cost_logs = collapse_duplicate_cost_proposal_tabs(typed)
+                logs.extend(cost_logs)
+        except Exception:  # noqa: BLE001
+            pass
+    if drop_clone_tabs:
+        sections, title_dups = collapse_title_near_duplicate_sections(sections)
+        logs.extend(title_dups)
+        # Mega parents first so pairwise prune sees the dedicated siblings cleanly.
+        sections, removed = remove_aggregate_restatement_sections(sections)
+        logs.extend(removed)
+        sections, pruned = prune_near_duplicate_sections(sections)
+        logs.extend(pruned)
     # Offeror/Company Information forms that restate 1.3 → cross-ref only (no table copy)
     draft_like = ProposalDraft(
         rfpId="dedupe-scan",
@@ -774,6 +930,9 @@ def dedupe_manuscript_for_scan(
     if company_logs:
         sections = list(compressed.sections)
         logs.extend(company_logs)
+    if not drop_clone_tabs:
+        sections, trim_logs = trim_overlapping_section_prose(sections)
+        logs.extend(trim_logs)
     return sections, logs
 
 

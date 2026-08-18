@@ -173,20 +173,40 @@ def _locks_brief_for_repair(research: ProposalResearchCache | None) -> str:
 
 
 def _manuscript_digest_for_senior_editor(draft: ProposalDraft, *, max_chars: int = 35_000) -> str:
-    parts: list[str] = []
-    used = 0
+    """Full TOC first (never truncated away), then per-tab excerpts until the budget."""
+    toc_lines = [
+        "## FULL TABLE OF CONTENTS — keep every tab; never delete a listed id",
+    ]
+    for i, section in enumerate(draft.sections, 1):
+        body = (section.content or "").strip()
+        wc = word_count(body)
+        if not body:
+            status = "EMPTY"
+        elif wc < 45:
+            status = f"STUB {wc}w"
+        else:
+            status = f"{wc}w"
+        toc_lines.append(f"{i}. `{section.id}` — {section.title} [{status}]")
+    toc_block = "\n".join(toc_lines)
+    parts: list[str] = [toc_block, "", "## Section excerpts"]
+    used = len(toc_block)
+    excerpted = 0
     for section in draft.sections:
         body = (section.content or "").strip()
         if not body:
             chunk = f"### {section.id} — {section.title}\n(empty)\n"
         else:
-            # Head of each section is enough for coverage/dedupe tickets.
-            excerpt = body[:1200]
+            excerpt = body[:900]
             chunk = f"### {section.id} — {section.title}\n{excerpt}\n"
         if used + len(chunk) > max_chars:
+            remaining = len(draft.sections) - excerpted
+            parts.append(
+                f"(excerpt budget reached — {remaining} later tab(s) listed in TOC only)\n"
+            )
             break
         parts.append(chunk)
         used += len(chunk)
+        excerpted += 1
     return "\n".join(parts)
 
 
@@ -209,6 +229,98 @@ def _ticket_rewrite_brief(ticket: dict[str, Any]) -> str:
     if isinstance(unmet, list) and unmet:
         parts.append("Unmet RFP requirements:\n" + "\n".join(f"- {u}" for u in unmet[:12]))
     return "\n".join(parts).strip()
+
+
+def _manuscript_needs_senior_llm_emit(
+    draft: ProposalDraft,
+    *,
+    verify_tag_count: int,
+    mechanical_coverage: list[dict[str, Any]],
+    dedupe_logs: list[str],
+) -> bool:
+    """Skip the LLM ticket-emit pass when deterministic prep already looks clean."""
+    if verify_tag_count > 0:
+        return True
+    if mechanical_coverage:
+        return True
+    if dedupe_logs:
+        return True
+    from app.services.proposal_manuscript_compact import list_sections_needing_compact
+
+    overlong = list_sections_needing_compact(draft)
+    if len(overlong) >= 3:
+        return True
+    thin = sum(
+        1
+        for section in draft.sections
+        if (section.content or "").strip() and word_count(section.content or "") < 45
+    )
+    return thin >= 2
+
+
+def _empty_senior_editor_tickets() -> dict[str, Any]:
+    return {
+        "deleteSectionTickets": [],
+        "dedupeTickets": [],
+        "compactFormatTickets": [],
+        "coverageTickets": [],
+        "complianceTickets": [],
+        "notes": [],
+    }
+
+
+def normalize_senior_editor_tickets(tickets: dict[str, Any]) -> dict[str, Any]:
+    """Keep every TOC tab. Convert any delete tickets into trim-only dedupe tickets."""
+
+    def _dict_list(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        return [t for t in value if isinstance(t, dict)]
+
+    deletes = _dict_list(tickets.get("deleteSectionTickets"))
+    extra_dedupe: list[dict[str, Any]] = []
+    refused: list[str] = []
+    for raw in deletes:
+        sid = str(raw.get("sectionId") or "").strip()
+        if not sid:
+            continue
+        keep = str(raw.get("keepSectionId") or raw.get("keepHomeSectionId") or "").strip()
+        reason = str(raw.get("reason") or "").strip()
+        refused.append(sid)
+        extra_dedupe.append(
+            {
+                "sectionId": sid,
+                "keepHomeSectionId": keep,
+                "trimGuidance": (
+                    "KEEP this tab in the TOC — never delete it. "
+                    "Trim only duplicated prose already owned by "
+                    f"`{keep or 'the overlapping sibling tab'}`. "
+                    "Keep this tab's unique RFP ask and one short cross-reference."
+                    + (f" Editor note: {reason}" if reason else "")
+                ),
+            }
+        )
+    notes_raw = tickets.get("notes") or []
+    notes = (
+        [str(n) for n in notes_raw if str(n).strip()]
+        if isinstance(notes_raw, list)
+        else []
+    )
+    if refused:
+        notes.append(
+            "Refused deleteSectionTickets for: "
+            + ", ".join(refused[:12])
+            + " — kept every TOC tab; converted to trim-only dedupe."
+        )
+    existing_dedupe = _dict_list(tickets.get("dedupeTickets"))
+    return {
+        "deleteSectionTickets": [],
+        "dedupeTickets": extra_dedupe + existing_dedupe,
+        "compactFormatTickets": _dict_list(tickets.get("compactFormatTickets")),
+        "coverageTickets": _dict_list(tickets.get("coverageTickets")),
+        "complianceTickets": _dict_list(tickets.get("complianceTickets")),
+        "notes": notes,
+    }
 
 
 async def _redraft_section_via_phase3_isolated(
@@ -359,6 +471,16 @@ async def _redraft_section_via_phase3_isolated(
     return next_draft, research, improved, "phase3_ticket_redraft"
 
 
+def _section_is_stub_for_ticket(draft: ProposalDraft, section_id: str) -> bool:
+    existing = next((s for s in draft.sections if s.id == section_id), None)
+    if existing is None:
+        return True
+    body = (existing.content or "").strip()
+    if not body:
+        return True
+    return word_count(body) < 60
+
+
 async def _apply_senior_editor_tickets(
     *,
     tickets: dict[str, Any],
@@ -369,74 +491,24 @@ async def _apply_senior_editor_tickets(
     report: SelfEditReport,
     max_tickets: int = 5,
 ) -> tuple[ProposalDraft, ProposalResearchCache | None]:
-    """Dispatch Phase 3 single-section redrafts for already-emitted Senior Editor tickets."""
+    """Apply senior-editor tickets as surgical patches. Never delete a TOC tab."""
     from app.services.proposal_budget_content import find_budget_section_index
-    from app.services.proposal_section_dedup import (
-        _is_protected_budget_section,
-        _is_static_cq_section_id,
+
+    tickets = normalize_senior_editor_tickets(tickets)
+    refused_note = next(
+        (
+            str(n)
+            for n in (tickets.get("notes") or [])
+            if "Refused deleteSectionTickets" in str(n)
+        ),
+        "",
     )
-
-    # Budget / Pricing is canonically rendered — never hard-delete via LLM tickets.
-    protected_budget_ids = {
-        s.id for s in draft.sections if _is_protected_budget_section(s)
-    }
-    budget_idx_pre = find_budget_section_index(draft.sections)
-    if budget_idx_pre is not None:
-        protected_budget_ids.add(draft.sections[budget_idx_pre].id)
-
-    # Apply hard deletes first — no point repairing a tab we are about to remove.
-    delete_tickets = [
-        t for t in (tickets.get("deleteSectionTickets") or []) if isinstance(t, dict)
-    ]
-    drop_ids: set[str] = set()
-    blocked_budget_deletes = 0
-    for raw in delete_tickets:
-        sid = str(raw.get("sectionId") or "").strip()
-        keep = str(raw.get("keepSectionId") or "").strip()
-        if not sid or _is_static_cq_section_id(sid):
-            continue
-        if sid in protected_budget_ids:
-            blocked_budget_deletes += 1
-            logger.warning(
-                "Senior editor refused delete ticket for protected budget section %s",
-                sid,
-            )
-            continue
-        if keep and not any(s.id == keep for s in draft.sections):
-            continue
-        if not any(s.id == sid for s in draft.sections):
-            continue
-        drop_ids.add(sid)
-    if blocked_budget_deletes:
-        report.section_logs.append(
-            {
-                "section": "senior-editor",
-                "detail": (
-                    f"Blocked {blocked_budget_deletes} delete ticket(s) "
-                    "targeting Budget/Pricing (fee tab is protected)"
-                ),
-            }
-        )
-    if drop_ids:
-        kept = [s for s in draft.sections if s.id not in drop_ids]
-        draft = draft.model_copy(
-            update={
-                "sections": kept,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        await asave_proposal_draft(draft)
-        report.section_logs.append(
-            {
-                "section": "senior-editor",
-                "detail": f"Deleted {len(drop_ids)} duplicate section tab(s) via tickets",
-            }
-        )
+    if refused_note:
+        report.section_logs.append({"section": "senior-editor", "detail": refused_note})
+        logger.warning("Senior editor %s", refused_note)
 
     # The Budget/Pricing section is deterministically rendered (render_budget_markdown)
-    # and must never go through a generic Phase 3 section redraft, which would freely
-    # rewrite the reconciled table as ordinary prose. Never apply a ticket to it —
-    # budget corrections belong in the budget editor, not the senior editor ticket pass.
+    # and must never go through a generic Phase 3 section redraft.
     budget_idx = find_budget_section_index(draft.sections)
     budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
 
@@ -450,7 +522,7 @@ async def _apply_senior_editor_tickets(
         if not isinstance(raw, dict):
             continue
         sid = str(raw.get("sectionId") or "").strip()
-        if not sid or sid in seen or sid in drop_ids:
+        if not sid or sid in seen:
             continue
         if sid == budget_section_id:
             continue
@@ -465,34 +537,37 @@ async def _apply_senior_editor_tickets(
         if len(ordered) >= max_tickets:
             break
 
-    if not ordered and not drop_ids:
+    if not ordered:
         report.section_logs.append(
             {"section": "senior-editor", "detail": "no tickets emitted"}
         )
         return draft, research
 
-    if ordered:
-        report.section_logs.append(
-            {
-                "section": "senior-editor",
-                "detail": (
-                    f"{len(delete_tickets)} delete / {len(dedupe)} dedupe / "
-                    f"{len(coverage)} coverage / {len(compliance)} compliance "
-                    f"ticket(s); applying {len(ordered)} rewrite(s)"
-                ),
-            }
-        )
-    elif not drop_ids:
-        return draft, research
+    report.section_logs.append(
+        {
+            "section": "senior-editor",
+            "detail": (
+                f"{len(dedupe)} dedupe / {len(coverage)} coverage / "
+                f"{len(compliance)} compliance ticket(s); applying "
+                f"{len(ordered)} surgical patch(es) — no TOC tabs deleted"
+            ),
+        }
+    )
 
     for ticket in ordered:
         sid = str(ticket.get("sectionId") or "")
         brief = _ticket_rewrite_brief(ticket)
         is_dedupe = ticket in dedupe and ticket not in coverage and ticket not in compliance
-        if is_dedupe:
+        needs_full_redraft = (not is_dedupe) and _section_is_stub_for_ticket(draft, sid)
+        if is_dedupe or not needs_full_redraft:
             default_msg = (
                 "Trim duplicated company/bio/case-study content; keep this "
                 "section's unique job and one short cross-reference."
+                if is_dedupe
+                else (
+                    "Surgical patch only — keep this tab. Address the ticket. "
+                    "Do not blank the section or drop RFP asks already covered."
+                )
             )
             _sid, improved, detail = await _repair_one_section(
                 rfp_id,
@@ -511,8 +586,11 @@ async def _apply_senior_editor_tickets(
                 report.sections_improved += 1
             else:
                 report.sections_unchanged += 1
+            kind = "dedupe" if is_dedupe else (
+                "compliance" if ticket in compliance else "coverage"
+            )
             report.section_logs.append(
-                {"sectionId": sid, "detail": detail, "ticket": "dedupe"}
+                {"sectionId": sid, "detail": detail, "ticket": kind}
             )
             continue
 
@@ -549,6 +627,8 @@ async def _apply_designer_compact_pass(
     report: SelfEditReport,
     max_sections: int | None = None,
     skip_section_ids: set[str] | None = None,
+    compact_tickets: list[dict[str, Any]] | None = None,
+    lean: bool = False,
 ) -> tuple[ProposalDraft, ProposalResearchCache | None]:
     """Rewrite every overlong/essay tab to designer-compact layout — full RFP coverage."""
     from app.core.config import settings as app_settings
@@ -560,15 +640,27 @@ async def _apply_designer_compact_pass(
     if not app_settings.designer_compact_in_generate:
         return draft, research
 
-    cap = max_sections
-    if cap is None:
-        cap = max(1, int(app_settings.designer_compact_max_sections or 12))
     skip = skip_section_ids or set()
-    targets = [
-        s for s in list_sections_needing_compact(draft) if s.id not in skip
-    ][:cap]
-    if not targets:
-        return draft, research
+    if lean and compact_tickets is not None:
+        ticket_ids = {
+            str(t.get("sectionId") or "").strip()
+            for t in compact_tickets
+            if isinstance(t, dict) and str(t.get("sectionId") or "").strip()
+        }
+        targets = [
+            s for s in draft.sections if s.id in ticket_ids and s.id not in skip
+        ][: max(1, min(5, int(app_settings.designer_compact_max_sections or 5)))]
+        if not targets:
+            return draft, research
+    else:
+        cap = max_sections
+        if cap is None:
+            cap = max(1, int(app_settings.designer_compact_max_sections or 8))
+        targets = [
+            s for s in list_sections_needing_compact(draft) if s.id not in skip
+        ][:cap]
+        if not targets:
+            return draft, research
 
     report.section_logs.append(
         {
@@ -1020,12 +1112,21 @@ async def run_self_edit_loop(
     max_iterations: int = MAX_SELF_EDIT_ITERATIONS,
     time_budget_sec: int = SELF_EDIT_TIME_BUDGET_SEC,
     parallel: int = SELF_EDIT_PARALLEL,
+    lean: bool = False,
+    skip_blocker_preflight: bool = False,
 ) -> tuple[ProposalDraft, ProposalResearchCache | None, SelfEditReport]:
-    """Focused senior editor: dedupe + RFP coverage + mandatory gov/buyer compliance.
+    """Focused senior editor: keep every TOC tab; mechanically trim copied prose.
 
-    Unused kwargs kept for API compatibility with callers.
+    ``lean=True`` (full generate) is deterministic: no ticket-emit LLM, no per-tab
+    rewrites, no VERIFY scrub LLM, no designer-compact LLM. Duplicate paragraphs
+    become a one-line cross-ref. Delete tickets never drop headings.
     """
     del max_iterations, time_budget_sec, parallel
+
+    from app.core.config import settings as app_settings
+
+    if lean and not app_settings.senior_editor_lean_in_generate:
+        lean = False
 
     draft = await aget_proposal_draft(rfp_id)
     if not draft:
@@ -1086,27 +1187,37 @@ async def run_self_edit_loop(
     for line in bio_logs[:8]:
         logger.info("Self-edit bio stub collapse %s: %s", rfp_id, line)
 
-    suite = await apply_feedback_blocker_suite(
-        draft,
-        rfp=rfp,
-        research=research,
-        rfp_text=rfp_context or "",
-        use_llm_contradiction=True,
-    )
-    draft = suite.draft
-    if suite.logs:
-        await asave_proposal_draft(draft)
-        for line in suite.logs[:12]:
-            logger.info("Self-edit blocker suite %s: %s", rfp_id, line)
+    suite = None
+    if not skip_blocker_preflight:
+        suite = await apply_feedback_blocker_suite(
+            draft,
+            rfp=rfp,
+            research=research,
+            rfp_text=rfp_context or "",
+            use_llm_contradiction=True,
+        )
+        draft = suite.draft
+        if suite.logs:
+            await asave_proposal_draft(draft)
+            for line in suite.logs[:12]:
+                logger.info("Self-edit blocker suite %s: %s", rfp_id, line)
+    elif lean:
+        logger.info(
+            "Self-edit lean mode for %s — skipping duplicate blocker preflight",
+            rfp_id,
+        )
 
     from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
     from app.services.proposal_section_dedup import dedupe_manuscript_for_scan
 
     report = SelfEditReport(iterations_run=1)
 
-    # Deterministic manuscript compact — fast, no LLM call, so it runs before the
-    # concurrent scans below and they see already-deduped / trimmed content.
-    sections, dedupe_logs = dedupe_manuscript_for_scan(list(draft.sections))
+    # Deterministic compact — trim restates inside tabs. Never drop TOC headings
+    # here; the director pass keeps every scored tab and trims overlapping prose.
+    sections, dedupe_logs = dedupe_manuscript_for_scan(
+        list(draft.sections),
+        drop_clone_tabs=False,
+    )
     from app.services.proposal_budget_content import ensure_budget_section_present
 
     sections, budget_restored = ensure_budget_section_present(
@@ -1137,7 +1248,7 @@ async def run_self_edit_loop(
         )
         await record_pipeline_activity(
             rfp_id,
-            label="Senior editor: Compact manuscript",
+            label="Senior editor: Mechanical trim (no LLM rewrites)",
             detail=f"{len(dedupe_logs)} compact action(s)"
             + (" + budget restore" if budget_restored else ""),
             step_index=0,
@@ -1153,10 +1264,10 @@ async def run_self_edit_loop(
     # cost since it no longer needs a second manual pass afterward).
     await record_pipeline_activity(
         rfp_id,
-        label="Senior editor: Removing duplicates + coverage & compliance",
+        label="Senior editor: Coverage & optional-claim scrub",
         detail=(
-            "Deleting near-duplicate tabs; trimming rehash; scanning manuscript vs. "
-            "RFP; scrubbing optional VERIFY / MANUAL FILL noise"
+            "Keep every tab; mechanical trim already ran; flag coverage gaps; "
+            "scrub optional VERIFY / MANUAL FILL without per-tab rewrites"
         ),
         step_index=1,
         step_total=1,
@@ -1258,6 +1369,7 @@ async def run_self_edit_loop(
             research=research,
             rfp_text=rfp_context or "",
             rfp_title=rfp.title or "",
+            use_llm_toc=not lean,
         )
     )
     if coverage_audit_logs:
@@ -1273,42 +1385,70 @@ async def run_self_edit_loop(
             samples=coverage_audit_logs[:10],
         )
 
-    ticket_coro = senior_editor_emit_tickets(
-        rfp_client=rfp.client,
-        rfp_title=rfp.title,
-        manuscript_digest=_manuscript_digest_for_senior_editor(draft),
-        requirements_by_section=_requirements_by_section_id(research),
+    skip_llm_rewrites = lean
+    skip_llm_emit = skip_llm_rewrites or (
+        lean
+        and bool(app_settings.senior_editor_skip_llm_emit_in_generate)
+        and not _manuscript_needs_senior_llm_emit(
+            draft,
+            verify_tag_count=verify_mid,
+            mechanical_coverage=mechanical_coverage,
+            dedupe_logs=dedupe_logs,
+        )
     )
-    if verify_ids:
-        tickets, (scrubbed_sections, scrub_logs) = await asyncio.gather(
-            ticket_coro,
-            scrub_draft_optional_verify_tags(
-                list(draft.sections),
-                rfp_text=rfp_context,
-                section_filter_ids=verify_ids,
-            ),
+    if skip_llm_emit:
+        tickets = _empty_senior_editor_tickets()
+        if mechanical_coverage:
+            tickets["coverageTickets"] = list(mechanical_coverage)
+        tickets["notes"] = [
+            "lean: mechanical trim only — skipped LLM emit, VERIFY scrub, and per-tab rewrites"
+        ]
+        scrubbed_sections, scrub_logs = list(draft.sections), []
+        logger.info(
+            "Senior editor skip LLM rewrites for %s (lean=%s verify=%s mechanical=%s dedupe=%s)",
+            rfp_id,
+            lean,
+            verify_mid,
+            len(mechanical_coverage),
+            len(dedupe_logs),
         )
     else:
-        tickets = await ticket_coro
-        scrubbed_sections, scrub_logs = list(draft.sections), []
+        ticket_coro = senior_editor_emit_tickets(
+            rfp_client=rfp.client,
+            rfp_title=rfp.title,
+            manuscript_digest=_manuscript_digest_for_senior_editor(draft),
+            requirements_by_section=_requirements_by_section_id(research),
+        )
+        if verify_ids:
+            tickets, (scrubbed_sections, scrub_logs) = await asyncio.gather(
+                ticket_coro,
+                scrub_draft_optional_verify_tags(
+                    list(draft.sections),
+                    rfp_text=rfp_context,
+                    section_filter_ids=verify_ids,
+                ),
+            )
+        else:
+            tickets = await ticket_coro
+            scrubbed_sections, scrub_logs = list(draft.sections), []
 
-    from app.services.proposal_manuscript_compact import merge_compact_tickets
+        from app.services.proposal_manuscript_compact import merge_compact_tickets
 
-    tickets = merge_compact_tickets(tickets, draft)
+        tickets = merge_compact_tickets(tickets, draft)
 
-    if mechanical_coverage:
-        existing = list(tickets.get("coverageTickets") or [])
-        seen_ids = {
-            str(t.get("sectionId") or "").strip()
-            for t in existing
-            if isinstance(t, dict)
-        }
-        for ticket in mechanical_coverage:
-            sid = str(ticket.get("sectionId") or "").strip()
-            if sid and sid not in seen_ids:
-                existing.append(ticket)
-                seen_ids.add(sid)
-        tickets["coverageTickets"] = existing
+        if mechanical_coverage:
+            existing = list(tickets.get("coverageTickets") or [])
+            seen_ids = {
+                str(t.get("sectionId") or "").strip()
+                for t in existing
+                if isinstance(t, dict)
+            }
+            for ticket in mechanical_coverage:
+                sid = str(ticket.get("sectionId") or "").strip()
+                if sid and sid not in seen_ids:
+                    existing.append(ticket)
+                    seen_ids.add(sid)
+            tickets["coverageTickets"] = existing
 
     if scrub_logs:
         draft = draft.model_copy(
@@ -1374,16 +1514,38 @@ async def run_self_edit_loop(
 
     from app.core.config import settings as app_settings
 
-    ticket_cap = max(1, int(app_settings.senior_editor_max_tickets or 10))
-    draft, research = await _apply_senior_editor_tickets(
-        tickets=tickets,
-        rfp_id=rfp_id,
-        rfp=rfp,
-        draft=draft,
-        research=research,
-        report=report,
-        max_tickets=ticket_cap,
+    ticket_cap = max(1, int(app_settings.senior_editor_max_tickets or 6))
+    if lean:
+        ticket_cap = min(ticket_cap, 6)
+    total_actionable = (
+        len(tickets.get("dedupeTickets") or [])
+        + len(tickets.get("coverageTickets") or [])
+        + len(tickets.get("complianceTickets") or [])
     )
+    if total_actionable > 0 and not skip_llm_rewrites:
+        draft, research = await _apply_senior_editor_tickets(
+            tickets=tickets,
+            rfp_id=rfp_id,
+            rfp=rfp,
+            draft=draft,
+            research=research,
+            report=report,
+            max_tickets=ticket_cap,
+        )
+    elif skip_llm_rewrites:
+        report.section_logs.append(
+            {
+                "section": "senior-editor",
+                "detail": (
+                    "skipped per-tab LLM rewrites — duplicate prose already "
+                    "trimmed mechanically; coverage gaps flagged only"
+                ),
+            }
+        )
+    else:
+        report.section_logs.append(
+            {"section": "senior-editor", "detail": "no actionable tickets — skipped rewrites"}
+        )
     draft = await aget_proposal_draft(rfp_id) or draft
     research = await aget_research_cache(rfp_id) or research
 
@@ -1395,7 +1557,7 @@ async def run_self_edit_loop(
         draft,
         rfp=rfp,
         research=research,
-        use_llm=True,
+        use_llm=not skip_llm_rewrites,
     )
     if budget_xsec.logs:
         draft = budget_xsec.draft
@@ -1423,24 +1585,28 @@ async def run_self_edit_loop(
 
     from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
 
-    await record_pipeline_activity(
-        rfp_id,
-        label="Senior editor: Designer-compact pass",
-        detail="Rewriting overlong tabs — dense tables/bullets, full RFP coverage",
-        step_index=0,
-        step_total=1,
-        in_progress_phase="phase-3-6-self-edit",
-    )
-    draft, research = await _apply_designer_compact_pass(
-        rfp_id=rfp_id,
-        rfp=rfp,
-        draft=draft,
-        research=research,
-        report=report,
-        skip_section_ids=recently_repaired,
-    )
-    draft = await aget_proposal_draft(rfp_id) or draft
-    research = await aget_research_cache(rfp_id) or research
+    compact_tickets = list(tickets.get("compactFormatTickets") or [])
+    if not skip_llm_rewrites and (compact_tickets or not lean):
+        await record_pipeline_activity(
+            rfp_id,
+            label="Senior editor: Designer-compact pass",
+            detail="Dense layout on ticketed overlong tabs — keep every RFP ask",
+            step_index=0,
+            step_total=1,
+            in_progress_phase="phase-3-6-self-edit",
+        )
+        draft, research = await _apply_designer_compact_pass(
+            rfp_id=rfp_id,
+            rfp=rfp,
+            draft=draft,
+            research=research,
+            report=report,
+            skip_section_ids=recently_repaired,
+            compact_tickets=compact_tickets,
+            lean=lean,
+        )
+        draft = await aget_proposal_draft(rfp_id) or draft
+        research = await aget_research_cache(rfp_id) or research
 
     # Re-run deterministic guards after compact/ticket LLM passes — compact rewrites
     # can reintroduce invented phase tables or internal flags.

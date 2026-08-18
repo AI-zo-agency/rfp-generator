@@ -1,56 +1,37 @@
-"""LangGraph Phase 2: Proposal Intelligence → ProposalExecutionPlan."""
+"""LangGraph Phase 2: Proposal Intelligence → ProposalExecutionPlan.
+
+Production graph uses batched agent passes (5 LLM hops) instead of ~18 sequential
+specialist calls. Individual agent modules remain for tests and fallbacks.
+The outline planner stays a dedicated hop — that prompt is accuracy-critical.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from app.services.proposal_intelligence.agents.budget_planner import run_budget_planner
-from app.services.proposal_intelligence.agents.communication_planner import (
-    run_communication_planner,
-)
-from app.services.proposal_intelligence.agents.compliance_mapping import run_compliance_mapping
-from app.services.proposal_intelligence.agents.delivery_pattern import run_delivery_pattern
 from app.services.proposal_intelligence.agents.dynamic_section_planner import (
     run_dynamic_section_planner,
 )
-from app.services.proposal_intelligence.agents.evaluation_criteria import run_evaluation_criteria
-from app.services.proposal_intelligence.agents.methodology_planner import run_methodology_planner
-from app.services.proposal_intelligence.agents.opportunity_strategy import run_opportunity_strategy
-from app.services.proposal_intelligence.agents.qa_planner import run_qa_planner
-from app.services.proposal_intelligence.agents.resource_planner import run_resource_planner
-from app.services.proposal_intelligence.agents.retrieval_planner import run_retrieval_planner
-from app.services.proposal_intelligence.agents.rfp_understanding import run_rfp_understanding
-from app.services.proposal_intelligence.agents.risk_planner import run_risk_planner
-from app.services.proposal_intelligence.agents.scope_analysis import run_scope_analysis
-from app.services.proposal_intelligence.agents.section_strategy_planner import (
-    run_section_strategy_planner,
-)
-from app.services.proposal_intelligence.agents.success_criteria import run_success_criteria
-from app.services.proposal_intelligence.agents.timeline_planner import run_timeline_planner
-from app.services.proposal_intelligence.agents.training_planner import run_training_planner
 from app.services.proposal_intelligence.agents.validation import run_validate_plan
-from app.services.proposal_intelligence.agents.work_breakdown_planner import (
-    run_work_breakdown_planner,
-)
-from app.services.proposal_intelligence.agents.winning_pattern_intelligence import (
-    run_winning_pattern_intelligence,
-)
 from app.services.proposal_intelligence.assembler import (
     derive_legacy_fields,
     refresh_proposal_memory,
     stamp_metadata,
 )
 from app.services.proposal_intelligence.log import get_intelligence_log_path, log_intel_event
+from app.services.proposal_intelligence.merged_passes import (
+    run_execution_plan,
+    run_opportunity_extract,
+    run_strategy_delivery,
+    run_writing_briefs,
+)
 from app.services.proposal_intelligence.plan_ops import IntelligenceError
 from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
 
 logger = logging.getLogger(__name__)
-
-_LLM_SEMAPHORE = asyncio.Semaphore(2)
 
 
 class IntelligenceGraphState(TypedDict, total=False):
@@ -96,11 +77,6 @@ def _meta(state: IntelligenceGraphState) -> dict[str, str]:
     return meta
 
 
-async def _with_sem(coro):  # type: ignore[no-untyped-def]
-    async with _LLM_SEMAPHORE:
-        return await coro
-
-
 def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
     async def node(state: IntelligenceGraphState) -> dict[str, Any]:
         if state.get("error"):
@@ -114,27 +90,24 @@ def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
                 rfp_id=str(state.get("rfp_id") or ""),
                 node_name=name,
             ):
-                plan = await _with_sem(
-                    fn(
-                        plan=plan,
-                        rfp_context=state.get("rfp_context") or "",
-                        rfp_meta=_meta(state),
-                    )
+                plan = await fn(
+                    plan=plan,
+                    rfp_context=state.get("rfp_context") or "",
+                    rfp_meta=_meta(state),
                 )
         except TypeError:
-            # Agents that don't take rfp_context
             try:
                 with llm_call_context(
                     rfp_id=str(state.get("rfp_id") or ""),
                     node_name=name,
                 ):
-                    plan = await _with_sem(fn(plan=plan, rfp_meta=_meta(state)))
+                    plan = await fn(plan=plan, rfp_meta=_meta(state))
             except TypeError:
                 with llm_call_context(
                     rfp_id=str(state.get("rfp_id") or ""),
                     node_name=name,
                 ):
-                    plan = await _with_sem(fn(plan=plan))
+                    plan = await fn(plan=plan)
         except IntelligenceError as exc:
             log_intel_event("node_fail", node=name, error=str(exc)[:200])
             return {"error": str(exc), "plan": _dump_plan(plan)}
@@ -148,42 +121,6 @@ def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
         }
 
     return node
-
-
-async def _delivery_parallel(state: IntelligenceGraphState) -> dict[str, Any]:
-    """Fan-out independent delivery planners under a shared semaphore."""
-    if state.get("error"):
-        return {}
-    from app.services.llm_call_context import llm_call_context
-
-    log_intel_event("node_enter", node="delivery_parallel")
-    plan = _load_plan(state)
-    meta = _meta(state)
-
-    async def _one(runner, node_name: str):  # type: ignore[no-untyped-def]
-        async with _LLM_SEMAPHORE:
-            try:
-                with llm_call_context(
-                    rfp_id=str(state.get("rfp_id") or ""),
-                    node_name=node_name,
-                ):
-                    return await runner(plan=plan, rfp_meta=meta)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("delivery parallel agent failed: %s", exc)
-                return plan
-
-    # Run sequentially under semaphore via gather of locked coroutines —
-    # each updates different delivery branches on the shared plan object.
-    await asyncio.gather(
-        _one(run_methodology_planner, "methodology_planner"),
-        _one(run_budget_planner, "budget_planner"),
-        _one(run_risk_planner, "risk_planner"),
-        _one(run_qa_planner, "qa_planner"),
-        _one(run_communication_planner, "communication_planner"),
-        _one(run_training_planner, "training_planner"),
-    )
-    log_intel_event("node_exit", node="delivery_parallel")
-    return {"plan": _dump_plan(plan), "provider": plan.metadata.provider or ""}
 
 
 async def _assemble(state: IntelligenceGraphState) -> dict[str, Any]:
@@ -220,8 +157,6 @@ async def _derive_legacy(state: IntelligenceGraphState) -> dict[str, Any]:
         sections=len(sections),
         queries=len(legacy.get("sectionQueries") or {}),
     )
-    # Terminal + intelligence log: what the RFP requires us to write
-    logger = logging.getLogger(__name__)
     logger.info(
         "Phase 2 RFP outline for %s — %d required proposal sections:",
         state.get("rfp_id"),
@@ -252,49 +187,23 @@ async def _derive_legacy(state: IntelligenceGraphState) -> dict[str, Any]:
 def _build_graph() -> Any:
     graph = StateGraph(IntelligenceGraphState)
 
-    graph.add_node("rfp_understanding", _wrap("rfp_understanding", run_rfp_understanding))
-    graph.add_node("compliance_mapping", _wrap("compliance_mapping", run_compliance_mapping))
-    graph.add_node("scope_analysis", _wrap("scope_analysis", run_scope_analysis))
-    graph.add_node("evaluation_criteria", _wrap("evaluation_criteria", run_evaluation_criteria))
-    graph.add_node("success_criteria", _wrap("success_criteria", run_success_criteria))
-    graph.add_node("opportunity_strategy", _wrap("opportunity_strategy", run_opportunity_strategy))
-    graph.add_node("delivery_pattern", _wrap("delivery_pattern", run_delivery_pattern))
-    graph.add_node("delivery_parallel", _delivery_parallel)
-    graph.add_node(
-        "work_breakdown", _wrap("work_breakdown", run_work_breakdown_planner)
-    )
-    graph.add_node("timeline", _wrap("timeline", run_timeline_planner))
-    graph.add_node("resource", _wrap("resource", run_resource_planner))
+    graph.add_node("opportunity_extract", _wrap("opportunity_extract", run_opportunity_extract))
+    graph.add_node("strategy_delivery", _wrap("strategy_delivery", run_strategy_delivery))
+    graph.add_node("execution_plan", _wrap("execution_plan", run_execution_plan))
     graph.add_node(
         "dynamic_section", _wrap("dynamic_section", run_dynamic_section_planner)
     )
-    graph.add_node(
-        "winning_pattern", _wrap("winning_pattern", run_winning_pattern_intelligence)
-    )
-    graph.add_node(
-        "section_strategy", _wrap("section_strategy", run_section_strategy_planner)
-    )
-    graph.add_node("retrieval_planner", _wrap("retrieval_planner", run_retrieval_planner))
+    graph.add_node("writing_briefs", _wrap("writing_briefs", run_writing_briefs))
     graph.add_node("assemble", _assemble)
     graph.add_node("validate", _validate)
     graph.add_node("derive_legacy", _derive_legacy)
 
-    graph.add_edge(START, "rfp_understanding")
-    graph.add_edge("rfp_understanding", "compliance_mapping")
-    graph.add_edge("compliance_mapping", "scope_analysis")
-    graph.add_edge("scope_analysis", "evaluation_criteria")
-    graph.add_edge("evaluation_criteria", "success_criteria")
-    graph.add_edge("success_criteria", "opportunity_strategy")
-    graph.add_edge("opportunity_strategy", "delivery_pattern")
-    graph.add_edge("delivery_pattern", "delivery_parallel")
-    graph.add_edge("delivery_parallel", "work_breakdown")
-    graph.add_edge("work_breakdown", "timeline")
-    graph.add_edge("timeline", "resource")
-    graph.add_edge("resource", "dynamic_section")
-    graph.add_edge("dynamic_section", "winning_pattern")
-    graph.add_edge("winning_pattern", "section_strategy")
-    graph.add_edge("section_strategy", "retrieval_planner")
-    graph.add_edge("retrieval_planner", "assemble")
+    graph.add_edge(START, "opportunity_extract")
+    graph.add_edge("opportunity_extract", "strategy_delivery")
+    graph.add_edge("strategy_delivery", "execution_plan")
+    graph.add_edge("execution_plan", "dynamic_section")
+    graph.add_edge("dynamic_section", "writing_briefs")
+    graph.add_edge("writing_briefs", "assemble")
     graph.add_edge("assemble", "validate")
     graph.add_edge("validate", "derive_legacy")
     graph.add_edge("derive_legacy", END)

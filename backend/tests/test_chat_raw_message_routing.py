@@ -9,6 +9,7 @@ assistant misunderstand ordinary asks.
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.models.proposal import ProposalDraft, ProposalSection
@@ -104,24 +105,30 @@ class ChatRawMessageRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen.get("advisory"), ask)
 
     async def test_structure_plan_uses_raw_ask_on_edit_path(self) -> None:
+        section = ProposalSection(
+            id="approach",
+            title="Approach",
+            content="## Approach\n\nWe will deliver the work.",
+            source="generated",
+            mode="write",
+        )
         draft = ProposalDraft(
             rfpId="rfp_0001",
             updatedAt="2026-08-10T00:00:00+00:00",
-            sections=[_section()],
+            sections=[section],
         )
         seen: dict[str, str] = {}
 
-        async def capture_classify(**kwargs):
-            seen["classify"] = kwargs["user_message"]
-            return {
-                "intent": "single_edit",
-                "primarySectionId": "section-20-budget",
-                "reason": "test",
-            }
+        class _Stop(BaseException):
+            pass
+
+        async def capture_scope(**kwargs):
+            seen["scope"] = kwargs["user_message"]
+            raise _Stop()
 
         async def capture_structure(**kwargs):
             seen["structure"] = kwargs["user_message"]
-            raise AssertionError("stop after structure plan")
+            raise AssertionError("structure planner should not run for polish edits")
 
         ask = "tighten the opening paragraph"
         with (
@@ -129,7 +136,13 @@ class ChatRawMessageRoutingTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 editor,
                 "aload_rfp_for_proposal",
-                new=AsyncMock(return_value=(_rfp(), "", "RFP text")),
+                new=AsyncMock(
+                    return_value=(
+                        _rfp(),
+                        SimpleNamespace(description="", pdf_text=""),
+                        "RFP text",
+                    )
+                ),
             ),
             patch.object(
                 editor, "aget_proposal_draft", new=AsyncMock(return_value=draft)
@@ -138,25 +151,31 @@ class ChatRawMessageRoutingTests(unittest.IsolatedAsyncioTestCase):
                 editor, "aget_research_cache", new=AsyncMock(return_value=None)
             ),
             patch(
-                "app.services.proposal_chat_manuscript_fix.classify_chat_edit_intent",
-                side_effect=capture_classify,
-            ),
-            patch(
                 "app.services.proposal_chat_structure.plan_chat_structure_action",
                 side_effect=capture_structure,
             ),
+            patch.object(editor, "_plan_edit_scope", side_effect=capture_scope),
+            patch.object(
+                editor,
+                "_try_budget_manual_fill_handoff",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                editor,
+                "_try_budget_section_canonical_refresh",
+                new=AsyncMock(return_value=None),
+            ),
         ):
-            with self.assertRaises(AssertionError):
+            with self.assertRaises(_Stop):
                 await editor.improve_proposal_section(
                     "rfp_0001",
-                    "section-20-budget",
+                    "approach",
                     ask,
                     persist=False,
                 )
-
-        self.assertEqual(seen.get("classify"), ask)
-        self.assertEqual(seen.get("structure"), ask)
-        self.assertNotIn("Evidence policy", seen["structure"])
+        self.assertEqual(seen.get("scope"), ask)
+        self.assertNotIn("Evidence policy", seen.get("scope", ""))
+        self.assertNotIn("structure", seen)
 
 
 class ManualFillStanzaHijackTests(unittest.IsolatedAsyncioTestCase):

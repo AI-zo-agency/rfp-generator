@@ -112,9 +112,16 @@ async def _enqueue_pipeline_phase(
     # Mark in-progress before returning so the first poll sees the phase.
     await record_phase_started(rfp_id, phase)
 
+    import uuid
+
+    from app.services.llm_call_context import llm_call_context
+
+    run_id = str(uuid.uuid4())
+
     async def _run() -> Any:
         async with pipeline_phase(rfp_id, phase):
-            return await work()
+            with llm_call_context(rfp_id=rfp_id, run_id=run_id, node_name=phase):
+                return await work()
 
     record = await start_proposal_job(rfp_id, phase, _run)
     return JSONResponse(
@@ -864,10 +871,23 @@ async def improve_section_endpoint(
     """Re-query KB with new detailed queries and re-draft one section from user feedback."""
     from app.services.proposal_repository import aget_proposal_draft, aget_research_cache
 
+    import uuid
+
+    from app.services.llm_call_context import llm_call_context
+
     prior_draft = await aget_proposal_draft(rfp_id)
+    chat_run_id = str(uuid.uuid4())
     try:
-        section, draft, research, _provider, assistant_message, draft_changed, suggested_fix = (
-            await improve_proposal_section(
+        with llm_call_context(rfp_id=rfp_id, run_id=chat_run_id, node_name="section_chat"):
+            (
+                section,
+                draft,
+                research,
+                _provider,
+                assistant_message,
+                draft_changed,
+                suggested_fix,
+            ) = await improve_proposal_section(
                 rfp_id,
                 section_id,
                 body.message,
@@ -881,7 +901,6 @@ async def improve_section_endpoint(
                 apply_fix=body.apply_fix,
                 improve_section_pinned=body.improve_section_pinned,
             )
-        )
     except ProposalError as exc:
         # Policy / rewrite checks must recap in chat — never 422 the UI.
         if exc.status_code in (400, 422) and prior_draft and prior_draft.sections:

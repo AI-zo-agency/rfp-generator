@@ -56,6 +56,7 @@ async def apply_senior_editor_section_coverage_audit(
     research: ProposalResearchCache | None,
     rfp_text: str,
     rfp_title: str = "",
+    use_llm_toc: bool = True,
 ) -> tuple[ProposalDraft, list[str], list[dict[str, Any]]]:
     """Repair pointer stubs, add missing TOC tabs, emit mechanical coverage tickets."""
     logs: list[str] = []
@@ -94,14 +95,15 @@ async def apply_senior_editor_section_coverage_audit(
         draft = draft.model_copy(update={"sections": rewritten})
 
     specs = []
-    try:
-        specs = await extract_rfp_scored_section_specs(
-            rfp_text,
-            rfp_title=rfp_title,
-            existing_section_titles=[s.title for s in draft.sections if s.title],
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Senior editor TOC extract skipped: %s", exc)
+    if use_llm_toc:
+        try:
+            specs = await extract_rfp_scored_section_specs(
+                rfp_text,
+                rfp_title=rfp_title,
+                existing_section_titles=[s.title for s in draft.sections if s.title],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Senior editor TOC extract skipped: %s", exc)
     if not specs and research and research.rfp_sections:
         specs = specs_from_intelligence_outline(
             [

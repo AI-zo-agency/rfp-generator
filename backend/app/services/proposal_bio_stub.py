@@ -160,6 +160,27 @@ def expected_bio_pdf_filename(member: str) -> str:
     return f"04_Bio_{bio_file_slug(member)}.pdf"
 
 
+def bio_filename_matches_member(file_name: str, member: str) -> bool:
+    """True when a KB file is this person's 04_Bio, ignoring spaces/underscores.
+
+    Exact lookup uses 04_Bio_LetitiaHopper.pdf. Drive uploads often keep
+    04_Bio_Letitia_Hopper.pdf or 04_Bio_Letitia Hopper.pdf — those must still count.
+    """
+    base = str(file_name or "").strip().split("/")[-1].casefold()
+    compact = re.sub(r"[^a-z0-9]+", "", base)
+    if not compact.startswith("04bio"):
+        return False
+    tokens = [
+        re.sub(r"[^a-z0-9]+", "", part.casefold())
+        for part in (member or "").split()
+        if part
+    ]
+    tokens = [t for t in tokens if len(t) >= 3]
+    if len(tokens) < 2:
+        return False
+    return all(token in compact for token in tokens)
+
+
 def is_bio_pdf_designer_note(text: str) -> bool:
     """True when a designer-note (or section body) is a bio-PDF insert handoff."""
     return bool(_BIO_PDF_DESIGNER_NOTE_RE.search(text or ""))

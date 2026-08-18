@@ -47,6 +47,126 @@ def _format_recent_chat(
     return blob or "(no prior chat)"
 
 
+_DETERMINISTIC_ADVISORY_RE = re.compile(
+    r"^(?:"
+    r"what(?:'s|s| is| are| does| do| did| should| would| could| can| this)|"
+    r"how (?:does|do|is|are|many|much|should|would|can)|"
+    r"why |is (?:this|it|there|that)|are (?:there|these|they)|"
+    r"does (?:this|it|the)|do (?:these|they|we)|"
+    r"tell me|show me|explain|summarize|describe|"
+    r"can you (?:explain|tell|show|clarify|verify|confirm|check)|"
+    r"which (?:section|ones?)|list |check |review |audit |evaluate |"
+    r"analyze |compare |verify |confirm |cross[\s-]?check |fact[\s-]?check "
+    r")",
+    re.I,
+)
+
+_DETERMINISTIC_VERIFY_RE = re.compile(
+    r"\b(?:"
+    r"verify|confirm|fact[\s-]?check|cross[\s-]?check|cross[\s-]?verify|"
+    r"fabricat|made[\s-]?up|is this (?:true|correct|accurate|right)"
+    r")\b",
+    re.I,
+)
+
+_DETERMINISTIC_EDIT_RE = re.compile(
+    r"^(?:please\s+)?(?:"
+    r"fix|update|rewrite|revise|shorten|tighten|expand|add|remove|delete|"
+    r"replace|change|improve|rephrase|rework|condense|trim|"
+    r"make (?:it|this)|put |insert |move |merge |split "
+    r")\b",
+    re.I,
+)
+
+_DETERMINISTIC_STRUCTURE_RE = re.compile(
+    r"^(?:please\s+)?(?:"
+    r"add(?:\s+(?:a|new|another))*\s+(?:section|tab|bio|case.?stud)|"
+    r"create(?:\s+(?:a|new|another))*\s+(?:section|tab|bio|case.?stud)|"
+    r"delete(?:\s+(?:this|the))?\s+(?:section|tab)|"
+    r"remove(?:\s+(?:this|the))?\s+(?:section|tab)|"
+    r"rename(?:\s+(?:this|the))?\s+(?:section|tab)"
+    r")\b",
+    re.I,
+)
+
+
+def _deterministic_intent_classify(
+    user_message: str,
+    *,
+    focus_section_id: str | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
+) -> dict[str, Any] | None:
+    """Fast regex pre-classifier. Returns None when ambiguous (LLM needed).
+
+    CONSERVATIVE: only resolves when signals are unambiguous. Falls back to the
+    LLM classifier whenever there is any doubt — accuracy over speed.
+
+    Conditions that force LLM (return None):
+    - Message too long (nuanced multi-sentence asks)
+    - Contains both advisory AND edit signals (mixed intent)
+    - References multiple sections or "the proposal" (may need multi_patch)
+    - Conversation has recent assistant suggestion context (may be confirmation)
+    - Contains conditional language ("if", "then", "and then")
+    - Names a specific section different from the focused one
+    """
+    text = (user_message or "").strip()
+    if not text:
+        return None
+
+    # Long messages are nuanced — always use LLM
+    if len(text) > 200:
+        return None
+
+    # Conditional/compound asks need LLM judgment
+    if re.search(r"\b(and then|then |if |but |however|otherwise)\b", text, re.I):
+        return None
+
+    # References to other sections need LLM to resolve target
+    if re.search(r"\b(section \d|tab \d|in the .{3,30} section)\b", text, re.I):
+        return None
+
+    # Multi-section scope needs LLM
+    if re.search(r"\b(every|all|each|across|whole|entire)\s+(section|proposal|tab)", text, re.I):
+        return None
+
+    # Recent conversation with assistant suggestion → user might be confirming
+    if conversation_history and len(conversation_history) >= 2:
+        last_assistant = None
+        for turn in reversed(conversation_history[-4:]):
+            if turn.get("role") == "assistant":
+                last_assistant = (turn.get("content") or "")[:500]
+                break
+        if last_assistant and any(
+            s in last_assistant.casefold()
+            for s in ("shall i", "want me to", "would you like", "i can", "apply")
+        ):
+            return None
+
+    if _DETERMINISTIC_STRUCTURE_RE.match(text):
+        return {"intent": "structure", "primarySectionId": focus_section_id, "reason": "deterministic_structure"}
+
+    # Pure questions / fact-checks with no edit verb → advisory without LLM.
+    # Do not require a trailing "?" — users often omit punctuation / type "what this
+    # section about". Mixed "check then fix" already returned None above.
+    if not _DETERMINISTIC_EDIT_RE.search(text) and (
+        _DETERMINISTIC_ADVISORY_RE.match(text) or _DETERMINISTIC_VERIFY_RE.search(text)
+    ):
+        return {
+            "intent": "advisory",
+            "primarySectionId": focus_section_id,
+            "reason": "deterministic_advisory",
+        }
+
+    # Short unambiguous edit commands on the open section
+    if _DETERMINISTIC_EDIT_RE.match(text) and not _DETERMINISTIC_ADVISORY_RE.match(text):
+        # "add/create/delete a section/tab/bio" is structure, not single_edit
+        if re.search(r"\b(?:add|create|delete|remove|rename)\s+(?:(?:a|new|another|this|the)\s+)*(?:section|tab|bio|case.?stud)", text, re.I):
+            return {"intent": "structure", "primarySectionId": focus_section_id, "reason": "deterministic_structure"}
+        return {"intent": "single_edit", "primarySectionId": focus_section_id, "reason": "deterministic_single_edit"}
+
+    return None
+
+
 async def _classify_chat_edit_intent_once(
     *,
     user_message: str,
@@ -57,10 +177,24 @@ async def _classify_chat_edit_intent_once(
     conversation_history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """One classification attempt. Callers should use classify_chat_edit_intent."""
+    # Fast path: skip LLM when deterministic signals are unambiguous
+    deterministic = _deterministic_intent_classify(
+        user_message,
+        focus_section_id=focus_section_id,
+        conversation_history=conversation_history,
+    )
+    if deterministic is not None:
+        logger.info(
+            "Chat intent resolved deterministically: %s (%s)",
+            deterministic["intent"],
+            deterministic["reason"],
+        )
+        return deterministic
+
     outline = "\n".join(
         f"- {s.id}: {s.title}" for s in draft.sections[:40] if s.id and s.title
     )
-    recent = _format_recent_chat(conversation_history, max_chars=4_000)
+    recent = _format_recent_chat(conversation_history, max_chars=2_000)
     try:
         raw, _ = await llm.chat_json(
             [
@@ -68,8 +202,8 @@ async def _classify_chat_edit_intent_once(
                     "role": "system",
                     "content": (
                         "Classify the user's chat message for a proposal editor.\n\n"
-                        "Read the message and recent chat. Understand intent — do not "
-                        "match keywords.\n"
+                        "FIRST restate the ask in `reason` (one clause) — including typos "
+                        "and missing punctuation. Classify that restatement, not keywords.\n"
                         "Classify ONLY the user's ask. Ignore any Evidence policy / "
                         "prompt scaffolding if it appears in the message.\n\n"
                         '- "advisory" — user asks what is wrong / for a review / analysis / '
@@ -118,7 +252,7 @@ async def _classify_chat_edit_intent_once(
                     ),
                 },
             ],
-            max_tokens=512,
+            max_tokens=256,
             temperature=0.0,
             tier="light",
             node_name="chat_manuscript_intent",

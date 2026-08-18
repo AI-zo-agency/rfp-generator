@@ -229,6 +229,7 @@ async def _draft_closing_section(
             ],
             max_tokens=2048,
             temperature=0.2,
+            node_name="fulfill_scan_closing_section",
         )
         content = str((raw or {}).get("content") or "").strip()
         return content or stub
@@ -379,18 +380,27 @@ async def run_fulfill_rfp_gaps(
         record_generation_stopped,
     )
     from app.services.proposal_verify_optional_scrub import run_verify_scrub_only_scan
+    import uuid
 
+    from app.services.llm_call_context import llm_call_context
+
+    scan_run_id = str(uuid.uuid4())
     token = bind_active_rfp(rfp_id)
     cancelled = False
     try:
-        if (mode or "full").strip().lower() in {
-            "verify_scrub_only",
-            "verify-scrub",
-            "verify_scrub",
-            "scrub",
-        }:
-            return await run_verify_scrub_only_scan(rfp_id)
-        return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
+        with llm_call_context(
+            rfp_id=rfp_id,
+            run_id=scan_run_id,
+            node_name="fulfill-scan",
+        ):
+            if (mode or "full").strip().lower() in {
+                "verify_scrub_only",
+                "verify-scrub",
+                "verify_scrub",
+                "scrub",
+            }:
+                return await run_verify_scrub_only_scan(rfp_id)
+            return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
     except ProposalGenerationCancelled:
         cancelled = True
         await record_generation_stopped(rfp_id, "fulfill-scan")
@@ -682,36 +692,8 @@ async def _run_fulfill_rfp_gaps_body(
             report["logs"].append(f"Scored stub draft skipped: {exc}")
 
     try:
-        from app.services.proposal_fulfill_fabrication_guard import (
-            repair_fabricated_qualifications_async,
-        )
-
-        draft, fab_logs, fab_human = await repair_fabricated_qualifications_async(
-            draft, research
-        )
-        report["logs"].extend(fab_logs)
-        report["humanDecisionGaps"].extend(fab_human)
-        if fab_logs:
-            await asave_proposal_draft(draft)
-    except ProposalGenerationCancelled:
-        raise
-    except FulfillStepSkip as skip:
-        _log_resume_skip(skip.step)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Fabrication guard skipped: %s", exc)
-        report["logs"].append(f"Fabrication guard skipped: {exc}")
-
-    try:
-        from app.services.proposal_integrity_guards import (
-            apply_manuscript_integrity_guards,
-            apply_reference_contact_evidence_guard,
-        )
         from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
 
-        draft, integrity_logs = apply_manuscript_integrity_guards(draft)
-        report["logs"].extend(integrity_logs[:16])
-        draft, phone_logs = apply_reference_contact_evidence_guard(draft, research)
-        report["logs"].extend(phone_logs[:12])
         draft, zf_report = apply_zero_fabrication_guards(
             draft,
             research=research,
@@ -720,7 +702,12 @@ async def _run_fulfill_rfp_gaps_body(
             label="scan-preflight",
         )
         report["logs"].extend(zf_report.logs[:16])
-        if integrity_logs or phone_logs or zf_report.logs:
+        report["humanDecisionGaps"].extend(
+            line.split("HUMAN_GAP:", 1)[1].strip()
+            for line in zf_report.logs
+            if "HUMAN_GAP:" in line
+        )
+        if zf_report.logs:
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
@@ -963,7 +950,10 @@ async def _run_fulfill_rfp_gaps_body(
             "Delete clones, remove mega sections that restate sibling tabs.",
         )
         await _ensure_not_stopped()
-        sections, dedupe_logs = dedupe_manuscript_for_scan(list(draft.sections))
+        sections, dedupe_logs = dedupe_manuscript_for_scan(
+            list(draft.sections),
+            drop_clone_tabs=False,
+        )
         if dedupe_logs:
             draft = draft.model_copy(
                 update={
@@ -1003,7 +993,8 @@ async def _run_fulfill_rfp_gaps_body(
         await _scan_progress(
             6,
             "Scan RFP: senior editor review",
-            "RFP proposal reviewer — dedupe, cross-refs, coverage gaps; no invented facts.",
+            "RFP proposal reviewer — coverage gaps from the outline; overlap already trimmed. "
+            "No second senior-editor LLM rewrite.",
         )
         await _ensure_not_stopped()
         from app.services.proposal_scan_senior_reviewer import (
@@ -1637,10 +1628,13 @@ async def _run_fulfill_rfp_gaps_body(
         await _scan_progress(
             15,
             "Scan RFP: Compact manuscript",
-            "Final pass — remove leftover duplicate/restated tabs after adds/rewrites.",
+            "Final pass — trim leftover restated prose after adds/rewrites. Keep every TOC tab.",
         )
         await _ensure_not_stopped()
-        sections, final_logs = dedupe_manuscript_for_scan(list(draft.sections))
+        sections, final_logs = dedupe_manuscript_for_scan(
+            list(draft.sections),
+            drop_clone_tabs=False,
+        )
         if final_logs:
             draft = draft.model_copy(
                 update={

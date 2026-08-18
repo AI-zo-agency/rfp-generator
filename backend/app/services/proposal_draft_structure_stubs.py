@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime, timezone
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.models.rfp import RfpRecord
 from app.services.proposal_manual_flags import strip_section_draft_stub_manual_fills
+from app.services.proposal_section_health import classify_section_health
 from app.services.proposal_section_quality import word_count
 
 logger = logging.getLogger(__name__)
 
-_DRAFT_STUB_RE = re.compile(
-    r"(?is)\[MANUAL\s+FILL:\s*Draft this RFP-required section",
+_SKIP_FILL_ID_PREFIXES = (
+    "section-2-bio-",
+    "section-3-work-",
 )
+
+_DRAFT_STUB_MARKER = "draft this rfp-required section"
 
 
 def section_is_rfp_draft_stub(section: ProposalSection) -> bool:
     body = section.content or ""
-    if _DRAFT_STUB_RE.search(body):
+    if _DRAFT_STUB_MARKER in body.casefold():
         return True
     # Heuristic: outline-only stub with almost no prose.
     if "RFP-required outline" in body and word_count(
@@ -30,21 +33,128 @@ def section_is_rfp_draft_stub(section: ProposalSection) -> bool:
     return False
 
 
+def _is_stub_chrome_line(line: str) -> bool:
+    cf = line.casefold().strip()
+    return (
+        cf.startswith("rfp-required outline")
+        or cf.startswith("rfp required outline")
+        or cf.startswith("rfp instructions")
+        or cf.startswith("evaluation weight")
+        or _DRAFT_STUB_MARKER in cf
+    )
+
+
+def _normalize_title_echo(text: str) -> str:
+    plain = (text or "").strip()
+    while plain.startswith("#"):
+        plain = plain[1:].lstrip()
+    i = 0
+    while i < len(plain) and plain[i] in "0123456789.":
+        i += 1
+    plain = plain[i:].strip()
+    return " ".join(plain.casefold().replace("&", "and").split())
+
+
+def _meaningful_body(content: str, title: str) -> str:
+    """Body with stub tags, title-echo headings, and outline chrome removed."""
+    stripped = strip_section_draft_stub_manual_fills(content or "")
+    title_echo = _normalize_title_echo(title)
+    keep: list[str] = []
+    for raw in stripped.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _is_stub_chrome_line(line):
+            continue
+        if title_echo and _normalize_title_echo(line) == title_echo:
+            continue
+        keep.append(line)
+    return "\n".join(keep)
+
+
+def _is_thin_unfilled_shell(section: ProposalSection) -> bool:
+    if not (section.content or "").strip():
+        return True
+    if section_is_rfp_draft_stub(section):
+        return True
+    return word_count(_meaningful_body(section.content or "", section.title or "")) < 12
+
+
+def section_needs_presubmit_fill(section: ProposalSection) -> bool:
+    """True for leftover empty / Action-needed RFP tabs Review must draft.
+
+    Does not rewrite finished prose. Skips bios, case-study cards, and Budget.
+    """
+    sid = section.id or ""
+    if sid.startswith("section-1-"):
+        return False
+    if sid.startswith(_SKIP_FILL_ID_PREFIXES):
+        return False
+    try:
+        from app.services.proposal_section_dedup import (
+            _is_protected_budget_section,
+            is_rfp_company_identity_form_section,
+        )
+
+        if _is_protected_budget_section(section):
+            return False
+        if is_rfp_company_identity_form_section(
+            section_id=sid,
+            title=section.title or "",
+            content=section.content or "",
+        ):
+            return False
+    except Exception:  # noqa: BLE001
+        title_cf = (section.title or "").casefold()
+        if "budget" in title_cf and "pricing" in title_cf:
+            return False
+    health = classify_section_health(section.content)
+    if health is not None:
+        return True
+    return _is_thin_unfilled_shell(section)
+
+
+def stub_fill_landed(before: ProposalSection, after: ProposalSection) -> bool:
+    """Persist when a shell became real prose — ignore the repair 'improvement' gate."""
+    if not (after.content or "").strip():
+        return False
+    if _DRAFT_STUB_MARKER in (after.content or "").casefold():
+        return False
+    after_n = word_count(_meaningful_body(after.content or "", after.title or ""))
+    before_n = word_count(_meaningful_body(before.content or "", before.title or ""))
+    return after_n >= 25 and after_n > before_n + 12
+
+
+def _stub_draft_brief(section: ProposalSection) -> str:
+    title = (section.title or "this section").strip()
+    return (
+        f"This tab is an unfilled RFP-required section (“{title}”). "
+        "Write submission-ready prose for THIS tab's unique ask only. "
+        "Use KB + THIS RFP. Do not invent clients, contacts, certs, carriers, "
+        "or metrics. If a figure is not in the RFP or KB, use [VERIFY: …]. "
+        "Do NOT leave [MANUAL FILL: Draft this RFP-required section…] tags. "
+        "Do not recopy Who We Are, full bios, or full case studies — "
+        "one short cross-ref is enough, then new detail for this tab. "
+        "Licenses, certifications, and insurance Compliant claims belong in "
+        "Section 1.4 / 1.5 with companyfacts proof — this tab may cross-ref them, "
+        "never invent Compliant, carriers, or KPI numbers the RFP/KB do not state."
+    )
+
+
 async def draft_rfp_structure_stubs(
     draft: ProposalDraft,
     *,
     rfp_id: str,
     rfp: RfpRecord,
-    max_sections: int = 3,
+    max_sections: int = 8,
 ) -> tuple[ProposalDraft, list[str]]:
-    """LLM-draft scored tabs left as 'Draft this RFP-required section' stubs.
+    """LLM-draft leftover empty / heading-only RFP tabs. One call each.
 
-    Structure Scan used to ADD stubs for missing TOC tabs then skip drafting
-    anything titled '…Qualifications…' (treating Team Qualifications like
-    inventable case-study references). High-weight personnel sections must
-    be written, not left as Action needed.
+    Does not use the self-edit improvement gate (that gate was reverting stub
+    fills and leaving ACTION NEEDED / title-only shells in place).
     """
-    from app.services.proposal_self_edit_loop import _repair_one_section
+    from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
+    from app.services.proposal_section_editor import improve_proposal_section
 
     logs: list[str] = []
     sections = list(draft.sections)
@@ -52,40 +162,46 @@ async def draft_rfp_structure_stubs(
     for section in sections:
         if drafted >= max_sections:
             break
-        if not section_is_rfp_draft_stub(section):
+        if not section_needs_presubmit_fill(section):
             continue
-        message = (
-            f"This tab is an RFP-required scored section stub for “{section.title}”. "
-            "Write full submission-ready prose now. "
-            "Use Section 2 bios, org structure, and KB team facts. "
-            "Emphasize public education campaigns, media planning/buying, graphic/digital "
-            "production, and account management relevant to THIS RFP. "
-            "Do NOT leave [MANUAL FILL: Draft this RFP-required section…] tags. "
-            "Do NOT invent client names, phones, emails, or metrics. "
-            "Short bios for principal team members with role-on-this-engagement are required."
-        )
+        message = _stub_draft_brief(section)
         try:
-            _sid, improved, detail = await _repair_one_section(
-                rfp_id,
-                section.id,
-                use_senior_editor=False,
-                rfp=rfp,
-                rfp_client=rfp.client,
-                rfp_title=rfp.title,
-                budget=None,
-                repair_message=message,
+            _updated, updated_draft, _research, _provider, detail, _ok, _extra = (
+                await improve_proposal_section(
+                    rfp_id,
+                    section.id,
+                    message,
+                    persist=False,
+                    proposal_wide=False,
+                    improve_section_pinned=True,
+                )
             )
-            if improved:
+            after = next(
+                (s for s in updated_draft.sections if s.id == section.id),
+                section,
+            )
+            if stub_fill_landed(section, after):
+                await asave_proposal_draft(updated_draft)
                 drafted += 1
                 logs.append(
-                    f"Drafted scored stub “{section.title}”: {detail or 'updated'}"
+                    f"Drafted leftover tab “{section.title}”: "
+                    f"{word_count(section.content or '')}→{word_count(after.content or '')}w"
                 )
-                from app.services.proposal_repository import aget_proposal_draft
-
                 latest = await aget_proposal_draft(rfp_id)
                 if latest:
                     draft = latest
                     sections = list(draft.sections)
+            else:
+                logs.append(
+                    f"Stub still empty “{section.title}”: "
+                    f"{(detail or 'writer did not land prose')[:120]}"
+                )
+                logger.warning(
+                    "Presubmit stub fill reverted/empty rfp_id=%s section_id=%s detail=%s",
+                    rfp_id,
+                    section.id,
+                    (detail or "")[:160],
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Stub draft failed for %s: %s", section.id, str(exc)[:160])
             logs.append(f"Stub draft skipped for “{section.title}”: {exc}")

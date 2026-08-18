@@ -15,7 +15,10 @@ import {
   stripLegacyMonolithSections,
 } from "@/lib/proposal-draft";
 import { getManuscriptSections, normalizeOutlineSectionOrder, resolveManuscriptJumpTarget, buildManuscriptIndexMap } from "@/lib/proposal-outline-tree";
-import { isSectionDrafted } from "@/lib/proposal-section-health";
+import {
+  isManuscriptSectionDrafted,
+  isSectionDrafted,
+} from "@/lib/proposal-section-health";
 import { buildScanRfpSummary, type ScanRfpFulfillReport, type ScanRfpSummary } from "@/lib/proposal-scan-report";
 import { ScanRfpSummaryBanner } from "@/components/ScanRfpSummaryBanner";
 import {
@@ -49,6 +52,7 @@ import {
   type FullProposalProgress,
   type ProposalPipelineStatus,
 } from "@/lib/proposal-api";
+import { getLlmCostForRfp, type LlmCostRfpBreakdown } from "@/lib/llm-cost-service";
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
 import { ProposalSectionTree } from "./ProposalSectionTree";
@@ -286,6 +290,9 @@ function ProposalDraftWorkspaceInner({
   const [provider, setProvider] = useState<string | null>(null);
   const [pipelineStatus, setPipelineStatus] =
     useState<ProposalPipelineStatus | null>(null);
+  const [rfpCost, setRfpCost] = useState<LlmCostRfpBreakdown | null>(null);
+  const rfpCostRef = useRef<LlmCostRfpBreakdown | null>(null);
+  rfpCostRef.current = rfpCost;
   const skipNextSaveRef = useRef(false);
   const saveGenerationRef = useRef(0);
   const fullProposalAbortRef = useRef<AbortController | null>(null);
@@ -331,6 +338,60 @@ function ProposalDraftWorkspaceInner({
     [outline.selectedKeyPersonas]
   );
   const hasKeyPersonas = selectedPersonaIds.length > 0;
+
+  const fmtUsd = useCallback((value: number) => {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 3,
+    }).format(value);
+  }, []);
+
+  const costByRunType = useMemo(() => {
+    const runs = rfpCost?.byRun ?? [];
+    const totals = {
+      generate: 0,
+      completeScan: 0,
+      chat: 0,
+    };
+    for (const run of runs) {
+      if (run.runType === "generate_proposal") totals.generate += run.costUsd;
+      else if (run.runType === "complete_scan") totals.completeScan += run.costUsd;
+      else if (run.runType === "chat") totals.chat += run.costUsd;
+    }
+    return totals;
+  }, [rfpCost]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const load = async () => {
+      const next = await getLlmCostForRfp(rfp.id);
+      if (cancelled || !next) return;
+      const prev = rfpCostRef.current;
+      if (
+        next.callCount === 0 &&
+        next.totalCostUsd === 0 &&
+        prev &&
+        (prev.callCount > 0 || prev.totalCostUsd > 0)
+      ) {
+        return;
+      }
+      setRfpCost(next);
+    };
+
+    void load();
+    if (isFullProposalRunning || isFulfillingRfpGaps) {
+      timer = window.setInterval(() => void load(), 4000);
+    }
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearInterval(timer);
+    };
+  }, [rfp.id, isFullProposalRunning, isFulfillingRfpGaps]);
 
   const requireKeyPersonas = useCallback(
     (run: () => void) => {
@@ -594,7 +655,7 @@ function ProposalDraftWorkspaceInner({
     // three sections held no draft — contradicting the pipeline, which correctly
     // refuses to mark Phase 3 complete for them.
     const complete = manuscriptSections.filter((s) =>
-      isSectionDrafted(s.content)
+      isManuscriptSectionDrafted(s)
     ).length;
     return { complete, total };
   }, [manuscriptSections]);
@@ -2490,6 +2551,30 @@ function ProposalDraftWorkspaceInner({
         isFulfillScanRunning={isFulfillingRfpGaps}
         rfpTabProgress={rfpTabProgress}
       />
+
+      {rfpCost ? (
+        <div className="border-b border-zo-border/70 bg-[#fafbfc] px-3 py-2 md:px-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zo-text-muted">
+            <span className="font-semibold text-foreground">
+              LLM cost: {fmtUsd(rfpCost.totalCostUsd)}
+            </span>
+            <span>Generate: {fmtUsd(costByRunType.generate)}</span>
+            <span>Complete Scan: {fmtUsd(costByRunType.completeScan)}</span>
+            <span>Chat edits: {fmtUsd(costByRunType.chat)}</span>
+            <span>{rfpCost.callCount.toLocaleString()} calls</span>
+            <span>{rfpCost.runCount} runs</span>
+          </div>
+          {rfpCost.byNode.length > 0 ? (
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-zo-text-muted">
+              {rfpCost.byNode.slice(0, 6).map((row) => (
+                <span key={row.nodeName}>
+                  {row.nodeName}: {fmtUsd(row.costUsd)}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="proposal-workspace-body">
       {/* Outline tab */}

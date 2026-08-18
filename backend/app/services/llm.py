@@ -49,6 +49,56 @@ _LlmPostResult = tuple[str, dict[str, Any]]
 _FIREWORKS_SUSPENDED = False
 
 
+def _resolve_run_cost_cap_usd(node_name: str | None) -> float:
+    """Return per-run hard cost cap for guarded pipeline phases; 0 = disabled."""
+    try:
+        from app.core.step_debug_logger import get_pipeline_phase
+
+        phase = (get_pipeline_phase() or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        phase = ""
+    node = (node_name or get_llm_node_name() or "").strip().lower()
+
+    # Complete Scan budget cap.
+    if phase == "fulfill-scan" or "fulfill-scan" in node or "fulfill_scan" in node:
+        return float(getattr(settings, "complete_scan_max_cost_usd", 0.0) or 0.0)
+
+    # Generate proposal budget cap (pipeline + drafting phases).
+    if (
+        phase in {"pipeline", "sections-1-3", "phase-2", "phase-3", "phase-3-5", "phase-3-6"}
+        or "phase-" in node
+        or "generate" in node
+        or "sections-1-3" in node
+        or "proposal_generator" in node
+    ):
+        return float(getattr(settings, "generate_proposal_max_cost_usd", 0.0) or 0.0)
+    return 0.0
+
+
+def _enforce_run_cost_cap(node_name: str | None, run_id: str | None) -> None:
+    """Hard stop when the current run already exceeded the configured budget."""
+    cap = _resolve_run_cost_cap_usd(node_name)
+    if cap <= 0:
+        return
+    resolved_run = (run_id if run_id is not None else get_llm_run_id()).strip()
+    if not resolved_run:
+        return
+    try:
+        from app.services.llm_call_log import get_run_total_cost_usd
+
+        spent = float(get_run_total_cost_usd(resolved_run))
+    except Exception:  # noqa: BLE001
+        return
+    if spent >= cap:
+        raise LlmError(
+            (
+                f"LLM run budget exceeded: ${spent:.2f} spent (cap ${cap:.2f}). "
+                "Stop this run and continue with targeted/manual edits."
+            ),
+            status_code=429,
+        )
+
+
 def _redact_langsmith_llm_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     """Never send API keys / bearer tokens to LangSmith."""
     redacted = dict(inputs)
@@ -556,7 +606,28 @@ def _record_successful_call(
 ) -> None:
     """Persist cost/token row — never raises."""
     try:
+        from app.core.step_debug_logger import (
+            get_pipeline_rfp_id,
+            get_pipeline_run_id,
+            resolve_pipeline_node_name,
+        )
         from app.services.llm_call_log import record_llm_call
+        from app.services.proposal_generation_cancel import get_active_rfp_id
+
+        resolved_node = resolve_pipeline_node_name(
+            node_name if node_name is not None else get_llm_node_name()
+        )
+        resolved_rfp = (
+            (rfp_id if rfp_id is not None else get_llm_rfp_id())
+            or get_pipeline_rfp_id()
+            or get_active_rfp_id()
+            or ""
+        )
+        resolved_run = (
+            (run_id if run_id is not None else get_llm_run_id())
+            or get_pipeline_run_id()
+            or "unknown"
+        )
 
         inp = int(usage.get("prompt_tokens") or 0)
         out = int(usage.get("completion_tokens") or 0)
@@ -572,9 +643,9 @@ def _record_successful_call(
             cache_ttl_1h=settings.llm_cache_ttl_1h,
         )
         record_llm_call(
-            run_id=run_id if run_id is not None else get_llm_run_id(),
-            rfp_id=rfp_id if rfp_id is not None else get_llm_rfp_id(),
-            node_name=node_name if node_name is not None else get_llm_node_name(),
+            run_id=resolved_run,
+            rfp_id=resolved_rfp,
+            node_name=resolved_node,
             model=model,
             tier=tier,
             provider=provider,
@@ -589,7 +660,7 @@ def _record_successful_call(
         logger.info(
             "LLM cost: node=%s model=%s tier=%s in=%d out=%d cache_w=%d cache_r=%d "
             "cost_usd=%.6f latency_ms=%d estimated=%s",
-            node_name if node_name is not None else get_llm_node_name() or "unknown",
+            node_name if node_name is not None else get_llm_node_name() or resolved_node,
             model,
             tier,
             inp,
@@ -628,6 +699,7 @@ async def chat_json(
     )
     if node_name is None:
         node_name = _resolved_node or None
+    _enforce_run_cost_cap(node_name, run_id)
 
     # Try Gemini first if API key is configured and not skipped by preferences
     gemini_key = settings.gemini_api_key.strip()
@@ -867,6 +939,7 @@ async def chat_text(
     )
     if node_name is None:
         node_name = _resolved_node or None
+    _enforce_run_cost_cap(node_name, run_id)
 
     gemini_key = settings.gemini_api_key.strip()
     if gemini_key and not _is_placeholder_key(gemini_key) and not skip_gemini:
