@@ -304,7 +304,7 @@ export function AgingBar({ buckets }: { buckets: { label: string; amount: number
 /** Clicks and keystrokes that land on a link or control belong to that control. */
 function isInteractiveTarget(target: EventTarget | null): boolean {
   return (
-    target instanceof HTMLElement &&
+    target instanceof Element &&
     target.closest("a, button, input, select, textarea, [role='button']") !== null
   );
 }
