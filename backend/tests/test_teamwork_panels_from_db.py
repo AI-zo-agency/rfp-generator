@@ -77,3 +77,39 @@ def test_build_overview_empty_rows(monkeypatch):
     assert payload["projects"] == []
     assert payload["time"]["by_person"] == []
 
+
+def test_summarize_timelogs_splits_billable_per_bucket():
+    rows = [
+        {"minutes": 90, "billable": True, "user_id": 7, "user_name": "Sonja", "project_id": 10, "project_name": "Oakdale"},
+        {"minutes": 30, "billable": False, "user_id": 7, "user_name": "Sonja", "project_id": 10, "project_name": "Oakdale"},
+        {"minutes": 60, "billable": True, "user_id": 8, "user_name": "Alex", "project_id": 11, "project_name": "Riverside"},
+    ]
+
+    summary = panels._summarize_timelogs(rows)
+
+    sonja = next(b for b in summary["by_person"] if b["name"] == "Sonja")
+    assert sonja["minutes"] == 120
+    assert sonja["billable_minutes"] == 90
+
+    alex = next(b for b in summary["by_person"] if b["name"] == "Alex")
+    assert alex["minutes"] == 60
+    assert alex["billable_minutes"] == 60
+
+    oakdale = next(b for b in summary["by_project"] if b["name"] == "Oakdale")
+    assert oakdale["minutes"] == 120
+    assert oakdale["billable_minutes"] == 90
+
+    assert summary["total_minutes"] == 180
+    assert summary["billable_minutes"] == 150
+
+
+def test_summarize_timelogs_zero_billable_still_reports_the_key():
+    rows = [
+        {"minutes": 45, "billable": False, "user_id": 9, "user_name": "Ray", "project_id": 12, "project_name": "Internal"},
+    ]
+
+    summary = panels._summarize_timelogs(rows)
+
+    assert summary["by_person"][0]["billable_minutes"] == 0
+    assert summary["by_project"][0]["billable_minutes"] == 0
+

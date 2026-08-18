@@ -95,23 +95,38 @@ def _summarize_timelogs(rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_project: dict[str, dict[str, Any]] = {}
     for row in rows:
         minutes = int(row.get("minutes") or 0)
+        is_billable = bool(row.get("billable"))
         total_minutes += minutes
-        if row.get("billable"):
+        if is_billable:
             billable_minutes += minutes
         user_id = str(row.get("user_id") or "")
         project_id = str(row.get("project_id") or "")
         if user_id:
             bucket = by_person.setdefault(
                 user_id,
-                {"id": user_id, "name": row.get("user_name") or user_id, "minutes": 0},
+                {
+                    "id": user_id,
+                    "name": row.get("user_name") or user_id,
+                    "minutes": 0,
+                    "billable_minutes": 0,
+                },
             )
             bucket["minutes"] += minutes
+            if is_billable:
+                bucket["billable_minutes"] += minutes
         if project_id:
             bucket = by_project.setdefault(
                 project_id,
-                {"id": project_id, "name": row.get("project_name") or project_id, "minutes": 0},
+                {
+                    "id": project_id,
+                    "name": row.get("project_name") or project_id,
+                    "minutes": 0,
+                    "billable_minutes": 0,
+                },
             )
             bucket["minutes"] += minutes
+            if is_billable:
+                bucket["billable_minutes"] += minutes
     return {
         "total_minutes": total_minutes,
         "billable_minutes": billable_minutes,
