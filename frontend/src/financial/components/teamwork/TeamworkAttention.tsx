@@ -13,10 +13,26 @@ const SECTION_LABEL: Record<SectionId, string> = {
 export function TeamworkAttention({
   signals,
   onGo,
+  hasSnapshot = true,
 }: {
   signals: TeamworkSignal[];
   onGo: (id: SectionId) => void;
+  hasSnapshot?: boolean;
 }) {
+  // No snapshot means no evidence, which is not the same as no problems.
+  // Claiming "nothing needs attention" from an empty payload is a lie the
+  // reader has no way to detect.
+  if (!hasSnapshot) {
+    return (
+      <Panel title="Needs attention">
+        <p className="qb-allclear">
+          No snapshot yet, so there is nothing to assess. This fills in after the first
+          successful Teamwork sync.
+        </p>
+      </Panel>
+    );
+  }
+
   if (!signals.length) {
     return (
       <Panel title="Needs attention">

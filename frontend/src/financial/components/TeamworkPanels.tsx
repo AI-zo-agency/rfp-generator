@@ -4,7 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Figure, Note } from "./qb-ui";
-import { billablePct, buildSignals, daysUntil, type SectionId } from "../lib/teamwork-derive";
+import {
+  billablePct,
+  buildSignals,
+  daysUntil,
+  hoursLabel,
+  type SectionId,
+} from "../lib/teamwork-derive";
 import { TeamworkAttention } from "./teamwork/TeamworkAttention";
 import { TeamworkProjects } from "./teamwork/TeamworkProjects";
 import { TeamworkWork } from "./teamwork/TeamworkWork";
@@ -85,7 +91,12 @@ export function TeamworkPanels() {
   }, [load]);
 
   const errorEntries = Object.entries(data?.errors || {});
-  const notConfigured = data && !data.connected && Boolean(data.errors.config || data.errors.auth);
+  const notConfigured = data ? !data.connected : false;
+  const hasSnapshot =
+    Boolean(data) &&
+    data?.sync_status !== "backfill_pending" &&
+    data?.sync_status !== "missing" &&
+    !data?.errors?.overview;
   const todayISO = useMemo(
     () => (data?.as_of || new Date().toISOString()).slice(0, 10),
     [data?.as_of],
@@ -165,9 +176,9 @@ export function TeamworkPanels() {
           </div>
         ) : null}
 
-        {!loading && data && !notConfigured ? (
+        {data && !notConfigured ? (
           <div className="min-h-0 flex-1 overflow-auto" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-            <TeamworkAttention signals={signals} onGo={goToSection} />
+            <TeamworkAttention signals={signals} onGo={goToSection} hasSnapshot={hasSnapshot} />
 
             <div className="qb-moneyline">
               <Figure
@@ -185,7 +196,13 @@ export function TeamworkPanels() {
                 size="lg"
                 value={data.summary.overdue_task_count}
                 tone={data.summary.overdue_task_count ? "out" : undefined}
-                sub={oldestLate ? `oldest ${oldestLate}d late` : "Nothing overdue"}
+                sub={
+                  data.summary.overdue_task_count
+                    ? oldestLate
+                      ? `oldest ${oldestLate}d late`
+                      : "No due dates recorded"
+                    : "Nothing overdue"
+                }
               />
               <Figure
                 label="Due in 14 days"
@@ -196,15 +213,17 @@ export function TeamworkPanels() {
               <Figure
                 label="Hours this month"
                 size="lg"
-                value={`${data.summary.hours_this_month}h`}
+                value={hoursLabel(data.time.total_minutes)}
                 sub={`${billablePct(data.time.billable_minutes, data.time.total_minutes)}% billable`}
               />
             </div>
 
             {errorEntries.length ? (
               <Note>
-                Teamwork sync has issues ({errorEntries.map(([key]) => key).join(", ")}). Showing the
-                last cached snapshot from our backend mirror.
+                Teamwork sync has issues ({errorEntries.map(([key]) => key).join(", ")}).{" "}
+                {hasSnapshot
+                  ? "Showing the last cached snapshot from our backend mirror."
+                  : "Teamwork has not completed a sync yet, so there is no snapshot to show."}
               </Note>
             ) : null}
 
