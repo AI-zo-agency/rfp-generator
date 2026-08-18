@@ -69,6 +69,14 @@ html.fin-lock body {
   }
 }
 
+.qb-sync[data-tone="warn"] .qb-sync-dot {
+  background: var(--zo-orange);
+}
+
+.qb-sync[data-tone="bad"] .qb-sync-dot {
+  background: var(--zo-danger);
+}
+
 .qb-sync[data-failed="true"] .qb-sync-dot {
   background: var(--zo-danger);
 }

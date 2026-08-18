@@ -5,6 +5,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { RefreshCw } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DataTable, Figure, Note, Panel } from "./qb-ui";
+import { billablePct, daysUntil, hoursLabel } from "../lib/teamwork-derive";
 import type {
   TeamworkMilestone,
   TeamworkOverview,
@@ -24,17 +25,41 @@ function isAbortError(err: unknown) {
   );
 }
 
+/** "4 hours ago" — the form a reader can act on. The timestamp goes in the title. */
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const minutes = Math.round((Date.now() - then) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+type SyncTone = "ok" | "warn" | "bad";
+
+function syncState(
+  data: TeamworkOverview | null,
+  loading: boolean,
+  error: string | null,
+  notConfigured: boolean,
+): { label: string; tone: SyncTone } {
+  if (loading) return { label: "Reading Teamwork…", tone: "ok" };
+  if (error) return { label: "Unavailable", tone: "bad" };
+  if (notConfigured) return { label: "Not connected", tone: "bad" };
+  if (data?.sync_status === "backfill_pending") return { label: "Backfill pending", tone: "warn" };
+  if (data?.sync_status === "missing") return { label: "Snapshot missing", tone: "warn" };
+  if (data?.sync_status === "failed") return { label: "Stale cache", tone: "warn" };
+  if (Object.keys(data?.errors || {}).length) return { label: "Partial sync", tone: "warn" };
+  return { label: "Synced", tone: "ok" };
+}
+
 function shortDate(value?: string | null) {
   if (!value) return "—";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return String(value).slice(0, 10);
   return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
-
-function hoursLabel(minutes: number) {
-  const hours = minutes / 60;
-  if (!hours) return "0h";
-  return `${hours.toFixed(hours >= 10 ? 0 : 1)}h`;
 }
 
 function healthLabel(health: string) {
@@ -189,37 +214,42 @@ export function TeamworkPanels() {
 
   const errorEntries = Object.entries(data?.errors || {});
   const notConfigured = data && !data.connected && Boolean(data.errors.config || data.errors.auth);
-  let syncLabel = "Cached";
-  if (loading) syncLabel = "Reading Teamwork…";
-  else if (error) syncLabel = "Unavailable";
-  else if (notConfigured) syncLabel = "Not connected";
-  else if (data?.sync_status === "backfill_pending") syncLabel = "Backfill pending";
-  else if (data?.sync_status === "missing") syncLabel = "Snapshot missing";
-  else if (data?.sync_status === "failed") syncLabel = "Stale cache";
-  else if (errorEntries.length) syncLabel = "Partial";
+  const todayISO = useMemo(
+    () => (data?.as_of || new Date().toISOString()).slice(0, 10),
+    [data?.as_of],
+  );
+  const sync = syncState(data, loading, error, Boolean(notConfigured));
+  const syncedAt = data?.synced_at || data?.generated_at || null;
+  const atRiskCount = data?.projects.filter((p) => p.health === "bad").length ?? 0;
+  const oldestLate = useMemo(() => {
+    if (!data) return 0;
+    let worst = 0;
+    for (const t of data.overdue_tasks) {
+      const days = daysUntil(t.due_date, todayISO);
+      if (days !== null && days < 0) worst = Math.max(worst, Math.abs(days));
+    }
+    return worst;
+  }, [data, todayISO]);
 
   return (
     <TooltipProvider delayDuration={120}>
       <div className="qb-ledger" aria-busy={loading || undefined}>
         <div className="qb-toolbar">
-          <p className="qb-sync" data-failed={error || notConfigured ? "true" : undefined}>
+          <p className="qb-sync" data-tone={sync.tone}>
             <span className="qb-sync-dot" data-busy={loading ? "true" : undefined} aria-hidden />
-            {syncLabel}
-            {!loading && (data?.synced_at || data?.generated_at) ? (
-              <span className="qb-sync-meta">
-                {new Date(data.synced_at || data.generated_at || "").toLocaleString()}
+            {sync.label}
+            {!loading && syncedAt ? (
+              <span className="qb-sync-meta" title={new Date(syncedAt).toLocaleString()}>
+                {relativeTime(syncedAt)}
               </span>
             ) : null}
             {!loading && data?.summary ? (
-              <span className="qb-sync-meta">{data.summary.project_count} active projects</span>
+              <span className="qb-sync-meta">
+                {data.summary.project_count} active projects
+              </span>
             ) : null}
           </p>
-          <button
-            type="button"
-            className="qb-retry"
-            onClick={() => void load()}
-            disabled={loading}
-          >
+          <button type="button" className="qb-retry" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={13} />
             Refresh
           </button>
@@ -259,27 +289,30 @@ export function TeamworkPanels() {
                 label="Active projects"
                 size="lg"
                 value={data.summary.project_count}
-                sub="Current, late, and upcoming"
+                sub={
+                  atRiskCount
+                    ? `${atRiskCount} at risk`
+                    : "All healthy"
+                }
               />
               <Figure
                 label="Overdue tasks"
                 size="lg"
                 value={data.summary.overdue_task_count}
                 tone={data.summary.overdue_task_count ? "out" : undefined}
-                sub="Across all accessible projects"
+                sub={oldestLate ? `oldest ${oldestLate}d late` : "Nothing overdue"}
+              />
+              <Figure
+                label="Due in 14 days"
+                size="lg"
+                value={data.summary.upcoming_task_count}
+                sub="Tasks with a near due date"
               />
               <Figure
                 label="Hours this month"
                 size="lg"
                 value={`${data.summary.hours_this_month}h`}
-                sub={`${hoursLabel(data.time.billable_minutes)} billable`}
-              />
-              <Figure
-                label="Late milestones"
-                size="lg"
-                value={data.summary.late_milestone_count}
-                tone={data.summary.late_milestone_count ? "warn" : undefined}
-                sub={`${data.summary.upcoming_task_count} tasks due in 14 days`}
+                sub={`${billablePct(data.time.billable_minutes, data.time.total_minutes)}% billable`}
               />
             </div>
 
