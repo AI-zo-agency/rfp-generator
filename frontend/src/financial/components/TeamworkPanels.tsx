@@ -8,11 +8,10 @@ import { DataTable, Figure, Note, Panel } from "./qb-ui";
 import { billablePct, buildSignals, daysUntil, hoursLabel, type SectionId } from "../lib/teamwork-derive";
 import { TeamworkAttention } from "./teamwork/TeamworkAttention";
 import { TeamworkProjects } from "./teamwork/TeamworkProjects";
+import { TeamworkWork } from "./teamwork/TeamworkWork";
 import type {
-  TeamworkMilestone,
   TeamworkOverview,
   TeamworkPerson,
-  TeamworkTask,
   TeamworkTimeBucket,
 } from "../types/teamwork";
 import "./QuickBooksLedger.css";
@@ -56,13 +55,6 @@ function syncState(
   return { label: "Synced", tone: "ok" };
 }
 
-function shortDate(value?: string | null) {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return String(value).slice(0, 10);
-  return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
-
 export function TeamworkPanels() {
   const [data, setData] = useState<TeamworkOverview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -95,52 +87,6 @@ export function TeamworkPanels() {
     void load();
     return () => abortRef.current?.abort();
   }, [load]);
-
-  const taskCols = useMemo<ColumnDef<TeamworkTask, unknown>[]>(
-    () => [
-      {
-        accessorKey: "name",
-        header: "Task",
-        cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
-      },
-      { accessorKey: "project_name", header: "Project" },
-      {
-        accessorKey: "assignees",
-        header: "Assigned",
-        cell: (c) => (c.getValue<string[]>() || []).join(", ") || "—",
-      },
-      {
-        accessorKey: "due_date",
-        header: "Due",
-        cell: (c) => shortDate(c.getValue<string | null>()),
-      },
-    ],
-    [],
-  );
-
-  const milestoneCols = useMemo<ColumnDef<TeamworkMilestone, unknown>[]>(
-    () => [
-      {
-        accessorKey: "name",
-        header: "Milestone",
-        cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
-      },
-      { accessorKey: "project_name", header: "Project" },
-      { accessorKey: "status", header: "Status" },
-      {
-        accessorKey: "progress_pct",
-        header: "Done",
-        meta: { numeric: true },
-        cell: (c) => (c.getValue<number | null>() == null ? "—" : `${c.getValue<number>()}%`),
-      },
-      {
-        accessorKey: "due_date",
-        header: "Due",
-        cell: (c) => shortDate(c.getValue<string | null>()),
-      },
-    ],
-    [],
-  );
 
   const timeCols = useMemo<ColumnDef<TeamworkTimeBucket, unknown>[]>(
     () => [
@@ -301,33 +247,7 @@ export function TeamworkPanels() {
             </div>
 
             <div id="teamwork-work" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <Panel title="Overdue tasks" meta={`${data.overdue_tasks.length}`}>
-                  <DataTable
-                    data={data.overdue_tasks}
-                    columns={taskCols}
-                    pageSize={8}
-                    empty="Nothing overdue."
-                  />
-                </Panel>
-                <Panel title="Due in the next 14 days" meta={`${data.upcoming_tasks.length}`}>
-                  <DataTable
-                    data={data.upcoming_tasks}
-                    columns={taskCols}
-                    pageSize={8}
-                    empty="No upcoming due dates in the next two weeks."
-                  />
-                </Panel>
-              </div>
-
-              <Panel title="Milestones" meta={`${data.milestones.length}`}>
-                <DataTable
-                  data={data.milestones}
-                  columns={milestoneCols}
-                  pageSize={8}
-                  empty="No late or upcoming milestones."
-                />
-              </Panel>
+              <TeamworkWork data={data} todayISO={todayISO} />
             </div>
 
             <div id="teamwork-time" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
