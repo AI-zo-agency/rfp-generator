@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import type { ColumnDef } from "@tanstack/react-table";
-import { DataTable, DueChip, Panel, Pill } from "../qb-ui";
+import { DataTable, DueChip, MiniBar, Panel, Pill } from "../qb-ui";
 import { daysUntil, describeDue, taskUrl } from "../../lib/teamwork-derive";
 import type { TeamworkMilestone, TeamworkOverview, TeamworkTask } from "../../types/teamwork";
 
@@ -81,6 +81,15 @@ export function TeamworkWork({
           const status = c.getValue<string>() || "";
           const isLate = status.toLowerCase() === "late";
           return <Pill label={status || "—"} tone={isLate ? "bad" : "neutral"} />;
+        },
+      },
+      {
+        accessorKey: "progress_pct",
+        header: "Done",
+        cell: (c) => {
+          const pct = c.getValue<number | null>();
+          if (pct == null) return <span className="qb-due" data-tone="none">—</span>;
+          return <MiniBar value={pct} max={100} label={`${pct}%`} />;
         },
       },
       {
