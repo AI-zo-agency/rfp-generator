@@ -5,7 +5,8 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { RefreshCw } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DataTable, Figure, Note, Panel } from "./qb-ui";
-import { billablePct, daysUntil, hoursLabel } from "../lib/teamwork-derive";
+import { billablePct, buildSignals, daysUntil, hoursLabel, type SectionId } from "../lib/teamwork-derive";
+import { TeamworkAttention } from "./teamwork/TeamworkAttention";
 import type {
   TeamworkMilestone,
   TeamworkOverview,
@@ -231,6 +232,17 @@ export function TeamworkPanels() {
     return worst;
   }, [data, todayISO]);
 
+  const signals = useMemo(
+    () => (data ? buildSignals(data, todayISO) : []),
+    [data, todayISO],
+  );
+
+  const goToSection = useCallback((id: SectionId) => {
+    document
+      .getElementById(`teamwork-${id}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
   return (
     <TooltipProvider delayDuration={120}>
       <div className="qb-ledger" aria-busy={loading || undefined}>
@@ -284,6 +296,8 @@ export function TeamworkPanels() {
 
         {!loading && data && !notConfigured ? (
           <div className="min-h-0 flex-1 overflow-auto" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+            <TeamworkAttention signals={signals} onGo={goToSection} />
+
             <div className="qb-moneyline">
               <Figure
                 label="Active projects"
@@ -323,73 +337,79 @@ export function TeamworkPanels() {
               </Note>
             ) : null}
 
-            <Panel title="Projects" meta={`${data.projects.length} shown`}>
-              <DataTable
-                data={data.projects}
-                columns={projectCols}
-                initialSort="tasks_overdue"
-                pageSize={12}
-                empty="No active Teamwork projects for this API user."
-              />
-            </Panel>
-
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <Panel title="Overdue tasks" meta={`${data.overdue_tasks.length}`}>
+            <div id="teamwork-projects">
+              <Panel title="Projects" meta={`${data.projects.length} shown`}>
                 <DataTable
-                  data={data.overdue_tasks}
-                  columns={taskCols}
-                  pageSize={8}
-                  empty="Nothing overdue."
-                />
-              </Panel>
-              <Panel title="Due in the next 14 days" meta={`${data.upcoming_tasks.length}`}>
-                <DataTable
-                  data={data.upcoming_tasks}
-                  columns={taskCols}
-                  pageSize={8}
-                  empty="No upcoming due dates in the next two weeks."
+                  data={data.projects}
+                  columns={projectCols}
+                  initialSort="tasks_overdue"
+                  pageSize={12}
+                  empty="No active Teamwork projects for this API user."
                 />
               </Panel>
             </div>
 
-            <Panel title="Milestones" meta={`${data.milestones.length}`}>
-              <DataTable
-                data={data.milestones}
-                columns={milestoneCols}
-                pageSize={8}
-                empty="No late or upcoming milestones."
-              />
-            </Panel>
+            <div id="teamwork-work" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <Panel title="Overdue tasks" meta={`${data.overdue_tasks.length}`}>
+                  <DataTable
+                    data={data.overdue_tasks}
+                    columns={taskCols}
+                    pageSize={8}
+                    empty="Nothing overdue."
+                  />
+                </Panel>
+                <Panel title="Due in the next 14 days" meta={`${data.upcoming_tasks.length}`}>
+                  <DataTable
+                    data={data.upcoming_tasks}
+                    columns={taskCols}
+                    pageSize={8}
+                    empty="No upcoming due dates in the next two weeks."
+                  />
+                </Panel>
+              </div>
 
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <Panel title="Time by person" meta={hoursLabel(data.time.total_minutes)}>
+              <Panel title="Milestones" meta={`${data.milestones.length}`}>
                 <DataTable
-                  data={data.time.by_person}
-                  columns={timeCols}
-                  initialSort="minutes"
+                  data={data.milestones}
+                  columns={milestoneCols}
                   pageSize={8}
-                  empty="No time logged this month."
-                />
-              </Panel>
-              <Panel title="Time by project" meta={hoursLabel(data.time.total_minutes)}>
-                <DataTable
-                  data={data.time.by_project}
-                  columns={timeCols}
-                  initialSort="minutes"
-                  pageSize={8}
-                  empty="No time logged this month."
+                  empty="No late or upcoming milestones."
                 />
               </Panel>
             </div>
 
-            <Panel title="People" meta={`${data.people.length} owner-company users`}>
-              <DataTable
-                data={data.people}
-                columns={peopleCols}
-                pageSize={12}
-                empty="No owner-company people returned."
-              />
-            </Panel>
+            <div id="teamwork-time" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <Panel title="Time by person" meta={hoursLabel(data.time.total_minutes)}>
+                  <DataTable
+                    data={data.time.by_person}
+                    columns={timeCols}
+                    initialSort="minutes"
+                    pageSize={8}
+                    empty="No time logged this month."
+                  />
+                </Panel>
+                <Panel title="Time by project" meta={hoursLabel(data.time.total_minutes)}>
+                  <DataTable
+                    data={data.time.by_project}
+                    columns={timeCols}
+                    initialSort="minutes"
+                    pageSize={8}
+                    empty="No time logged this month."
+                  />
+                </Panel>
+              </div>
+
+              <Panel title="People" meta={`${data.people.length} owner-company users`}>
+                <DataTable
+                  data={data.people}
+                  columns={peopleCols}
+                  pageSize={12}
+                  empty="No owner-company people returned."
+                />
+              </Panel>
+            </div>
           </div>
         ) : null}
       </div>
