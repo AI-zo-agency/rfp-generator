@@ -57,11 +57,13 @@ Initial backfill:
 - pulls tasks in the two dashboard buckets only
 - writes mirror tables first
 - builds the cached dashboard overview from the mirror
-- advances `updated_after_cursor` only after the cache write succeeds
+- marks the backfill complete only after the cache write succeeds
 
-Nightly incremental sync:
+Nightly snapshot sync:
 
-- uses `updatedAfter` where supported
+- refetches each dashboard slice without `updatedAfter`; due dates can change a task's
+  operational bucket without Teamwork recording a remote edit
+- prunes mirror rows not returned by the successful snapshot
 - recomputes `teamwork_panel_cache` after entity upserts
 - keeps the last known good cache if sync fails
 
@@ -108,5 +110,6 @@ Teamwork coverage is split across:
 - `backend/tests/test_teamwork_repository.py`
 - `backend/tests/test_teamwork_sync.py`
 - `backend/tests/test_teamwork_panels_from_db.py`
+- `backend/tests/test_teamwork_status.py`
 
 These tests mock Teamwork and Supabase interactions; no live Teamwork key is required.

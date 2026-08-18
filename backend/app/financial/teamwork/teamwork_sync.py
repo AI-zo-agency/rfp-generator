@@ -1,11 +1,11 @@
-"""Teamwork backfill and nightly incremental sync orchestration."""
+"""Teamwork backfill and nightly snapshot sync orchestration."""
 
 from __future__ import annotations
 
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from app.core.config import settings
@@ -25,6 +25,7 @@ from app.financial.teamwork.teamwork_repository import (
     get_panel_cache,
     get_sync_state,
     insert_sync_run,
+    prune_snapshot_rows,
     release_lease,
     try_acquire_lease,
     upsert_milestones,
@@ -43,14 +44,6 @@ class LeaseHeld(RuntimeError):
     pass
 
 
-ENTITY_FETCHERS: dict[str, Callable[..., tuple[list[dict[str, Any]], dict[str, Any]]]] = {
-    "projects": client.list_projects,
-    "people": client.list_people,
-    "timelogs": client.list_timelogs,
-    "milestones": client.list_milestones,
-}
-
-
 def _site_id() -> str:
     return site_id_from_base_url(settings.teamwork_base_url)
 
@@ -59,14 +52,10 @@ def _time_window_year_start(started: datetime) -> str:
     return f"{started.year}-01-01"
 
 
-def _updated_after_params(cursor: str | None) -> dict[str, Any]:
-    return {"updatedAfter": cursor} if cursor else {}
-
-
-def _sync_tasks(*, site_id: str, synced_at: str, updated_after: str | None) -> dict[str, int]:
+def _sync_tasks(*, site_id: str, synced_at: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for bucket, task_filter in (("overdue", "overdue"), ("upcoming", "within14")):
-        params = {"taskFilter": task_filter, **_updated_after_params(updated_after)}
+        params = {"taskFilter": task_filter}
         rows, included = client.list_tasks(params)
         mapped = [
             map_task(
@@ -82,14 +71,14 @@ def _sync_tasks(*, site_id: str, synced_at: str, updated_after: str | None) -> d
     return counts
 
 
-def _sync_projects(*, site_id: str, synced_at: str, updated_after: str | None) -> int:
-    rows, included = client.list_projects(_updated_after_params(updated_after))
+def _sync_projects(*, site_id: str, synced_at: str) -> int:
+    rows, included = client.list_projects()
     mapped = [map_project(site_id=site_id, project=row, included=included, synced_at=synced_at) for row in rows]
     return upsert_projects(mapped)
 
 
-def _sync_people(*, site_id: str, synced_at: str, updated_after: str | None) -> int:
-    rows, included = client.list_people(_updated_after_params(updated_after))
+def _sync_people(*, site_id: str, synced_at: str) -> int:
+    rows, included = client.list_people()
     mapped = [
         mapped_row
         for row in rows
@@ -98,34 +87,35 @@ def _sync_people(*, site_id: str, synced_at: str, updated_after: str | None) -> 
     return upsert_people(mapped)
 
 
-def _sync_timelogs(*, site_id: str, synced_at: str, started: datetime, updated_after: str | None) -> int:
+def _sync_timelogs(*, site_id: str, synced_at: str, started: datetime) -> int:
     params = {
         "startDate": _time_window_year_start(started),
         "endDate": started.date().isoformat(),
-        **_updated_after_params(updated_after),
     }
     rows, included = client.list_timelogs(params)
     mapped = [map_timelog(site_id=site_id, timelog=row, included=included, synced_at=synced_at) for row in rows]
     return upsert_timelogs(mapped)
 
 
-def _sync_milestones(*, site_id: str, synced_at: str, updated_after: str | None) -> int:
-    rows, included = client.list_milestones(_updated_after_params(updated_after))
+def _sync_milestones(*, site_id: str, synced_at: str) -> int:
+    rows, included = client.list_milestones()
     mapped = [map_milestone(site_id=site_id, milestone=row, included=included, synced_at=synced_at) for row in rows]
     return upsert_milestones(mapped)
 
 
-def _fetch_incremental(*, site_id: str, started: datetime, synced_at: str, updated_after: str | None) -> dict[str, int]:
-    logger.info("operation=teamwork_fetch_incremental site_id=%s updated_after=%s", site_id, updated_after)
-    task_counts = _sync_tasks(site_id=site_id, synced_at=synced_at, updated_after=updated_after)
-    return {
-        "projects": _sync_projects(site_id=site_id, synced_at=synced_at, updated_after=updated_after),
-        "people": _sync_people(site_id=site_id, synced_at=synced_at, updated_after=updated_after),
-        "timelogs": _sync_timelogs(site_id=site_id, synced_at=synced_at, started=started, updated_after=updated_after),
-        "milestones": _sync_milestones(site_id=site_id, synced_at=synced_at, updated_after=updated_after),
+def _fetch_snapshot(*, site_id: str, started: datetime, synced_at: str) -> dict[str, int]:
+    logger.info("operation=teamwork_fetch_snapshot site_id=%s", site_id)
+    task_counts = _sync_tasks(site_id=site_id, synced_at=synced_at)
+    counts = {
+        "projects": _sync_projects(site_id=site_id, synced_at=synced_at),
+        "people": _sync_people(site_id=site_id, synced_at=synced_at),
+        "timelogs": _sync_timelogs(site_id=site_id, synced_at=synced_at, started=started),
+        "milestones": _sync_milestones(site_id=site_id, synced_at=synced_at),
         "overdue_tasks": task_counts["overdue"],
         "upcoming_tasks": task_counts["upcoming"],
     }
+    prune_snapshot_rows(site_id, synced_at)
+    return counts
 
 
 def _write_panel_cache(site_id: str, *, started: datetime, computed_at: str) -> None:
@@ -137,14 +127,13 @@ def _run_backfill(*, site_id: str, started: datetime, run_id: str) -> dict[str, 
     synced_at = started.isoformat()
     logger.info("operation=teamwork_run_backfill site_id=%s run_id=%s status=started", site_id, run_id)
     upsert_sync_state(site_id, {"last_started_at": synced_at, "last_mode": "backfill"})
-    counts = _fetch_incremental(site_id=site_id, started=started, synced_at=synced_at, updated_after=None)
+    counts = _fetch_snapshot(site_id=site_id, started=started, synced_at=synced_at)
     computed_at = datetime.now(timezone.utc).isoformat()
     _write_panel_cache(site_id, started=started, computed_at=computed_at)
     now = datetime.now(timezone.utc).isoformat()
     upsert_sync_state(
         site_id,
         {
-            "updated_after_cursor": started.isoformat(),
             "backfill_completed_at": now,
             "last_success_at": now,
             "last_error": None,
@@ -156,20 +145,16 @@ def _run_backfill(*, site_id: str, started: datetime, run_id: str) -> dict[str, 
 
 
 def _run_nightly(*, site_id: str, started: datetime, state: dict[str, Any], run_id: str) -> dict[str, int]:
-    cursor = state.get("updated_after_cursor")
-    if not cursor:
-        raise RuntimeError("nightly sync requires updated_after_cursor; run backfill first")
     synced_at = started.isoformat()
-    logger.info("operation=teamwork_run_nightly site_id=%s run_id=%s cursor=%s", site_id, run_id, cursor)
+    logger.info("operation=teamwork_run_nightly site_id=%s run_id=%s", site_id, run_id)
     upsert_sync_state(site_id, {"last_started_at": synced_at, "last_mode": "nightly"})
-    counts = _fetch_incremental(site_id=site_id, started=started, synced_at=synced_at, updated_after=str(cursor))
+    counts = _fetch_snapshot(site_id=site_id, started=started, synced_at=synced_at)
     computed_at = datetime.now(timezone.utc).isoformat()
     _write_panel_cache(site_id, started=started, computed_at=computed_at)
     now = datetime.now(timezone.utc).isoformat()
     upsert_sync_state(
         site_id,
         {
-            "updated_after_cursor": started.isoformat(),
             "last_success_at": now,
             "last_error": None,
             "last_mode": "nightly",

@@ -39,6 +39,69 @@ def test_auto_nightly_when_backfill_completed(monkeypatch):
     assert "backfill" not in called
 
 
+def test_task_snapshot_ignores_cursor_for_time_derived_buckets(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        sync.client,
+        "list_tasks",
+        lambda params: calls.append(params) or ([], {}),
+    )
+    monkeypatch.setattr(sync, "upsert_tasks", lambda rows: len(rows))
+
+    sync._sync_tasks(site_id="zoagency.teamwork.com", synced_at="2026-08-18T00:00:00+00:00")
+
+    assert calls == [
+        {"taskFilter": "overdue"},
+        {"taskFilter": "within14"},
+    ]
+
+
+def test_snapshot_prunes_rows_not_returned_by_teamwork(monkeypatch):
+    monkeypatch.setattr(sync, "_sync_tasks", lambda **kwargs: {"overdue": 1, "upcoming": 2})
+    monkeypatch.setattr(sync, "_sync_projects", lambda **kwargs: 3)
+    monkeypatch.setattr(sync, "_sync_people", lambda **kwargs: 4)
+    monkeypatch.setattr(sync, "_sync_timelogs", lambda **kwargs: 5)
+    monkeypatch.setattr(sync, "_sync_milestones", lambda **kwargs: 6)
+    pruned = []
+    monkeypatch.setattr(
+        sync,
+        "prune_snapshot_rows",
+        lambda site_id, synced_at: pruned.append((site_id, synced_at)),
+    )
+
+    counts = sync._fetch_snapshot(
+        site_id="zoagency.teamwork.com",
+        started=datetime(2026, 8, 18, tzinfo=timezone.utc),
+        synced_at="2026-08-18T00:00:00+00:00",
+    )
+
+    assert counts == {
+        "projects": 3,
+        "people": 4,
+        "timelogs": 5,
+        "milestones": 6,
+        "overdue_tasks": 1,
+        "upcoming_tasks": 2,
+    }
+    assert pruned == [("zoagency.teamwork.com", "2026-08-18T00:00:00+00:00")]
+
+
+def test_nightly_snapshot_does_not_require_an_incremental_cursor(monkeypatch):
+    state_updates = []
+    monkeypatch.setattr(sync, "_fetch_snapshot", lambda **kwargs: {})
+    monkeypatch.setattr(sync, "_write_panel_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sync, "upsert_sync_state", lambda _site, fields: state_updates.append(fields))
+
+    sync._run_nightly(
+        site_id="zoagency.teamwork.com",
+        started=datetime(2026, 8, 18, tzinfo=timezone.utc),
+        state={"backfill_completed_at": "2026-08-17T00:00:00+00:00"},
+        run_id="run-1",
+    )
+
+    assert state_updates[-1]["last_mode"] == "nightly"
+
+
 def test_failed_nightly_does_not_advance_cursor(monkeypatch):
     state = {
         "updated_after_cursor": "2026-08-01T00:00:00+00:00",
@@ -47,7 +110,7 @@ def test_failed_nightly_does_not_advance_cursor(monkeypatch):
     monkeypatch.setattr(sync, "try_acquire_lease", lambda *a, **k: True)
     monkeypatch.setattr(sync, "release_lease", lambda *a, **k: None)
     monkeypatch.setattr(sync, "get_sync_state", lambda site_id: state)
-    monkeypatch.setattr(sync, "_fetch_incremental", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(sync, "_fetch_snapshot", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     advanced = []
     monkeypatch.setattr(sync, "upsert_sync_state", lambda site_id, fields: advanced.append(fields))
     monkeypatch.setattr(sync, "insert_sync_run", lambda row: "run-1")
@@ -60,8 +123,8 @@ def test_failed_nightly_does_not_advance_cursor(monkeypatch):
 
 def test_failed_backfill_cache_build_publishes_no_cache_or_cursor(monkeypatch):
     published = []
-    monkeypatch.setattr(sync, "ENTITY_FETCHERS", {})
     monkeypatch.setattr(sync, "get_sync_state", lambda _site: {})
+    monkeypatch.setattr(sync, "_fetch_snapshot", lambda *a, **k: {})
     monkeypatch.setattr(sync, "_write_panel_cache", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("cache failed")))
     monkeypatch.setattr(sync, "upsert_sync_state", lambda site_id, fields: published.append(fields))
 
@@ -81,4 +144,3 @@ def test_lease_busy_raises_lease_error():
             monkeypatch.setattr(sync, "try_acquire_lease", lambda *a, **k: False)
             monkeypatch.setattr(sync.settings, "teamwork_base_url", "https://zoagency.teamwork.com")
             sync.run_sync("nightly")
-

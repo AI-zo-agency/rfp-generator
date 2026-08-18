@@ -12,6 +12,13 @@ logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 500
 _LIST_PAGE_SIZE = 1000
+_SNAPSHOT_TABLES = (
+    "teamwork_projects",
+    "teamwork_tasks",
+    "teamwork_people",
+    "teamwork_time_entries",
+    "teamwork_milestones",
+)
 
 
 def _rows(data: Any) -> list[dict[str, Any]]:
@@ -93,6 +100,14 @@ def upsert_timelogs(rows: list[dict[str, Any]]) -> int:
 
 def upsert_milestones(rows: list[dict[str, Any]]) -> int:
     return _upsert_batches("teamwork_milestones", rows, on_conflict="site_id,milestone_id")
+
+
+def prune_snapshot_rows(site_id: str, synced_at: str) -> None:
+    """Remove mirror rows absent from a completed full Teamwork snapshot."""
+    client = _get_client()
+    for table in _SNAPSHOT_TABLES:
+        client.table(table).delete().eq("site_id", site_id).lt("synced_at", synced_at).execute()
+    logger.info("operation=teamwork_prune_snapshot site_id=%s", site_id)
 
 
 def list_projects(site_id: str, **filters: Any) -> list[dict[str, Any]]:

@@ -11,7 +11,7 @@ import logging
 from app.financial import google_sheets, ai_classifier
 from app.financial.qb_repository import get_panel_cache, get_sync_state
 from app.financial.qb_sync import LeaseHeld, run_sync
-from app.financial.teamwork.overview import connection_status as teamwork_connection_status
+from app.financial.teamwork.status import connection_status as teamwork_connection_status
 from app.financial.teamwork.teamwork_repository import (
     get_panel_cache as get_teamwork_panel_cache,
 )
@@ -740,7 +740,7 @@ def get_teamwork_status():
 
 
 @router.get("/teamwork/overview")
-def get_teamwork_overview(refresh: bool = Query(False)):
+def get_teamwork_overview():
     """Return the latest persisted Teamwork snapshot without calling Teamwork live."""
     site_id = site_id_from_base_url(settings.teamwork_base_url)
     state = get_teamwork_sync_state(site_id) or {}
@@ -785,9 +785,8 @@ def get_teamwork_overview(refresh: bool = Query(False)):
             "sync_status": "failed" if state.get("last_error") and state.get("last_success_at") else "ok",
         }
     logger.info(
-        "operation=teamwork_overview_route connected=%s refresh_ignored=%s error_keys=%s",
+        "operation=teamwork_overview_route connected=%s error_keys=%s",
         payload.get("connected"),
-        refresh,
         sorted((payload.get("errors") or {}).keys()),
     )
     return payload
