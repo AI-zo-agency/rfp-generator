@@ -69,3 +69,43 @@ def test_teamwork_overview_reads_cached_payload(monkeypatch):
     assert response.status_code == 200
     assert response.json()["summary"]["project_count"] == 2
     assert response.json()["synced_at"] == "2026-08-18T00:00:00+00:00"
+
+
+def test_teamwork_overview_includes_base_url_when_configured(monkeypatch):
+    from app.financial import router
+
+    monkeypatch.setattr(
+        router,
+        "get_teamwork_panel_cache",
+        lambda site_id: {
+            "payload": {"summary": {"project_count": 1}, "projects": [], "errors": {}},
+            "as_of": "2026-08-18",
+            "computed_at": "2026-08-18T00:00:00+00:00",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(router, "get_teamwork_sync_state", lambda site_id: {}, raising=False)
+    monkeypatch.setattr(router.settings, "teamwork_base_url", "https://zoagency.teamwork.com", raising=False)
+    monkeypatch.setattr(router.settings, "teamwork_api_key", "test_key", raising=False)
+    monkeypatch.setattr(router, "teamwork_origin", lambda: "https://zoagency.teamwork.com", raising=False)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/financials/teamwork/overview")
+
+    assert response.status_code == 200
+    assert response.json()["base_url"] == "https://zoagency.teamwork.com"
+
+
+def test_teamwork_overview_base_url_is_none_when_not_configured(monkeypatch):
+    from app.financial import router
+
+    monkeypatch.setattr(router, "get_teamwork_panel_cache", lambda site_id: None, raising=False)
+    monkeypatch.setattr(router, "get_teamwork_sync_state", lambda site_id: {}, raising=False)
+    monkeypatch.setattr(router.settings, "teamwork_base_url", "", raising=False)
+    monkeypatch.setattr(router.settings, "teamwork_api_key", "", raising=False)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/financials/teamwork/overview")
+
+    assert response.status_code == 200
+    assert response.json()["base_url"] is None

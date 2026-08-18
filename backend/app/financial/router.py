@@ -19,6 +19,7 @@ from app.financial.teamwork.teamwork_repository import (
     get_sync_state as get_teamwork_sync_state,
 )
 from app.financial.teamwork.teamwork_map import site_id_from_base_url
+from app.financial.teamwork.client import origin as teamwork_origin
 from app.financial.teamwork.teamwork_sync import (
     LeaseHeld as TeamworkLeaseHeld,
 )
@@ -784,6 +785,7 @@ def get_teamwork_overview():
             "synced_at": state.get("last_success_at") or cache.get("computed_at"),
             "sync_status": "failed" if state.get("last_error") and state.get("last_success_at") else "ok",
         }
+    payload["base_url"] = teamwork_origin() if settings.teamwork_configured else None
     logger.info(
         "operation=teamwork_overview_route connected=%s error_keys=%s",
         payload.get("connected"),
