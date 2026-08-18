@@ -47,10 +47,13 @@ export interface TeamworkTimeBucket {
   id: string;
   name: string;
   minutes: number;
+  /** Optional: cache rows written before the per-bucket split shipped omit this. */
+  billable_minutes?: number;
 }
 
 export interface TeamworkOverview {
   connected: boolean;
+  base_url?: string | null;
   generated_at?: string | null;
   as_of?: string | null;
   synced_at?: string | null;
