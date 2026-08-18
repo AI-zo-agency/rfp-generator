@@ -7,11 +7,11 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { DataTable, Figure, Note, Panel } from "./qb-ui";
 import { billablePct, buildSignals, daysUntil, hoursLabel, type SectionId } from "../lib/teamwork-derive";
 import { TeamworkAttention } from "./teamwork/TeamworkAttention";
+import { TeamworkProjects } from "./teamwork/TeamworkProjects";
 import type {
   TeamworkMilestone,
   TeamworkOverview,
   TeamworkPerson,
-  TeamworkProject,
   TeamworkTask,
   TeamworkTimeBucket,
 } from "../types/teamwork";
@@ -63,13 +63,6 @@ function shortDate(value?: string | null) {
   return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-function healthLabel(health: string) {
-  if (health === "bad") return "At risk";
-  if (health === "ok") return "OK";
-  if (health === "good") return "Good";
-  return "—";
-}
-
 export function TeamworkPanels() {
   const [data, setData] = useState<TeamworkOverview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -102,40 +95,6 @@ export function TeamworkPanels() {
     void load();
     return () => abortRef.current?.abort();
   }, [load]);
-
-  const projectCols = useMemo<ColumnDef<TeamworkProject, unknown>[]>(
-    () => [
-      {
-        accessorKey: "name",
-        header: "Project",
-        cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
-      },
-      { accessorKey: "company_name", header: "Client" },
-      { accessorKey: "status", header: "Status" },
-      {
-        accessorKey: "health",
-        header: "Health",
-        cell: (c) => healthLabel(c.getValue<string>() ?? ""),
-      },
-      {
-        accessorKey: "progress_pct",
-        header: "Done",
-        meta: { numeric: true },
-        cell: (c) => `${c.getValue<number>()}%`,
-      },
-      {
-        accessorKey: "tasks_overdue",
-        header: "Overdue",
-        meta: { numeric: true },
-      },
-      {
-        accessorKey: "due_date",
-        header: "Due",
-        cell: (c) => shortDate(c.getValue<string | null>()),
-      },
-    ],
-    [],
-  );
 
   const taskCols = useMemo<ColumnDef<TeamworkTask, unknown>[]>(
     () => [
@@ -338,15 +297,7 @@ export function TeamworkPanels() {
             ) : null}
 
             <div id="teamwork-projects">
-              <Panel title="Projects" meta={`${data.projects.length} shown`}>
-                <DataTable
-                  data={data.projects}
-                  columns={projectCols}
-                  initialSort="tasks_overdue"
-                  pageSize={12}
-                  empty="No active Teamwork projects for this API user."
-                />
-              </Panel>
+              <TeamworkProjects data={data} todayISO={todayISO} />
             </div>
 
             <div id="teamwork-work" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
