@@ -301,6 +301,14 @@ export function AgingBar({ buckets }: { buckets: { label: string; amount: number
 
 /* ── table ─────────────────────────────────────────────────────────────── */
 
+/** Clicks and keystrokes that land on a link or control belong to that control. */
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    target.closest("a, button, input, select, textarea, [role='button']") !== null
+  );
+}
+
 /**
  * One sortable table, used everywhere a ranked list used to be. Sorting is the
  * affordance that replaced nine near-identical bar charts: the reader picks the
@@ -313,6 +321,7 @@ export function DataTable<T>({
   pageSize,
   empty = "Nothing here yet.",
   renderSubRow,
+  rowId,
 }: {
   data: T[];
   columns: ColumnDef<T, unknown>[];
@@ -323,6 +332,10 @@ export function DataTable<T>({
   empty?: string;
   /** When provided, rows expand on click to show this content. One at a time. */
   renderSubRow?: (row: T) => ReactNode;
+  /** Stable per-row identity. Pass this whenever renderSubRow is used and the
+   *  data array can be filtered or reordered, or the open row is keyed by
+   *  array position and will latch onto the wrong entity. */
+  rowId?: (row: T) => string;
 }) {
   const [sorting, setSorting] = useState<SortingState>(
     initialSort ? [{ id: initialSort, desc: true }] : [],
@@ -334,6 +347,7 @@ export function DataTable<T>({
     data,
     columns,
     state: { sorting },
+    ...(rowId ? { getRowId: (row: T) => rowId(row) } : {}),
     onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
@@ -393,11 +407,19 @@ export function DataTable<T>({
                   data-open={isOpen ? "true" : undefined}
                   aria-expanded={renderSubRow ? isOpen : undefined}
                   tabIndex={renderSubRow ? 0 : undefined}
-                  onClick={renderSubRow ? toggle : undefined}
+                  onClick={
+                    renderSubRow
+                      ? (event) => {
+                          if (isInteractiveTarget(event.target)) return;
+                          toggle();
+                        }
+                      : undefined
+                  }
                   onKeyDown={
                     renderSubRow
                       ? (event) => {
                           if (event.key !== "Enter" && event.key !== " ") return;
+                          if (isInteractiveTarget(event.target)) return;
                           event.preventDefault();
                           toggle();
                         }
