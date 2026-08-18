@@ -79,11 +79,35 @@ Operational control tables:
 
 `GET /api/v1/financials/teamwork/overview` returns the latest cached payload from Supabase. It does not call Teamwork live during page load.
 
+The overview payload also carries `base_url` (Teamwork origin, or `null` when unconfigured)
+for deep links, and per-bucket `billable_minutes` on every `time.by_person` and
+`time.by_project` entry.
+
 The frontend surfaces:
 
-- sync freshness via `generated_at` / `synced_at`
-- stale cache state via `sync_status`
-- cached partial data if the last sync wrote a good snapshot but a later run failed
+- sync freshness as a relative time with a colour-coded state dot
+- a needs-attention block derived client-side: projects at risk, unassigned overdue tasks,
+  the oldest overdue task, late milestones, and projects past their due date
+- a filterable projects table whose rows expand into that project's overdue tasks, upcoming
+  tasks, and milestones
+- time grouped by person or project with a billable split
+- per-person workload joining assigned task counts with logged hours
+
+Derivation logic lives in `frontend/src/financial/lib/teamwork-derive.ts` and is unit-tested
+in `teamwork-derive.test.ts`.
+
+### Known data gaps
+
+The dashboard renders correctly but is currently starved of three inputs by the sync layer, not by the UI:
+
+- `map_task` does not resolve a task's `projectId` from the Teamwork response, so mirrored tasks carry an
+  empty `project_id`. The projects drill-down groups by that field and therefore shows its empty state for
+  every project, and attention-signal details render "No project".
+- Project `stats` are not populated, so `tasks_overdue`, `progress_pct`, and `health` are `0`/`unset` for
+  every project. The "At risk" and "Has overdue" filter chips are consequently always `0`.
+- Per-bucket `billable_minutes` only appears after a sync run on or after the change that introduced it.
+  Payloads cached before then render `0%` in the Billable column; the `?? 0` fallback keeps that from
+  becoming `NaN%`.
 
 ## Database
 

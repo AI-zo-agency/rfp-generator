@@ -177,7 +177,7 @@ export function TeamworkPanels() {
                 sub={
                   atRiskCount
                     ? `${atRiskCount} at risk`
-                    : "All healthy"
+                    : "None flagged at risk"
                 }
               />
               <Figure
