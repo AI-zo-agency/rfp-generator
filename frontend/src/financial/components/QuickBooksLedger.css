@@ -1385,6 +1385,155 @@ table.qb-table {
   transform: rotate(90deg);
 }
 
+.tw-time-name {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.tw-time-table tr[data-open="true"] {
+  background: var(--zo-surface);
+}
+.tw-time-table tr[data-open="true"] td {
+  border-bottom: 0;
+}
+.tw-time-table tr[data-open="true"] + .qb-drillrow > td {
+  padding: 0 10px 12px;
+  background: var(--zo-surface);
+}
+
+.tw-time-alloc {
+  padding: 12px 8px 6px 28px;
+  border-top: 1px solid var(--zo-border);
+}
+.tw-time-alloc__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.tw-time-alloc__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--zo-text);
+}
+.tw-time-alloc__sub {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--zo-text-muted);
+}
+.tw-time-alloc__total {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--zo-text-muted);
+}
+.tw-time-alloc__stack {
+  display: flex;
+  overflow: hidden;
+  height: 10px;
+  margin-bottom: 14px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--zo-teal) 10%, var(--zo-card-bg));
+}
+.tw-time-alloc__stack > span {
+  min-width: 3px;
+  height: 100%;
+}
+.tw-time-alloc__cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 3.5rem 5.75rem;
+  gap: 10px;
+  margin: 0 0 6px 16px;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--zo-text-muted);
+}
+.tw-time-alloc__cols span {
+  white-space: nowrap;
+}
+.tw-time-alloc__cols span:nth-child(n + 2) {
+  text-align: right;
+}
+.tw-time-alloc--billable .tw-time-alloc__cols,
+.tw-time-alloc--billable .tw-time-alloc__line {
+  grid-template-columns: minmax(0, 1fr) 3.5rem 5.75rem 4.75rem;
+}
+.tw-time-alloc__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tw-time-alloc__row {
+  display: flex;
+  gap: 8px;
+  padding: 8px 0;
+}
+.tw-time-alloc__dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 99px;
+}
+.tw-time-alloc__body {
+  min-width: 0;
+  flex: 1;
+}
+.tw-time-alloc__line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 3.5rem 5.75rem;
+  align-items: baseline;
+  gap: 10px;
+}
+.tw-time-alloc__name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--zo-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tw-time-alloc__hours {
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--zo-text);
+}
+.tw-time-alloc__pct {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--zo-text-muted);
+}
+.tw-time-alloc__bar {
+  display: block;
+  height: 5px;
+  margin-top: 6px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--zo-teal) 10%, var(--zo-card-bg));
+}
+.tw-time-alloc__bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+}
+.tw-time-alloc__empty {
+  margin: 0;
+  padding: 8px 0 8px 28px;
+  font-size: 12.5px;
+  color: var(--zo-text-muted);
+}
+
 .tw-row-link {
   display: inline-flex;
   align-items: center;

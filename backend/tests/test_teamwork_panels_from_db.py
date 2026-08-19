@@ -146,6 +146,9 @@ def test_summarize_timelogs_splits_billable_per_bucket():
     sonja = next(b for b in summary["by_person"] if b["name"] == "Sonja")
     assert sonja["minutes"] == 120
     assert sonja["billable_minutes"] == 90
+    assert sonja["breakdown"] == [
+        {"id": "10", "name": "Oakdale", "minutes": 120, "billable_minutes": 90},
+    ]
 
     alex = next(b for b in summary["by_person"] if b["name"] == "Alex")
     assert alex["minutes"] == 60
@@ -154,6 +157,14 @@ def test_summarize_timelogs_splits_billable_per_bucket():
     oakdale = next(b for b in summary["by_project"] if b["name"] == "Oakdale")
     assert oakdale["minutes"] == 120
     assert oakdale["billable_minutes"] == 90
+    assert oakdale["breakdown"] == [
+        {"id": "7", "name": "Sonja", "minutes": 120, "billable_minutes": 90},
+    ]
+
+    riverside = next(b for b in summary["by_project"] if b["name"] == "Riverside")
+    assert riverside["breakdown"] == [
+        {"id": "8", "name": "Alex", "minutes": 60, "billable_minutes": 60},
+    ]
 
     assert summary["total_minutes"] == 180
     assert summary["billable_minutes"] == 150

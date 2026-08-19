@@ -101,6 +101,32 @@ def _milestone_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _add_time_part(
+    parent: dict[str, Any],
+    *,
+    part_id: str,
+    name: str,
+    minutes: int,
+    is_billable: bool,
+) -> None:
+    part = parent["parts"].setdefault(
+        part_id,
+        {"id": part_id, "name": name, "minutes": 0, "billable_minutes": 0},
+    )
+    part["minutes"] += minutes
+    if is_billable:
+        part["billable_minutes"] += minutes
+
+
+def _finish_time_buckets(store: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for bucket in store.values():
+        parts = bucket.pop("parts")
+        bucket["breakdown"] = sorted(parts.values(), key=lambda item: item["minutes"], reverse=True)
+        rows.append(bucket)
+    return sorted(rows, key=lambda item: item["minutes"], reverse=True)
+
+
 def _summarize_timelogs(rows: list[dict[str, Any]]) -> dict[str, Any]:
     total_minutes = 0
     billable_minutes = 0
@@ -114,37 +140,57 @@ def _summarize_timelogs(rows: list[dict[str, Any]]) -> dict[str, Any]:
             billable_minutes += minutes
         user_id = str(row.get("user_id") or "")
         project_id = str(row.get("project_id") or "")
+        user_name = row.get("user_name") or user_id
+        project_name = row.get("project_name") or project_id
         if user_id:
             bucket = by_person.setdefault(
                 user_id,
                 {
                     "id": user_id,
-                    "name": row.get("user_name") or user_id,
+                    "name": user_name,
                     "minutes": 0,
                     "billable_minutes": 0,
+                    "parts": {},
                 },
             )
             bucket["minutes"] += minutes
             if is_billable:
                 bucket["billable_minutes"] += minutes
+            if project_id:
+                _add_time_part(
+                    bucket,
+                    part_id=project_id,
+                    name=str(project_name),
+                    minutes=minutes,
+                    is_billable=is_billable,
+                )
         if project_id:
             bucket = by_project.setdefault(
                 project_id,
                 {
                     "id": project_id,
-                    "name": row.get("project_name") or project_id,
+                    "name": project_name,
                     "minutes": 0,
                     "billable_minutes": 0,
+                    "parts": {},
                 },
             )
             bucket["minutes"] += minutes
             if is_billable:
                 bucket["billable_minutes"] += minutes
+            if user_id:
+                _add_time_part(
+                    bucket,
+                    part_id=user_id,
+                    name=str(user_name),
+                    minutes=minutes,
+                    is_billable=is_billable,
+                )
     return {
         "total_minutes": total_minutes,
         "billable_minutes": billable_minutes,
-        "by_person": sorted(by_person.values(), key=lambda item: item["minutes"], reverse=True),
-        "by_project": sorted(by_project.values(), key=lambda item: item["minutes"], reverse=True),
+        "by_person": _finish_time_buckets(by_person),
+        "by_project": _finish_time_buckets(by_project),
     }
 
 

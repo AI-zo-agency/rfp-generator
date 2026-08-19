@@ -51,6 +51,8 @@ export interface TeamworkTimeBucket {
   minutes: number;
   /** Optional: cache rows written before the per-bucket split shipped omit this. */
   billable_minutes?: number;
+  /** Person→projects or project→people, depending on the parent list. */
+  breakdown?: TeamworkTimeBucket[];
 }
 
 export interface TeamworkOverview {

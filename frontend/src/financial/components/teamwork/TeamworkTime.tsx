@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { ChevronRight } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import { DataTable, Figure, FilterChips, MiniBar, Panel } from "../qb-ui";
 import { billablePct, buildWorkload, hoursLabel, type WorkloadRow } from "../../lib/teamwork-derive";
@@ -8,6 +9,96 @@ import type { TeamworkOverview, TeamworkTimeBucket } from "../../types/teamwork"
 import { Count, HoursValue } from "./kpis";
 
 type TimeView = "person" | "project";
+
+const ALLOC_COLORS = [
+  "#004c4c",
+  "#006666",
+  "#008080",
+  "#66b2b2",
+  "#b2d8d8",
+];
+
+function allocShade(index: number, total: number): string {
+  if (total <= 1) return ALLOC_COLORS[0];
+  const pos = Math.round((index / (total - 1)) * (ALLOC_COLORS.length - 1));
+  return ALLOC_COLORS[pos];
+}
+
+function TimeBreakdown({
+  rows,
+  empty,
+  maxMinutes,
+  kind,
+  parentName,
+}: {
+  rows: TeamworkTimeBucket[];
+  empty: string;
+  maxMinutes: number;
+  kind: TimeView;
+  parentName: string;
+}) {
+  if (!rows.length) return <p className="tw-time-alloc__empty">{empty}</p>;
+  const max = maxMinutes || Math.max(...rows.map((row) => row.minutes), 1);
+  const billed = rows.map((row) => billablePct(row.billable_minutes ?? 0, row.minutes));
+  const showBillable = billed.some((pct) => pct !== billed[0]);
+  const childLabel = kind === "person" ? "projects" : "people";
+
+  return (
+      <div className={`tw-time-alloc${showBillable ? " tw-time-alloc--billable" : ""}`}>
+      <header className="tw-time-alloc__head">
+        <div>
+          <p className="tw-time-alloc__title">{kind === "person" ? "Project allocation" : "People allocation"}</p>
+          <p className="tw-time-alloc__sub">
+            How {parentName}&rsquo;s {hoursLabel(max)} is allocated across {childLabel}.
+          </p>
+        </div>
+        <span className="tw-time-alloc__total">{hoursLabel(max)} allocated</span>
+      </header>
+      <div
+        className="tw-time-alloc__stack"
+        role="img"
+        aria-label={`${parentName} time split across ${rows.length} ${childLabel}`}
+      >
+        {rows.map((row, index) => (
+          <span
+            key={row.id}
+            style={{ flexGrow: Math.max(row.minutes, 1), background: allocShade(index, rows.length) }}
+            title={`${row.name}: ${hoursLabel(row.minutes)}`}
+          />
+        ))}
+      </div>
+      <div className="tw-time-alloc__cols" aria-hidden>
+        <span>{kind === "person" ? "Project" : "Person"}</span>
+        <span>Hours</span>
+        <span>Allocation</span>
+        {showBillable ? <span>Billable</span> : null}
+      </div>
+      <ul className="tw-time-alloc__list">
+        {rows.map((row, index) => {
+          const share = max > 0 ? Math.round((row.minutes / max) * 100) : 0;
+          return (
+            <li key={row.id} className="tw-time-alloc__row">
+              <span className="tw-time-alloc__dot" style={{ background: allocShade(index, rows.length) }} aria-hidden />
+              <div className="tw-time-alloc__body">
+                <div className="tw-time-alloc__line">
+                  <span className="tw-time-alloc__name">{row.name}</span>
+                  <span className="tw-time-alloc__hours">{hoursLabel(row.minutes)}</span>
+                  <span className="tw-time-alloc__pct">{share}%</span>
+                  {showBillable ? (
+                    <span className="tw-time-alloc__pct">{billed[index]}%</span>
+                  ) : null}
+                </div>
+                <span className="tw-time-alloc__bar">
+                  <span style={{ width: `${Math.min(100, share)}%`, background: allocShade(index, rows.length) }} />
+                </span>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
 
 export function TeamworkTime({ data }: { data: TeamworkOverview }) {
   const [view, setView] = useState<TimeView>("person");
@@ -23,7 +114,12 @@ export function TeamworkTime({ data }: { data: TeamworkOverview }) {
       {
         accessorKey: "name",
         header: view === "person" ? "Person" : "Project",
-        cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
+        cell: (c) => (
+          <span className="tw-time-name">
+            <ChevronRight size={14} className="tw-row-chevron__icon" aria-hidden />
+            <span className="qb-name">{c.getValue<string>()}</span>
+          </span>
+        ),
       },
       {
         accessorKey: "minutes",
@@ -157,13 +253,30 @@ export function TeamworkTime({ data }: { data: TeamworkOverview }) {
             { id: "project" as TimeView, label: "By project" },
           ]}
         />
-        <DataTable
-          data={buckets}
-          columns={timeCols}
-          initialSort="minutes"
-          pageSize={10}
-          empty="No time logged this month."
-        />
+        <div className="tw-time-table">
+          <DataTable
+            key={view}
+            data={buckets}
+            columns={timeCols}
+            initialSort="minutes"
+            pageSize={10}
+            rowId={(bucket) => bucket.id}
+            empty="No time logged this month."
+            renderSubRow={(bucket) => (
+              <TimeBreakdown
+                rows={bucket.breakdown ?? []}
+                maxMinutes={bucket.minutes}
+                kind={view}
+                parentName={bucket.name}
+                empty={
+                  view === "person"
+                    ? "No projects on these hours."
+                    : "No people on these hours."
+                }
+              />
+            )}
+          />
+        </div>
       </Panel>
 
       <Panel title="Workload" meta={`${workload.length} people`}>
