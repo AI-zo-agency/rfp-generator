@@ -80,6 +80,24 @@ def test_sync_projects_skips_completed_rows(monkeypatch):
             {},
         ),
     )
+    monkeypatch.setattr(
+        sync.client,
+        "get_project_summary",
+        lambda _project_id: {
+            "health": {"0": 1, "1": 0, "2": 0, "3": 0},
+            "tasks": {
+                "everyone": {
+                    "active": 0,
+                    "late": 0,
+                    "complete": 0,
+                    "upcoming": 0,
+                    "today": 0,
+                    "started": 0,
+                    "nodate": 0,
+                }
+            },
+        },
+    )
     upserted = []
     monkeypatch.setattr(sync, "upsert_projects", lambda rows: upserted.extend(rows) or len(rows))
 
@@ -129,7 +147,6 @@ def test_nightly_snapshot_does_not_require_an_incremental_cursor(monkeypatch):
     sync._run_nightly(
         site_id="zoagency.teamwork.com",
         started=datetime(2026, 8, 18, tzinfo=timezone.utc),
-        state={"backfill_completed_at": "2026-08-17T00:00:00+00:00"},
         run_id="run-1",
     )
 

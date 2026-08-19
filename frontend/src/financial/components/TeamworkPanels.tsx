@@ -31,6 +31,7 @@ import {
   hoursLabel,
   type SectionId,
 } from "../lib/teamwork-derive";
+import { parseTeamworkView, type TeamworkViewId } from "../lib/financial-tab";
 import { TeamworkAttention } from "./teamwork/TeamworkAttention";
 import { TeamworkProjects } from "./teamwork/TeamworkProjects";
 import { TeamworkWork } from "./teamwork/TeamworkWork";
@@ -259,11 +260,16 @@ function HoursChart({ data }: { data: TeamworkOverview }) {
   );
 }
 
-export function TeamworkPanels() {
+export function TeamworkPanels({
+  view,
+  onViewChange,
+}: {
+  view: TeamworkViewId;
+  onViewChange: (id: TeamworkViewId) => void;
+}) {
   const [data, setData] = useState<TeamworkOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState("position");
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
@@ -322,9 +328,12 @@ export function TeamworkPanels() {
     [data, todayISO],
   );
 
-  const goToSection = useCallback((id: SectionId) => {
-    setView(id);
-  }, []);
+  const goToSection = useCallback(
+    (id: SectionId) => {
+      onViewChange(id);
+    },
+    [onViewChange],
+  );
 
   const showBody = Boolean(data) && !notConfigured;
   const showError = !loading && !data && !notConfigured;
@@ -367,7 +376,11 @@ export function TeamworkPanels() {
             </Note>
           </div>
         ) : (
-          <Tabs value={view} onValueChange={setView} className="qb-tabs">
+          <Tabs
+            value={view}
+            onValueChange={(id) => onViewChange(parseTeamworkView(id))}
+            className="qb-tabs"
+          >
             <TabsList className="qb-tablist">
               {VIEWS.map((v) => (
                 <TabsTrigger key={v.id} value={v.id}>

@@ -75,7 +75,26 @@ def _sync_projects(*, site_id: str, synced_at: str) -> int:
     rows, included = client.list_projects()
     mapped = []
     for row in rows:
-        item = map_project(site_id=site_id, project=row, included=included, synced_at=synced_at)
+        summary = None
+        try:
+            project_id_raw = row.get("id")
+            if project_id_raw is not None:
+                summary = client.get_project_summary(int(project_id_raw))
+        except TeamworkError:
+            logger.warning(
+                "operation=teamwork_get_project_summary_failed site_id=%s project=%s",
+                site_id,
+                row.get("id"),
+            )
+            summary = None
+
+        item = map_project(
+            site_id=site_id,
+            project=row,
+            included=included,
+            synced_at=synced_at,
+            summary=summary,
+        )
         if str(item.get("status") or "").lower() == "completed":
             logger.info(
                 "operation=teamwork_skip_completed_project site_id=%s project_id=%s",
@@ -154,7 +173,7 @@ def _run_backfill(*, site_id: str, started: datetime, run_id: str) -> dict[str, 
     return counts
 
 
-def _run_nightly(*, site_id: str, started: datetime, state: dict[str, Any], run_id: str) -> dict[str, int]:
+def _run_nightly(*, site_id: str, started: datetime, run_id: str) -> dict[str, int]:
     synced_at = started.isoformat()
     logger.info("operation=teamwork_run_nightly site_id=%s run_id=%s", site_id, run_id)
     upsert_sync_state(site_id, {"last_started_at": synced_at, "last_mode": "nightly"})
@@ -221,7 +240,7 @@ def run_sync(mode: str = "auto") -> dict[str, str]:
         if resolved_mode == "backfill":
             counts = _run_backfill(site_id=site_id, started=started, run_id=run_id)
         elif resolved_mode == "nightly":
-            counts = _run_nightly(site_id=site_id, started=started, state=state, run_id=run_id)
+            counts = _run_nightly(site_id=site_id, started=started, run_id=run_id)
         else:
             raise ValueError(f"Unknown sync mode: {mode}")
         finish_sync_run(run_id, "success", entities_upserted=counts)

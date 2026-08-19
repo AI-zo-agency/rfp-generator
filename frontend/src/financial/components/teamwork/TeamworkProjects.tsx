@@ -4,6 +4,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { ChevronRight, ExternalLink } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import { DataTable, DueChip, Figure, FilterChips, MiniBar, Panel, Pill } from "../qb-ui";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   describeDue,
   describeProjectDue,
@@ -47,19 +48,19 @@ function TaskCard({
 
   return (
     <article className="tw-task-card">
-      <div className="tw-task-card__main">
-        {href ? (
-          <a className="tw-task-card__name" href={href} target="_blank" rel="noreferrer">
-            {task.name}
-          </a>
-        ) : (
-          <span className="tw-task-card__name">{task.name}</span>
-        )}
+      {href ? (
+        <a className="tw-task-card__name" href={href} target="_blank" rel="noreferrer">
+          {task.name}
+        </a>
+      ) : (
+        <span className="tw-task-card__name">{task.name}</span>
+      )}
+      <div className="tw-task-card__meta">
         <span className={`tw-task-card__assignee${task.assignees.length ? "" : " tw-task-card__assignee--empty"}`}>
           {assignees}
         </span>
+        <DueChip label={due.label} tone={due.tone} />
       </div>
-      <DueChip label={due.label} tone={due.tone} />
     </article>
   );
 }
@@ -77,11 +78,11 @@ function MilestoneCard({
 
   return (
     <article className="tw-task-card">
-      <div className="tw-task-card__main">
-        <span className="tw-task-card__name">{milestone.name}</span>
-        {status ? <Pill label={status} tone={isLate ? "bad" : "neutral"} /> : null}
+      <span className="tw-task-card__name">{milestone.name}</span>
+      <div className="tw-task-card__meta">
+        {status ? <Pill label={status} tone={isLate ? "bad" : "neutral"} /> : <span />}
+        <DueChip label={due.label} tone={due.tone} />
       </div>
-      <DueChip label={due.label} tone={due.tone} />
     </article>
   );
 }
@@ -125,7 +126,6 @@ function ProjectPanel({
   baseUrl?: string | null;
   todayISO: string;
 }) {
-  const href = projectUrl(baseUrl, project.id);
   const overdue = work?.overdue ?? [];
   const upcoming = work?.upcoming ?? [];
   const milestones = work?.milestones ?? [];
@@ -159,12 +159,6 @@ function ProjectPanel({
             {dateRange ? ` · ${dateRange}` : null}
           </p>
         </div>
-        {href ? (
-          <a className="tw-project-panel__open" href={href} target="_blank" rel="noreferrer">
-            Open in Teamwork
-            <ExternalLink size={14} aria-hidden />
-          </a>
-        ) : null}
       </header>
 
       {!totalItems ? (
@@ -322,6 +316,16 @@ export function TeamworkProjects({
         header: "Health",
         cell: (c) => {
           const health = HEALTH[c.getValue<string>()] ?? HEALTH.unset;
+          if (health.tone === "muted") {
+            return (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span><Pill label={health.label} tone={health.tone} /></span>
+                </TooltipTrigger>
+                <TooltipContent>Set project health in Teamwork to see it here</TooltipContent>
+              </Tooltip>
+            );
+          }
           return <Pill label={health.label} tone={health.tone} />;
         },
       },
@@ -330,7 +334,35 @@ export function TeamworkProjects({
         header: "Done",
         cell: (c) => {
           const pct = c.getValue<number>() ?? 0;
+          if (!pct) {
+            return (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span><MiniBar value={0} max={100} label="0%" /></span>
+                </TooltipTrigger>
+                <TooltipContent>Mark tasks complete in Teamwork to track progress</TooltipContent>
+              </Tooltip>
+            );
+          }
           return <MiniBar value={pct} max={100} label={`${pct}%`} />;
+        },
+      },
+      {
+        id: "budget",
+        header: "Budget",
+        accessorFn: (row) => row.budget_capacity,
+        cell: (c) => {
+          const p = c.row.original;
+          if (!p.budget_capacity) return <span className="qb-muted">—</span>;
+          const cap = p.budget_capacity / 100;
+          const used = p.budget_used / 100;
+          const pct = Math.round((used / cap) * 100);
+          return (
+            <span className="tw-budget-cell">
+              <MiniBar value={pct} max={100} label={`${pct}%`} tone={pct > 90 ? "bad" : pct > 75 ? "warn" : undefined} />
+              <span className="tw-budget-sub">${used.toLocaleString()} of ${cap.toLocaleString()}</span>
+            </span>
+          );
         },
       },
       {

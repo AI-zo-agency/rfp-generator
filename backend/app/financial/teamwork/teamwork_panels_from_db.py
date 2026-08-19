@@ -58,6 +58,8 @@ def _project_payload(row: dict[str, Any]) -> dict[str, Any]:
         "tasks_completed": int(row.get("tasks_completed") or 0),
         "tasks_overdue": int(row.get("tasks_overdue") or 0),
         "progress_pct": int(row.get("progress_pct") or 0),
+        "budget_capacity": int(row.get("budget_capacity") or 0),
+        "budget_used": int(row.get("budget_used") or 0),
     }
 
 

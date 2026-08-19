@@ -7,6 +7,10 @@ import {
   FinancialNavSidebar,
   type FinancialTabId,
 } from "./FinancialNavSidebar";
+import {
+  applyFinancialNavSearch,
+  type TeamworkViewId,
+} from "../lib/financial-tab";
 import { TabFade } from "./TabFade";
 import { IWorkerTimesheetsTable, TimesheetEntry } from "./IWorkerTimesheetsTable";
 import { AiInsightsPanel, AiInsightsData } from "./AiInsightsPanel";
@@ -17,8 +21,24 @@ import { TeamworkPanels } from "./TeamworkPanels";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 
-export function FinancialInsightsClient() {
-  const [activeTab, setActiveTab] = useState<FinancialTabId>("quickbooks");
+function persistFinancialNav(patch: { tab?: FinancialTabId; view?: TeamworkViewId }) {
+  const next = applyFinancialNavSearch(window.location.search, patch);
+  try {
+    window.history.replaceState(null, "", `${window.location.pathname}${next}`);
+  } catch (err) {
+    console.warn("Failed to persist financial tab to the URL:", err);
+  }
+}
+
+export function FinancialInsightsClient({
+  initialTab = "quickbooks",
+  initialView = "position",
+}: {
+  initialTab?: FinancialTabId;
+  initialView?: TeamworkViewId;
+}) {
+  const [activeTab, setActiveTab] = useState<FinancialTabId>(initialTab);
+  const [teamworkView, setTeamworkView] = useState<TeamworkViewId>(initialView);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [selectedContractor, setSelectedContractor] = useState<string>("all");
@@ -109,6 +129,16 @@ export function FinancialInsightsClient() {
     void fetchIworkerData(selectedContractor);
   }, [activeTab, fetchIworkerData, iworkerData, selectedContractor]);
 
+  const selectTab = (id: FinancialTabId) => {
+    setActiveTab(id);
+    persistFinancialNav({ tab: id });
+  };
+
+  const selectTeamworkView = (id: TeamworkViewId) => {
+    setTeamworkView(id);
+    persistFinancialNav({ view: id });
+  };
+
   const handleSelectContractor = (contractorName: string) => {
     setSelectedContractor(contractorName);
     void fetchIworkerData(contractorName);
@@ -171,7 +201,7 @@ export function FinancialInsightsClient() {
     <div className="flex h-full min-h-0 min-w-0 flex-1">
       <FinancialNavSidebar
         activeTab={activeTab}
-        onChange={setActiveTab}
+        onChange={selectTab}
         mobileOpen={mobileNavOpen}
         onMobileOpenChange={setMobileNavOpen}
       />
@@ -208,7 +238,7 @@ export function FinancialInsightsClient() {
                 className="min-h-0 flex-1 overflow-clip"
                 id="financial-panel-teamwork"
               >
-                <TeamworkPanels />
+                <TeamworkPanels view={teamworkView} onViewChange={selectTeamworkView} />
               </TabFade>
             ) : null}
 

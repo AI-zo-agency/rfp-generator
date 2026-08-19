@@ -93,3 +93,44 @@ def test_map_project_falls_back_to_status_when_substatus_missing():
         synced_at="2026-08-18T00:00:00+00:00",
     )
     assert row["status"] == "active"
+
+
+def test_map_project_uses_summary_for_health_and_task_counts():
+    project = {
+        "id": 1309523,
+        "name": "FCC 26145 Website Speed Fixes",
+        "status": "active",
+        "subStatus": "late",
+        "startDate": None,
+        "endDate": "2026-08-18",
+        # Mirror projects.json doesn't include health/stats, so summary should win.
+        "health": None,
+    }
+    summary = {
+        "health": {"0": 1, "1": 0, "2": 0, "3": 0},
+        "tasks": {
+            "everyone": {
+                "active": 6,
+                "late": 6,
+                "complete": 0,
+                "upcoming": 0,
+                "today": 0,
+                "started": 0,
+                "nodate": 0,
+            }
+        },
+    }
+
+    row = map_project(
+        site_id="zoagency.teamwork.com",
+        project=project,
+        included={},
+        synced_at="2026-08-18T00:00:00+00:00",
+        summary=summary,
+    )
+
+    assert row["health"] == "unset"
+    assert row["tasks_open"] == 12
+    assert row["tasks_completed"] == 0
+    assert row["tasks_overdue"] == 6
+    assert row["progress_pct"] == 0

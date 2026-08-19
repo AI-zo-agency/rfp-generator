@@ -305,3 +305,8 @@ def list_milestones(extra: dict[str, Any] | None = None) -> tuple[list[dict[str,
     if extra:
         params.update(extra)
     return paginate_with_included(MILESTONES_PATH, "milestones", params=params)
+
+
+def get_project_summary(project_id: int) -> dict[str, Any]:
+    """Fetch project-level counters for tasks + health."""
+    return request_json(f"/projects/api/v3/projects/{project_id}/summary.json")

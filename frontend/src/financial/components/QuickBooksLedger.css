@@ -1222,6 +1222,7 @@ table.qb-table {
 
 .qb-table tbody tr.qb-drillrow > td {
   padding: 0 8px 12px;
+  white-space: normal;
 }
 
 .qb-drill {
@@ -1365,25 +1366,6 @@ table.qb-table {
   color: var(--zo-text-muted);
 }
 
-.tw-project-panel__open {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 12px;
-  border: 1px solid var(--zo-border);
-  border-radius: 8px;
-  background: var(--zo-card-bg);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--zo-teal);
-  white-space: nowrap;
-}
-
-.tw-project-panel__open:hover {
-  background: var(--zo-surface);
-}
-
 .tw-project-panel__empty {
   margin: 0;
   padding: 16px;
@@ -1441,7 +1423,8 @@ table.qb-table {
   display: none;
   gap: 12px;
   padding: 12px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow-x: auto;
+  grid-template-columns: repeat(3, minmax(240px, 1fr));
 }
 
 .tw-task-list {
@@ -1452,29 +1435,35 @@ table.qb-table {
 
 .tw-task-card {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
   border: 1px solid var(--zo-border);
   border-radius: 8px;
   background: var(--zo-surface);
 }
 
-.tw-task-card__main {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 4px;
-}
-
 .tw-task-card__name {
+  display: block;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.35;
   color: var(--zo-text);
-  word-break: break-word;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.tw-task-card__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tw-task-card__meta .qb-due {
+  flex-shrink: 0;
 }
 
 a.tw-task-card__name:hover {
@@ -1483,6 +1472,10 @@ a.tw-task-card__name:hover {
 }
 
 .tw-task-card__assignee {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--zo-text-muted);
 }
@@ -1494,7 +1487,7 @@ a.tw-task-card__name:hover {
 
 .tw-work-section {
   display: flex;
-  min-width: 0;
+  min-width: 240px;
   flex-direction: column;
   border: 1px solid var(--zo-border);
   border-radius: 8px;
@@ -1573,16 +1566,19 @@ a.tw-task-card__name:hover {
     flex-direction: column;
   }
 
-  .tw-project-panel__open {
-    align-self: flex-start;
-  }
-
-  .tw-task-card {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .tw-end-cell {
     align-items: flex-start;
   }
+}
+
+.tw-budget-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 90px;
+}
+.tw-budget-sub {
+  font-size: 0.7rem;
+  color: var(--qb-text-muted, #888);
+  white-space: nowrap;
 }

@@ -84,9 +84,55 @@ def _task_counts(project: dict[str, Any]) -> tuple[int, int, int]:
     return open_count, completed, overdue
 
 
+def _task_counts_from_summary(summary: dict[str, Any]) -> tuple[int, int, int]:
+    """
+    Teamwork project summary uses `tasks.everyone.*` counters.
+    We treat everything except `complete` as "open", and `late` as overdue.
+    """
+
+    tasks_everyone = {}
+    tasks = summary.get("tasks")
+    if isinstance(tasks, dict):
+        tasks_everyone = tasks.get("everyone") if isinstance(tasks.get("everyone"), dict) else {}
+
+    # Open is everything that isn't "complete". This intentionally includes "late"
+    # so progress_pct reflects total workload.
+    open_count = sum(
+        _int(tasks_everyone.get(k))
+        for k in ("active", "late", "upcoming", "today", "started", "nodate")
+    )
+    completed = _int(tasks_everyone.get("complete"))
+    overdue = _int(tasks_everyone.get("late"))
+    return open_count, completed, overdue
+
+
 def _health(project: dict[str, Any]) -> str:
     health = _int(project.get("health"), -1)
     return {1: "bad", 2: "ok", 3: "good"}.get(health, "unset")
+
+
+def _health_from_summary(summary: dict[str, Any]) -> str:
+    """
+    Project summary `health` is a map of { "0": 1|0, "1": 1|0, "2": 1|0, "3": 1|0 }.
+    """
+
+    mapping = {0: "unset", 1: "bad", 2: "ok", 3: "good"}
+    health = summary.get("health")
+    if not isinstance(health, dict):
+        return "unset"
+
+    best_key: int | None = None
+    best_value = -1
+    for raw_key, raw_value in health.items():
+        try:
+            k = int(raw_key)
+        except (TypeError, ValueError):
+            continue
+        v = _int(raw_value)
+        if v > best_value:
+            best_value = v
+            best_key = k
+    return mapping.get(best_key or 0, "unset")
 
 
 def _project_status(project: dict[str, Any]) -> str:
@@ -97,18 +143,30 @@ def _project_status(project: dict[str, Any]) -> str:
     return str(project.get("status") or "").strip().lower()
 
 
-def map_project(*, site_id: str, project: dict[str, Any], included: dict[str, Any], synced_at: str) -> dict[str, Any]:
+def map_project(
+    *,
+    site_id: str,
+    project: dict[str, Any],
+    included: dict[str, Any],
+    synced_at: str,
+    summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     company_id = _ref_id(project.get("companyId") or project.get("company"))
     companies = included.get("companies") if isinstance(included.get("companies"), dict) else {}
     company = companies.get(str(company_id)) if company_id is not None else None
-    open_count, completed, overdue = _task_counts(project)
+    if summary:
+        open_count, completed, overdue = _task_counts_from_summary(summary)
+        health = _health_from_summary(summary)
+    else:
+        open_count, completed, overdue = _task_counts(project)
+        health = _health(project)
     total = open_count + completed
     row = {
         "site_id": site_id,
         "project_id": _ref_id(project.get("id")) or 0,
         "name": str(project.get("name") or "Untitled project"),
         "status": _project_status(project),
-        "health": _health(project),
+        "health": health,
         "company_id": company_id,
         "company_name": str((company or {}).get("name") or project.get("companyName") or ""),
         "start_date": _date(project.get("startDate")),
@@ -118,9 +176,18 @@ def map_project(*, site_id: str, project: dict[str, Any], included: dict[str, An
         "tasks_overdue": overdue,
         "progress_pct": round((completed / total) * 100) if total else 0,
         "updated_at_remote": _ts(project.get("updatedAt") or project.get("lastChangedOn")),
+        "budget_capacity": 0,
+        "budget_used": 0,
         "synced_at": synced_at,
         "raw": project,
     }
+    budget_id = _ref_id(project.get("financialBudgetId") or project.get("financialBudget"))
+    if budget_id is not None:
+        budgets = included.get("projectBudgets") if isinstance(included.get("projectBudgets"), dict) else {}
+        budget = budgets.get(str(budget_id))
+        if isinstance(budget, dict):
+            row["budget_capacity"] = _int(budget.get("capacity"))
+            row["budget_used"] = _int(budget.get("capacityUsed"))
     logger.debug(
         "operation=teamwork_map_project site_id=%s project_id=%s status=%s",
         site_id,

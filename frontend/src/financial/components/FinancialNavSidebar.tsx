@@ -13,8 +13,9 @@ import {
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import type { FinancialTabId } from "../lib/financial-tab";
 
-export type FinancialTabId = "quickbooks" | "teamwork" | "iworker" | "ai" | "sources";
+export type { FinancialTabId };
 
 export interface FinancialNavTab {
   id: FinancialTabId;

@@ -12,6 +12,8 @@ export interface TeamworkProject {
   tasks_completed: number;
   tasks_overdue: number;
   progress_pct: number;
+  budget_capacity: number;
+  budget_used: number;
 }
 
 export interface TeamworkTask {
