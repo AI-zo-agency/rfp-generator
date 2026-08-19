@@ -76,6 +76,17 @@ function asString(value: unknown, fallback = ""): string {
   return fallback;
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+function asUnknownList(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 function mapProposal(row: Record<string, unknown>): LlmCostProposalRow {
   return {
     rfpId: asString(row.rfp_id),
@@ -147,6 +158,7 @@ export async function getLlmCostSummary(): Promise<LlmCostSummary | null> {
       console.warn("[llm-cost] invalid summary payload");
       return null;
     }
+    const unknownBreakdown = asRecord(data.unknown_breakdown);
     return {
       totalCostUsd: Number(data.total_cost_usd ?? 0),
       totalInputTokens: Number(data.total_input_tokens ?? 0),
@@ -157,24 +169,20 @@ export async function getLlmCostSummary(): Promise<LlmCostSummary | null> {
       unknownNodeCostUsd: Number(data.unknown_node_cost_usd ?? 0),
       unknownNodeCalls: Number(data.unknown_node_calls ?? 0),
       unknownBreakdown: {
-        byModel: (
-          Array.isArray((data.unknown_breakdown as Record<string, unknown>)?.by_model)
-            ? (data.unknown_breakdown as Record<string, unknown>).by_model
-            : []
-        ).map((r) => mapUnknownRow(r as Record<string, unknown>)),
-        byDate: (
-          Array.isArray((data.unknown_breakdown as Record<string, unknown>)?.by_date)
-            ? (data.unknown_breakdown as Record<string, unknown>).by_date
-            : []
-        ).map((r) => mapUnknownRow(r as Record<string, unknown>)),
+        byModel: asUnknownList(unknownBreakdown.by_model).map((r) =>
+          mapUnknownRow(r as Record<string, unknown>),
+        ),
+        byDate: asUnknownList(unknownBreakdown.by_date).map((r) =>
+          mapUnknownRow(r as Record<string, unknown>),
+        ),
       },
-      byProposal: (Array.isArray(data.by_proposal) ? data.by_proposal : []).map((r) =>
+      byProposal: asUnknownList(data.by_proposal).map((r) =>
         mapProposal(r as Record<string, unknown>),
       ),
-      byNode: (Array.isArray(data.by_node) ? data.by_node : []).map((r) =>
+      byNode: asUnknownList(data.by_node).map((r) =>
         mapStage(r as Record<string, unknown>),
       ),
-      byModel: (Array.isArray(data.by_model) ? data.by_model : []).map((r) =>
+      byModel: asUnknownList(data.by_model).map((r) =>
         mapModel(r as Record<string, unknown>),
       ),
     };
