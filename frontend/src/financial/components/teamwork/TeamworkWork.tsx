@@ -2,9 +2,10 @@
 
 import { useMemo } from "react";
 import type { ColumnDef } from "@tanstack/react-table";
-import { DataTable, DueChip, MiniBar, Panel, Pill } from "../qb-ui";
+import { DataTable, DueChip, Figure, MiniBar, Panel, Pill } from "../qb-ui";
 import { daysUntil, describeDue, taskUrl } from "../../lib/teamwork-derive";
 import type { TeamworkMilestone, TeamworkOverview, TeamworkTask } from "../../types/teamwork";
+import { Count } from "./kpis";
 
 /** Soonest-to-worst: the most negative day count is the most overdue. */
 function byUrgency(tasks: TeamworkTask[], todayISO: string): TeamworkTask[] {
@@ -25,6 +26,9 @@ export function TeamworkWork({
   const overdue = useMemo(() => byUrgency(data.overdue_tasks, todayISO), [data.overdue_tasks, todayISO]);
   const upcoming = useMemo(() => byUrgency(data.upcoming_tasks, todayISO), [data.upcoming_tasks, todayISO]);
   const unassignedCount = overdue.filter((t) => t.assignees.length === 0).length;
+  const lateMilestoneCount = data.milestones.filter(
+    (m) => (m.status || "").toLowerCase() === "late",
+  ).length;
 
   const taskCols = useMemo<ColumnDef<TeamworkTask, unknown>[]>(
     () => [
@@ -106,7 +110,40 @@ export function TeamworkWork({
 
   return (
     <>
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className="qb-moneyline">
+        <Figure
+          label="Overdue tasks"
+          size="lg"
+          metric="overdue"
+          value={<Count value={overdue.length} />}
+          tone={overdue.length ? "out" : undefined}
+          sub={overdue.length ? "Still open past the due date" : "Nothing overdue"}
+        />
+        <Figure
+          label="Unassigned"
+          size="lg"
+          metric="risk"
+          value={<Count value={unassignedCount} />}
+          tone={unassignedCount ? "warn" : undefined}
+          sub={unassignedCount ? "Overdue with no owner" : "Every overdue task has an owner"}
+        />
+        <Figure
+          label="Due in 14 days"
+          size="lg"
+          metric="soon"
+          value={<Count value={upcoming.length} />}
+          sub="Upcoming due dates"
+        />
+        <Figure
+          label="Late milestones"
+          size="lg"
+          metric="flag"
+          value={<Count value={lateMilestoneCount} />}
+          tone={lateMilestoneCount ? "out" : undefined}
+          sub={`${data.milestones.length} late or upcoming`}
+        />
+      </div>
+      <div className="qb-two">
         <Panel
           title="Overdue tasks"
           meta={unassignedCount ? `${overdue.length} · ${unassignedCount} unassigned` : `${overdue.length}`}

@@ -19,15 +19,22 @@ import {
   type SortingState,
 } from "@tanstack/react-table";
 import {
+  CalendarClock,
   ChevronDown,
   ChevronUp,
   ChevronsUpDown,
   CircleDollarSign,
+  Clock,
+  Flag,
+  FolderKanban,
   HandCoins,
+  ListTodo,
   Percent,
   Receipt,
   Scale,
+  ShieldAlert,
   TrendingUp,
+  Users,
   Wallet,
   type LucideIcon,
 } from "lucide-react";
@@ -102,7 +109,21 @@ export function Note({ children }: { children: ReactNode }) {
   return <p className="qb-note">{children}</p>;
 }
 
-type FigureMetric = "cash" | "ar" | "ap" | "net" | "booked" | "margin" | "income";
+type FigureMetric =
+  | "cash"
+  | "ar"
+  | "ap"
+  | "net"
+  | "booked"
+  | "margin"
+  | "income"
+  | "projects"
+  | "overdue"
+  | "soon"
+  | "hours"
+  | "risk"
+  | "people"
+  | "flag";
 
 const METRIC_ICON: Record<FigureMetric, LucideIcon> = {
   cash: Wallet,
@@ -112,6 +133,13 @@ const METRIC_ICON: Record<FigureMetric, LucideIcon> = {
   booked: TrendingUp,
   margin: Percent,
   income: CircleDollarSign,
+  projects: FolderKanban,
+  overdue: ListTodo,
+  soon: CalendarClock,
+  hours: Clock,
+  risk: ShieldAlert,
+  people: Users,
+  flag: Flag,
 };
 
 /**

@@ -43,8 +43,12 @@ APScheduler
 
 Key modules:
 
-- `backend/app/financial/teamwork/client.py`: Teamwork transport, auth, pagination, retry behavior
-- `backend/app/financial/teamwork/teamwork_map.py`: API payload -> mirror row normalization
+- `backend/app/financial/teamwork/client.py`: Teamwork transport, auth, pagination, retry behavior.
+  Project list uses `projectStatuses=current,late,upcoming`. Teamwork's `active` token is the
+  not-deleted lifecycle and includes completed projects, so it is omitted on purpose.
+- `backend/app/financial/teamwork/teamwork_map.py`: API payload -> mirror row normalization.
+  Project `status` is Teamwork `subStatus` (`current` / `late` / `upcoming` / `completed`),
+  not the lifecycle `status` field (which stays `active` after a project is marked complete).
 - `backend/app/financial/teamwork/teamwork_repository.py`: Supabase reads and writes
 - `backend/app/financial/teamwork/teamwork_sync.py`: backfill and nightly sync orchestration
 - `backend/app/financial/teamwork/teamwork_panels_from_db.py`: DB mirror -> dashboard payload
@@ -86,23 +90,23 @@ for deep links, and per-bucket `billable_minutes` on every `time.by_person` and
 The frontend surfaces:
 
 - sync freshness as a relative time with a colour-coded state dot
+- sub-tabs that match the QuickBooks ledger: Position, Projects, Tasks, Time
+- Position: overview figures, then needs-attention, then hours this month
 - a needs-attention block derived client-side: projects at risk, unassigned overdue tasks,
-  the oldest overdue task, late milestones, and projects past their due date
+  the oldest overdue task, late milestones, and projects past their due date. Action links
+  switch to the matching sub-tab
 - a filterable projects table whose rows expand into that project's overdue tasks, upcoming
   tasks, and milestones
-- time grouped by person or project with a billable split
-- per-person workload joining assigned task counts with logged hours
+- overdue / upcoming task tables and milestones on Tasks
+- time grouped by person or project with a billable split, plus per-person workload
 
 Derivation logic lives in `frontend/src/financial/lib/teamwork-derive.ts` and is unit-tested
 in `teamwork-derive.test.ts`.
 
 ### Known data gaps
 
-The dashboard renders correctly but is currently starved of three inputs by the sync layer, not by the UI:
+The dashboard renders correctly but is currently starved of two inputs by the sync layer, not by the UI:
 
-- `map_task` does not resolve a task's `projectId` from the Teamwork response, so mirrored tasks carry an
-  empty `project_id`. The projects drill-down groups by that field and therefore shows its empty state for
-  every project, and attention-signal details render "No project".
 - Project `stats` are not populated, so `tasks_overdue`, `progress_pct`, and `health` are `0`/`unset` for
   every project. The "At risk" and "Has overdue" filter chips are consequently always `0`.
 - Per-bucket `billable_minutes` only appears after a sync run on or after the change that introduced it.

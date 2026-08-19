@@ -3,9 +3,10 @@
 import { useMemo, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
-import { DataTable, DueChip, FilterChips, MiniBar, Panel, Pill } from "../qb-ui";
+import { DataTable, DueChip, Figure, FilterChips, MiniBar, Panel, Pill } from "../qb-ui";
 import {
   describeDue,
+  describeProjectDue,
   filterProjects,
   projectUrl,
   taskUrl,
@@ -13,6 +14,7 @@ import {
   type ProjectFilter,
   type ProjectWork,
 } from "../../lib/teamwork-derive";
+import { Count } from "./kpis";
 import type {
   TeamworkMilestone,
   TeamworkOverview,
@@ -223,7 +225,7 @@ export function TeamworkProjects({
         accessorKey: "due_date",
         header: "Due",
         cell: (c) => {
-          const due = describeDue(c.getValue<string | null>(), todayISO);
+          const due = describeProjectDue(c.row.original, todayISO);
           return <DueChip label={due.label} tone={due.tone} />;
         },
       },
@@ -232,38 +234,72 @@ export function TeamworkProjects({
   );
 
   return (
-    <Panel title="Projects" meta={`${rows.length} of ${data.projects.length}`}>
-      <FilterChips
-        label="Filter projects"
-        value={filter}
-        onChange={setFilter}
-        options={[
-          { id: "all", label: "All", count: counts.all },
-          { id: "risk", label: "At risk", count: counts.risk },
-          { id: "overdue", label: "Has overdue", count: counts.overdue },
-          { id: "soon", label: "Due soon", count: counts.soon },
-        ]}
-      />
-      <DataTable
-        data={rows}
-        columns={columns}
-        initialSort="tasks_overdue"
-        pageSize={12}
-        rowId={(project) => project.id}
-        empty={
-          filter === "all"
-            ? "No active Teamwork projects for this API user."
-            : "No projects match this filter."
-        }
-        renderSubRow={(project) => (
-          <ProjectDrill
-            project={project}
-            work={work.get(project.id)}
-            baseUrl={data.base_url}
-            todayISO={todayISO}
-          />
-        )}
-      />
-    </Panel>
+    <>
+      <div className="qb-moneyline">
+        <Figure
+          label="Active projects"
+          size="lg"
+          metric="projects"
+          value={<Count value={counts.all} />}
+          sub={counts.risk ? `${counts.risk} at risk` : "None flagged at risk"}
+        />
+        <Figure
+          label="At risk"
+          size="lg"
+          metric="risk"
+          value={<Count value={counts.risk} />}
+          tone={counts.risk ? "warn" : undefined}
+          sub={counts.risk ? "Teamwork health is at risk" : "None flagged at risk"}
+        />
+        <Figure
+          label="Has overdue"
+          size="lg"
+          metric="overdue"
+          value={<Count value={counts.overdue} />}
+          tone={counts.overdue ? "out" : undefined}
+          sub={counts.overdue ? "Projects carrying late tasks" : "No overdue work"}
+        />
+        <Figure
+          label="Due soon"
+          size="lg"
+          metric="soon"
+          value={<Count value={counts.soon} />}
+          sub="Project due date within 14 days"
+        />
+      </div>
+      <Panel title="Projects" meta={`${rows.length} of ${data.projects.length}`}>
+        <FilterChips
+          label="Filter projects"
+          value={filter}
+          onChange={setFilter}
+          options={[
+            { id: "all", label: "All", count: counts.all },
+            { id: "risk", label: "At risk", count: counts.risk },
+            { id: "overdue", label: "Has overdue", count: counts.overdue },
+            { id: "soon", label: "Due soon", count: counts.soon },
+          ]}
+        />
+        <DataTable
+          data={rows}
+          columns={columns}
+          initialSort="tasks_overdue"
+          pageSize={12}
+          rowId={(project) => project.id}
+          empty={
+            filter === "all"
+              ? "No active Teamwork projects for this API user."
+              : "No projects match this filter."
+          }
+          renderSubRow={(project) => (
+            <ProjectDrill
+              project={project}
+              work={work.get(project.id)}
+              baseUrl={data.base_url}
+              todayISO={todayISO}
+            />
+          )}
+        />
+      </Panel>
+    </>
   );
 }

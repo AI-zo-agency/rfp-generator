@@ -2,9 +2,10 @@
 
 import { useMemo, useState } from "react";
 import type { ColumnDef } from "@tanstack/react-table";
-import { DataTable, FilterChips, MiniBar, Panel } from "../qb-ui";
+import { DataTable, Figure, FilterChips, MiniBar, Panel } from "../qb-ui";
 import { billablePct, buildWorkload, hoursLabel, type WorkloadRow } from "../../lib/teamwork-derive";
 import type { TeamworkOverview, TeamworkTimeBucket } from "../../types/teamwork";
+import { Count, HoursValue } from "./kpis";
 
 type TimeView = "person" | "project";
 
@@ -96,9 +97,53 @@ export function TeamworkTime({ data }: { data: TeamworkOverview }) {
   );
 
   const overallBillable = billablePct(data.time.billable_minutes, data.time.total_minutes);
+  const peopleLogging = data.time.by_person.filter((bucket) => bucket.minutes > 0).length;
+  const unbillableMinutes = Math.max(0, data.time.total_minutes - data.time.billable_minutes);
+  const through = data.time.period_end
+    ? new Date(`${data.time.period_end}T00:00:00Z`).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        timeZone: "UTC",
+      })
+    : null;
 
   return (
     <>
+      <div className="qb-moneyline">
+        <Figure
+          label="Hours this month"
+          size="lg"
+          metric="hours"
+          value={<HoursValue minutes={data.time.total_minutes} />}
+          sub={through ? `Through ${through}` : "Logged this month"}
+        />
+        <Figure
+          label="Billable"
+          size="lg"
+          metric="margin"
+          value={
+            <>
+              {overallBillable}
+              <span className="qb-unit">%</span>
+            </>
+          }
+          sub={`${hoursLabel(data.time.billable_minutes)} of ${hoursLabel(data.time.total_minutes)}`}
+        />
+        <Figure
+          label="People logging"
+          size="lg"
+          metric="people"
+          value={<Count value={peopleLogging} />}
+          sub={`${data.people.length} in the directory`}
+        />
+        <Figure
+          label="Non-billable"
+          size="lg"
+          metric="overdue"
+          value={<HoursValue minutes={unbillableMinutes} />}
+          sub="Hours not marked billable"
+        />
+      </div>
       <Panel
         title="Time this month"
         meta={`${hoursLabel(data.time.total_minutes)} · ${overallBillable}% billable`}

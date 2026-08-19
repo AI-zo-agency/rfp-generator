@@ -65,6 +65,62 @@ def test_build_overview_from_mirror_rows(monkeypatch):
     assert payload["time"]["billable_minutes"] == 90
 
 
+def test_build_overview_omits_completed_projects(monkeypatch):
+    projects = [
+        {
+            "project_id": 10,
+            "name": "Oakdale",
+            "status": "current",
+            "health": "ok",
+            "company_name": "City of Oakdale",
+            "due_date": "2026-09-30",
+            "tasks_open": 1,
+            "tasks_completed": 0,
+            "tasks_overdue": 0,
+            "progress_pct": 0,
+        },
+        {
+            "project_id": 1289744,
+            "name": "EFF 26124 EverFast July Retainer",
+            "status": "active",
+            "health": "unset",
+            "company_name": "Everfast Fiber Networks LLC",
+            "due_date": "2026-08-17",
+            "tasks_open": 0,
+            "tasks_completed": 0,
+            "tasks_overdue": 0,
+            "progress_pct": 0,
+            "raw": {
+                "status": "active",
+                "subStatus": "completed",
+                "completedAt": "2026-08-17T17:35:33Z",
+                "endDate": "2026-08-17T00:00:00Z",
+            },
+        },
+        {
+            "project_id": 11,
+            "name": "Already mapped complete",
+            "status": "completed",
+            "health": "unset",
+            "company_name": "Acme",
+            "due_date": "2026-08-01",
+            "tasks_open": 0,
+            "tasks_completed": 0,
+            "tasks_overdue": 0,
+            "progress_pct": 0,
+        },
+    ]
+    monkeypatch.setattr(panels, "list_projects", lambda site_id, **filters: projects)
+    monkeypatch.setattr(panels, "list_tasks", lambda site_id, **filters: [])
+    monkeypatch.setattr(panels, "list_people", lambda site_id, **filters: [])
+    monkeypatch.setattr(panels, "list_milestones", lambda site_id, **filters: [])
+    monkeypatch.setattr(panels, "list_timelogs", lambda site_id, **filters: [])
+
+    payload = panels.build_overview("zoagency.teamwork.com", as_of="2026-08-18")
+    assert [row["name"] for row in payload["projects"]] == ["Oakdale"]
+    assert payload["summary"]["project_count"] == 1
+
+
 def test_build_overview_empty_rows(monkeypatch):
     monkeypatch.setattr(panels, "list_projects", lambda site_id, **filters: [])
     monkeypatch.setattr(panels, "list_tasks", lambda site_id, **filters: [])

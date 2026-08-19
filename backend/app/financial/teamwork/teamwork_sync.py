@@ -73,7 +73,17 @@ def _sync_tasks(*, site_id: str, synced_at: str) -> dict[str, int]:
 
 def _sync_projects(*, site_id: str, synced_at: str) -> int:
     rows, included = client.list_projects()
-    mapped = [map_project(site_id=site_id, project=row, included=included, synced_at=synced_at) for row in rows]
+    mapped = []
+    for row in rows:
+        item = map_project(site_id=site_id, project=row, included=included, synced_at=synced_at)
+        if str(item.get("status") or "").lower() == "completed":
+            logger.info(
+                "operation=teamwork_skip_completed_project site_id=%s project_id=%s",
+                site_id,
+                item.get("project_id"),
+            )
+            continue
+        mapped.append(item)
     return upsert_projects(mapped)
 
 

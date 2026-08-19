@@ -5,10 +5,15 @@ import {
   buildWorkload,
   daysUntil,
   describeDue,
+  describeProjectDue,
   filterProjects,
+  hoursChartRows,
   hoursLabel,
+  hoursNumber,
   nameList,
+  projectIsComplete,
   projectUrl,
+  shortPersonName,
   taskUrl,
   toUTCDay,
   workByProject,
@@ -79,6 +84,25 @@ describe("describeDue", () => {
   });
 });
 
+describe("describeProjectDue", () => {
+  it("does not label a completed project as late", () => {
+    expect(
+      describeProjectDue(project({ due_date: "2026-08-17", status: "completed", progress_pct: 0 }), TODAY),
+    ).toEqual({ label: "Complete", days: -1, tone: "none" });
+  });
+
+  it("still labels an open late project as late", () => {
+    expect(describeProjectDue(project({ due_date: "2026-08-14", status: "late" }), TODAY).tone).toBe("late");
+  });
+});
+
+describe("projectIsComplete", () => {
+  it("treats Teamwork subStatus completed as complete", () => {
+    expect(projectIsComplete(project({ status: "completed", progress_pct: 0 }))).toBe(true);
+    expect(projectIsComplete(project({ status: "active", progress_pct: 0 }))).toBe(false);
+  });
+});
+
 describe("hoursLabel", () => {
   it("shows one decimal below ten hours", () => {
     expect(hoursLabel(90)).toBe("1.5h");
@@ -90,6 +114,50 @@ describe("hoursLabel", () => {
 
   it("renders zero without a decimal", () => {
     expect(hoursLabel(0)).toBe("0h");
+  });
+});
+
+describe("hoursNumber", () => {
+  it("matches hoursLabel rounding", () => {
+    expect(hoursNumber(90)).toBe(1.5);
+    expect(hoursNumber(600)).toBe(10);
+    expect(hoursNumber(0)).toBe(0);
+  });
+});
+
+describe("shortPersonName", () => {
+  it("keeps a single token", () => {
+    expect(shortPersonName("Sonja")).toBe("Sonja");
+  });
+
+  it("shortens a full name to first plus last initial", () => {
+    expect(shortPersonName("Sonja Anderson")).toBe("Sonja A.");
+  });
+
+  it("ignores extra whitespace", () => {
+    expect(shortPersonName("  Ray   Patel  ")).toBe("Ray P.");
+  });
+});
+
+describe("hoursChartRows", () => {
+  it("orders people by hours and caps the list", () => {
+    const { rows, split } = hoursChartRows(
+      [
+        { id: "1", name: "Ada Lovelace", minutes: 60, billable_minutes: 60 },
+        { id: "2", name: "Grace Hopper", minutes: 180, billable_minutes: 120 },
+        { id: "3", name: "Skip Me", minutes: 0, billable_minutes: 0 },
+      ],
+      8,
+    );
+    expect(split).toBe(true);
+    expect(rows.map((row) => row.name)).toEqual(["Grace H.", "Ada L."]);
+    expect(rows[0]).toMatchObject({ hours: 3, billable: 2, nonBillable: 1 });
+  });
+
+  it("does not invent a billable split when the cache omits it", () => {
+    const { rows, split } = hoursChartRows([{ id: "1", name: "Ada", minutes: 120 }]);
+    expect(split).toBe(false);
+    expect(rows[0]).toMatchObject({ name: "Ada", hours: 2, billable: 0, nonBillable: 2 });
   });
 });
 
@@ -244,6 +312,16 @@ describe("buildSignals", () => {
   it("does not flag a completed project that is past its due date", () => {
     const signals = buildSignals(
       overview({ projects: [project({ due_date: "2026-08-01", progress_pct: 100 })] }),
+      TODAY,
+    );
+    expect(signals.some((s) => s.id === "projects-past-due")).toBe(false);
+  });
+
+  it("does not flag a Teamwork-completed project with 0% task progress", () => {
+    const signals = buildSignals(
+      overview({
+        projects: [project({ due_date: "2026-08-17", status: "completed", progress_pct: 0 })],
+      }),
       TODAY,
     );
     expect(signals.some((s) => s.id === "projects-past-due")).toBe(false);

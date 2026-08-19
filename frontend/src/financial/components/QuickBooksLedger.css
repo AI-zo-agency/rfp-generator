@@ -401,6 +401,34 @@ html.fin-lock body {
   --qb-fig-hue: var(--qb-fig-income);
 }
 
+.qb-figure[data-metric="projects"] {
+  --qb-fig-hue: var(--qb-fig-cash);
+}
+
+.qb-figure[data-metric="overdue"] {
+  --qb-fig-hue: var(--qb-fig-ar);
+}
+
+.qb-figure[data-metric="soon"] {
+  --qb-fig-hue: var(--qb-fig-ap);
+}
+
+.qb-figure[data-metric="hours"] {
+  --qb-fig-hue: var(--qb-fig-booked);
+}
+
+.qb-figure[data-metric="risk"] {
+  --qb-fig-hue: var(--qb-fig-net);
+}
+
+.qb-figure[data-metric="people"] {
+  --qb-fig-hue: var(--qb-fig-margin);
+}
+
+.qb-figure[data-metric="flag"] {
+  --qb-fig-hue: var(--qb-fig-income);
+}
+
 .qb-figure[data-metric] .qb-figure-value {
   color: var(--qb-fig-hue);
 }

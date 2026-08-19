@@ -56,6 +56,40 @@ def test_task_snapshot_ignores_cursor_for_time_derived_buckets(monkeypatch):
     ]
 
 
+def test_sync_projects_skips_completed_rows(monkeypatch):
+    monkeypatch.setattr(
+        sync.client,
+        "list_projects",
+        lambda: (
+            [
+                {
+                    "id": 10,
+                    "name": "Oakdale",
+                    "status": "active",
+                    "subStatus": "current",
+                },
+                {
+                    "id": 1289744,
+                    "name": "EFF 26124 EverFast July Retainer",
+                    "status": "active",
+                    "subStatus": "completed",
+                    "completedAt": "2026-08-17T17:35:33Z",
+                    "endDate": "2026-08-17T00:00:00Z",
+                },
+            ],
+            {},
+        ),
+    )
+    upserted = []
+    monkeypatch.setattr(sync, "upsert_projects", lambda rows: upserted.extend(rows) or len(rows))
+
+    count = sync._sync_projects(site_id="zoagency.teamwork.com", synced_at="2026-08-18T00:00:00+00:00")
+
+    assert count == 1
+    assert [row["project_id"] for row in upserted] == [10]
+    assert upserted[0]["status"] == "current"
+
+
 def test_snapshot_prunes_rows_not_returned_by_teamwork(monkeypatch):
     monkeypatch.setattr(sync, "_sync_tasks", lambda **kwargs: {"overdue": 1, "upcoming": 2})
     monkeypatch.setattr(sync, "_sync_projects", lambda **kwargs: 3)

@@ -54,6 +54,18 @@ def _ref_id(value: Any) -> int | None:
         return None
 
 
+def _task_project_id(task: dict[str, Any]) -> int | None:
+    """Teamwork V3 tasks omit projectId; it lives on the nested tasklist."""
+    project_id = _ref_id(task.get("projectId") or task.get("project"))
+    if project_id is not None:
+        return project_id
+    tasklist = task.get("tasklist")
+    if not isinstance(tasklist, dict):
+        return None
+    meta = tasklist.get("meta") if isinstance(tasklist.get("meta"), dict) else {}
+    return _ref_id(meta.get("projectId") or meta.get("project"))
+
+
 def _name(row: dict[str, Any]) -> str:
     first = str(row.get("firstName") or "").strip()
     last = str(row.get("lastName") or "").strip()
@@ -77,6 +89,14 @@ def _health(project: dict[str, Any]) -> str:
     return {1: "bad", 2: "ok", 3: "good"}.get(health, "unset")
 
 
+def _project_status(project: dict[str, Any]) -> str:
+    """Teamwork `status` stays `active` after complete; the UI state is `subStatus`."""
+    sub_status = str(project.get("subStatus") or "").strip()
+    if sub_status:
+        return sub_status.lower()
+    return str(project.get("status") or "").strip().lower()
+
+
 def map_project(*, site_id: str, project: dict[str, Any], included: dict[str, Any], synced_at: str) -> dict[str, Any]:
     company_id = _ref_id(project.get("companyId") or project.get("company"))
     companies = included.get("companies") if isinstance(included.get("companies"), dict) else {}
@@ -87,7 +107,7 @@ def map_project(*, site_id: str, project: dict[str, Any], included: dict[str, An
         "site_id": site_id,
         "project_id": _ref_id(project.get("id")) or 0,
         "name": str(project.get("name") or "Untitled project"),
-        "status": str(project.get("status") or ""),
+        "status": _project_status(project),
         "health": _health(project),
         "company_id": company_id,
         "company_name": str((company or {}).get("name") or project.get("companyName") or ""),
@@ -101,7 +121,12 @@ def map_project(*, site_id: str, project: dict[str, Any], included: dict[str, An
         "synced_at": synced_at,
         "raw": project,
     }
-    logger.debug("operation=teamwork_map_project site_id=%s project_id=%s", site_id, row["project_id"])
+    logger.debug(
+        "operation=teamwork_map_project site_id=%s project_id=%s status=%s",
+        site_id,
+        row["project_id"],
+        row["status"],
+    )
     return row
 
 
@@ -132,7 +157,7 @@ def map_task(
     task_bucket: str,
     synced_at: str,
 ) -> dict[str, Any]:
-    project_id = _ref_id(task.get("projectId") or task.get("project"))
+    project_id = _task_project_id(task)
     projects = included.get("projects") if isinstance(included.get("projects"), dict) else {}
     project = projects.get(str(project_id)) if project_id is not None else None
     row = {
@@ -150,7 +175,13 @@ def map_task(
         "synced_at": synced_at,
         "raw": task,
     }
-    logger.debug("operation=teamwork_map_task site_id=%s task_id=%s bucket=%s", site_id, row["task_id"], task_bucket)
+    logger.debug(
+        "operation=teamwork_map_task site_id=%s task_id=%s bucket=%s project_id=%s",
+        site_id,
+        row["task_id"],
+        task_bucket,
+        row["project_id"],
+    )
     return row
 
 

@@ -1,13 +1,33 @@
 "use client";
 
+/**
+ * Teamwork delivery.
+ *
+ * Reading order matches the ledger: the first screen states the position,
+ * then what needs a decision, then the one trend worth a chart. Projects,
+ * tasks, and time each live on their own tab so they do not compete for
+ * the same glance.
+ */
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip as RTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { RefreshCw } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { Figure, Note } from "./qb-ui";
+import { Empty, Figure, Note, Panel } from "./qb-ui";
 import {
   billablePct,
   buildSignals,
   daysUntil,
+  hoursChartRows,
   hoursLabel,
   type SectionId,
 } from "../lib/teamwork-derive";
@@ -15,10 +35,24 @@ import { TeamworkAttention } from "./teamwork/TeamworkAttention";
 import { TeamworkProjects } from "./teamwork/TeamworkProjects";
 import { TeamworkWork } from "./teamwork/TeamworkWork";
 import { TeamworkTime } from "./teamwork/TeamworkTime";
+import { Count, HoursValue } from "./teamwork/kpis";
 import type { TeamworkOverview } from "../types/teamwork";
 import "./QuickBooksLedger.css";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
+
+const VIEWS = [
+  { id: "position", label: "Position" },
+  { id: "projects", label: "Projects" },
+  { id: "work", label: "Tasks" },
+  { id: "time", label: "Time" },
+] as const;
+
+const AXIS = {
+  tickLine: false,
+  axisLine: false,
+  tick: { fill: "var(--zo-text-muted)", fontSize: 11 },
+} as const;
 
 function isAbortError(err: unknown) {
   return (
@@ -57,10 +91,179 @@ function syncState(
   return { label: "Synced", tone: "ok" };
 }
 
+function LedgerSkeleton() {
+  return (
+    <div className="qb-skel" aria-busy="true" aria-live="polite" aria-label="Reading Teamwork">
+      <div className="qb-skel-block" style={{ height: 88 }} />
+      <div className="qb-skel-block" style={{ height: 220 }} />
+      <div className="qb-skel-block" style={{ height: 230 }} />
+    </div>
+  );
+}
+
+function ChartTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: { name?: string; value?: number; color?: string; dataKey?: string }[];
+  label?: string;
+}) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="qb-charttip">
+      <p className="qb-charttip-title">{label}</p>
+      {payload.map((p) => (
+        <p key={p.dataKey} className="qb-charttip-row">
+          <span className="qb-swatch" style={{ background: p.color }} aria-hidden />
+          <span>{p.name}</span>
+          <strong>{hoursLabel(Math.round((p.value ?? 0) * 60))}</strong>
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function DeliveryLine({
+  data,
+  atRiskCount,
+  oldestLate,
+}: {
+  data: TeamworkOverview;
+  atRiskCount: number;
+  oldestLate: number;
+}) {
+  let overdueSub = "Nothing overdue";
+  if (data.summary.overdue_task_count) {
+    overdueSub = oldestLate ? `oldest ${oldestLate}d late` : "No due dates recorded";
+  }
+
+  return (
+    <div className="qb-moneyline">
+      <Figure
+        label="Active projects"
+        size="lg"
+        metric="projects"
+        value={<Count value={data.summary.project_count} />}
+        sub={atRiskCount ? `${atRiskCount} at risk` : "None flagged at risk"}
+      />
+      <Figure
+        label="Overdue tasks"
+        size="lg"
+        metric="overdue"
+        value={<Count value={data.summary.overdue_task_count} />}
+        tone={data.summary.overdue_task_count ? "out" : undefined}
+        sub={overdueSub}
+      />
+      <Figure
+        label="Due in 14 days"
+        size="lg"
+        metric="soon"
+        value={<Count value={data.summary.upcoming_task_count} />}
+        sub="Tasks with a near due date"
+      />
+      <Figure
+        label="Hours this month"
+        size="lg"
+        metric="hours"
+        value={<HoursValue minutes={data.time.total_minutes} />}
+        sub={`${billablePct(data.time.billable_minutes, data.time.total_minutes)}% billable`}
+      />
+    </div>
+  );
+}
+
+function HoursChart({ data }: { data: TeamworkOverview }) {
+  const { rows, split } = useMemo(() => hoursChartRows(data.time.by_person), [data.time.by_person]);
+  const through = useMemo(() => {
+    if (!data.time.period_end) return null;
+    return new Date(`${data.time.period_end}T00:00:00Z`).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+  }, [data.time.period_end]);
+  const total = hoursLabel(data.time.total_minutes);
+
+  return (
+    <Panel title="Hours this month" meta={through ? `${total} · Through ${through}` : total}>
+      {rows.length ? (
+        <>
+          <div className="qb-legend">
+            {split ? (
+              <>
+                <span>
+                  <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+                  Billable
+                </span>
+                <span>
+                  <span className="qb-swatch" style={{ background: "var(--zo-orange)" }} aria-hidden />
+                  Non-billable
+                </span>
+              </>
+            ) : (
+              <span>
+                <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+                Hours
+              </span>
+            )}
+          </div>
+          <ResponsiveContainer width="100%" height={230}>
+            <BarChart
+              data={rows}
+              margin={{ top: 4, right: 4, bottom: 0, left: -12 }}
+              barGap={3}
+              barCategoryGap="32%"
+            >
+              <CartesianGrid vertical={false} stroke="var(--zo-border)" />
+              <XAxis dataKey="name" {...AXIS} />
+              <YAxis {...AXIS} width={42} tickFormatter={(v: number) => `${v}h`} />
+              <RTooltip cursor={{ fill: "var(--zo-surface)" }} content={<ChartTooltip />} />
+              {split ? (
+                <>
+                  <Bar
+                    dataKey="billable"
+                    name="Billable"
+                    fill="var(--zo-teal)"
+                    radius={[3, 3, 0, 0]}
+                    maxBarSize={26}
+                    isAnimationActive={false}
+                  />
+                  <Bar
+                    dataKey="nonBillable"
+                    name="Non-billable"
+                    fill="var(--zo-orange)"
+                    radius={[3, 3, 0, 0]}
+                    maxBarSize={26}
+                    isAnimationActive={false}
+                  />
+                </>
+              ) : (
+                <Bar
+                  dataKey="hours"
+                  name="Hours"
+                  fill="var(--zo-teal)"
+                  radius={[3, 3, 0, 0]}
+                  maxBarSize={38}
+                  isAnimationActive={false}
+                />
+              )}
+            </BarChart>
+          </ResponsiveContainer>
+        </>
+      ) : (
+        <Empty>No time logged this month.</Empty>
+      )}
+    </Panel>
+  );
+}
+
 export function TeamworkPanels() {
   const [data, setData] = useState<TeamworkOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState("position");
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
@@ -120,10 +323,12 @@ export function TeamworkPanels() {
   );
 
   const goToSection = useCallback((id: SectionId) => {
-    document
-      .getElementById(`teamwork-${id}`)
-      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setView(id);
   }, []);
+
+  const showBody = Boolean(data) && !notConfigured;
+  const showError = !loading && !data && !notConfigured;
+  const showSkeleton = loading && !data;
 
   return (
     <TooltipProvider delayDuration={120}>
@@ -144,23 +349,10 @@ export function TeamworkPanels() {
             ) : null}
           </p>
           <button type="button" className="qb-retry" onClick={() => void load()} disabled={loading}>
-            <RefreshCw size={13} />
+            <RefreshCw size={13} strokeWidth={2.25} aria-hidden />
             Refresh
           </button>
         </div>
-
-        {loading && !data ? (
-          <p className="qb-empty">Loading Teamwork projects…</p>
-        ) : null}
-
-        {!loading && (error || !data) ? (
-          <div className="qb-error">
-            <p>{error ?? "No Teamwork data"}</p>
-            <button type="button" className="qb-retry" onClick={() => void load()}>
-              Try again
-            </button>
-          </div>
-        ) : null}
 
         {!loading && data && notConfigured ? (
           <div className="qb-error">
@@ -174,72 +366,62 @@ export function TeamworkPanels() {
               receives the API key.
             </Note>
           </div>
-        ) : null}
+        ) : (
+          <Tabs value={view} onValueChange={setView} className="qb-tabs">
+            <TabsList className="qb-tablist">
+              {VIEWS.map((v) => (
+                <TabsTrigger key={v.id} value={v.id}>
+                  {v.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
 
-        {data && !notConfigured ? (
-          <div className="min-h-0 flex-1 overflow-auto" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-            <TeamworkAttention signals={signals} onGo={goToSection} hasSnapshot={hasSnapshot} />
+            {showSkeleton ? <LedgerSkeleton /> : null}
 
-            <div className="qb-moneyline">
-              <Figure
-                label="Active projects"
-                size="lg"
-                value={data.summary.project_count}
-                sub={
-                  atRiskCount
-                    ? `${atRiskCount} at risk`
-                    : "None flagged at risk"
-                }
-              />
-              <Figure
-                label="Overdue tasks"
-                size="lg"
-                value={data.summary.overdue_task_count}
-                tone={data.summary.overdue_task_count ? "out" : undefined}
-                sub={
-                  data.summary.overdue_task_count
-                    ? oldestLate
-                      ? `oldest ${oldestLate}d late`
-                      : "No due dates recorded"
-                    : "Nothing overdue"
-                }
-              />
-              <Figure
-                label="Due in 14 days"
-                size="lg"
-                value={data.summary.upcoming_task_count}
-                sub="Tasks with a near due date"
-              />
-              <Figure
-                label="Hours this month"
-                size="lg"
-                value={hoursLabel(data.time.total_minutes)}
-                sub={`${billablePct(data.time.billable_minutes, data.time.total_minutes)}% billable`}
-              />
-            </div>
-
-            {errorEntries.length ? (
-              <Note>
-                Teamwork sync has issues ({errorEntries.map(([key]) => key).join(", ")}).{" "}
-                {hasSnapshot
-                  ? "Showing the last cached snapshot from our backend mirror."
-                  : "Teamwork has not completed a sync yet, so there is no snapshot to show."}
-              </Note>
+            {showError ? (
+              <div className="qb-error">
+                <p>{error ?? "No Teamwork data"}</p>
+                <button type="button" className="qb-retry" onClick={() => void load()}>
+                  <RefreshCw size={13} strokeWidth={2.25} aria-hidden /> Try again
+                </button>
+              </div>
             ) : null}
 
-            <div id="teamwork-projects">
-              <TeamworkProjects data={data} todayISO={todayISO} />
-            </div>
+            {showBody && data ? (
+              <>
+                <TabsContent value="position" className="qb-view">
+                  <DeliveryLine data={data} atRiskCount={atRiskCount} oldestLate={oldestLate} />
+                  <TeamworkAttention
+                    signals={signals}
+                    onGo={goToSection}
+                    hasSnapshot={hasSnapshot}
+                  />
+                  {errorEntries.length ? (
+                    <Note>
+                      Teamwork sync has issues ({errorEntries.map(([key]) => key).join(", ")}).{" "}
+                      {hasSnapshot
+                        ? "Showing the last cached snapshot from our backend mirror."
+                        : "Teamwork has not completed a sync yet, so there is no snapshot to show."}
+                    </Note>
+                  ) : null}
+                  <HoursChart data={data} />
+                </TabsContent>
 
-            <div id="teamwork-work" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-              <TeamworkWork data={data} todayISO={todayISO} />
-            </div>
+                <TabsContent value="projects" className="qb-view">
+                  <TeamworkProjects data={data} todayISO={todayISO} />
+                </TabsContent>
 
-            <div id="teamwork-time" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-              <TeamworkTime data={data} />
-            </div>
-          </div>
-        ) : null}
+                <TabsContent value="work" className="qb-view">
+                  <TeamworkWork data={data} todayISO={todayISO} />
+                </TabsContent>
+
+                <TabsContent value="time" className="qb-view">
+                  <TeamworkTime data={data} />
+                </TabsContent>
+              </>
+            ) : null}
+          </Tabs>
+        )}
       </div>
     </TooltipProvider>
   );

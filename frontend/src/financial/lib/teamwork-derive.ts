@@ -10,6 +10,7 @@ import type {
   TeamworkOverview,
   TeamworkProject,
   TeamworkTask,
+  TeamworkTimeBucket,
 } from "../types/teamwork";
 
 const MS_PER_DAY = 86_400_000;
@@ -57,10 +58,76 @@ export function describeDue(
   return { label: `in ${days}d`, days, tone: "later" };
 }
 
+/** Teamwork `status` stays `active`; completion lives on `subStatus`. */
+export function projectIsComplete(project: TeamworkProject): boolean {
+  return (project.status || "").toLowerCase() === "completed";
+}
+
+/** Project due chip: completed work is done, not late. */
+export function describeProjectDue(project: TeamworkProject, todayISO: string): DueDescriptor {
+  if (projectIsComplete(project)) {
+    return { label: "Complete", days: daysUntil(project.due_date, todayISO), tone: "none" };
+  }
+  return describeDue(project.due_date, todayISO);
+}
+
 export function hoursLabel(minutes: number): string {
   const hours = (minutes || 0) / 60;
   if (!hours) return "0h";
   return `${hours.toFixed(hours >= 10 ? 0 : 1)}h`;
+}
+
+/** Chart axis / tooltip hours. Same rounding as hoursLabel, as a number. */
+export function hoursNumber(minutes: number): number {
+  const hours = (minutes || 0) / 60;
+  if (!hours) return 0;
+  return hours >= 10 ? Math.round(hours) : Math.round(hours * 10) / 10;
+}
+
+/** "Sonja A." — first name plus last initial, so an 8-bar axis still fits. */
+export function shortPersonName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "";
+  if (parts.length === 1) {
+    return parts[0].length > 14 ? `${parts[0].slice(0, 13)}…` : parts[0];
+  }
+  const last = parts.at(-1);
+  return last ? `${parts[0]} ${last[0]}.` : parts[0];
+}
+
+export interface HoursChartRow {
+  name: string;
+  hours: number;
+  billable: number;
+  nonBillable: number;
+}
+
+/**
+ * Top people by hours this month, ready to plot.
+ *
+ * `split` is true only when at least one bucket carries a billable slice.
+ * Older cache rows omit that field, and a two-series chart would paint
+ * every hour as non-billable.
+ */
+export function hoursChartRows(
+  buckets: TeamworkTimeBucket[],
+  limit = 8,
+): { rows: HoursChartRow[]; split: boolean } {
+  const split = buckets.some((bucket) => (bucket.billable_minutes ?? 0) > 0);
+  const rows = [...buckets]
+    .filter((bucket) => bucket.minutes > 0)
+    .sort((a, b) => b.minutes - a.minutes)
+    .slice(0, limit)
+    .map((bucket) => {
+      const billableMinutes = bucket.billable_minutes ?? 0;
+      return {
+        name: shortPersonName(bucket.name),
+        hours: hoursNumber(bucket.minutes),
+        billable: hoursNumber(billableMinutes),
+        nonBillable: hoursNumber(Math.max(0, bucket.minutes - billableMinutes)),
+      };
+    });
+  return { rows, split };
 }
 
 export function billablePct(billableMinutes: number, totalMinutes: number): number {
@@ -177,8 +244,9 @@ export function buildSignals(data: TeamworkOverview, todayISO: string): Teamwork
   }
 
   const pastDue = data.projects.filter((p) => {
+    if (projectIsComplete(p) || p.progress_pct >= 100) return false;
     const days = daysUntil(p.due_date, todayISO);
-    return days !== null && days < 0 && p.progress_pct < 100;
+    return days !== null && days < 0;
   });
   if (pastDue.length) {
     signals.push({
@@ -237,6 +305,7 @@ export function filterProjects(
   if (filter === "overdue") return projects.filter((p) => p.tasks_overdue > 0);
   if (filter === "soon") {
     return projects.filter((p) => {
+      if (projectIsComplete(p)) return false;
       const days = daysUntil(p.due_date, todayISO);
       return days !== null && days >= 0 && days <= 14;
     });

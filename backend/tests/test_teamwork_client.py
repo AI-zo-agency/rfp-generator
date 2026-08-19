@@ -244,6 +244,21 @@ def test_list_tasks_sends_overdue_filter(configured, monkeypatch):
     assert captured["params"]["taskFilter"] == "overdue"
 
 
+def test_list_projects_requests_open_operational_statuses(configured, monkeypatch):
+    """`active` is Teamwork's not-deleted lifecycle and includes completed projects."""
+    captured = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        captured["params"] = params
+        return _response({"projects": [], "meta": {"page": {"hasMore": False}}})
+
+    monkeypatch.setattr(tw.httpx, "get", fake_get)
+    tw.list_projects()
+    assert captured["params"]["projectStatuses"] == "current,late,upcoming"
+    assert "active" not in captured["params"]["projectStatuses"].split(",")
+    assert "completed" not in captured["params"]["projectStatuses"].split(",")
+
+
 def test_list_projects_empty(configured, monkeypatch):
     monkeypatch.setattr(
         tw.httpx,

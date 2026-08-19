@@ -247,7 +247,9 @@ def list_projects(extra: dict[str, Any] | None = None) -> tuple[list[dict[str, A
         "pageSize": PAGE_SIZE,
         "includeStats": True,
         "include": "companies,projectBudgets",
-        "projectStatuses": "active,current,late,upcoming",
+        # `active` is Teamwork's not-deleted lifecycle and includes completed
+        # projects. Operational states are current / late / upcoming.
+        "projectStatuses": "current,late,upcoming",
         "skipCounts": True,
     }
     if extra:

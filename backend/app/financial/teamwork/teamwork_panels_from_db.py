@@ -34,6 +34,17 @@ def _hours(minutes: int) -> float:
     return round((minutes or 0) / 60, 1)
 
 
+def _project_is_complete(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or "").strip().lower()
+    if status == "completed":
+        return True
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    sub_status = str(raw.get("subStatus") or "").strip().lower()
+    if sub_status == "completed":
+        return True
+    return bool(raw.get("completedAt"))
+
+
 def _project_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(row.get("project_id") or ""),
@@ -136,7 +147,17 @@ def _summarize_timelogs(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def build_overview(site_id: str, *, as_of: str, computed_at: str | None = None) -> dict[str, Any]:
-    projects = [_project_payload(row) for row in list_projects(site_id)]
+    open_projects = []
+    for row in list_projects(site_id):
+        if _project_is_complete(row):
+            logger.info(
+                "operation=teamwork_omit_completed_project site_id=%s project_id=%s",
+                site_id,
+                row.get("project_id"),
+            )
+            continue
+        open_projects.append(_project_payload(row))
+    projects = open_projects
     overdue_tasks = [_task_payload(row) for row in list_tasks(site_id, task_bucket="overdue")]
     upcoming_tasks = [_task_payload(row) for row in list_tasks(site_id, task_bucket="upcoming")]
     people = [_person_payload(row) for row in list_people(site_id)]
