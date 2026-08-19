@@ -52,8 +52,11 @@ const VIEWS = [
 const AXIS = {
   tickLine: false,
   axisLine: false,
-  tick: { fill: "var(--zo-text-muted)", fontSize: 11 },
+  tick: { fill: "#73787f", fontSize: 11 },
 } as const;
+
+/** Recharts paints `fill`/`stroke` as SVG attributes; CSS variables do not resolve there. */
+const BAR = { teal: "#274742", orange: "#ef5018", grid: "rgba(17, 24, 39, 0.12)", cursor: "rgba(17, 24, 39, 0.04)" } as const;
 
 function isAbortError(err: unknown) {
   return (
@@ -213,20 +216,20 @@ function HoursChart({ data }: { data: TeamworkOverview }) {
           <ResponsiveContainer width="100%" height={230}>
             <BarChart
               data={rows}
-              margin={{ top: 4, right: 4, bottom: 0, left: -12 }}
+              margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
               barGap={3}
               barCategoryGap="32%"
             >
-              <CartesianGrid vertical={false} stroke="var(--zo-border)" />
+              <CartesianGrid vertical={false} stroke={BAR.grid} />
               <XAxis dataKey="name" {...AXIS} />
               <YAxis {...AXIS} width={42} tickFormatter={(v: number) => `${v}h`} />
-              <RTooltip cursor={{ fill: "var(--zo-surface)" }} content={<ChartTooltip />} />
+              <RTooltip cursor={{ fill: BAR.cursor }} content={<ChartTooltip />} />
               {split ? (
                 <>
                   <Bar
                     dataKey="billable"
                     name="Billable"
-                    fill="var(--zo-teal)"
+                    fill={BAR.teal}
                     radius={[3, 3, 0, 0]}
                     maxBarSize={26}
                     isAnimationActive={false}
@@ -234,7 +237,7 @@ function HoursChart({ data }: { data: TeamworkOverview }) {
                   <Bar
                     dataKey="nonBillable"
                     name="Non-billable"
-                    fill="var(--zo-orange)"
+                    fill={BAR.orange}
                     radius={[3, 3, 0, 0]}
                     maxBarSize={26}
                     isAnimationActive={false}
@@ -244,7 +247,7 @@ function HoursChart({ data }: { data: TeamworkOverview }) {
                 <Bar
                   dataKey="hours"
                   name="Hours"
-                  fill="var(--zo-teal)"
+                  fill={BAR.teal}
                   radius={[3, 3, 0, 0]}
                   maxBarSize={38}
                   isAnimationActive={false}
