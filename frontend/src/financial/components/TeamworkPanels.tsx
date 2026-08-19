@@ -10,18 +10,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip as RTooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { RefreshCw } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Empty, Figure, Note, Panel } from "./qb-ui";
 import {
   billablePct,
@@ -48,15 +39,6 @@ const VIEWS = [
   { id: "work", label: "Tasks" },
   { id: "time", label: "Time" },
 ] as const;
-
-const AXIS = {
-  tickLine: false,
-  axisLine: false,
-  tick: { fill: "#73787f", fontSize: 11 },
-} as const;
-
-/** Recharts paints `fill`/`stroke` as SVG attributes; CSS variables do not resolve there. */
-const BAR = { teal: "#274742", orange: "#ef5018", grid: "rgba(17, 24, 39, 0.12)", cursor: "rgba(17, 24, 39, 0.04)" } as const;
 
 function isAbortError(err: unknown) {
   return (
@@ -101,30 +83,6 @@ function LedgerSkeleton() {
       <div className="qb-skel-block" style={{ height: 88 }} />
       <div className="qb-skel-block" style={{ height: 220 }} />
       <div className="qb-skel-block" style={{ height: 230 }} />
-    </div>
-  );
-}
-
-function ChartTooltip({
-  active,
-  payload,
-  label,
-}: {
-  active?: boolean;
-  payload?: { name?: string; value?: number; color?: string; dataKey?: string }[];
-  label?: string;
-}) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div className="qb-charttip">
-      <p className="qb-charttip-title">{label}</p>
-      {payload.map((p) => (
-        <p key={p.dataKey} className="qb-charttip-row">
-          <span className="qb-swatch" style={{ background: p.color }} aria-hidden />
-          <span>{p.name}</span>
-          <strong>{hoursLabel(Math.round((p.value ?? 0) * 60))}</strong>
-        </p>
-      ))}
     </div>
   );
 }
@@ -189,6 +147,7 @@ function HoursChart({ data }: { data: TeamworkOverview }) {
     });
   }, [data.time.period_end]);
   const total = hoursLabel(data.time.total_minutes);
+  const max = Math.max(...rows.map((row) => row.hours), 1);
 
   return (
     <Panel title="Hours this month" meta={through ? `${total} · Through ${through}` : total}>
@@ -213,48 +172,59 @@ function HoursChart({ data }: { data: TeamworkOverview }) {
               </span>
             )}
           </div>
-          <ResponsiveContainer width="100%" height={230}>
-            <BarChart
-              data={rows}
-              margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
-              barGap={3}
-              barCategoryGap="32%"
-            >
-              <CartesianGrid vertical={false} stroke={BAR.grid} />
-              <XAxis dataKey="name" {...AXIS} />
-              <YAxis {...AXIS} width={42} tickFormatter={(v: number) => `${v}h`} />
-              <RTooltip cursor={{ fill: BAR.cursor }} content={<ChartTooltip />} />
-              {split ? (
-                <>
-                  <Bar
-                    dataKey="billable"
-                    name="Billable"
-                    fill={BAR.teal}
-                    radius={[3, 3, 0, 0]}
-                    maxBarSize={26}
-                    isAnimationActive={false}
-                  />
-                  <Bar
-                    dataKey="nonBillable"
-                    name="Non-billable"
-                    fill={BAR.orange}
-                    radius={[3, 3, 0, 0]}
-                    maxBarSize={26}
-                    isAnimationActive={false}
-                  />
-                </>
-              ) : (
-                <Bar
-                  dataKey="hours"
-                  name="Hours"
-                  fill={BAR.teal}
-                  radius={[3, 3, 0, 0]}
-                  maxBarSize={38}
-                  isAnimationActive={false}
-                />
-              )}
-            </BarChart>
-          </ResponsiveContainer>
+          <div className="tw-hours" role="img" aria-label={`Hours this month, ${total}`}>
+            {rows.map((row) => (
+              <Tooltip key={row.name} delayDuration={0}>
+                <TooltipTrigger asChild>
+                  <button type="button" className="tw-hours__col">
+                    <div className="tw-hours__track">
+                      {split ? (
+                        <>
+                          <span
+                            className="tw-hours__bar tw-hours__bar--billable"
+                            style={{ height: `${(row.billable / max) * 100}%` }}
+                          />
+                          <span
+                            className="tw-hours__bar tw-hours__bar--nb"
+                            style={{ height: `${(row.nonBillable / max) * 100}%` }}
+                          />
+                        </>
+                      ) : (
+                        <span
+                          className="tw-hours__bar tw-hours__bar--billable"
+                          style={{ height: `${(row.hours / max) * 100}%` }}
+                        />
+                      )}
+                    </div>
+                    <span className="tw-hours__label">{row.name}</span>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" sideOffset={8} className="qb-charttip [&_.rotate-45]:hidden">
+                  <p className="qb-charttip-title">{row.name}</p>
+                  {split ? (
+                    <>
+                      <p className="qb-charttip-row">
+                        <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+                        <span>Billable</span>
+                        <strong>{row.billable}h</strong>
+                      </p>
+                      <p className="qb-charttip-row">
+                        <span className="qb-swatch" style={{ background: "var(--zo-orange)" }} aria-hidden />
+                        <span>Non-billable</span>
+                        <strong>{row.nonBillable}h</strong>
+                      </p>
+                    </>
+                  ) : (
+                    <p className="qb-charttip-row">
+                      <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+                      <span>Hours</span>
+                      <strong>{row.hours}h</strong>
+                    </p>
+                  )}
+                </TooltipContent>
+              </Tooltip>
+            ))}
+          </div>
         </>
       ) : (
         <Empty>No time logged this month.</Empty>

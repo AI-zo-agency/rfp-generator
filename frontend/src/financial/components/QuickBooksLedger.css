@@ -897,8 +897,14 @@ table.qb-table {
   border: 1px solid var(--zo-border);
   border-radius: 10px;
   background: var(--zo-card-bg);
+  color: var(--zo-text);
   box-shadow: 0 2px 4px rgba(15, 23, 42, 0.06), 0 12px 28px -10px rgba(15, 23, 42, 0.22);
   font-variant-numeric: tabular-nums;
+}
+
+[data-slot="tooltip-content"].qb-charttip {
+  background: var(--zo-card-bg);
+  color: var(--zo-text);
 }
 
 .qb-charttip-title {
@@ -930,6 +936,70 @@ table.qb-table {
 .recharts-wrapper:focus,
 .recharts-surface:focus {
   outline: none;
+}
+
+.tw-hours {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  height: 230px;
+}
+.tw-hours__col {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.tw-hours__col:hover,
+.tw-hours__col:focus-visible {
+  outline: none;
+}
+.tw-hours__col:hover .tw-hours__track,
+.tw-hours__col:focus-visible .tw-hours__track {
+  background: var(--zo-surface);
+}
+.tw-hours__track {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column-reverse;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 2px;
+  border-bottom: 1px solid var(--zo-border);
+}
+.tw-hours__bar {
+  display: block;
+  width: 70%;
+  max-width: 28px;
+  min-height: 0;
+  border-radius: 0;
+}
+.tw-hours__bar--billable {
+  background: var(--zo-teal);
+}
+.tw-hours__bar--nb {
+  background: var(--zo-orange);
+}
+.tw-hours__track .tw-hours__bar:last-child {
+  border-radius: 3px 3px 0 0;
+}
+.tw-hours__label {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--zo-text-muted);
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── loading & error ───────────────────────────────────────────────────── */
