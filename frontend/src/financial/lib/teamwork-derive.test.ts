@@ -7,6 +7,7 @@ import {
   describeDue,
   describeProjectDue,
   filterProjects,
+  formatProjectDate,
   hoursChartRows,
   hoursLabel,
   hoursNumber,
@@ -81,6 +82,16 @@ describe("describeDue", () => {
 
   it("falls back to an em dash with no date", () => {
     expect(describeDue(null, TODAY)).toEqual({ label: "—", days: null, tone: "none" });
+  });
+});
+
+describe("formatProjectDate", () => {
+  it("formats a calendar date in UTC", () => {
+    expect(formatProjectDate("2026-08-17")).toBe("Mon, Aug 17");
+  });
+
+  it("returns an em dash when the date is missing", () => {
+    expect(formatProjectDate(null)).toBe("—");
   });
 });
 

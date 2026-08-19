@@ -1136,6 +1136,12 @@ table.qb-table {
   font-variant-numeric: tabular-nums;
   color: var(--zo-text-secondary);
   white-space: nowrap;
+  /* Prevent "End/Due" chips from overflowing into neighboring cells on
+     very narrow layouts. */
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .qb-due[data-tone="late"] {
@@ -1215,7 +1221,7 @@ table.qb-table {
 }
 
 .qb-table tbody tr.qb-drillrow > td {
-  padding: 0 0 10px;
+  padding: 0 8px 12px;
 }
 
 .qb-drill {
@@ -1274,4 +1280,309 @@ table.qb-table {
 
 .qb-drill-link:hover {
   text-decoration: underline;
+}
+
+/* ── teamwork project panel ─────────────────────────────────────────────── */
+
+.tw-date {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--zo-text);
+}
+
+.tw-end-cell {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.tw-row-chevron {
+  display: inline-flex;
+  color: var(--zo-text-muted);
+}
+
+.tw-row-chevron__icon {
+  transition: transform 0.15s ease;
+}
+
+.qb-table tbody tr[data-open="true"] .tw-row-chevron__icon {
+  transform: rotate(90deg);
+}
+
+.tw-row-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--zo-text-muted);
+}
+
+.tw-row-link:hover {
+  background: var(--zo-surface);
+  color: var(--zo-teal);
+}
+
+.tw-project-panel {
+  margin: 0 4px 4px;
+  border: 1px solid var(--zo-border);
+  border-radius: 10px;
+  background: var(--zo-card-bg);
+  overflow: hidden;
+}
+
+.tw-project-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--zo-border);
+  background: color-mix(in srgb, var(--zo-teal) 4%, var(--zo-card-bg));
+}
+
+.tw-project-panel__titleblock {
+  min-width: 0;
+}
+
+.tw-project-panel__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.3;
+  color: var(--zo-text);
+}
+
+.tw-project-panel__meta {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--zo-text-muted);
+}
+
+.tw-project-panel__open {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--zo-border);
+  border-radius: 8px;
+  background: var(--zo-card-bg);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--zo-teal);
+  white-space: nowrap;
+}
+
+.tw-project-panel__open:hover {
+  background: var(--zo-surface);
+}
+
+.tw-project-panel__empty {
+  margin: 0;
+  padding: 16px;
+  font-size: 13px;
+  color: var(--zo-text-muted);
+}
+
+.tw-project-panel__tabs {
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--zo-border);
+  overflow-x: auto;
+}
+
+.tw-project-panel__tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--zo-text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tw-project-panel__tabs button[data-state="on"] {
+  border-color: var(--zo-border);
+  background: var(--zo-surface);
+  color: var(--zo-text);
+}
+
+.tw-project-panel__tabcount {
+  display: inline-flex;
+  min-width: 18px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--zo-text) 8%, transparent);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tw-project-panel__content {
+  display: block;
+  padding: 12px;
+}
+
+.tw-project-panel__desktop {
+  display: none;
+  gap: 12px;
+  padding: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.tw-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tw-task-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--zo-border);
+  border-radius: 8px;
+  background: var(--zo-surface);
+}
+
+.tw-task-card__main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tw-task-card__name {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--zo-text);
+  word-break: break-word;
+}
+
+a.tw-task-card__name:hover {
+  color: var(--zo-teal);
+  text-decoration: underline;
+}
+
+.tw-task-card__assignee {
+  font-size: 12px;
+  color: var(--zo-text-muted);
+}
+
+.tw-task-card__assignee--empty {
+  color: var(--zo-danger);
+  font-weight: 600;
+}
+
+.tw-work-section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border: 1px solid var(--zo-border);
+  border-radius: 8px;
+  background: var(--zo-card-bg);
+  overflow: hidden;
+}
+
+.tw-work-section[data-tone="bad"] {
+  border-color: color-mix(in srgb, var(--zo-danger) 24%, var(--zo-border));
+}
+
+.tw-work-section[data-tone="warn"] {
+  border-color: color-mix(in srgb, var(--zo-orange) 24%, var(--zo-border));
+}
+
+.tw-work-section__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--zo-border);
+  background: var(--zo-surface);
+}
+
+.tw-work-section__head h4 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--zo-text-muted);
+}
+
+.tw-work-section[data-tone="bad"] .tw-work-section__head h4 {
+  color: var(--zo-danger);
+}
+
+.tw-work-section[data-tone="warn"] .tw-work-section__head h4 {
+  color: var(--zo-orange);
+}
+
+.tw-work-section__count {
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--zo-text-muted);
+}
+
+.tw-work-section__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.tw-work-section__empty {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--zo-text-muted);
+}
+
+@media (min-width: 960px) {
+  .tw-project-panel__tabs,
+  .tw-project-panel__content {
+    display: none;
+  }
+
+  .tw-project-panel__desktop {
+    display: grid;
+  }
+}
+
+@media (max-width: 959px) {
+  .tw-project-panel__header {
+    flex-direction: column;
+  }
+
+  .tw-project-panel__open {
+    align-self: flex-start;
+  }
+
+  .tw-task-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .tw-end-cell {
+    align-items: flex-start;
+  }
 }

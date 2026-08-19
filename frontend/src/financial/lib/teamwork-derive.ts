@@ -71,6 +71,18 @@ export function describeProjectDue(project: TeamworkProject, todayISO: string): 
   return describeDue(project.due_date, todayISO);
 }
 
+/** Calendar date for project tables — UTC-safe, Teamwork-style weekday label. */
+export function formatProjectDate(value?: string | null): string {
+  const day = toUTCDay(value);
+  if (day === null) return "—";
+  return new Date(day).toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
 export function hoursLabel(minutes: number): string {
   const hours = (minutes || 0) / 60;
   if (!hours) return "0h";

@@ -1,13 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import { ChevronRight, ExternalLink } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import { DataTable, DueChip, Figure, FilterChips, MiniBar, Panel, Pill } from "../qb-ui";
 import {
   describeDue,
   describeProjectDue,
   filterProjects,
+  formatProjectDate,
   projectUrl,
   taskUrl,
   workByProject,
@@ -29,78 +30,91 @@ const HEALTH: Record<string, { label: string; tone: "good" | "bad" | "muted" | "
   unset: { label: "Not set", tone: "muted" },
 };
 
-function TaskList({
-  title,
-  items,
+type WorkSection = "overdue" | "upcoming" | "milestones";
+
+function TaskCard({
+  task,
   baseUrl,
   todayISO,
-  empty,
 }: {
-  title: string;
-  items: TeamworkTask[];
+  task: TeamworkTask;
   baseUrl?: string | null;
   todayISO: string;
-  empty: string;
 }) {
+  const href = taskUrl(baseUrl, task.id);
+  const due = describeDue(task.due_date, todayISO);
+  const assignees = task.assignees.length ? task.assignees.join(", ") : "Unassigned";
+
   return (
-    <div>
-      <h4>{title}</h4>
-      {items.length ? (
-        <ul>
-          {items.map((task) => {
-            const href = taskUrl(baseUrl, task.id);
-            const due = describeDue(task.due_date, todayISO);
-            return (
-              <li key={task.id}>
-                {href ? (
-                  <a href={href} target="_blank" rel="noreferrer">
-                    {task.name}
-                  </a>
-                ) : (
-                  <span>{task.name}</span>
-                )}
-                <DueChip label={due.label} tone={due.tone} />
-              </li>
-            );
-          })}
-        </ul>
-      ) : (
-        <p className="qb-drill-empty">{empty}</p>
-      )}
-    </div>
+    <article className="tw-task-card">
+      <div className="tw-task-card__main">
+        {href ? (
+          <a className="tw-task-card__name" href={href} target="_blank" rel="noreferrer">
+            {task.name}
+          </a>
+        ) : (
+          <span className="tw-task-card__name">{task.name}</span>
+        )}
+        <span className={`tw-task-card__assignee${task.assignees.length ? "" : " tw-task-card__assignee--empty"}`}>
+          {assignees}
+        </span>
+      </div>
+      <DueChip label={due.label} tone={due.tone} />
+    </article>
   );
 }
 
-function MilestoneList({
-  items,
+function MilestoneCard({
+  milestone,
   todayISO,
 }: {
-  items: TeamworkMilestone[];
+  milestone: TeamworkMilestone;
   todayISO: string;
 }) {
+  const due = describeDue(milestone.due_date, todayISO);
+  const status = (milestone.status || "").toLowerCase();
+  const isLate = status === "late";
+
   return (
-    <div>
-      <h4>Milestones</h4>
-      {items.length ? (
-        <ul>
-          {items.map((milestone) => {
-            const due = describeDue(milestone.due_date, todayISO);
-            return (
-              <li key={milestone.id}>
-                <span>{milestone.name}</span>
-                <DueChip label={due.label} tone={due.tone} />
-              </li>
-            );
-          })}
-        </ul>
-      ) : (
-        <p className="qb-drill-empty">No late or upcoming milestones.</p>
-      )}
-    </div>
+    <article className="tw-task-card">
+      <div className="tw-task-card__main">
+        <span className="tw-task-card__name">{milestone.name}</span>
+        {status ? <Pill label={status} tone={isLate ? "bad" : "neutral"} /> : null}
+      </div>
+      <DueChip label={due.label} tone={due.tone} />
+    </article>
   );
 }
 
-function ProjectDrill({
+function WorkSectionPanel({
+  title,
+  count,
+  tone,
+  items,
+  empty,
+  children,
+}: {
+  title: string;
+  count: number;
+  tone?: "bad" | "warn" | "neutral";
+  items: number;
+  empty: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="tw-work-section" data-tone={tone}>
+      <header className="tw-work-section__head">
+        <h4>{title}</h4>
+        <span className="tw-work-section__count">{count}</span>
+      </header>
+      <div className="tw-work-section__body">
+        {items ? children : <p className="tw-work-section__empty">{empty}</p>}
+      </div>
+    </section>
+  );
+}
+
+function ProjectPanel({
   project,
   work,
   baseUrl,
@@ -112,44 +126,130 @@ function ProjectDrill({
   todayISO: string;
 }) {
   const href = projectUrl(baseUrl, project.id);
-  const isEmpty =
-    !work || (!work.overdue.length && !work.upcoming.length && !work.milestones.length);
+  const overdue = work?.overdue ?? [];
+  const upcoming = work?.upcoming ?? [];
+  const milestones = work?.milestones ?? [];
+  const totalItems = overdue.length + upcoming.length + milestones.length;
+
+  const defaultSection: WorkSection = overdue.length
+    ? "overdue"
+    : upcoming.length
+      ? "upcoming"
+      : "milestones";
+  const [section, setSection] = useState<WorkSection>(defaultSection);
+
+  const tabs: { id: WorkSection; label: string; count: number }[] = [
+    { id: "overdue", label: "Overdue", count: overdue.length },
+    { id: "upcoming", label: "Due in 14 days", count: upcoming.length },
+    { id: "milestones", label: "Milestones", count: milestones.length },
+  ];
+
+  const dateRange =
+    project.start_date || project.due_date
+      ? [formatProjectDate(project.start_date), formatProjectDate(project.due_date)].join(" → ")
+      : null;
 
   return (
-    <div className="qb-drill">
-      {isEmpty ? (
-        // The sync only mirrors the overdue and within-14-days task buckets, so an
-        // empty drill-down means "no urgent work", never "no tasks". Say so, or the
-        // healthiest projects read as empty ones.
-        <p className="qb-drill-empty">
+    <div className="tw-project-panel">
+      <header className="tw-project-panel__header">
+        <div className="tw-project-panel__titleblock">
+          <h3 className="tw-project-panel__title">{project.name}</h3>
+          <p className="tw-project-panel__meta">
+            {project.company_name || "No client"}
+            {dateRange ? ` · ${dateRange}` : null}
+          </p>
+        </div>
+        {href ? (
+          <a className="tw-project-panel__open" href={href} target="_blank" rel="noreferrer">
+            Open in Teamwork
+            <ExternalLink size={14} aria-hidden />
+          </a>
+        ) : null}
+      </header>
+
+      {!totalItems ? (
+        <p className="tw-project-panel__empty">
           Nothing overdue or due in the next 14 days. Tasks outside those two windows are not
           mirrored, so this is not the project&rsquo;s full task list.
         </p>
       ) : (
-        <div className="qb-drill-grid">
-          <TaskList
-            title="Overdue"
-            items={work.overdue}
-            baseUrl={baseUrl}
-            todayISO={todayISO}
-            empty="Nothing overdue."
-          />
-          <TaskList
-            title="Due in 14 days"
-            items={work.upcoming}
-            baseUrl={baseUrl}
-            todayISO={todayISO}
-            empty="Nothing due soon."
-          />
-          <MilestoneList items={work.milestones} todayISO={todayISO} />
-        </div>
+        <>
+          <div className="tw-project-panel__tabs" role="tablist" aria-label="Project work">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={section === tab.id}
+                data-state={section === tab.id ? "on" : undefined}
+                onClick={() => setSection(tab.id)}
+              >
+                {tab.label}
+                <span className="tw-project-panel__tabcount">{tab.count}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="tw-project-panel__content">
+            {section === "overdue" ? (
+              <div className="tw-task-list" role="tabpanel">
+                {overdue.map((task) => (
+                  <TaskCard key={task.id} task={task} baseUrl={baseUrl} todayISO={todayISO} />
+                ))}
+              </div>
+            ) : null}
+            {section === "upcoming" ? (
+              <div className="tw-task-list" role="tabpanel">
+                {upcoming.map((task) => (
+                  <TaskCard key={task.id} task={task} baseUrl={baseUrl} todayISO={todayISO} />
+                ))}
+              </div>
+            ) : null}
+            {section === "milestones" ? (
+              <div className="tw-task-list" role="tabpanel">
+                {milestones.map((milestone) => (
+                  <MilestoneCard key={milestone.id} milestone={milestone} todayISO={todayISO} />
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="tw-project-panel__desktop">
+            <WorkSectionPanel
+              title="Overdue"
+              count={overdue.length}
+              tone="bad"
+              items={overdue.length}
+              empty="Nothing overdue."
+            >
+              {overdue.map((task) => (
+                <TaskCard key={task.id} task={task} baseUrl={baseUrl} todayISO={todayISO} />
+              ))}
+            </WorkSectionPanel>
+            <WorkSectionPanel
+              title="Due in 14 days"
+              count={upcoming.length}
+              tone="warn"
+              items={upcoming.length}
+              empty="Nothing due soon."
+            >
+              {upcoming.map((task) => (
+                <TaskCard key={task.id} task={task} baseUrl={baseUrl} todayISO={todayISO} />
+              ))}
+            </WorkSectionPanel>
+            <WorkSectionPanel
+              title="Milestones"
+              count={milestones.length}
+              items={milestones.length}
+              empty="No late or upcoming milestones."
+            >
+              {milestones.map((milestone) => (
+                <MilestoneCard key={milestone.id} milestone={milestone} todayISO={todayISO} />
+              ))}
+            </WorkSectionPanel>
+          </div>
+        </>
       )}
-      {href ? (
-        <a className="qb-drill-link" href={href} target="_blank" rel="noreferrer">
-          Open in Teamwork
-          <ExternalLink size={12} aria-hidden />
-        </a>
-      ) : null}
     </div>
   );
 }
@@ -180,22 +280,43 @@ export function TeamworkProjects({
   const columns = useMemo<ColumnDef<TeamworkProject, unknown>[]>(
     () => [
       {
+        id: "expand",
+        header: "",
+        enableSorting: false,
+        cell: () => (
+          <span className="tw-row-chevron" aria-hidden>
+            <ChevronRight size={14} className="tw-row-chevron__icon" />
+          </span>
+        ),
+        meta: { numeric: true },
+      },
+      {
         accessorKey: "name",
         header: "Project",
+        cell: (c) => <span className="qb-name">{c.getValue<string>()}</span>,
+      },
+      { accessorKey: "company_name", header: "Client" },
+      {
+        accessorKey: "start_date",
+        header: "Start",
+        cell: (c) => <span className="tw-date">{formatProjectDate(c.getValue<string | null>())}</span>,
+      },
+      {
+        accessorKey: "due_date",
+        header: "End",
         cell: (c) => {
           const project = c.row.original;
-          const href = projectUrl(data.base_url, project.id);
-          if (!href) return <span className="qb-name">{project.name}</span>;
+          const due = describeProjectDue(project, todayISO);
           return (
-            // No stopPropagation needed: DataTable's isInteractiveTarget guard
-            // already leaves clicks and Enter on links to the link itself.
-            <a className="qb-name" href={href} target="_blank" rel="noreferrer">
-              {project.name}
-            </a>
+            <span className="tw-end-cell">
+              <span className="tw-date">{formatProjectDate(project.due_date)}</span>
+              {due.tone !== "none" || due.label === "Complete" ? (
+                <DueChip label={due.label} tone={due.tone} />
+              ) : null}
+            </span>
           );
         },
       },
-      { accessorKey: "company_name", header: "Client" },
       {
         accessorKey: "health",
         header: "Health",
@@ -222,12 +343,26 @@ export function TeamworkProjects({
         },
       },
       {
-        accessorKey: "due_date",
-        header: "Due",
+        id: "teamwork",
+        header: "",
+        enableSorting: false,
         cell: (c) => {
-          const due = describeProjectDue(c.row.original, todayISO);
-          return <DueChip label={due.label} tone={due.tone} />;
+          const href = projectUrl(data.base_url, c.row.original.id);
+          if (!href) return null;
+          return (
+            <a
+              className="tw-row-link"
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              aria-label={`Open ${c.row.original.name} in Teamwork`}
+              title="Open in Teamwork"
+            >
+              <ExternalLink size={14} aria-hidden />
+            </a>
+          );
         },
+        meta: { numeric: true },
       },
     ],
     [data.base_url, todayISO],
@@ -291,7 +426,7 @@ export function TeamworkProjects({
               : "No projects match this filter."
           }
           renderSubRow={(project) => (
-            <ProjectDrill
+            <ProjectPanel
               project={project}
               work={work.get(project.id)}
               baseUrl={data.base_url}
