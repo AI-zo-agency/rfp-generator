@@ -38,15 +38,22 @@ export function TeamworkWork({
         cell: (c) => {
           const task = c.row.original;
           const href = taskUrl(data.base_url, task.id);
-          if (!href) return <span className="qb-name">{task.name}</span>;
+          if (!href) return <span className="qb-name" title={task.name}>{task.name}</span>;
           return (
-            <a className="qb-name" href={href} target="_blank" rel="noreferrer">
+            <a className="qb-name" href={href} target="_blank" rel="noreferrer" title={task.name}>
               {task.name}
             </a>
           );
         },
       },
-      { accessorKey: "project_name", header: "Project" },
+      {
+        accessorKey: "project_name",
+        header: "Project",
+        cell: (c) => {
+          const name = c.getValue<string>() || "";
+          return <span className="qb-name" title={name}>{name}</span>;
+        },
+      },
       {
         accessorKey: "assignees",
         header: "Assigned",
@@ -55,7 +62,8 @@ export function TeamworkWork({
           // An owner-less overdue task cannot move on its own, so it gets a mark
           // rather than the em dash that used to make it look like missing data.
           if (!assignees.length) return <Pill label="Unassigned" tone="bad" />;
-          return <span>{assignees.join(", ")}</span>;
+          const label = assignees.join(", ");
+          return <span className="qb-name" title={label}>{label}</span>;
         },
       },
       {
@@ -143,7 +151,7 @@ export function TeamworkWork({
           sub={`${data.milestones.length} late or upcoming`}
         />
       </div>
-      <div className="qb-two">
+      <div className="qb-two tw-task-pair">
         <Panel
           title="Overdue tasks"
           meta={unassignedCount ? `${overdue.length} · ${unassignedCount} unassigned` : `${overdue.length}`}

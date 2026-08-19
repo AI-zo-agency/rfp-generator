@@ -229,15 +229,21 @@ html.fin-lock body {
 
 .qb-two {
   display: grid;
-  grid-template-columns: 1fr;
+  /* minmax(0, 1fr): 1fr tracks default to min-width:auto, so a nowrap table
+     can push one column past half and clip the sibling (Due / Task header). */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--qb-gap);
-  align-items: start;
+  align-items: stretch;
 }
 
 @media (min-width: 1040px) {
   .qb-two {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
+}
+
+.qb-two > * {
+  min-width: 0;
 }
 
 /* ── panel ─────────────────────────────────────────────────────────────── */
@@ -1644,6 +1650,81 @@ table.qb-table {
   padding: 12px;
   overflow-x: auto;
   grid-template-columns: repeat(3, minmax(240px, 1fr));
+}
+
+/* Side-by-side overdue / upcoming lists share one column template so the
+   two cards stay the same width, height, and header alignment. */
+.tw-task-pair > .qb-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.tw-task-pair .qb-panel-head {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+}
+
+.tw-task-pair .qb-panel-head h3 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tw-task-pair .qb-panel-meta {
+  flex-shrink: 0;
+}
+
+.tw-task-pair .qb-tablewrap {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.tw-task-pair [data-slot="table-container"] {
+  min-width: 0;
+}
+
+.tw-task-pair table.qb-table {
+  table-layout: fixed;
+}
+
+.tw-task-pair .qb-table th:nth-child(1),
+.tw-task-pair .qb-table td:nth-child(1) {
+  width: 36%;
+}
+
+.tw-task-pair .qb-table th:nth-child(2),
+.tw-task-pair .qb-table td:nth-child(2) {
+  width: 28%;
+}
+
+.tw-task-pair .qb-table th:nth-child(3),
+.tw-task-pair .qb-table td:nth-child(3) {
+  width: 22%;
+}
+
+.tw-task-pair .qb-table th:nth-child(4),
+.tw-task-pair .qb-table td:nth-child(4) {
+  width: 14%;
+}
+
+.tw-task-pair .qb-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tw-task-pair .qb-name {
+  display: block;
+  max-width: 100%;
+}
+
+.tw-task-pair .qb-more {
+  margin-top: auto;
+  padding-top: 10px;
 }
 
 .tw-task-list {
