@@ -53,43 +53,6 @@ export function buildLeanNoGoReasons(
   return reasons;
 }
 
-function DimensionBlock({
-  title,
-  dimension,
-}: {
-  title: string;
-  dimension: GoNoGoAnalysis["scopeMatch"];
-}) {
-  const distinctFlags = dimension.flags.filter(
-    (flag) => flag.message.trim() !== dimension.summary.trim()
-  );
-
-  return (
-    <div className="rounded-xl border border-zo-border p-4">
-      <h3 className="font-heading text-sm font-bold text-foreground">{title}</h3>
-      <p className="mt-2 text-sm text-zo-text-secondary">{dimension.summary}</p>
-      {distinctFlags.length > 0 && (
-        <ul className="mt-3 space-y-2">
-          {distinctFlags.map((flag) => (
-            <li
-              key={`${flag.category}-${flag.message}`}
-              className={`text-xs ${
-                flag.severity === "critical"
-                  ? "text-zo-error"
-                  : flag.severity === "warning"
-                    ? "text-zo-orange"
-                    : "text-zo-text-muted"
-              }`}
-            >
-              {flag.message}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 function DeadlineBanner({ deadline }: { deadline: GoNoGoDeadlineInfo }) {
   const urgent = deadline.isPast || deadline.isToday;
   if (!urgent && deadline.daysRemaining !== null && deadline.daysRemaining > 7) {
@@ -199,7 +162,7 @@ function StageOneReport({
   return (
     <div className="space-y-4 border-t border-zo-border pt-6">
       <h3 className="font-heading text-lg font-bold text-foreground">
-        Full Stage 1 Report
+        Analyst Brief
       </h3>
       {sections.map((section) => {
         const lines = section.split("\n");
@@ -465,39 +428,6 @@ export function GoNoGoAnalysisPanel({
         </div>
       )}
 
-      <div className="grid gap-4 border-t border-zo-border pt-6 lg:grid-cols-2">
-        <DimensionBlock title="Scope vs. What We Do" dimension={analysis.scopeMatch} />
-        <DimensionBlock title="Sector Match" dimension={analysis.sectorMatch} />
-        <DimensionBlock title="Compliance & Eligibility" dimension={analysis.compliance} />
-        <DimensionBlock title="Team & Resources" dimension={analysis.teamMatch} />
-      </div>
-
-      {analysis.evaluations && analysis.evaluations.length > 0 && (
-        <details className="rounded-xl border border-zo-border p-4">
-          <summary className="cursor-pointer font-heading text-sm font-bold text-foreground">
-            Evaluation Questions ({analysis.evaluations.length})
-          </summary>
-          <div className="mt-4 space-y-3">
-            {analysis.evaluations.map((item) => (
-              <div
-                key={item.id}
-                className="rounded-xl border border-zo-border p-4"
-              >
-                <p className="text-xs font-bold uppercase tracking-wide text-zo-text-muted">
-                  {item.id.replaceAll("_", " ")}
-                </p>
-                <p className="mt-1 text-sm font-semibold text-foreground">
-                  {item.question}
-                </p>
-                <p className="mt-2 text-sm text-zo-text-secondary">{item.answer}</p>
-                {item.impact && (
-                  <p className="mt-1 text-xs text-zo-text-muted">{item.impact}</p>
-                )}
-              </div>
-            ))}
-          </div>
-        </details>
-      )}
     </section>
   );
 }

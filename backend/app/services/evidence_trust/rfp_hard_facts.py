@@ -167,7 +167,14 @@ def evaluation_table_is_reliable(facts: dict[str, Any]) -> bool:
     return True
 
 
-def extract_rfp_hard_facts(text: str) -> dict[str, Any]:
+def extract_rfp_hard_facts(
+    text: str,
+    *,
+    opportunity_class: str | None = None,
+    compensation_signal: str | None = None,
+    compensation_evidence_quote: str = "",
+    compensation_rationale: str = "",
+) -> dict[str, Any]:
     """Pull contract value + evaluation point rows from the FULL RFP body."""
     body = text or ""
     contract_lines: list[str] = []
@@ -265,12 +272,12 @@ def extract_rfp_hard_facts(text: str) -> dict[str, Any]:
         if weight is not None:
             total_pts += weight
 
-    from app.services.go_no_go_opportunity import classify_opportunity
-
-    opportunity_class, compensation_signal = classify_opportunity(body)
-    # Contract ceiling lines are authoritative confirmed fee even if prose is thin.
-    if contract_lines and compensation_signal == "undisclosed":
-        compensation_signal = "confirmed_fee"
+    # Opportunity/compensation: set by Go/No-Go LLM classifier (analyze_rfp). Sync
+    # callers without classification default to ambiguous/undisclosed — never regex.
+    opp_class = opportunity_class or "ambiguous"
+    comp_signal = compensation_signal or "undisclosed"
+    if contract_lines and comp_signal == "undisclosed":
+        comp_signal = "confirmed_fee"
 
     facts = {
         "contract_value_lines": contract_lines,
@@ -278,8 +285,10 @@ def extract_rfp_hard_facts(text: str) -> dict[str, Any]:
         "eligibility_dollar_lines": eligibility_dollars,
         "evaluation_lines": evaluation_lines,
         "evaluation_total": total_pts if total_pts > 0 else None,
-        "opportunity_class": opportunity_class,
-        "compensation_signal": compensation_signal,
+        "opportunity_class": opp_class,
+        "compensation_signal": comp_signal,
+        "compensation_evidence_quote": compensation_evidence_quote,
+        "compensation_rationale": compensation_rationale,
     }
     # Drop unreliable / thin false-positive tables entirely.
     if not evaluation_table_is_reliable(facts):

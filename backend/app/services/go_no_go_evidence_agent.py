@@ -126,6 +126,22 @@ def select_initial_queries(
     return selected
 
 
+def core_requirements_have_enough_hits(
+    requirements: list[RfpRequirement],
+    hits_by_requirement: dict[str, list[dict[str, Any]]],
+    *,
+    min_ratio: float = 0.72,
+) -> bool:
+    """Skip follow-up LLM when most core rows already have KB hits."""
+    core = [r for r in requirements if r.is_core]
+    if not core:
+        return True
+    with_hits = sum(
+        1 for r in core if (hits_by_requirement.get(r.requirement) or [])
+    )
+    return (with_hits / len(core)) >= min_ratio
+
+
 def build_evidence_digest(
     requirements: list[RfpRequirement],
     hits_by_requirement: dict[str, list[dict[str, Any]]],
@@ -268,7 +284,14 @@ async def run_evidence_agent(
     working = list(requirements)
     hits_by_req = attribute_hits(working, by_query)
 
-    if allow_follow_up and max_follow_up > 0:
+    skip_follow_up = core_requirements_have_enough_hits(working, hits_by_req)
+    if skip_follow_up:
+        logger.info(
+            "go_no_go evidence agent skipping follow-up for %s — core hit ratio sufficient",
+            rfp_id,
+        )
+
+    if allow_follow_up and max_follow_up > 0 and not skip_follow_up:
         digest = build_evidence_digest(working, hits_by_req)
         messages = [
             {"role": "system", "content": FOLLOW_UP_PROMPT},
@@ -286,6 +309,7 @@ async def run_evidence_agent(
                 messages,
                 max_tokens=2048,
                 temperature=0.1,
+                tier="light",
                 node_name="go_no_go_evidence_agent",
                 rfp_id=rfp_id,
             )

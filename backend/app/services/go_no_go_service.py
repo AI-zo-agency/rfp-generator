@@ -44,9 +44,10 @@ from app.services.go_no_go_capability import (
     calibrate_technical_capability_score,
     gap_matrix_from_requirements,
     reconcile_narrative,
-    upsert_capability_section,
     unverified_core_requirements,
 )
+from app.services.go_no_go_compliance_brief import fetch_compliance_brief
+from app.services.go_no_go_report_builder import build_stage_one_report
 from app.services.rfp_content import combine_rfp_text, load_local_rfp_text, resolve_rfp_pdf_path
 from app.services.pdf_text import IMAGE_ONLY_TEXT_THRESHOLD
 from app.services.rfp_repository import get_rfp_pdf_path
@@ -56,6 +57,7 @@ from app.services.evidence_trust.rfp_hard_facts import (
 )
 from app.services.go_no_go_opportunity import (
     apply_opportunity_score_caps,
+    classify_opportunity_llm,
     format_opportunity_facts_lines,
 )
 from app.services.proposal_rfp_excerpt import build_priority_rfp_excerpt
@@ -218,18 +220,16 @@ Compare the RFP against ONLY the provided knowledge-base excerpts. Never invent 
 team members, insurance, case studies, or past work. Flag gaps explicitly with [VERIFY] when human follow-up is needed.
 
 PROCESS:
-1. Emit scores FIRST in the JSON (fitScore, worthScore, recommendation, decisionMatrix with all 5 integer scores).
-2. Answer every evaluation question in "evaluations".
-3. Write a concise "stageOneReport" in Markdown LAST (see structure below) — keep it short so the JSON never truncates.
+1. Emit scores in the JSON (fitScore, worthScore, recommendation, decisionMatrix with all 5 integer scores).
+2. Write a concise dashboard "summary" (2–3 sentences). The full Stage 1 report is assembled separately — do NOT output stageOneReport.
 
 CRITICAL OUTPUT ORDER (truncation protection):
-- decisionMatrix scores MUST be concrete integers 0–5 (never null). Emit the full decisionMatrix
-  before stageOneReport. If you must cut length, shorten the report — never omit scores.
+- decisionMatrix scores MUST be concrete integers 0–5 (never null). Never omit scores.
 
 INSUFFICIENT RFP CONTENT:
 If scope, deliverables, budget, compliance, or team requirements are missing:
 - insufficientData=true, recommendation=null, fitScore=null, worthScore=null
-- Populate clarifyingQuestions; stageOneReport should explain what is missing
+- Populate clarifyingQuestions explaining what is missing
 - Do NOT call missing scope "out of lane"
 
 OUT OF LANE (no_go only when explicit):
@@ -288,61 +288,11 @@ DEADLINE CHECK (required — use today's date provided in the user prompt):
 - Still complete the full analysis (capability, compliance, scoring) and add conditions for leadership override if re-solicit is possible.
 - Populate the "deadline" object and mention deadline status in summary.
 
-stageOneReport — concise Markdown matching a senior analyst brief. Prefer short bullets and
-compact tables over essays. Cap the whole report at ~800–1000 words. Completeness of scores/
-recommendation matters more than prose length — never truncate mid-JSON. RFP-specific:
-
-## EXECUTIVE SUMMARY
-Open with deadline status vs today's date when relevant. Client, project, solicitation number, deadline (with timezone if stated),
-contract value/term, Worth It Score X/5 (1-sentence why), Overall Go Score X/5 (matrix average, 1-sentence why), Recommendation label.
-Do NOT mention "AI Fit Score" or fitScore in the report text.
-
-## COMPLIANCE SNAPSHOT
-### Mandatory Documents Required
-Bulleted pass/fail disqualifiers — every required attachment, form, reference, insurance cert, sealed package rule.
-### Submission Format
-Electronic vs hard copy, email/portal, subject line, page limits, separate technical/cost packages, numbering, validity period.
-### Disqualification Risks
-Explicit instant-rejection triggers from the RFP (pricing in technical proposal, missing signatures, late submission, etc.).
-### State/Registration Requirements
-Vendor registration, tax registration, DBE/MBE/WBE programs, insurance limits with dollar amounts.
-Use [FLAG FOR NAME/ROLE: ...] for human follow-up on registration, certifications, or compliance posture.
-
-## CAPABILITY ASSESSMENT
-### Technical and Service Requirements vs. zö Capabilities
-When the RFP lists service categories or deliverables, enumerate each with "— Yes" or "— Gap" and KB evidence.
-Never mark Google Ads / Meta Ads (or similar) as agency Verified unless KB shows agency-level certs.
-### Required Industry Experience vs. Documented Experience
-Sector/client-type match with named case studies from KB; flag thin reference depth.
-Cite 03_CS / 06_WON only as wins. Label any 07_FIN citation as finalist/loss. Note MCI mismatches.
-### Required Team Roles vs. Actual Team
-Map RFP roles to documented zö team members; [FLAG: ...] for account lead or presentation assignments.
-### Offeror presence / office requirements
-If RFP requires Offeror office establishment, call it out as structural (not a staffing/sub fix) with owner flag.
-Markdown table when helpful: RFP Requirement | zö Capability (KB source + 03_CS/06_WON/07_FIN) | Status (Verified/Gap/[VERIFY])
-
-## EVALUATION CRITERIA BREAKDOWN
-If HARD FACTS include evaluation point rows: Table Category | Max Points | zö Strength | Vulnerability
-using ONLY those extracted weights (they must sum consistently — never invent extra Cost/Experience rows).
-If HARD FACTS say point allocations were NOT found: write clearly that the RFP does not disclose a
-point-weighted table (pass/fail + scored question groups are fine to describe narratively). Do NOT
-invent percentages or point totals. Note where effort should concentrate based on question groups only.
-
-## COMPETITIVE CONTEXT
-Likely competitors, zö positioning advantages (bullets), red flags for this client type (bullets).
-
-## GO/NO-GO DECISION MATRIX
-Table: Dimension | Score (X/5) | Notes
-
-## FINAL RECOMMENDATION
-GO / GO WITH CONDITIONS / NO-GO (include "— DEADLINE PASSED" when applicable).
-Numbered conditions with [Owner] tags. If no_go due to deadline, note re-solicit monitoring steps.
-
-Also populate "actionFlags" array with every [FLAG...] line from the report (full text of each flag).
+Populate "actionFlags" with every [FLAG FOR ROLE: ...] or [FLAG: ...] item needing human follow-up before submission.
 
 Flag severity must be exactly one of: info, warning, critical (never high/medium/low).
 
-Return ONLY valid JSON. Emit decision fields BEFORE stageOneReport so scores survive if output is truncated.
+Return ONLY valid JSON. Do NOT include stageOneReport or evaluations — those are assembled separately.
 {
   "insufficientData": false,
   "fitScore": 0,
@@ -356,7 +306,6 @@ Return ONLY valid JSON. Emit decision fields BEFORE stageOneReport so scores sur
     {"dimension": "Strategic Value", "score": 0, "notes": "RFP-specific rationale"},
     {"dimension": "Win Probability", "score": 0, "notes": "RFP-specific rationale using evaluation criteria and competition"}
   ],
-  "evaluations": [{"id": "scope_lane", "question": "...", "answer": "...", "impact": "..."}],
   "scopeMatch": {"summary": "...", "scoreImpact": "...", "flags": [{"category": "scope", "severity": "warning", "message": "..."}]},
   "sectorMatch": {"summary": "...", "scoreImpact": "...", "flags": []},
   "compliance": {"summary": "...", "scoreImpact": "...", "flags": []},
@@ -373,8 +322,7 @@ Return ONLY valid JSON. Emit decision fields BEFORE stageOneReport so scores sur
     "lateSubmissionDisqualifies": false,
     "note": "Deadline assessment narrative"
   },
-  "clarifyingQuestions": [],
-  "stageOneReport": "## EXECUTIVE SUMMARY\\n..."
+  "clarifyingQuestions": []
 }"""
 
 KB_QUERY_PLANNER_PROMPT = """You plan targeted Supermemory knowledge-base searches for zö agency Go/No-Go analysis.
@@ -1000,8 +948,15 @@ def _build_scoring_factors(rfp: RfpRecord, content: RfpContentInfo) -> str:
 
     opp_class = hard.get("opportunity_class") or "ambiguous"
     compensation = hard.get("compensation_signal") or "undisclosed"
-    lines.append("- OPPORTUNITY SHAPE (deterministic — respect these caps):")
-    lines.extend(format_opportunity_facts_lines(opp_class, compensation))
+    lines.append("- OPPORTUNITY SHAPE (LLM classifier — respect these caps):")
+    lines.extend(
+        format_opportunity_facts_lines(
+            opp_class,  # type: ignore[arg-type]
+            compensation,  # type: ignore[arg-type]
+            evidence_quote=str(hard.get("compensation_evidence_quote") or ""),
+            rationale=str(hard.get("compensation_rationale") or ""),
+        )
+    )
 
     term_matches = re.findall(
         r"(\d+)\s*(?:-|\s)?\s*(?:month|year)s?",
@@ -1163,7 +1118,7 @@ async def _plan_rfp_requirements(
         },
     ]
     try:
-        raw, provider = await llm.chat_json(messages, max_tokens=4096, temperature=0.2)
+        raw, provider = await llm.chat_json(messages, max_tokens=3072, temperature=0.0, tier="light", node_name="requirement_planner", rfp_id=rfp.id)
         requirements = parse_requirements(raw)
         logger.info(
             "Planned %d RFP requirements (%d core) for %s via %s",
@@ -1419,7 +1374,8 @@ def _coerce_go_no_go_raw(raw: dict[str, Any]) -> dict[str, Any]:
     raw.pop("capability_matrix", None)
 
     raw["summary"] = str(raw.get("summary") or "Go/No-Go analysis complete.").strip()
-    raw["stageOneReport"] = str(raw.get("stageOneReport") or raw.get("stage_one_report") or "").strip()
+    raw["stageOneReport"] = ""
+    raw["evaluations"] = []
 
     recommendation = _normalize_recommendation(raw.get("recommendation"))
     if recommendation is not None:
@@ -1459,10 +1415,6 @@ def _coerce_go_no_go_raw(raw: dict[str, Any]) -> dict[str, Any]:
     raw["teamMatch"] = _coerce_dimension(
         raw.get("teamMatch"), fallback_summary="Team match assessment."
     )
-
-    evaluations = _coerce_evaluations(raw.get("evaluations"))
-    if evaluations:
-        raw["evaluations"] = evaluations
 
     for list_key in ("criticalGaps", "conditions", "clarifyingQuestions", "actionFlags"):
         values = raw.get(list_key)
@@ -2183,7 +2135,9 @@ async def _adjudicate_capabilities(
         if (getattr(r, "requirement", "") or "") in recoverable
         and sources.get(getattr(r, "requirement", "") or "")
     ]
-    if gap_with_docs:
+    verified_count = sum(1 for row in rows if row.status == "verified")
+    verified_ratio = verified_count / len(rows) if rows else 1.0
+    if gap_with_docs and verified_ratio < 0.75 and len(gap_with_docs) <= 6:
         recover_body = build_gap_recover_payload(
             gap_with_docs, sources, full_sources=full_sources
         )
@@ -2439,23 +2393,8 @@ def _enforce_capability_evidence(
 
     updates["critical_gaps"] = gaps
 
-    # Bring the narrative in line with the enforced verdict. Readers act on the
-    # Markdown report, so leaving the model's own "GO WITH CONDITIONS" and its
-    # self-stated score in place produced a document contradicting its own
-    # capability table two paragraphs below.
+    # Reconcile dashboard summary with enforced verdict (report is built separately).
     reconciled = analysis.model_copy(update=updates)
-    narrative = reconcile_narrative(
-        reconciled.stage_one_report,
-        recommendation=reconciled.recommendation,
-        overall_score=compute_overall_go_score(reconciled),
-    )
-    # Show the validated matrix in the report itself — the frontend renders
-    # stageOneReport, not capabilityMatrix, so this is what the reader sees.
-    updates["stage_one_report"] = upsert_capability_section(narrative, validated)
-    # The summary is surfaced on its own in the UI and activity feed, so it
-    # needs the same treatment — a live run left it reading "strong technical
-    # capability match ... Overall Go Score 3.8/5" beside an enforced No-Go
-    # at 3.0 with 20 unevidenced core requirements.
     summary = reconcile_narrative(
         reconciled.summary,
         recommendation=reconciled.recommendation,
@@ -2510,9 +2449,21 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
         )
         return _build_needs_input_analysis(rfp, content)
 
-    kb_context, kb_hits, rfp_requirements, hits_by_requirement = (
-        await _gather_knowledge_context(rfp, content)
+    full_rfp_text = combine_rfp_text(content.description, content.pdf_text)
+    kb_task = asyncio.create_task(_gather_knowledge_context(rfp, content))
+    opp_task = asyncio.create_task(
+        classify_opportunity_llm(
+            full_rfp_text,
+            rfp_id=rfp.id,
+            title=rfp.title or "",
+        )
     )
+    (
+        kb_context,
+        kb_hits,
+        rfp_requirements,
+        hits_by_requirement,
+    ), opportunity = await asyncio.gather(kb_task, opp_task)
     # Judge each RFP requirement against retrieved KB evidence BEFORE the
     # narrative analyst runs, so Technical/Win scores follow requirement needs.
     capability_rows: list[GoNoGoCapabilityRow] = []
@@ -2532,7 +2483,11 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
     rfp_context = _build_rfp_context(rfp, content)
     deadline_info = _assess_deadline(rfp, content)
     hard_facts = extract_rfp_hard_facts(
-        combine_rfp_text(content.description, content.pdf_text)
+        full_rfp_text,
+        opportunity_class=opportunity.opportunity_class,
+        compensation_signal=opportunity.compensation_signal,
+        compensation_evidence_quote=opportunity.evidence_quote,
+        compensation_rationale=opportunity.rationale,
     )
     evaluation_points_found = evaluation_table_is_reliable(hard_facts)
 
@@ -2541,8 +2496,8 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
         thin_rfp_note = (
             "\n\nNOTE: This RFP appears thin (metadata shell or placeholder client). "
             "You MUST set insufficientData=true, recommendation=null, fitScore=null, worthScore=null, "
-            "and populate clarifyingQuestions. Still answer all evaluation questions explaining what "
-            "is missing. Do NOT issue no_go solely because content is missing.\n"
+            "and populate clarifyingQuestions explaining what is missing. "
+            "Do NOT issue no_go solely because content is missing.\n"
         )
 
     requirements_brief = _format_rfp_requirements_brief(
@@ -2558,9 +2513,7 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
         else "Technical Capability will be derived from the requirement evidence matrix."
     )
 
-    user_prompt = f"""Produce a full Stage 1 Fit Analysis for zö agency.
-
-{_evaluation_questions_block()}
+    user_prompt = f"""Produce Stage 1 Fit Analysis scores and dashboard summary for zö agency.
 {thin_rfp_note}
 ## Deadline check (authoritative — use today's date)
 {_build_deadline_context(deadline_info)}
@@ -2573,27 +2526,16 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
 
 {tech_hint}
 
-Write a CONCISE stageOneReport (~800–1000 words max) LAST in the JSON — short bullets and
-compact tables, not essays. Emit fitScore, worthScore, recommendation, and decisionMatrix
-(all 5 scores as integers 0–5, never null) BEFORE stageOneReport.
-JSON MUST be complete and valid within the output budget — never truncate mid-object.
+Emit fitScore, worthScore, recommendation, decisionMatrix (all 5 scores as integers 0–5, never null),
+summary, criticalGaps, conditions, actionFlags, and dimension blocks. Do NOT output stageOneReport or evaluations.
 Populate decisionMatrix with all 5 dimensions — derive each score dynamically from THIS RFP's budget, geography,
 evaluation criteria weights (ONLY if listed in HARD FACTS), compliance risks, KB evidence, and competitive position.
 No default or template scores. Do not invent pessimistic point tables to justify low scores.
 If HARD FACTS list a contract ceiling / year budgets, Financial Viability MUST cite them (do not say undisclosed).
-If HARD FACTS list evaluation point rows, Win Probability and the EVALUATION CRITERIA table MUST use them.
+If HARD FACTS list evaluation point rows, Win Probability MUST reference them.
 If HARD FACTS say evaluation points were NOT found, say so — never invent %.
-Do NOT output a capability matrix. Capability is computed separately by matching
-each RFP requirement against the KB documents actually retrieved for it, and
-that computed result overrides any capability claim in your narrative. So in the
-report, never assert a capability as proven unless the KB excerpts below contain
-a document that evidences it — a related-but-different capability does not count
-(content development ≠ content migration; print/brand design ≠ web or UX design;
-branding for a city ≠ building that city a website). Where evidence is absent,
-say so plainly; unsupported claims are stripped and become critical gaps.
+Do NOT output a capability matrix. Capability is computed separately.
 Use [FLAG FOR ROLE: ...] and [FLAG: ...] for every item needing human confirmation before submission.
-Use tables with pipe characters for capability assessment; evaluation point tables ONLY when HARD FACTS provide them.
-Cite specific RFP requirements and specific knowledge-base evidence. Tag uncertain items [VERIFY].
 
 EVIDENCE DISCIPLINE FOR THIS RUN:
 - Offeror office ≠ automatic subcontractor fix.
@@ -2627,7 +2569,7 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
             # so truncation does not force a second ~2min Sonnet call.
             raw, provider = await llm.chat_json(
                 messages,
-                max_tokens=5500,
+                max_tokens=3200,
                 temperature=0.0,
                 node_name="go_no_go_analysis",
             )
@@ -2693,6 +2635,50 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
         )
 
     analysis = align_recommendation_with_score(analysis)
+
+    # Claude Project-style report: compliance brief + deterministic tables.
+    try:
+        brief = await fetch_compliance_brief(
+            rfp_id=rfp.id,
+            rfp_title=rfp.title or "",
+            rfp_excerpt=full_rfp_text,
+            hard_facts=hard_facts,
+            capability_rows=analysis.capability_matrix or capability_rows,
+        )
+        report = build_stage_one_report(
+            compliance_snapshot=brief.get("complianceSnapshot") or [],
+            capability_rows=analysis.capability_matrix or capability_rows,
+            capability_summary=str(brief.get("capabilitySummary") or "").strip(),
+            evaluation_lines=hard_facts.get("evaluation_lines") or [],
+            evaluation_positions=brief.get("evaluationPositions") or [],
+            evaluation_summary=str(brief.get("evaluationSummary") or "").strip(),
+            decision_matrix=analysis.decision_matrix,
+            recommendation=analysis.recommendation,
+            conditions=analysis.conditions,
+            critical_gaps=analysis.critical_gaps,
+            evaluation_total=hard_facts.get("evaluation_total"),
+        )
+        analysis = analysis.model_copy(update={"stage_one_report": report})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Go/No-Go report builder failed for %s: %s — using matrix-only report",
+            rfp.id,
+            str(exc)[:200],
+        )
+        fallback_report = build_stage_one_report(
+            compliance_snapshot=[],
+            capability_rows=analysis.capability_matrix or capability_rows,
+            capability_summary="",
+            evaluation_lines=hard_facts.get("evaluation_lines") or [],
+            evaluation_positions=[],
+            evaluation_summary="",
+            decision_matrix=analysis.decision_matrix,
+            recommendation=analysis.recommendation,
+            conditions=analysis.conditions,
+            critical_gaps=analysis.critical_gaps,
+            evaluation_total=hard_facts.get("evaluation_total"),
+        )
+        analysis = analysis.model_copy(update={"stage_one_report": fallback_report})
 
     logger.info(
         "Go/No-Go analysis complete for rfp_id=%s provider=%s recommendation=%s "
