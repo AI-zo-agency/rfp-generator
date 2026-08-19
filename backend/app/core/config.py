@@ -166,9 +166,16 @@ class Settings(BaseSettings):
     fast_proposal_generation: bool = False
     phase3_llm_concurrency: int = 1
     designer_compact_in_generate: bool = True
-    designer_compact_max_sections: int = 25
-    senior_editor_max_tickets: int = 18
+    designer_compact_max_sections: int = 8
+    senior_editor_max_tickets: int = 6
+    # Lean generate skips duplicate blocker preflight. Ticket emit / per-tab
+    # rewrites are off during generate (mechanical trim only).
+    senior_editor_lean_in_generate: bool = True
+    senior_editor_skip_llm_emit_in_generate: bool = True
     self_edit_repair_parallel: int = 1
+    # Hard LLM run budgets (USD). 0 disables guard.
+    generate_proposal_max_cost_usd: float = 3.0
+    complete_scan_max_cost_usd: float = 3.0
 
     # LangSmith — process env is synced at startup (see langsmith_tracing.py).
     langsmith_tracing: bool = False

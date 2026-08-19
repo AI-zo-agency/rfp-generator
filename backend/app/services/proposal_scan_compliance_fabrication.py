@@ -258,6 +258,11 @@ async def run_compliance_fabrication_repairs(
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
     from app.services.proposal_scan_fact_repairs import parse_org_chart_roles
     from app.services.proposal_sections_graph import _fetch_member_bio_kb
+    from app.services.proposal_capability_bio_grounding import (
+        align_bio_education_deterministically,
+        align_bio_years_deterministically,
+        person_name_from_tab_title,
+    )
 
     logs: list[str] = []
 
@@ -290,41 +295,52 @@ async def run_compliance_fabrication_repairs(
 
         if sid.startswith("section-2-bio-") and sid != "section-2-bio-placeholder":
             member = _member_name_from_bio_section(section.title or "")
-            if member:
-                org_role = org_roles.get(member.casefold(), "")
-                if not org_role:
-                    key = member.casefold()
-                    for name, role in org_roles.items():
-                        parts = key.split()
-                        if len(parts) >= 2 and parts[0] in name and parts[-1] in name:
-                            org_role = role
-                            break
+        else:
+            member = person_name_from_tab_title(section.title or "")
+        if member:
+            org_role = org_roles.get(member.casefold(), "")
+            if not org_role:
+                key = member.casefold()
+                for name, role in org_roles.items():
+                    parts = key.split()
+                    if len(parts) >= 2 and parts[0] in name and parts[-1] in name:
+                        org_role = role
+                        break
 
-                fixed_role, role_logs = repair_bio_role_from_org_chart(
-                    new_body,
-                    member_name=member,
-                    org_roles=org_roles,
+            fixed_role, role_logs = repair_bio_role_from_org_chart(
+                new_body,
+                member_name=member,
+                org_roles=org_roles,
+            )
+            if fixed_role != new_body:
+                new_body = fixed_role
+                section_logs.extend(role_logs)
+
+            kb_text = ""
+            try:
+                kb_text, _ = await _fetch_member_bio_kb(member)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Bio KB for grounding %s: %s", member, exc)
+
+            if kb_text:
+                aligned, year_logs = align_bio_years_deterministically(new_body, kb_text)
+                aligned, edu_logs = align_bio_education_deterministically(
+                    aligned, kb_text, member=member
                 )
-                if fixed_role != new_body:
-                    new_body = fixed_role
-                    section_logs.extend(role_logs)
+                if year_logs or edu_logs:
+                    new_body = aligned
+                    section_logs.extend(year_logs + edu_logs)
 
-                kb_text = ""
-                try:
-                    kb_text, _ = await _fetch_member_bio_kb(member)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("Bio KB for grounding %s: %s", member, exc)
-
-                if bio_narrative_ungrounded(new_body, kb_text):
-                    rebuilt = await _rebuild_bio_stub(
-                        section.model_copy(update={"content": new_body}),
-                        member=member,
-                        org_role=org_role,
-                        rfp_text=rfp_text,
-                    )
-                    if rebuilt:
-                        new_body, rebuild_logs = rebuilt
-                        section_logs.extend(rebuild_logs)
+            if bio_narrative_ungrounded(new_body, kb_text):
+                rebuilt = await _rebuild_bio_stub(
+                    section.model_copy(update={"content": new_body}),
+                    member=member,
+                    org_role=org_role,
+                    rfp_text=rfp_text,
+                )
+                if rebuilt:
+                    new_body, rebuild_logs = rebuilt
+                    section_logs.extend(rebuild_logs)
 
         if any(
             k in title_cf
@@ -354,6 +370,18 @@ async def run_compliance_fabrication_repairs(
             sections.append(section)
 
     working = draft.model_copy(update={"sections": sections}) if changed else draft
+
+    if (evidence_text or "").strip():
+        from app.services.proposal_integrity_guards import (
+            apply_case_study_metric_scrub_to_draft,
+        )
+
+        working, metric_logs = apply_case_study_metric_scrub_to_draft(
+            working, source_text=evidence_text
+        )
+        if metric_logs:
+            changed = True
+            logs.extend(metric_logs)
 
     from app.services.proposal_capability_bio_grounding import (
         run_capability_bio_grounding,

@@ -126,6 +126,81 @@ export function isSectionDrafted(content: string | null | undefined): boolean {
   return classifySectionHealth(content) === null;
 }
 
+const DRAFT_STUB_MARKER = "draft this rfp-required section";
+
+function isStubChromeLine(line: string): boolean {
+  const cf = line.toLowerCase().trim();
+  return (
+    cf.startsWith("rfp-required outline") ||
+    cf.startsWith("rfp required outline") ||
+    cf.startsWith("rfp instructions") ||
+    cf.startsWith("evaluation weight") ||
+    cf.includes(DRAFT_STUB_MARKER)
+  );
+}
+
+function normalizeTitleEcho(text: string): string {
+  let plain = text.trim();
+  while (plain.startsWith("#")) {
+    plain = plain.slice(1).trimStart();
+  }
+  let i = 0;
+  while (i < plain.length && "0123456789.".includes(plain[i] ?? "")) {
+    i += 1;
+  }
+  plain = plain
+    .slice(i)
+    .trim()
+    .toLowerCase()
+    .replaceAll("&", "and");
+  return plain.split(" ").filter(Boolean).join(" ");
+}
+
+/** Heading-only / outline-stub RFP tabs that look "drafted" because they are non-empty. */
+export function isThinUnfilledShell(
+  content: string | null | undefined,
+  title = "",
+): boolean {
+  const body = (content ?? "").trim();
+  if (!body) return true;
+  if (body.toLowerCase().includes(DRAFT_STUB_MARKER)) return true;
+  const titleEcho = normalizeTitleEcho(title);
+  const keep: string[] = [];
+  for (const raw of body.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (isStubChromeLine(line)) continue;
+    if (titleEcho && normalizeTitleEcho(line) === titleEcho) continue;
+    keep.push(line);
+  }
+  const words = keep.join(" ").split(" ").filter((w) => {
+    if (!w) return false;
+    for (const ch of w) {
+      if (
+        (ch >= "0" && ch <= "9") ||
+        (ch >= "a" && ch <= "z") ||
+        (ch >= "A" && ch <= "Z")
+      ) {
+        return true;
+      }
+    }
+    return false;
+  });
+  return words.length < 12;
+}
+
+/** Sidebar / progress: RFP tabs that are only a title or draft-stub are not drafted. */
+export function isManuscriptSectionDrafted(section: {
+  id?: string;
+  title?: string;
+  content?: string | null;
+}): boolean {
+  if (!isSectionDrafted(section.content)) return false;
+  const id = section.id ?? "";
+  if (!id.startsWith("rfp-")) return true;
+  return !isThinUnfilledShell(section.content, section.title ?? "");
+}
+
 /** Short, human-readable reason a section is not drafted. For tooltips. */
 export function deadSectionLabel(health: SectionHealth): string {
   switch (health) {

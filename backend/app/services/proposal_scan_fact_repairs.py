@@ -359,89 +359,9 @@ async def rebuild_team_bios_from_kb(
     rfp_text: str = "",
 ) -> tuple[ProposalDraft, list[str]]:
     """Replace dumped resumes with the designer-note stub (attach 04_Bio PDF)."""
-    from app.services.proposal_bio_stub import (
-        expected_bio_pdf_filename,
-        is_bio_pdf_designer_note,
-        resolve_bio_pdf_filename,
-        rfp_requires_inline_bios,
-        stub_from_extraction,
-    )
-    from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
-    from app.services.proposal_sections_graph import _fetch_member_bio_kb
+    from app.services.proposal_capability_bio_grounding import ground_bios_to_kb
 
-    logs: list[str] = []
-    sections: list[ProposalSection] = []
-    changed = False
-    inline_required = rfp_requires_inline_bios(rfp_text)
-    org_roles = parse_org_chart_roles(draft)
-
-    for section in draft.sections:
-        sid = section.id or ""
-        if not sid.startswith("section-2-bio-") or sid == "section-2-bio-placeholder":
-            sections.append(section)
-            continue
-        member = _member_name_from_bio_section(section.title or "")
-        if not member:
-            sections.append(section)
-            continue
-        body = section.content or ""
-        if is_bio_pdf_designer_note(body) and not inline_required:
-            sections.append(section)
-            continue
-
-        org_role = ""
-        key = member.casefold()
-        org_role = org_roles.get(key, "")
-        if not org_role:
-            for name, role in org_roles.items():
-                parts = key.split()
-                if len(parts) >= 2 and parts[0] in name and parts[-1] in name:
-                    org_role = role
-                    break
-
-        pdf_name = expected_bio_pdf_filename(member)
-        kb_text = ""
-        kb_available = True
-        extracted: dict = {}
-        if inline_required:
-            try:
-                kb_text, sources = await _fetch_member_bio_kb(member)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Bio KB fetch failed for %s: %s", member, exc)
-                kb_text, sources = "", []
-            kb_available = bool(
-                (kb_text or "").strip()
-                and not kb_text.startswith("(Supermemory")
-                and len(kb_text) >= 200
-            )
-            pdf_name = resolve_bio_pdf_filename(member, sources)
-            # Verbatim bullets from KB text only — never an LLM bio rewrite.
-
-        new_content = stub_from_extraction(
-            member=member,
-            role=org_role,
-            pdf_filename=pdf_name,
-            kb_text=kb_text if inline_required else "",
-            kb_available=kb_available,
-            inline_required=inline_required,
-            extracted=extracted,
-        )
-        if not new_content.strip():
-            sections.append(section)
-            continue
-        if new_content.strip() != body.strip():
-            logs.append(
-                f"Replaced {member} in-manuscript resume with designer stub "
-                f"(attach {pdf_name})"
-            )
-            sections.append(section.model_copy(update={"content": new_content}))
-            changed = True
-        else:
-            sections.append(section)
-
-    if not changed:
-        return draft, logs
-    return draft.model_copy(update={"sections": sections}), logs
+    return await ground_bios_to_kb(draft, rfp_text=rfp_text, use_llm=False)
 
 
 def _bio_index_by_name(draft: ProposalDraft) -> dict[str, str]:

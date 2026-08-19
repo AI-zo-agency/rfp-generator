@@ -219,7 +219,34 @@ class IntelligenceTabOrderTests(unittest.TestCase):
         self.assertEqual(wrapped.sections[0].title, "Company Background")
         self.assertEqual(wrapped.sections[1].id, "section-1-who-we-are")
         self.assertEqual(wrapped.sections[1].content, "Who we are body.")
+        self.assertIn("DESIGNER NOTE", wrapped.sections[0].content or "")
         self.assertTrue(any("1.1–1.5" in x or "1.1-1.5" in x for x in wrap_logs))
+
+    def test_repair_pointer_only_section_gets_draft_stub(self) -> None:
+        from app.services.proposal_fulfill_rfp_structure import (
+            is_pointer_only_company_delegation,
+            repair_pointer_only_rfp_sections,
+        )
+
+        pointer = (
+            "The company background for this submission is Sections 1.1–1.5 below "
+            "(Who We Are through Insurance Information)."
+        )
+        self.assertTrue(is_pointer_only_company_delegation(pointer))
+        draft = ProposalDraft(
+            rfpId="rfp-cov",
+            sections=[
+                ProposalSection(
+                    id="rfp-bg",
+                    title="Background and Experience",
+                    content=pointer,
+                )
+            ],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
+        repaired, logs = repair_pointer_only_rfp_sections(draft)
+        self.assertIn("MANUAL FILL", repaired.sections[0].content or "")
+        self.assertTrue(any("pointer-only" in x.casefold() for x in logs))
 
     def test_apply_layout_drops_pointer_tab_and_keeps_who_we_are(self) -> None:
         from app.services.proposal_fulfill_rfp_structure import apply_rfp_toc_layout

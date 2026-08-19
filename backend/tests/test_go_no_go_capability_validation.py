@@ -213,6 +213,57 @@ class TechnicalScoreTests(unittest.TestCase):
         self.assertIn("Hosting / SLA", gaps)
 
 
+class CalibratedTechnicalScoreTests(unittest.TestCase):
+    """Strong campaign/comms proof should not collapse to 2/5."""
+
+    def test_communications_rfp_calibrates_to_three_or_higher(self) -> None:
+        from app.services.go_no_go_capability import calibrate_technical_capability_score
+
+        rows = [
+            GoNoGoCapabilityRow(
+                requirement="Strategic communications planning",
+                status="verified",
+                isCore=True,
+                category="service",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Bilingual public health outreach",
+                status="verified",
+                isCore=True,
+                category="service",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Media buying and placement",
+                status="partial",
+                isCore=True,
+                category="service",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Polling-based impact evaluation",
+                status="gap",
+                isCore=True,
+                category="service",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Toolkit development for partners",
+                status="gap",
+                isCore=True,
+                category="service",
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Media buyer specialist",
+                status="gap",
+                isCore=True,
+                category="role",
+            ),
+        ]
+        raw = derive_technical_capability_score(rows)
+        calibrated = calibrate_technical_capability_score(rows)
+        self.assertIsNotNone(raw)
+        self.assertLessEqual(raw or 0, 3)
+        self.assertGreaterEqual(calibrated or 0, 3)
+
+
 
 class EnforceCapabilityEvidenceTests(unittest.TestCase):
     """End-to-end: the real municipal-website RFP that scored 3.4."""

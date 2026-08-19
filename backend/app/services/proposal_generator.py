@@ -252,6 +252,23 @@ def section_1_subsections_complete(sections: list[ProposalSection]) -> bool:
     )
 
 
+def section_2_track_complete(sections: list[ProposalSection]) -> bool:
+    """True when Section 2 has at least one real bio or team overview with body text."""
+    return any(
+        (
+            (s.id.startswith("section-2-bio-") and s.id != "section-2-bio-placeholder")
+            or s.id == "section-2-team-overview"
+        )
+        and (s.content or "").strip()
+        for s in sections
+    )
+
+
+def section_3_track_complete(sections: list[ProposalSection]) -> bool:
+    """True when Section 3 has at least one usable case-study card."""
+    return any(_section3_card_is_usable(s) for s in sections)
+
+
 def static_sections_1_3_have_content(draft: ProposalDraft | None) -> bool:
     """True when all three zö template sections have body text (modern subsections only)."""
     if not draft:
@@ -733,6 +750,40 @@ def _merge_static_with_rfp_sections(
     return [*static_sections, *rfp_only]
 
 
+def _should_preserve_phase3_extra(section: ProposalSection) -> bool:
+    """Keep budget/closing/custom tabs when Phase 3 partial saves rebuild the manuscript."""
+    if not (section.content or "").strip():
+        return False
+    sid = section.id or ""
+    from app.services.proposal_section_dedup import _is_protected_budget_section
+
+    if _is_protected_budget_section(section):
+        return True
+    if sid.startswith(("rfp-closing-", "rfp-req-", "rfp-sec-", "ledger-comp-")):
+        return True
+    return bool(section.custom)
+
+
+def _merge_phase3_preserving_extras(
+    static_sections: list[ProposalSection],
+    rfp_sections: list[ProposalSection],
+    existing_sections: list[ProposalSection] | None = None,
+) -> list[ProposalSection]:
+    """Merge static + RFP tabs without dropping budget, closing, or custom sections."""
+    merged = _merge_static_with_rfp_sections(static_sections, rfp_sections)
+    if not existing_sections:
+        return merged
+    merged_ids = {section.id for section in merged}
+    extras = [
+        section
+        for section in existing_sections
+        if section.id not in merged_ids and _should_preserve_phase3_extra(section)
+    ]
+    if not extras:
+        return merged
+    return [*merged, *extras]
+
+
 # Optional shells — empty by design until dynamic cards replace them.
 # Never treat these (or any *-placeholder) as "incomplete content" that
 # warrants a full graph retry / token burn.
@@ -836,9 +887,29 @@ def _prefer_richer_section(current: ProposalSection, incoming: ProposalSection) 
     return incoming
 
 
+async def _collapse_bio_stubs(
+    rfp_id: str,
+    *,
+    draft: ProposalDraft | None = None,
+    rfp_text: str = "",
+    log_label: str = "bio stub collapse",
+) -> ProposalDraft | None:
+    """Designer-note stubs only — no 04_Bio fetch, no LLM."""
+    from app.services.proposal_capability_bio_grounding import persist_collapsed_bio_stubs
+
+    updated, logs = await persist_collapsed_bio_stubs(
+        rfp_id, draft=draft, rfp_text=rfp_text
+    )
+    for line in logs[:8]:
+        logger.info("%s: %s — %s", log_label, rfp_id, line)
+    return updated if updated is not None else draft
+
+
 async def _incremental_fact_check_after_sections(
     rfp_id: str,
     section_ids: list[str],
+    *,
+    only_rewrite_section_ids: list[str] | None = None,
 ) -> None:
     """Run KB fact-check + consistency sync on sections just generated."""
     ids = list(dict.fromkeys(sid for sid in section_ids if sid))
@@ -850,7 +921,10 @@ async def _incremental_fact_check_after_sections(
     try:
         rfp, _, rfp_context = await aload_rfp_for_proposal(rfp_id)
         research = await aget_research_cache(rfp_id)
-        from app.services.proposal_kb_fact_checker import run_kb_fact_check_section_ids
+        from app.services.proposal_kb_fact_checker import (
+            FactCheckReport,
+            run_kb_fact_check_section_ids,
+        )
         from app.services.proposal_consistency_enforcement import (
             apply_consistency_enforcement,
         )
@@ -859,33 +933,72 @@ async def _incremental_fact_check_after_sections(
         )
         from app.services.proposal_intelligence.log import log_intel_event
 
-        draft, fc_report = await run_kb_fact_check_section_ids(
-            draft,
-            ids,
-            rfp=rfp,
-            rfp_context=rfp_context,
-            research=research,
+        # Collapse resume dumps FIRST so contradiction/fact-check never ingest 04_Bio.
+        collapsed = await _collapse_bio_stubs(
+            rfp_id,
+            draft=draft,
+            rfp_text=rfp_context or "",
+            log_label="incremental bio stub",
         )
-        draft, consistency_logs = apply_consistency_enforcement(
-            draft,
-            research=research,
-            rfp_text=rfp_context,
-        )
-        fact_result = await run_manuscript_fact_contradiction_pass(
-            draft,
-            rfp=rfp,
-            use_llm=True,
-        )
-        draft = fact_result.draft
+        if collapsed is not None:
+            draft = collapsed
+
+        check_ids = [
+            sid
+            for sid in ids
+            if not (
+                sid.startswith("section-2-bio-")
+                and sid != "section-2-bio-placeholder"
+            )
+        ]
+        fc_report = FactCheckReport()
+        consistency_logs: list[str] = []
+        fact_rewrites = 0
+        fact_logs: list[str] = []
+        if check_ids:
+            draft, fc_report = await run_kb_fact_check_section_ids(
+                draft,
+                check_ids,
+                rfp=rfp,
+                rfp_context=rfp_context,
+                research=research,
+            )
+            draft, consistency_logs = apply_consistency_enforcement(
+                draft,
+                research=research,
+                rfp_text=rfp_context,
+            )
+            fact_result = await run_manuscript_fact_contradiction_pass(
+                draft,
+                rfp=rfp,
+                use_llm=True,
+                only_rewrite_section_ids=(
+                    frozenset(only_rewrite_section_ids)
+                    if only_rewrite_section_ids is not None
+                    else None
+                ),
+            )
+            draft = fact_result.draft
+            fact_rewrites = fact_result.rewrites_applied
+            fact_logs = list(fact_result.logs)
+            # Undo any bio expansion the contradiction pass attempted.
+            collapsed = await _collapse_bio_stubs(
+                rfp_id,
+                draft=draft,
+                rfp_text=rfp_context or "",
+                log_label="post-fact-check bio stub",
+            )
+            if collapsed is not None:
+                draft = collapsed
         await asave_proposal_draft(draft)
-        if fc_report.logs or consistency_logs or fact_result.logs:
+        if fc_report.logs or consistency_logs or fact_logs:
             logger.info(
                 "KB fact-check/consistency after %s for %s: fc=%s; cons=%s; facts=%s",
                 ", ".join(ids[:3]),
                 rfp_id,
                 "; ".join(fc_report.logs[:3]) or "ok",
                 "; ".join(consistency_logs[:2]) or "ok",
-                "; ".join(fact_result.logs[:2]) or "ok",
+                "; ".join(fact_logs[:2]) or "ok",
             )
         log_intel_event(
             "SECTION_FACT_CHECK_DONE",
@@ -894,7 +1007,7 @@ async def _incremental_fact_check_after_sections(
             repairs=fc_report.requirement_repairs,
             verify_fills=fc_report.verify_tags_filled,
             consistency_fixes=len(consistency_logs),
-            fact_contradiction_rewrites=fact_result.rewrites_applied,
+            fact_contradiction_rewrites=fact_rewrites,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Incremental KB fact-check failed for %s %s: %s", rfp_id, ids, exc)
@@ -912,13 +1025,9 @@ async def _persist_sections_1_3_partial(
     Parallel S1 / S2 / S3 tracks emit independently — merge with the existing draft so
     one track never blanks another track's already-generated subsections.
     """
-    partial_emit = list(sections_1_3)
     rfp = get_rfp(rfp_id)
     page_limit = rfp.page_limit if rfp else 30
     existing = await aget_proposal_draft(rfp_id)
-    prior_content_by_id = (
-        {s.id: (s.content or "") for s in existing.sections} if existing else {}
-    )
 
     template_1_3 = [
         s
@@ -1008,16 +1117,6 @@ async def _persist_sections_1_3_partial(
     )
     await asave_proposal_draft(draft)
 
-    fact_check_ids = [
-        s.id
-        for s in partial_emit
-        if (s.content or "").strip()
-        and not _is_legacy_monolith_section_id(s.id)
-        and prior_content_by_id.get(s.id) != (s.content or "").strip()
-    ]
-    if fact_check_ids:
-        await _incremental_fact_check_after_sections(rfp_id, fact_check_ids)
-
     if brand_voice is not None:
         prior_research = await aget_research_cache(rfp_id)
         research = ProposalResearchCache(
@@ -1087,9 +1186,10 @@ async def _persist_phase3_partial(
         )
         drafted_titles.append(mapped.title)
 
-    merged_sections = _merge_static_with_rfp_sections(
+    merged_sections = _merge_phase3_preserving_extras(
         static_sections,
         [*drafted_rfp_sections, *stubs],
+        existing.sections if existing else None,
     )
     merged_sections = [
         section.model_copy(
@@ -1116,15 +1216,6 @@ async def _persist_phase3_partial(
         provider=provider,
     )
     await asave_proposal_draft(draft)
-
-    new_ids = [
-        s.id
-        for s in drafted_rfp_sections
-        if (s.content or "").strip()
-        and prior_content_by_id.get(s.id) != (s.content or "").strip()
-    ]
-    if new_ids:
-        await _incremental_fact_check_after_sections(rfp_id, new_ids)
 
 
 def _load_rfp_for_proposal(rfp_id: str) -> tuple[RfpRecord, RfpContentInfo, str]:
@@ -1546,6 +1637,7 @@ async def _generate_sections_1_3_inner(
         provider: str,
         brand_voice: ProposalBrandVoice | None,
     ) -> None:
+        # Write-once: save + deterministic zö voice only — no LLM fact-check here.
         await _persist_sections_1_3_partial(
             rfp_id,
             partial,
@@ -1762,6 +1854,8 @@ async def _generate_sections_1_3_inner(
                 rfp_id,
             )
             for sid in empty_ids:
+                if sid.startswith("section-2-bio-"):
+                    continue
                 section = next((s for s in sections_1_3 if s.id == sid), None)
                 if not section:
                     continue
@@ -1856,30 +1950,15 @@ async def _generate_sections_1_3_inner(
         logger.info("Sections 1–3 integrity: %s — %s", rfp_id, line)
     await asave_proposal_draft(draft)
 
-    from app.core.config import settings as app_settings
+    from app.services.proposal_capability_bio_grounding import ground_bios_to_kb
 
-    if not app_settings.fast_proposal_generation and llm.is_configured():
-        try:
-            from app.services.proposal_manuscript_fact_contradictions import (
-                run_manuscript_fact_contradiction_pass,
-            )
-
-            fact = await run_manuscript_fact_contradiction_pass(
-                draft,
-                rfp=rfp,
-                use_llm=True,
-            )
-            draft = fact.draft
-            if fact.rewrites_applied or fact.verify_tags_added:
-                await asave_proposal_draft(draft)
-            for line in fact.logs[:10]:
-                logger.info("Sections 1–3 fact-contradiction: %s — %s", rfp_id, line)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Sections 1–3 fact-contradiction pass skipped for %s: %s",
-                rfp_id,
-                exc,
-            )
+    draft, bio_stub_logs = await ground_bios_to_kb(
+        draft, rfp_text=rfp_context or "", use_llm=False
+    )
+    if bio_stub_logs:
+        await asave_proposal_draft(draft)
+        for line in bio_stub_logs[:8]:
+            logger.info("Sections 1–3 bio stub: %s — %s", rfp_id, line)
 
     prior_research = await aget_research_cache(rfp_id)
     research = ProposalResearchCache(
@@ -1949,6 +2028,15 @@ async def _run_phase3_drafting_inner(
         raise ProposalError(
             "No RFP sections mapped. Re-run Phase 2.",
             status_code=400,
+        )
+
+    existing_draft = await aget_proposal_draft(rfp_id)
+    if existing_draft:
+        await _collapse_bio_stubs(
+            rfp_id,
+            draft=existing_draft,
+            rfp_text=rfp_context or rfp_source_text or "",
+            log_label="Phase 3 bio stub collapse",
         )
 
     # Final outline hygiene before any LLM drafting — collapse near-dup tabs
@@ -2103,9 +2191,10 @@ async def _run_phase3_drafting_inner(
         research = research.model_copy(update={"evidence_corpus": jit_corpus})
         await asave_research_cache(research)
 
-    merged_sections = _merge_static_with_rfp_sections(
+    merged_sections = _merge_phase3_preserving_extras(
         static_sections,
         [*already_filled, *drafted_rfp_sections],
+        existing.sections if existing else None,
     )
     merged_sections = [
         section.model_copy(
@@ -2174,7 +2263,7 @@ async def _run_phase3_drafting_inner(
             rfp=rfp,
             research=research,
             rfp_text=rfp_source_text or "",
-            use_llm_contradiction=not app_settings.fast_proposal_generation,
+            use_llm_contradiction=False,
         )
         draft = suite.draft
         for line in suite.logs[:16]:
@@ -2269,6 +2358,14 @@ async def _run_phase3_drafting_inner(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Phase 3 claim validation skipped for %s: %s", rfp_id, exc)
 
+    collapsed = await _collapse_bio_stubs(
+        rfp_id,
+        draft=draft,
+        rfp_text=rfp_source_text or "",
+        log_label="Phase 3 end bio stub",
+    )
+    if collapsed is not None:
+        draft = collapsed
     await asave_proposal_draft(draft)
 
     updated_research = research.model_copy(
@@ -2299,7 +2396,19 @@ async def _run_phase3_drafting_inner(
 async def run_phase3_6_self_edit(rfp_id: str):
     """Phase 3.6: senior-editor self-edit loop (section-wise KB repair)."""
     with pipeline_phase("phase-3-6-self-edit", rfp_id=rfp_id):
-        draft, research, report = await run_self_edit_loop(rfp_id)
+        await _collapse_bio_stubs(rfp_id, log_label="Phase 3.6 start bio stub")
+        draft, research, report = await run_self_edit_loop(
+            rfp_id,
+            lean=True,
+            skip_blocker_preflight=True,
+        )
+        collapsed = await _collapse_bio_stubs(
+            rfp_id,
+            draft=draft,
+            log_label="Phase 3.6 end bio stub",
+        )
+        if collapsed is not None:
+            draft = collapsed
         step_trace(
             "phase3_6_complete",
             rfp_id=rfp_id,
@@ -2323,11 +2432,7 @@ async def run_phase3_5_budget_reconcile(
     from app.services.proposal_budget_content import (
         prepare_budget_for_client_display,
         reconcile_draft_budget_summaries,
-        rfp_wants_blended_pricing_form,
     )
-
-    if rfp_wants_blended_pricing_form(rfp_context):
-        budget = budget.model_copy(update={"budget_format": "blended_rate_form"})
 
     # Final math BEFORE narrative sync so fee claims cannot drift after.
     budget = run_budget_editor_pass(
@@ -2335,6 +2440,26 @@ async def run_phase3_5_budget_reconcile(
         rfp_sections=research.rfp_sections if research else [],
         rfp_context=rfp_context[:28_000],
     )
+    try:
+        from app.services.proposal_budget_format_judge import (
+            align_budget_format_to_judgment,
+            judge_rfp_budget_format,
+        )
+
+        judgment = await judge_rfp_budget_format(rfp_context)
+        aligned_fmt, fmt_changed = align_budget_format_to_judgment(
+            budget.budget_format, judgment
+        )
+        if fmt_changed:
+            budget = budget.model_copy(update={"budget_format": aligned_fmt})
+            logger.info(
+                "Budget reconcile Cost format judged → %s for %s",
+                aligned_fmt,
+                rfp_id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Budget format judge skipped on reconcile for %s: %s", rfp_id, exc)
+
     budget = prepare_budget_for_client_display(budget)
     research = research.model_copy(update={"budget": budget})
     await asave_research_cache(research)
@@ -2344,7 +2469,23 @@ async def run_phase3_5_budget_reconcile(
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
     draft, _ = reconcile_draft_budget_summaries(draft, budget)
-    from app.services.proposal_budget_content import sync_phase_budget_tables_across_draft
+    from app.services.proposal_budget_content import (
+        apply_rfp_required_budget_instrument,
+        sync_phase_budget_tables_across_draft,
+    )
+
+    draft, budget, reshaped = apply_rfp_required_budget_instrument(
+        draft, budget, rfp_text=rfp_context
+    )
+    if reshaped:
+        if research:
+            research = research.model_copy(update={"budget": budget})
+            await asave_research_cache(research)
+        logger.info(
+            "Phase 3.5 reconcile reshaped Cost to RFP instrument (%s) for %s",
+            budget.budget_format,
+            rfp_id,
+        )
 
     draft, phase_sync_logs = sync_phase_budget_tables_across_draft(draft, budget)
     if phase_sync_logs:
@@ -2438,6 +2579,7 @@ async def run_phase3_5_budget(
         budget_before_drafting=bool(app_settings.budget_before_drafting),
         has_manuscript=has_manuscript,
     ):
+        await _collapse_bio_stubs(rfp_id, log_label="Phase 3.5 bio stub collapse")
         return await _run_phase3_5_budget_inner(
             rfp_id,
             app_settings=app_settings,
@@ -2488,13 +2630,10 @@ async def _run_phase3_5_budget_inner(
     from app.services.proposal_budget_content import (
         prepare_budget_for_client_display,
         reconcile_draft_budget_summaries,
-        rfp_wants_blended_pricing_form,
     )
 
-    if rfp_wants_blended_pricing_form(rfp_context):
-        budget = budget.model_copy(update={"budget_format": "blended_rate_form"})
-
     # Final math first — then manuscript sync/grounding against the frozen totals.
+    # budgetFormat from the pricing agent is authoritative (no RFP synonym regex).
     try:
         budget = run_budget_editor_pass(
             budget,
@@ -2520,6 +2659,68 @@ async def _run_phase3_5_budget_inner(
 
     budget = prepare_budget_for_client_display(budget)
     await _assert_proposal_not_reset(rfp_id)
+
+    # Principle-based Cost instrument judge — overrides habit phased when confident.
+    try:
+        from app.services.proposal_budget_format_judge import (
+            align_budget_format_to_judgment,
+            judge_rfp_budget_format,
+        )
+
+        judgment = await judge_rfp_budget_format(rfp_context)
+        aligned_fmt, fmt_changed = align_budget_format_to_judgment(
+            budget.budget_format, judgment
+        )
+        if fmt_changed:
+            budget = budget.model_copy(update={"budget_format": aligned_fmt})
+            logger.info(
+                "Phase 3.5 Cost format judged %s → %s for %s (%s)",
+                judgment.budget_format,
+                aligned_fmt,
+                rfp_id,
+                judgment.reason[:120],
+            )
+            step_trace(
+                "phase3_5_budget_format_judged",
+                rfp_id=rfp_id,
+                budget_format=aligned_fmt,
+                confidence=judgment.confidence,
+                reason=judgment.reason[:200],
+                rfp_quote=judgment.rfp_quote[:200],
+            )
+        elif judgment.confidence >= 0.55:
+            step_trace(
+                "phase3_5_budget_format_confirmed",
+                rfp_id=rfp_id,
+                budget_format=budget.budget_format,
+                confidence=judgment.confidence,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Budget format judge skipped for %s: %s", rfp_id, exc)
+
+    from app.services.proposal_pricing_service import coerce_budget_to_phased_from_guide
+    from app.models.pricing_rate_card import PricingRateCard
+
+    rate_card_obj = None
+    if research and research.pricing_rate_card:
+        try:
+            rate_card_obj = PricingRateCard.model_validate(research.pricing_rate_card)
+        except Exception:  # noqa: BLE001
+            rate_card_obj = None
+    budget, coerce_logs = coerce_budget_to_phased_from_guide(
+        budget, rate_card_obj, rfp_text=rfp_context
+    )
+    for line in coerce_logs:
+        logger.info("Phase 3.5 budget coerce for %s: %s", rfp_id, line)
+    if coerce_logs:
+        budget = run_budget_editor_pass(
+            budget,
+            rfp_sections=research.rfp_sections if research else [],
+            rfp_context=rfp_context[:28_000],
+            rate_card=rate_card_obj,
+        )
+        budget = prepare_budget_for_client_display(budget)
+
     if research:
         research = research.model_copy(update={"budget": budget})
         await asave_research_cache(research)
@@ -2547,7 +2748,28 @@ async def _run_phase3_5_budget_inner(
         raise ProposalError("No proposal draft to incorporate budget.", status_code=400)
 
     draft, _ = reconcile_draft_budget_summaries(draft, budget)
-    from app.services.proposal_budget_content import sync_phase_budget_tables_across_draft
+    from app.services.proposal_budget_content import (
+        apply_rfp_required_budget_instrument,
+        sync_phase_budget_tables_across_draft,
+    )
+
+    draft, budget, reshaped = apply_rfp_required_budget_instrument(
+        draft, budget, rfp_text=rfp_context
+    )
+    if reshaped:
+        if research:
+            research = research.model_copy(update={"budget": budget})
+            await asave_research_cache(research)
+        logger.info(
+            "Phase 3.5 reshaped Cost to RFP instrument (%s) for %s",
+            budget.budget_format,
+            rfp_id,
+        )
+        step_trace(
+            "phase3_5_budget_reshape_for_rfp",
+            rfp_id=rfp_id,
+            budget_format=budget.budget_format,
+        )
 
     draft, phase_sync_logs = sync_phase_budget_tables_across_draft(draft, budget)
     if phase_sync_logs:
@@ -2657,7 +2879,7 @@ async def _run_phase3_5_budget_inner(
 
 
 async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, ProposalResearchCache]:
-    """Stage 4: audit → optional adversarial repair → pre-submit + ending report."""
+    """Stage 4: fill leftover required stubs → optional adversarial repair → pre-submit audit."""
     rfp = get_rfp(rfp_id)
     if not rfp:
         raise ProposalError("RFP not found", status_code=404)
@@ -2674,7 +2896,82 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
     from app.services.proposal_presubmit_review import run_presubmit_review_with_manual_flags
 
     extra_issues: list = []
-    if app_settings.adversarial_repair_loop:
+    await _collapse_bio_stubs(rfp_id, draft=draft, log_label="Phase 4 start bio stub")
+    draft = await aget_proposal_draft(rfp_id) or draft
+
+    from app.services.proposal_draft_structure_stubs import (
+        draft_rfp_structure_stubs,
+        section_needs_presubmit_fill,
+    )
+    from app.services.proposal_pipeline_checkpoint import record_pipeline_activity
+
+    unfilled = [
+        s.title or s.id
+        for s in draft.sections
+        if section_needs_presubmit_fill(s)
+    ]
+    if unfilled:
+        await record_pipeline_activity(
+            rfp_id,
+            label="Pre-submit: Fill leftover required tabs",
+            detail=(
+                "One draft pass each — "
+                + ", ".join(unfilled[:6])
+                + ("…" if len(unfilled) > 6 else "")
+            ),
+            step_index=0,
+            step_total=1,
+            in_progress_phase="phase-4-review",
+        )
+        draft, stub_logs = await draft_rfp_structure_stubs(
+            draft, rfp_id=rfp_id, rfp=rfp, max_sections=8
+        )
+        if stub_logs:
+            await asave_proposal_draft(draft)
+            for line in stub_logs[:12]:
+                logger.info("Phase 4 stub fill %s: %s", rfp_id, line)
+            from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
+
+            research = await aget_research_cache(rfp_id) or research
+            draft, zf_report = apply_zero_fabrication_guards(
+                draft,
+                research=research,
+                budget=research.budget if research else None,
+                rfp_text="",
+                label="phase4-stub-fill",
+            )
+            if zf_report.logs:
+                await asave_proposal_draft(draft)
+            step_trace(
+                "phase4_stub_fill",
+                rfp_id=rfp_id,
+                filled=len(stub_logs),
+                samples=stub_logs[:8],
+            )
+
+    still_unfilled = [
+        s.title or s.id
+        for s in draft.sections
+        if section_needs_presubmit_fill(s)
+    ]
+    # Only skip repair/auditor LLM when shells are still empty — if fill landed,
+    # continue into adversarial + full audit.
+    skip_adversarial = bool(still_unfilled)
+    if skip_adversarial:
+        logger.info(
+            "Phase 4 skipping adversarial repair for %s — leftover-tab fill first "
+            "(had=%s remaining=%s)",
+            rfp_id,
+            unfilled[:6],
+            still_unfilled[:6],
+        )
+        step_trace(
+            "adversarial_repair_skipped",
+            rfp_id=rfp_id,
+            reason="leftover_required_tabs_fill",
+            remaining=still_unfilled[:8],
+        )
+    elif app_settings.adversarial_repair_loop:
         with pipeline_phase("adversarial-repair", rfp_id=rfp_id):
             draft, research, _audit, repair_report = await run_adversarial_repair_loop(
                 rfp=rfp,
@@ -2705,6 +3002,12 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
             rfp_id=rfp_id,
             reason="adversarial_repair_loop=false",
         )
+
+    collapsed = await _collapse_bio_stubs(
+        rfp_id, draft=draft, log_label="Phase 4 end bio stub"
+    )
+    if collapsed is not None:
+        draft = collapsed
 
     # Scan any surviving [VERIFY] tags against the RFP before building the review
     # the user sees: keep a tag only if the RFP explicitly requires that fact,
@@ -2787,6 +3090,7 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         rfp=rfp,
         draft=draft,
         research=research,
+        use_llm=not still_unfilled,
     )
     # Preserve repair report if the audit attach path returned a copy without it.
     if (
@@ -3085,10 +3389,11 @@ async def generate_full_proposal(
                     full_rfp_text = load_rfp_for_proposal(rfp_id)[2]
 
                 with pipeline_step("ensure_closing_sections"):
-                    draft, closing_added, close_logs = await ensure_closing_sections(
+                    draft, closing_added, close_logs, research = await ensure_closing_sections(
                         draft=draft,
                         rfp=rfp,
                         rfp_text=full_rfp_text,
+                        research=research,
                     )
                 research = _merge_closing_into_research_map(research, closing_added) or research
                 for line in close_logs[:8]:
@@ -3223,6 +3528,39 @@ async def generate_full_proposal(
                         log_count=len(struct_logs),
                         samples=struct_logs[:8],
                     )
+
+                # Same compulsory-count gate as Complete & Clean — Generate must not
+                # ship short case-study / reference packets when THIS RFP states a floor.
+                try:
+                    from app.services.proposal_rfp_compulsory_content import (
+                        audit_draft_against_rfp_compulsory_content,
+                        merge_compulsory_gap_stubs,
+                    )
+
+                    shortfalls = await audit_draft_against_rfp_compulsory_content(
+                        draft, struct_rfp_text
+                    )
+                    if shortfalls:
+                        draft, stub_logs = merge_compulsory_gap_stubs(draft, shortfalls)
+                        await asave_proposal_draft(draft)
+                        for line in stub_logs[:8]:
+                            logger.info(
+                                "Full proposal compulsory content: %s — %s",
+                                rfp_id,
+                                line,
+                            )
+                        step_trace(
+                            "compulsory_content_audit",
+                            rfp_id=rfp_id,
+                            shortfalls=len(shortfalls),
+                            samples=[s.message[:120] for s in shortfalls[:6]],
+                        )
+                except Exception as comp_exc:  # noqa: BLE001
+                    logger.warning(
+                        "Full proposal compulsory content audit skipped for %s: %s",
+                        rfp_id,
+                        comp_exc,
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Full proposal structure coverage skipped for %s: %s", rfp_id, exc
@@ -3232,11 +3570,13 @@ async def generate_full_proposal(
 
         # Final zero-fabrication pass — canonical budget, reference phones, flags.
         try:
-            from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
+            from app.services.proposal_zero_fabrication import (
+                apply_zero_fabrication_guards_before_persist,
+            )
 
             rfp_final = get_rfp(rfp_id)
             final_rfp_text = load_rfp_for_proposal(rfp_id)[2] if rfp_final else ""
-            draft, zf_report = apply_zero_fabrication_guards(
+            draft, zf_report = await apply_zero_fabrication_guards_before_persist(
                 draft,
                 research=research,
                 budget=research.budget if research else None,
@@ -3400,6 +3740,12 @@ async def generate_full_proposal(
                         research.budget if research else None
                     ),
                 )
+
+        collapsed = await _collapse_bio_stubs(
+            rfp_id, draft=draft, log_label="full proposal end bio stub"
+        )
+        if collapsed is not None:
+            draft = collapsed
 
         try:
             assert_manuscript_ready(

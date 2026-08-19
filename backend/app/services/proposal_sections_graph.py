@@ -532,9 +532,47 @@ def _hit_file_name(hit: dict[str, Any]) -> str:
 
 def _is_member_bio_file_hit(hit: dict[str, Any], member: str) -> bool:
     """True when hit is from this person's 04_Bio_* PDF (not proposals/case studies)."""
+    from app.services.proposal_bio_stub import bio_filename_matches_member
+
     file_name = _hit_file_name(hit)
     expected = f"04_Bio_{_bio_file_slug(member)}.pdf".casefold()
-    return file_name.strip().casefold() == expected
+    if file_name.strip().casefold() == expected:
+        return True
+    return bio_filename_matches_member(file_name, member)
+
+
+async def _find_member_bio_document(member: str) -> dict[str, Any] | None:
+    """Exact 04_Bio_FirstLast.pdf, then any 04_Bio file whose name contains the person."""
+    from app.services.proposal_bio_stub import (
+        bio_filename_matches_member,
+        expected_bio_pdf_filename,
+    )
+
+    candidates = [
+        f"04_Bio_{_bio_file_slug(member)}.pdf",
+        expected_bio_pdf_filename(member),
+    ]
+    seen: set[str] = set()
+    for name in candidates:
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            doc = await supermemory.find_document_by_file_name(name)
+        except supermemory.SupermemoryError:
+            doc = None
+        if doc:
+            return doc
+    try:
+        docs = await supermemory.list_all_container_documents()
+    except supermemory.SupermemoryError:
+        return None
+    for doc in docs or []:
+        file_name = _hit_file_name(doc)
+        if bio_filename_matches_member(file_name, member):
+            return doc
+    return None
 
 
 def _prefer_full_bio_text(full_text: str, search_text: str) -> str:
@@ -645,19 +683,42 @@ def _section_has_usable_facts(section_name: str, block: str) -> bool:
     return True
 
 
+async def _bio_stub_kb_inputs(
+    member: str, *, inline_required: bool
+) -> tuple[str, list[str], bool, str]:
+    """KB text + PDF name for a bio stub. Skip the full 04_Bio fetch unless inline."""
+    from app.services.proposal_bio_stub import (
+        expected_bio_pdf_filename,
+        resolve_bio_pdf_filename,
+    )
+
+    if not inline_required:
+        pdf = expected_bio_pdf_filename(member)
+        return "", [pdf], True, pdf
+
+    kb_text, sources = await _fetch_member_bio_kb(member)
+    kb_available = bool(kb_text.strip() and len(kb_text) >= 200)
+    pdf = resolve_bio_pdf_filename(member, sources)
+    return kb_text, sources, kb_available, pdf
+
+
 async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
     """Assemble bio from 04_Bio_{Name}.pdf, section RAG, and Master Template fallback."""
+    from app.services.proposal_bio_stub import is_plausible_person_name
+
+    if not is_plausible_person_name(member):
+        logger.info("Skip 04_Bio fetch for non-person label %r", member)
+        return "", []
     if not supermemory.is_configured():
         return "(Supermemory not configured.)", []
 
-    slug = _bio_file_slug(member)
-    target_file = f"04_Bio_{slug}.pdf"
     sources: list[str] = []
     full_text = ""
 
     # 1) Authoritative full document by filename (not fuzzy RFP-mixed search).
+    #    Also accept 04_Bio_First_Last.pdf / "04_Bio_First Last.pdf" variants.
     try:
-        doc = await supermemory.find_document_by_file_name(target_file)
+        doc = await _find_member_bio_document(member)
         if doc:
             custom_id = supermemory.document_fetch_key(doc)
             if custom_id:
@@ -2071,7 +2132,6 @@ async def _build_bios(state: SectionsGraphState) -> dict[str, Any]:
         return {}
 
     from app.services.proposal_bio_stub import (
-        resolve_bio_pdf_filename,
         rfp_requires_inline_bios,
         stub_from_extraction,
     )
@@ -2122,17 +2182,15 @@ async def _build_bios(state: SectionsGraphState) -> dict[str, Any]:
             member,
             inline_required,
         )
-        kb_text_for_extraction, bio_sources = await _fetch_member_bio_kb(member)
-        kb_available = bool(
-            kb_text_for_extraction.strip() and len(kb_text_for_extraction) >= 200
+        kb_text_for_extraction, bio_sources, kb_available, pdf_name = (
+            await _bio_stub_kb_inputs(member, inline_required=inline_required)
         )
-        if not kb_available:
+        if inline_required and not kb_available:
             logger.warning(
                 "No 04_Bio content for %s — stub with Ella MANUAL FILL",
                 member,
             )
 
-        pdf_name = resolve_bio_pdf_filename(member, bio_sources)
         extracted: dict[str, Any] = {}
         if inline_required and kb_available:
             # Title / bullets only — stub_from_extraction ignores key_accounts.
@@ -2714,7 +2772,6 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
 
 
     from app.services.proposal_bio_stub import (
-        resolve_bio_pdf_filename,
         rfp_requires_inline_bios,
         stub_from_extraction,
     )
@@ -2742,17 +2799,15 @@ async def _build_section_2(state: SectionsGraphState) -> dict[str, Any]:
             member,
             inline_required,
         )
-        kb_text_for_extraction, bio_sources = await _fetch_member_bio_kb(member)
-        kb_available = bool(
-            kb_text_for_extraction.strip() and len(kb_text_for_extraction) >= 200
+        kb_text_for_extraction, bio_sources, kb_available, pdf_name = (
+            await _bio_stub_kb_inputs(member, inline_required=inline_required)
         )
-        if not kb_available:
+        if inline_required and not kb_available:
             logger.warning(
                 "No 04_Bio content for %s — stub with Ella MANUAL FILL",
                 member,
             )
 
-        pdf_name = resolve_bio_pdf_filename(member, bio_sources)
         extracted: dict[str, Any] = {}
         if inline_required and kb_available:
             extracted = await _extract_member_bio_facts(member, kb_text_for_extraction)
@@ -2970,9 +3025,16 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                 "kbRefs": kb_sources,
             }
         content = _sanitize_content(raw.get("content", "").strip())
-        from app.services.proposal_integrity_guards import scrub_case_study_overbuild
+        from app.services.proposal_integrity_guards import (
+            scrub_case_study_overbuild,
+            scrub_ungrounded_case_study_percent_metrics,
+        )
 
+        source_blob = prefetched_studies.get(study, "")[:12000] or case_corpus[:8000]
         content, _cs_logs = scrub_case_study_overbuild(content)
+        content, _metric_logs = scrub_ungrounded_case_study_percent_metrics(
+            content, source_text=source_blob
+        )
         section = _section_payload(
             section_id=sec_id,
             title=sec_title,

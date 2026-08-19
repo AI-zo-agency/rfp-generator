@@ -67,7 +67,7 @@ class FabricatedPersonnelGroundingTests(unittest.TestCase):
             "Brittany Frazier documented as Creative Director": [MASTER],
             "Project Lead": [MASTER],
         }
-        _body, sources = build_adjudication_payload(reqs, hits)
+        _body, sources, _full = build_adjudication_payload(reqs, hits)
         rows, rejected, _rec = rows_from_assessments(
             reqs,
             [

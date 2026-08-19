@@ -244,5 +244,49 @@ class PriorityQueryTests(unittest.TestCase):
         self.assertIn("01_companyfacts", q)
 
 
+class BioStubFactCheckSkipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_designer_note_bio_does_not_retrieve_04_bio(self) -> None:
+        from unittest.mock import patch
+
+        from app.models.rfp import RfpRecord
+        from app.services.proposal_bio_stub import format_bio_stub_content
+        from app.services.proposal_kb_fact_checker import _fact_check_one_section
+
+        section = ProposalSection(
+            id="section-2-bio-ella-lindau",
+            title="2.3 — Ella Lindau",
+            content=format_bio_stub_content(
+                member="Ella Lindau",
+                role="Account and Operations Manager",
+            ),
+        )
+        rfp = RfpRecord(
+            id="r1",
+            title="RFP",
+            client="Dane County",
+            due_date="2026-09-01",
+            received_date="2026-08-01",
+            last_activity="2026-08-17",
+            last_activity_note="gen",
+        )
+
+        async def _boom(*_a, **_k):  # noqa: ANN002
+            raise AssertionError("04_Bio retrieve must not run for designer-note stubs")
+
+        with patch(
+            "app.services.proposal_kb_fact_checker.retrieve_for_question",
+            new=_boom,
+        ):
+            updated, report = await _fact_check_one_section(
+                section,
+                rfp=rfp,
+                rfp_context="Describe qualifications and experience.",
+                research=None,
+                brand_voice=None,
+            )
+        self.assertEqual(updated.content, section.content)
+        self.assertTrue(any("designer-note bio stub" in line for line in report.logs))
+
+
 if __name__ == "__main__":
     unittest.main()

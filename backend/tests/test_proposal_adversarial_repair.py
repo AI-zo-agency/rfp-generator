@@ -571,7 +571,7 @@ class AdversarialRepairLoopTests(unittest.IsolatedAsyncioTestCase):
             ),
             mock.patch(
                 "app.services.proposal_fulfill_rfp_gaps.ensure_closing_sections",
-                new=mock.AsyncMock(return_value=(draft, [], [])),
+                new=mock.AsyncMock(return_value=(draft, [], [], None)),
             ),
             mock.patch(
                 "app.services.proposal_fulfill_rfp_gaps._merge_closing_into_research_map",

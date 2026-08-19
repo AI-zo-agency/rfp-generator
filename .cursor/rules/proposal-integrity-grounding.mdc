@@ -20,7 +20,7 @@ Principle-based — never client-specific keyword exceptions.
 ## Insurance certifications (signed forms)
 - Exception / compliance forms must NOT mark coverages Compliant or claim "meets or exceeds" unless Section 1.5 (or companyfacts) lists that coverage type and limit.
 - Otherwise → `[MANUAL FILL: Sonja — confirm on COI]` or a real exception / bind-before-execution. Same severity as fabricated vendor registration.
-- Gate runs on generate (blocker suite + zero-fabrication) and Complete Scan — not only one path.
+- Gate runs on **generate**, **Complete Scan**, and **section chat persist** via `apply_zero_fabrication_guards_before_persist` — not only one path.
 
 ## Capabilities & case studies
 - Never assert past technical deliveries the included case studies / bios / companyfacts do not evidence.

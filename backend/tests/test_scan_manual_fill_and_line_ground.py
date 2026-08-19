@@ -58,6 +58,35 @@ class ManualFillScrubTests(unittest.TestCase):
         self.assertIn("Done.", cleaned)
 
 
+class MoneyPlaceholderKeepTests(unittest.TestCase):
+    def test_keeps_estimated_cost_manual_fill(self) -> None:
+        body = (
+            "| Subcontractor Type | Scope | Estimated Cost |\n"
+            "| --- | --- | --- |\n"
+            "| Polling Vendor | Years 2-3 | [MANUAL FILL: estimated cost] |\n"
+        )
+        rfp = "Describe technical approach. Subcontracting is optional."
+        cleaned, removed = strip_manual_fill_tags_not_required_by_rfp(body, rfp)
+        self.assertEqual(removed, 0)
+        self.assertIn("[MANUAL FILL: estimated cost]", cleaned)
+
+    def test_restores_empty_estimated_cost_cells(self) -> None:
+        from app.services.proposal_verify_optional_scrub import (
+            restore_empty_money_table_cells,
+        )
+
+        body = (
+            "| Subcontractor Type | Scope | Estimated Cost |\n"
+            "| --- | --- | --- |\n"
+            "| American Indian Community Liaison | Outreach |  |\n"
+            "| Polling Vendor (Years 2-3 only) | Survey | |\n"
+        )
+        cleaned, n = restore_empty_money_table_cells(body)
+        self.assertGreaterEqual(n, 2)
+        self.assertIn("[MANUAL FILL: estimated cost", cleaned)
+        self.assertIn("American Indian Community Liaison", cleaned)
+
+
 class LineGroundCanonicalTests(unittest.TestCase):
     def test_canonical_company_excerpt_picks_who_we_are(self) -> None:
         from app.models.proposal import ProposalSection

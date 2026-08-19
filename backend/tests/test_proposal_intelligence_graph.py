@@ -15,19 +15,23 @@ class IntelligenceGraphTests(unittest.TestCase):
         graph = compiled.get_graph()
         node_ids = set(graph.nodes.keys())
         for expected in (
-            "rfp_understanding",
-            "opportunity_strategy",
-            "delivery_pattern",
-            "delivery_parallel",
-            "work_breakdown",
+            "opportunity_extract",
+            "strategy_delivery",
+            "execution_plan",
             "dynamic_section",
-            "winning_pattern",
-            "section_strategy",
-            "retrieval_planner",
+            "writing_briefs",
             "validate",
             "derive_legacy",
         ):
             self.assertIn(expected, node_ids)
+        for retired in (
+            "rfp_understanding",
+            "delivery_parallel",
+            "winning_pattern",
+            "section_strategy",
+            "retrieval_planner",
+        ):
+            self.assertNotIn(retired, node_ids)
 
 
 if __name__ == "__main__":

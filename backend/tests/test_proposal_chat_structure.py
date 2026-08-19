@@ -443,7 +443,7 @@ class ChatStructureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(plan)
 
 
-class AddCaseStudyHeuristicTests(unittest.TestCase):
+class AddCaseStudyHeuristicTests(unittest.IsolatedAsyncioTestCase):
     def test_add_rno_in_case_studies_does_not_replace_previous_experience(self) -> None:
         from app.services.proposal_chat_structure import (
             _heuristic_add_case_study_plan,
@@ -499,6 +499,88 @@ class AddCaseStudyHeuristicTests(unittest.TestCase):
         assert plan is not None
         self.assertEqual(plan.action, "edit")
         self.assertEqual(plan.edit_section_id, "section-3-work-rno")
+
+    def test_can_we_add_one_case_study_section_is_add_intent(self) -> None:
+        from app.services.proposal_chat_structure import _is_add_to_case_studies_intent
+
+        self.assertTrue(
+            _is_add_to_case_studies_intent("can we add one case study section?")
+        )
+        self.assertTrue(_is_add_to_case_studies_intent("add a case study"))
+        self.assertTrue(_is_add_to_case_studies_intent("add another case study from KB"))
+
+    def test_unnamed_add_picks_next_unused_kb_case_study(self) -> None:
+        from app.services.proposal_chat_structure import (
+            unused_case_study_name_from_sources,
+            _plan_add_named_case_study,
+        )
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec(
+                    "section-3-work-hillsboro",
+                    "3.1 — Hillsboro Public Library Messaging, Visual Identity 2016 2017",
+                    "hillsboro",
+                ),
+                _sec(
+                    "section-3-work-maricopa",
+                    "3.2 — Maricopa County Brand, Swag, Video 2025",
+                    "maricopa",
+                ),
+            ],
+            updatedAt="2026-08-17T00:00:00+00:00",
+        )
+        name = unused_case_study_name_from_sources(
+            draft,
+            [
+                "03_CS_Hillsboro_Public_Library.pdf",
+                "03_CS_Maricopa_County_Brand.pdf",
+                "03_CS_AllCaseStudies.pdf",
+                "03_CS_City of Umatilla_Digital Campaign_2006.pdf",
+            ],
+        )
+        self.assertEqual(name, "City of Umatilla")
+        plan = _plan_add_named_case_study(draft, name)
+        self.assertEqual(plan.action, "add_sections")
+        self.assertEqual(plan.additions[0].case_study_name, "City of Umatilla")
+        self.assertEqual(plan.additions[0].kind, "case_study")
+
+    async def test_unnamed_add_plan_adds_instead_of_asking_which_client(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.proposal_chat_structure import plan_chat_structure_action
+
+        draft = ProposalDraft(
+            rfpId="rfp-1",
+            sections=[
+                _sec(
+                    "section-3-work-hillsboro",
+                    "3.1 — Hillsboro Public Library Messaging",
+                    "hillsboro",
+                ),
+            ],
+            updatedAt="2026-08-17T00:00:00+00:00",
+        )
+        with patch(
+            "app.services.proposal_chat_structure._next_unused_kb_case_study_name",
+            new=AsyncMock(return_value="City of Umatilla"),
+        ), patch(
+            "app.services.proposal_chat_structure._structure_plan_llm_once",
+            new=AsyncMock(side_effect=AssertionError("LLM should not run")),
+        ):
+            plan = await plan_chat_structure_action(
+                draft=draft,
+                user_message="can we add one case study section?",
+                focus_section_id="section-budget",
+                rfp_title="Denver Health",
+                rfp_client="Denver Health",
+                rfp_context="",
+                chat_intent="structure",
+            )
+        self.assertEqual(plan.action, "add_sections")
+        self.assertEqual(plan.additions[0].case_study_name, "City of Umatilla")
+        self.assertNotEqual(plan.action, "clarify")
 
 
 class AddBioHeuristicTests(unittest.TestCase):

@@ -352,6 +352,41 @@ class ProposalBudgetValidationTests(unittest.TestCase):
         assert_budget_canonical(reconciled)
         self.assertLessEqual(float(reconciled.agency_revenue_estimate or 0), 100_000.01)
 
+    def test_scales_fees_plus_media_to_year1_available_funds(self) -> None:
+        """Year 1 NTE covers the whole bid (fees + media), not professional fees alone."""
+        rfp = (
+            "Year 1 budget is $68,200. Proposals shall not exceed this amount. "
+            "Years 2–3 budget approximately $50,000 per year subject to annual review."
+        )
+        budget = ProposalBudget(
+            rfpId="year1-nte",
+            updatedAt="2026-08-17T00:00:00Z",
+            lineItems=[
+                _line(item_id="fees", description="Professional fees", extended=33_081),
+                BudgetLineItem(
+                    id="media",
+                    category="Media",
+                    description="Client media pass-through",
+                    extended=40_540,
+                    lineItemType="client_passthrough",
+                ),
+            ],
+            agencyFeeSubtotal=33_081,
+            clientMediaPassthrough=40_540,
+            totalClientInvoicing=73_621,
+            agencyRevenueEstimate=33_081,
+            lineItemSum=73_621,
+        )
+        reconciled = reconcile_proposal_budget(budget, rfp_context=rfp)
+        total = float(reconciled.total_client_invoicing or 0)
+        self.assertAlmostEqual(float(reconciled.rfp_budget_cap or 0), 68_200.0, places=2)
+        self.assertLessEqual(total, 68_200.01)
+        self.assertGreaterEqual(total, 68_200 - 2)
+        self.assertTrue(
+            any("Auto-scaled all line items" in f for f in (reconciled.pricing_flags or [])),
+            reconciled.pricing_flags,
+        )
+
     def test_pm_high_ratio_not_auto_cut_below_guide_floor(self) -> None:
         """SRIA-style: cutting PM to hit 5–8% must not drop below ~$7,500 engagement floor."""
         items = [

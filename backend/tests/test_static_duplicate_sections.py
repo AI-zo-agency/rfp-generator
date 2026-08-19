@@ -41,7 +41,15 @@ class StaticDuplicateSectionTests(unittest.TestCase):
     def test_duplicate_of_static_field_skips(self) -> None:
         self.assertTrue(
             should_skip_rfp_section_as_static_duplicate(
-                title="Firm Background Narrative",
+                title="Company Overview",
+                duplicate_of_static_section="section-1",
+            )
+        )
+
+    def test_background_and_experience_not_skipped_as_section_1_dup(self) -> None:
+        self.assertFalse(
+            should_skip_rfp_section_as_static_duplicate(
+                title="Background and Experience",
                 duplicate_of_static_section="section-1",
             )
         )

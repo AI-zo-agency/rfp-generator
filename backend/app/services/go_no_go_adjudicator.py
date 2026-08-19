@@ -61,6 +61,19 @@ ignore retrieved proof):
 - Keep orthogonal gaps separate: missing hosting/SLA/office/registration must
   NOT be used to claim missing platform or craft capability, and vice versa.
 
+STRATEGIC COMMUNICATIONS / MEDIA / PUBLIC-HEALTH CAMPAIGNS (common RFP shape):
+- Won proposals (06_WON_*) and case studies (03_CS_*) that describe campaign
+  strategy, television/radio/digital placement, media planning/buying, bilingual
+  outreach, coalition messaging, or public-health education ARE verified or
+  partial proof for strategic communications and media-buying requirements —
+  even when the RFP also asks for polling, toolkit development, or formal
+  evaluation sub-deliverables those documents do not repeat verbatim.
+- Mark the core delivery/campaign ask verified/partial from that proof; mark
+  evaluation-only sub-asks (polling, pre/post surveys, toolkit handoff) partial
+  when campaign delivery is strong but that specific sub-ask is not stated.
+- A bio naming media planning, advertising, or broadcast IS verified for media
+  buyer / media specialist role requirements when the quote is verbatim.
+
 But do NOT stretch across a real difference: content development is not content
 migration; print/brand design is not web development; branding for a city is not
 building that city a website; a pricing guide is not proof of delivery
@@ -97,6 +110,7 @@ Return ONLY JSON:
   "reason":"one short sentence"}]}"""
 
 _MAX_DOC_CHARS = 2_500
+_MAX_RECOVER_DOC_CHARS = 8_000
 _MAX_DOCS_PER_REQUIREMENT = 8
 # Quotes are normalized before comparison: models reliably alter whitespace even
 # when copying faithfully, and failing an honest quote on a line break would
@@ -132,6 +146,36 @@ def quote_is_grounded(quote: str, source_text: str) -> bool:
     return needle in _normalize(source_text)
 
 
+def _ground_quote(
+    quote: str,
+    kb_source: str,
+    available: dict[str, str],
+    *,
+    full_available: dict[str, str] | None = None,
+) -> tuple[bool, str | None]:
+    """Check quote against excerpt first, then the full retrieved document."""
+    source_text = available.get(kb_source)
+    if source_text is None:
+        for display, text in available.items():
+            if _normalize(display) == _normalize(kb_source):
+                source_text = text
+                break
+    if source_text is not None and quote_is_grounded(quote, source_text):
+        return True, source_text
+
+    full_text = None
+    if full_available:
+        full_text = full_available.get(kb_source)
+        if full_text is None:
+            for display, text in full_available.items():
+                if _normalize(display) == _normalize(kb_source):
+                    full_text = text
+                    break
+    if full_text and quote_is_grounded(quote, full_text):
+        return True, full_text
+    return False, source_text or full_text
+
+
 
 def best_matching_excerpt(text: str, requirement: str, max_chars: int) -> str:
     """Return the span of ``text`` that best matches ``requirement``.
@@ -163,7 +207,7 @@ def build_adjudication_payload(
     requirements: list[Any],
     hits_by_requirement: dict[str, list[dict[str, Any]]],
     all_hits: list[dict[str, Any]] | None = None,
-) -> tuple[str, dict[str, dict[str, str]]]:
+) -> tuple[str, dict[str, dict[str, str]], dict[str, dict[str, str]]]:
     """Render requirements + candidate excerpts, and the text to verify against.
 
     Each requirement sees the documents its own queries returned FIRST, then
@@ -173,11 +217,14 @@ def build_adjudication_payload(
     the model fell back to citing the org-chart document for everything and
     every claim was correctly — but uselessly — rejected.
 
-    Returns (prompt_body, {requirement: {display_name: text}}).
+    Returns (prompt_body, excerpt_sources, full_text_sources). Quotes are
+    verified against full retrieved text when they fall outside the excerpt
+    window shown to the model.
     """
     shared = build_source_index(all_hits or [])
     blocks: list[str] = []
     sources: dict[str, dict[str, str]] = {}
+    full_sources: dict[str, dict[str, str]] = {}
 
     for requirement in requirements:
         name = getattr(requirement, "requirement", "") or ""
@@ -192,6 +239,7 @@ def build_adjudication_payload(
             candidates.setdefault(key, value)
 
         per_requirement: dict[str, str] = {}
+        per_requirement_full: dict[str, str] = {}
         lines = [f"### REQUIREMENT: {name}"]
         if not candidates:
             lines.append("(no KB documents retrieved)")
@@ -203,25 +251,29 @@ def build_adjudication_payload(
             # long file — a master bio roster puts most people past any fixed
             # head slice.
             excerpt = best_matching_excerpt(text, name, _MAX_DOC_CHARS)
-            # Verify quotes against the SAME text the model was shown.
+            # Verify quotes against full retrieved text — not only the excerpt.
             per_requirement[display] = excerpt
+            per_requirement_full[display] = text
             lines.append(f"--- DOCUMENT: {display}\n{excerpt}")
         sources[name] = per_requirement
+        full_sources[name] = per_requirement_full
         blocks.append("\n".join(lines))
 
-    return "\n\n".join(blocks), sources
+    return "\n\n".join(blocks), sources, full_sources
 
 
 def rows_from_assessments(
     requirements: list[Any],
     assessments: list[dict[str, Any]],
     sources: dict[str, dict[str, str]],
+    *,
+    full_sources: dict[str, dict[str, str]] | None = None,
 ) -> tuple[list[GoNoGoCapabilityRow], list[str], set[str]]:
     """Turn adjudications into rows, dropping any whose quote is not grounded.
 
     Returns (rows, rejected_messages, recoverable_requirement_names).
-    ``recoverable`` are rows the model called gap (or omitted) — eligible for an
-    LLM semantic re-check. Quote-grounding failures are NOT recoverable.
+    ``recoverable`` are rows eligible for LLM gap re-check — model gaps and
+    quote-grounding failures where retrieved docs exist.
     """
     by_requirement = {
         str(item.get("requirement") or "").strip().casefold(): item
@@ -232,6 +284,7 @@ def rows_from_assessments(
     rows: list[GoNoGoCapabilityRow] = []
     rejected: list[str] = []
     recoverable: set[str] = set()
+    quote_recoverable: set[str] = set()
 
     for requirement in requirements:
         name = getattr(requirement, "requirement", "") or ""
@@ -269,42 +322,55 @@ def rows_from_assessments(
             )
             continue
 
-        source_text = available.get(kb_source)
-        if source_text is None:
-            for display, text in available.items():
-                if _normalize(display) == _normalize(kb_source):
-                    source_text = text
-                    break
+        full_available = (full_sources or {}).get(name, {})
 
-        if source_text is None:
+        def _source_retrieved() -> bool:
+            if not kb_source:
+                return False
+            for mapping in (available, full_available):
+                if kb_source in mapping:
+                    return True
+                if any(
+                    _normalize(display) == _normalize(kb_source)
+                    for display in mapping
+                ):
+                    return True
+            return False
+
+        if not _source_retrieved():
             failure = f"cited source '{kb_source}' was not retrieved for this requirement"
         elif not source_can_evidence_capability(kb_source):
             failure = (
                 f"'{kb_source}' is a pricing/rate document — it cannot evidence "
                 "delivery capability"
             )
-        elif not quote_is_grounded(quote, source_text):
-            failure = f"quoted evidence does not appear in '{kb_source}'"
         else:
-            personnel_fail = personnel_claim_failure(
-                requirement=name,
-                quote=quote,
-                source_text=source_text,
+            grounded, grounded_text = _ground_quote(
+                quote, kb_source, available, full_available=full_available
             )
-            if personnel_fail:
-                failure = personnel_fail
+            if not grounded:
+                failure = f"quoted evidence does not appear in '{kb_source}'"
+                quote_recoverable.add(name)
             else:
-                rows.append(
-                    GoNoGoCapabilityRow(
-                        requirement=name,
-                        status=status,
-                        kbSource=kb_source,
-                        evidence=quote[:400],
-                        isCore=is_core,
-                        category=category,
-                    )
+                personnel_fail = personnel_claim_failure(
+                    requirement=name,
+                    quote=quote,
+                    source_text=grounded_text or "",
                 )
-                continue
+                if personnel_fail:
+                    failure = personnel_fail
+                else:
+                    rows.append(
+                        GoNoGoCapabilityRow(
+                            requirement=name,
+                            status=status,
+                            kbSource=kb_source,
+                            evidence=quote[:400],
+                            isCore=is_core,
+                            category=category,
+                        )
+                    )
+                    continue
 
         rejected.append(f"{name}: {failure}")
         rows.append(
@@ -317,6 +383,7 @@ def rows_from_assessments(
             )
         )
 
+    recoverable |= quote_recoverable
     if rejected:
         logger.info(
             "go_no_go adjudication rejected %d ungrounded claim(s): %s",
@@ -334,8 +401,13 @@ Judge by MEANING only — never by keyword lists:
   platform and related CMS/web-development asks.
 - A delivery case study that describes the same kind of work evidences that
   craft ask (redesign, UX, migration, etc.).
+- Campaign / media / strategic-communications won proposals and case studies
+  evidence media buying, placement, and health/education outreach requirements
+  even when evaluation or toolkit sub-asks are not spelled out in the doc.
 - Do NOT require a separately titled case study when a bio already proves the skill.
 - Do NOT invent. If nothing in the documents supports the ask, keep status=gap.
+- Copy quotes EXACTLY from the document text below — long proposals often place
+  the proof outside the first paragraph; search the full excerpt carefully.
 
 For verified or partial you MUST return kbSource (exact document name) and a
 VERBATIM quote copied from that document's text. Quotes are checked mechanically.
@@ -350,18 +422,25 @@ Only include requirements listed below."""
 def build_gap_recover_payload(
     gap_requirements: list[Any],
     sources: dict[str, dict[str, str]],
+    *,
+    full_sources: dict[str, dict[str, str]] | None = None,
 ) -> str:
     blocks: list[str] = []
     for requirement in gap_requirements:
         name = getattr(requirement, "requirement", "") or ""
         if not name:
             continue
-        docs = sources.get(name, {})
+        docs = full_sources.get(name, {}) if full_sources else sources.get(name, {})
+        if not docs:
+            docs = sources.get(name, {})
         if not docs:
             continue
         lines = [f"### REQUIREMENT: {name}"]
         for display, text in list(docs.items())[:_MAX_DOCS_PER_REQUIREMENT]:
-            lines.append(f"--- DOCUMENT: {display}\n{(text or '')[:_MAX_DOC_CHARS]}")
+            lines.append(
+                f"--- DOCUMENT: {display}\n"
+                f"{(text or '')[:_MAX_RECOVER_DOC_CHARS]}"
+            )
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 
@@ -373,6 +452,7 @@ def apply_gap_recover_assessments(
     assessments: list[dict[str, Any]],
     sources: dict[str, dict[str, str]],
     requirements: list[Any],
+    full_sources: dict[str, dict[str, str]] | None = None,
 ) -> list[GoNoGoCapabilityRow]:
     """Apply LLM gap re-checks onto recoverable rows; quote failures stay frozen."""
     if not recoverable or not assessments:
@@ -386,7 +466,7 @@ def apply_gap_recover_assessments(
     if not subset:
         return rows
     recovered_rows, _rejected, _rec = rows_from_assessments(
-        subset, assessments, sources
+        subset, assessments, sources, full_sources=full_sources
     )
     by_name = {r.requirement: r for r in recovered_rows}
     out: list[GoNoGoCapabilityRow] = []

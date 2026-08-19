@@ -255,6 +255,62 @@ def scale_line_items_to_hard_cap(
     ]
 
 
+def scale_line_items_to_total_cap(
+    line_items: list[BudgetLineItem],
+    *,
+    total_cap: float,
+    extra_direct: float = 0.0,
+) -> tuple[list[BudgetLineItem], list[str]]:
+    """Proportionally scale every line (fees + media) so client invoicing ≤ total_cap.
+
+    Use when the RFP's available-funds / Year 1 budget covers the whole bid, not
+    professional fees alone.
+    """
+    if total_cap <= 0:
+        return line_items, []
+    line_sum, _, _ = split_line_item_totals(line_items)
+    current = round(line_sum + float(extra_direct or 0), 2)
+    if current <= total_cap + 0.01:
+        return line_items, []
+    target_lines = max(0.0, round(total_cap - float(extra_direct or 0), 2))
+    if line_sum <= 0 or target_lines <= 0:
+        return line_items, [
+            f"[PRICING FLAG: Proposed total {_usd(current)} exceeds RFP available-funds "
+            f"cap {_usd(total_cap)} — could not auto-scale; Sonja must rebuild]"
+        ]
+    factor = target_lines / line_sum
+    if factor < _ABSURD_HARD_CAP_SCALE_FACTOR:
+        return line_items, [
+            f"[PRICING FLAG: REFUSED auto-scale of bid {_usd(current)} → {_usd(total_cap)} "
+            f"(factor {factor:.2f}) — cap looks inconsistent with the guide build; "
+            "kept original fees — Sonja confirm RFP ceiling before submission]"
+        ]
+
+    scaled: list[BudgetLineItem] = []
+    for item in line_items:
+        ext = float(item.extended or 0)
+        if ext <= 0:
+            scaled.append(item)
+            continue
+        new_ext = round(ext * factor, 2)
+        updates: dict[str, Any] = {"extended": new_ext}
+        if item.rate is not None and item.quantity is not None and float(item.quantity) > 0:
+            synced_ext, synced_rate = sync_rate_extended_pair(
+                target_extended=new_ext,
+                quantity=float(item.quantity),
+            )
+            updates["extended"] = synced_ext
+            updates["rate"] = synced_rate
+        elif item.rate is not None and item.quantity is None:
+            updates["rate"] = round(float(item.rate) * factor, 2)
+        scaled.append(item.model_copy(update=updates))
+
+    return scaled, [
+        f"[PRICING FLAG: Auto-scaled all line items {_usd(current)} → {_usd(total_cap)} "
+        "to stay at or under the RFP available-funds / Year 1 budget cap — Sonja confirm scope]"
+    ]
+
+
 def _usd(value: float) -> str:
     return f"${value:,.0f}"
 
@@ -1001,6 +1057,29 @@ def reconcile_proposal_budget(
     # Infer / keep hard cap — only from strong Year/NTE/Annual Allocation rows.
     # Never treat stripped work rows (false envelope matches) as the RFP ceiling.
     hard_cap = budget.rfp_budget_cap
+    envelope_cap = budget.rfp_media_or_program_envelope
+    if rfp_context.strip():
+        from app.services.evidence_trust.rfp_money_constraints import (
+            apply_constraints_to_budget_fields,
+            extract_rfp_money_constraints,
+        )
+
+        seeded = apply_constraints_to_budget_fields(
+            budget,
+            extract_rfp_money_constraints(rfp_context),
+        )
+        if seeded.rfp_budget_cap is not None and float(seeded.rfp_budget_cap) > 0:
+            hard_cap = seeded.rfp_budget_cap
+        if (
+            seeded.rfp_media_or_program_envelope is not None
+            and float(seeded.rfp_media_or_program_envelope) > 0
+        ):
+            envelope_cap = seeded.rfp_media_or_program_envelope
+        if seeded.rfp_money_constraint_notes:
+            budget = budget.model_copy(
+                update={"rfp_money_constraint_notes": seeded.rfp_money_constraint_notes}
+            )
+
     strong_envelope_rows = [i for i in _envelope_rows if is_strong_budget_envelope_row(i)]
     inferred_cap_from_envelope = False
     if hard_cap is None and strong_envelope_rows:
@@ -1056,6 +1135,30 @@ def reconcile_proposal_budget(
             ]
         elif inferred_cap_from_envelope:
             pass  # keep inferred cap when scale succeeded or wasn't needed
+
+    # Available-funds / Year 1 budget covers fees + media, not fees alone.
+    _, agency_after_fee_scale, pass_after_fee_scale = split_line_item_totals(line_items)
+    extra_direct = float(budget.direct_expenses_total or 0)
+    total_after_fee_scale = round(
+        agency_after_fee_scale + pass_after_fee_scale + extra_direct, 2
+    )
+    package_cap: float | None = None
+    if envelope_cap is not None and float(envelope_cap) > 0:
+        if total_after_fee_scale > float(envelope_cap) + 0.01:
+            package_cap = float(envelope_cap)
+    elif hard_cap is not None and float(hard_cap) > 0:
+        if (
+            agency_after_fee_scale <= float(hard_cap) + 0.01
+            and total_after_fee_scale > float(hard_cap) + 0.01
+        ):
+            package_cap = float(hard_cap)
+    if package_cap is not None:
+        line_items, total_notes = scale_line_items_to_total_cap(
+            line_items,
+            total_cap=package_cap,
+            extra_direct=extra_direct,
+        )
+        flags.extend(total_notes)
 
     # Final snap: scaling can leave rate×qty ≠ extended by a few cents.
     line_items = resync_line_items_rate_extended(line_items)

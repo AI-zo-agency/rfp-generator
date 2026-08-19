@@ -496,6 +496,47 @@ async def run_scan_coverage_orchestrator(
             logger.warning("Compulsory content audit skipped: %s", exc)
             logs.append(f"compulsory-content audit skipped: {exc}")
 
+        try:
+            from app.services.proposal_closing_ledger import (
+                audit_draft_against_closing_ledger,
+                audit_issues_for_dq,
+                get_or_extract_closing_ledger,
+            )
+
+            closing_ledger, research = await get_or_extract_closing_ledger(
+                rfp_text, research=research
+            )
+            from app.services.proposal_closing_ledger import (
+                ensure_missing_closing_stubs,
+                repair_fabricated_ready_in_draft,
+            )
+
+            draft, fix_logs = repair_fabricated_ready_in_draft(draft, closing_ledger)
+            draft, stub_logs = ensure_missing_closing_stubs(draft, closing_ledger)
+            if fix_logs or stub_logs:
+                dq.changed = True
+                dq.draft = draft
+                dq.logs.extend(fix_logs)
+                dq.logs.extend(stub_logs)
+                logs.extend(fix_logs)
+                logs.extend(stub_logs)
+                await asave_proposal_draft(draft)
+
+            closing_audits = audit_draft_against_closing_ledger(draft, closing_ledger)
+            for line in audit_issues_for_dq(closing_audits):
+                dq.human_decision_gaps.append(line)
+                if "fabricated_ready" in line or "missing" in line:
+                    dq.disqualification_risks.append(line)
+                dq.logs.append(f"closing-ledger: {line}")
+            if closing_audits:
+                logs.append(
+                    f"closing-ledger: audited {len(closing_audits)} requirement(s); "
+                    f"{sum(1 for a in closing_audits if a.state != 'complete')} issue(s)."
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Closing ledger audit skipped: %s", exc)
+            logs.append(f"closing-ledger audit skipped: {exc}")
+
         if pass_idx >= _MAX_ORCHESTRATOR_PASSES:
             break
         if not _ledger_needs_second_pass(ledger_result, ledger_draft_logs):

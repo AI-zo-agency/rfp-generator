@@ -53,43 +53,43 @@ class AgentProfile:
     node_name: str = ""
 
 
-SENIOR_EDITOR_SYSTEM = """You are zö agency's Senior Proposal Editor (manuscript director).
+SENIOR_EDITOR_SYSTEM = """You are zö agency's Senior Proposal Editor — the final manuscript director.
+You read the FULL TABLE OF CONTENTS against THIS RFP, then emit a few surgical tickets.
 You do NOT fill [VERIFY] tags or invent KB facts — the KB fact-checker owns facts.
-You do NOT rewrite every section or hunt grammar for its own sake.
+You do NOT rewrite the book yourself. You do NOT hunt grammar.
 
-Your ONLY jobs for ONE pass over the proposal:
-1. DEDUPE — Scan EVERY section.
-   a) If Who We Are / brand story / FEIN / full bios / full case studies / budget tables are
-      re-copied into a section that has a different job, emit a dedupeTicket with trimGuidance:
-      keep what THAT section needs + one short cross-ref — remove the unnecessary duplicate.
-      Do NOT blank required content.
-   b) If TWO RFP tabs are near-duplicates of each other (same ask / same proof rewritten —
-      e.g. "Relevant Experience" vs "Successful Campaigns" both rewriting the same case study),
-      emit a deleteSectionTicket for the weaker/later tab with keepSectionId pointing at the
-      tab that should remain. NEVER delete Sections 1.1–1.5, bio cards, or Our Work cards.
-      NEVER delete Budget & Pricing, Cost Proposal, Fee Schedule, Pricing, Compensation,
-      References, Communication/Collaboration, Reports, Schedules, Crisis, Workflow,
-      or undrafted empty tabs. Fee tables are canonically rendered — never merge them away.
-      Prefer deleting content clones over leaving the designer to cut pages.
-2. COMPACT FORMAT — For ANY tab that exceeds wordTarget OR reads like essay walls (long
-   paragraphs, repeated subsection headings, bullet dumps under every heading), emit a
-   compactFormatTicket: rewrite to short lead + tables/bullets + [DESIGNER NOTE] for
-   layout. COMPLETE coverage is mandatory — compress FORMAT, never drop RFP asks. Skip
-   form/checklist/MANUAL FILL tabs and canon Budget/Pricing / static Sections 1–3 / bio cards.
-3. RFP COVERAGE — For each mapped RFP requirement, check whether the manuscript covers it.
-   If unmet, emit a coverageTicket with unmetRequirements and a rewriteBrief for the writer.
-4. GOV / BUYER COMPLIANCE — Flag missing mandatory public-sector items THIS RFP demands
-   (addenda ack, non-collusion, insurance/COI, W-9, authorized signature, pricing form,
-   MCCS/state terms, validity period, tax-exempt handling, required exhibits). Emit a
-   complianceTicket with policyOrGuideline + rewriteBrief. Do NOT invent policies the RFP
-   never mentions. Do NOT paste generic FAR/GSA boilerplate unprompted by THIS RFP.
-5. Do NOT rewrite section prose yourself. Do NOT emit tickets for style/tone polish.
-6. BUDGET CROSS-SECTION (notes only — dedicated pass fixes these): when Budget/Pricing
-   coexists with Monthly Capacity / hours tables, watch for double-billed coordination
-   (Planning + PM both claiming meetings/status reporting) and hours-vs-fee mismatch.
-   Mention in notes[] if seen; do not delete Budget tab.
-7. Return ONLY JSON:
-{"deleteSectionTickets":[{"sectionId":"...","keepSectionId":"...","reason":"..."}],
+HARD RULE — NEVER DELETE A TOC TAB:
+- Every section id in the digest TOC stays in the proposal. Capacity, Work Plan, Timeline,
+  letters, admin/forms, references, budget, bios, case studies — all stay.
+- deleteSectionTickets MUST always be []. The apply layer will refuse deletes anyway.
+- If two scored tabs overlap (same proof rewritten twice), KEEP BOTH TABS. Emit a
+  dedupeTicket on the tab that is rehashing: trim duplicated prose, add one short
+  cross-ref to keepHomeSectionId, keep that tab's unique RFP ask. Never blank a section.
+- Never delete a tab to save pages. Page budget is a designer/layout problem, not a
+  chapter-deletion problem.
+
+Your ONLY jobs for ONE pass:
+1. TOC vs RFP — Walk every digest TOC row. EMPTY / STUB / pointer-only ("see 1.1–1.5")
+   tabs that the RFP actually scores → coverageTicket with unmetRequirements + rewriteBrief.
+   Do not invent a new tab id. Do not recommend dropping an existing tab.
+2. DEDUPE (trim, never drop) — If Who We Are / FEIN / full bios / full case studies /
+   budget tables are copied into a tab that has a different job, emit a dedupeTicket
+   with trimGuidance: keep THIS tab's unique ask + one short cross-ref. Same for two
+   overlapping RFP tabs (e.g. Relevant Experience vs Successful Campaigns): trim the
+   clone prose; keep both headings.
+3. COMPACT FORMAT — Only if a tab is overlong essay AND the RFP asks can survive as
+   short lead + tables/bullets + [DESIGNER NOTE]. Compress FORMAT, never drop asks.
+   Skip forms, MANUAL FILL, Budget/Pricing, static Sections 1–3, bio cards.
+4. GOV / BUYER COMPLIANCE — Flag missing mandatory items THIS RFP demands (addenda ack,
+   non-collusion, insurance/COI, W-9, authorized signature, pricing form, MCCS/state
+   terms, validity period, tax-exempt, required exhibits). complianceTicket with
+   policyOrGuideline + rewriteBrief. Do NOT invent policies the RFP never mentions.
+5. BUDGET CROSS-SECTION (notes[] only): hours vs fee mismatch, double-billed PM/meetings.
+   Never ticket-delete Budget & Pricing.
+6. Do NOT emit tickets for style/tone polish. Prefer few high-value tickets over many.
+
+Return ONLY JSON:
+{"deleteSectionTickets":[],
  "dedupeTickets":[{"sectionId":"...","keepHomeSectionId":"...","trimGuidance":"..."}],
  "compactFormatTickets":[{"sectionId":"...","reason":"...","rewriteBrief":"..."}],
  "coverageTickets":[{"sectionId":"...","unmetRequirements":["..."],"rewriteBrief":"..."}],
@@ -553,6 +553,7 @@ async def _parse_json_from_agent_text(text: str) -> dict[str, Any]:
         ],
         max_tokens=4096,
         temperature=0.0,
+        node_name="agent_json_salvage",
     )
     if isinstance(structured, dict):
         content = content_from_agent_payload(structured, text)
@@ -657,7 +658,7 @@ async def senior_editor_emit_tickets(
     manuscript_digest: str,
     requirements_by_section: dict[str, list[str]],
 ) -> dict[str, Any]:
-    """Senior Editor: emit dedupe + coverage tickets (no prose rewrite, no fact fill)."""
+    """Senior Editor: emit trim/coverage/compliance tickets (never delete TOC tabs)."""
     req_lines: list[str] = []
     for sid, reqs in requirements_by_section.items():
         if not reqs:
@@ -666,40 +667,28 @@ async def senior_editor_emit_tickets(
         req_lines.extend(f"  - {r}" for r in reqs[:12])
     user_content = (
         f"Client: {rfp_client}\nRFP: {rfp_title}\n\n"
+        "DIRECTOR RULES: Keep every TOC tab. Overlap → dedupeTicket (trim + cross-ref), "
+        "never deleteSectionTickets. Empty/stub scored tabs → coverageTicket. "
+        "Missing mandatory forms/attestations THIS RFP names → complianceTicket. "
+        "Few high-value tickets only.\n\n"
         f"Mapped requirements by section:\n"
         + ("\n".join(req_lines) if req_lines else "(none mapped)")
         + f"\n\nProposal manuscript digest:\n{manuscript_digest[:40_000]}"
     )
     try:
         raw, _ = await run_json_agent(AgentRole.SENIOR_EDITOR, user_content)
-        deletes = (
-            raw.get("deleteSectionTickets")
-            if isinstance(raw.get("deleteSectionTickets"), list)
-            else []
+        from app.services.proposal_self_edit_loop import normalize_senior_editor_tickets
+
+        return normalize_senior_editor_tickets(
+            {
+                "deleteSectionTickets": raw.get("deleteSectionTickets") or [],
+                "dedupeTickets": raw.get("dedupeTickets") or [],
+                "compactFormatTickets": raw.get("compactFormatTickets") or [],
+                "coverageTickets": raw.get("coverageTickets") or [],
+                "complianceTickets": raw.get("complianceTickets") or [],
+                "notes": raw.get("notes") or [],
+            }
         )
-        dedupe = raw.get("dedupeTickets") if isinstance(raw.get("dedupeTickets"), list) else []
-        coverage = (
-            raw.get("coverageTickets") if isinstance(raw.get("coverageTickets"), list) else []
-        )
-        compliance = (
-            raw.get("complianceTickets")
-            if isinstance(raw.get("complianceTickets"), list)
-            else []
-        )
-        compact = (
-            raw.get("compactFormatTickets")
-            if isinstance(raw.get("compactFormatTickets"), list)
-            else []
-        )
-        notes = raw.get("notes") if isinstance(raw.get("notes"), list) else []
-        return {
-            "deleteSectionTickets": [t for t in deletes if isinstance(t, dict)],
-            "dedupeTickets": [t for t in dedupe if isinstance(t, dict)],
-            "compactFormatTickets": [t for t in compact if isinstance(t, dict)],
-            "coverageTickets": [t for t in coverage if isinstance(t, dict)],
-            "complianceTickets": [t for t in compliance if isinstance(t, dict)],
-            "notes": [str(n) for n in notes if str(n).strip()],
-        }
     except (LlmError, Exception) as exc:
         logger.warning("Senior editor ticket pass failed: %s", exc)
         return {

@@ -1,13 +1,16 @@
-"""Classify opportunity shape + apply deterministic Go/No-Go score caps.
+"""Opportunity shape + compensation classification and deterministic score caps.
 
-Stage 1 must distinguish paid professional-services RFPs from open design
-competitions / unpaid speculative work before averaging matrix vibes.
+Classification is LLM-judged with a verbatim RFP quote — no regex synonym tables.
+Score caps apply only after classification; they never invent evidence.
 """
 
 from __future__ import annotations
 
-import re
+import logging
+from dataclasses import dataclass
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 OpportunityClass = Literal["professional_services", "open_competition", "ambiguous"]
 CompensationSignal = Literal[
@@ -17,99 +20,147 @@ CompensationSignal = Literal[
     "undisclosed",
 ]
 
-_OPEN_COMPETITION_RES = (
-    re.compile(r"\bcommunity\s+design\s+competition\b", re.I),
-    re.compile(r"\bartists?,?\s+designers?,?\s+and\s+community\s+members\b", re.I),
-    re.compile(
-        r"\binvites?\s+(?:artists?|designers?|community\s+members?)\b",
-        re.I,
-    ),
-    re.compile(
-        r"\bsubmit\s+(?:your|an?\s+original)\s+(?:design|concept|seal|logo)\b",
-        re.I,
-    ),
-    re.compile(r"\bdesign\s+competition\b", re.I),
-    re.compile(r"\bopen\s+(?:call|competition)\s+for\s+(?:design|artists?)\b", re.I),
-)
-
-_PROFESSIONAL_SERVICES_RES = (
-    re.compile(r"\bscope\s+of\s+services\b", re.I),
-    re.compile(r"\bprofessional\s+services\s+agreement\b", re.I),
-    re.compile(r"\brequest\s+for\s+proposals?\b", re.I),
-    re.compile(
-        r"\b(?:methodology|staffing\s+plan|cost\s+proposal|team\s+bios?|"
-        r"case\s+studies|approach\s+and\s+methodology)\b",
-        re.I,
-    ),
-    re.compile(
-        r"\bqualified\s+(?:marketing\s+)?(?:agenc(?:y|ies)|firms?)\b",
-        re.I,
-    ),
-)
-
-_CONFIRMED_FEE_RES = (
-    re.compile(
-        r"\b(?:not\s+to\s+exceed|NTE|fixed[\s-]?price\s+ceiling|"
-        r"maximum\s+(?:contract|compensation|budget)|"
-        r"compensation\s+shall(?:\s+not)?|"
-        r"contract\s+(?:value|ceiling|amount)|"
-        r"total\s+(?:contract|project|award)\s+(?:value|amount|budget))\b",
-        re.I,
-    ),
-    re.compile(
-        r"\$\s*[\d,]+(?:\.\d+)?\s*(?:million|m)?\b.{0,40}\b(?:ceiling|NTE|budget|fee)\b",
-        re.I,
-    ),
-)
-
-_PRIZE_ONLY_RES = (
-    re.compile(r"\b(?:prize|honorarium|stipend)\b", re.I),
-    re.compile(r"\bpublic\s+recognition\s+only\b", re.I),
-)
-
-_EXPLICITLY_UNPAID_RES = (
-    re.compile(r"\b(?:no|without)\s+(?:compensation|payment|fee|remuneration)\b", re.I),
-    re.compile(r"\bunpaid\s+(?:work|contest|competition|submission)\b", re.I),
-    re.compile(r"\bvolunte?er(?:ed)?\s+(?:basis|submission)\b", re.I),
-)
-
 _DIM_FINANCIAL = "financial viability"
 _DIM_STRATEGIC = "strategic value"
 _DIM_WIN = "win probability"
 
+_OPPORTUNITY_CLASSIFIER_PROMPT = """You classify an RFP's opportunity shape and compensation model for a marketing agency Go/No-Go decision.
 
-def classify_opportunity(text: str) -> tuple[OpportunityClass, CompensationSignal]:
-    """Deterministic opportunity + compensation signals from RFP body."""
-    body = text or ""
-    competition_hits = sum(1 for rx in _OPEN_COMPETITION_RES if rx.search(body))
-    services_hits = sum(1 for rx in _PROFESSIONAL_SERVICES_RES if rx.search(body))
+Read the RFP excerpt and return JSON only:
+{
+  "opportunityClass": "professional_services" | "open_competition" | "ambiguous",
+  "compensationSignal": "confirmed_fee" | "undisclosed" | "explicitly_unpaid" | "prize_only",
+  "evidenceQuote": "verbatim phrase from the RFP that supports compensationSignal (required)",
+  "rationale": "one sentence"
+}
 
-    if competition_hits >= 1 and services_hits == 0:
-        opp_class: OpportunityClass = "open_competition"
-    elif competition_hits >= 2 and services_hits < competition_hits:
-        # Strong contest language outweighs thin "RFP" boilerplate headers.
-        opp_class = "open_competition"
-    elif services_hits >= 1 and competition_hits == 0:
-        opp_class = "professional_services"
-    elif services_hits > competition_hits:
-        opp_class = "professional_services"
-    elif competition_hits > services_hits:
-        opp_class = "open_competition"
+Principles (judge by meaning — no keyword shortcuts):
+- professional_services: agency delivers scoped marketing/branding/communications work under contract.
+- open_competition: public design contest / open call where participants submit concepts for recognition or prize, not a professional fee engagement.
+- confirmed_fee: RFP states paid contract mechanics — fixed ceiling/NTE, price agreement, IDIQ/task-order vehicle, hourly rate schedule, invoicing/NET terms, sample services agreement for paid work.
+- undisclosed: paid professional-services shape but no reliable contract ceiling or rate table in the excerpt (common for IDIQ without a dollar cap stated upfront).
+- explicitly_unpaid: deliverable work itself is unpaid, volunteer-only, or prize/recognition-only — NOT standard bid-prep boilerplate.
+- CRITICAL: "No payment for proposal preparation" / "costs incurred prior to award" / "no fee for submitting a proposal" describe BID PREP only. That is NOT explicitly_unpaid when the RFP also requests hourly rates, price agreements, invoicing, or paid services scope.
+- prize_only: compensation is honorarium/stipend/public recognition without a professional services contract.
+
+evidenceQuote MUST appear verbatim (or near-verbatim) in the RFP text provided."""
+
+
+@dataclass(frozen=True)
+class OpportunityClassification:
+    opportunity_class: OpportunityClass
+    compensation_signal: CompensationSignal
+    evidence_quote: str = ""
+    rationale: str = ""
+
+
+def default_opportunity_classification() -> OpportunityClassification:
+    """Safe fallback when LLM classification is unavailable."""
+    return OpportunityClassification(
+        opportunity_class="ambiguous",
+        compensation_signal="undisclosed",
+    )
+
+
+def parse_opportunity_classification(
+    raw: dict[str, Any],
+    *,
+    rfp_text: str,
+) -> OpportunityClassification:
+    """Parse LLM JSON and verify the quote is grounded in the RFP text."""
+    opp_raw = str(
+        raw.get("opportunityClass") or raw.get("opportunity_class") or "ambiguous"
+    ).strip()
+    comp_raw = str(
+        raw.get("compensationSignal") or raw.get("compensation_signal") or "undisclosed"
+    ).strip()
+    quote = str(raw.get("evidenceQuote") or raw.get("evidence_quote") or "").strip()
+    rationale = str(raw.get("rationale") or "").strip()
+
+    opp_class: OpportunityClass
+    if opp_raw in {"professional_services", "open_competition", "ambiguous"}:
+        opp_class = opp_raw  # type: ignore[assignment]
     else:
         opp_class = "ambiguous"
 
-    compensation = _classify_compensation(body)
-    return opp_class, compensation
+    comp: CompensationSignal
+    if comp_raw in {"confirmed_fee", "undisclosed", "explicitly_unpaid", "prize_only"}:
+        comp = comp_raw  # type: ignore[assignment]
+    else:
+        comp = "undisclosed"
+
+    if quote and rfp_text and quote.casefold() not in rfp_text.casefold():
+        # Ungrounded quote — do not trust explicitly_unpaid / prize_only caps.
+        logger.warning(
+            "opportunity classifier quote not found in RFP — downgrading to undisclosed "
+            "(quote=%r)",
+            quote[:80],
+        )
+        if comp in {"explicitly_unpaid", "prize_only"}:
+            comp = "undisclosed"
+
+    return OpportunityClassification(
+        opportunity_class=opp_class,
+        compensation_signal=comp,
+        evidence_quote=quote,
+        rationale=rationale,
+    )
 
 
-def _classify_compensation(body: str) -> CompensationSignal:
-    if any(rx.search(body) for rx in _EXPLICITLY_UNPAID_RES):
-        return "explicitly_unpaid"
-    if any(rx.search(body) for rx in _CONFIRMED_FEE_RES):
-        return "confirmed_fee"
-    if any(rx.search(body) for rx in _PRIZE_ONLY_RES):
-        return "prize_only"
-    return "undisclosed"
+async def classify_opportunity_llm(
+    text: str,
+    *,
+    rfp_id: str = "",
+    title: str = "",
+) -> OpportunityClassification:
+    """One light LLM call — opportunity shape + compensation with grounded quote."""
+    body = (text or "").strip()
+    if not body:
+        return default_opportunity_classification()
+
+    from app.services import llm
+
+    if not llm.is_configured():
+        return default_opportunity_classification()
+
+    excerpt = body[:24_000]
+    try:
+        raw, provider = await llm.chat_json(
+            [
+                {"role": "system", "content": _OPPORTUNITY_CLASSIFIER_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"RFP title: {title or '(not provided)'}\n\n"
+                        f"RFP text:\n{excerpt}"
+                    ),
+                },
+            ],
+            max_tokens=512,
+            temperature=0.0,
+            tier="light",
+            node_name="go_no_go_opportunity_classifier",
+            rfp_id=rfp_id,
+        )
+        parsed = parse_opportunity_classification(
+            raw if isinstance(raw, dict) else {},
+            rfp_text=excerpt,
+        )
+        logger.info(
+            "opportunity classifier for %s via %s: class=%s compensation=%s",
+            rfp_id or "unknown",
+            provider,
+            parsed.opportunity_class,
+            parsed.compensation_signal,
+        )
+        return parsed
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "opportunity classifier failed for %s: %s",
+            rfp_id or "unknown",
+            str(exc)[:160],
+        )
+        return default_opportunity_classification()
 
 
 def has_confirmed_professional_fee(
@@ -177,16 +228,30 @@ def apply_opportunity_score_caps(
 def format_opportunity_facts_lines(
     opportunity_class: OpportunityClass,
     compensation_signal: CompensationSignal,
+    *,
+    evidence_quote: str = "",
+    rationale: str = "",
 ) -> list[str]:
-    return [
-        f"- Opportunity class (extracted): {opportunity_class}",
-        f"- Compensation signal (extracted): {compensation_signal}",
-        "- If opportunity class is open_competition and compensation is not confirmed_fee: "
-        "Financial Viability must be 0, Worth ≤ 1, Strategic ≤ 2, Win ≤ 2, prefer no_go. "
-        "Do NOT treat this as a normal paid professional-services RFP.",
-        "- If professional_services with undisclosed budget: Worth ~3 (mixed) is allowed; "
-        "do NOT invent a fee, and do NOT force Financial to 0 solely for undisclosed budget.",
+    lines = [
+        f"- Opportunity class (LLM): {opportunity_class}",
+        f"- Compensation signal (LLM): {compensation_signal}",
     ]
+    if evidence_quote:
+        lines.append(f'- Compensation evidence (verbatim): "{evidence_quote[:240]}"')
+    if rationale:
+        lines.append(f"- Classifier rationale: {rationale[:240]}")
+    lines.extend(
+        [
+            "- If opportunity class is open_competition and compensation is not confirmed_fee: "
+            "Financial Viability must be 0, Worth ≤ 1, Strategic ≤ 2, Win ≤ 2, prefer no_go. "
+            "Do NOT treat this as a normal paid professional-services RFP.",
+            "- If professional_services with undisclosed budget: Worth ~3 (mixed) is allowed; "
+            "do NOT invent a fee, and do NOT force Financial to 0 solely for undisclosed budget.",
+            '- "No payment for proposal preparation" is bid-prep boilerplate — NOT explicitly_unpaid '
+            "when hourly rates / price agreement / invoicing appear elsewhere in the RFP.",
+        ]
+    )
+    return lines
 
 
 def _matrix_rows(raw: dict[str, Any]) -> list[dict[str, Any]]:

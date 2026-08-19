@@ -17,8 +17,8 @@ from app.services.proposal_langchain import _provider_name
 logger = logging.getLogger(__name__)
 
 COVERAGE_THRESHOLD = 85
-MAX_RETRIEVAL_ROUNDS = 3
-QUERIES_PER_SECTION = 5
+MAX_RETRIEVAL_ROUNDS = 2
+QUERIES_PER_SECTION = 3
 SEARCH_LIMIT = 8
 MAX_CHUNKS_PER_SECTION = 30
 EXCERPT_MAX_CHARS = 2_000
@@ -125,6 +125,7 @@ class RetrievalGraphState(TypedDict, total=False):
     evidence_corpus: list[dict[str, Any]]
     provider: str
     error: str | None
+    retrieval_no_progress: bool
     llm_semaphore: asyncio.Semaphore
 
 
@@ -178,6 +179,7 @@ async def _analyze_rfp(state: RetrievalGraphState) -> dict[str, Any]:
             ],
             max_tokens=4096,
             temperature=0.25,
+            node_name="retrieval_rfp_analyzer",
         )
         sections_raw = raw.get("sections", [])
         sections: list[dict[str, Any]] = []
@@ -220,13 +222,22 @@ async def _analyze_rfp(state: RetrievalGraphState) -> dict[str, Any]:
                     len(dropped),
                     dropped[:12],
                 )
+            from app.services.proposal_closing_ledger import get_or_extract_closing_ledger
             from app.services.proposal_outline_dedup import (
                 merge_closing_components_into_outline,
             )
+            from app.services.proposal_repository import aget_research_cache
 
+            rfp_id = str(state.get("rfp_id") or "")
+            research = await aget_research_cache(rfp_id) if rfp_id else None
+            closing_ledger, _research = await get_or_extract_closing_ledger(
+                state.get("rfp_context") or "",
+                research=research,
+            )
             merged, closing_added = merge_closing_components_into_outline(
                 sections,
                 rfp_context=state.get("rfp_context") or "",
+                ledger=closing_ledger,
             )
             # Convert OutlineSection objects back to dicts for retrieval state.
             sections = []
@@ -380,6 +391,7 @@ async def _plan_queries_for_sections(
                 ],
                 max_tokens=2048,
                 temperature=0.25,
+                node_name="retrieval_query_planner_batch",
             )
         planned_sections = raw.get("sections", [])
         if isinstance(planned_sections, list):
@@ -467,7 +479,8 @@ async def _retrieve_round(state: RetrievalGraphState) -> dict[str, Any]:
     if not targets:
         targets = state.get("rfp_sections") or []
 
-    section_hits = dict(state.get("section_hits") or {})
+    prior_section_hits = state.get("section_hits") or {}
+    section_hits = dict(prior_section_hits)
     section_queries = dict(state.get("section_queries") or {})
 
     planned = await _plan_queries_for_sections(targets, state, gap_fill=gap_fill)
@@ -495,15 +508,35 @@ async def _retrieve_round(state: RetrievalGraphState) -> dict[str, Any]:
             section_queries[sid] = [*prior_queries, *planned.get(sid, [])]
 
     total_queries = sum(len(planned.get(str(s.get("id") or ""), [])) for s in targets)
+    total_new_hits = 0
+    for section in targets:
+        sid = str(section.get("id") or "")
+        prior_n = len(prior_section_hits.get(sid, []))
+        merged_n = len(section_hits.get(sid, []))
+        if merged_n > prior_n:
+            total_new_hits += merged_n - prior_n
+    no_progress = bool(search_tasks) and total_new_hits == 0
 
     logger.info(
-        "Retrieval round %d for %s: %d sections, %d queries (1 LLM plan call)",
+        "Retrieval round %d for %s: %d sections, %d queries, +%d hits (1 LLM plan call)",
         next_round,
         state.get("rfp_id"),
         len(targets),
         total_queries,
+        total_new_hits,
     )
-    return {"round": next_round, "section_hits": section_hits, "section_queries": section_queries}
+    if no_progress:
+        logger.info(
+            "Retrieval round %d no-progress for %s — skipping extra rounds",
+            next_round,
+            state.get("rfp_id"),
+        )
+    return {
+        "round": next_round,
+        "section_hits": section_hits,
+        "section_queries": section_queries,
+        "retrieval_no_progress": no_progress,
+    }
 
 
 async def _evaluate_coverage_batch(
@@ -557,6 +590,7 @@ async def _evaluate_coverage_batch(
                     ],
                     max_tokens=2048,
                     temperature=0.2,
+                    node_name="retrieval_coverage_evaluator_batch",
                 )
             for item in raw.get("sections", []):
                 if not isinstance(item, dict):
@@ -620,6 +654,8 @@ async def _evaluate_coverage(state: RetrievalGraphState) -> dict[str, Any]:
 def _should_continue_retrieval(state: RetrievalGraphState) -> Literal["retrieve_round", "build_evidence"]:
     current_round = state.get("round") or 0
     if current_round >= MAX_RETRIEVAL_ROUNDS:
+        return "build_evidence"
+    if bool(state.get("retrieval_no_progress")):
         return "build_evidence"
     sections = state.get("rfp_sections") or []
     if not sections:

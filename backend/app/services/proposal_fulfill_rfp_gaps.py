@@ -75,7 +75,10 @@ async def _repair_misstated_closing_sections(
     rfp_text: str,
 ) -> tuple[ProposalDraft, list[str]]:
     """Re-draft References / Pricing closing tabs when they contradict the RFP."""
-    components = {c.id: c for c in detect_closing_components(rfp_text)}
+    from app.services.proposal_closing_ledger import get_or_extract_closing_ledger
+
+    ledger, _ = await get_or_extract_closing_ledger(rfp_text, research=None, persist=False)
+    components = {c.id: c for c in detect_closing_components(rfp_text, ledger=ledger)}
     logs: list[str] = []
     sections = list(draft.sections)
     changed = False
@@ -90,6 +93,12 @@ async def _repair_misstated_closing_sections(
             or "does not specify" in content.casefold()
         ):
             comp = components.get("references")
+            if not comp:
+                # Prefer any ledger row whose id/title mentions references
+                for c in components.values():
+                    if "reference" in c.id or "reference" in (c.title or "").casefold():
+                        comp = c
+                        break
             if comp:
                 new_content = await _draft_closing_section(
                     component=comp,
@@ -118,7 +127,14 @@ async def _repair_misstated_closing_sections(
                 content
             ):
                 continue
-            comp = components.get("pricing_form")
+            comp = None
+            for c in components.values():
+                if any(
+                    tok in c.id or tok in (c.title or "").casefold()
+                    for tok in ("pric", "quotation", "cost")
+                ):
+                    comp = c
+                    break
             if comp:
                 new_content = await _draft_closing_section(
                     component=comp,
@@ -129,14 +145,12 @@ async def _repair_misstated_closing_sections(
                     update={"content": new_content, "status": "generated"}
                 )
                 changed = True
-                logs.append(
-                    "Re-drafted Pricing/Quotation section — removed substitute Section A–D structure."
-                )
+                logs.append("Re-drafted Pricing form — prior text rewrote buyer form structure.")
 
-    if not changed:
-        return draft, logs
-    now = datetime.now(timezone.utc).isoformat()
-    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
+    if changed:
+        now = datetime.now(timezone.utc).isoformat()
+        draft = draft.model_copy(update={"sections": sections, "updated_at": now})
+    return draft, logs
 
 
 async def _draft_closing_section(
@@ -215,6 +229,7 @@ async def _draft_closing_section(
             ],
             max_tokens=2048,
             temperature=0.2,
+            node_name="fulfill_scan_closing_section",
         )
         content = str((raw or {}).get("content") or "").strip()
         return content or stub
@@ -230,16 +245,21 @@ async def ensure_closing_sections(
     draft: ProposalDraft,
     rfp: RfpRecord,
     rfp_text: str,
-) -> tuple[ProposalDraft, list[ClosingComponent], list[str]]:
-    """Add missing closing sections demanded by THIS RFP.
+    research: ProposalResearchCache | None = None,
+) -> tuple[ProposalDraft, list[ClosingComponent], list[str], ProposalResearchCache | None]:
+    """Add missing closing sections from the closing-requirement ledger.
 
-    Only components this RFP obliges the vendor to submit. A closing statement
-    is no longer forced in: under a page limit an unrequested section displaces
-    content the RFP actually asks for.
+    Only components THIS RFP's ledger obliges. A closing statement is not
+    forced — under a page limit an unrequested section displaces real asks.
     """
-    components = detect_closing_components(rfp_text)
+    from app.services.proposal_closing_ledger import get_or_extract_closing_ledger
+
+    ledger, research = await get_or_extract_closing_ledger(
+        rfp_text, research=research
+    )
+    components = detect_closing_components(rfp_text, ledger=ledger)
     if not components:
-        return draft, [], ["No closing package items available."]
+        return draft, [], ["No closing package items in ledger."], research
 
     ids = {s.id for s in draft.sections}
     titles = [s.title for s in draft.sections]
@@ -252,6 +272,7 @@ async def ensure_closing_sections(
             draft_section_ids=ids,
             draft_titles=titles,
             component=component,
+            draft=draft,
         ):
             logs.append(f"Closing already covered: {component.id}")
             continue
@@ -277,12 +298,32 @@ async def ensure_closing_sections(
         added.append(component)
         logs.append(f"Added closing section: {component.title}")
 
-    if not added:
-        return draft, [], logs
+    logs.append(f"__closing_ledger_count__={len(ledger.requirements)}")
+
+    from app.services.proposal_closing_ledger import (
+        ensure_missing_closing_stubs,
+        repair_fabricated_ready_in_draft,
+    )
+
+    # Apply on current sections (including any just added) so Ready fakes die.
+    probe = draft if not added else draft.model_copy(
+        update={
+            "sections": sections,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    probe, fix_logs = repair_fabricated_ready_in_draft(probe, ledger)
+    logs.extend(fix_logs)
+    probe, stub_logs = ensure_missing_closing_stubs(probe, ledger)
+    logs.extend(stub_logs)
+    sections = list(probe.sections)
+
+    if not added and not fix_logs and not stub_logs:
+        return draft, [], logs, research
 
     now = datetime.now(timezone.utc).isoformat()
     updated = draft.model_copy(update={"sections": sections, "updated_at": now})
-    return updated, added, logs
+    return updated, added, logs, research
 
 
 def _merge_closing_into_research_map(
@@ -339,18 +380,27 @@ async def run_fulfill_rfp_gaps(
         record_generation_stopped,
     )
     from app.services.proposal_verify_optional_scrub import run_verify_scrub_only_scan
+    import uuid
 
+    from app.services.llm_call_context import llm_call_context
+
+    scan_run_id = str(uuid.uuid4())
     token = bind_active_rfp(rfp_id)
     cancelled = False
     try:
-        if (mode or "full").strip().lower() in {
-            "verify_scrub_only",
-            "verify-scrub",
-            "verify_scrub",
-            "scrub",
-        }:
-            return await run_verify_scrub_only_scan(rfp_id)
-        return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
+        with llm_call_context(
+            rfp_id=rfp_id,
+            run_id=scan_run_id,
+            node_name="fulfill-scan",
+        ):
+            if (mode or "full").strip().lower() in {
+                "verify_scrub_only",
+                "verify-scrub",
+                "verify_scrub",
+                "scrub",
+            }:
+                return await run_verify_scrub_only_scan(rfp_id)
+            return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
     except ProposalGenerationCancelled:
         cancelled = True
         await record_generation_stopped(rfp_id, "fulfill-scan")
@@ -449,6 +499,7 @@ async def _run_fulfill_rfp_gaps_body(
         "submissionChecklistExpected": [],
     }
     added: list[Any] = []
+    all_closing: list[Any] = []
     if resume_at > 1:
         prior = dict(draft.last_fulfill_report or {})
         if prior:
@@ -531,13 +582,19 @@ async def _run_fulfill_rfp_gaps_body(
         )
         await _ensure_not_stopped()
 
-        draft, added, close_logs = await ensure_closing_sections(
+        draft, added, close_logs, research = await ensure_closing_sections(
             draft=draft,
             rfp=rfp,
             rfp_text=rfp_text,
+            research=research,
         )
         report["logs"].extend(close_logs)
-        all_closing = detect_closing_components(rfp_text)
+        from app.services.proposal_closing_ledger import get_or_extract_closing_ledger
+
+        closing_ledger, research = await get_or_extract_closing_ledger(
+            rfp_text, research=research
+        )
+        all_closing = detect_closing_components(rfp_text, ledger=closing_ledger)
         ids_after = {s.id for s in draft.sections}
         titles_after = [s.title for s in draft.sections]
         report["closingDetectedSections"] = [
@@ -550,6 +607,7 @@ async def _run_fulfill_rfp_gaps_body(
                 draft_section_ids=ids_after,
                 draft_titles=titles_after,
                 component=c,
+                draft=draft,
             )
         ]
         report["logs"].append(
@@ -634,36 +692,8 @@ async def _run_fulfill_rfp_gaps_body(
             report["logs"].append(f"Scored stub draft skipped: {exc}")
 
     try:
-        from app.services.proposal_fulfill_fabrication_guard import (
-            repair_fabricated_qualifications_async,
-        )
-
-        draft, fab_logs, fab_human = await repair_fabricated_qualifications_async(
-            draft, research
-        )
-        report["logs"].extend(fab_logs)
-        report["humanDecisionGaps"].extend(fab_human)
-        if fab_logs:
-            await asave_proposal_draft(draft)
-    except ProposalGenerationCancelled:
-        raise
-    except FulfillStepSkip as skip:
-        _log_resume_skip(skip.step)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Fabrication guard skipped: %s", exc)
-        report["logs"].append(f"Fabrication guard skipped: {exc}")
-
-    try:
-        from app.services.proposal_integrity_guards import (
-            apply_manuscript_integrity_guards,
-            apply_reference_contact_evidence_guard,
-        )
         from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
 
-        draft, integrity_logs = apply_manuscript_integrity_guards(draft)
-        report["logs"].extend(integrity_logs[:16])
-        draft, phone_logs = apply_reference_contact_evidence_guard(draft, research)
-        report["logs"].extend(phone_logs[:12])
         draft, zf_report = apply_zero_fabrication_guards(
             draft,
             research=research,
@@ -672,7 +702,12 @@ async def _run_fulfill_rfp_gaps_body(
             label="scan-preflight",
         )
         report["logs"].extend(zf_report.logs[:16])
-        if integrity_logs or phone_logs or zf_report.logs:
+        report["humanDecisionGaps"].extend(
+            line.split("HUMAN_GAP:", 1)[1].strip()
+            for line in zf_report.logs
+            if "HUMAN_GAP:" in line
+        )
+        if zf_report.logs:
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
@@ -800,9 +835,7 @@ async def _run_fulfill_rfp_gaps_body(
                         "title": d["title"],
                     }
                 )
-        report["closingDetected"] = [
-            c.id for c in detect_closing_components(rfp_text)
-        ]
+        report["closingDetected"] = [c.id for c in all_closing]
         research = _merge_closing_into_research_map(research, added)
         if added:
             await asave_proposal_draft(draft)
@@ -917,7 +950,10 @@ async def _run_fulfill_rfp_gaps_body(
             "Delete clones, remove mega sections that restate sibling tabs.",
         )
         await _ensure_not_stopped()
-        sections, dedupe_logs = dedupe_manuscript_for_scan(list(draft.sections))
+        sections, dedupe_logs = dedupe_manuscript_for_scan(
+            list(draft.sections),
+            drop_clone_tabs=False,
+        )
         if dedupe_logs:
             draft = draft.model_copy(
                 update={
@@ -957,7 +993,8 @@ async def _run_fulfill_rfp_gaps_body(
         await _scan_progress(
             6,
             "Scan RFP: senior editor review",
-            "RFP proposal reviewer — dedupe, cross-refs, coverage gaps; no invented facts.",
+            "RFP proposal reviewer — coverage gaps from the outline; overlap already trimmed. "
+            "No second senior-editor LLM rewrite.",
         )
         await _ensure_not_stopped()
         from app.services.proposal_scan_senior_reviewer import (
@@ -1591,10 +1628,13 @@ async def _run_fulfill_rfp_gaps_body(
         await _scan_progress(
             15,
             "Scan RFP: Compact manuscript",
-            "Final pass — remove leftover duplicate/restated tabs after adds/rewrites.",
+            "Final pass — trim leftover restated prose after adds/rewrites. Keep every TOC tab.",
         )
         await _ensure_not_stopped()
-        sections, final_logs = dedupe_manuscript_for_scan(list(draft.sections))
+        sections, final_logs = dedupe_manuscript_for_scan(
+            list(draft.sections),
+            drop_clone_tabs=False,
+        )
         if final_logs:
             draft = draft.model_copy(
                 update={
@@ -1751,6 +1791,28 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Scan RFP quality gate skipped: %s", exc)
         report["logs"].append(f"Quality gate skipped: {exc}")
         report["qualityGate"] = {"ran": False, "stoppedReason": str(exc)}
+
+    # Final zero-fabrication pass — quality gate / stage 17 may reintroduce claims.
+    try:
+        from app.services.proposal_zero_fabrication import (
+            apply_zero_fabrication_guards_before_persist,
+        )
+
+        draft, zf_final = await apply_zero_fabrication_guards_before_persist(
+            draft,
+            research=research,
+            rfp_text=rfp_text,
+            label="scan-final",
+        )
+        if zf_final.logs:
+            await asave_proposal_draft(draft)
+            report["logs"].extend(zf_final.logs[:20])
+            report["logs"].append(
+                f"Final zero-fabrication pass: {len(zf_final.logs)} guard action(s)"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Scan final zero-fabrication pass skipped: %s", exc)
+        report["logs"].append(f"Final zero-fabrication pass skipped: {exc}")
 
     await _scan_progress(
         18,

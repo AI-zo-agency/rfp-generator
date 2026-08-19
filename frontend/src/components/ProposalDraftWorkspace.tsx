@@ -15,7 +15,10 @@ import {
   stripLegacyMonolithSections,
 } from "@/lib/proposal-draft";
 import { getManuscriptSections, normalizeOutlineSectionOrder, resolveManuscriptJumpTarget, buildManuscriptIndexMap } from "@/lib/proposal-outline-tree";
-import { isSectionDrafted } from "@/lib/proposal-section-health";
+import {
+  isManuscriptSectionDrafted,
+  isSectionDrafted,
+} from "@/lib/proposal-section-health";
 import { buildScanRfpSummary, type ScanRfpFulfillReport, type ScanRfpSummary } from "@/lib/proposal-scan-report";
 import { ScanRfpSummaryBanner } from "@/components/ScanRfpSummaryBanner";
 import {
@@ -42,11 +45,14 @@ import {
   saveProposalDraft,
   startLiveDraftPolling,
   fullProposalProgressFromInFlight,
+  getProposalJobStatus,
+  pollFulfillScanCompletion,
   matchCaseStudiesForRfp,
   type CaseStudyMatchResult,
   type FullProposalProgress,
   type ProposalPipelineStatus,
 } from "@/lib/proposal-api";
+import { getLlmCostForRfp, type LlmCostRfpBreakdown } from "@/lib/llm-cost-service";
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
 import { ProposalSectionTree } from "./ProposalSectionTree";
@@ -86,6 +92,7 @@ import {
   FULFILL_SCAN_STEP_LABELS,
   pipelineServerStillWorkingMessage,
   inProgressPhaseLabel,
+  type PipelineInProgressPhase,
 } from "@/lib/proposal-pipeline-checkpoint";
 
 type WorkspaceTab = "outline" | "content" | "export";
@@ -283,6 +290,9 @@ function ProposalDraftWorkspaceInner({
   const [provider, setProvider] = useState<string | null>(null);
   const [pipelineStatus, setPipelineStatus] =
     useState<ProposalPipelineStatus | null>(null);
+  const [rfpCost, setRfpCost] = useState<LlmCostRfpBreakdown | null>(null);
+  const rfpCostRef = useRef<LlmCostRfpBreakdown | null>(null);
+  rfpCostRef.current = rfpCost;
   const skipNextSaveRef = useRef(false);
   const saveGenerationRef = useRef(0);
   const fullProposalAbortRef = useRef<AbortController | null>(null);
@@ -328,6 +338,60 @@ function ProposalDraftWorkspaceInner({
     [outline.selectedKeyPersonas]
   );
   const hasKeyPersonas = selectedPersonaIds.length > 0;
+
+  const fmtUsd = useCallback((value: number) => {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 3,
+    }).format(value);
+  }, []);
+
+  const costByRunType = useMemo(() => {
+    const runs = rfpCost?.byRun ?? [];
+    const totals = {
+      generate: 0,
+      completeScan: 0,
+      chat: 0,
+    };
+    for (const run of runs) {
+      if (run.runType === "generate_proposal") totals.generate += run.costUsd;
+      else if (run.runType === "complete_scan") totals.completeScan += run.costUsd;
+      else if (run.runType === "chat") totals.chat += run.costUsd;
+    }
+    return totals;
+  }, [rfpCost]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const load = async () => {
+      const next = await getLlmCostForRfp(rfp.id);
+      if (cancelled || !next) return;
+      const prev = rfpCostRef.current;
+      if (
+        next.callCount === 0 &&
+        next.totalCostUsd === 0 &&
+        prev &&
+        (prev.callCount > 0 || prev.totalCostUsd > 0)
+      ) {
+        return;
+      }
+      setRfpCost(next);
+    };
+
+    void load();
+    if (isFullProposalRunning || isFulfillingRfpGaps) {
+      timer = window.setInterval(() => void load(), 4000);
+    }
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearInterval(timer);
+    };
+  }, [rfp.id, isFullProposalRunning, isFulfillingRfpGaps]);
 
   const requireKeyPersonas = useCallback(
     (run: () => void) => {
@@ -591,7 +655,7 @@ function ProposalDraftWorkspaceInner({
     // three sections held no draft — contradicting the pipeline, which correctly
     // refuses to mark Phase 3 complete for them.
     const complete = manuscriptSections.filter((s) =>
-      isSectionDrafted(s.content)
+      isManuscriptSectionDrafted(s)
     ).length;
     return { complete, total };
   }, [manuscriptSections]);
@@ -681,7 +745,7 @@ function ProposalDraftWorkspaceInner({
       );
 
       const inFlightPhase = research?.pipelineCheckpoint?.inProgressPhase;
-      if (inFlightPhase && inFlightPhase !== FULFILL_SCAN_PHASE) {
+      if (inFlightPhase) {
         setGenerateNotice(pipelineServerStillWorkingMessage(inFlightPhase));
       }
 
@@ -794,7 +858,7 @@ function ProposalDraftWorkspaceInner({
             buildPipelineStatus(result.draft, result.research, result.pipelineStatus)
           );
           const inFlight = result.research.pipelineCheckpoint?.inProgressPhase;
-          if (inFlight && inFlight !== FULFILL_SCAN_PHASE) {
+          if (inFlight) {
             setGenerateNotice(pipelineServerStillWorkingMessage(inFlight));
             setActiveTab("content");
           }
@@ -1286,50 +1350,151 @@ function ProposalDraftWorkspaceInner({
 
   /** Resume live manuscript updates when user reopens during backend generation. */
   useEffect(() => {
-    if (!hydrated || isFullProposalRunning) return;
-    const phase = research?.pipelineCheckpoint?.inProgressPhase;
-    if (!phase || phase === FULFILL_SCAN_PHASE) {
-      return;
-    }
-    const progressMap: Record<string, FullProposalProgress> = {
-      "sections-1-3": "sections-1-3",
-      "phase-2": "phase-2",
-      "phase-3": "phase-3",
-      "phase-3-6-self-edit": "phase-3-6-self-edit",
-      "phase-3-5-budget": "phase-3-5-budget",
-      "phase-4-review": "phase-4-review",
-    };
-    setFullProposalProgress(
-      progressMap[phase] ??
-        fullProposalProgressFromInFlight(phase) ??
-        "phase-3"
-    );
-    setGenerateNotice(pipelineServerStillWorkingMessage(phase));
-    setGenerateError(null);
-    const stop = startLiveDraftPolling(
-      rfp.id,
-      (draft) => handleLiveDraftUpdateRef.current(draft),
-      (updated) => {
-        handleResearchPollRef.current(updated);
-        const live = updated?.pipelineCheckpoint?.inProgressPhase;
-        if (live && live !== FULFILL_SCAN_PHASE) {
-          setGenerateNotice(pipelineServerStillWorkingMessage(live));
-        } else {
-          setGenerateNotice((prev) =>
-            prev?.startsWith("Still generating") ? null : prev
-          );
+    if (!hydrated || isFullProposalRunning || isFulfillingRfpGaps) return;
+
+    let cancelled = false;
+    let stopPoll: (() => void) | null = null;
+    let abort: AbortController | null = null;
+
+    async function reconnect() {
+      const checkpointPhase = research?.pipelineCheckpoint?.inProgressPhase;
+      const job = await getProposalJobStatus(rfp.id);
+      if (cancelled) return;
+
+      const jobRunning =
+        job?.status === "running" && Boolean(job.jobType);
+      const activePhase: PipelineInProgressPhase | null =
+        (jobRunning ? (job!.jobType as PipelineInProgressPhase) : null) ??
+        checkpointPhase ??
+        null;
+
+      if (!activePhase) return;
+      if (!jobRunning && !checkpointPhase) return;
+
+      setGenerateError(null);
+      setGenerateNotice(pipelineServerStillWorkingMessage(activePhase));
+
+      stopPoll = startLiveDraftPolling(
+        rfp.id,
+        (draft) => handleLiveDraftUpdateRef.current(draft),
+        (updated) => {
+          handleResearchPollRef.current(updated);
+          const live = updated?.pipelineCheckpoint?.inProgressPhase;
+          if (live) {
+            setGenerateNotice(pipelineServerStillWorkingMessage(live));
+          }
         }
+      );
+
+      if (activePhase === FULFILL_SCAN_PHASE) {
+        if (!jobRunning) return;
+        setIsFulfillingRfpGaps(true);
+        abort = new AbortController();
+        fulfillAbortRef.current = abort;
+        try {
+          const waited = await pollFulfillScanCompletion(rfp.id, abort.signal);
+          if (cancelled || !waited.draft || !waited.research) return;
+          const fulfillReport = (waited.draft.lastFulfillReport ?? {}) as Record<
+            string,
+            unknown
+          >;
+          setPresubmitReview(waited.research.presubmitReview ?? null);
+          setResearch(waited.research);
+          applyOutlineFromServer({
+            ...waited.draft,
+            lastFulfillReport: fulfillReport,
+          });
+          setScanSummary(buildScanRfpSummary(fulfillReport as ScanRfpFulfillReport));
+          setScanSummaryExpanded(false);
+          setGapResolveNotice("Saved version available (Before complete & clean).");
+          setGenerateNotice(null);
+          setGenerateError(null);
+        } catch (error) {
+          if (cancelled) return;
+          if (
+            abort.signal.aborted ||
+            (error instanceof DOMException && error.name === "AbortError")
+          ) {
+            setGenerateNotice(
+              "Complete & clean stopped — progress saved. Use Complete & clean draft to resume from the last step."
+            );
+            setGenerateError(null);
+            return;
+          }
+          const message =
+            error instanceof Error ? error.message : "Complete & clean failed";
+          setGenerateError(message);
+        } finally {
+          if (fulfillAbortRef.current === abort) {
+            fulfillAbortRef.current = null;
+          }
+          stopPoll?.();
+          if (!cancelled) setIsFulfillingRfpGaps(false);
+        }
+        return;
       }
-    );
+
+      const progressMap: Record<string, FullProposalProgress> = {
+        "sections-1-3": "sections-1-3",
+        "phase-2": "phase-2",
+        "phase-3": "phase-3",
+        "phase-3-6-self-edit": "phase-3-6-self-edit",
+        "phase-3-5-budget": "phase-3-5-budget",
+        "phase-4-review": "phase-4-review",
+      };
+      setFullProposalProgress(
+        progressMap[activePhase] ??
+          fullProposalProgressFromInFlight(activePhase) ??
+          "phase-3"
+      );
+    }
+
+    void reconnect();
     return () => {
-      stop();
+      cancelled = true;
+      stopPoll?.();
+      abort?.abort();
     };
   }, [
     hydrated,
     isFullProposalRunning,
+    isFulfillingRfpGaps,
     research?.pipelineCheckpoint?.inProgressPhase,
     rfp.id,
+    applyOutlineFromServer,
   ]);
+
+  /** Don't keep a stale "Stopped" banner while the server job is still running. */
+  useEffect(() => {
+    if (!hydrated || !generateNotice?.startsWith("Stopped")) return;
+
+    let cancelled = false;
+    const syncRunningJob = async () => {
+      const job = await getProposalJobStatus(rfp.id);
+      if (cancelled || !job || job.status !== "running" || !job.jobType) return;
+
+      setGenerateError(null);
+      setGenerateNotice(
+        pipelineServerStillWorkingMessage(job.jobType as PipelineInProgressPhase)
+      );
+      if (job.jobType === FULFILL_SCAN_PHASE) {
+        setIsFulfillingRfpGaps(true);
+        return;
+      }
+      setIsFullProposalRunning(true);
+      setFullProposalProgress(
+        fullProposalProgressFromInFlight(job.jobType as PipelineInProgressPhase) ??
+          "phase-3"
+      );
+    };
+
+    void syncRunningJob();
+    const interval = setInterval(() => void syncRunningJob(), 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [hydrated, rfp.id, generateNotice]);
 
   const rfpTabProgress = useMemo(() => {
     const ids = new Set(research?.rfpSections?.map((s) => s.id) ?? []);
@@ -1476,6 +1641,8 @@ function ProposalDraftWorkspaceInner({
     if (!scanOk) {
       return;
     }
+    setGenerateNotice(null);
+    setGenerateError(null);
     setIsFulfillingRfpGaps(true);
     setGapResolveError(null);
     setGapResolveNotice(null);
@@ -2384,6 +2551,30 @@ function ProposalDraftWorkspaceInner({
         isFulfillScanRunning={isFulfillingRfpGaps}
         rfpTabProgress={rfpTabProgress}
       />
+
+      {rfpCost ? (
+        <div className="border-b border-zo-border/70 bg-[#fafbfc] px-3 py-2 md:px-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zo-text-muted">
+            <span className="font-semibold text-foreground">
+              LLM cost: {fmtUsd(rfpCost.totalCostUsd)}
+            </span>
+            <span>Generate: {fmtUsd(costByRunType.generate)}</span>
+            <span>Complete Scan: {fmtUsd(costByRunType.completeScan)}</span>
+            <span>Chat edits: {fmtUsd(costByRunType.chat)}</span>
+            <span>{rfpCost.callCount.toLocaleString()} calls</span>
+            <span>{rfpCost.runCount} runs</span>
+          </div>
+          {rfpCost.byNode.length > 0 ? (
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-zo-text-muted">
+              {rfpCost.byNode.slice(0, 6).map((row) => (
+                <span key={row.nodeName}>
+                  {row.nodeName}: {fmtUsd(row.costUsd)}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="proposal-workspace-body">
       {/* Outline tab */}

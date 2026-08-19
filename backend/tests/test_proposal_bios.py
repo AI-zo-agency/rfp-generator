@@ -316,5 +316,24 @@ Account lead
         )
 
 
+class BioStubKbInputTests(unittest.IsolatedAsyncioTestCase):
+    async def test_skips_04_bio_fetch_when_not_inline(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.proposal_sections_graph import _bio_stub_kb_inputs
+
+        with patch(
+            "app.services.proposal_sections_graph._fetch_member_bio_kb",
+            new=AsyncMock(side_effect=AssertionError("must not fetch 04_Bio")),
+        ):
+            text, sources, available, pdf = await _bio_stub_kb_inputs(
+                "Ella Lindau", inline_required=False
+            )
+        self.assertEqual(text, "")
+        self.assertTrue(available)
+        self.assertEqual(pdf, "04_Bio_EllaLindau.pdf")
+        self.assertEqual(sources, ["04_Bio_EllaLindau.pdf"])
+
+
 if __name__ == "__main__":
     unittest.main()

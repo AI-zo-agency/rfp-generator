@@ -120,9 +120,21 @@ def extract_manual_fill_tags(text: str) -> list[ManualFillTag]:
     return tags
 
 
+def user_asks_submit_handoff_fill(text: str) -> bool:
+    """True when the user wants open confirm-before-submit handoffs addressed."""
+    raw = (text or "").casefold()
+    if "confirm before submit" in raw:
+        return True
+    if "fill all" in raw and ("submit" in raw or "confirm" in raw):
+        return True
+    return False
+
+
 def is_manual_fill_request(text: str) -> bool:
     """True when the user is explicitly asking to resolve MANUAL FILL tags."""
-    return bool(_MANUAL_FILL_REQUEST_RE.search(text or ""))
+    return bool(_MANUAL_FILL_REQUEST_RE.search(text or "")) or user_asks_submit_handoff_fill(
+        text
+    )
 
 
 def mask_manual_fill_tags(content: str) -> tuple[str, list[str]]:

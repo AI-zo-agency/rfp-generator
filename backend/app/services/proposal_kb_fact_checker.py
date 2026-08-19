@@ -29,6 +29,25 @@ from app.services.proposal_section_quality import word_count
 
 logger = logging.getLogger(__name__)
 
+
+async def _append_personnel_04_bio(section: ProposalSection, kb_context: str) -> str:
+    """QA/Complete Scan: attach real 04_Bio text. Do not write it into the manuscript."""
+    from app.services.proposal_capability_bio_grounding import (
+        is_personnel_bio_section,
+        pack_04_bio_kb_for_section,
+    )
+
+    if not is_personnel_bio_section(section):
+        return kb_context
+    packed = await pack_04_bio_kb_for_section(section)
+    if not packed.strip():
+        return kb_context
+    header = (
+        "04_Bio (verify named staff against this; do NOT dump full resumes into "
+        "the manuscript; Section 2 designer-note stubs stay stubs):\n"
+    )
+    return f"{header}{packed}\n\n{kb_context}"
+
 # Cap concurrent section fact-checks / KB queries (I/O bound; avoid rate-limit storms).
 FACT_CHECK_SECTION_PARALLEL = 4
 FACT_CHECK_KB_QUERY_PARALLEL = 4
@@ -429,11 +448,8 @@ async def _repair_bio_subsection_block(
     heading: str,
     block: str,
 ) -> tuple[str, int]:
-    """Fill VERIFY tags in one bio subsection; also rewrite Role-on-engagement
-    blurbs so they cannot invent titles or sector specializations.
-    """
-    role_layer = "role" in heading.casefold() and "engagement" in heading.casefold()
-    if "[VERIFY:" not in block and not _INSUFFICIENT_EVIDENCE_RE.search(block) and not role_layer:
+    """Fill VERIFY tags in one bio subsection. Do not LLM-expand Role lines from 04_Bio."""
+    if "[VERIFY:" not in block and not _INSUFFICIENT_EVIDENCE_RE.search(block):
         return block, 0
 
     query = _kb_query_for_bio_subsection(member, heading)
@@ -491,10 +507,7 @@ async def _repair_bio_subsection_block(
 async def _fact_check_bio_subsections(
     section: ProposalSection,
 ) -> tuple[ProposalSection, int, list[str]]:
-    """Fill VERIFY tags, and always ground Role-on-this-engagement blurbs to 04_Bio.
-
-    Source bio PDF body is not rewritten here; engagement-specific role narrative is.
-    """
+    """Fill VERIFY tags in bio subsections. Do not fetch 04_Bio to expand Role lines."""
     if not section.id.startswith("section-2-bio"):
         return section, 0, []
 
@@ -510,12 +523,7 @@ async def _fact_check_bio_subsections(
         rebuilt.append(preamble)
 
     for heading, block in blocks:
-        role_layer = "role" in heading.casefold() and "engagement" in heading.casefold()
-        if (
-            "[VERIFY:" not in block
-            and not _INSUFFICIENT_EVIDENCE_RE.search(block)
-            and not role_layer
-        ):
+        if "[VERIFY:" not in block and not _INSUFFICIENT_EVIDENCE_RE.search(block):
             rebuilt.append(block)
             continue
         new_block, fills = await _repair_bio_subsection_block(
@@ -1021,6 +1029,17 @@ async def _fact_check_one_section(
     """Fact-check a single section; returns section + per-section report deltas."""
     report = FactCheckReport(sections_checked=1)
     current = section
+    from app.services.proposal_bio_stub import skip_inline_bio_expansion
+
+    if (
+        (current.id or "").startswith("section-2-bio")
+        and current.id != "section-2-bio-placeholder"
+        and skip_inline_bio_expansion(rfp_context or "")
+    ):
+        report.logs.append(
+            f"{section.title}: skipped KB fact-check (designer-note bio stub)"
+        )
+        return current, report
     mapped = _resolve_mapped_section(section, research)
     requirements = _requirements_for_section(section, mapped)
     retrieval_focus = list(mapped.retrieval_focus) if mapped else []
@@ -1100,6 +1119,7 @@ async def _fact_check_one_section(
             rfp=rfp,
             mapped=mapped,
         )
+        kb_context = await _append_personnel_04_bio(current, kb_context)
         if _is_whole_section_draft_stub(current.content or "") and not kb_context.strip():
             logger.info(
                 "KB fact-check: skipping stub repair for %s — no KB evidence found",
@@ -1138,6 +1158,7 @@ async def _fact_check_one_section(
             kb_context, sources = await _kb_blob_for_section(
                 current, rfp, mapped=mapped
             )
+        kb_context = await _append_personnel_04_bio(current, kb_context)
 
     if kb_context:
         new_body, fills = _replace_verify_tags_from_blob(

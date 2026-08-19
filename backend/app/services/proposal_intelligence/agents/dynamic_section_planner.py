@@ -80,7 +80,9 @@ Rules:
 -   CLOSING / compliance package items MUST be included when the RFP names them (even if forms):
   References, Acknowledgement of Addenda, Non-Collusion / Ownership Disclosure, Pricing
   Proposal Form, Authorized Signature, Exemplar Agreement acknowledgment, Offeror Commitment
-  & Closing Statement, and attachment CHECKLISTS (W-9 / signed forms / "attach COI PDF").
+  & Closing Statement, Generative AI Disclosure (when the RFP requires it), Vendor
+  Questionnaire / OpenGov portal fields (when the RFP is portal-submitted), and attachment
+  CHECKLISTS (W-9 / signed forms / "attach COI PDF").
   Do NOT add a narrative "Certificate of Insurance" / insurance-coverage essay — Section 1.5
   already owns coverage; attachment items are file-return checklists only.
   ATTACHMENTS (COI, W-9, signed/notarized forms, exhibits the buyer supplies): outline them
@@ -98,6 +100,17 @@ Rules:
 - Do NOT copy another client's outline. Do NOT write section prose.
 - Mark required=true only for mandatory submission items; use conditionalReason for optional ones.
 - When an evaluation criterion clearly matches a section, set evaluationWeight to that criterion's points.
+- Set protectFromCap=true for mandatory submission instruments the buyer must receive
+  (scored Cost / pricing form, official quotation form, required certifications, AI disclosure,
+  references package, addenda acknowledgement, portal/vendor questionnaire, attachment checklists).
+  Do NOT set protectFromCap for optional narrative padding.
+- Set submissionInstrument to exactly one of:
+  cost | form | disclosure | references | narrative | null
+  Use "cost" for the scored pricing INSTRUMENT (hourly labor-category table, blended rate form,
+  official quotation/pricing proposal form) — NOT for optional fee narrative that is not the
+  scored Cost deliverable. Use "disclosure" for AI / generative-AI disclosures.
+  Use "references" for reference forms. Use "form" for other signed compliance forms.
+  Use "narrative" for approach / experience essays. Leave null only when unsure.
 
 Return JSON only:
 {
@@ -111,7 +124,9 @@ Return JSON only:
       "parentId": null,
       "children": [],
       "dependencies": [],
-      "evaluationWeight": null
+      "evaluationWeight": null,
+      "protectFromCap": false,
+      "submissionInstrument": null
     }
   ],
   "confidence": 0.0
@@ -223,9 +238,20 @@ async def run_dynamic_section_planner(
             drop_generic_filler=False,
         )
         dropped = list(dropped) + list(dropped_safe)
+    from app.services.proposal_closing_ledger import get_or_extract_closing_ledger
+    from app.services.proposal_repository import aget_research_cache
+
+    research = None
+    rfp_id = getattr(getattr(plan, "metadata", None), "rfp_id", None) or ""
+    if rfp_id:
+        research = await aget_research_cache(str(rfp_id))
+    closing_ledger, research = await get_or_extract_closing_ledger(
+        rfp_context, research=research
+    )
     kept, closing_added = merge_closing_components_into_outline(
         kept,
         rfp_context=rfp_context,
+        ledger=closing_ledger,
     )
     # Closing merge can reintroduce near-dups — free Jaccard/head-label pass only
     # (no second LLM call; cost stays in the single planner request).

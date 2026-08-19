@@ -24,12 +24,19 @@ if "langchain_openai" not in sys.modules:
 from app.services.proposal_section_editor import decide_chat_route  # noqa: E402
 
 
-def route(intent="none", message="rewrite this section", selection=False, history=None):
+def route(
+    intent="none",
+    message="rewrite this section",
+    selection=False,
+    history=None,
+    improve_pinned=False,
+):
     return decide_chat_route(
         chat_intent=intent,
         user_message=message,
         selection_mode=selection,
         conversation_history=history,
+        improve_pinned=improve_pinned,
     )
 
 
@@ -63,8 +70,18 @@ class DecideChatRouteTests(unittest.TestCase):
         self.assertFalse(r.advisory)
         self.assertEqual(r.reason, "structure_ask")
 
-    def test_classifier_advisory_wins_over_edit_keywords(self) -> None:
+    def test_improve_this_section_beats_classifier_advisory(self) -> None:
+        r = route(intent="advisory", message="Improve this section for the RFP.")
+        self.assertFalse(r.advisory)
+        self.assertEqual(r.reason, "open_tab_edit")
+
+    def test_rewrite_this_section_beats_classifier_advisory(self) -> None:
         r = route(intent="advisory", message="rewrite this section")
+        self.assertFalse(r.advisory)
+        self.assertEqual(r.reason, "open_tab_edit")
+
+    def test_classifier_advisory_wins_when_ask_is_not_this_section(self) -> None:
+        r = route(intent="advisory", message="review the whole proposal against the RFP")
         self.assertTrue(r.advisory)
         self.assertEqual(r.reason, "classifier_advisory")
 
@@ -99,10 +116,9 @@ class DecideChatRouteTests(unittest.TestCase):
         self.assertEqual(r.reason, "classifier_multi_patch")
 
     def test_keyword_gate_decides_only_when_classifier_abstains(self) -> None:
-        self.assertFalse(route(intent="none", message="rewrite this section").advisory)
-        self.assertEqual(
-            route(intent="none", message="rewrite this section").reason, "keyword_edit"
-        )
+        r = route(intent="none", message="rewrite this section")
+        self.assertFalse(r.advisory)
+        self.assertIn(r.reason, {"keyword_edit", "open_tab_edit"})
 
     def test_default_is_advisory(self) -> None:
         """The safe direction: never rewrite a draft on an unrecognised ask."""
@@ -124,6 +140,33 @@ class DecideChatRouteTests(unittest.TestCase):
         r = route(intent="none", message="yes", history=history)
         self.assertFalse(r.advisory)
         self.assertEqual(r.reason, "keyword_edit")
+
+    def test_improve_pin_question_answers_instead_of_rewriting(self) -> None:
+        r = route(
+            intent="single_edit",
+            message="is this grounded in the knowledge base?",
+            improve_pinned=True,
+        )
+        self.assertTrue(r.advisory)
+        self.assertEqual(r.reason, "improve_pin_question")
+
+    def test_improve_pin_change_request_edits_this_tab(self) -> None:
+        r = route(
+            intent="advisory",
+            message="make the opening shorter and add a client quote",
+            improve_pinned=True,
+        )
+        self.assertFalse(r.advisory)
+        self.assertEqual(r.reason, "improve_pin_edit")
+
+    def test_improve_pin_default_prompt_edits_this_tab(self) -> None:
+        r = route(
+            intent="advisory",
+            message="Improve this section for the RFP.",
+            improve_pinned=True,
+        )
+        self.assertFalse(r.advisory)
+        self.assertEqual(r.reason, "improve_pin_edit")
 
 
 if __name__ == "__main__":

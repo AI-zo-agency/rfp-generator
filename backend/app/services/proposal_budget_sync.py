@@ -358,18 +358,18 @@ def _fee_detail_row_sum(markdown: str) -> float | None:
             continue
         if re.search(r"(?i)\|\s*:?---", stripped):
             continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        label = cells[0].replace("*", "").strip().casefold()
         if re.search(r"(?i)\bamount\b", stripped) and re.search(
             r"(?i)\b(phase|deliverable)\b", stripped
         ):
             continue
-        if re.search(
-            r"(?i)\*\*\s*total\b|\bgrand\s+total\b|\bdirect\s+expenses\b|"
-            r"pass-?through|\bmedia\s+(?:buy|placement|spend)\b|"
-            r"travel\s*/\s*reimbursables",
-            stripped,
-        ):
+        if label in {"total", "grand total"} or "subtotal" in label:
             continue
-        amounts = re.findall(r"\$[\d,]+(?:\.\d{2})?", stripped)
+        # Last cell only — deliverable prose often names other dollar figures.
+        amounts = re.findall(r"\$[\d,]+(?:\.\d{2})?", cells[-1])
         if not amounts:
             continue
         total += _money(amounts[-1])
@@ -465,13 +465,23 @@ def collect_prose_arithmetic_violations(markdown: str) -> list[str]:
             )
 
     table_sum = _fee_detail_row_sum(text)
-    if table_sum is not None and fee_m:
-        tol = max(1.0, fee * 0.005)
-        if abs(table_sum - fee) > tol:
-            violations.append(
-                f"Fee Detail by Phase rows sum to ${table_sum:,.0f}, but the stated "
-                f"agency fee / professional-fee figure is ${fee:,.0f}."
-            )
+    if table_sum is not None:
+        total = _money(total_m.group(1)) if total_m else None
+        fee = _money(fee_m.group(1)) if fee_m else None
+        target: float | None = None
+        label = "agency fee / professional-fee figure"
+        if total is not None and abs(table_sum - total) <= max(1.0, table_sum * 0.02):
+            target = total
+            label = "total proposed investment"
+        elif fee is not None:
+            target = fee
+        if target is not None:
+            tol = max(1.0, target * 0.005)
+            if abs(table_sum - target) > tol:
+                violations.append(
+                    f"Fee Detail by Phase rows sum to ${table_sum:,.0f}, but the stated "
+                    f"{label} is ${target:,.0f}."
+                )
 
     for line_sum, table_total in _iter_markdown_table_sums(text):
         if line_sum is None:

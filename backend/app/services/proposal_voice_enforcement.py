@@ -270,6 +270,60 @@ def _fix_we_verb_agreement(text: str) -> str:
     return _WE_VERB_AGREEMENT.sub(fix, text)
 
 
+# Rev 3 empty hype + generic AI filler — deterministic strip on persist/generate.
+_BANNED_HYPE_WORD_RES = tuple(
+    re.compile(rf"\b{word}\b", re.IGNORECASE)
+    for word in (
+        "nice",
+        "great",
+        "amazing",
+        "incredible",
+        "exciting",
+        "passionate",
+        "robust",
+        "seamless",
+        "leverage",
+        "elevate",
+        "unlock",
+        "impactful",
+    )
+)
+_BANNED_HYPE_SOLUTION_RES = re.compile(r"\b(?:our|the|a|an)\s+solutions?\b", re.IGNORECASE)
+_GENERIC_AI_OPENERS_RES = (
+    re.compile(r"^\s*At the end of the day,?\s*", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Here(?:'s|\s+is)\s+the\s+thing:?\s*", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Let me be clear:?\s*", re.IGNORECASE | re.MULTILINE),
+    re.compile(
+        r"^\s*(?:I(?:'m|\s+am)\s+thrilled\s+to|I\s+hope\s+this\s+finds\s+you\s+well),?\s*",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(r"^\s*I\s+wanted\s+to\s+reach\s+out\s+(?:to\s+)?", re.IGNORECASE | re.MULTILINE),
+)
+_NOT_X_ITS_Y_RES = re.compile(
+    r"\b(?:not|isn't|is not|wasn't|was not|don't just|do not just)\s+[^,.;]{1,80}?"
+    r"(?:,\s*)?(?:it(?:'s| is| was)|they(?:'re| are)|we(?:'re| are))\s+",
+    re.IGNORECASE,
+)
+
+
+def scrub_generic_ai_prose(content: str) -> str:
+    """Strip rev-3 banned hype words and obvious generic-AI openers."""
+    if not content.strip():
+        return content
+
+    text = content
+    for pattern in _GENERIC_AI_OPENERS_RES:
+        text = pattern.sub("", text)
+    for pattern in _BANNED_HYPE_WORD_RES:
+        text = pattern.sub("", text)
+    text = _BANNED_HYPE_SOLUTION_RES.sub("", text)
+    text = _NOT_X_ITS_Y_RES.sub("", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r" +([,.;:!?])", r"\1", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def apply_writing_standards_mechanics(content: str) -> str:
     """Deterministic rev 3 mechanics: company name + no em dashes."""
     if not content.strip():
@@ -296,7 +350,8 @@ def fix_narrative_register(content: str) -> str:
     if not content.strip():
         return content
 
-    text = apply_writing_standards_mechanics(content)
+    text = scrub_generic_ai_prose(content)
+    text = apply_writing_standards_mechanics(text)
     text = _SUBSECTION_VENDOR_HEADER.sub(
         r"\1Company Identification",
         text,
@@ -428,6 +483,18 @@ def should_skip_rfp_section_as_static_duplicate(
         r"price\s+proposal|pricing\s+proposal|compensation\s+schedule|"
         r"budget\s*(?:&|and)\s*pricing|budget\s+and\s+fees|"
         r"\bbudget\b|\bpricing\b|\bfees?\b"
+        r")\b",
+        title or "",
+        re.IGNORECASE,
+    ):
+        return False
+    # Scored narrative tabs — never skip even when intelligence tagged section-1/2/3.
+    if re.search(
+        r"\b("
+        r"background\s+and\s+experience|qualifications?\s+and\s+experience|"
+        r"firm\s+(?:qualifications?|experience|background)|"
+        r"agency\s+(?:qualifications?|experience|background)|"
+        r"experience\s+(?:and|&)\s+qualifications?"
         r")\b",
         title or "",
         re.IGNORECASE,

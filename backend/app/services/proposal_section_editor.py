@@ -76,8 +76,10 @@ from app.services.proposal_budget_playbook import (
 )
 from app.services.proposal_budget_content import (
     budget_section_score,
+    canonical_budget_summary_figures,
     fill_section_budget_verify_from_canonical,
     insert_budget_table_into_section,
+    normalize_fixed_pricing_narrative,
     reconcile_draft_budget_summaries,
     render_budget_markdown,
     render_embedded_budget_table_markdown,
@@ -132,6 +134,10 @@ logger = logging.getLogger(__name__)
 
 SECTION_CHAT_ADVISORY_PROMPT = """You are a zö agency proposal editor assistant — sharp, thorough, and honest.
 
+FIRST understand the user's actual question (including typos and missing punctuation).
+Answer THAT ask. Do not dump a full-proposal audit unless they asked for a review,
+gaps, compliance, or whole-proposal check.
+
 You receive the FULL proposal manuscript digest (every section) plus the currently open
 tab for orientation. The manuscript digest is authoritative for whole-proposal questions.
 
@@ -182,8 +188,12 @@ Rules:
       the table is wrong. Still check internal arithmetic (do line items sum to the
       stated total?) and say so clearly.
     - Quote the KB fact you checked against and name its source doc
-      (e.g. 01_companyfacts verified.docx). Prefer verified.docx over older .md
-      when both appear. If no KB excerpt covers it, say so plainly —
+      (e.g. 01_companyfacts verified.docx or 04_Bio_FirstLast.pdf). Prefer
+      verified.docx over older .md when both appear. If a Verified 04_Bio KB
+      block is present, those people HAVE bios in the KB — never say there is
+      no bio, and never recommend invented stand-ins (Drew Stone, Brittany
+      Frazier, or anyone not in that 04_Bio block / companyfacts / org chart).
+      If no KB excerpt covers it, say so plainly —
       never imply you verified something you only read back from the draft.
     - If it is wrong or needs a scrub, show what to change and set hasFix so they
       can apply it. Do not apply it in this turn.
@@ -281,11 +291,15 @@ def _should_skip_structure_planner(
         return False
     # Add/delete sidebar tabs always go through the structure planner — even when
     # Improve is pinned or the classifier guessed single_edit.
-    if chat_intent == "structure" or is_add_section_intent(user_message):
+    if is_add_section_intent(user_message):
+        return False
+    # "Improve this section" is a content rewrite on the open tab — never outline
+    # clarify, even if the classifier guessed structure.
+    if user_points_at_open_section(user_message):
+        return True
+    if chat_intent == "structure":
         return False
     if selection_mode or apply_fix or improve_section_pinned:
-        return True
-    if user_points_at_open_section(user_message):
         return True
     from app.services.proposal_section_kb_evidence import user_asks_kb_fetch_or_fill
     from app.services.proposal_verify_optional_scrub import (
@@ -304,6 +318,57 @@ def _should_skip_structure_planner(
     # Content edits / advisory / multi-patch — never outline clarify.
     if chat_intent in {"single_edit", "multi_patch", "advisory"}:
         return True
+    return False
+
+
+def _chat_improve_skip_kb(gate: Any, user_message: str) -> bool:
+    """True when this chat rewrite does not need a second understand/KB-plan LLM.
+
+    Evidence gate already decided WRITE / MANUAL FILL / cleanup. Running
+    `_plan_section_improve` (previously unnamed → quality model) then throwing
+    the queries away was a wasted hop.
+    """
+    from app.services.proposal_evidence_gate import EvidenceDecision
+    from app.services.proposal_section_kb_evidence import user_asks_kb_fetch_or_fill
+
+    if user_asks_kb_fetch_or_fill(user_message) or _selection_asks_to_fill_verify(
+        user_message
+    ):
+        return False
+    if gate is None:
+        return False
+    return bool(
+        not gate.requires_retrieval
+        or gate.action
+        in {
+            EvidenceDecision.WRITE_FROM_PLAN,
+            EvidenceDecision.MANUAL_FILL,
+            EvidenceDecision.DETERMINISTIC_CLEANUP,
+            EvidenceDecision.VERIFY_FIELD,
+        }
+    )
+
+
+def _advisory_needs_kb_lookup(user_message: str, excerpt: str) -> bool:
+    """KB retrieval for advisory: fact-check / fetch / pinned-wrong — not 'what is this?'.
+
+    Highlighting text used to trigger a query-planner LLM + two KB fetches on every
+    question, including 'what does this mean?'.
+    """
+    from app.services.proposal_section_kb_evidence import user_asks_kb_fetch_or_fill
+
+    text = user_message or ""
+    if user_asks_kb_fetch_or_fill(text):
+        return True
+    if _is_verification_only_ask(text) or _VERIFY_ASK_RE.search(text):
+        return True
+    pin = (excerpt or "").strip()
+    if pin and _EXCERPT_CLAIMED_WRONG_RE.search(text):
+        return True
+    # Pinned excerpt + a correctness question (not a meaning/what-is ask).
+    if pin and not _is_informational_only_ask(text):
+        if _ADVISORY_INTENT_RE.search(text) or text.strip().endswith("?"):
+            return True
     return False
 
 
@@ -365,6 +430,11 @@ _VERIFY_ASK_RE = re.compile(
     r"(?:everything|this|it)\s+(?:is\s+)?(?:true|truth|accurate|real)\b|"
     r"(?:any|is\s+there|are\s+there)\s+(?:fake|false|fabricat\w*|made[\s-]?up)"
     r")\b",
+    re.I,
+)
+
+_EXCERPT_CLAIMED_WRONG_RE = re.compile(
+    r"\b(?:wrong|incorrect|inaccurate|not\s+right|isn'?t\s+right|typo|mistake)\b",
     re.I,
 )
 
@@ -567,6 +637,16 @@ def _build_verification_kb_queries(
     excerpt_snip = re.sub(r"\s+", " ", (excerpt or "").strip())[:120]
     if excerpt_snip and len(excerpt_snip) >= 12:
         seeds.append(excerpt_snip)
+
+    from app.services.proposal_capability_bio_grounding import named_people_in_section
+
+    person_seeds: list[str] = []
+    for person in named_people_in_section(
+        section, user_message=f"{user_message or ''}\n{excerpt or ''}"
+    )[:4]:
+        person_seeds.append(person)
+        person_seeds.append(f"04_Bio {person}")
+    seeds = person_seeds + seeds
 
     # Keep short proper-noun spans from the user ask (e.g. "Umatilla"), drop verbs.
     ask = (user_message or "").strip()
@@ -956,6 +1036,14 @@ def _wants_section_edit(user_message: str, *, conversation_history: list[dict[st
 
     from app.services.proposal_section_kb_evidence import user_asks_kb_fetch_or_fill
 
+    # Questions first. "what's missing from this section?" is advisory — it must
+    # not be treated as a KB-fill rewrite just because it says "missing".
+    if (
+        _is_informational_only_ask(text) or _is_verification_only_ask(text)
+    ) and not _FOLLOW_WITH_MUTATE_RE.search(text):
+        if not user_asks_kb_fetch_or_fill(text):
+            return False
+
     # KB fetch/fill always mutates the open tab — never answer-only advisory.
     if user_asks_kb_fetch_or_fill(text) or _open_tab_verify_resolve_ask(text):
         return True
@@ -1053,7 +1141,13 @@ async def _apply_suggested_fix_to_section(
 ) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache, str, str, bool]:
     """One-click Apply the fix — rewrite from prior audit context, no KB re-plan."""
     prior_content = section.content or ""
-    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(prior_content)
+    from app.services.proposal_bio_stub import (
+        MISPLACED_BIO_STUB_REWRITE_NOTE,
+        prior_content_for_rewrite,
+    )
+
+    rewrite_body = prior_content_for_rewrite(section.id, prior_content)
+    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(rewrite_body)
     prior_chat = _format_apply_fix_prior_context(conversation_history)
 
     user_content = (
@@ -1061,6 +1155,8 @@ async def _apply_suggested_fix_to_section(
         f"Client: {rfp.client}\n\n"
         f"Apply instruction:\n{instruction.strip()}\n\n"
     )
+    if not rewrite_body.strip() and prior_content.strip():
+        user_content += f"{MISPLACED_BIO_STUB_REWRITE_NOTE}\n\n"
     if prior_chat:
         user_content += (
             "Prior chat (verified audit — use facts cited here; do not invent):\n"
@@ -1266,6 +1362,7 @@ def decide_chat_route(
     user_message: str,
     selection_mode: bool,
     conversation_history: list[dict[str, str]] | None = None,
+    improve_pinned: bool = False,
 ) -> ChatRoute:
     """Decide advisory vs edit for one chat turn.
 
@@ -1275,6 +1372,8 @@ def decide_chat_route(
 
     * a pinned excerpt edits unless the turn reads as a question about it —
       highlighting text scopes the ask, it does not authorise a rewrite;
+    * Improve full section binds the open tab the same way: questions are
+      answered, change requests rewrite THAT tab, never "which section?";
     * a structure ask (add/delete a section) always mutates, overriding even a
       classifier that said "advisory";
     * the LLM classifier decides next, because it reads the whole manuscript;
@@ -1283,10 +1382,20 @@ def decide_chat_route(
     """
     from app.services.proposal_section_kb_evidence import user_asks_kb_fetch_or_fill
 
-    # KB fetch/fill on any tab overrides selection mode, classifier, and verify-only.
-    if _selection_asks_to_fill_verify(user_message) or user_asks_kb_fetch_or_fill(
+    # KB fetch/fill on any tab overrides selection mode, classifier, and verify-only
+    # — except a pure question that only said "missing" / "this section".
+    kb_fill = _selection_asks_to_fill_verify(
         user_message
-    ):
+    ) or user_asks_kb_fetch_or_fill(user_message)
+    question_only = (
+        (
+            _is_informational_only_ask(user_message)
+            or _is_verification_only_ask(user_message)
+        )
+        and not _FOLLOW_WITH_MUTATE_RE.search(user_message)
+        and not user_asks_kb_fetch_or_fill(user_message)
+    )
+    if kb_fill and not question_only:
         return ChatRoute(advisory=False, reason="kb_fetch_or_verify_fill")
 
     if selection_mode:
@@ -1303,14 +1412,43 @@ def decide_chat_route(
         ):
             return ChatRoute(advisory=True, reason="selection_question")
         return ChatRoute(advisory=False, reason="selection_edit")
-    if chat_intent == "structure":
-        return ChatRoute(advisory=False, reason="classifier_structure")
+
+    if improve_pinned:
+        from app.services.proposal_chat_structure import is_add_section_intent
+
+        # New sidebar tab still goes through the outline planner.
+        if is_add_section_intent(user_message):
+            return ChatRoute(advisory=False, reason="structure_ask")
+        # Questions about THIS tab: answer, do not rewrite, do not ask which section.
+        if _is_verification_only_ask(user_message):
+            return ChatRoute(advisory=True, reason="improve_pin_verify_ask")
+        if _is_informational_only_ask(user_message):
+            return ChatRoute(advisory=True, reason="improve_pin_informational_ask")
+        if _selection_ask_is_advisory(
+            user_message, conversation_history=conversation_history
+        ):
+            return ChatRoute(advisory=True, reason="improve_pin_question")
+        # Change request / default "Improve this section for the RFP." → rewrite this tab.
+        return ChatRoute(advisory=False, reason="improve_pin_edit")
+
+    from app.services.proposal_chat_structure import is_add_section_intent
+
+    if chat_intent == "structure" or is_add_section_intent(user_message):
+        return ChatRoute(
+            advisory=False,
+            reason="structure_ask" if is_add_section_intent(user_message) else "classifier_structure",
+        )
     # Fact-check / fabricated-values asks must never rewrite — even when the
     # classifier guesses single_edit because the open tab looks like a target.
     if _is_verification_only_ask(user_message):
         return ChatRoute(advisory=True, reason="verify_ask")
     if _is_informational_only_ask(user_message):
         return ChatRoute(advisory=True, reason="informational_ask")
+    # "Improve this section" is a bound-tab rewrite, not a whole-proposal Q&A.
+    if user_points_at_open_section(user_message) and _wants_section_edit(
+        user_message, conversation_history=conversation_history
+    ):
+        return ChatRoute(advisory=False, reason="open_tab_edit")
     if chat_intent == "advisory":
         return ChatRoute(advisory=True, reason="classifier_advisory")
     if chat_intent in {"single_edit", "multi_patch"}:
@@ -1329,12 +1467,12 @@ def _compose_chat_user_message(
     lines = [
         "Prior conversation (MUST remember — address the latest message using this context):"
     ]
-    for turn in conversation_history[-20:]:
+    for turn in conversation_history[-8:]:
         role = turn.get("role", "user")
         label = "User" if role == "user" else "Assistant"
         content = (turn.get("content") or "").strip()
         if content:
-            lines.append(f"{label}: {content[:2000]}")
+            lines.append(f"{label}: {content[:800]}")
     lines.append(f"\nLatest user message:\n{user_message.strip()}")
     return "\n".join(lines)
 
@@ -1815,6 +1953,8 @@ def _advisory_target_binding(
         "If the user said 'section N', they mean this sidebar tab. Do NOT describe "
         "Understanding / tourism-context / evaluation-criterion sections unless "
         "THIS tab's title is that topic.\n"
+        "The user is already on this tab. Do not ask which section to work on. "
+        "Answer questions about this tab, or describe the edit for this tab only.\n"
     )
 
 
@@ -2586,6 +2726,9 @@ Rules:
    HTML/div, or "styled as …". The note body must be a layout/production handoff
    (callout box, columns, attach signed form/PDF, visual separation) — never meta
    commentary like "This section establishes…" or "critical for budget control".
+7. If the user asks to REMOVE or ADD a named person, bio, row, sentence, or fact:
+   mode MUST be patch. Anchor the paragraph, list item, or table row that contains
+   that name (or the team/staff block for an add). NEVER full_rewrite the section.
 """
 
 
@@ -2846,7 +2989,7 @@ async def _plan_edit_scope(
                     f"Client: {rfp.client}\n"
                     f"Section: {section.title}\n\n"
                     f"User message:\n{user_message.strip()}\n\n"
-                    f"Current section content:\n{content[:12000]}"
+                    f"Current section content:\n{content[:6000]}"
                 ),
             },
         ],
@@ -2978,6 +3121,34 @@ async def _verification_facts_block(
     return ""
 
 
+async def _verification_04_bio_kb_block(
+    section: ProposalSection,
+    *,
+    user_message: str = "",
+    excerpt: str = "",
+) -> str:
+    """Pack 04_Bio into QA/verify prompts. Never write it into the manuscript.
+
+    Generate keeps designer-note stubs. Chat verify / Complete Scan still need
+    the real PDF so they cannot claim a named teammate has no bio.
+    """
+    from app.services.proposal_capability_bio_grounding import pack_04_bio_kb_for_section
+
+    packed = await pack_04_bio_kb_for_section(
+        section, user_message=f"{user_message or ''}\n{excerpt or ''}"
+    )
+    if not packed.strip():
+        return ""
+    return (
+        "\n\nVerified 04_Bio KB (authoritative for named staff — these PDFs ARE "
+        "in the knowledge base. Never say there is no bio for anyone listed here. "
+        "Cite the 04_Bio filename. Do NOT paste this resume into the manuscript; "
+        "Section 2 tabs stay designer-note stubs. Never recommend fabricated "
+        "stand-ins such as Drew Stone or Brittany Frazier.)\n"
+        f"{packed}\n"
+    )
+
+
 async def _section_chat_advisory_reply(
     *,
     section: ProposalSection,
@@ -3026,6 +3197,9 @@ async def _section_chat_advisory_reply(
             requirements=_rfp_section_requirements_list(research, section.id),
             section_content=section.content or "",
         )
+        bio_block = await _verification_04_bio_kb_block(
+            section, user_message=user_message or "", excerpt=excerpt
+        )
         if packed:
             kb_block = (
                 "\n\n"
@@ -3041,11 +3215,8 @@ async def _section_chat_advisory_reply(
                 "found no matching case-study snippets. Say what is still missing — "
                 "do NOT claim you searched if this block is empty.\n"
             )
-    elif (
-        excerpt
-        or _is_verification_only_ask(user_message)
-        or _VERIFY_ASK_RE.search(user_message or "")
-    ):
+        kb_block = bio_block + kb_block
+    elif _advisory_needs_kb_lookup(user_message or "", excerpt):
         queries = await _plan_verification_kb_queries(
             section=section,
             user_message=user_message or "",
@@ -3076,6 +3247,17 @@ async def _section_chat_advisory_reply(
             except Exception:
                 logger.warning("Advisory KB blob failed for %s", section.id, exc_info=True)
 
+        bio_block = ""
+        if reachable:
+            try:
+                bio_block = await _verification_04_bio_kb_block(
+                    section, user_message=user_message or "", excerpt=excerpt
+                )
+            except Exception:
+                logger.warning(
+                    "Advisory 04_Bio pack failed for %s", section.id, exc_info=True
+                )
+
         if not reachable:
             # Never let an outage be reported as "the KB has no such document".
             kb_block = (
@@ -3092,6 +3274,11 @@ async def _section_chat_advisory_reply(
             if contact_pin:
                 kb_block += f"{contact_pin}\n\n"
             kb_block += f"{facts}\n"
+            if supporting.strip():
+                kb_block += f"\nSupporting KB excerpts:\n{supporting[:4000]}\n"
+            kb_block = bio_block + kb_block
+        elif bio_block.strip():
+            kb_block = bio_block
             if supporting.strip():
                 kb_block += f"\nSupporting KB excerpts:\n{supporting[:4000]}\n"
         else:
@@ -3132,7 +3319,11 @@ async def _section_chat_advisory_reply(
 
     # Numbered-section asks: put the target draft FIRST and shrink RFP context so
     # an RFP "Section 11" criterion cannot override sidebar section 11.
-    rfp_budget = 1_500 if sidebar_number_ask else 8_000
+    rfp_budget = (
+        1_500
+        if sidebar_number_ask or _is_informational_only_ask(user_message)
+        else 8_000
+    )
     open_tab_block = (
         f"Open-tab draft (THIS is what 'section N' refers to when a target is bound):\n"
         f"{(section.content or '')[:6000]}"
@@ -3318,11 +3509,13 @@ Rules:
 7. NEVER insert citation markers like [E1], [E14], or **[E3]** into the excerpt.
 8. Return ONLY JSON: {"replacement": "revised excerpt text only"}
    - Escape line breaks inside the string as \\n (required for markdown tables).
-   - If the user asks to REMOVE / DELETE / DROP the selected span: prefer {"replacement": ""}.
-     After the delete, the section MUST still read grammatically (capitalize sentence starts;
-     no orphaned mid-phrase stubs). If empty deletion would leave a broken join given the
-     text before/after the span, return a MINIMAL replacement that fixes only the join —
-     do not invent new claims or rewrite unrelated sentences.
+   - If the user asked to REMOVE THIS HIGHLIGHT (this excerpt / this part / cut this out):
+     prefer {"replacement": ""}. If empty deletion would leave a broken join, return a
+     MINIMAL join fix — do not invent claims.
+   - If they named a person, row, or fact to remove INSIDE the excerpt: delete only that
+     person/row/sentence. Keep every other sentence, heading, and table row verbatim.
+     Never blank the whole excerpt because they said "remove".
+   - If they asked to ADD a person, sentence, or row: insert it and preserve the rest.
 9. Budget/pricing excerpts: NEVER change agency revenue or commission lines to $0 — use commission rate × pass-through or canonical fee from section context; if unknown use [VERIFY: Sonja confirm commission rate and annual media estimate].
 10. Do NOT reverse-engineer dollar amounts to hit a user-requested total — each line must trace to the Pricing Guide; suggest tier/scope changes instead (option C).
 11. One-time setup/development lines must not be multiplied by 12 unless the excerpt is explicitly a monthly recurring service from the guide.
@@ -3441,7 +3634,11 @@ def _draft_supplemental_blob(draft: ProposalDraft) -> str:
 
 
 def _selection_asks_to_remove(user_message: str) -> bool:
-    """True when the user wants the span deleted or significantly shortened."""
+    """True when a highlighted span may shrink or disappear (remove/shorten/cut).
+
+    Empty replacement is allowed. The model is told to DELETE the whole span only
+    when `_selection_asks_to_delete_entire_span` is also true.
+    """
     return bool(
         re.search(
             r"\b("
@@ -3457,6 +3654,449 @@ def _selection_asks_to_remove(user_message: str) -> bool:
             re.I,
         )
     )
+
+
+@dataclass(frozen=True)
+class LocalChatEdit:
+    """Localized add/remove inside a section — not a full rewrite."""
+
+    kind: str  # delete_span | remove_named | add_named
+    target: str
+
+
+_LOCAL_DEMONSTRATIVE_RE = re.compile(
+    r"^(?:this|that|it|these|those|"
+    r"the\s+(?:excerpt|span|selection|highlight|highlighted\s+text|"
+    r"part|text|paragraph|sentence|block|piece))s?\b",
+    re.I,
+)
+# Per line — last matching instruction wins when the user pasted an excerpt first.
+_LOCAL_REMOVE_LEAD_RE = re.compile(
+    r"(?im)^\s*(?:please\s+)?(?:"
+    r"remove|delete|drop|omit|erase|excise|cut\s+out|take\s+out|get\s+rid\s+of"
+    r")\s+(?P<body>.+)$"
+)
+_LOCAL_ADD_LEAD_RE = re.compile(
+    r"(?im)^\s*(?:please\s+)?(?:add|insert|include|put)\s+(?P<body>.+)$"
+)
+_NAMED_PERSON_SKIP_WORDS = frozenset(
+    {
+        "section",
+        "tab",
+        "indicators",
+        "indicator",
+        "appendix",
+        "attachment",
+        "form",
+        "letter",
+        "proposal",
+        "draft",
+        "excerpt",
+        "highlight",
+        "paragraph",
+        "sentence",
+    }
+)
+
+
+def _clean_local_edit_body(body: str) -> str:
+    text = (body or "").strip().strip("\"'")
+    text = re.sub(
+        r"(?is)\s+(?:from|in|to)\s+(?:this|the|that)?\s*"
+        r"(?:section|tab|excerpt|highlight|proposal|draft|team|staff|bios?|list|table).*$",
+        "",
+        text,
+    )
+    text = re.sub(r"(?is)\s+(?:please|thanks|thank you)[.!]*$", "", text)
+    text = re.sub(
+        r"(?i)^(the|a|an|all|any)\s+(?:mentions?\s+of\s+|references?\s+to\s+)?",
+        "",
+        text,
+    )
+    return text.strip(" .,")
+
+
+def _understand_local_edit(user_message: str) -> LocalChatEdit | None:
+    """Parse add/remove of a named person or of this highlight — meaning, not keywords."""
+    text = (user_message or "").strip()
+    if not text:
+        return None
+    from app.services.proposal_chat_structure import is_add_section_intent
+
+    if is_add_section_intent(text):
+        return None
+    last: tuple[int, str, str] | None = None
+    for match in _LOCAL_REMOVE_LEAD_RE.finditer(text):
+        last = (match.start(), "remove", match.group("body"))
+    for match in _LOCAL_ADD_LEAD_RE.finditer(text):
+        if last is None or match.start() >= last[0]:
+            last = (match.start(), "add", match.group("body"))
+    if last is None:
+        return None
+    _, kind, raw_body = last
+    body = _clean_local_edit_body(raw_body)
+    if kind == "remove":
+        if not body or _LOCAL_DEMONSTRATIVE_RE.match(body):
+            return LocalChatEdit("delete_span", "")
+        if re.match(
+            r"(?i)^(?:this|that)\s+(?:person|people|bio|row|bullet|name|one)\b",
+            body,
+        ):
+            return LocalChatEdit("delete_span", "")
+        return LocalChatEdit("remove_named", body[:120])
+    if not body or _LOCAL_DEMONSTRATIVE_RE.match(body):
+        return None
+    return LocalChatEdit("add_named", body[:120])
+
+
+def _selection_asks_to_delete_entire_span(
+    user_message: str,
+    *,
+    excerpt: str = "",
+    full_content: str = "",
+    selection_start: int | None = None,
+    selection_end: int | None = None,
+) -> bool:
+    """True only when the highlighted span itself should be deleted.
+
+    'remove Drew Stone' from a staffing table is a patch, not a wipe of the
+    highlight. Never delete a near-full-section highlight.
+    """
+    local = _understand_local_edit(user_message)
+    if local is None or local.kind != "delete_span":
+        return False
+    if (
+        full_content
+        and selection_start is not None
+        and selection_end is not None
+        and _selection_covers_most_of_section(
+            full_content, selection_start, selection_end
+        )
+    ):
+        return False
+    excerpt_words = word_count(excerpt)
+    if excerpt_words >= 80:
+        return False
+    return True
+
+
+def _expand_match_to_block(content: str, start: int, end: int) -> tuple[int, int]:
+    """Grow a name match to its markdown block (row, list item, or paragraph)."""
+    body = content or ""
+    if start < 0 or end > len(body) or start >= end:
+        return start, end
+    line_start = body.rfind("\n", 0, start) + 1
+    line_end = body.find("\n", end)
+    if line_end < 0:
+        line_end = len(body)
+    line = body[line_start:line_end]
+    stripped = line.lstrip()
+    if stripped.startswith("|") or re.match(r"^(?:[-*]|\d+[.)])\s+", stripped):
+        return line_start, line_end
+    if stripped.startswith("#"):
+        nxt = re.search(r"(?m)^#{1,6}\s+", body[line_end:])
+        block_end = len(body) if nxt is None else line_end + nxt.start()
+        if block_end - line_start <= 1200 and (
+            len(body) < 40 or (block_end - line_start) < int(len(body) * 0.75)
+        ):
+            return line_start, block_end
+    para_start = body.rfind("\n\n", 0, start)
+    block_start = 0 if para_start < 0 else para_start + 2
+    para_end = body.find("\n\n", end)
+    block_end = len(body) if para_end < 0 else para_end
+    if block_end - block_start > 1200 or (
+        len(body) >= 40 and (block_end - block_start) >= int(len(body) * 0.75)
+    ):
+        return line_start, line_end
+    return block_start, block_end
+
+
+def _expand_match_to_sentence(
+    content: str,
+    start: int,
+    end: int,
+    *,
+    include_pronoun: bool = False,
+) -> tuple[int, int]:
+    """Grow a name match to its table row, list item, or prose sentence — never just the name."""
+    body = content or ""
+    if start < 0 or end > len(body) or start >= end:
+        return start, end
+    line_start = body.rfind("\n", 0, start) + 1
+    line_end = body.find("\n", end)
+    if line_end < 0:
+        line_end = len(body)
+    line = body[line_start:line_end]
+    stripped = line.lstrip()
+    if stripped.startswith("|") or re.match(r"^(?:[-*]|\d+[.)])\s+", stripped):
+        return line_start, line_end
+    if stripped.startswith("#"):
+        return line_start, line_end
+
+    sent_start = 0
+    i = start - 1
+    while i >= 0:
+        ch = body[i]
+        if ch in ".!?" and (i + 1 >= len(body) or body[i + 1] in " \t\n\"')"):
+            sent_start = i + 1
+            while sent_start < start and body[sent_start] in " \t\n":
+                sent_start += 1
+            break
+        if ch == "\n" and (i == 0 or body[i - 1] == "\n"):
+            sent_start = i + 1
+            break
+        i -= 1
+
+    sent_end = len(body)
+    j = end
+    while j < len(body):
+        ch = body[j]
+        if ch in ".!?":
+            sent_end = j + 1
+            break
+        if ch == "\n" and (j + 1 >= len(body) or body[j + 1] == "\n"):
+            sent_end = j
+            break
+        j += 1
+    if include_pronoun:
+        sent_end = _extend_span_with_following_pronoun(body, sent_end)
+    return sent_start, sent_end
+
+
+_FOLLOW_PRONOUN_RE = re.compile(
+    r"\A[ \t]*(?:\n{1,2}(?!#{1,6}\s))?(?:His|Her|Him|She|He)\b",
+    re.I,
+)
+
+
+def _extend_span_with_following_pronoun(body: str, sent_end: int) -> int:
+    """Include the next sentence when it is 'He/She owns…' after the named person."""
+    if sent_end < 0 or sent_end >= len(body):
+        return sent_end
+    match = _FOLLOW_PRONOUN_RE.match(body[sent_end:])
+    if not match:
+        return sent_end
+    j = sent_end + match.end()
+    end = len(body)
+    while j < len(body):
+        ch = body[j]
+        if ch in ".!?":
+            return j + 1
+        if ch == "\n" and (j + 1 >= len(body) or body[j + 1] == "\n"):
+            return j
+        j += 1
+    return end
+
+
+_GIVEN_NAME_STOP = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "this",
+        "that",
+        "our",
+        "their",
+        "and",
+        "or",
+        "for",
+        "from",
+    }
+)
+
+
+def _named_target_given_name(target: str) -> str | None:
+    if not _target_looks_like_named_person(target):
+        return None
+    words = [w for w in re.split(r"\s+", (target or "").strip()) if w]
+    first = re.sub(r"[^A-Za-z'-]", "", words[0] if words else "")
+    if len(first) < 2 or first.casefold() in _GIVEN_NAME_STOP:
+        return None
+    return first
+
+
+def _named_target_candidates(target: str) -> list[str]:
+    needle = (target or "").strip()
+    if len(needle) < 2:
+        return []
+    candidates: list[str] = [needle]
+    # Split "Ron Comer and Letitia Hopper" — never "Performance and Outcome Indicators".
+    if not _target_looks_like_named_person(needle):
+        return candidates
+    for part in re.split(r"\s+and\s+|,\s*", needle, flags=re.I):
+        part = part.strip()
+        if len(part) >= 2 and part.casefold() not in {c.casefold() for c in candidates}:
+            candidates.append(part)
+    words = [w for w in re.split(r"\s+", needle) if w]
+    if len(words) >= 2:
+        two = f"{words[0]} {words[1]}"
+        if two.casefold() not in {c.casefold() for c in candidates}:
+            candidates.append(two)
+    return candidates
+
+
+def _target_looks_like_named_person(target: str) -> bool:
+    """True for 'Ron Comer' / 'Letitia Hopper' — not a sidebar title or 'this excerpt'."""
+    words = [w for w in re.split(r"\s+", (target or "").strip()) if w]
+    if not (2 <= len(words) <= 4):
+        return False
+    if any(re.sub(r"[^a-z]", "", w.casefold()) in _NAMED_PERSON_SKIP_WORDS for w in words):
+        return False
+    return sum(1 for w in words if re.search(r"[A-Za-z]", w)) >= 2
+
+
+def _iter_named_matches(
+    content: str,
+    target: str,
+    *,
+    skip_given_name: bool = False,
+) -> list[tuple[int, int]]:
+    body = content or ""
+    found: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for cand in _named_target_candidates(target):
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(cand)}(?![A-Za-z0-9])"
+        for match in re.finditer(pattern, body, re.I):
+            key = (match.start(), match.end())
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(key)
+    given = None if skip_given_name else _named_target_given_name(target)
+    if given:
+        for match in re.finditer(rf"\b{re.escape(given)}(?:['’]s)?\b", body, re.I):
+            key = (match.start(), match.end())
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(key)
+    found.sort(key=lambda pair: (pair[0], -(pair[1] - pair[0])))
+    merged: list[tuple[int, int]] = []
+    for start, end in found:
+        if merged and start < merged[-1][1]:
+            continue
+        merged.append((start, end))
+    return merged
+
+
+def _normalize_heading_title(title: str) -> str:
+    text = (title or "").strip()
+    text = re.sub(r"^\d+(?:\.\d+)*\s*[—\-–:]\s*", "", text)
+    return re.sub(r"\s+", " ", text).casefold()
+
+
+def _heading_block_spans(content: str, target: str) -> list[tuple[int, int]]:
+    """Subsection from a matching markdown heading through the next same-or-higher heading."""
+    body = content or ""
+    needle = _normalize_heading_title(target)
+    if len(needle) < 4:
+        return []
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"(?m)^(#{1,6})\s+(.+)$", body):
+        title_cf = _normalize_heading_title(match.group(2))
+        if not title_cf:
+            continue
+        if needle != title_cf and not (
+            len(needle) >= 8 and (needle in title_cf or title_cf in needle)
+        ):
+            continue
+        level = len(match.group(1))
+        start = match.start()
+        rest = body[match.end() :]
+        nxt = re.search(rf"(?m)^#{{1,{level}}}\s+", rest)
+        end = len(body) if nxt is None else match.end() + nxt.start()
+        if start < end:
+            spans.append((start, end))
+    return spans
+
+
+_LINE_START_PRONOUN_RE = re.compile(r"(?m)^(?:His|Her|Him|She|He)\b", re.I)
+
+
+def _spans_for_named_target(content: str, target: str) -> list[tuple[int, int]]:
+    """Every sentence / row / list item / heading block that names this target."""
+    body = content or ""
+    person = _target_looks_like_named_person(target)
+    heading_spans = _heading_block_spans(body, target)
+    include_pronoun = person and not heading_spans
+    spans: list[tuple[int, int]] = list(heading_spans)
+    for match_start, match_end in _iter_named_matches(
+        body, target, skip_given_name=bool(heading_spans)
+    ):
+        start, end = _expand_match_to_sentence(
+            body,
+            match_start,
+            match_end,
+            include_pronoun=include_pronoun,
+        )
+        if start < end:
+            spans.append((start, end))
+    if include_pronoun:
+        for match in _LINE_START_PRONOUN_RE.finditer(body):
+            start, end = _expand_match_to_sentence(
+                body, match.start(), match.end(), include_pronoun=False
+            )
+            if start < end:
+                spans.append((start, end))
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _span_for_named_target(content: str, target: str) -> tuple[int, int] | None:
+    """Locate the sentence / list item / table row that names this person or item."""
+    spans = _spans_for_named_target(content, target)
+    return spans[0] if spans else None
+
+
+def _strip_named_mentions(
+    content: str,
+    target: str,
+    restrict: tuple[int, int] | None = None,
+) -> tuple[str, int]:
+    """Delete every sentence/row naming ``target``. Returns (new_content, mention_count)."""
+    body = content or ""
+    if restrict is not None:
+        start, end = restrict
+        if start < 0 or end > len(body) or start >= end:
+            return body, 0
+        inner, n = _strip_named_mentions(body[start:end], target, restrict=None)
+        if n <= 0:
+            return body, 0
+        return body[:start] + inner + body[end:], n
+    spans = _spans_for_named_target(body, target)
+    if not spans:
+        return body, 0
+    out = body
+    for start, end in reversed(spans):
+        out = _splice_selection(out, start=start, end=end, replacement="")
+        out = _heal_selection_join_deterministic(out, splice_at=start)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out, len(spans)
+
+
+def _span_for_staff_block(content: str) -> tuple[int, int] | None:
+    """Team/staff heading block — insert point when adding a named person."""
+    body = content or ""
+    match = re.search(
+        r"(?im)^#{1,6}\s+[^\n]*(team|staff|personnel|bios?|people)\b[^\n]*",
+        body,
+    )
+    if not match:
+        return None
+    start = match.start()
+    nxt = re.search(r"(?m)^#{1,6}\s+", body[match.end() :])
+    end = len(body) if nxt is None else match.end() + nxt.start()
+    if end <= start:
+        return None
+    if len(body) >= 40 and (end - start) >= int(len(body) * 0.75):
+        return None
+    return start, end
 
 
 def _selection_asks_to_fill_verify(user_message: str) -> bool:
@@ -3801,8 +4441,10 @@ async def _plan_section_improve(
                 ),
             },
         ],
-        max_tokens=1200,
+        max_tokens=800,
         temperature=0.2,
+        tier="light",
+        node_name="section_improve_plan",
     )
     understood = str(raw.get("understoodAsk") or "").strip()
     outline_action = str(
@@ -4044,11 +4686,28 @@ async def _bio_kb_context_for_section(
     user_message: str = "",
 ) -> str:
     """Authoritative 04_Bio PDF text for team bios and Experience of Personnel tabs."""
+    from app.services.proposal_bio_stub import is_bio_pdf_designer_note
     from app.services.proposal_capability_bio_grounding import (
         is_personnel_bio_section,
         pack_04_bio_kb_for_section,
     )
 
+    wants_full_bio = bool(
+        re.search(
+            r"\b(resume|full bio|inline bio|work history|key accounts)\b",
+            user_message or "",
+            re.I,
+        )
+    )
+    if (
+        (section.id or "").startswith("section-2-bio")
+        and is_bio_pdf_designer_note(section.content or "")
+        and not wants_full_bio
+    ):
+        return ""
+
+    # Chat *edits* must not dump 04_Bio into a designer-note stub. QA/verify
+    # packs bios separately via _verification_04_bio_kb_block.
     if is_personnel_bio_section(section):
         packed = await pack_04_bio_kb_for_section(
             section, user_message=user_message
@@ -4404,6 +5063,22 @@ async def _improve_section_selection(
     allow_remove = _selection_asks_to_remove(user_message) or _selection_asks_to_remove(
         ask_for_compliance
     )
+    delete_entire_span = _selection_asks_to_delete_entire_span(
+        user_message,
+        excerpt=excerpt,
+        full_content=content,
+        selection_start=selection_start,
+        selection_end=selection_end,
+    ) or _selection_asks_to_delete_entire_span(
+        ask_for_compliance,
+        excerpt=excerpt,
+        full_content=content,
+        selection_start=selection_start,
+        selection_end=selection_end,
+    )
+    local_edit = _understand_local_edit(ask_for_compliance) or _understand_local_edit(
+        user_message
+    )
     allow_verify_fill = (
         _selection_asks_to_fill_verify(user_message)
         or _selection_asks_to_fill_verify(ask_for_compliance)
@@ -4474,7 +5149,7 @@ async def _improve_section_selection(
                 user_block += f"{avoidance_block}\n\n"
             if should_apply_budget_playbook(section, ask_for_compliance):
                 user_block += f"{budget_playbook_prompt_block(research=research)}\n\n"
-        if allow_remove:
+        if delete_entire_span:
             user_block += (
                 "\nThe user wants this selected span REMOVED. "
                 'Prefer {"replacement": ""}. '
@@ -4482,6 +5157,17 @@ async def _improve_section_selection(
                 "starting mid-phrase with a lowercase word), return a MINIMAL "
                 "grammatically correct replacement for the span only — fix capitalization/"
                 "join words, do not add new claims.\n"
+            )
+        elif local_edit and local_edit.kind == "remove_named":
+            user_block += (
+                f"\nThe user asked to REMOVE {local_edit.target!r} from this excerpt. "
+                "Delete only that person / row / sentence. Keep every other heading, "
+                "sentence, and table row verbatim. Do NOT blank the whole excerpt.\n"
+            )
+        elif local_edit and local_edit.kind == "add_named":
+            user_block += (
+                f"\nThe user asked to ADD {local_edit.target!r} in this excerpt. "
+                "Insert it and preserve all existing sentences and rows.\n"
             )
         elif allow_verify_fill and VERIFY_TAG_RE.search(masked_excerpt):
             user_block += (
@@ -4528,16 +5214,23 @@ async def _improve_section_selection(
         else:
             replacement = ""
         # Normalize: keep internal whitespace, but treat whitespace-only as empty delete.
-        if allow_remove and not replacement.strip():
+        if not replacement.strip() and (
+            delete_entire_span
+            or (
+                local_edit is not None
+                and local_edit.kind == "remove_named"
+                and word_count(excerpt) <= 220
+            )
+        ):
             replacement = ""
+        elif not replacement.strip():
+            raise ProposalError(
+                "Selection edit did not return replacement text. "
+                "Try a more specific instruction.",
+                status_code=422,
+            )
         elif not allow_remove:
             replacement = replacement.strip()
-            if not replacement:
-                raise ProposalError(
-                    "Selection edit did not return replacement text. "
-                    "Try a more specific instruction.",
-                    status_code=422,
-                )
         try:
             # Only excerpt placeholders must survive in the replacement span.
             if replacement and mfill_originals:
@@ -4711,7 +5404,7 @@ async def _plan_refined_queries(
     retrieval_focus = rfp_section.retrieval_focus if rfp_section else []
 
     planned = await plan_section_queries_agent(
-        role=AgentRole.USER_REVISE,
+        role=AgentRole.QUERY_PLANNER,
         rfp_client=rfp.client,
         rfp_sector=rfp.sector,
         rfp_title=rfp.title,
@@ -4745,6 +5438,8 @@ async def _plan_refined_queries(
         ],
         max_tokens=1024,
         temperature=0.35,
+        tier="light",
+        node_name="query_planner",
     )
     queries = raw.get("queries", [])
     if not isinstance(queries, list):
@@ -4797,18 +5492,28 @@ async def _redraft_rfp_section(
     original_content = (section.content or "").strip()
     prior_for_agent, full_rewrite = prior_content_for_redraft(section)
     rewrite_note = ""
+    from app.services.proposal_bio_stub import (
+        MISPLACED_BIO_STUB_REWRITE_NOTE,
+        prior_content_for_rewrite,
+    )
+
+    if original_content and not prior_for_agent.strip():
+        rewrite_note = f"\n\nIMPORTANT: {MISPLACED_BIO_STUB_REWRITE_NOTE}\n"
     bio_kb = await _bio_kb_context_for_section(
         section, user_message=user_message or compliance_user_message or ""
     )
     if full_rewrite:
         rewrite_note = (
-            "\n\nIMPORTANT: Prior draft is below the word target or not marked generated. "
+            rewrite_note
+            + "\n\nIMPORTANT: Prior draft is below the word target or not marked generated. "
             "Write the COMPLETE section for every listed requirement from evidence and KB tools. "
             "Do not return stubs, error text, or unchanged placeholder content.\n"
         )
 
     # Protect MANUAL FILL tags in the prior draft from incidental rewrite.
-    source_for_tags = prior_content or original_content
+    source_for_tags = prior_for_agent or prior_content_for_rewrite(
+        section.id, prior_content or original_content
+    )
     from app.services.proposal_manuscript_locks import (
         kpi_weave_instruction,
         strip_kpi_lock_manual_fills,
@@ -5073,7 +5778,13 @@ async def _improve_static_section(
     )
 
     prior = section.content or ""
-    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(prior)
+    from app.services.proposal_bio_stub import (
+        MISPLACED_BIO_STUB_REWRITE_NOTE,
+        prior_content_for_rewrite,
+    )
+
+    rewrite_body = prior_content_for_rewrite(section.id, prior)
+    masked_prior, mfill_originals = _mask_manual_fill_for_rewrite(rewrite_body)
     system_prompt = STATIC_SECTION_REDRAFT_PROMPT
     if mfill_originals:
         system_prompt = f"{STATIC_SECTION_REDRAFT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
@@ -5082,12 +5793,18 @@ async def _improve_static_section(
     provider = _provider_name()
     raw: dict[str, Any] = {}
     for attempt in (1, 2):
+        misplaced = (
+            f"{MISPLACED_BIO_STUB_REWRITE_NOTE}\n\n"
+            if prior.strip() and not rewrite_body.strip()
+            else ""
+        )
         user_content = (
             f"BRAND VOICE (mandatory — maintain throughout; do not genericize):\n{voice_block}\n\n"
             f"Section: {section.title}\n"
             f"Mode: {section.mode}\n"
             f"Client: {rfp.client}\n"
             f"Sector: {rfp.sector}\n"
+            f"{misplaced}"
             f"User request:\n{user_message}\n\n"
             f"Previous content (preserve zö voice while improving — fill gaps from KB):\n"
             f"{masked_prior[:9000]}\n\n"
@@ -5157,8 +5874,18 @@ async def _persist_section_improve_draft(
     section_title: str,
 ) -> ProposalDraft:
     """Save improved manuscript + an After snapshot so versions keep chat content."""
-    to_save = push_after_section_edit_snapshot(
+    from app.services.proposal_zero_fabrication import (
+        apply_zero_fabrication_guards_before_persist,
+    )
+
+    guarded, _report = await apply_zero_fabrication_guards_before_persist(
         updated_draft,
+        research=research,
+        budget=research.budget if research else None,
+        label="chat-persist",
+    )
+    to_save = push_after_section_edit_snapshot(
+        guarded,
         section_title=section_title,
     )
     await asave_proposal_draft(to_save)
@@ -5370,6 +6097,431 @@ async def _try_budget_summary_reconcile(
     return focus, updated_draft, research, provider, reply, True
 
 
+def _budget_section_chat_would_freeform_edit(
+    *,
+    chat_intent: str,
+    user_message: str,
+    conversation_history: list[dict[str, str]] | None,
+) -> bool:
+    if chat_intent in {"single_edit", "multi_patch"}:
+        return True
+    if chat_intent in {"advisory", "structure"}:
+        return False
+    return _wants_section_edit(user_message, conversation_history=conversation_history)
+
+
+async def _apply_budget_section_canonical_refresh(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    rfp_text: str,
+    persist: bool,
+    reply_hint: str = "",
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+]:
+    provider = _provider_name()
+    if research is None:
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+    canonical = research.budget if research else None
+    if canonical is None or not (canonical.line_items or []):
+        return (
+            section,
+            draft,
+            research,
+            provider,
+            (
+                f"**{section.title}** — I can't refresh fees yet because there is no "
+                "canonical Stage 3.5 budget. Run **Budget build** or ask to rebuild "
+                "Cost Proposal from the pricing guide first."
+            ),
+            False,
+        )
+
+    from app.services.proposal_budget_validation import reconcile_proposal_budget
+
+    budget = reconcile_proposal_budget(canonical, rfp_context=rfp_text)
+    budget = normalize_fixed_pricing_narrative(budget, rfp_text=rfp_text)
+    now = datetime.now(timezone.utc).isoformat()
+    research = research.model_copy(update={"budget": budget, "updatedAt": now})
+    content = render_budget_markdown(budget, rfp_text=rfp_text)
+    working = section.model_copy(update={"content": content, "status": "generated"})
+    merged = [working if s.id == section_id else s for s in draft.sections]
+    now = datetime.now(timezone.utc).isoformat()
+    updated_draft = draft.model_copy(
+        update={"sections": merged, "updated_at": now, "provider": provider}
+    )
+    if persist:
+        updated_draft = await _persist_section_improve_draft(
+            updated_draft,
+            research,
+            section_title=section.title,
+        )
+        working = _find_draft_section(updated_draft, section_id) or working
+
+    figs = canonical_budget_summary_figures(budget)
+    n_items = len(budget.line_items or [])
+    cap = budget.rfp_budget_cap or budget.rfp_media_or_program_envelope
+    reply = (
+        f"**{section.title}** — refreshed from the canonical Stage 3.5 fee ledger "
+        f"(${figs['total']:,.2f} total; {n_items} line item(s)). "
+        "Cost Proposal is rendered from verified phase fees — chat does not invent "
+        "hourly rates or rewrite the fee table. For a full pricing rebuild, ask to "
+        "**rebuild Cost Proposal from the pricing guide**."
+    )
+    if cap is not None and float(cap) > 0:
+        total = float(figs.get("total") or 0)
+        if total <= float(cap) + 0.01:
+            reply += (
+                f" Bid total is at or under the RFP available-funds cap "
+                f"(${float(cap):,.2f})."
+            )
+        else:
+            reply += (
+                f" WARNING: bid total still exceeds the RFP cap "
+                f"(${float(cap):,.2f}) — rebuild Cost Proposal."
+            )
+    if reply_hint.strip():
+        reply = f"{reply}\n\n{reply_hint.strip()}"
+    return working, updated_draft, research, provider, reply, True
+
+
+def _budget_manual_fill_tags(
+    section: ProposalSection,
+    research: ProposalResearchCache | None,
+) -> list:
+    from app.services.proposal_manual_flags import extract_manual_fill_tags
+
+    seen: set[str] = set()
+    tags = []
+    for blob in (section.content or "",):
+        for tag in extract_manual_fill_tags(blob):
+            if tag.text not in seen:
+                seen.add(tag.text)
+                tags.append(tag)
+    budget = research.budget if research else None
+    if budget is not None:
+        for item in budget.line_items or []:
+            for field in (item.description or "", item.notes or ""):
+                for tag in extract_manual_fill_tags(field):
+                    if tag.text not in seen:
+                        seen.add(tag.text)
+                        tags.append(tag)
+    return tags
+
+
+async def _try_budget_manual_fill_handoff(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    rfp_context: str,
+    rfp_text: str,
+    persist: bool,
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+] | None:
+    """Resolve or honestly surface confirm-before-submit MANUAL FILL rows on Cost tabs."""
+    from app.services.proposal_manual_flags import (
+        is_manual_fill_request,
+        user_asks_submit_handoff_fill,
+    )
+
+    ask = (user_message or "").strip()
+    if not section_is_budget_related(section):
+        return None
+    if not (is_manual_fill_request(ask) or user_asks_submit_handoff_fill(ask)):
+        return None
+
+    tags = _budget_manual_fill_tags(section, research)
+    if not tags:
+        return None
+
+    mfill = await _try_manual_fill_resolution(
+        rfp_id=rfp_id,
+        section=section,
+        section_id=section_id,
+        draft=draft,
+        research=research,
+        user_message=ask,
+        rfp_context=rfp_context,
+        persist=False,
+    )
+    if mfill is not None:
+        working, updated_draft, research, provider, reply, changed = mfill
+        if changed:
+            if persist:
+                updated_draft = await _persist_section_improve_draft(
+                    updated_draft,
+                    research,
+                    section_title=section.title,
+                )
+                working = _find_draft_section(updated_draft, section_id) or working
+            return working, updated_draft, research, provider, reply, True
+
+    # Could not invent values — re-render fee table with handoff tags intact.
+    refresh = await _apply_budget_section_canonical_refresh(
+        rfp_id=rfp_id,
+        section=section,
+        section_id=section_id,
+        draft=draft,
+        research=research,
+        user_message=ask,
+        rfp_text=rfp_text,
+        persist=persist,
+        reply_hint="",
+    )
+    working, updated_draft, research, provider, _, changed = refresh
+    open_tags = [t.text for t in _budget_manual_fill_tags(working, research)]
+    reply = (
+        f"**{section.title}** — {len(open_tags)} confirm-before-submit item(s) still "
+        "need Sonja / KB before submission (not invented):\n"
+        + "\n".join(f"- {tag}" for tag in open_tags[:8])
+    )
+    if len(open_tags) > 8:
+        reply += f"\n- …and {len(open_tags) - 8} more"
+    reply += (
+        "\n\nProvide the value in chat or add the fact to Supermemory — "
+        "I will not invent media base or commission dollars."
+    )
+    return working, updated_draft, research, provider, reply, changed
+
+
+async def _try_budget_section_canonical_refresh(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    chat_intent: str,
+    conversation_history: list[dict[str, str]] | None,
+    rfp_text: str,
+    persist: bool,
+    selection_mode: bool,
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+] | None:
+    """Re-render Cost / Budget tabs from Stage 3.5 — never freeform LLM fee invention."""
+    if selection_mode or not section_is_budget_related(section):
+        return None
+    ask = (user_message or "").strip()
+    if user_asks_budget_rebuild(ask) or user_asks_global_cost_rebuild(ask):
+        return None
+    if user_asks_budget_summary_reconcile(ask):
+        return None
+    if user_asked_reverse_engineered_total(ask):
+        return None
+    from app.services.proposal_manual_flags import (
+        extract_manual_fill_tags,
+        is_manual_fill_request,
+        user_asks_submit_handoff_fill,
+    )
+
+    if is_manual_fill_request(ask) or user_asks_submit_handoff_fill(ask):
+        return None
+    if extract_manual_fill_tags(section.content or ""):
+        return None
+    if not _budget_section_chat_would_freeform_edit(
+        chat_intent=chat_intent,
+        user_message=ask,
+        conversation_history=conversation_history,
+    ):
+        return None
+
+    hint = ""
+    if ask:
+        hint = (
+            f"*(Your ask: “{ask[:160]}” — applied as a canonical fee-table refresh, "
+            "not a free rewrite.)*"
+        )
+    return await _apply_budget_section_canonical_refresh(
+        rfp_id=rfp_id,
+        section=section,
+        section_id=section_id,
+        draft=draft,
+        research=research,
+        user_message=ask,
+        rfp_text=rfp_text,
+        persist=persist,
+        reply_hint=hint,
+    )
+
+
+async def _try_forms_attachments_integrity_repair(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    persist: bool,
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+] | None:
+    """Audit + repair all forms-table status claims against the manuscript in one pass."""
+    from app.services.proposal_forms_attachments_integrity import (
+        audit_and_repair_forms_attachments,
+        format_forms_integrity_reply,
+        section_is_forms_attachments,
+    )
+
+    if not section_is_forms_attachments(section):
+        return None
+    if not _wants_section_edit(user_message or ""):
+        return None
+
+    provider = _provider_name()
+    if research is None:
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+
+    result = await audit_and_repair_forms_attachments(
+        section.content or "",
+        draft=draft,
+        research=research,
+    )
+
+    if not result.findings and not result.changed:
+        return (
+            section,
+            draft,
+            research,
+            provider,
+            format_forms_integrity_reply(result, section_title=section.title or ""),
+            False,
+        )
+
+    working = section.model_copy(
+        update={"content": result.content, "status": "generated"}
+    )
+    merged = [working if s.id == section_id else s for s in draft.sections]
+    now = datetime.now(timezone.utc).isoformat()
+    updated_draft = draft.model_copy(
+        update={"sections": merged, "updated_at": now, "provider": provider}
+    )
+    if persist:
+        updated_draft = await _persist_section_improve_draft(
+            updated_draft,
+            research,
+            section_title=section.title,
+        )
+        working = _find_draft_section(updated_draft, section_id) or working
+
+    reply = format_forms_integrity_reply(result, section_title=section.title or "")
+    return working, updated_draft, research, provider, reply, result.changed
+
+
+async def _try_section_cert_claim_scrub(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    section_id: str,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    persist: bool,
+) -> tuple[
+    ProposalSection,
+    ProposalDraft,
+    ProposalResearchCache | None,
+    str,
+    str,
+    bool,
+] | None:
+    """Deterministic cert scrub when user asks to remove false/unverified certifications."""
+    from app.services.proposal_cert_claim_scrub import (
+        scrub_section_cert_claims,
+        user_asks_cert_claim_scrub,
+    )
+
+    ask = (user_message or "").strip()
+    if not user_asks_cert_claim_scrub(ask):
+        return None
+
+    provider = _provider_name()
+    if research is None:
+        research = ProposalResearchCache(
+            rfpId=rfp_id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+
+    scrubbed, logs = scrub_section_cert_claims(section)
+    if not logs and (scrubbed.content or "") == (section.content or ""):
+        return (
+            section,
+            draft,
+            research,
+            provider,
+            (
+                f"**{section.title}** — reviewed certification claims against the verified "
+                "agency list (WBENC, WOSB, publicly verifiable B Corp). No MBE/DBE/standalone "
+                "WBE or unverified badges remain to remove."
+            ),
+            False,
+        )
+
+    working = scrubbed.model_copy(update={"status": "generated"})
+    merged = [working if s.id == section_id else s for s in draft.sections]
+    now = datetime.now(timezone.utc).isoformat()
+    updated_draft = draft.model_copy(
+        update={"sections": merged, "updated_at": now, "provider": provider}
+    )
+    if persist:
+        updated_draft = await _persist_section_improve_draft(
+            updated_draft,
+            research,
+            section_title=section.title,
+        )
+        working = _find_draft_section(updated_draft, section_id) or working
+
+    reply = (
+        f"**{section.title}** — removed fabricated / unverified certification claims "
+        f"({len(logs)} change(s)). Kept only verified agency credentials: WBENC/WOSB and "
+        "publicly verifiable B Corp where present. "
+        + "; ".join(logs[:4])
+        + ("…" if len(logs) > 4 else "")
+    )
+    return working, updated_draft, research, provider, reply, True
+
+
 async def _try_section_budget_table_insert(
     *,
     rfp_id: str,
@@ -5395,8 +6547,24 @@ async def _try_section_budget_table_insert(
     if not user_asks_insert_budget_table(ask):
         return None
     if section_is_budget_related(section):
-        # Cost Proposal tab → Stage 3.5 path handles full rebuilds.
-        return None
+        from app.services.go_no_go_service import combine_rfp_text
+        from app.services.proposal_common import load_rfp_for_proposal
+
+        _, content_info, rfp_ctx = load_rfp_for_proposal(rfp_id)
+        rfp_body = combine_rfp_text(content_info.description, content_info.pdf_text)
+        return await _apply_budget_section_canonical_refresh(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=ask,
+            rfp_text=rfp_body or rfp_ctx or "",
+            persist=persist,
+            reply_hint=(
+                "Inserted/refreshed the fee table from the canonical Stage 3.5 budget."
+            ),
+        )
 
     provider = _provider_name()
     if research is None:
@@ -6021,6 +7189,17 @@ async def improve_proposal_section(
     # matched the stanza's own edit verbs and turned every question into an edit.
     raw_user_message = user_message.strip()
 
+    from app.services.proposal_chat_ops import chat_ask_is_proposal_wide
+
+    # Improve pin / "this section" binds the open tab. Don't dump the whole
+    # manuscript into advisory — that made the model ask "which section?".
+    if (
+        (improve_section_pinned or user_points_at_open_section(raw_user_message))
+        and not chat_ask_is_proposal_wide(raw_user_message)
+        and not selection_mode
+    ):
+        proposal_wide = False
+
     research = await aget_research_cache(rfp_id)
 
     # Shared Evidence Gate: decide KB vs write (same policy as drafting / repair).
@@ -6052,6 +7231,59 @@ async def improve_proposal_section(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("section_chat_evidence_gate failed rfp_id=%s: %s", rfp_id, exc)
+
+    # Structural merge: keep one tab's body under another title, delete orphan duplicate.
+    from app.services.proposal_section_merge import (
+        apply_section_merge,
+        format_merge_reply,
+        plan_section_merge,
+    )
+
+    merge_plan = plan_section_merge(
+        draft,
+        raw_user_message,
+        open_section_id=section_id,
+    )
+    if merge_plan is not None and not selection_mode:
+        provider = _provider_name()
+        if research is None:
+            research = ProposalResearchCache(
+                rfpId=rfp_id,
+                updatedAt=datetime.now(timezone.utc).isoformat(),
+                provider=provider,
+            )
+        updated_draft, focus, merge_logs = apply_section_merge(draft, merge_plan)
+        from app.services.proposal_forms_attachments_integrity import (
+            audit_and_repair_forms_attachments,
+            section_is_forms_attachments,
+        )
+
+        if section_is_forms_attachments(focus):
+            forms_fix = await audit_and_repair_forms_attachments(
+                focus.content or "",
+                draft=updated_draft,
+                research=research,
+            )
+            if forms_fix.changed:
+                focus = focus.model_copy(update={"content": forms_fix.content})
+                updated_draft = updated_draft.model_copy(
+                    update={
+                        "sections": [
+                            focus if s.id == focus.id else s
+                            for s in updated_draft.sections
+                        ]
+                    }
+                )
+                merge_logs.extend(forms_fix.fix_logs)
+        if persist:
+            updated_draft = await _persist_section_improve_draft(
+                updated_draft,
+                research,
+                section_title=focus.title,
+            )
+            focus = _find_draft_section(updated_draft, focus.id) or focus
+        reply = format_merge_reply(merge_logs, focus_title=focus.title or "")
+        return _improve_outcome(focus, updated_draft, research, provider, reply, True)
 
     # Powerful chat ops: duplicate audit / fabrication purge (content → RFP → KB)
     from app.services.proposal_chat_ops import classify_chat_op, run_chat_ops
@@ -6196,22 +7428,16 @@ async def improve_proposal_section(
             chat_intent, scope_reason = coerce_chat_intent_for_scope(
                 chat_intent, raw_user_message
             )
-            # Improve pin = edit THIS tab — unless the user clearly wants a NEW
-            # sidebar section/tab (including "add one more section for case studies").
+            # Improve pin binds THIS tab. Questions stay advisory; change
+            # requests rewrite this tab. Only a clear add-tab ask leaves the pin.
             if chat_intent == "structure" or is_add_section_intent(raw_user_message):
                 if chat_intent != "structure":
                     chat_intent = "structure"
                 intent_degraded = bool(intent_info.get("degraded"))
                 scope_reason = "add_section_overrides_improve_pin"
             else:
-                chat_intent = "single_edit"
-                intent_info = {
-                    "intent": "single_edit",
-                    "primarySectionId": section_id,
-                    "degraded": False,
-                }
+                intent_degraded = bool(intent_info.get("degraded"))
                 scope_reason = "improve_section_pinned"
-                intent_degraded = False
         else:
             intent_info = await classify_chat_edit_intent(
                 user_message=raw_user_message,
@@ -6252,6 +7478,28 @@ async def improve_proposal_section(
                 section_id,
             )
 
+        from app.services.proposal_chat_structure import (
+            is_add_section_intent,
+            is_bio_resume_attachment_intent,
+        )
+
+        if (
+            user_points_at_open_section(raw_user_message)
+            and _wants_section_edit(raw_user_message)
+            and not _selection_ask_is_advisory(
+                raw_user_message, conversation_history=conversation_history
+            )
+            and not is_add_section_intent(raw_user_message)
+            and not is_bio_resume_attachment_intent(raw_user_message)
+        ):
+            chat_intent = "single_edit"
+            intent_info["intent"] = "single_edit"
+            intent_info.setdefault("primarySectionId", section_id)
+            logger.info(
+                "chat intent forced to single_edit (this section) section_id=%s",
+                section_id,
+            )
+
         if apply_fix:
             logger.info(
                 "chat intent forced to single_edit (apply_fix) section_id=%s",
@@ -6261,10 +7509,7 @@ async def improve_proposal_section(
         # For multi_patch, do NOT remap to one named section — the plan spans many.
         # For single_edit / default, named titles + LLM primary beat the open tab.
         # Exception: "… here / this section" stays on the open tab (budget table insert).
-        stay_on_open = user_points_at_open_section(raw_user_message) and (
-            user_asks_insert_budget_table(raw_user_message)
-            or user_asks_section_budget_fill(raw_user_message)
-        )
+        stay_on_open = user_points_at_open_section(raw_user_message)
         if chat_intent != "multi_patch" and not stay_on_open and not apply_fix and not improve_section_pinned:
             primary = intent_info.get("primarySectionId")
             default_sec = _find_draft_section(draft, section_id)
@@ -6375,6 +7620,28 @@ async def improve_proposal_section(
                 )
                 if offer_form_fill is not None:
                     return (*offer_form_fill, None)
+                forms_integrity = await _try_forms_attachments_integrity_repair(
+                    rfp_id=rfp_id,
+                    section=early_section,
+                    section_id=section_id,
+                    draft=draft,
+                    research=research,
+                    user_message=raw_user_message,
+                    persist=persist,
+                )
+                if forms_integrity is not None:
+                    return (*forms_integrity, None)
+                cert_scrub = await _try_section_cert_claim_scrub(
+                    rfp_id=rfp_id,
+                    section=early_section,
+                    section_id=section_id,
+                    draft=draft,
+                    research=research,
+                    user_message=raw_user_message,
+                    persist=persist,
+                )
+                if cert_scrub is not None:
+                    return (*cert_scrub, None)
 
         if chat_intent == "multi_patch":
             from app.services.proposal_chat_content_repair import (
@@ -6453,6 +7720,7 @@ async def improve_proposal_section(
 
     if (
         not selection_mode
+        and not improve_section_pinned
         and chat_intent not in {"multi_patch", "single_edit"}
         and chat_intent != "structure"
         and _message_needs_case_study_clarify(raw_user_message)
@@ -6490,14 +7758,13 @@ async def improve_proposal_section(
     # keyword advisory regex — the model already decided the user wants edits.
     if apply_fix:
         route = ChatRoute(advisory=False, reason="apply_fix")
-    elif improve_section_pinned and chat_intent != "structure":
-        route = ChatRoute(advisory=False, reason="improve_section_pinned")
     else:
         route = decide_chat_route(
             chat_intent=chat_intent,
             user_message=raw_user_message,
             selection_mode=bool(selection_mode),
             conversation_history=conversation_history,
+            improve_pinned=bool(improve_section_pinned),
         )
     logger.info("chat route=%s reason=%s", "advisory" if route.advisory else "edit", route.reason)
     if route.advisory:
@@ -6629,10 +7896,7 @@ async def improve_proposal_section(
             if structure_plan.edit_section_id:
                 section_id = structure_plan.edit_section_id
 
-            stay_on_open = user_points_at_open_section(raw_user_message) and (
-                user_asks_insert_budget_table(raw_user_message)
-                or user_asks_section_budget_fill(raw_user_message)
-            )
+            stay_on_open = user_points_at_open_section(raw_user_message)
             if not stay_on_open and not apply_fix:
                 section_id = _remap_chat_section_if_explicit(
                     draft, raw_user_message, section_id
@@ -6883,6 +8147,69 @@ async def improve_proposal_section(
         )
         if offer_form_fill is not None:
             return (*offer_form_fill, None)
+
+    if not selection_mode:
+        forms_integrity = await _try_forms_attachments_integrity_repair(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=latest_user_ask,
+            persist=persist,
+        )
+        if forms_integrity is not None:
+            return (*forms_integrity, None)
+
+    if not selection_mode:
+        cert_scrub = await _try_section_cert_claim_scrub(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=latest_user_ask,
+            persist=persist,
+        )
+        if cert_scrub is not None:
+            return (*cert_scrub, None)
+
+    if not selection_mode:
+        from app.services.go_no_go_service import combine_rfp_text
+
+        budget_handoff = await _try_budget_manual_fill_handoff(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=latest_user_ask,
+            rfp_context=rfp_context or "",
+            rfp_text=combine_rfp_text(
+                "" if isinstance(_content, str) else getattr(_content, "description", "") or "",
+                _content if isinstance(_content, str) else getattr(_content, "pdf_text", "") or "",
+            ),
+            persist=persist,
+        )
+        if budget_handoff is not None:
+            return (*budget_handoff, None)
+
+    if not selection_mode:
+        canon_refresh = await _try_budget_section_canonical_refresh(
+            rfp_id=rfp_id,
+            section=section,
+            section_id=section_id,
+            draft=draft,
+            research=research,
+            user_message=latest_user_ask,
+            chat_intent=chat_intent,
+            conversation_history=conversation_history,
+            rfp_text=rfp_context or "",
+            persist=persist,
+            selection_mode=selection_mode,
+        )
+        if canon_refresh is not None:
+            return (*canon_refresh, None)
 
     # Budget/fee edits on the Cost Proposal tab: Stage 3.5 agent.
     # Never steal a case-study "fill budget part" / "implement table here" ask.
@@ -7363,8 +8690,121 @@ async def improve_proposal_section(
     planned_spans: list[tuple[int, int, EditScopePatch]] | None = None
     from app.services.proposal_chat_structure import is_add_section_intent
 
-    if not selection_mode and not is_add_section_intent(latest_user_ask) and not _open_tab_kb_fetch_ask(
-        latest_user_ask
+    local_edit = _understand_local_edit(latest_user_ask)
+    section_body = section.content or ""
+    if (
+        local_edit
+        and local_edit.kind == "remove_named"
+        and local_edit.target
+        and len(local_edit.target.strip()) >= 2
+    ):
+        restrict: tuple[int, int] | None = None
+        stay_on_tab = user_points_at_open_section(latest_user_ask) or improve_section_pinned
+        if (
+            not stay_on_tab
+            and selection_mode
+            and selection_start is not None
+            and selection_end is not None
+            and selection_end > selection_start
+            and not _selection_covers_most_of_section(
+                section_body, selection_start, selection_end
+            )
+        ):
+            restrict = (selection_start, selection_end)
+        stripped, n_removed = _strip_named_mentions(
+            section_body, local_edit.target, restrict=restrict
+        )
+        if n_removed > 0 and stripped != section_body:
+            provider = _provider_name()
+            if research is None:
+                research = ProposalResearchCache(
+                    rfpId=rfp_id,
+                    updatedAt=datetime.now(timezone.utc).isoformat(),
+                    provider=provider,
+                )
+            working = section.model_copy(
+                update={"content": stripped, "status": "generated"}
+            )
+            merged = [working if s.id == section_id else s for s in draft.sections]
+            now = datetime.now(timezone.utc).isoformat()
+            updated_draft = draft.model_copy(
+                update={"sections": merged, "updated_at": now, "provider": provider}
+            )
+            if persist:
+                updated_draft = await _persist_section_improve_draft(
+                    updated_draft,
+                    research,
+                    section_title=working.title,
+                )
+                working = next(
+                    (s for s in updated_draft.sections if s.id == section_id),
+                    working,
+                )
+            logger.info(
+                "Mechanical named-remove %r → %d mention(s) in %s / %s",
+                local_edit.target[:80],
+                n_removed,
+                rfp_id,
+                section_id,
+            )
+            mention = "mention" if n_removed == 1 else "mentions"
+            return _improve_outcome(
+                working,
+                updated_draft,
+                research,
+                provider,
+                (
+                    f"Removed **{local_edit.target}** from **{working.title}** "
+                    f"({n_removed} {mention}; {word_count(working.content or '')} words). "
+                    "Other sentences and tables in this tab are unchanged."
+                ),
+                True,
+            )
+
+    if local_edit and local_edit.kind in {"remove_named", "add_named"} and local_edit.target:
+        search_body = section_body
+        search_offset = 0
+        if (
+            selection_mode
+            and selection_start is not None
+            and selection_end is not None
+            and selection_end > selection_start
+        ):
+            search_body = section_body[selection_start:selection_end]
+            search_offset = selection_start
+        span = _span_for_named_target(search_body, local_edit.target)
+        if span is None and local_edit.kind == "add_named":
+            span = _span_for_staff_block(search_body)
+        if span is not None:
+            selection_start = search_offset + span[0]
+            selection_end = search_offset + span[1]
+            selection_text = section_body[selection_start:selection_end]
+            selection_mode = True
+            scope_plan = EditScopePlan(
+                understood_ask=latest_user_ask.strip(),
+                mode="patch",
+                patches=[
+                    EditScopePatch(
+                        anchor_excerpt=selection_text,
+                        editor_instruction=latest_user_ask.strip(),
+                    )
+                ],
+                kb_queries=[],
+            )
+            logger.info(
+                "Localized %s %r → chars %d-%d in %s / %s",
+                local_edit.kind,
+                local_edit.target[:80],
+                selection_start,
+                selection_end,
+                rfp_id,
+                section_id,
+            )
+
+    if (
+        not selection_mode
+        and not is_add_section_intent(latest_user_ask)
+        and not _open_tab_kb_fetch_ask(latest_user_ask)
     ):
         try:
             scope_plan = await _plan_edit_scope(
@@ -7395,18 +8835,81 @@ async def improve_proposal_section(
                 else:
                     logger.info(
                         "Edit-scope plan asked patch but no anchors found in %s — "
-                        "falling back to full rewrite",
+                        "falling back to named-target locate or full rewrite",
                         section_id,
                     )
+                    if local_edit and local_edit.target:
+                        fallback = _span_for_named_target(
+                            section.content or "", local_edit.target
+                        )
+                        if fallback is None and local_edit.kind == "add_named":
+                            fallback = _span_for_staff_block(section.content or "")
+                        if fallback is not None:
+                            selection_start, selection_end = fallback
+                            selection_text = (section.content or "")[
+                                selection_start:selection_end
+                            ]
+                            selection_mode = True
+                            scope_plan = EditScopePlan(
+                                understood_ask=scope_plan.understood_ask
+                                or latest_user_ask.strip(),
+                                mode="patch",
+                                patches=[
+                                    EditScopePatch(
+                                        anchor_excerpt=selection_text,
+                                        editor_instruction=latest_user_ask.strip(),
+                                    )
+                                ],
+                                kb_queries=list(scope_plan.kb_queries or []),
+                            )
+                            logger.info(
+                                "Recovered localized patch for %s chars %d-%d",
+                                local_edit.target[:60],
+                                selection_start,
+                                selection_end,
+                            )
             elif scope_plan.mode == "full_rewrite":
-                logger.info(
-                    "Edit-scope plan → full_rewrite for %s / %s ask=%r",
-                    rfp_id,
-                    section_id,
-                    (scope_plan.understood_ask or latest_user_ask)[:80],
-                )
-                if scope_plan.editor_instruction.strip():
-                    user_message = scope_plan.editor_instruction
+                coerced = False
+                if local_edit and local_edit.kind in {"remove_named", "add_named"}:
+                    fallback = _span_for_named_target(
+                        section.content or "", local_edit.target
+                    )
+                    if fallback is None and local_edit.kind == "add_named":
+                        fallback = _span_for_staff_block(section.content or "")
+                    if fallback is not None:
+                        selection_start, selection_end = fallback
+                        selection_text = (section.content or "")[
+                            selection_start:selection_end
+                        ]
+                        selection_mode = True
+                        scope_plan = EditScopePlan(
+                            understood_ask=scope_plan.understood_ask
+                            or latest_user_ask.strip(),
+                            mode="patch",
+                            patches=[
+                                EditScopePatch(
+                                    anchor_excerpt=selection_text,
+                                    editor_instruction=latest_user_ask.strip(),
+                                )
+                            ],
+                            kb_queries=list(scope_plan.kb_queries or []),
+                        )
+                        coerced = True
+                        logger.info(
+                            "Coerced full_rewrite → patch for %s %r in %s",
+                            local_edit.kind,
+                            local_edit.target[:60],
+                            section_id,
+                        )
+                if not coerced:
+                    logger.info(
+                        "Edit-scope plan → full_rewrite for %s / %s ask=%r",
+                        rfp_id,
+                        section_id,
+                        (scope_plan.understood_ask or latest_user_ask)[:80],
+                    )
+                    if scope_plan.editor_instruction.strip():
+                        user_message = scope_plan.editor_instruction
         except Exception:
             logger.exception(
                 "Edit-scope planning failed for %s / %s — continuing with default path",
@@ -7854,13 +9357,25 @@ async def improve_proposal_section(
             rfp=rfp,
             prior_queries=prior_queries,
         )
-        understood_ask, editor_instruction, planned, outline_action = await _plan_section_improve(
-            section=section,
-            rfp=rfp,
-            rfp_section=rfp_section,
-            user_message=query_focus,
-            prior_queries=[*prior_queries, *seeded],
-        )
+        skip_kb = _chat_improve_skip_kb(gate, raw_user_message)
+        if skip_kb:
+            understood_ask = raw_user_message.strip()
+            editor_instruction = raw_user_message.strip()
+            planned = []
+            outline_action = "edit_open_section"
+            logger.info(
+                "static section_improve planner skipped (no retrieval) %s / %s",
+                rfp_id,
+                section_id,
+            )
+        else:
+            understood_ask, editor_instruction, planned, outline_action = await _plan_section_improve(
+                section=section,
+                rfp=rfp,
+                rfp_section=rfp_section,
+                user_message=query_focus,
+                prior_queries=[*prior_queries, *seeded],
+            )
         if outline_action in {"add_sidebar_section", "delete_sidebar_section"}:
             logger.info(
                 "outlineAction=%s — redirecting to structure planner for %s",
@@ -7890,28 +9405,31 @@ async def improve_proposal_section(
                 merged_q.append(q.strip()[:240])
                 used_q.add(key)
         queries = merged_q
-        if not queries:
+        if skip_kb:
+            queries = []
+        elif not queries:
             queries = [
                 f"zö agency 01 companyfacts firm legal name address Bend Oregon {rfp.sector}"[:220],
                 f"zö agency contact phone email Sonja 02 master template {section.title}"[:220],
                 f"zö agency tourism DMO destination marketing experience {rfp.sector}"[:220],
                 f"zö agency company philosophy employees organizational structure {section.title}"[:220],
             ]
-        from app.services.proposal_section_kb_evidence import (
-            fetch_packed_section_kb_evidence,
-            inject_packed_evidence_into_instruction,
-        )
-
-        packed_block, _packed_sources = await fetch_packed_section_kb_evidence(
-            section_title=section.title or "",
-            user_message=raw_user_message,
-            requirements=list(rfp_section.requirements or []) if rfp_section else [],
-            section_content=section.content or "",
-        )
-        if packed_block:
-            user_message = inject_packed_evidence_into_instruction(
-                user_message, packed_block
+        if not skip_kb:
+            from app.services.proposal_section_kb_evidence import (
+                fetch_packed_section_kb_evidence,
+                inject_packed_evidence_into_instruction,
             )
+
+            packed_block, _packed_sources = await fetch_packed_section_kb_evidence(
+                section_title=section.title or "",
+                user_message=raw_user_message,
+                requirements=list(rfp_section.requirements or []) if rfp_section else [],
+                section_content=section.content or "",
+            )
+            if packed_block:
+                user_message = inject_packed_evidence_into_instruction(
+                    user_message, packed_block
+                )
         query_count = len(queries)
         avoidance_block = ""
         if research:
@@ -8013,6 +9531,28 @@ async def improve_proposal_section(
                         len(bio_pack),
                         section_id,
                     )
+        elif _chat_improve_skip_kb(gate, raw_user_message):
+            understood_ask = raw_user_message.strip()
+            queries = []
+            user_message = raw_user_message.strip()
+            logger.info(
+                "section_improve_planner_skipped (no retrieval) rfp_id=%s section_id=%s",
+                rfp_id,
+                section_id,
+            )
+        elif scope_plan is not None:
+            understood_ask = (
+                scope_plan.understood_ask or raw_user_message
+            ).strip()
+            queries = list(scope_plan.kb_queries or [])
+            user_message = raw_user_message.strip()
+            logger.info(
+                "section_improve_planner_skipped (reuse edit-scope) rfp_id=%s "
+                "section_id=%s queries=%d",
+                rfp_id,
+                section_id,
+                len(queries),
+            )
         else:
             understood_ask, editor_instruction, queries, outline_action = await _plan_section_improve(
                 section=section,
@@ -8052,25 +9592,7 @@ async def improve_proposal_section(
                 )
             else:
                 user_message = raw_user_message.strip()
-        skip_kb = bool(
-            gate is not None
-            and (
-                not gate.requires_retrieval
-                or gate.action
-                in {
-                    EvidenceDecision.WRITE_FROM_PLAN,
-                    EvidenceDecision.MANUAL_FILL,
-                    EvidenceDecision.DETERMINISTIC_CLEANUP,
-                    EvidenceDecision.VERIFY_FIELD,
-                }
-            )
-        )
-        from app.services.proposal_section_kb_evidence import user_asks_kb_fetch_or_fill
-
-        if user_asks_kb_fetch_or_fill(raw_user_message) or _selection_asks_to_fill_verify(
-            raw_user_message
-        ):
-            skip_kb = False
+        skip_kb = _chat_improve_skip_kb(gate, raw_user_message)
         if skip_kb:
             queries = []
             logger.info(
@@ -8218,6 +9740,51 @@ async def improve_proposal_section(
             "kb_refs": [],
         }
     )
+    if re.search(
+        r"certif|forms.*attach|supplier\s+diversity",
+        f"{updated_section.title or ''}\n{updated_section.content or ''}",
+        re.I,
+    ):
+        from app.services.proposal_cert_claim_scrub import scrub_section_cert_claims
+
+        cert_scrubbed, cert_logs = scrub_section_cert_claims(updated_section)
+        if cert_logs:
+            updated_section = cert_scrubbed.model_copy(
+                update={
+                    "content": scrub_client_facing_section_artifacts(
+                        cert_scrubbed.content or ""
+                    )
+                }
+            )
+            logger.info(
+                "post_llm_cert_scrub section_id=%s logs=%s",
+                section_id,
+                cert_logs,
+            )
+    from app.services.proposal_forms_attachments_integrity import (
+        audit_and_repair_forms_attachments,
+        section_is_forms_attachments,
+    )
+
+    if section_is_forms_attachments(updated_section):
+        forms_result = await audit_and_repair_forms_attachments(
+            updated_section.content or "",
+            draft=draft,
+            research=research,
+        )
+        if forms_result.changed:
+            updated_section = updated_section.model_copy(
+                update={
+                    "content": scrub_client_facing_section_artifacts(
+                        forms_result.content
+                    )
+                }
+            )
+            logger.info(
+                "post_llm_forms_integrity section_id=%s fixes=%s",
+                section_id,
+                forms_result.fix_logs,
+            )
     # Case-study body swapped (e.g. Umatilla → San Leandro) must update the sidebar title.
     updated_section = sync_case_study_title_from_content(updated_section)
     try:

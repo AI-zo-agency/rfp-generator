@@ -1,11 +1,13 @@
 """Tests for bio stub + designer-note Option B."""
 
 from app.services.proposal_bio_stub import (
+    extract_engagement_role,
     format_bio_stub_content,
     is_bio_pdf_designer_note,
     is_bio_stub_section,
     rfp_requires_inline_bios,
     resolve_bio_pdf_filename,
+    skip_inline_bio_expansion,
     stub_from_extraction,
 )
 from app.services.proposal_rfp_optional_claim_scrub import strip_designer_notes
@@ -89,6 +91,16 @@ def test_resolve_filename_from_sources() -> None:
     assert name == "04_Bio_SonjaAnderson.pdf"
 
 
+def test_bio_filename_matches_spaced_and_underscored_uploads() -> None:
+    from app.services.proposal_bio_stub import bio_filename_matches_member
+
+    assert bio_filename_matches_member("04_Bio_LetitiaHopper.pdf", "Letitia Hopper")
+    assert bio_filename_matches_member("04_Bio_Letitia_Hopper.pdf", "Letitia Hopper")
+    assert bio_filename_matches_member("04_Bio_Letitia Hopper.pdf", "Letitia Hopper")
+    assert not bio_filename_matches_member("04_Bio_SonjaAnderson.pdf", "Letitia Hopper")
+    assert not bio_filename_matches_member("03_CS_LetitiaHopper.pdf", "Letitia Hopper")
+
+
 def test_scrub_preserves_bio_pdf_designer_note() -> None:
     body = (
         "### Sonja\n\n"
@@ -106,3 +118,20 @@ def test_is_bio_stub_section() -> None:
     content = format_bio_stub_content(member="Curt Schultz", role="Creative")
     assert is_bio_stub_section("section-2-bio-curt-schultz", content)
     assert not is_bio_stub_section("section-1-who-we-are", content)
+
+
+def test_extract_engagement_role_drops_resume_prose() -> None:
+    body = (
+        "### Ella Lindau\n"
+        "**Role on this engagement:** Account and Operations Manager. "
+        "She has 5 years with zö and previously led accounts at agencies.\n"
+        "ACCOUNT AND OPERATIONS MANAGER | 5 YEARS WITH ZÖ AGENCY\n"
+    )
+    assert extract_engagement_role(body) == "Account and Operations Manager"
+
+
+def test_skip_inline_bio_expansion_default() -> None:
+    assert skip_inline_bio_expansion("Describe your team approach.")
+    assert not skip_inline_bio_expansion(
+        "Offerors shall include resumes in the proposal body within the page limit."
+    )

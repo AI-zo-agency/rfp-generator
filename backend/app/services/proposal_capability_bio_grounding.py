@@ -66,24 +66,17 @@ Rules:
 Return JSON: {"content": "...", "changed": true/false, "notes": "one line"}
 """
 
-_BIO_GROUND_SYSTEM = """You fix ONE team bio so it matches the 04_Bio KB source ONLY.
+_BIO_GROUND_SYSTEM = """You fix ONE team bio tab. Default is a designer-note stub,
+not a rewritten resume.
 
 Rules:
-- Years of experience: use ONLY numbers stated in the KB. Never inflate
-  (e.g. KB says 10 years → draft must not say 12). If KB says 12 years, keep 12.
-- If KB lists skill categories (Management 30 years, Creative 20 years), keep that
-  breakdown — do NOT paraphrase as a larger total "marketing industry experience"
-  that invents a career-span total the KB does not state.
-- Sector specialization (government, municipal, enterprise integration, accessibility
-  compliance, etc.): keep ONLY if the KB uses that language. Otherwise omit it.
-- NEVER leave a named person with only a Role line. If the 04_Bio KB has facts,
-  write 2–4 client-facing sentences using ONLY those facts (years, tools, markets
-  the KB actually names). Never invent government/municipal/enterprise-integration
-  specialization the KB does not state. If the KB is empty for that person, keep
-  the Role line and add [VERIFY: restore bio from 04_Bio] — do not invent years.
+- Unless the user/RFP requires inline resumes, keep ### Name, **Role on this
+  engagement** (one line), and [DESIGNER NOTE: Insert approved bio PDF — 04_Bio_*.pdf].
+  Do NOT paste Work History, Key Accounts, years tables, or 04_Bio PDF body.
+- Years / specialization: never inflate or invent. If any prose remains, numbers
+  must match 04_Bio exactly.
 - Keep **Role on this engagement** if present. Do not invent clients, awards, or
   citation markers like [E3].
-- Do not replace a bio with a designer-note stub when KB text is available.
 Return JSON: {"content": "...", "changed": true/false, "notes": "one line"}
 """
 
@@ -115,6 +108,40 @@ _PERSONNEL_TITLE_HINTS = (
     "resumes",
 )
 
+_EDU_GENERIC_TOKENS = frozenset(
+    {
+        "arts",
+        "associate",
+        "bachelor",
+        "college",
+        "degree",
+        "diploma",
+        "earned",
+        "education",
+        "federal",
+        "from",
+        "graduated",
+        "holds",
+        "master",
+        "phd",
+        "received",
+        "science",
+        "university",
+    }
+)
+
+_PERSONAL_EDUCATION_RE = re.compile(
+    r"(?is)"
+    r"("
+    r"[^.!?\n]{0,80}?\b(?:holds?|earned|received|completed|has)\s+"
+    r"(?:a\s+|an\s+)?(?:bachelor|master|associate|ph\.?d|mba|degree)\b[^.!?\n]{0,160}[.!]?"
+    r"|"
+    r"[^.!?\n]{0,50}?\b(?:bachelor|master|associate)\s+(?:of|in|'s)\s+[^.!?\n]{0,140}[.!]?"
+    r"|"
+    r"[^.!?\n]{0,40}?\b(?:university|college)\s+of\s+[A-Z][^.!?\n]{0,100}[.!]?"
+    r")"
+)
+
 _PERSON_HEADING_RE = re.compile(
     r"(?m)^(?:#{1,4}\s+|\*\*)"
     r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z'\-]+){1,3})"
@@ -128,9 +155,51 @@ _PERSON_NAME_IN_TEXT_RE = re.compile(
 )
 
 
+def person_name_from_tab_title(title: str) -> str:
+    """'2.2 — Sonja Anderson' → 'Sonja Anderson'; Who We Are / org tabs → ''."""
+    from app.services.proposal_bio_stub import is_plausible_person_name
+    from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
+
+    candidate = _member_name_from_bio_section(title or "")
+    if not candidate or not is_plausible_person_name(candidate):
+        return ""
+    return candidate
+
+
+def is_who_we_are_section(section: ProposalSection) -> bool:
+    sid = (section.id or "").casefold()
+    if sid.startswith("section-1-who-we-are"):
+        return True
+    from app.services.proposal_bio_stub import is_company_identity_title
+
+    return is_company_identity_title(section.title or "")
+
+
+def is_our_work_section(section: ProposalSection) -> bool:
+    sid = (section.id or "").casefold()
+    return sid.startswith("section-3-")
+
+
+def is_named_person_bio_tab(section: ProposalSection) -> bool:
+    sid = (section.id or "")
+    if sid.startswith("section-1-") or is_who_we_are_section(section):
+        return False
+    if is_our_work_section(section):
+        return False
+    if sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
+        return True
+    return bool(person_name_from_tab_title(section.title or ""))
+
+
 def is_personnel_bio_section(section: ProposalSection) -> bool:
     sid = (section.id or "").casefold()
+    if sid.startswith("section-1-") or is_who_we_are_section(section):
+        return False
+    if is_our_work_section(section):
+        return False
     if sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
+        return True
+    if person_name_from_tab_title(section.title or ""):
         return True
     title = (section.title or "").casefold()
     return any(hint in title for hint in _PERSONNEL_TITLE_HINTS)
@@ -157,6 +226,11 @@ def section_or_instruction_needs_bio_kb(
     )
 
 
+_NAME_COMMA_ROLE_RE = re.compile(
+    r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z'\-]+){1,2})\s*,\s+[A-Z]"
+)
+
+
 def named_people_in_section(
     section: ProposalSection,
     *,
@@ -164,34 +238,53 @@ def named_people_in_section(
 ) -> list[str]:
     """Heading names in a personnel / bio tab (First Last).
 
-    Also picks up names the user mentioned (e.g. \"Shawn DiCriscio … resume\")
-    and headings like \"### Shawn DiCriscio, Senior Web Developer\".
+    Also picks up names the user mentioned (e.g. \"Shawn DiCriscio … resume\"),
+    headings like \"### Shawn DiCriscio, Senior Web Developer\", and staffing
+    prose like \"Letitia Hopper, Digital Media Strategist, …\".
     """
+    from app.services.proposal_bio_stub import is_plausible_person_name
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
 
     names: list[str] = []
+    skip = {
+        "role on this engagement",
+        "team qualifications summary",
+        "senior web developer",
+        "creative director",
+        "account director",
+    }
+
+    def _add(name: str) -> None:
+        cleaned = (name or "").strip()
+        if not cleaned or cleaned.casefold() in skip:
+            return
+        if not is_plausible_person_name(cleaned):
+            return
+        if cleaned not in names:
+            names.append(cleaned)
+
     sid = section.id or ""
-    if sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
+    from_title = person_name_from_tab_title(section.title or "")
+    if from_title:
+        _add(from_title)
+    elif sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
         member = _member_name_from_bio_section(section.title or "")
         if member:
-            names.append(member)
+            _add(member)
     blob = f"{section.title or ''}\n{section.content or ''}"
     for match in _PERSON_HEADING_RE.finditer(blob):
-        name = match.group(1).strip()
-        if name.casefold() in {
-            "role on this engagement",
-            "team qualifications summary",
-            "senior web developer",
-            "creative director",
-            "account director",
-        }:
-            continue
-        if name not in names:
-            names.append(name)
+        _add(match.group(1).strip())
+
+    content = section.content or ""
+    # Staffing / team paragraphs: "Letitia Hopper, Digital Media Strategist, …"
+    # — not a markdown heading, so heading parse misses them.
+    for match in _NAME_COMMA_ROLE_RE.finditer(f"{content}\n{user_message or ''}"):
+        cand = match.group(1).strip()
+        if is_plausible_person_name(cand):
+            _add(cand)
 
     # User named a person — include even when heading parse missed commas/titles.
     msg = (user_message or "").strip()
-    content = section.content or ""
     if msg and content:
         content_cf = content.casefold()
         # Prefer people already present in the draft body (any heading style).
@@ -202,18 +295,14 @@ def named_people_in_section(
             content,
         ):
             name = match.group(1).strip()
-            if name.casefold() in {
-                "role on this engagement",
-                "team qualifications summary",
-            }:
+            if name.casefold() in skip:
                 continue
             # Message mentions this person (case-insensitive).
-            if name.casefold() in msg.casefold() and name not in names:
-                names.append(name)
+            if name.casefold() in msg.casefold():
+                _add(name)
             elif (
                 name.split()[0].casefold() in msg.casefold()
                 and len(name.split()) >= 2
-                and name not in names
                 and name.casefold() in content_cf
             ):
                 # "shawn" alone → Shawn DiCriscio when unique in section
@@ -226,8 +315,59 @@ def named_people_in_section(
                     )
                 ]
                 if len({h.casefold() for h in first_hits}) == 1:
-                    names.append(name)
+                    _add(name)
+        for match in _PERSON_NAME_IN_TEXT_RE.finditer(msg):
+            cand = match.group(1).strip()
+            if is_plausible_person_name(cand) and cand.casefold() in content_cf:
+                _add(cand)
+            elif is_plausible_person_name(cand):
+                _add(cand)
     return names
+
+
+def named_people_in_text(text: str) -> list[str]:
+    """First Last names in a pin / chat ask (not the whole staffing roster)."""
+    from app.services.proposal_bio_stub import is_plausible_person_name
+
+    names: list[str] = []
+    blob = text or ""
+    for match in _NAME_COMMA_ROLE_RE.finditer(blob):
+        cand = match.group(1).strip()
+        if is_plausible_person_name(cand) and cand not in names:
+            names.append(cand)
+    for match in _PERSON_NAME_IN_TEXT_RE.finditer(blob):
+        cand = match.group(1).strip()
+        if is_plausible_person_name(cand) and cand not in names:
+            names.append(cand)
+    return names
+
+
+def people_for_bio_pack(
+    section: ProposalSection,
+    *,
+    user_message: str = "",
+    excerpt: str = "",
+) -> list[str]:
+    """People whose 04_Bio to fetch for this turn.
+
+    A pinned Letitia paragraph must not pull Ron/Curt/every teammate on the tab.
+    Fall back to the full tab roster only when the ask does not name anyone.
+    """
+    focus_blob = f"{excerpt or ''}\n{user_message or ''}"
+    focused = named_people_in_text(focus_blob)
+    if not focused:
+        return named_people_in_section(section, user_message=user_message)
+    roster = {
+        n.casefold()
+        for n in named_people_in_section(section, user_message=focus_blob)
+    }
+    content_cf = f"{section.content or ''}\n{excerpt or ''}".casefold()
+    kept: list[str] = []
+    for name in focused:
+        if name.casefold() in roster or name.casefold() in content_cf:
+            if name not in kept:
+                kept.append(name)
+    return kept or named_people_in_section(section, user_message=user_message)
 
 
 def bio_block_is_role_only(content: str, member: str) -> bool:
@@ -360,6 +500,119 @@ def align_bio_years_deterministically(
     return new_text, logs
 
 
+def _kb_education_excerpt(kb_text: str) -> str:
+    """First education line already present in 04_Bio — never invent a school."""
+    kb = (kb_text or "").strip()
+    if not kb:
+        return ""
+    headed = re.search(
+        r"(?is)(?:^|\n)\s*education\s*[:\n]+\s*(.+?)(?:\n\s*\n|\n\s*(?:work history|experience|certif|license)|\Z)",
+        kb,
+    )
+    if headed:
+        line = headed.group(1).strip().splitlines()[0].strip(" -•*\t")
+        if 8 <= len(line) <= 200:
+            return line if line.endswith(".") else f"{line}."
+    for sent in re.split(r"(?<=[.!?])\s+", kb):
+        if re.search(
+            r"(?i)\b(?:associate|bachelor|master|ph\.?d|mba|college|university)\b",
+            sent,
+        ):
+            cleaned = sent.strip()
+            if 8 <= len(cleaned) <= 240:
+                return cleaned
+    return ""
+
+
+def align_bio_education_deterministically(
+    content: str,
+    kb_text: str,
+    *,
+    member: str = "",
+) -> tuple[str, list[str]]:
+    """Replace invented degree / school sentences with 04_Bio education wording."""
+    kb = (kb_text or "").strip()
+    if not kb or kb.startswith("(Supermemory"):
+        return content, []
+    kb_cf = kb.casefold()
+    name_tokens = {p.casefold() for p in (member or "").split() if len(p) >= 2}
+    logs: list[str] = []
+    text = content or ""
+    excerpt = _kb_education_excerpt(kb)
+
+    def _repl(match: re.Match[str]) -> str:
+        sent = match.group(0).strip()
+        distinctive = [
+            tok
+            for tok in re.findall(r"[A-Za-z]{4,}", sent)
+            if tok.casefold() not in _EDU_GENERIC_TOKENS
+            and tok.casefold() not in name_tokens
+        ]
+        if not distinctive:
+            return match.group(0)
+        if all(tok.casefold() in kb_cf for tok in distinctive):
+            return match.group(0)
+        logs.append(
+            "Bio education ungrounded vs 04_Bio — replaced invented degree/school"
+        )
+        return excerpt
+
+    new_text = _PERSONAL_EDUCATION_RE.sub(_repl, text)
+    new_text = re.sub(r"[ \t]+\n", "\n", new_text)
+    new_text = re.sub(r"\n{3,}", "\n\n", new_text)
+    new_text = re.sub(r"  +", " ", new_text)
+    return new_text, logs
+
+
+async def align_named_bios_to_kb(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """Years + education on named-person tabs must match packed 04_Bio."""
+    from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+    from app.services.proposal_sections_graph import _fetch_member_bio_kb
+
+    logs: list[str] = []
+    sections: list[ProposalSection] = []
+    changed = False
+
+    for section in draft.sections:
+        if not is_named_person_bio_tab(section):
+            sections.append(section)
+            continue
+        if is_bio_pdf_designer_note(section.content or ""):
+            sections.append(section)
+            continue
+        member = person_name_from_tab_title(section.title or "")
+        if not member:
+            from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
+
+            member = _member_name_from_bio_section(section.title or "")
+        if not member:
+            sections.append(section)
+            continue
+        try:
+            kb_text, _ = await _fetch_member_bio_kb(member)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Bio KB align skipped for %s: %s", member, exc)
+            sections.append(section)
+            continue
+        body = section.content or ""
+        body, year_logs = align_bio_years_deterministically(body, kb_text)
+        body, edu_logs = align_bio_education_deterministically(
+            body, kb_text, member=member
+        )
+        if year_logs or edu_logs:
+            changed = True
+            logs.extend(f"{section.title or section.id}: {line}" for line in year_logs + edu_logs)
+            sections.append(section.model_copy(update={"content": body}))
+        else:
+            sections.append(section)
+
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs
+
+
 async def _llm_rewrite(
     section: ProposalSection,
     *,
@@ -482,6 +735,32 @@ async def pack_04_bio_kb_for_section(
     return "\n".join(parts)
 
 
+async def _lookup_approved_bio_pdf(member: str) -> tuple[str, bool]:
+    """Resolve 04_Bio_*.pdf from KB when possible; never invent a different person."""
+    from app.services.proposal_bio_stub import (
+        expected_bio_pdf_filename,
+        resolve_bio_pdf_filename,
+    )
+
+    expected = expected_bio_pdf_filename(member)
+    try:
+        from app.services import supermemory
+
+        if not supermemory.is_configured():
+            return expected, True
+        from app.services.proposal_sections_graph import _find_member_bio_document
+
+        doc = await _find_member_bio_document(member)
+        if not doc:
+            return expected, False
+        meta = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        name = str(meta.get("fileName") or expected)
+        return resolve_bio_pdf_filename(member, [name]), True
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Bio PDF lookup skipped for %s: %s", member, exc)
+        return expected, True
+
+
 async def ground_bios_to_kb(
     draft: ProposalDraft,
     *,
@@ -489,43 +768,67 @@ async def ground_bios_to_kb(
     rfp_id: str = "",
     use_llm: bool = True,
 ) -> tuple[ProposalDraft, list[str]]:
-    """Section 2 bios → designer-note stub. Never LLM-rewrite 04_Bio into the manuscript."""
-    del rfp_id, use_llm  # bios are stub-only; capability LLM is a separate pass
+    """Every named bio tab → designer-note stub (insert approved 04_Bio PDF).
+
+    Never LLM-rewrite resumes into the manuscript. Capabilities stay in their
+    own tabs and are grounded separately. Who We Are / Section 1 identity cards
+    are written by the Section 1 brand-voice path — never stubbed as 04_Bio PDFs.
+    Our Work / Section 3 case-study cards are never bios, even when the title is
+    two Title-Case words (Municipality Summaries).
+    """
+    del rfp_id, use_llm, rfp_text
     from app.services.proposal_bio_stub import (
-        expected_bio_pdf_filename,
+        extract_engagement_role,
         format_bio_stub_content,
         is_bio_pdf_designer_note,
-        rfp_requires_inline_bios,
+        is_plausible_person_name,
     )
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
+    from app.services.proposal_scan_fact_repairs import parse_org_chart_roles
 
     logs: list[str] = []
     sections: list[ProposalSection] = []
     changed = False
-    inline_required = rfp_requires_inline_bios(rfp_text)
+    org_roles = parse_org_chart_roles(draft)
 
     for section in draft.sections:
-        sid = section.id or ""
-        if not sid.startswith("section-2-bio-") or sid.endswith("placeholder"):
+        if not is_named_person_bio_tab(section):
             sections.append(section)
             continue
 
-        member = _member_name_from_bio_section(section.title or "")
+        sid = section.id or ""
+        member = person_name_from_tab_title(section.title or "")
+        if not member and sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
+            member = _member_name_from_bio_section(section.title or "")
+        if member and not is_plausible_person_name(member):
+            member = ""
         if not member:
             sections.append(section)
             continue
 
         body = section.content or ""
-        if is_bio_pdf_designer_note(body) and not inline_required:
-            sections.append(section)
-            continue
+        if is_bio_pdf_designer_note(body) and "### " in body and "Role on this engagement" in body:
+            # Already a clean stub — skip unless leftover resume prose remains.
+            if len(_bio_narrative_without_role(body).split()) < 12:
+                sections.append(section)
+                continue
 
-        pdf = expected_bio_pdf_filename(member)
+        role = extract_engagement_role(body)
+        if not role:
+            role = org_roles.get(member.casefold(), "")
+            if not role:
+                for name, mapped in org_roles.items():
+                    parts = member.casefold().split()
+                    if len(parts) >= 2 and parts[0] in name and parts[-1] in name:
+                        role = mapped
+                        break
+
+        pdf, kb_available = await _lookup_approved_bio_pdf(member)
         stub = format_bio_stub_content(
             member=member,
-            role="",
+            role=role,
             pdf_filename=pdf,
-            kb_available=True,
+            kb_available=kb_available,
             inline_required=False,
         )
         if stub.strip() != body.strip():
@@ -540,6 +843,37 @@ async def ground_bios_to_kb(
     if not changed:
         return draft, logs
     return draft.model_copy(update={"sections": sections}), logs
+
+
+async def persist_collapsed_bio_stubs(
+    rfp_id: str,
+    *,
+    draft: ProposalDraft | None = None,
+    rfp_text: str = "",
+) -> tuple[ProposalDraft | None, list[str]]:
+    """Cheap no-LLM collapse of Section 2 resume dumps → designer-note stubs.
+
+    Safe on Continue Proposal / phase start / pipeline end. Does not fetch 04_Bio.
+    """
+    from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
+
+    current = draft
+    if current is None:
+        current = await aget_proposal_draft(rfp_id)
+    if current is None:
+        return None, []
+    text = rfp_text or ""
+    if not text.strip():
+        try:
+            from app.services.proposal_common import load_rfp_for_proposal
+
+            text = load_rfp_for_proposal(rfp_id)[2] or ""
+        except Exception:  # noqa: BLE001
+            text = ""
+    updated, logs = await ground_bios_to_kb(current, rfp_text=text, use_llm=False)
+    if logs:
+        await asave_proposal_draft(updated)
+    return updated, logs
 
 
 async def run_capability_bio_grounding(

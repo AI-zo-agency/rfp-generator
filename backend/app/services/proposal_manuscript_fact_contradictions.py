@@ -58,22 +58,29 @@ IS a contradiction (flag these):
   or companyfacts excerpt in the manuscript evidences that exact past delivery.
   Severity=critical/major. Rewrite to adjacent verified experience or [VERIFY] —
   never assert checkable past work that is not in the evidence.
+- STATE BUSINESS REGISTRATION: "registered / qualified / authorized to conduct
+  business in [State]" when that state is not on the companyfacts / Section 1.3
+  State Registrations list. Severity=critical. rewrite → MANUAL FILL for Sonja
+  (public-record filing) or delete the sentence. Never leave a signed letter
+  asserting an unlisted foreign qualification.
+- CASE STUDY NAME / URL: a project title, client name, or URL that does not
+  appear in Section 3 cards, 03_CS, or ClientList. Severity=critical. Remove or
+  VERIFY — never keep an invented case-study name or link.
 - CASE STUDY / SECTOR FRAMING MISMATCH: narrative claims government / utility /
   enterprise web proof while the included Section 3 case studies are private
   healthcare, retail, or otherwise do not demonstrate the claimed capability.
   Rewrite the framing to match the actual studies shown, or flag VERIFY for
   better portfolio selections.
-- INVENTED SPECIALIST ROLES: team org charts naming dedicated specialist titles
-  (e.g. dedicated accessibility lead, QA lead) when Section 2 bios do not include
-  a matching named person — rewrite to real roster names / generalist coverage /
-  [MANUAL FILL: subcontractor] rather than phantom specialists.
+- INVENTED CASE-STUDY METRICS: impressions, clicks, CTR, or % lift in a campaign
+  write-up when the 03_CS / case-study KB excerpt does not contain those numbers.
+  Rewrite to qualitative outcomes from the source or [VERIFY] — never keep invented KPIs.
 
 NOT a contradiction (do NOT flag):
 - RFP-specific project staffing (named roles on THIS engagement — Section 2 bios)
 - [VERIFY] / [MANUAL FILL] tags already flagging uncertainty
-- Case-study client metrics (project-specific, not agency-wide)
 - Budget/fees/dollar amounts (handled elsewhere)
 - Duplication of Who We Are in other tabs (Senior Editor handles dedupe)
+- Case-study metrics whose exact figures appear in the 03_CS source for that study
 
 NEVER invent replacement numbers. When fixing team size, use the companyfacts
 value exactly OR remove the invented claim and state team size per verified facts.
@@ -275,6 +282,7 @@ async def run_manuscript_fact_contradiction_pass(
     *,
     rfp: RfpRecord,
     use_llm: bool = True,
+    only_rewrite_section_ids: frozenset[str] | None = None,
 ) -> ManuscriptFactContradictionResult:
     """LLM scan for internal + KB verified-fact contradictions across all sections."""
     result = ManuscriptFactContradictionResult(draft=draft)
@@ -336,10 +344,27 @@ async def run_manuscript_fact_contradiction_pass(
     fixed_ids: set[str] = set()
 
     for finding in findings:
+        if (
+            only_rewrite_section_ids is not None
+            and finding.section_id not in only_rewrite_section_ids
+        ):
+            result.logs.append(
+                f"{finding.section_id}: skipped fact-contradiction rewrite "
+                "(outside scoped track)"
+            )
+            continue
         idx = by_id.get(finding.section_id)
         if idx is None:
             continue
         section = sections[idx]
+        if (
+            (section.id or "").startswith("section-2-bio-")
+            and section.id != "section-2-bio-placeholder"
+        ):
+            result.logs.append(
+                f"{finding.section_id}: skipped fact-contradiction rewrite on bio stub"
+            )
+            continue
         if finding.severity in {"critical", "major"}:
             updated, changed, notes = await _rewrite_section_for_fact_contradiction(
                 section,

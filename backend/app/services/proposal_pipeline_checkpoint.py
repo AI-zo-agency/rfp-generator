@@ -544,6 +544,7 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
 
 @asynccontextmanager
 async def pipeline_phase(rfp_id: str, phase: str):
+    from app.services.llm_call_context import get_llm_run_id, llm_call_context
     from app.services.proposal_generation_cancel import (
         ProposalGenerationCancelled,
         bind_active_rfp,
@@ -553,11 +554,13 @@ async def pipeline_phase(rfp_id: str, phase: str):
 
     token = bind_active_rfp(rfp_id)
     await record_phase_started(rfp_id, phase)
+    run_id = get_llm_run_id() or ""
     try:
-        await check_generation_cancelled(rfp_id)
-        yield
-        await check_generation_cancelled(rfp_id)
-        await record_phase_completed(rfp_id, phase)
+        with llm_call_context(rfp_id=rfp_id, run_id=run_id, node_name=phase):
+            await check_generation_cancelled(rfp_id)
+            yield
+            await check_generation_cancelled(rfp_id)
+            await record_phase_completed(rfp_id, phase)
     except ProposalGenerationCancelled as exc:
         await record_generation_stopped(rfp_id, phase)
         raise exc

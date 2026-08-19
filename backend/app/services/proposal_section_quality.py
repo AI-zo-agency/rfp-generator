@@ -41,7 +41,9 @@ def prior_content_for_redraft(section: ProposalSection) -> tuple[str, bool]:
     Choose what prior text to show the revise agent.
     Returns (prior_text, full_rewrite_mode).
     """
-    content = (section.content or "").strip()
+    from app.services.proposal_bio_stub import prior_content_for_rewrite
+
+    content = prior_content_for_rewrite(section.id, section.content or "").strip()
     if section_content_is_substantial(section, content) and section.status == "generated":
         return content, False
     if content and word_count(content) >= 40:

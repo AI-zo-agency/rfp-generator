@@ -39,15 +39,21 @@ _CONTRACTOR_KPI_PHRASES = (
     "+0.8%",
 )
 
-_ROSTER_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
+_ROSTER_IDENTITY_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bTed Anderson\b"), "Todd Anderson"),
     (re.compile(r"\bTed brings\b"), "Todd brings"),
+    (re.compile(r"\bMurilo Mendes\b"), "Marcelle Benevides"),
+)
+_ROSTER_DENYLIST_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bBen Edwards\b"), "[REMOVE: verify roster — not on approved team]"),
     (re.compile(r"\bErica Schultz\b"), "[REMOVE: verify roster — not on approved team]"),
     (re.compile(r"\bBrittany Frazier\b"), "[REMOVE: verify roster — not on approved team]"),
     (re.compile(r"\bDrew Stone\b"), "[REMOVE: verify roster — not on approved team]"),
     (re.compile(r"\bMorgan Nivan\b"), "[REMOVE: verify roster — not on approved team]"),
-    (re.compile(r"\bMarcelle Benevides\b"), "[REMOVE: verify roster — not on approved team]"),
+)
+_ROSTER_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
+    *_ROSTER_IDENTITY_FIXES,
+    *_ROSTER_DENYLIST_FIXES,
 )
 
 _OCEANIA_NO_OFFICE = re.compile(
@@ -130,10 +136,15 @@ def run_global_contractor_kpi_fix(
     )
 
 
-def apply_deterministic_roster_fixes(content: str) -> tuple[str, list[str]]:
+def apply_deterministic_roster_fixes(
+    content: str,
+    *,
+    identity_only: bool = False,
+) -> tuple[str, list[str]]:
     logs: list[str] = []
     out = content or ""
-    for pattern, repl in _ROSTER_FIXES:
+    fixes = _ROSTER_IDENTITY_FIXES if identity_only else _ROSTER_FIXES
+    for pattern, repl in fixes:
         if pattern.search(out):
             out = pattern.sub(repl, out)
             logs.append(f"Roster fix: {pattern.pattern} → {repl[:40]}")

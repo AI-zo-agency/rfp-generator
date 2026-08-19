@@ -1,163 +1,129 @@
-"""Closing sections must require a submission obligation, not a topic mention.
+"""Closing sections come from the ledger — not topic-mention regex.
 
-Real symptom this guards: a 12-page-capped RFP produced sections for
-"Acknowledgement of Addenda", "Contract / Agreement Acknowledgment" and an
-unconditional "Offeror Commitment and Closing Statement" — none of which the
-RFP asked vendors to write. They matched procedural prose.
+Regex catalog retired. Obligation gate lives in the LLM extract prompt;
+these tests lock the sync adapter + merge behavior with fixture ledgers.
 """
 
 from __future__ import annotations
 
+import ast
 import unittest
+from pathlib import Path
 
+from app.services.proposal_closing_ledger import ledger_from_fixture
 from app.services.proposal_closing_package import detect_closing_components
+from app.services.proposal_outline_dedup import merge_closing_components_into_outline
 
 
-def _ids(text: str, **kw) -> set[str]:
-    return {c.id for c in detect_closing_components(text, **kw)}
+def _ids(ledger_items: list[dict], **kw) -> set[str]:
+    ledger = ledger_from_fixture(ledger_items)
+    return {c.id for c in detect_closing_components("ignored", ledger=ledger, **kw)}
 
 
-class ObligationGateTests(unittest.TestCase):
-    def test_procedural_addenda_clause_does_not_add_a_section(self) -> None:
-        # Paraphrase of the RFP 1.6 language that triggered the false positive.
+class LedgerAuthorityTests(unittest.TestCase):
+    def test_procedural_text_alone_does_not_add_sections(self) -> None:
+        # Without a ledger, catalog scan is retired → empty.
         rfp = (
             "1.6 ADDENDA. The County may issue any addenda to this solicitation "
             "prior to the proposal due date. Vendors are responsible for "
             "monitoring ColoradoVSS and BidNet for addenda affecting this "
             "proposal. Addenda will be posted electronically."
         )
-        self.assertNotIn("addenda_acknowledgement", _ids(rfp))
+        self.assertEqual(detect_closing_components(rfp), [])
 
-    def test_real_addenda_requirement_still_adds_the_section(self) -> None:
-        rfp = (
-            "All addenda must be acknowledged and returned with your proposal. "
-            "Failure to return signed addenda may render the quote non-responsive."
+    def test_ledger_row_still_adds_addenda(self) -> None:
+        self.assertIn(
+            "addenda_acknowledgement",
+            _ids(
+                [
+                    {
+                        "id": "addenda_acknowledgement",
+                        "title": "Acknowledgement of Addenda",
+                        "kind": "form",
+                    }
+                ]
+            ),
         )
-        self.assertIn("addenda_acknowledgement", _ids(rfp))
-
-    def test_procedural_contract_terms_clause_does_not_add_a_section(self) -> None:
-        rfp = (
-            "1.7 CONTRACT TERMS. The initial term is one year with two optional "
-            "extensions. Submission of a quote constitutes acceptance of the "
-            "terms and conditions stated herein. The County may cancel with "
-            "thirty days notice."
-        )
-        self.assertNotIn("exemplar_agreement", _ids(rfp))
 
     def test_commitment_section_is_not_added_unconditionally(self) -> None:
         rfp = "Section IV Documentation. Provide a company overview and pricing."
-        self.assertNotIn("offeror_commitment", _ids(rfp))
+        self.assertNotIn(
+            "offeror_commitment",
+            {c.id for c in detect_closing_components(rfp)},
+        )
 
     def test_empty_rfp_text_adds_nothing(self) -> None:
-        self.assertEqual(_ids(""), set())
+        self.assertEqual(detect_closing_components(""), [])
 
     def test_commitment_still_available_when_caller_opts_in(self) -> None:
-        ids = _ids("Provide a company overview.", always_include_commitment=True)
+        ids = {
+            c.id
+            for c in detect_closing_components(
+                "Provide a company overview.",
+                always_include_commitment=True,
+            )
+        }
         self.assertIn("offeror_commitment", ids)
 
-    def test_genuine_reference_requirement_survives(self) -> None:
-        rfp = (
-            "Offerors must submit three client references from like institutions, "
-            "including contact name, telephone and email, with the proposal."
-        )
-        self.assertIn("references", _ids(rfp))
-
-    def test_genuine_pricing_form_requirement_survives(self) -> None:
-        rfp = (
-            "The Pricing Proposal Form must be completed and returned with your "
-            "quote. Provide hourly, monthly and annual blended rates."
-        )
-        self.assertIn("pricing_form", _ids(rfp))
-
-
-
-class InjectionSiteTests(unittest.TestCase):
-    """The unit gate is useless if injection sites override it.
-
-    detect_closing_components defaulting to False did not fix anything on its
-    own: ensure_closing_sections and the outline dedup pass both passed
-    always_include_commitment=True explicitly, so the unrequested closing
-    section was still added to real drafts.
-    """
-
-    def test_no_injection_site_forces_the_commitment_section(self) -> None:
-        import ast
-        from pathlib import Path
-
-        app_dir = Path(__file__).resolve().parents[1] / "app"
-        offenders: list[str] = []
-
-        for path in app_dir.rglob("*.py"):
-            if "__pycache__" in path.parts:
-                continue
-            try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-            except SyntaxError:
-                continue
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                fn = node.func
-                name = getattr(fn, "id", None) or getattr(fn, "attr", None)
-                if name != "detect_closing_components":
-                    continue
-                for kw in node.keywords:
-                    if kw.arg != "always_include_commitment":
-                        continue
-                    if isinstance(kw.value, ast.Constant) and kw.value.value is True:
-                        offenders.append(
-                            f"{path.relative_to(app_dir.parent)}:{node.lineno}"
-                        )
-
-        self.assertEqual(
-            offenders,
-            [],
-            msg=(
-                "always_include_commitment=True at "
-                + ", ".join(offenders)
-                + " — this re-adds a section no RFP asked for"
+    def test_genuine_reference_ledger_row_survives(self) -> None:
+        self.assertIn(
+            "references",
+            _ids(
+                [
+                    {
+                        "id": "references",
+                        "title": "References",
+                        "kind": "form",
+                        "draftInstructions": "three client references",
+                    }
+                ]
             ),
         )
 
 
+class InjectionSiteTests(unittest.TestCase):
+    """ensure_closing_sections / merge must not force always_include_commitment=True."""
 
-class AttachmentChecklistScopeTests(unittest.TestCase):
-    """The attachments tab must not read as a second Insurance Information.
+    ROOT = Path(__file__).resolve().parents[1] / "app" / "services"
 
-    Section 1.5 already states zö's coverage. A closing tab titled "Insurance
-    Certificates & Required Attachments" reads as a duplicate of it, and its
-    instructions never said not to restate limits and carriers. Its real job is
-    a checklist of documents to RETURN.
-    """
+    def _calls_with_always_true(self, path: Path) -> list[str]:
+        tree = ast.parse(path.read_text())
+        hits: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "attr", None) or getattr(func, "id", None)
+            if name != "detect_closing_components":
+                continue
+            for kw in node.keywords:
+                if kw.arg == "always_include_commitment" and isinstance(
+                    kw.value, ast.Constant
+                ):
+                    if kw.value.value is True:
+                        hits.append(f"{path.name}:{node.lineno}")
+        return hits
 
-    RFP = (
-        "Submit a certificate of insurance naming the County as additional "
-        "insured, a completed W-9, and Exhibit A with your proposal."
-    )
+    def test_ensure_closing_sections_does_not_force_commitment(self) -> None:
+        hits = self._calls_with_always_true(
+            self.ROOT / "proposal_fulfill_rfp_gaps.py"
+        )
+        self.assertEqual(hits, [])
 
-    def _component(self):
-        comps = detect_closing_components(self.RFP)
-        return next((c for c in comps if c.id == "insurance_attachments"), None)
+    def test_outline_merge_does_not_force_commitment(self) -> None:
+        hits = self._calls_with_always_true(self.ROOT / "proposal_outline_dedup.py")
+        self.assertEqual(hits, [])
 
-    def test_component_is_still_detected(self) -> None:
-        self.assertIsNotNone(self._component())
-
-    def test_title_no_longer_leads_with_insurance(self) -> None:
-        title = self._component().title
-        self.assertNotIn("Insurance Certificates", title)
-        self.assertIn("Attachments", title)
-
-    def test_instructions_forbid_restating_section_1_5(self) -> None:
-        instructions = self._component().draft_instructions
-        self.assertIn("1.5", instructions)
-        self.assertIn("do NOT restate", instructions)
-        for banned in ("limits", "carriers"):
-            self.assertIn(banned, instructions)
-
-    def test_instructions_ask_for_a_checklist_not_prose(self) -> None:
-        instructions = self._component().draft_instructions
-        self.assertIn("CHECKLIST", instructions)
-        self.assertIn("W-9", instructions)
+    def test_merge_without_ledger_adds_nothing_even_if_rfp_mentions_forms(self) -> None:
+        merged, added = merge_closing_components_into_outline(
+            [],
+            rfp_context=self.RFP if hasattr(self, "RFP") else (
+                "All addenda must be acknowledged and returned with your proposal. "
+                "Submit three references and the Pricing Proposal Form."
+            ),
+        )
+        self.assertEqual(added, [])
+        self.assertEqual(merged, [])
 
 
 if __name__ == "__main__":

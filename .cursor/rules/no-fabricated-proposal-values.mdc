@@ -1,0 +1,54 @@
+---
+description: Strict no-fabrication rule for generate, Complete Scan, and section chat
+alwaysApply: true
+---
+
+# No fabricated proposal values (generate · Complete Scan · chat)
+
+Every path that writes manuscript content MUST run the zero-fabrication guard
+stack before persisting. Never ship invented facts, carriers, certs, team
+members, rates, or compliance statuses.
+
+## Mandatory hook
+
+`apply_zero_fabrication_guards` / `apply_zero_fabrication_guards_before_persist`
+in `proposal_zero_fabrication.py` — canonical order:
+
+1. Manuscript integrity (references, case-study overbuild, pricing tiers)
+2. Reference contact evidence (no full contacts without KB proof)
+3. Budget sync / ceiling scrub (canonical ledger wins)
+4. Fabricated qualifications guard (invented clients / case studies)
+5. Insurance certification gate (no Compliant without Section 1.5 / companyfacts)
+6. Cert claim scrub (MBE/DBE, individual platform certs as agency-wide, etc.)
+7. Fabricated personnel scrub (Brittany Frazier, Drew Stone, … → MANUAL FILL)
+8. Forms & Attachments integrity (LLM audit + verbatim replace only) on persist
+
+## Where it MUST run
+
+| Path | When |
+|------|------|
+| **Generate proposal** | Phase 3.5 budget + post–self-edit final (`apply_zero_fabrication_guards_before_persist`) |
+| **Complete Scan** | Preflight + **after stage 17 quality gate** (final `before_persist`) |
+| **Section chat** | Every `_persist_section_improve_draft` save (`chat-persist`) |
+
+## Never fabricate
+
+- Insurance carriers, NAIC numbers, policy issuers, or "Compliant" / "meets or exceeds"
+- Hourly labor rates or cost rows when budget is fixed/phased / MANUAL FILL
+- Full reference contacts when KB shows incomplete / withheld
+- Agency certifications not in companyfacts (MBE/DBE, WBE Oregon-only, etc.)
+- Team member names not in 04_Bio / MasterTemplate
+- Past-proven delivery claims without case-study / bio evidence
+- Vendor registration, download, or procurement attestations without proof
+- Budget totals, phase tables, or ceiling figures not from canonical ledger
+
+## Chat / LLM edits
+
+- Post-LLM hooks are additive; **persist guard is the hard gate**.
+- Chat ops (`remove_fabricated`, content-risk repair) do not replace persist guards.
+- Replace invented bio sentences with 04_Bio wording — never delete and leave Role-only gaps.
+
+## Evidence
+
+- LLM judgment + verbatim quote replace for forms/compliance fixes.
+- No regex synonym tables for capability or carrier matching (see `no-regex-evidence-matching.mdc`).

@@ -49,6 +49,56 @@ _LlmPostResult = tuple[str, dict[str, Any]]
 _FIREWORKS_SUSPENDED = False
 
 
+def _resolve_run_cost_cap_usd(node_name: str | None) -> float:
+    """Return per-run hard cost cap for guarded pipeline phases; 0 = disabled."""
+    try:
+        from app.core.step_debug_logger import get_pipeline_phase
+
+        phase = (get_pipeline_phase() or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        phase = ""
+    node = (node_name or get_llm_node_name() or "").strip().lower()
+
+    # Complete Scan budget cap.
+    if phase == "fulfill-scan" or "fulfill-scan" in node or "fulfill_scan" in node:
+        return float(getattr(settings, "complete_scan_max_cost_usd", 0.0) or 0.0)
+
+    # Generate proposal budget cap (pipeline + drafting phases).
+    if (
+        phase in {"pipeline", "sections-1-3", "phase-2", "phase-3", "phase-3-5", "phase-3-6"}
+        or "phase-" in node
+        or "generate" in node
+        or "sections-1-3" in node
+        or "proposal_generator" in node
+    ):
+        return float(getattr(settings, "generate_proposal_max_cost_usd", 0.0) or 0.0)
+    return 0.0
+
+
+def _enforce_run_cost_cap(node_name: str | None, run_id: str | None) -> None:
+    """Hard stop when the current run already exceeded the configured budget."""
+    cap = _resolve_run_cost_cap_usd(node_name)
+    if cap <= 0:
+        return
+    resolved_run = (run_id if run_id is not None else get_llm_run_id()).strip()
+    if not resolved_run:
+        return
+    try:
+        from app.services.llm_call_log import get_run_total_cost_usd
+
+        spent = float(get_run_total_cost_usd(resolved_run))
+    except Exception:  # noqa: BLE001
+        return
+    if spent >= cap:
+        raise LlmError(
+            (
+                f"LLM run budget exceeded: ${spent:.2f} spent (cap ${cap:.2f}). "
+                "Stop this run and continue with targeted/manual edits."
+            ),
+            status_code=429,
+        )
+
+
 def _redact_langsmith_llm_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     """Never send API keys / bearer tokens to LangSmith."""
     redacted = dict(inputs)
@@ -556,7 +606,28 @@ def _record_successful_call(
 ) -> None:
     """Persist cost/token row — never raises."""
     try:
+        from app.core.step_debug_logger import (
+            get_pipeline_rfp_id,
+            get_pipeline_run_id,
+            resolve_pipeline_node_name,
+        )
         from app.services.llm_call_log import record_llm_call
+        from app.services.proposal_generation_cancel import get_active_rfp_id
+
+        resolved_node = resolve_pipeline_node_name(
+            node_name if node_name is not None else get_llm_node_name()
+        )
+        resolved_rfp = (
+            (rfp_id if rfp_id is not None else get_llm_rfp_id())
+            or get_pipeline_rfp_id()
+            or get_active_rfp_id()
+            or ""
+        )
+        resolved_run = (
+            (run_id if run_id is not None else get_llm_run_id())
+            or get_pipeline_run_id()
+            or "unknown"
+        )
 
         inp = int(usage.get("prompt_tokens") or 0)
         out = int(usage.get("completion_tokens") or 0)
@@ -572,9 +643,9 @@ def _record_successful_call(
             cache_ttl_1h=settings.llm_cache_ttl_1h,
         )
         record_llm_call(
-            run_id=run_id if run_id is not None else get_llm_run_id(),
-            rfp_id=rfp_id if rfp_id is not None else get_llm_rfp_id(),
-            node_name=node_name if node_name is not None else get_llm_node_name(),
+            run_id=resolved_run,
+            rfp_id=resolved_rfp,
+            node_name=resolved_node,
             model=model,
             tier=tier,
             provider=provider,
@@ -589,7 +660,7 @@ def _record_successful_call(
         logger.info(
             "LLM cost: node=%s model=%s tier=%s in=%d out=%d cache_w=%d cache_r=%d "
             "cost_usd=%.6f latency_ms=%d estimated=%s",
-            node_name if node_name is not None else get_llm_node_name() or "unknown",
+            node_name if node_name is not None else get_llm_node_name() or resolved_node,
             model,
             tier,
             inp,
@@ -628,6 +699,7 @@ async def chat_json(
     )
     if node_name is None:
         node_name = _resolved_node or None
+    _enforce_run_cost_cap(node_name, run_id)
 
     # Try Gemini first if API key is configured and not skipped by preferences
     gemini_key = settings.gemini_api_key.strip()
@@ -867,6 +939,7 @@ async def chat_text(
     )
     if node_name is None:
         node_name = _resolved_node or None
+    _enforce_run_cost_cap(node_name, run_id)
 
     gemini_key = settings.gemini_api_key.strip()
     if gemini_key and not _is_placeholder_key(gemini_key) and not skip_gemini:
@@ -1328,8 +1401,53 @@ def _salvage_company_truth_payload(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _escape_raw_controls_in_json_strings(text: str) -> str:
+    """Turn raw newlines/tabs inside JSON strings into escapes so json.loads can run.
+
+    Claude often emits ```json fences and then puts real line breaks inside
+    \"summary\" / \"replacement\" values. That is invalid JSON even when the
+    object is otherwise complete.
+    """
+    out: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            out.append(ch)
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            out.append(ch)
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            continue
+        if in_string:
+            if ch == "\n":
+                out.append("\\n")
+                continue
+            if ch == "\r":
+                continue
+            if ch == "\t":
+                out.append("\\t")
+                continue
+            if ord(ch) < 32:
+                out.append(f"\\u{ord(ch):04x}")
+                continue
+        out.append(ch)
+    return "".join(out)
+
+
 def _try_parse_json_object(text: str) -> dict[str, Any] | None:
-    for candidate in (text, _close_truncated_json(text)):
+    escaped = _escape_raw_controls_in_json_strings(text)
+    for candidate in (
+        text,
+        escaped,
+        _close_truncated_json(text),
+        _close_truncated_json(escaped),
+    ):
         try:
             parsed = json.loads(candidate)
         except json.JSONDecodeError:
@@ -1563,16 +1681,17 @@ def _salvage_section1_budgets_payload(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _salvage_recommendations_payload(text: str) -> dict[str, Any] | None:
-    """Recover complete recommendation objects from a truncated editorial-review JSON."""
-    start = text.find('"recommendations"')
+def _salvage_object_array_payload(text: str, key: str) -> list[dict[str, Any]] | None:
+    """Recover complete objects from a truncated JSON array field."""
+    needle = f'"{key}"'
+    start = text.find(needle)
     if start == -1:
         return None
     bracket = text.find("[", start)
     if bracket == -1:
         return None
 
-    recs: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     i = bracket + 1
     n = len(text)
     while i < n:
@@ -1608,16 +1727,47 @@ def _salvage_recommendations_payload(text: str) -> dict[str, Any] | None:
                         break
             j += 1
         if not closed:
+            # Last object was cut off — try to close it.
+            snippet = _escape_raw_controls_in_json_strings(text[obj_start:])
+            parsed = _try_parse_json_object(snippet)
+            if isinstance(parsed, dict) and parsed:
+                items.append(parsed)
             break
+        blob = _escape_raw_controls_in_json_strings(text[obj_start:j])
         try:
-            recs.append(json.loads(text[obj_start:j]))
+            obj = json.loads(blob)
         except json.JSONDecodeError:
-            pass
+            obj = _try_parse_json_object(blob)
+        if isinstance(obj, dict):
+            items.append(obj)
         i = j
+    return items
 
-    if recs:
-        return {"recommendations": recs}
-    return None
+
+def _salvage_issues_payload(text: str) -> dict[str, Any] | None:
+    """Recover forms-audit {issues: [...]} when Claude fences or truncates JSON."""
+    if not re.search(r'"issues"\s*:', text):
+        return None
+    looks_like_audit = bool(
+        re.search(r'\{\s*"issues"\s*:', text)
+        or '"verbatimQuote"' in text
+        or '"verbatim_quote"' in text
+        or '"fixAction"' in text
+    )
+    if not looks_like_audit:
+        return None
+    items = _salvage_object_array_payload(text, "issues")
+    if items is None:
+        return None
+    return {"issues": items}
+
+
+def _salvage_recommendations_payload(text: str) -> dict[str, Any] | None:
+    """Recover complete recommendation objects from a truncated editorial-review JSON."""
+    items = _salvage_object_array_payload(text, "recommendations")
+    if not items:
+        return None
+    return {"recommendations": items}
 
 
 def _parse_json_response(raw: str) -> dict[str, Any]:
@@ -1639,6 +1789,7 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
             (_salvage_section1_budgets_payload, "section-1 budget(s)"),
             (_salvage_company_truth_payload, "company truth field(s)"),
             (_salvage_sections_payload, "section(s)"),
+            (_salvage_issues_payload, "forms-audit issue(s)"),
             (_salvage_recommendations_payload, "recommendation(s)"),
             (_salvage_simple_content_payload, "simple content"),
             (_salvage_budget_payload, "budget field(s)"),
@@ -1648,6 +1799,7 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
                 count = len(
                     salvaged.get("sections")
                     or salvaged.get("recommendations")
+                    or salvaged.get("issues")
                     or salvaged.get("lineItems")
                     or salvaged.get("budgets")
                     or salvaged.get("primary")

@@ -95,6 +95,36 @@ class ExtractMoneyConstraintsTests(unittest.TestCase):
         self.assertIsNone(primary_hard_fee_nte(constraints))
         self.assertIsNone(primary_program_media_envelope(constraints))
 
+    def test_year1_budget_under_100k_is_hard_nte(self) -> None:
+        text = (
+            "Section IV. Year 1 budget is $68,200. Proposals shall not exceed "
+            "this amount. Years 2–3 budget approximately $50,000 per year "
+            "subject to annual review."
+        )
+        constraints = extract_rfp_money_constraints(text)
+        nte = primary_hard_fee_nte(constraints)
+        self.assertIsNotNone(nte)
+        assert nte is not None
+        self.assertAlmostEqual(nte.amount, 68_200.0, places=2)
+        self.assertFalse(
+            any(
+                c.kind == CONSTRAINT_HARD_FEE_NTE and abs(c.amount - 50_000.0) < 1
+                for c in constraints
+            ),
+            constraints,
+        )
+
+    def test_do_not_exceed_available_funds(self) -> None:
+        text = (
+            "Available funds for this engagement shall not exceed $68,200. "
+            "Do not go above this budget."
+        )
+        constraints = extract_rfp_money_constraints(text)
+        nte = primary_hard_fee_nte(constraints)
+        self.assertIsNotNone(nte)
+        assert nte is not None
+        self.assertAlmostEqual(nte.amount, 68_200.0, places=2)
+
     def test_apply_sets_budget_fields(self) -> None:
         budget = _budget(fee=80_000, media=30_000)
         constraints = extract_rfp_money_constraints(ADVERTISING_ENVELOPE_SNIPPET)

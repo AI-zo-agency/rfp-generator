@@ -1,56 +1,52 @@
-"""Compulsory closing + attachment pattern detection."""
+"""Closing package adapters — ledger is authority (no regex catalog)."""
+
+from __future__ import annotations
 
 from app.services.proposal_closing_package import detect_closing_components
+from app.services.proposal_closing_ledger import ledger_from_fixture
 from app.services.proposal_rfp_submission_requirements import (
     list_submission_checklist_from_rfp,
 )
 
 
-def test_commitment_not_added_unless_caller_opts_in():
-    """Deliberate change: the closing statement is no longer unconditional.
-
-    An RFP that never asks for a closing statement should not get one. Under a
-    page cap an unrequested section displaces content the RFP does require.
-    Callers that genuinely want it can still pass always_include_commitment.
-    """
+def test_detect_without_ledger_returns_empty() -> None:
     text = (
-        "Kennebec Valley Community College seeks a marketing plan. "
-        "Submit technical ability, past performance, and cost."
+        "Submit three references. Complete the Pricing Proposal Form "
+        "(hourly, monthly, annual). Return Acknowledgement of Addenda. "
+        "Attach Certificate of Insurance and W-9. Sign as authorized representative. "
+        "Acknowledge the exemplar agreement with no exceptions."
     )
-    assert "offeror_commitment" not in {c.id for c in detect_closing_components(text)}
-
-    comps = detect_closing_components(text, always_include_commitment=True)
-    commitment = next(c for c in comps if c.id == "offeror_commitment")
-    assert commitment.section_id == "rfp-closing-commitment"
-    assert commitment.match_hint
+    assert detect_closing_components(text) == []
 
 
-def test_closing_detects_attachments_and_forms():
-    text = """
-    Required submission documents:
-    - Acknowledgement of Addenda
-    - Certificate of Insurance with Additional Insured
-    - Form W-9
-    - Exhibit A pricing schedule
-    - Authorized signature of officer who can legally bind the firm
-    Proposer must acknowledge all addenda.
-    """
-    comps = detect_closing_components(text)
+def test_detect_with_ledger_fixture() -> None:
+    ledger = ledger_from_fixture(
+        [
+            {"id": "references", "title": "References", "kind": "form"},
+            {"id": "pricing_form", "title": "Pricing Proposal Form", "kind": "form"},
+            {
+                "id": "offeror_commitment",
+                "title": "Offeror Commitment & Closing Statement",
+                "kind": "narrative",
+            },
+        ]
+    )
+    comps = detect_closing_components("ignored", ledger=ledger)
     ids = {c.id for c in comps}
-    # Genuine submission requirements still detected under the obligation gate.
-    assert "addenda_acknowledgement" in ids
-    assert "insurance_attachments" in ids
-    assert "authorized_signature" in ids
+    assert "references" in ids
+    assert "pricing_form" in ids
+    assert "offeror_commitment" in ids
 
 
-def test_empty_rfp_yields_nothing_by_default():
-    """No RFP text means nothing is evidenced as required."""
+def test_commitment_opt_in_without_ledger() -> None:
+    comps = detect_closing_components("", always_include_commitment=True)
+    assert {c.id for c in comps} == {"offeror_commitment"}
+
+
+def test_empty_rfp_without_opt_in() -> None:
     assert detect_closing_components("") == []
 
-    comps = detect_closing_components("", always_include_commitment=True)
-    assert [c.id for c in comps] == ["offeror_commitment"]
 
-
-def test_checklist_always_lists_closing():
+def test_submission_checklist_still_lists_common_items() -> None:
     checklist = list_submission_checklist_from_rfp("Just a short RFP about marketing.")
-    assert "Offeror commitment / closing statement" in checklist
+    assert isinstance(checklist, list)

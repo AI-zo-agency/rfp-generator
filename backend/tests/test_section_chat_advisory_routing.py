@@ -87,6 +87,28 @@ class WantsSectionEditTests(unittest.TestCase):
                     )
                 )
 
+    def test_improve_this_section_skips_structure_planner_even_if_classifier_says_structure(self) -> None:
+        from app.services.proposal_section_editor import _should_skip_structure_planner
+
+        self.assertTrue(
+            _should_skip_structure_planner(
+                "structure",
+                user_message="Improve this section for the RFP.",
+                selection_mode=False,
+                apply_fix=False,
+                improve_section_pinned=True,
+            )
+        )
+        self.assertTrue(
+            _should_skip_structure_planner(
+                "advisory",
+                user_message="Improve this section for the RFP.",
+                selection_mode=False,
+                apply_fix=False,
+                improve_section_pinned=False,
+            )
+        )
+
     def test_improve_pin_skips_structure_for_content_edit(self) -> None:
         from app.services.proposal_section_editor import _should_skip_structure_planner
 
@@ -183,7 +205,7 @@ class WantsSectionEditTests(unittest.TestCase):
             selection_mode=False,
         )
         self.assertFalse(route.advisory)
-        self.assertEqual(route.reason, "classifier_structure")
+        self.assertEqual(route.reason, "structure_ask")
         from app.services.proposal_section_editor import _should_skip_structure_planner
 
         self.assertFalse(

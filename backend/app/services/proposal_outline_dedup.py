@@ -11,7 +11,7 @@ from app.services.proposal_voice_enforcement import (
 )
 
 # Short invented marketing labels — enrich from RFP when possible; drop only if
-# the RFP never mentions them AND they are not closing/important submission items.
+# the RFP never mentions them AND they are not agent-protected submission items.
 _GENERIC_FILLER_TITLES = re.compile(
     r"^(?:"
     r"executive\s+summary|"
@@ -31,24 +31,6 @@ _GENERIC_FILLER_TITLES = re.compile(
     r"project\s+plan|"
     r"technical\s+ability"
     r")$",
-    re.IGNORECASE,
-)
-
-_IMPORTANT_OR_CLOSING_TITLE_RE = re.compile(
-    r"\b("
-    r"reference|"
-    r"addenda|addendum|"
-    r"non[\s-]*collusion|"
-    r"ownership\s+disclosure|"
-    r"authorized\s+signature|"
-    r"pricing\s+proposal\s+form|quotation\s+form|fee\s+schedule|cost\s+proposal|"
-    r"closing\s+statement|offeror\s+commitment|proposer\s+commitment|"
-    r"sample\s+work|portfolio|"
-    r"agency\s+requirements?|capability\s+matrix|"
-    r"scope\s+of\s+work|statement\s+of\s+work|"
-    r"insurance|certificate\s+of\s+insurance|w-?9|"
-    r"evaluation|technical\s+approach|public\s+awareness"
-    r")\b",
     re.IGNORECASE,
 )
 
@@ -103,16 +85,37 @@ def outline_title_head_label(title: str) -> str:
     return normalize_outline_title(text)
 
 
-def outline_titles_near_duplicate(a: str, b: str, *, threshold: float = 0.72) -> bool:
-    """True when two outline titles likely cover the same ask."""
+def outline_titles_near_duplicate(
+    a: str,
+    b: str,
+    *,
+    threshold: float = 0.72,
+    instrument_a: str | None = None,
+    instrument_b: str | None = None,
+) -> bool:
+    """True when two outline titles likely cover the same ask.
+
+    Agent-stamped submissionInstrument wins over title similarity: a ``cost``
+    instrument is never a near-dup of a non-cost pricing narrative.
+    """
+    ia = (instrument_a or "").strip().casefold() or None
+    ib = (instrument_b or "").strip().casefold() or None
+    if (ia == "cost") != (ib == "cost") and (ia == "cost" or ib == "cost"):
+        return False
     na = normalize_outline_title(a)
     nb = normalize_outline_title(b)
     if not na or not nb:
         return False
     if na == nb:
         return True
-    # Bare Price vs Proposal Pricing / Fee Schedule / Hourly Rates — same ask.
-    if is_pricing_outline_title(a) and is_pricing_outline_title(b):
+    # Bare Price vs Proposal Pricing / Fee Schedule — same ask only when BOTH
+    # are generic pricing labels and neither is a stamped cost instrument.
+    if (
+        is_pricing_outline_title(a)
+        and is_pricing_outline_title(b)
+        and ia != "cost"
+        and ib != "cost"
+    ):
         return True
     # Agency Requirements G.# siblings are collapsed later in
     # collapse_agency_requirements_siblings (need all titles to build G.1–G.16 span).
@@ -153,6 +156,17 @@ def outline_titles_near_duplicate(a: str, b: str, *, threshold: float = 0.72) ->
     return jaccard >= threshold or coverage >= 0.85
 
 
+def outline_sections_near_duplicate(a: Any, b: Any, *, threshold: float = 0.72) -> bool:
+    """Near-dup using titles + agent-stamped submissionInstrument."""
+    return outline_titles_near_duplicate(
+        _section_title(a),
+        _section_title(b),
+        threshold=threshold,
+        instrument_a=_section_submission_instrument(a),
+        instrument_b=_section_submission_instrument(b),
+    )
+
+
 _AGENCY_REQ_TITLE_RE = re.compile(
     r"\bagency\s+requirements?\b|\bcapability\s+matrix\b|\bG\.\s*\d+\b",
     re.IGNORECASE,
@@ -168,6 +182,56 @@ _PRICING_TITLE_RE = re.compile(
 
 def is_pricing_outline_title(title: str) -> bool:
     return bool(_PRICING_TITLE_RE.search(title or ""))
+
+
+def _section_title(section: Any) -> str:
+    if hasattr(section, "title"):
+        return str(section.title or "")
+    if isinstance(section, dict):
+        return str(section.get("title") or "")
+    return ""
+
+
+def _section_submission_instrument(section: Any) -> str | None:
+    raw = None
+    if hasattr(section, "submission_instrument"):
+        raw = getattr(section, "submission_instrument", None)
+    if raw is None and isinstance(section, dict):
+        raw = section.get("submissionInstrument")
+        if raw is None:
+            raw = section.get("submission_instrument")
+    text = str(raw or "").strip().casefold()
+    return text or None
+
+
+def section_protect_from_cap(section: Any) -> bool:
+    """True when the agent (or eval stamp) says this tab must survive lean/cap."""
+    if section_carries_evaluation_points(section):
+        return True
+    flagged = False
+    if hasattr(section, "protect_from_cap"):
+        flagged = bool(getattr(section, "protect_from_cap", False))
+    if not flagged and isinstance(section, dict):
+        flagged = bool(
+            section.get("protectFromCap")
+            or section.get("protect_from_cap")
+        )
+    if flagged:
+        return True
+    # Cost / form / disclosure / references instruments are always protected
+    # when the planner stamped the instrument even if protectFromCap was omitted.
+    instrument = _section_submission_instrument(section)
+    return instrument in {"cost", "form", "disclosure", "references"}
+
+
+def is_important_or_closing_outline_title(title: str) -> bool:
+    """Deprecated title-only check — always False.
+
+    Protect decisions use ``section_protect_from_cap`` (agent fields), not
+    title synonym regex. Kept as a no-op for older imports/tests.
+    """
+    del title
+    return False
 
 
 _G_CODE_RE = re.compile(r"\bG\.\s*(\d+)\b", re.IGNORECASE)
@@ -261,11 +325,6 @@ _KB_ARTEFACT_TITLE_RE = re.compile(
 def is_kb_artefact_outline_title(title: str) -> bool:
     """True when a section title is really a knowledge-base filename."""
     return bool(_KB_ARTEFACT_TITLE_RE.search(title or ""))
-
-
-def is_important_or_closing_outline_title(title: str) -> bool:
-    """Submission-critical / scored / closing tabs — never drop for being 'generic'."""
-    return bool(_IMPORTANT_OR_CLOSING_TITLE_RE.search(title or ""))
 
 
 def _section_evaluation_points(section: Any) -> float | None:
@@ -441,8 +500,8 @@ def enforce_outline_section_cap(
 ) -> tuple[list[Any], list[str]]:
     """Keep at most ``max_n`` outline tabs, preferring closing + scored + required.
 
-    Deterministic post-planner safety net when the LLM emits one tab per bullet /
-    criterion. Reorders by priority for selection, then restores original order.
+    Never drops important/closing/scored tabs for the hard-cap — those are
+    RFP instruments. Cap only trims optional narrative padding.
     """
     if max_n <= 0 or len(sections) <= max_n:
         return list(sections), []
@@ -468,22 +527,30 @@ def enforce_outline_section_cap(
         except (TypeError, ValueError):
             return 0.0
 
-    ranked = sorted(
-        enumerate(sections),
+    def _protected(section: Any) -> bool:
+        return section_protect_from_cap(section)
+
+    protected = [sec for sec in sections if _protected(sec)]
+    optional = [sec for sec in sections if not _protected(sec)]
+    # Always keep every protected tab; fill remaining slots with optional.
+    room = max(0, max_n - len(protected))
+    ranked_optional = sorted(
+        enumerate(optional),
         key=lambda pair: (
-            0 if is_important_or_closing_outline_title(_title(pair[1])) else 1,
-            0 if section_carries_evaluation_points(pair[1]) else 1,
             -_weight(pair[1]),
-            0 if _required(pair[1]) else 1,
             pair[0],
         ),
     )
-    keep_idx = {idx for idx, _ in ranked[:max_n]}
-    kept = [sec for i, sec in enumerate(sections) if i in keep_idx]
+    keep_optional = {id(sec) for _, sec in ranked_optional[:room]}
+    kept = [
+        sec
+        for sec in sections
+        if _protected(sec) or id(sec) in keep_optional
+    ]
     dropped = [
         f"{_title(sec)} (outline hard-cap {max_n})"
-        for i, sec in enumerate(sections)
-        if i not in keep_idx
+        for sec in sections
+        if sec not in kept
     ]
     for i, section in enumerate(kept, start=1):
         if hasattr(section, "order"):
@@ -495,8 +562,6 @@ def enforce_outline_section_cap(
 
 def is_generic_filler_outline_title(title: str) -> bool:
     """Short/vague invented labels that should be enriched (or dropped if not in RFP)."""
-    if is_important_or_closing_outline_title(title):
-        return False
     core = normalize_outline_title(title)
     if not core:
         return True
@@ -640,6 +705,7 @@ def filter_lean_outline_sections(
         # A section carrying evaluation points is never dropped as generic
         # filler or a static duplicate — see section_carries_evaluation_points.
         scored = section_carries_evaluation_points(section)
+        protected = section_protect_from_cap(section)
         if not scored and (
             should_skip_rfp_section_as_static_duplicate(
                 title=title,
@@ -653,7 +719,12 @@ def filter_lean_outline_sections(
             # do not re-protect them here via "important/closing" title lists.
             dropped.append(f"{original_title} (owned by Sections 1–3)")
             continue
-        if not scored and drop_generic_filler and is_generic_filler_outline_title(title):
+        if (
+            not scored
+            and not protected
+            and drop_generic_filler
+            and is_generic_filler_outline_title(title)
+        ):
             # A topic being MENTIONED in the RFP is not a request for a section
             # about it. Procedural clauses (addenda process, PERA retiree
             # notification, sex-offender registration) are standing obligations,
@@ -673,20 +744,30 @@ def filter_lean_outline_sections(
             requested = (not (rfp_context or "").strip()) or rfp_requires_topic(
                 rfp_context, terms
             ) or rfp_lists_section_heading(rfp_context, title)
-            if not requested and not is_important_or_closing_outline_title(title):
+            if not requested:
                 mentioned = bool(core and core in rfp_blob)
                 reason = (
                     "mentioned but not requested" if mentioned else "generic filler"
                 )
                 dropped.append(f"{original_title} ({reason})")
                 continue
-        if any(outline_titles_near_duplicate(title, _title(prev)) for prev in kept):
+        # Temporary section with enriched title for instrument-aware near-dup.
+        probe = section
+        if title != original_title:
+            if isinstance(section, dict):
+                probe = {**section, "title": title}
+            elif hasattr(section, "model_copy"):
+                probe = section.model_copy(update={"title": title})
+        if any(outline_sections_near_duplicate(probe, prev) for prev in kept):
             # Prefer the longer / more specific title when near-dup.
             # Never drop a scored tab in favor of an unscored near-dup.
+            # True near-dups still collapse (LOI long vs short, Approach twins).
+            # Distinct instruments (cost vs narrative) already return False via
+            # submissionInstrument on outline_sections_near_duplicate.
             prev_idx = next(
                 i
                 for i, prev in enumerate(kept)
-                if outline_titles_near_duplicate(title, _title(prev))
+                if outline_sections_near_duplicate(probe, prev)
             )
             prev = kept[prev_idx]
             prev_scored = section_carries_evaluation_points(prev)
@@ -731,17 +812,37 @@ def merge_closing_components_into_outline(
     sections: list[Any],
     *,
     rfp_context: str,
+    ledger: Any | None = None,
 ) -> tuple[list[Any], list[str]]:
-    """Ensure RFP-detected closing package tabs appear in the Intelligence outline."""
+    """Ensure ledger closing tabs appear in the Intelligence outline.
+
+    ``ledger`` is the closing-requirement ledger (authority). Without it,
+    nothing is added — regex catalog detection is retired.
+    """
     from app.services.proposal_closing_package import (
+        ClosingComponent,
         detect_closing_components,
         draft_already_covers_component,
     )
     from app.services.proposal_intelligence.schemas import OutlineSection
 
-    # Obligation-gated only — an unrequested closing tab consumes page budget
-    # that belongs to sections the RFP actually requires.
-    components = detect_closing_components(rfp_context)
+    def _closing_component_instrument(component: ClosingComponent) -> str:
+        cid = (component.id or "").casefold()
+        kind = (component.kind or "").casefold()
+        if cid == "references" or "reference" in cid:
+            return "references"
+        if "ai" in cid and "disclosure" in cid:
+            return "disclosure"
+        if kind == "attachment":
+            return "form"
+        if any(
+            tok in cid
+            for tok in ("pricing", "quotation", "cost_proposal", "fee_schedule")
+        ):
+            return "cost"
+        return "form"
+
+    components = detect_closing_components(rfp_context, ledger=ledger)
     if not components:
         return sections, []
 
@@ -768,16 +869,17 @@ def merge_closing_components_into_outline(
         title = enrich_outline_title_from_rfp(component.title, rfp_context)
         # Closing package must not re-add a near-dup of an outline tab that
         # already covers the same ask under a fuller RFP-phrased title.
-        from app.services.proposal_outline_dedup import outline_titles_near_duplicate
-
         if any(outline_titles_near_duplicate(title, prev) for prev in titles):
             continue
+        instrument = _closing_component_instrument(component)
         section = OutlineSection(
             id=component.section_id,
             title=title,
             order=order_base + i,
             required=True,
             conditionalReason=f"Closing package — {component.match_hint}",
+            protectFromCap=True,
+            submissionInstrument=instrument,
         )
         out.append(section)
         ids.add(component.section_id)
