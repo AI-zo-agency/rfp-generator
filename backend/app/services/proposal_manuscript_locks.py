@@ -42,6 +42,7 @@ _PRIMARY_ROLE_PHRASES: tuple[str, ...] = (
 )
 
 # People who might be incorrectly named as primary (checked as plain substrings).
+# Retired names are filtered at use-time via is_retired_team_member.
 _ACCOUNT_CANDIDATE_NAMES: tuple[str, ...] = (
     "Ron Comer",
     "Haley Neff",
@@ -50,6 +51,12 @@ _ACCOUNT_CANDIDATE_NAMES: tuple[str, ...] = (
     "Todd Anderson",
     "Ella Lindau",
 )
+
+
+def _active_account_candidate_names() -> tuple[str, ...]:
+    from app.services.evidence_trust.personnel_grounding import is_retired_team_member
+
+    return tuple(n for n in _ACCOUNT_CANDIDATE_NAMES if not is_retired_team_member(n))
 
 _REPORTING_TITLE_MARKERS: tuple[str, ...] = (
     "methodolog",
@@ -307,7 +314,7 @@ def _section_has_primary_role_claim(content: str) -> bool:
 
 
 def _candidate_names_for_scan(locks: ManuscriptLocks) -> list[str]:
-    names = list(_ACCOUNT_CANDIDATE_NAMES)
+    names = list(_active_account_candidate_names())
     for extra in (locks.primary_contact_name, locks.executive_sponsor_name):
         if extra and extra.strip():
             names.extend(_name_variants(extra))

@@ -2028,19 +2028,37 @@ async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, A
     by_id = {p["id"]: p for p in all_personas}
     resolved: list[dict[str, Any]] = []
     missing: list[str] = []
+    from app.services.evidence_trust.personnel_grounding import is_retired_team_member
+    from app.services.retired_staff_store import is_retired_id
+
     for pid in selected_ids:
+        if is_retired_id(pid):
+            logger.info("Skipping retired Key Persona id %s for rfp %s", pid, rfp_id)
+            continue
         persona = by_id.get(pid)
         if persona:
-            if persona.get("retired"):
+            if persona.get("retired") or is_retired_team_member(
+                str(persona.get("name") or "")
+            ):
                 continue
             resolved.append(persona)
             continue
         # Never silently drop a user pick — stub so Section 2 still gets a bio card.
+        # But never stub a retired id as if they were current staff.
+        stub_name = _persona_name_from_id(pid)
+        if is_retired_team_member(stub_name):
+            logger.info(
+                "Skipping retired Key Persona stub %s (%s) for rfp %s",
+                pid,
+                stub_name,
+                rfp_id,
+            )
+            continue
         missing.append(pid)
         resolved.append(
             {
                 "id": pid,
-                "name": _persona_name_from_id(pid),
+                "name": stub_name,
                 "title": "Team Specialist",
                 "hasResume": False,
                 "sourceFile": "",
@@ -2061,6 +2079,8 @@ async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, A
 def _team_selection_from_personas(personas: list[dict[str, Any]]) -> TeamSelectionResult:
     """Build a TeamSelectionResult straight from the user's Key Persona picks —
     no RFP-needs matching, no roster re-scoring, no owner auto-insert."""
+    from app.services.evidence_trust.personnel_grounding import is_retired_team_member
+
     members = [
         TeamMemberSelection(
             name=str(p["name"]),
@@ -2069,6 +2089,8 @@ def _team_selection_from_personas(personas: list[dict[str, Any]]) -> TeamSelecti
         )
         for p in personas
         if str(p.get("name") or "").strip()
+        and not p.get("retired")
+        and not is_retired_team_member(str(p.get("name") or ""))
     ]
     return TeamSelectionResult(members=members)
 
