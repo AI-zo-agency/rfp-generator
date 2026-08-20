@@ -1,5 +1,6 @@
 from datetime import date
 
+from app.leads.ai import preparation_facts
 from app.leads.scoring import build_brief, build_leads, disqualify, load_dataset
 
 TODAY = date(2026, 8, 20)
@@ -55,3 +56,23 @@ def test_brief_never_drafts_messaging():
     assert brief["case_studies"]  # phase 6 match by industry
     assert "drafts no messaging" in brief["next_step"]
     assert brief["visitor_intel"] is None  # RB2B deferred
+
+
+def test_preparation_facts_include_monid_company_and_person_data():
+    facts = preparation_facts(
+        {"contact_id": "1", "company": "Mt Baker", "industry": "Wholesale"},
+        {
+            "employee_band": "51-200",
+            "what_they_do": "Forest products wholesaler.",
+            "person": {"job_title": "Purchasing Manager", "job_title_levels": "manager"},
+        },
+    )
+
+    assert facts["monid_company"] == {
+        "employee_band": "51-200",
+        "what_they_do": "Forest products wholesaler.",
+    }
+    assert facts["monid_contact"] == {
+        "job_title": "Purchasing Manager",
+        "job_title_levels": "manager",
+    }

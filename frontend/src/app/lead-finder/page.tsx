@@ -5,8 +5,8 @@ import {
 } from "@/leads/components/LeadFinderClient";
 
 export const metadata = {
-  title: "Lead Finder & Outreach Matcher | ZÖ Agency",
-  description: "Wave 3 PoC — contact prioritization and outreach prep briefs.",
+  title: "Prospect Operations | ZÖ Agency",
+  description: "HubSpot-backed prospect prioritization, research, and human-led outreach preparation.",
 };
 
 export const dynamic = "force-dynamic";

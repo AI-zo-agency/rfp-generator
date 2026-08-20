@@ -14,6 +14,7 @@ message-drafting function here on purpose.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -90,13 +91,20 @@ async def enrich_company(domain: str, sample_email: str) -> dict[str, Any]:
     return result
 
 
-async def synthesize_brief(brief: dict[str, Any]) -> dict[str, Any]:
-    """Phase 7: prep summary and open questions. No messaging."""
-    key = f"brief:{brief['contact_id']}"
-    if key in _CACHE:
-        return _CACHE[key]
-
-    facts = {
+def preparation_facts(brief: dict[str, Any], enrichment: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return the verified and inferred facts the preparation model may use."""
+    enrichment = enrichment or {}
+    company_fields = (
+        "company_name", "industry", "company_type", "city", "state", "employee_band",
+        "employee_count", "founded", "inferred_revenue", "website", "what_they_do", "tags",
+        "confidence", "basis", "source",
+    )
+    person_fields = (
+        "full_name", "job_title", "job_title_role", "job_title_levels", "job_company_name",
+        "phone", "linkedin_url", "confidence", "basis", "source",
+    )
+    person = enrichment.get("person") if isinstance(enrichment.get("person"), dict) else {}
+    return {
         "who": brief.get("who"),
         "company": brief.get("company"),
         "industry": brief.get("industry"),
@@ -108,8 +116,24 @@ async def synthesize_brief(brief: dict[str, Any]) -> dict[str, Any]:
         "why_scored": brief.get("why"),
         "relevant_case_studies": brief.get("case_studies"),
         "firmographics_verified": brief.get("company_data_source") == "hubspot",
+        "monid_company": {key: enrichment[key] for key in company_fields if enrichment.get(key) is not None},
+        "monid_contact": {key: person[key] for key in person_fields if person.get(key) is not None},
+        "enrichment_status": {
+            "company_error": enrichment.get("company_error"),
+            "person_error": enrichment.get("person_error"),
+            "company_skipped": enrichment.get("company_skipped"),
+        },
         "website_visitor_intel": "not available — visitor tracking not deployed",
     }
+
+
+async def synthesize_brief(brief: dict[str, Any], enrichment: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Phase 7: prep summary and open questions. No messaging."""
+    facts = preparation_facts(brief, enrichment)
+    key = f"brief:{json.dumps(facts, sort_keys=True, default=str)}"
+    if key in _CACHE:
+        return _CACHE[key]
+
     payload, _model = await chat_json(
         [
             {"role": "system", "content": BRIEF_SYSTEM},

@@ -6,10 +6,13 @@ swap points once HubSpot/Apollo credentials land.
 """
 
 import logging
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.leads import ai
+from app.leads import case_studies
+from app.leads import monid
 from app.leads.scoring import (
     WEIGHTS_RATIONALE,
     build_brief,
@@ -75,14 +78,25 @@ def _find_lead(contact_id: str):
     raise HTTPException(status_code=404, detail="Contact not found")
 
 
+async def _build_brief(contact_id: str) -> dict:
+    data, lead = _find_lead(contact_id)
+    brief = build_brief(lead, data.get("case_studies", {}))
+    kb_studies = await case_studies.find_case_studies(brief.get("industry"))
+    if kb_studies is not None:
+        brief["case_studies"] = kb_studies
+        brief["case_studies_source"] = "supermemory"
+    else:
+        brief["case_studies_source"] = "fixture" if brief.get("case_studies") else "none"
+    brief["ai_available"] = ai.available()
+    return brief
+
+
 @router.get("/{contact_id}/brief")
 async def get_brief(
     contact_id: str,
     ai_summary: bool = Query(False, alias="ai"),
 ) -> dict:
-    data, lead = _find_lead(contact_id)
-    brief = build_brief(lead, data.get("case_studies", {}))
-    brief["ai_available"] = ai.available()
+    brief = await _build_brief(contact_id)
     if ai_summary and brief["ai_available"]:
         try:
             brief["ai"] = await ai.synthesize_brief(brief)
@@ -92,20 +106,45 @@ async def get_brief(
     return brief
 
 
+@router.post("/{contact_id}/brief")
+async def generate_brief(
+    contact_id: str,
+    enrichment: dict[str, Any] | None = Body(default=None),
+) -> dict:
+    brief = await _build_brief(contact_id)
+    if not brief["ai_available"]:
+        raise HTTPException(status_code=503, detail="AI preparation is not configured")
+    try:
+        brief["ai"] = await ai.synthesize_brief(brief, enrichment)
+    except Exception as exc:
+        logger.warning("AI brief synthesis failed for %s: %s", contact_id, exc)
+        raise HTTPException(status_code=502, detail="Could not generate preparation notes") from exc
+    return brief
+
+
 @router.post("/{contact_id}/enrich")
 async def enrich(contact_id: str) -> dict:
-    """Apollo stand-in. Infers firmographics from the email domain via LLM.
-
-    Everything it returns is a model guess, labelled as such. It is offered
-    only where HubSpot has no verified company record.
-    """
-    if not ai.available():
-        raise HTTPException(status_code=503, detail="No LLM provider configured")
+    """Enrich company + person from Monid. HubSpot company records are not overwritten."""
     _data, lead = _find_lead(contact_id)
-    if (lead.company or {}).get("source") == "hubspot":
+    email = lead.contact["email"]
+    domain = email_domain(email)
+    skip_company = (lead.company or {}).get("source") == "hubspot"
+    if monid.available():
+        result = await monid.enrich_contact(domain, email, skip_company=skip_company)
+        if result.get("company_name") or result.get("person"):
+            return result
+        errors = " ".join(
+            part for part in (result.get("company_error"), result.get("person_error")) if part
+        )
+        if "No records" in errors:
+            raise HTTPException(status_code=404, detail="Monid found no matching company or person record")
+        logger.warning("Monid enrichment returned nothing for %s: %s", contact_id, errors)
+        raise HTTPException(status_code=502, detail="Monid enrichment failed; try again later")
+    if skip_company:
         raise HTTPException(
             status_code=409,
             detail="Company already has a verified HubSpot record — not overwriting it",
         )
-    email = lead.contact["email"]
-    return await ai.enrich_company(email_domain(email), email)
+    if ai.available():
+        return await ai.enrich_company(domain, email)
+    raise HTTPException(status_code=503, detail="Monid and AI enrichment are not configured")

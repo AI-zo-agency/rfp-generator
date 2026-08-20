@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_model: str = "anthropic/claude-sonnet-4"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # Monid — server-side company enrichment only. Never expose this to the frontend.
+    monid_api_key: str = ""
+    monid_base_url: str = "https://api.monid.ai"
     # Role-tier router: heavy = Sonnet-class (writing/judgment); light = Haiku-class (plan/gate).
     # Empty heavy → fall back to openrouter_model. Empty light → fall back to heavy.
     llm_heavy_model: str = ""
