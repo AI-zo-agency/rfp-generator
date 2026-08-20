@@ -120,7 +120,7 @@ export default function ChooseWorkspacePage() {
             tone="leads"
             icon={<IconPipeline className="h-7 w-7" />}
             title="Prospect Outreach"
-            description="Prioritize contacts by sector fit and engagement, then open a prep brief before you reach out. Drafts no messaging."
+            description="Prioritize contacts by sector fit and engagement, then open a prep brief before you reach out."
             capabilities={["Lead Scoring", "AI Enrichment", "Prep Briefs"]}
             delay={0.28}
           />
@@ -183,13 +183,14 @@ function WorkspaceCard({
 
   return (
     <motion.div
+      className="h-full"
       initial={{ opacity: 0, y: 24 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.55, ease: expoOutEase, delay }}
     >
       <Link
         href={href}
-        className={`group transition-smooth zo-panel-white relative flex min-h-[360px] flex-col overflow-hidden rounded-2xl p-8 hover:-translate-y-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 sm:min-h-[420px] sm:p-10 ${palette.hover}`}
+        className={`group transition-smooth zo-panel-white relative flex h-full min-h-[360px] flex-col overflow-hidden rounded-2xl p-8 hover:-translate-y-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 sm:min-h-[420px] sm:p-10 ${palette.hover}`}
       >
         <div
           className={`pointer-events-none absolute -right-16 -top-20 h-64 w-64 rounded-full blur-3xl ${palette.glow}`}
@@ -205,7 +206,7 @@ function WorkspaceCard({
           {title}
         </h2>
 
-        <p className="relative z-10 mt-4 max-w-md text-sm leading-relaxed text-black/70 sm:text-base">
+        <p className="relative z-10 mt-4 line-clamp-3 min-h-[4.875em] max-w-md text-sm leading-relaxed text-black/70 sm:text-base">
           {description}
         </p>
 
