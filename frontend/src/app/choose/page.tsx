@@ -5,7 +5,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion } from "motion/react";
 import { ZoLogo } from "@/components/ZoLogo";
-import { IconArrowRight, IconFinancial, IconRfp } from "@/components/ui/icons";
+import {
+  IconArrowRight,
+  IconFinancial,
+  IconPipeline,
+  IconRfp,
+} from "@/components/ui/icons";
 import { expoOutEase } from "@/lib/motion";
 
 interface StoredUser {
@@ -91,7 +96,7 @@ export default function ChooseWorkspacePage() {
           </p>
         </motion.div>
 
-        <div className="grid gap-6 md:grid-cols-2 md:gap-8">
+        <div className="grid gap-6 md:grid-cols-3 md:gap-6">
           <WorkspaceCard
             href="/rfp-dashboard"
             tone="rfp"
@@ -110,11 +115,52 @@ export default function ChooseWorkspacePage() {
             capabilities={["Timesheets", "Task Classification", "Audit Queues"]}
             delay={0.18}
           />
+          <WorkspaceCard
+            href="/lead-finder"
+            tone="leads"
+            icon={<IconPipeline className="h-7 w-7" />}
+            title="Prospect Outreach"
+            description="Prioritize contacts by sector fit and engagement, then open a prep brief before you reach out. Drafts no messaging."
+            capabilities={["Lead Scoring", "AI Enrichment", "Prep Briefs"]}
+            delay={0.28}
+          />
         </div>
       </main>
     </div>
   );
 }
+
+type WorkspaceTone = "rfp" | "financial" | "leads";
+
+const TONES: Record<
+  WorkspaceTone,
+  { hover: string; glow: string; iconBox: string; pill: string; arrow: string }
+> = {
+  rfp: {
+    hover:
+      "hover:shadow-[0_24px_60px_rgba(239,80,24,0.18)] focus-visible:ring-[var(--zo-primary)]",
+    glow: "bg-[#ef5018]/15",
+    iconBox: "bg-black/[0.06] text-black",
+    pill: "bg-black/[0.06] text-black/70",
+    arrow: "bg-black text-white group-hover:bg-[var(--zo-primary)]",
+  },
+  financial: {
+    hover:
+      "hover:shadow-[0_24px_60px_rgba(60,90,86,0.22)] focus-visible:ring-[#3C5A56]",
+    glow: "bg-[#3C5A56]/12",
+    iconBox: "bg-[#3C5A56]/10 text-[#3C5A56]",
+    pill: "bg-[#3C5A56]/10 text-[#3C5A56]",
+    arrow: "bg-[#3C5A56] text-white group-hover:bg-[#2e4744]",
+  },
+  leads: {
+    hover:
+      "hover:shadow-[0_24px_60px_rgba(39,71,66,0.22)] focus-visible:ring-[#274742]",
+    glow: "bg-[#274742]/12",
+    iconBox: "bg-[#274742]/10 text-[#274742]",
+    pill: "bg-[#274742]/10 text-[#274742]",
+    arrow: "bg-[#274742] text-white group-hover:bg-[#1a2f2c]",
+  },
+};
 
 function WorkspaceCard({
   href,
@@ -126,14 +172,14 @@ function WorkspaceCard({
   delay,
 }: Readonly<{
   href: string;
-  tone: "rfp" | "financial";
+  tone: WorkspaceTone;
   icon: React.ReactNode;
   title: string;
   description: string;
   capabilities: string[];
   delay: number;
 }>) {
-  const isRfp = tone === "rfp";
+  const palette = TONES[tone];
 
   return (
     <motion.div
@@ -143,22 +189,14 @@ function WorkspaceCard({
     >
       <Link
         href={href}
-        className={`group transition-smooth zo-panel-white relative flex min-h-[360px] flex-col overflow-hidden rounded-2xl p-8 hover:-translate-y-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 sm:min-h-[420px] sm:p-10 ${
-          isRfp
-            ? "hover:shadow-[0_24px_60px_rgba(239,80,24,0.18)] focus-visible:ring-[var(--zo-primary)]"
-            : "hover:shadow-[0_24px_60px_rgba(60,90,86,0.22)] focus-visible:ring-[#3C5A56]"
-        }`}
+        className={`group transition-smooth zo-panel-white relative flex min-h-[360px] flex-col overflow-hidden rounded-2xl p-8 hover:-translate-y-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 sm:min-h-[420px] sm:p-10 ${palette.hover}`}
       >
         <div
-          className={`pointer-events-none absolute -right-16 -top-20 h-64 w-64 rounded-full blur-3xl ${
-            isRfp ? "bg-[#ef5018]/15" : "bg-[#3C5A56]/12"
-          }`}
+          className={`pointer-events-none absolute -right-16 -top-20 h-64 w-64 rounded-full blur-3xl ${palette.glow}`}
         />
 
         <div
-          className={`relative z-10 mb-6 flex h-14 w-14 items-center justify-center rounded-xl ${
-            isRfp ? "bg-black/[0.06] text-black" : "bg-[#3C5A56]/10 text-[#3C5A56]"
-          }`}
+          className={`relative z-10 mb-6 flex h-14 w-14 items-center justify-center rounded-xl ${palette.iconBox}`}
         >
           {icon}
         </div>
@@ -175,11 +213,7 @@ function WorkspaceCard({
           {capabilities.map((capability) => (
             <div
               key={capability}
-              className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.06em] ${
-                isRfp
-                  ? "bg-black/[0.06] text-black/70"
-                  : "bg-[#3C5A56]/10 text-[#3C5A56]"
-              }`}
+              className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.06em] ${palette.pill}`}
             >
               {capability}
             </div>
@@ -188,11 +222,7 @@ function WorkspaceCard({
 
         <div className="relative z-10 mt-auto flex items-center justify-end pt-8">
           <div
-            className={`transition-smooth flex h-11 w-11 items-center justify-center rounded-full group-hover:translate-x-1 ${
-              isRfp
-                ? "bg-black text-white group-hover:bg-[var(--zo-primary)]"
-                : "bg-[#3C5A56] text-white group-hover:bg-[#2e4744]"
-            }`}
+            className={`transition-smooth flex h-11 w-11 items-center justify-center rounded-full group-hover:translate-x-1 ${palette.arrow}`}
           >
             <IconArrowRight className="h-[18px] w-[18px]" />
           </div>
