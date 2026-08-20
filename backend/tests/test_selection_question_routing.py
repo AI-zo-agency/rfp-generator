@@ -15,7 +15,7 @@ from unittest.mock import patch
 from app.models.proposal import ProposalSection
 from app.models.rfp import RfpRecord
 from app.services import proposal_section_editor as editor
-from app.services.proposal_section_editor import decide_chat_route
+from app.services.proposal_section_editor import decide_chat_route, _locate_selection_span
 
 EXCERPT = "**Legal Name:** Z'Onion Creative Group LLC"
 
@@ -89,6 +89,15 @@ class SelectionRouteTests(unittest.TestCase):
         )
         self.assertFalse(route.advisory)
 
+    def test_fill_this_on_pinned_excerpt_edits_not_advises(self) -> None:
+        route = decide_chat_route(
+            chat_intent="none",
+            user_message="fill this",
+            selection_mode=True,
+        )
+        self.assertFalse(route.advisory)
+        self.assertEqual(route.reason, "kb_fetch_or_verify_fill")
+
     def test_non_selection_routing_is_unchanged(self) -> None:
         self.assertTrue(
             decide_chat_route(
@@ -100,6 +109,24 @@ class SelectionRouteTests(unittest.TestCase):
                 chat_intent="none", user_message="fix the legal name", selection_mode=False
             ).advisory
         )
+
+
+class LocateSelectionSpanTests(unittest.TestCase):
+    def test_recovers_table_excerpt_without_pipes(self) -> None:
+        body = (
+            "| ADDENDUM NUMBER | DATE ISSUED | ACKNOWLEDGED | INCORPORATED |\n"
+            "| --- | --- | --- | --- |\n"
+            "| Confirm before submit — Sonja confirm addendum number | "
+            "Confirm before submit — Sonja confirm addendum date | Yes | Yes |"
+        )
+        span = _locate_selection_span(
+            body,
+            "ADDENDUM NUMBER DATE ISSUED Confirm before submit Sonja confirm addendum number",
+        )
+        self.assertIsNotNone(span)
+        start, end = span
+        self.assertGreater(end, start)
+        self.assertIn("ADDENDUM", body[start:end])
 
 
 def _section() -> ProposalSection:

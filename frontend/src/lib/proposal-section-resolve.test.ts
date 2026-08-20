@@ -7,6 +7,7 @@ import {
   messageLooksOutlineStructure,
   messageLooksStructural,
   messageNeedsCaseStudyClarify,
+  messagePointsAtOpenSection,
   pinnedSectionConflictsWithMessage,
   resolveChatTarget,
   resolveSectionFromMention,
@@ -55,6 +56,11 @@ describe("chatBusyStatusLabel", () => {
   it("detects question-shaped messages", () => {
     expect(messageLooksChatQuestion("what this section about?")).toBe(true);
     expect(messageLooksChatQuestion("rewrite this to be shorter")).toBe(false);
+  });
+
+  it("treats fill this as bound to the open tab", () => {
+    expect(messagePointsAtOpenSection("fill this")).toBe(true);
+    expect(messagePointsAtOpenSection("fix this table")).toBe(true);
   });
 });
 

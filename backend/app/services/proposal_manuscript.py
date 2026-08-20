@@ -223,6 +223,34 @@ def convert_bare_confirmation_lines(text: str) -> str:
     return _BARE_CONFIRMATION_LINE_RE.sub(_repl, text)
 
 
+# Table cells and inline spans often ship "Confirm before submit — …" as visible
+# prose instead of [MANUAL FILL] tags. Match cell interiors bounded by pipes.
+_INLINE_TABLE_CONFIRM_RE = re.compile(
+    r"(?i)(?<=\|)\s*"
+    r"(?:confirm\s+before\s+(?:submit|submission)"
+    r"|needs?\s+your\s+input"
+    r"|action\s+needed"
+    r"|flag\s+for\s+sonja)"
+    r"\s*[—–\-,:]\s*"
+    r"(?P<body>[^|\n\]]{3,400})"
+    r"\s*(?=\|)"
+)
+
+
+def convert_inline_confirmation_phrases(text: str) -> str:
+    """Turn inline/table 'Confirm before submit — X' into [MANUAL FILL: …] tags."""
+    if not text:
+        return text
+
+    def _repl(match: re.Match[str]) -> str:
+        body = match.group("body").strip().rstrip(".;")
+        if not body or "[" in body or "]" in body:
+            return match.group(0)
+        return f"[MANUAL FILL: Sonja — {body}]"
+
+    return _INLINE_TABLE_CONFIRM_RE.sub(_repl, text)
+
+
 # Leaked internal identifiers inside MANUAL FILL descriptions — the DuPage draft
 # shipped:
 #   [MANUAL FILL: Sonja, deterministic.manuscript_locks.primary_contact_lock_is_ron_comer_but_this_section_names_haley_n\tPrimary contact lock is 'Ron Comer', but this section names Ron Comer, Sonja…]
@@ -349,6 +377,8 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
       5. collapse standalone empty subheadings ("Client Voice" with no body)
       6. normalize bold/plain "Designer Note:" prose into [DESIGNER NOTE: …]
          so the manuscript UI renders the callout box
+      7. repair flattened markdown tables (one-line pipe dumps) back into
+         one-row-per-line tables so Word / Google Doc / in-app stay in sync
     """
     cleaned = text or ""
     cleaned = convert_bare_confirmation_lines(cleaned)
@@ -358,6 +388,7 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
     cleaned = strip_internal_pricing_flags(strip_evidence_citation_markers(cleaned))
     cleaned = collapse_empty_subheadings(cleaned)
     cleaned = normalize_designer_note_markup(cleaned)
+    cleaned = repair_flattened_markdown_tables(cleaned)
     return cleaned
 
 
@@ -464,6 +495,12 @@ def _is_table_row(line: str) -> bool:
     trimmed = line.strip()
     if "|" not in trimmed:
         return False
+    if re.match(
+        r"^\[(?:MANUAL\s+FILL|VERIFY|FLAG|PRICING\s+FLAG|DESIGNER\s+NOTE)\b",
+        trimmed,
+        re.I,
+    ):
+        return False
     cells = [c for c in trimmed.strip("|").split("|")]
     return len(cells) >= 2
 
@@ -476,9 +513,175 @@ def _parse_table_row(line: str) -> list[str]:
     return [_strip_inline_md(cell) for cell in line.strip().strip("|").split("|")]
 
 
+# Flattened-table repair: LLM / cert-scrub / save paths sometimes collapse an
+# entire markdown table into one line (newlines between rows become spaces).
+_ROW_BOUNDARY_RE = re.compile(r"\|[ \t]+\|(?=[ \t]*\S)")
+_SEP_FRAGMENT_RE = re.compile(r"\|[ \t]*:?-{2,}:?[ \t]*\|")
+_SEP_CELL_RE = re.compile(r"^:?-{2,}:?$")
+
+
+def _is_flattened_table_line(line: str) -> bool:
+    """True when one line holds multiple markdown table rows."""
+    if not line.startswith("|"):
+        return False
+    pipes = line.count("|")
+    if pipes <= 6:
+        return False
+    boundaries = len(_ROW_BOUNDARY_RE.findall(line))
+    if boundaries < 1:
+        return False
+    if _SEP_FRAGMENT_RE.search(line):
+        return True
+    return pipes >= 16 and boundaries >= 2
+
+
+def _split_flattened_table_line(line: str) -> list[str]:
+    """Turn one flattened pipe-dump into one markdown table row per line."""
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    i = 0
+    n = len(cells)
+    header: list[str] = []
+    while i < n and cells[i] and not _SEP_CELL_RE.match(cells[i]):
+        header.append(cells[i])
+        i += 1
+    width = max(len(header), 1)
+    while i < n and not cells[i]:
+        i += 1
+    while i < n and _SEP_CELL_RE.match(cells[i] or ""):
+        i += 1
+    while i < n and not cells[i]:
+        i += 1
+
+    rows: list[list[str]] = []
+    current: list[str] = []
+    while i < n:
+        cell = cells[i]
+        i += 1
+        if not cell:
+            if not current:
+                continue
+            if len(current) >= width:
+                rows.append(current[:width])
+                current = []
+                continue
+            current.append("")
+            if len(current) >= width:
+                rows.append(current)
+                current = []
+            continue
+        current.append(cell)
+        if len(current) >= width:
+            rows.append(current)
+            current = []
+    if current:
+        rows.append((current + [""] * width)[:width])
+
+    sep = "| " + " | ".join("---" for _ in range(width)) + " |"
+    out = ["| " + " | ".join(header) + " |", sep]
+    for row in rows:
+        padded = (row + [""] * width)[:width]
+        out.append("| " + " | ".join(padded) + " |")
+    return out
+
+
+def repair_flattened_markdown_tables(text: str) -> str:
+    """Re-insert newlines so each markdown table row is its own line.
+
+    Authoring-time + persist-time: the stored manuscript must stay as real
+    markdown tables. Export parsers also call this so older flattened drafts
+    still render, but the source of truth is the markdown itself.
+    """
+    if not text or "|" not in text:
+        return text
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    out_lines: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not _is_flattened_table_line(stripped):
+            out_lines.append(line)
+            continue
+        out_lines.extend(_split_flattened_table_line(stripped))
+    return _unwrap_handoff_table_lines(_merge_split_amount_rows("\n".join(out_lines)))
+
+
+def _unwrap_handoff_table_lines(text: str) -> str:
+    """Turn leftover handoff-tag pipe debris into prose — never real table rows.
+
+    A flatten pass can leave ``[MANUAL FILL: … | leftover]`` as a fake table.
+    Rows that start with ``|`` and still have real cells (Yes, amounts, names)
+    must stay markdown tables even when a cell is ``[VERIFY: …]``.
+    """
+    out: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            real_cells = [c for c in cells if c and not _is_handoff_only_cell(c)]
+            if real_cells:
+                out.append(line)
+                continue
+        if (
+            "|" in stripped
+            and re.match(
+                r"^\[(?:MANUAL\s+FILL|VERIFY|FLAG|PRICING\s+FLAG|DESIGNER\s+NOTE)\b",
+                stripped.lstrip("| ").strip(),
+                re.I,
+            )
+        ):
+            inner = stripped.strip("|").replace("|", " — ").strip()
+            inner = re.sub(r"[ \t]{2,}", " ", inner)
+            out.append(inner)
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _is_handoff_only_cell(cell: str) -> bool:
+    t = (cell or "").strip()
+    return bool(
+        re.fullmatch(
+            r"\[(?:MANUAL\s+FILL|VERIFY|FLAG|PRICING\s+FLAG|DESIGNER\s+NOTE)\b[^\]]*\]",
+            t,
+            re.I,
+        )
+    )
+
+
+def _merge_split_amount_rows(text: str) -> str:
+    """Join a 1-cell label row with the following 1-cell money row.
+
+    A previous flatten/split pass can turn ``| **Total** | | **$199** |``
+    into two lines. Restore the empty middle cell.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        cells = [c.strip() for c in line.strip().strip("|").split("|")] if "|" in line else []
+        nxt_cells = [c.strip() for c in nxt.strip().strip("|").split("|")] if "|" in nxt else []
+        cells = [c for c in cells if c]
+        nxt_cells = [c for c in nxt_cells if c]
+        if (
+            len(cells) == 1
+            and len(nxt_cells) == 1
+            and "$" in nxt_cells[0]
+            and "$" not in cells[0]
+        ):
+            out.append(f"| {cells[0]} | | {nxt_cells[0]} |")
+            i += 2
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
 def parse_markdown_parts(markdown: str) -> list[dict[str, Any]]:
     """Split markdown into heading / paragraph / list / table parts for Docs export."""
-    lines = (markdown or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    text = (markdown or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = repair_flattened_markdown_tables(text)
+    lines = text.split("\n")
     parts: list[dict[str, Any]] = []
     i = 0
 
@@ -505,17 +708,48 @@ def parse_markdown_parts(markdown: str) -> list[dict[str, Any]]:
 
         if _is_table_row(trimmed):
             table_lines: list[str] = []
-            while i < len(lines) and _is_table_row(lines[i].strip()):
-                table_lines.append(lines[i].strip())
+            while i < len(lines):
+                cur = lines[i].strip()
+                if not cur:
+                    # Blank lines inside a markdown table are common after LLM
+                    # rewrites. Peek ahead — stay in the table if the next
+                    # non-empty line is still a pipe row.
+                    j = i + 1
+                    while j < len(lines) and not lines[j].strip():
+                        j += 1
+                    if j < len(lines) and _is_table_row(lines[j].strip()):
+                        i = j
+                        continue
+                    break
+                if not _is_table_row(cur):
+                    break
+                table_lines.append(cur)
                 i += 1
             data_lines = [row for row in table_lines if not _is_table_separator(row)]
             if data_lines:
                 headers = _parse_table_row(data_lines[0])
                 rows = [_parse_table_row(row) for row in data_lines[1:]]
-                width = max(len(headers), 1)
-                headers = (headers + [""] * width)[:width]
-                norm_rows = [(row + [""] * width)[:width] for row in rows]
-                parts.append({"type": "table", "headers": headers, "rows": norm_rows})
+                # Drop leftover separator cells if the sep row was misclassified.
+                if rows and all(
+                    re.fullmatch(r":?-{2,}:?", (c or "").strip()) for c in rows[0]
+                ):
+                    rows = rows[1:]
+                hdr_count = max(len(headers), 1)
+                # Clamp to header width — rows with extra cells (from
+                # literal "|" inside cell text) must not inflate the grid.
+                headers = (headers + [""] * hdr_count)[:hdr_count]
+                clamped_rows: list[list[str]] = []
+                for row in rows:
+                    if len(row) > hdr_count:
+                        # Merge overflow cells back into the last real column.
+                        kept = row[: hdr_count - 1]
+                        kept.append(" | ".join(row[hdr_count - 1 :]))
+                        clamped_rows.append(kept)
+                    else:
+                        clamped_rows.append(
+                            (row + [""] * hdr_count)[:hdr_count]
+                        )
+                parts.append({"type": "table", "headers": headers, "rows": clamped_rows})
             continue
 
         if re.match(r"^[-*]\s+", trimmed) or re.match(r"^\d+\.\s+", trimmed):
@@ -524,6 +758,16 @@ def parse_markdown_parts(markdown: str) -> list[dict[str, Any]]:
             while i < len(lines):
                 cur = lines[i].strip()
                 if not cur:
+                    j = i + 1
+                    while j < len(lines) and not lines[j].strip():
+                        j += 1
+                    nxt = lines[j].strip() if j < len(lines) else ""
+                    if nxt and (
+                        (ordered and re.match(r"^\d+\.\s+", nxt))
+                        or (not ordered and re.match(r"^[-*]\s+", nxt))
+                    ):
+                        i = j
+                        continue
                     break
                 if ordered:
                     m = re.match(r"^\d+\.\s+(.+)$", cur)

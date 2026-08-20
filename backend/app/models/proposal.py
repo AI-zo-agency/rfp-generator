@@ -753,6 +753,7 @@ class KeyPersona(BaseModel):
     has_resume: bool = Field(default=True, alias="hasResume")
     source_file: str = Field(default="", alias="sourceFile")
     bio_snippet: str = Field(default="", alias="bioSnippet")
+    retired: bool = False
 
 
 class ProposalDraft(BaseModel):

@@ -240,10 +240,22 @@ export function ProposalSectionChatPanel({
         return;
       }
 
-      const targetSection = resolution.section;
+      // Revise-excerpt pin always wins the API target — "fill this" must not follow
+      // chat history to a different tab while the table/paragraph is still pinned.
+      const selectionPin =
+        activeReference?.mode === "selection" && activeReference.selection
+          ? activeReference
+          : null;
+      let targetSection = resolution.section;
+      if (selectionPin) {
+        const pinnedSection = sections.find((s) => s.id === selectionPin.sectionId);
+        if (pinnedSection) targetSection = pinnedSection;
+      }
+
       // Stale Improve pin on another tab must not keep redirecting status/API.
       if (
         activeReference &&
+        activeReference.mode !== "selection" &&
         activeReference.sectionId !== targetSection.id &&
         resolution.reason !== "pinned"
       ) {

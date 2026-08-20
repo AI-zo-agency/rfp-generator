@@ -6,10 +6,13 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from app.services.go_no_go_evidence_agent import (
+    apply_query_plans,
     attribute_hits,
     build_evidence_digest,
+    core_requirements_missing_hits,
     merge_queries_onto_requirements,
     parse_follow_ups,
+    parse_query_plans,
     run_evidence_agent,
     select_initial_queries,
 )
@@ -32,6 +35,43 @@ class SelectInitialQueriesTests(unittest.TestCase):
         self.assertIn("early q", blob)
         self.assertIn("mid q", blob)
         self.assertIn("late q", blob)
+
+
+class QueryPlanParseTests(unittest.TestCase):
+    def test_parse_query_plans_with_why(self) -> None:
+        plans = parse_query_plans(
+            {
+                "plans": [
+                    {
+                        "requirement": "Media relations",
+                        "queries": [
+                            "zö agency press media relations 03_CS",
+                            "zö agency communications 04_Bio",
+                        ],
+                        "why": "need press/CS proof, not brand strategy",
+                    }
+                ]
+            },
+            known_requirements={"Media relations", "Hosting"},
+        )
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(plans[0][0], "Media relations")
+        self.assertEqual(len(plans[0][1]), 2)
+        self.assertIn("press", plans[0][2])
+
+    def test_apply_query_plans_replaces_seeds(self) -> None:
+        reqs = [_req("Media relations", "seed q")]
+        out = apply_query_plans(
+            reqs,
+            [
+                (
+                    "Media relations",
+                    ["zö agency press 03_CS"],
+                    "press proof",
+                )
+            ],
+        )
+        self.assertEqual(out[0].kb_queries, ["zö agency press 03_CS"])
 
 
 class FollowUpParseTests(unittest.TestCase):
@@ -58,6 +98,17 @@ class FollowUpParseTests(unittest.TestCase):
             reqs, [("CMS implementation", ["follow q bio"])]
         )
         self.assertEqual(out[0].kb_queries, ["first q", "follow q bio"])
+
+    def test_missing_cores_only(self) -> None:
+        reqs = [
+            _req("A", "qa"),
+            _req("B", "qb"),
+            _req("C", "qc", core=False),
+        ]
+        missing = core_requirements_missing_hits(
+            reqs, {"A": [{"title": "x"}], "B": [], "C": []}
+        )
+        self.assertEqual([r.requirement for r in missing], ["B"])
 
 
 class EvidenceAgentLoopTests(unittest.IsolatedAsyncioTestCase):
@@ -97,6 +148,7 @@ class EvidenceAgentLoopTests(unittest.IsolatedAsyncioTestCase):
                 rfp_excerpt="Need WordPress CMS",
                 requirements=reqs,
                 search=search,
+                plan_queries=False,
             )
 
         self.assertTrue(any("follow" in q.casefold() for q in queries))
@@ -105,6 +157,66 @@ class EvidenceAgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any("follow" in q.casefold() for q in working[0].kb_queries)
         )
+
+    async def test_skips_follow_up_when_cores_have_hits(self) -> None:
+        reqs = [_req("WordPress CMS", "cms q")]
+
+        async def search(_query: str):
+            return [{"title": "04_Bio.pdf", "content": "WordPress specialist"}]
+
+        with patch(
+            "app.services.go_no_go_evidence_agent.llm.chat_json",
+            new=AsyncMock(side_effect=AssertionError("follow-up must not run")),
+        ) as mock_llm:
+            _working, hits_by_req, _all_hits, queries = await run_evidence_agent(
+                rfp_id="rfp-1",
+                rfp_title="Website RFP",
+                rfp_excerpt="Need WordPress",
+                requirements=reqs,
+                search=search,
+                plan_queries=False,
+            )
+            mock_llm.assert_not_called()
+        self.assertEqual(len(queries), 1)
+        self.assertEqual(len(hits_by_req["WordPress CMS"]), 1)
+
+    async def test_plan_queries_then_search(self) -> None:
+        reqs = [_req("Press outreach", "seed")]
+
+        async def search(query: str):
+            if "press" in query.casefold():
+                return [{"title": "03_CS_Press.pdf", "content": "media relations"}]
+            return []
+
+        with patch(
+            "app.services.go_no_go_evidence_agent.llm.chat_json",
+            new=AsyncMock(
+                return_value=(
+                    {
+                        "plans": [
+                            {
+                                "requirement": "Press outreach",
+                                "queries": ["zö agency press media relations 03_CS"],
+                                "why": "need press CS",
+                            }
+                        ]
+                    },
+                    "test",
+                )
+            ),
+        ):
+            working, hits_by_req, _all_hits, queries = await run_evidence_agent(
+                rfp_id="rfp-1",
+                rfp_title="Comms RFP",
+                rfp_excerpt="media relations",
+                requirements=reqs,
+                search=search,
+                plan_queries=True,
+            )
+
+        self.assertTrue(any("press" in q.casefold() for q in queries))
+        self.assertIn("press", working[0].kb_queries[0].casefold())
+        self.assertEqual(len(hits_by_req["Press outreach"]), 1)
 
     async def test_digest_and_attribution(self) -> None:
         reqs = [_req("UX design", "ux q")]

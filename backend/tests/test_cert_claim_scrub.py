@@ -116,6 +116,25 @@ class CertClaimScrubTests(unittest.TestCase):
         )
         self.assertFalse(user_asks_cert_claim_scrub("What certifications do we have?"))
 
+    def test_cert_scrub_does_not_flatten_multiline_table(self) -> None:
+        table = (
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| Phase 1 | Discovery | $6,639.60 |\n"
+            "| Phase 2 | Strategy | $4,742.57 |\n"
+        )
+        section = ProposalSection(
+            id="price",
+            title="Price",
+            content=table,
+            status="generated",
+        )
+        scrubbed, _logs = scrub_section_cert_claims(section)
+        body = scrubbed.content or ""
+        self.assertIn("| Phase | Deliverable | Amount |\n", body)
+        self.assertIn("| Phase 1 | Discovery | $6,639.60 |\n", body)
+        self.assertNotIn("| Amount | | --- |", body)
+
 
 if __name__ == "__main__":
     unittest.main()

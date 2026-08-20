@@ -54,6 +54,34 @@ class FabricatedPersonnelScrubTests(unittest.TestCase):
         self.assertIn("Kelvin Kiruthu", body)
         self.assertTrue(logs)
 
+    def test_removes_retired_ron_comer_from_content_and_title(self) -> None:
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="t",
+            sections=[
+                ProposalSection(
+                    id="section-2-bio-ron",
+                    title="2.3 — Ron Comer",
+                    content=(
+                        "Ron Comer serves as your primary contract administrator "
+                        "and Senior Account Manager."
+                    ),
+                ),
+                ProposalSection(
+                    id="section-25",
+                    title="Respondent Contract Administrator",
+                    content="Primary contact: Ron Comer, Senior Account Manager.",
+                ),
+            ],
+        )
+        updated, logs = scrub_fabricated_personnel_from_draft(draft)
+        blob = "\n".join(
+            f"{s.title}\n{s.content}" for s in (updated.sections or [])
+        )
+        self.assertNotIn("Ron Comer", blob)
+        self.assertIn("retired", " ".join(logs).casefold())
+        self.assertIn("assign current staff", (updated.sections[0].content or "").casefold())
+
     def test_roster_fix_replaces_murilo_with_marcelle(self) -> None:
         text = "Kelvin Kiruthu Senior Graphic Designer Murilo Mendes Graphic Designer"
         fixed, logs = apply_deterministic_roster_fixes(text)

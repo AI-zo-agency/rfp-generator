@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gapChecklistLabel, humanizeGapTag } from "./gap-tag-humanize";
+import { gapChecklistLabel, humanizeGapTag, isInternalScanTag } from "./gap-tag-humanize";
 
 describe("humanizeGapTag", () => {
   it("turns KPI lock tags into plain asks", () => {
@@ -26,5 +26,23 @@ describe("gapChecklistLabel", () => {
     expect(label).not.toContain("deterministic");
     expect(label).toContain("Sonja");
     expect(label).toContain("KPI");
+  });
+
+  it("does not dump deterministic.compliance keys into the label", () => {
+    const h = humanizeGapTag(
+      "[MANUAL FILL: Sonja — deterministic.compliance.budget_still_has_internal_pricing_flags_resolve_fee_decisions_with | BUDGET STILL HAS INTERNAL PRICING FLAGS — RESOLVE FEE DECISIONS WITH SONJA]"
+    );
+    expect(h.title).toBe("Budget needs review");
+    expect(h.detail.toLowerCase()).not.toContain("deterministic");
+    expect(h.detail.toLowerCase()).toContain("pricing flags");
+  });
+
+  it("hides fabricated deferred-information scan codes", () => {
+    const tag =
+      "[MANUAL FILL: Sonja — deterministic.fabricated_fact.deferred_information_upon_request_is_forbidden.provide_full_detail | DEFERRED INFORMATION ('UPON REQUEST' IS FORBIDDEN - PROVIDE FULL DETAIL)]";
+    expect(isInternalScanTag(tag)).toBe(true);
+    const h = humanizeGapTag(tag);
+    expect(h.detail.toLowerCase()).not.toContain("deterministic");
+    expect(h.title).toBe("Do not defer facts");
   });
 });

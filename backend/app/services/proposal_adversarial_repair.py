@@ -121,8 +121,17 @@ def _protected_finding(section: ProposalSection | None, message: str) -> bool:
 def _deterministic_repair(section: ProposalSection) -> ProposalSection:
     repaired, _report = gate_section_legal_attestations(section, force=True)
     from app.services.proposal_cert_claim_scrub import scrub_section_cert_claims
+    from app.services.proposal_rfp_optional_claim_scrub import (
+        strip_auditor_echo_manual_fills,
+        strip_coi_upon_request,
+    )
 
     repaired, _cert_logs = scrub_section_cert_claims(repaired)
+    body = repaired.content or ""
+    body, _ = strip_auditor_echo_manual_fills(body)
+    body, _ = strip_coi_upon_request(body)
+    if body != (repaired.content or ""):
+        repaired = repaired.model_copy(update={"content": body})
     return repaired
 
 
@@ -348,13 +357,19 @@ def _append_manual_fill(
     finding_code: str | None = None,
 ) -> tuple[ProposalDraft, str | None]:
     """Append a Sonja handoff tag. Prefer stable finding codes over truncated prose."""
+    code = (finding_code or "").strip()
+    issue_cf = f"{code} {issue}".casefold()
+    if code.casefold().startswith("deterministic.fabricated_fact") or (
+        "deferred information" in issue_cf and "upon request" in issue_cf
+    ):
+        return draft, None
+
     draft, target_id = _resolve_escalation_section_id(
         draft, section_id=section_id, finding_code=finding_code
     )
     sections = []
     appended: str | None = None
     owner = _owner_for_field(issue)
-    code = (finding_code or "").strip()
     short_title = _report_issue_text(issue)
     if len(short_title) > 80:
         short_title = short_title[:77].rstrip() + "…"
@@ -365,6 +380,7 @@ def _append_manual_fill(
     else:
         # Fallback: full cleaned issue (no mid-word [:100] cut).
         tag = f"[MANUAL FILL: {owner} — {short_title}]"
+
     for section in draft.sections:
         if section.id != target_id:
             sections.append(section)

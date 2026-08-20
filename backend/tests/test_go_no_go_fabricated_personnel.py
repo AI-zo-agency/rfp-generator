@@ -52,6 +52,63 @@ class FabricatedPersonnelGroundingTests(unittest.TestCase):
         )
         self.assertIsNone(fail)
 
+    def test_invented_rad_s_is_rejected_from_kb_only_rule(self) -> None:
+        fail = personnel_claim_failure(
+            requirement="Website maintenance, updates, and expansion",
+            quote="Rad S. is the Web & Photography lead at zö agency.",
+            source_text="Shawn DiCriscio, Web Developer. Specializes in WordPress.",
+        )
+        self.assertIsNotNone(fail)
+        self.assertIn("Rad S", fail or "")
+
+    def test_sonja_middle_initial_matches_roster_in_kb(self) -> None:
+        fail = personnel_claim_failure(
+            requirement="Program Director/designated liaison role",
+            quote="Sonja M. Anderson is the CEO and Agency Director of zö agency.",
+            source_text="Sonja M. Anderson, CEO and Agency Director.",
+        )
+        self.assertIsNone(fail)
+
+    def test_retired_ron_comer_is_not_current_staff(self) -> None:
+        from app.services.evidence_trust.personnel_grounding import (
+            find_retired_team_names,
+            is_retired_team_member,
+        )
+
+        self.assertTrue(is_retired_team_member("Ron Comer"))
+        self.assertEqual(find_retired_team_names("Ron Comer, Account Manager"), ["Ron Comer"])
+        fail = personnel_claim_failure(
+            requirement="Public relations professional/account management",
+            quote="Ron Comer, Senior Account Manager",
+            source_text=MASTER["content"],
+        )
+        self.assertIsNotNone(fail)
+        self.assertIn("retired", (fail or "").casefold())
+
+    def test_requirement_titles_are_not_staffing_claims(self) -> None:
+        """PSU live bug: Title Case in criteria was parsed as a person.
+
+        'Oregon Revised Statutes', 'Portland State University', and
+        'Service Disabled Veteran' are not roster names. Treating them as
+        staffing claims flipped verified cert/policy rows into fake gaps.
+        """
+        source = (
+            "zö agency is WBENC and WOSB certified as a women-owned business. "
+            "We comply with applicable public contracting policies."
+        )
+        for requirement in (
+            "Minority, Women, Service Disabled Veteran Owned, or Emerging Small Business certification",
+            "Compliance with Oregon Revised Statutes (ORS) and PSU policies",
+            "Ability to work with Portland State University and Oregon public universities",
+            "Equal opportunity employment practices (non-discrimination)",
+        ):
+            fail = personnel_claim_failure(
+                requirement=requirement,
+                quote="zö agency is WBENC and WOSB certified as a women-owned business.",
+                source_text=source,
+            )
+            self.assertIsNone(fail, requirement)
+
     def test_adjudicator_rejects_brittany_verified_against_master_template(
         self,
     ) -> None:
@@ -118,6 +175,27 @@ class FabricatedPersonnelGroundingTests(unittest.TestCase):
         gaps = " | ".join(str(g) for g in raw["criticalGaps"])
         self.assertIn("Brittany Frazier", gaps)
         self.assertIn("not a documented zö team member", gaps)
+
+    def test_scrub_removes_retired_ron_comer_from_report(self) -> None:
+        from app.services.go_no_go_service import _scrub_invented_eval_and_people
+
+        raw = {
+            "summary": "Strong account management — Ron Comer as Senior AM.",
+            "stageOneReport": "Public relations: Ron Comer, Senior Account Manager.",
+            "fitScore": 3,
+            "worthScore": 4,
+            "recommendation": "review",
+            "criticalGaps": [],
+            "decisionMatrix": [
+                {"dimension": "Resource Availability", "score": 3, "notes": "Ron Comer"}
+            ],
+        }
+        _scrub_invented_eval_and_people(raw, evaluation_points_found=True)
+        blob = f"{raw['summary']}\n{raw['stageOneReport']}\n{raw['decisionMatrix'][0]['notes']}"
+        self.assertNotIn("Ron Comer", blob)
+        gaps = " | ".join(str(g) for g in raw["criticalGaps"])
+        self.assertIn("Ron Comer", gaps)
+        self.assertIn("retired", gaps.casefold())
 
 
 class EnforceFabricatedCapabilityRowTests(unittest.TestCase):

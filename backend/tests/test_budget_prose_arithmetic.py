@@ -430,6 +430,38 @@ class FeeTableVsSubtotalTests(unittest.TestCase):
         )
         self.assertEqual(collect_prose_arithmetic_violations(text), [])
 
+    def test_fee_rows_plus_travel_matching_grand_total_is_clean(self) -> None:
+        text = (
+            "**Professional fees: $31,600**\n"
+            "**Direct travel / reimbursables: $5,000**\n"
+            "**Total proposed investment: $36,600**\n\n"
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| Discovery & Research | Stakeholder Interviews | $7,000 |\n"
+            "| Strategy | Messaging Framework | $7,500 |\n"
+            "| Creative | Campaign Brand Development | $3,350 |\n"
+            "| Content & Social | Monthly Social Media Management | $4,000 |\n"
+            "| Project Management | Administration | $9,750 |\n"
+            "| Direct expenses | Travel / reimbursables | $5,000 |\n"
+            "| **Total** | | **$36,600** |\n"
+        )
+        self.assertEqual(collect_prose_arithmetic_violations(text), [])
+
+    def test_fee_only_table_not_flagged_against_grand_total_with_travel(self) -> None:
+        text = (
+            "**Professional fees: $31,600**\n"
+            "**Direct travel / reimbursables: $5,000**\n"
+            "**Total proposed investment: $36,600**\n\n"
+            "| Phase | Deliverable | Amount |\n"
+            "| --- | --- | ---: |\n"
+            "| Discovery & Research | Stakeholder Interviews | $7,000 |\n"
+            "| Strategy | Messaging Framework | $7,500 |\n"
+            "| Creative | Campaign Brand Development | $3,350 |\n"
+            "| Content & Social | Monthly Social Media Management | $4,000 |\n"
+            "| Project Management | Administration | $9,750 |\n"
+        )
+        self.assertEqual(collect_prose_arithmetic_violations(text), [])
+
 
 if __name__ == "__main__":
     unittest.main()

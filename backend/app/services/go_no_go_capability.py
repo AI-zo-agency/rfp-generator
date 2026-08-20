@@ -657,7 +657,31 @@ def calibrate_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int
     if service_verified >= 3 and ratio >= 0.45:
         floor = max(floor, 4)
 
+    # Multiple missing core crafts cannot be a 4. A live run scored Technical
+    # 4/5 while the notes said three material gaps "prevent a 4/5".
+    core_craft_gaps = sum(
+        1 for row in craft_cores if row.status not in {"verified", "partial"}
+    )
+    if core_craft_gaps >= 3:
+        floor = min(floor, 3)
+
     return max(0, min(5, floor))
+
+
+_WRITTEN_CAP_RE = re.compile(r"capped at\s+(\d)\s*/\s*5", re.IGNORECASE)
+
+
+def clamp_score_to_written_cap(score: int, notes: str) -> int:
+    """If notes say 'capped at N/5', the displayed score cannot exceed N.
+
+    Live runs showed Resource Availability 4/5 while the same cell said
+    'capped at 2/5'. The written cap is the intended score.
+    """
+    match = _WRITTEN_CAP_RE.search(notes or "")
+    if not match:
+        return score
+    cap = int(match.group(1))
+    return max(0, min(score, cap))
 
 
 def derive_resource_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | None:

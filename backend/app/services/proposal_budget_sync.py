@@ -495,12 +495,20 @@ def collect_prose_arithmetic_violations(markdown: str) -> list[str]:
                 )
         elif total_m:
             stated = _money(total_m.group(1))
+            fee_only = _money(fee_m.group(1)) if fee_m else None
+            direct_amt = _money(direct_m.group(1)) if direct_m else 0.0
             tol = max(1.0, stated * 0.005)
-            if abs(line_sum - stated) > tol:
-                violations.append(
-                    f"Budget table line items sum to ${line_sum:,.0f}, but the stated "
-                    f"total is ${stated:,.0f}."
-                )
+            if abs(line_sum - stated) <= tol:
+                continue
+            # Fee-only table vs grand total that also includes travel.
+            if fee_only is not None and abs(line_sum - fee_only) <= max(1.0, fee_only * 0.005):
+                continue
+            if abs(line_sum + direct_amt - stated) <= tol:
+                continue
+            violations.append(
+                f"Budget table line items sum to ${line_sum:,.0f}, but the stated "
+                f"total is ${stated:,.0f}."
+            )
 
     # A parenthetical that restates the whole total only omits something when the
     # total actually HAS more than one component. Fee-only, travel-only and
