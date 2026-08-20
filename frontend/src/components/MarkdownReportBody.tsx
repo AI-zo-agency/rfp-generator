@@ -3,7 +3,6 @@ import { humanizeGapTag, isInternalScanTag, isManualFillTag } from "@/lib/gap-ta
 type Block =
   | { type: "heading"; level: number; text: string }
   | { type: "table"; headers: string[]; rows: string[][] }
-  | { type: "table_raw"; lines: string[] }
   | { type: "list"; ordered: boolean; items: string[] }
   | { type: "paragraph"; text: string }
   | { type: "designer_note"; text: string }
@@ -168,7 +167,14 @@ export function stripEvidenceCitations(text: string): string {
       if (!trimmed.includes("|")) return true;
       const inner = trimmed.replace(/^\|/, "").replace(/\|$/, "");
       const cells = inner.split("|").map((c) => c.trim());
-      if (cells.length >= 2 && cells.every((c) => !c)) return false;
+      if (cells.length >= 1 && cells.every((c) => !c)) return false;
+      // Ellipsis / placeholder-only pipe rows
+      if (
+        cells.length >= 1 &&
+        cells.every((c) => !c || /^(?:\.{2,}|…+|[-–—_*]+)$/i.test(c))
+      ) {
+        return false;
+      }
       return true;
     })
     .join("\n");
@@ -185,9 +191,31 @@ function isEmptyOrDashRow(cells: string[]): boolean {
   return cells.length === 0 || cells.every(isDashOnlyCell);
 }
 
+/** Placeholder / ellipsis cells LLMs emit instead of real headers. */
+function isPlaceholderCell(cell: string): boolean {
+  const t = (cell || "").trim();
+  if (!t) return true;
+  return /^(?:\.{2,}|…+|[-–—_*]+|n\/?a|tbd|null|none)$/i.test(t);
+}
+
+/**
+ * Pipe noise: `| | | | |`, `||||`, or ellipsis-only rows. These must never
+ * render as paragraphs (raw pipes) or as table chrome.
+ */
+function isPipeNoiseLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return false;
+  if (!/^[\s|.:…\-–—_*]+$/.test(trimmed) && parseTableRow(trimmed).some((c) => !isPlaceholderCell(c))) {
+    return false;
+  }
+  const cells = parseTableRow(trimmed);
+  return cells.length >= 1 && cells.every(isPlaceholderCell);
+}
+
 function isTableRow(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed.includes("|")) return false;
+  if (isPipeNoiseLine(trimmed)) return false;
   const cells = parseTableRow(trimmed);
   if (cells.length < 2) return false;
   if (cells.every((c) => !(c || "").trim())) return false;
@@ -209,17 +237,27 @@ function parseTableRow(line: string): string[] {
     .map((cell) => cell.trim());
 }
 
+/** Drop empty leading/trailing cells from expand artifacts (`|| Foundation`). */
+function trimEmptyEdgeCells(cells: string[]): string[] {
+  let start = 0;
+  let end = cells.length;
+  while (start < end && !(cells[start] || "").trim()) start += 1;
+  while (end > start && !(cells[end - 1] || "").trim()) end -= 1;
+  return cells.slice(start, end);
+}
+
 function normalizeTableRows(headers: string[], rows: string[][]): string[][] {
   const colCount = Math.max(headers.length, 1);
   return rows.map((row) => {
-    if (row.length === colCount) {
-      return row;
+    const cells = trimEmptyEdgeCells(row);
+    if (cells.length === colCount) {
+      return cells;
     }
-    if (row.length < colCount) {
-      return [...row, ...Array(colCount - row.length).fill("")];
+    if (cells.length < colCount) {
+      return [...cells, ...Array(colCount - cells.length).fill("")];
     }
-    const head = row.slice(0, colCount - 1);
-    head.push(row.slice(colCount - 1).join(" | "));
+    const head = cells.slice(0, colCount - 1);
+    head.push(cells.slice(colCount - 1).join(" · "));
     return head;
   });
 }
@@ -235,14 +273,142 @@ function normalizeTableCellLabel(text: string): string {
   return t;
 }
 
-function TableRawFallback({ lines }: { lines: string[] }) {
-  return (
-    <div className="my-4 overflow-x-auto rounded-xl border border-zo-border bg-white p-4">
-      <pre className="m-0 whitespace-pre-wrap font-sans text-[13px] leading-relaxed text-foreground">
-        {lines.join("\n")}
-      </pre>
-    </div>
-  );
+/** Merge consecutive single-letter header columns: P|H|A|S|E → PHASE. */
+function collapseSpacedLetterColumns(cells: string[]): string[] {
+  const out: string[] = [];
+  let run: string[] = [];
+  const flush = () => {
+    if (run.length === 0) return;
+    if (run.length >= 3 && run.every((p) => p.length === 1 && /[A-Za-z]/i.test(p))) {
+      out.push(run.join(""));
+    } else {
+      out.push(...run);
+    }
+    run = [];
+  };
+  for (const cell of cells) {
+    const t = (cell || "").trim();
+    if (t.length === 1 && /[A-Za-z]/i.test(t)) {
+      run.push(t.toUpperCase());
+    } else {
+      flush();
+      out.push(normalizeTableCellLabel(t));
+    }
+  }
+  flush();
+  return out;
+}
+
+function dropEmptyColumns(
+  headers: string[],
+  rows: string[][]
+): { headers: string[]; rows: string[][] } {
+  if (headers.length === 0) return { headers, rows };
+  const keep: number[] = [];
+  for (let c = 0; c < headers.length; c += 1) {
+    const headerEmpty = isPlaceholderCell(headers[c] || "");
+    const allRowsEmpty = rows.every((row) => isPlaceholderCell(row[c] || ""));
+    if (!(headerEmpty && allRowsEmpty)) keep.push(c);
+  }
+  if (keep.length === headers.length || keep.length === 0) {
+    return { headers, rows };
+  }
+  return {
+    headers: keep.map((i) => headers[i]!),
+    rows: rows.map((row) => keep.map((i) => row[i] || "")),
+  };
+}
+
+function repairTableBlock(
+  headers: string[],
+  rows: string[][],
+  options: { hadSeparator: boolean }
+): { headers: string[]; rows: string[][] } | null {
+  const { hadSeparator } = options;
+  let h = collapseSpacedLetterColumns(headers.map((c) => (c || "").trim()));
+  let r = rows
+    .map((row) => trimEmptyEdgeCells(row.map((c) => (c || "").trim())))
+    .filter((row) => !isEmptyOrDashRow(row) && !row.every(isPlaceholderCell));
+
+  // No markdown separator → every pipe row is data (common in bios / key-value cards).
+  if (!hadSeparator) {
+    const allRows = [h, ...r]
+      .map((row) => collapseSpacedLetterColumns(row))
+      .filter((row) => row.length > 0 && !row.every(isPlaceholderCell));
+    if (allRows.length === 0) return null;
+    const width = Math.max(...allRows.map((row) => row.length), 2);
+    const first = allRows[0]!;
+    const firstLooksLikeHeader =
+      first.length >= 2 &&
+      first.every((c) => c.length > 0 && c.length <= 28) &&
+      /^(field|label|name|item|category|information|value|detail|description|role|rate)$/i.test(
+        first[0] || ""
+      );
+    if (firstLooksLikeHeader && allRows.length > 1) {
+      h = first;
+      r = allRows.slice(1);
+    } else {
+      h = Array.from({ length: width }, () => "");
+      r = allRows;
+    }
+  } else {
+    const headersUseless =
+      h.length === 0 ||
+      h.every(isPlaceholderCell) ||
+      (h.length >= 2 && h.filter((c) => isPlaceholderCell(c)).length / h.length >= 0.6);
+
+    if (headersUseless && r.length > 0) {
+      h = collapseSpacedLetterColumns(r[0]!.map((c) => (c || "").trim()));
+      r = r.slice(1);
+    }
+  }
+
+  if (h.length > 12) {
+    return null;
+  }
+
+  // Empty synthetic headers are OK for key-value cards (thead hidden).
+  if (h.length === 0) {
+    return null;
+  }
+  if (h.every(isPlaceholderCell) && r.length === 0) {
+    return null;
+  }
+
+  const normalized = normalizeTableRows(h, r);
+  // Keep empty header slots so 2-col key/value layout survives dropEmptyColumns.
+  const trimmed =
+    h.every(isPlaceholderCell) && r.length > 0
+      ? { headers: h, rows: normalized }
+      : dropEmptyColumns(h, normalized);
+  if (trimmed.headers.length === 0) return null;
+  if (trimmed.rows.length === 0 && trimmed.headers.every(isPlaceholderCell)) return null;
+  return trimmed;
+}
+
+/** Last resort: force pipe lines into a real HTML table — never a dotted list. */
+function tableFromRawLines(
+  rawLines: string[]
+): { headers: string[]; rows: string[][] } | null {
+  const rows = rawLines
+    .filter((l) => !isPipeNoiseLine(l) && !isTableSeparator(l))
+    .map((l) => trimEmptyEdgeCells(parseTableRow(l)))
+    .filter((row) => row.length > 0 && !row.every(isPlaceholderCell));
+  if (rows.length === 0) return null;
+  const width = Math.max(...rows.map((row) => row.length), 2);
+  const headers = Array.from({ length: width }, () => "");
+  return { headers, rows: normalizeTableRows(headers, rows) };
+}
+
+function sanitizeTableBlock(
+  headers: string[],
+  rows: string[][],
+  rawLines: string[]
+): { headers: string[]; rows: string[][] } | null {
+  const hadSeparator = rawLines.some((line) => isTableSeparator(line));
+  const repaired = repairTableBlock(headers, rows, { hadSeparator });
+  if (repaired) return repaired;
+  return tableFromRawLines(rawLines);
 }
 
 function ProposalTable({
@@ -261,35 +427,38 @@ function ProposalTable({
   const cellPad = compact ? "px-3 py-2.5" : "px-4 py-3";
   const headPad = compact ? "px-3 py-2" : "px-4 py-2.5";
   const textSize = compact ? "text-sm" : "text-[13px]";
+  const showHeader = headers.some((h) => !isPlaceholderCell(h));
   return (
     <div className="my-4 overflow-x-auto rounded-xl border border-zo-border bg-white">
-      <table className={`w-full min-w-[480px] border-collapse text-left ${textSize}`}>
-        <thead>
-          <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-xs uppercase tracking-wide text-zo-text-muted">
-            {headers.map((header, headerIndex) => (
-              <th
-                key={`${blockIndex}-h-${headerIndex}`}
-                className={`min-w-[5.5rem] max-w-[22rem] align-top whitespace-normal ${headPad} font-bold`}
-              >
-                {renderInline(header, highlights)}
-              </th>
-            ))}
-          </tr>
-        </thead>
+      <table className={`w-full min-w-[min(100%,480px)] border-collapse text-left ${textSize}`}>
+        {showHeader ? (
+          <thead>
+            <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-xs uppercase tracking-wide text-zo-text-muted">
+              {headers.map((header, headerIndex) => (
+                <th
+                  key={`${blockIndex}-h-${headerIndex}`}
+                  className={`min-w-[5.5rem] max-w-[22rem] align-top whitespace-normal ${headPad} font-bold`}
+                >
+                  {renderInline(header, highlights)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+        ) : null}
         <tbody>
           {rows.map((row, rowIndex) => (
             <tr
               key={rowIndex}
               className="border-b border-zo-border/60 align-top last:border-0"
             >
-              {row.map((cell, cellIndex) => (
+              {headers.map((_, cellIndex) => (
                 <td
                   key={cellIndex}
                   className={`min-w-[5.5rem] max-w-[22rem] align-top whitespace-normal ${cellPad} ${
                     compact ? "text-zo-text-secondary" : ""
-                  }`}
+                  } ${cellIndex === 0 && !showHeader ? "font-semibold text-foreground" : ""}`}
                 >
-                  {renderInline(cell, highlights)}
+                  {renderInline(row[cellIndex] || "", highlights)}
                 </td>
               ))}
             </tr>
@@ -300,39 +469,23 @@ function ProposalTable({
   );
 }
 
-function sanitizeTableBlock(
-  headers: string[],
-  rows: string[][],
-  rawLines: string[]
-): { headers: string[]; rows: string[][] } | { type: "raw"; lines: string[] } {
-  const h = headers.map(normalizeTableCellLabel);
-  const r = rows.map((row) => row.map(normalizeTableCellLabel));
-
-  const singleCharCols = h.filter((c) => c.length === 1).length;
-  const tooManyCols = h.length > 12;
-  const spacedLetterHeader =
-    h.length >= 4 &&
-    singleCharCols / h.length > 0.45 &&
-    h.filter((c) => c.length === 1).join("").length >= 3;
-
-  if (tooManyCols || spacedLetterHeader) {
-    return { type: "raw", lines: rawLines };
-  }
-
-  return { headers: h, rows: normalizeTableRows(h, r) };
-}
-
 function expandInlineTableLines(text: string): string {
   return text
     .split("\n")
     .map((line) => {
       const trimmed = line.trim();
       if (!trimmed.includes("|")) return line;
+      if (isPipeNoiseLine(trimmed)) return "";
       const pipes = trimmed.match(/\|/g)?.length ?? 0;
       // LLM often emits header + separator + rows on one line — split row boundaries.
       if (pipes < 6) return line;
       let expanded = trimmed.replace(/\|\s*\|(?=\s*[-:–—])/g, "|\n|");
       expanded = expanded.replace(/\|\s+(?=\|)/g, "|\n|");
+      // Collapse expand artifacts: `|| Foundation` → `| Foundation`
+      expanded = expanded
+        .split("\n")
+        .map((row) => row.replace(/^\|{2,}/, "|").replace(/\|{2,}$/, "|"))
+        .join("\n");
       return expanded;
     })
     .join("\n");
@@ -349,6 +502,12 @@ function parseBlocks(body: string): Block[] {
     const trimmed = line.trim();
 
     if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    // Never leak `| | | |` / ellipsis pipe rows as paragraphs.
+    if (isPipeNoiseLine(trimmed)) {
       index += 1;
       continue;
     }
@@ -397,14 +556,12 @@ function parseBlocks(body: string): Block[] {
         const headers = parsed[0]!;
         const rows = parsed.slice(1);
         const sanitized = sanitizeTableBlock(headers, rows, tableLines);
-        if ("headers" in sanitized) {
+        if (sanitized && sanitized.headers.length > 0) {
           blocks.push({
             type: "table",
             headers: sanitized.headers,
             rows: sanitized.rows,
           });
-        } else {
-          blocks.push({ type: "table_raw", lines: sanitized.lines });
         }
       }
       continue;
@@ -622,10 +779,6 @@ export function MarkdownReportBody({
             return <h4 key={index}>{renderInline(block.text, highlights)}</h4>;
           }
 
-          if (block.type === "table_raw") {
-            return <TableRawFallback key={index} lines={block.lines} />;
-          }
-
           if (block.type === "table") {
             return (
               <ProposalTable
@@ -707,10 +860,6 @@ export function MarkdownReportBody({
               {renderInline(block.text, highlights)}
             </h5>
           );
-        }
-
-        if (block.type === "table_raw") {
-          return <TableRawFallback key={index} lines={block.lines} />;
         }
 
         if (block.type === "table") {
