@@ -187,6 +187,102 @@ export function nameList(names: string[], max = 3): string {
   return rest > 0 ? `${shown.join(", ")} +${rest} more` : shown.join(", ");
 }
 
+/** Leading job code when present ("EKL 26140 …" → "EKL"), else a short name. */
+export function projectShortLabel(name: string): string {
+  const first = name.trim().split(/\s+/)[0] || name;
+  return first.length > 12 ? `${first.slice(0, 11)}…` : first;
+}
+
+export function formatUsdFromCents(cents: number): string {
+  const dollars = Math.round((cents || 0) / 100);
+  return dollars.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
+}
+
+export interface OverdueProjectBucket {
+  project_id: string;
+  project_name: string;
+  count: number;
+}
+
+/** Overdue tasks grouped by project, hottest first. */
+export function overdueByProject(tasks: TeamworkTask[]): OverdueProjectBucket[] {
+  const map = new Map<string, OverdueProjectBucket>();
+  for (const task of tasks) {
+    const projectId = task.project_id || "";
+    const projectName = task.project_name || "No project";
+    const key = projectId || `name:${projectName}`;
+    const bucket = map.get(key) ?? {
+      project_id: projectId,
+      project_name: projectName,
+      count: 0,
+    };
+    bucket.count += 1;
+    map.set(key, bucket);
+  }
+  return [...map.values()].sort(
+    (a, b) => b.count - a.count || a.project_name.localeCompare(b.project_name),
+  );
+}
+
+const NEAR_BUDGET_RATIO = 0.75;
+
+export interface BudgetPortfolio {
+  capacity: number;
+  used: number;
+  budgetedCount: number;
+  unbudgetedCount: number;
+  projectCount: number;
+  nearBudget: TeamworkProject[];
+}
+
+/** Portfolio spend vs Teamwork financial budgets (amounts in cents). */
+export function budgetPortfolio(projects: TeamworkProject[]): BudgetPortfolio {
+  let capacity = 0;
+  let used = 0;
+  let budgetedCount = 0;
+  let unbudgetedCount = 0;
+  const nearBudget: TeamworkProject[] = [];
+  for (const project of projects) {
+    const cap = project.budget_capacity || 0;
+    const spent = project.budget_used || 0;
+    if (cap > 0) {
+      budgetedCount += 1;
+      capacity += cap;
+      used += spent;
+      if (spent / cap >= NEAR_BUDGET_RATIO) nearBudget.push(project);
+    } else {
+      unbudgetedCount += 1;
+    }
+  }
+  return {
+    capacity,
+    used,
+    budgetedCount,
+    unbudgetedCount,
+    projectCount: projects.length,
+    nearBudget,
+  };
+}
+
+/** Overdue KPI subline: hottest project first, oldest-late as secondary. */
+export function describeOverdueHeat(
+  overdueTasks: TeamworkTask[],
+  oldestLateDays: number,
+): string {
+  if (!overdueTasks.length) return "Nothing overdue";
+  const ranked = overdueByProject(overdueTasks);
+  const top = ranked[0];
+  const heat = top ? `${top.count} on ${projectShortLabel(top.project_name)}` : "";
+  const oldest = oldestLateDays > 0 ? `oldest ${oldestLateDays}d late` : "";
+  if (heat && oldest) return `${heat} · ${oldest}`;
+  if (heat) return heat;
+  return oldest || "No due dates recorded";
+}
+
 /**
  * What is wrong right now, worst first.
  *
@@ -221,6 +317,37 @@ export function buildSignals(data: TeamworkOverview, todayISO: string): Teamwork
       figure: String(unassigned.length),
       goTo: "work",
     });
+  }
+
+  const overdueRanked = overdueByProject(data.overdue_tasks);
+  if (overdueRanked.length) {
+    const top = overdueRanked[0];
+    const hot = top.count >= 10;
+    if (overdueRanked.length === 1 || hot) {
+      signals.push({
+        id: "overdue-concentration",
+        severity: hot ? "critical" : "warn",
+        headline: `${top.project_name} holds ${top.count} overdue ${plural(top.count, "task")}`,
+        detail:
+          overdueRanked.length > 1
+            ? nameList(overdueRanked.slice(1).map((row) => `${row.project_name} (${row.count})`))
+            : undefined,
+        figure: String(top.count),
+        goTo: "work",
+      });
+    } else {
+      const lead = Math.min(3, overdueRanked.length);
+      signals.push({
+        id: "overdue-concentration",
+        severity: "warn",
+        headline: `${lead} ${plural(lead, "project")} hold most overdue`,
+        detail: nameList(
+          overdueRanked.slice(0, lead).map((row) => `${row.project_name} (${row.count})`),
+        ),
+        figure: String(lead),
+        goTo: "work",
+      });
+    }
   }
 
   let oldest: { task: TeamworkTask; days: number } | null = null;
@@ -267,6 +394,30 @@ export function buildSignals(data: TeamworkOverview, todayISO: string): Teamwork
       headline: `${pastDue.length} ${plural(pastDue.length, "project")} past the due date and not complete`,
       detail: nameList(pastDue.map((p) => p.name)),
       figure: String(pastDue.length),
+      goTo: "projects",
+    });
+  }
+
+  const budget = budgetPortfolio(data.projects);
+  if (budget.nearBudget.length) {
+    signals.push({
+      id: "near-budget",
+      severity: "warn",
+      headline: `${budget.nearBudget.length} ${plural(budget.nearBudget.length, "project")} at or over 75% of budget`,
+      detail: nameList(budget.nearBudget.map((p) => p.name)),
+      figure: String(budget.nearBudget.length),
+      goTo: "projects",
+    });
+  }
+  if (budget.unbudgetedCount > 0) {
+    signals.push({
+      id: "unbudgeted-projects",
+      severity: "warn",
+      headline: `${budget.unbudgetedCount} ${plural(budget.unbudgetedCount, "project")} have no financial budget`,
+      detail: nameList(
+        data.projects.filter((p) => !(p.budget_capacity > 0)).map((p) => p.name),
+      ),
+      figure: String(budget.unbudgetedCount),
       goTo: "projects",
     });
   }

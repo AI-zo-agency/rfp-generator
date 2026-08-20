@@ -16,8 +16,11 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Empty, Figure, Note, Panel } from "./qb-ui";
 import {
   billablePct,
+  budgetPortfolio,
   buildSignals,
   daysUntil,
+  describeOverdueHeat,
+  formatUsdFromCents,
   hoursChartRows,
   hoursLabel,
   type SectionId,
@@ -96,43 +99,68 @@ function DeliveryLine({
   atRiskCount: number;
   oldestLate: number;
 }) {
-  let overdueSub = "Nothing overdue";
-  if (data.summary.overdue_task_count) {
-    overdueSub = oldestLate ? `oldest ${oldestLate}d late` : "No due dates recorded";
-  }
+  const overdueSub = describeOverdueHeat(data.overdue_tasks, oldestLate);
+  const budget = budgetPortfolio(data.projects);
+  const budgetValue =
+    budget.capacity > 0
+      ? `${formatUsdFromCents(budget.used)} of ${formatUsdFromCents(budget.capacity)}`
+      : "—";
+  const budgetSub =
+    budget.projectCount > 0
+      ? `${budget.budgetedCount} of ${budget.projectCount} projects budgeted`
+      : "No active projects";
 
   return (
-    <div className="qb-moneyline">
-      <Figure
-        label="Active projects"
-        size="lg"
-        metric="projects"
-        value={<Count value={data.summary.project_count} />}
-        sub={atRiskCount ? `${atRiskCount} at risk` : "None flagged at risk"}
-      />
-      <Figure
-        label="Overdue tasks"
-        size="lg"
-        metric="overdue"
-        value={<Count value={data.summary.overdue_task_count} />}
-        tone={data.summary.overdue_task_count ? "out" : undefined}
-        sub={overdueSub}
-      />
-      <Figure
-        label="Due in 14 days"
-        size="lg"
-        metric="soon"
-        value={<Count value={data.summary.upcoming_task_count} />}
-        sub="Tasks with a near due date"
-      />
-      <Figure
-        label="Hours this month"
-        size="lg"
-        metric="hours"
-        value={<HoursValue minutes={data.time.total_minutes} />}
-        sub={`${billablePct(data.time.billable_minutes, data.time.total_minutes)}% billable`}
-      />
-    </div>
+    <>
+      <div className="qb-moneyline">
+        <Figure
+          label="Active projects"
+          size="lg"
+          metric="projects"
+          value={<Count value={data.summary.project_count} />}
+          sub={atRiskCount ? `${atRiskCount} at risk` : "None flagged at risk"}
+        />
+        <Figure
+          label="Overdue tasks"
+          size="lg"
+          metric="overdue"
+          value={<Count value={data.summary.overdue_task_count} />}
+          tone={data.summary.overdue_task_count ? "out" : undefined}
+          sub={overdueSub}
+        />
+        <Figure
+          label="Due in 14 days"
+          size="lg"
+          metric="soon"
+          value={<Count value={data.summary.upcoming_task_count} />}
+          sub="Tasks with a near due date"
+        />
+        <Figure
+          label="Hours this month"
+          size="lg"
+          metric="hours"
+          value={<HoursValue minutes={data.time.total_minutes} />}
+          sub={`${billablePct(data.time.billable_minutes, data.time.total_minutes)}% billable`}
+        />
+      </div>
+      <div className="qb-moneyline">
+        <Figure
+          label="Budget in play"
+          size="lg"
+          metric="cash"
+          value={budgetValue}
+          sub={budgetSub}
+        />
+        <Figure
+          label="Unbudgeted"
+          size="lg"
+          metric="flag"
+          value={<Count value={budget.unbudgetedCount} />}
+          tone={budget.unbudgetedCount > 0 ? "warn" : undefined}
+          sub="Active projects with no Teamwork budget"
+        />
+      </div>
+    </>
   );
 }
 
