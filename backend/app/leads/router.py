@@ -130,12 +130,22 @@ async def enrich(contact_id: str) -> dict:
     domain = email_domain(email)
     skip_company = (lead.company or {}).get("source") == "hubspot"
     if monid.available():
-        result = await monid.enrich_contact(domain, email, skip_company=skip_company)
+        result = await monid.enrich_contact(
+            domain,
+            email,
+            skip_company=skip_company,
+            known_company=(lead.company or {}).get("name"),
+        )
         if result.get("company_name") or result.get("person"):
             return result
         errors = " ".join(
             part for part in (result.get("company_error"), result.get("person_error")) if part
         )
+        if monid.is_payment_error(errors):
+            raise HTTPException(
+                status_code=402,
+                detail="Monid wallet has insufficient balance. Add funds at https://app.monid.ai",
+            )
         if "No records" in errors:
             raise HTTPException(status_code=404, detail="Monid found no matching company or person record")
         logger.warning("Monid enrichment returned nothing for %s: %s", contact_id, errors)

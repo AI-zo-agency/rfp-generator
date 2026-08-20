@@ -122,6 +122,7 @@ def preparation_facts(brief: dict[str, Any], enrichment: dict[str, Any] | None =
             "company_error": enrichment.get("company_error"),
             "person_error": enrichment.get("person_error"),
             "company_skipped": enrichment.get("company_skipped"),
+            "name_conflict": enrichment.get("name_conflict"),
         },
         "website_visitor_intel": "not available — visitor tracking not deployed",
     }

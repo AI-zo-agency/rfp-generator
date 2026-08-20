@@ -9,8 +9,11 @@ export function preparationState({
   enrichmentStatus: EnrichmentStatus;
 }): { ready: boolean; label: string } {
   if (!briefLoaded) return { ready: false, label: "Loading research brief…" };
-  if (enrichmentStatus === "idle" || enrichmentStatus === "loading") {
+  if (enrichmentStatus === "loading") {
     return { ready: false, label: "Verifying company and contact data…" };
+  }
+  if (enrichmentStatus === "idle") {
+    return { ready: true, label: "Research brief ready. Enrichment is optional." };
   }
   if (enrichmentStatus === "unavailable") {
     return { ready: true, label: "Using research brief; verification unavailable." };
@@ -54,6 +57,7 @@ export interface CompanyEnrichment {
   person_error?: string | null;
   company_skipped?: string | null;
   company_error?: string | null;
+  name_conflict?: string | null;
 }
 
 export function hrefFor(url: string | null | undefined): string | null {

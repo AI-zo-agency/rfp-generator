@@ -76,10 +76,17 @@ describe("enrichmentRows", () => {
 });
 
 describe("preparationState", () => {
-  it("waits for research and enrichment to settle", () => {
+  it("waits only while enrichment is in flight", () => {
     expect(preparationState({ briefLoaded: true, enrichmentStatus: "loading" })).toEqual({
       ready: false,
       label: "Verifying company and contact data…",
+    });
+  });
+
+  it("allows preparation before enrichment is requested", () => {
+    expect(preparationState({ briefLoaded: true, enrichmentStatus: "idle" })).toEqual({
+      ready: true,
+      label: "Research brief ready. Enrichment is optional.",
     });
   });
 
