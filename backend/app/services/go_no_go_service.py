@@ -42,6 +42,7 @@ from app.services.go_no_go_capability import (
     derive_resource_capability_score,
     derive_technical_capability_score,
     calibrate_technical_capability_score,
+    clamp_score_to_written_cap,
     gap_matrix_from_requirements,
     reconcile_narrative,
     unverified_core_requirements,
@@ -263,9 +264,9 @@ EVIDENCE HYGIENE (mandatory — these errors have changed real Go/No-Go outcomes
    do NOT fabricate Category/Max Points rows, percentages, or totals (no duplicate Cost/Experience
    rows, no "62% cost-heavy"). State that weights are undisclosed and score without them.
 8. NEVER INVENT PEOPLE: Do not name team members unless they appear in the KB excerpts provided.
-   Common documented leads include Sonja Anderson, Todd Anderson, Ron Comer, Ella Lindau,
-   Curt Schultz, Justin Bronson, Gil Aranowitz — but ONLY cite a name if the KB excerpt supports it.
-   Unknown roles → [FLAG FOR SONJA: assign …], never invent a Project Lead name.
+   Cite only current names in THIS run's 04_Bio excerpts. People marked Retired in Key Personas
+   are not current staff — never assign them. Unknown roles →
+   [FLAG FOR SONJA: assign …], never invent a name.
 9. NEAR-DIRECT CASE STUDIES: Scan KB excerpts for closest work-type matches (e.g. Recovery Network
    of Oregon / RNO for coalition health/stigma communications). If present, cite them as Verified
    and raise Technical Capability / Win Probability accordingly — do not mark "health policy" as a
@@ -368,8 +369,8 @@ Return ONLY JSON: {"queries": ["query 1", "query 2", ...]}"""
 
 
 DOCUMENTED_TEAM_SEARCH = (
-    "zö agency 04_Bio MasterTemplate team roster Sonja Anderson Todd Anderson Ron Comer "
-    "Ella Lindau Curt Schultz Justin Bronson Gil Aranowitz"
+    "zö agency 04_Bio MasterTemplate current team roster Sonja Anderson Todd Anderson "
+    "Haley Neff Ella Lindau Curt Schultz Justin Bronson Gil Aranowitz"
 )
 
 
@@ -433,6 +434,22 @@ def _deterministic_evidence_queries(rfp: RfpRecord, content: RfpContentInfo) -> 
         )
 
     if re.search(
+        r"media relations|press (?:release|outreach)|stakeholder engagement|"
+        r"relationship management|crisis communication|social media|"
+        r"project management.{0,40}communication",
+        sample,
+        re.IGNORECASE,
+    ):
+        queries.extend(
+            [
+                "zö agency 03_CS media relations press release outreach municipal",
+                "zö agency 03_CS stakeholder engagement relationship management public sector",
+                "zö agency 03_CS social media strategy management partner",
+                "zö agency 03_CS crisis communications emergency issues response",
+            ]
+        )
+
+    if re.search(
         r"cultural advisor|Oceania.{0,40}specialist|Hawaii.{0,40}specialist|"
         r"indigenous|Native Hawaiian|malama",
         sample,
@@ -484,12 +501,11 @@ def _deterministic_evidence_queries(rfp: RfpRecord, content: RfpContentInfo) -> 
     return queries
 
 
-# Hard cap on parallel Supermemory searches — unbounded fan-out caused long
-# runs and one flaky query could 502 the entire Go/No-Go analyze.
-# Reserve discipline slots and round-robin requirement queries so later rows
-# (and platform/craft searches) are never starved by planner fan-out.
-MAX_KB_QUERIES = 20
-MAX_RESERVED_ROLE_QUERIES = 6
+# Parallel Supermemory searches — fair round-robin across requirements.
+# Chunk limit per query is high so bios / companyfacts / case studies are not
+# truncated out of the top-8 memory summaries.
+MAX_KB_QUERIES = 36
+MAX_RESERVED_ROLE_QUERIES = 8
 
 
 def _append_unique_queries(
@@ -512,10 +528,14 @@ def _append_unique_queries(
 def _enrich_requirements_with_role_queries(
     requirements: list[RfpRequirement],
 ) -> list[RfpRequirement]:
-    """Put discipline + requirement-literal searches on each row."""
+    """Put discipline + requirement-literal searches on each row.
+
+    Must run before Supermemory search. Without this, planner-only queries
+    miss craft/press/CMS bios and the adjudicator cites weak adjacent docs.
+    """
     enriched: list[RfpRequirement] = []
     for req in requirements:
-        role_qs = role_queries_for_requirement(req.requirement)
+        role_qs = role_queries_for_requirement(req.requirement, max_queries=3)
         primary = primary_query_for_requirement(req.requirement)
         merged: list[str] = []
         seen: set[str] = set()
@@ -528,7 +548,7 @@ def _enrich_requirements_with_role_queries(
                 continue
             seen.add(key)
             merged.append(cleaned)
-        enriched.append(req.model_copy(update={"kb_queries": merged[:5]}))
+        enriched.append(req.model_copy(update={"kb_queries": merged[:8]}))
     return enriched
 
 
@@ -680,10 +700,12 @@ def _merge_kb_hits_round_robin(
     return merged
 
 
-KB_SEARCH_LIMIT = 8
-KB_CONTEXT_MAX_CHARS = 45_000
+KB_SEARCH_LIMIT = 100
+KB_CONTEXT_MAX_CHARS = 120_000
 RFP_PROMPT_MAX_CHARS = 50_000
 MAX_KB_CONCURRENCY = 8
+# Cap unique hits kept after fair interleave across queries.
+KB_MERGED_HIT_CAP = 400
 
 MIN_SUBSTANTIVE_CHARS = 400
 
@@ -1154,16 +1176,23 @@ async def _gather_knowledge_context(
         )
 
     requirements = await _plan_rfp_requirements(rfp, content)
+    # Evidence agent owns searches (1 light plan + optional follow-up for empty
+    # cores). No regex role lexicon / deterministic seed budget — those burned
+    # Supermemory calls without improving meaning match.
     rfp_sample = combine_rfp_text(content.description, content.pdf_text)[:20_000]
     sem = asyncio.Semaphore(MAX_KB_CONCURRENCY)
 
     async def run_query(query: str) -> list[dict[str, Any]]:
+        """Chunk-first retrieval — up to 100 raw spans per query."""
+        from app.services.kb_rag_retrieve import _search_hits_chunk_first
+
         async with sem:
             try:
-                hits = await supermemory.search_documents(
-                    query=query,
+                hits = await _search_hits_chunk_first(
+                    query,
                     limit=KB_SEARCH_LIMIT,
                     filters=supermemory.KNOWLEDGE_BASE_SEARCH_FILTERS,
+                    threshold=0.35,
                 )
                 return [hit for hit in hits if supermemory.is_knowledge_base_hit(hit)]
             except supermemory.SupermemoryError as exc:
@@ -1194,7 +1223,12 @@ async def _gather_knowledge_context(
         rfp_excerpt=rfp_sample,
         requirements=requirements,
         search=run_query,
+        plan_queries=True,
     )
+
+    # Fair interleave already happened inside the agent; still cap runaway volume.
+    if len(merged) > KB_MERGED_HIT_CAP:
+        merged = merged[:KB_MERGED_HIT_CAP]
 
     formatted = _format_go_no_go_kb_hits(
         merged,
@@ -1472,18 +1506,6 @@ _INVENTED_EVAL_WEIGHT_RE = re.compile(
     r"combined,?\s*requiring\s+competitive\s+pricing)",
     re.IGNORECASE,
 )
-_INVENTED_PERSON_RE = None  # set below from shared fabricated-personnel list
-
-
-def _invented_person_re() -> re.Pattern[str]:
-    global _INVENTED_PERSON_RE
-    if _INVENTED_PERSON_RE is None:
-        from app.services.evidence_trust.personnel_grounding import (
-            fabricated_personnel_regex,
-        )
-
-        _INVENTED_PERSON_RE = fabricated_personnel_regex()
-    return _INVENTED_PERSON_RE
 
 
 _NAME_SPELLING_FIXES: list[tuple[re.Pattern[str], str]] = [
@@ -1593,6 +1615,14 @@ def _scrub_invented_eval_and_people(
     evaluation_points_found: bool,
 ) -> None:
     """Mechanically remove fabrication failure modes that survive the LLM pass."""
+    from app.services.evidence_trust.personnel_grounding import (
+        KNOWN_FABRICATED_PERSONNEL,
+        find_known_fabricated_names,
+        find_retired_team_names,
+        replace_listed_names,
+        retired_team_personnel,
+    )
+
     blob = _text_blob_for_invention_scan(raw)
     gaps = raw.setdefault("criticalGaps", [])
     if not isinstance(gaps, list):
@@ -1616,7 +1646,7 @@ def _scrub_invented_eval_and_people(
             )
         )
     )
-    invented_person = bool(_invented_person_re().search(blob))
+    invented_person = bool(find_known_fabricated_names(blob))
     misattributed_contract = bool(_MISATTRIBUTED_CONTRACT_VALUE_RE.search(blob))
 
     if invented_weights:
@@ -1638,20 +1668,20 @@ def _scrub_invented_eval_and_people(
                     continue
                 dim = str(row.get("dimension") or "").casefold()
                 notes = str(row.get("notes") or "")
-                if dim in {"financial viability", "win probability"} and (
-                    _INVENTED_EVAL_WEIGHT_RE.search(notes)
-                    or "62%" in notes
-                    or int(row.get("score") or 0) <= 2
+                if dim == "win probability" and (
+                    _INVENTED_EVAL_WEIGHT_RE.search(notes) or "62%" in notes
                 ):
-                    # Scores are NEVER raised here. This branch fires because the
-                    # model invented an evaluation table, i.e. the analysis is
-                    # less trustworthy than usual — bumping the score turned a
-                    # fabrication signal into a higher Go score, which is how a
-                    # no-go opportunity scored 3.4. Restate the note only.
+                    # Scores are NEVER raised here. Restate Win notes only when
+                    # they actually contain invented weights — do not wipe
+                    # Financial rationale just because that score is ≤2.
                     row["notes"] = (
                         "Point-weighted evaluation table not disclosed in RFP — "
                         "score based on scope fit, competition, and logistics only."
                     )
+                elif dim == "financial viability" and (
+                    _INVENTED_EVAL_WEIGHT_RE.search(notes) or "62%" in notes
+                ):
+                    row["notes"] = _INVENTED_EVAL_WEIGHT_RE.sub("", notes).strip()
                 elif _INVENTED_EVAL_WEIGHT_RE.search(notes):
                     row["notes"] = _INVENTED_EVAL_WEIGHT_RE.sub("", notes).strip()
         # worthScore is likewise left as-is. Detecting invented weights cannot
@@ -1693,11 +1723,6 @@ def _scrub_invented_eval_and_people(
             gaps.append(msg)
 
     if invented_person:
-        from app.services.evidence_trust.personnel_grounding import (
-            find_known_fabricated_names,
-        )
-
-        person_re = _invented_person_re()
         found = find_known_fabricated_names(blob)
         who = found[0] if found else "unverified name"
         msg = (
@@ -1711,23 +1736,47 @@ def _scrub_invented_eval_and_people(
             isinstance(g, str) and "not a documented zö team member" in g for g in gaps
         ):
             gaps.append(msg)
-        report = person_re.sub(
-            "[FLAG FOR SONJA: assign documented roster person — unverified name removed]",
-            report,
-        )
-        summary = person_re.sub(
-            "[FLAG FOR SONJA: assign documented roster person — unverified name removed]",
-            summary,
-        )
+        flag = "[FLAG FOR SONJA: assign documented roster person — unverified name removed]"
+        report = replace_listed_names(report, KNOWN_FABRICATED_PERSONNEL, flag)
+        summary = replace_listed_names(summary, KNOWN_FABRICATED_PERSONNEL, flag)
         matrix = raw.get("decisionMatrix")
         if isinstance(matrix, list):
             for row in matrix:
-                if isinstance(row, dict) and person_re.search(
-                    str(row.get("notes") or "")
-                ):
-                    row["notes"] = person_re.sub(
+                if not isinstance(row, dict):
+                    continue
+                notes = str(row.get("notes") or "")
+                if find_known_fabricated_names(notes):
+                    row["notes"] = replace_listed_names(
+                        notes,
+                        KNOWN_FABRICATED_PERSONNEL,
                         "[unverified name removed — assign via Sonja]",
-                        str(row.get("notes") or ""),
+                    )
+
+    retired_blob = f"{report}\n{summary}\n{blob}"
+    retired_found = find_retired_team_names(retired_blob)
+    if retired_found:
+        who = retired_found[0]
+        msg = (
+            f"[VERIFY: '{who}' is retired — do not assign as current staff; "
+            "FLAG SONJA for the live roster]"
+        )
+        if not any(isinstance(g, str) and who in g and "retired" in g.casefold() for g in gaps):
+            gaps.append(msg)
+        retired_flag = "[retired staff removed — FLAG SONJA: assign current roster person]"
+        retired_names = retired_team_personnel()
+        report = replace_listed_names(report, retired_names, retired_flag)
+        summary = replace_listed_names(summary, retired_names, retired_flag)
+        matrix = raw.get("decisionMatrix")
+        if isinstance(matrix, list):
+            for row in matrix:
+                if not isinstance(row, dict):
+                    continue
+                notes = str(row.get("notes") or "")
+                if find_retired_team_names(notes):
+                    row["notes"] = replace_listed_names(
+                        notes,
+                        retired_names,
+                        "[retired staff removed — assign via Sonja]",
                     )
 
     report = _apply_name_spelling_fixes(report)
@@ -2135,11 +2184,19 @@ async def _adjudicate_capabilities(
         if (getattr(r, "requirement", "") or "") in recoverable
         and sources.get(getattr(r, "requirement", "") or "")
     ]
-    verified_count = sum(1 for row in rows if row.status == "verified")
-    verified_ratio = verified_count / len(rows) if rows else 1.0
-    if gap_with_docs and verified_ratio < 0.75 and len(gap_with_docs) <= 6:
+    # Always recover when docs exist. Skipping because *this* RFP already had
+    # a high verified ratio left quote/name failures frozen on the next RFP.
+    if gap_with_docs:
+        def _recover_priority(req: RfpRequirement) -> int:
+            name = getattr(req, "requirement", "") or ""
+            cat = str(getattr(req, "category", "") or "").casefold()
+            if name in recoverable and cat == "role":
+                return 0
+            return 1
+
+        to_recover = sorted(gap_with_docs, key=_recover_priority)[:16]
         recover_body = build_gap_recover_payload(
-            gap_with_docs, sources, full_sources=full_sources
+            to_recover, sources, full_sources=full_sources
         )
         if recover_body.strip():
             try:
@@ -2247,6 +2304,7 @@ def _enforce_capability_evidence(
     # row stayed Verified — same table, inconsistent filter).
     from app.services.evidence_trust.personnel_grounding import (
         find_known_fabricated_names,
+        find_retired_team_names,
     )
 
     scrubbed_rows: list[GoNoGoCapabilityRow] = []
@@ -2254,27 +2312,59 @@ def _enforce_capability_evidence(
         if row.status not in {"verified", "partial"}:
             scrubbed_rows.append(row)
             continue
-        fabricated = find_known_fabricated_names(
-            f"{row.requirement}\n{row.evidence}"
-        )
+        claim = f"{row.requirement}\n{row.evidence}"
+        fabricated = find_known_fabricated_names(claim)
+        retired = find_retired_team_names(claim)
         if fabricated:
             who = fabricated[0]
-            scrubbed_rows.append(
-                row.model_copy(
-                    update={
-                        "status": "gap",
-                        "kb_source": "",
-                        "evidence": "",
-                        "downgrade_reason": (
-                            f"fabricated personnel '{who}' is not a documented "
-                            "zö team member — FLAG SONJA; do not mark Verified"
-                        ),
-                    }
+            from app.services.go_no_go_adjudicator import (
+                _is_staffing_assignment_row,
+            )
+
+            if _is_staffing_assignment_row(row.requirement, row.category):
+                scrubbed_rows.append(
+                    row.model_copy(
+                        update={
+                            "status": "partial",
+                            "kb_source": "",
+                            "evidence": "",
+                            "evidence_state": "adjacent",
+                            "downgrade_reason": (
+                                "FLAG SONJA: assign a current roster person as "
+                                "liaison — do not invent staff"
+                            ),
+                        }
+                    )
                 )
+                continue
+            reason = (
+                f"fabricated personnel '{who}' is not a documented "
+                "zö team member — FLAG SONJA; do not mark Verified"
+            )
+        elif retired:
+            who = retired[0]
+            reason = (
+                f"'{who}' is retired and is not current zö staff — "
+                "do not assign as account lead; FLAG SONJA for the live roster"
             )
         else:
             scrubbed_rows.append(row)
-    validated = scrubbed_rows
+            continue
+        scrubbed_rows.append(
+            row.model_copy(
+                update={
+                    "status": "gap",
+                    "kb_source": "",
+                    "evidence": "",
+                    "downgrade_reason": reason,
+                }
+            )
+        )
+    from app.services.go_no_go_evidence_scrub import scrub_capability_rows
+
+    # Fabricated cert badges / cross-stitched case-study metrics — even when a
+    # polluted KB chunk or salvage pass left them in a "verified" quote.
+    validated = scrub_capability_rows(scrubbed_rows)
     downgrades = [
         f"{row.requirement}: {row.downgrade_reason}"
         for row in validated
@@ -2309,11 +2399,12 @@ def _enforce_capability_evidence(
             if (
                 row.dimension.casefold() == "resource availability"
                 and derived_resource is not None
-                and derived_resource != row.score
+                and derived_resource < row.score
             ):
-                direction = "raised" if derived_resource > row.score else "reduced"
+                # Never RAISE resource from role-row math. Sonja as liaison
+                # must not override an honest 2/5 for geography / attendance.
                 row.notes = (
-                    f"{row.notes} | Score {direction} to {derived_resource}/5 "
+                    f"{row.notes} | Score reduced to {derived_resource}/5 "
                     "from role/logistics requirement evidence."
                 ).strip(" |")
                 row.score = derived_resource
@@ -2359,6 +2450,14 @@ def _enforce_capability_evidence(
                         f"({evidenced_core}/{len(craft_cores)} core craft rows)."
                     ).strip(" |")
                     row.score = win_floor
+        for row in matrix:
+            clamped = clamp_score_to_written_cap(row.score, row.notes)
+            if clamped != row.score:
+                row.notes = (
+                    f"{row.notes} | Display score aligned to written cap "
+                    f"{clamped}/5."
+                ).strip(" |")
+                row.score = clamped
         updates["decision_matrix"] = matrix
 
     if core_gaps:
@@ -2513,6 +2612,10 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
         else "Technical Capability will be derived from the requirement evidence matrix."
     )
 
+    from app.services.evidence_trust.personnel_grounding import retired_team_personnel
+
+    retired_line = ", ".join(retired_team_personnel()) or "(none)"
+
     user_prompt = f"""Produce Stage 1 Fit Analysis scores and dashboard summary for zö agency.
 {thin_rfp_note}
 ## Deadline check (authoritative — use today's date)
@@ -2545,6 +2648,7 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 - Never invent "budget unknown" when HARD FACTS show a ceiling.
 - Never invent evaluation % / point totals when HARD FACTS say not found.
 - Never invent team names; never invent "Drew Stone".
+- Retired (Key Personas) — do not assign as current staff: {retired_line}.
 - Spell Ella Lindau correctly (not Lindeau).
 - Undisclosed budget alone ≠ Worth 2 when opportunity class is professional_services — usually Worth ~3.
 - open_competition / unpaid / prize_only without confirmed fee → Financial 0, Worth ≤1, prefer no_go.

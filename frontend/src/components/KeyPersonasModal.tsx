@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import {
   fetchKeyPersonas,
   saveProposalKeyPersonas,
+  setKeyPersonaRetired,
   type KeyPersonaItem,
 } from "@/lib/proposal-api";
 import type { ProposalOutline } from "@/types/proposal";
@@ -122,6 +123,8 @@ export function KeyPersonasModal({
 
   const togglePersona = useCallback(
     (id: string) => {
+      const person = personas.find((p) => p.id === id);
+      if (person?.retired) return;
       const current = selectedIdsRef.current;
       const exists = current.includes(id);
       const next = exists
@@ -129,11 +132,33 @@ export function KeyPersonasModal({
         : [...current, id];
       void persistSelection(next);
     },
+    [persistSelection, personas]
+  );
+
+  const toggleRetired = useCallback(
+    async (person: KeyPersonaItem, retired: boolean) => {
+      const updated = await setKeyPersonaRetired({
+        personId: person.id,
+        name: person.name,
+        retired,
+      });
+      if (updated?.personas) {
+        setPersonas(updated.personas);
+      } else {
+        setPersonas((prev) =>
+          prev.map((p) => (p.id === person.id ? { ...p, retired } : p))
+        );
+      }
+      if (retired) {
+        const next = selectedIdsRef.current.filter((id) => id !== person.id);
+        void persistSelection(next);
+      }
+    },
     [persistSelection]
   );
 
   const selectAll = useCallback(() => {
-    const allIds = personas.map((p) => p.id);
+    const allIds = personas.filter((p) => !p.retired).map((p) => p.id);
     void persistSelection(allIds);
   }, [personas, persistSelection]);
 
@@ -143,13 +168,15 @@ export function KeyPersonasModal({
 
   const filteredPersonas = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return personas;
-    return personas.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.title.toLowerCase().includes(q) ||
-        p.sourceFile.toLowerCase().includes(q)
-    );
+    const matched = !q
+      ? personas
+      : personas.filter(
+          (p) =>
+            p.name.toLowerCase().includes(q) ||
+            p.title.toLowerCase().includes(q) ||
+            p.sourceFile.toLowerCase().includes(q)
+        );
+    return [...matched].sort((a, b) => Number(Boolean(a.retired)) - Number(Boolean(b.retired)));
   }, [personas, searchQuery]);
 
   if (!isOpen) return null;
@@ -185,7 +212,8 @@ export function KeyPersonasModal({
               Key Persons
             </h2>
             <p className="mt-1 text-xs text-[#4b5563]">
-              Select team members whose Knowledge Base resumes will be included in this RFP proposal.
+              Select current staff whose Knowledge Base resumes go in this proposal.
+              Mark someone Retired so Go/No-Go and proposal agents never assign them.
             </p>
           </div>
           <button
@@ -247,23 +275,27 @@ export function KeyPersonasModal({
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {filteredPersonas.map((person) => {
-                const isSelected = selectedIds.includes(person.id);
+                const isRetired = Boolean(person.retired);
+                const isSelected = !isRetired && selectedIds.includes(person.id);
                 return (
                   <label
                     key={person.id}
                     htmlFor={`persona-modal-${person.id}`}
-                    className={`group relative flex items-start gap-3.5 rounded-xl border p-4 cursor-pointer transition-smooth ${
-                      isSelected
-                        ? "border-[#ef5018] bg-[#fef2f2]/60 shadow-xs"
-                        : "border-[#e5e7eb] bg-white hover:border-[#ef5018]/50 hover:bg-[#f9fafb]"
+                    className={`group relative flex items-start gap-3.5 rounded-xl border p-4 transition-smooth ${
+                      isRetired
+                        ? "cursor-not-allowed border-[#e5e7eb] bg-[#f9fafb] opacity-80"
+                        : isSelected
+                          ? "cursor-pointer border-[#ef5018] bg-[#fef2f2]/60 shadow-xs"
+                          : "cursor-pointer border-[#e5e7eb] bg-white hover:border-[#ef5018]/50 hover:bg-[#f9fafb]"
                     }`}
                   >
                     <input
                       type="checkbox"
                       id={`persona-modal-${person.id}`}
                       checked={isSelected}
+                      disabled={isRetired}
                       onChange={() => togglePersona(person.id)}
-                      className="mt-1 h-4.5 w-4.5 shrink-0 rounded border-[#d1d5db] text-[#ef5018] accent-[#ef5018] focus:ring-[#ef5018]/20 cursor-pointer"
+                      className="mt-1 h-4.5 w-4.5 shrink-0 rounded border-[#d1d5db] text-[#ef5018] accent-[#ef5018] focus:ring-[#ef5018]/20 cursor-pointer disabled:cursor-not-allowed"
                     />
 
                     <div className="min-w-0 flex-1">
@@ -271,11 +303,17 @@ export function KeyPersonasModal({
                         <span className="text-sm font-bold text-[#111827] group-hover:text-[#ef5018]">
                           {person.name}
                         </span>
-                        {person.hasResume ? (
-                          <span className="shrink-0 rounded-full border border-[#a7f3d0] bg-[#ecfdf5] px-2 py-0.5 text-[9px] font-bold text-[#047857]">
-                            Resume KB
-                          </span>
-                        ) : null}
+                        <span className="flex shrink-0 items-center gap-1">
+                          {isRetired ? (
+                            <span className="rounded-full border border-[#e5e7eb] bg-[#f3f4f6] px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-[#6b7280]">
+                              Retired
+                            </span>
+                          ) : person.hasResume ? (
+                            <span className="rounded-full border border-[#a7f3d0] bg-[#ecfdf5] px-2 py-0.5 text-[9px] font-bold text-[#047857]">
+                              Resume KB
+                            </span>
+                          ) : null}
+                        </span>
                       </div>
 
                       <p className="mt-0.5 text-xs font-semibold text-[#4b5563] truncate">
@@ -293,6 +331,18 @@ export function KeyPersonasModal({
                           📄 {person.sourceFile}
                         </p>
                       ) : null}
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          void toggleRetired(person, !isRetired);
+                        }}
+                        className="mt-2 text-[10px] font-semibold text-[#6b7280] underline-offset-2 hover:text-[#111827] hover:underline"
+                      >
+                        {isRetired ? "Mark current staff" : "Mark retired"}
+                      </button>
                     </div>
                   </label>
                 );

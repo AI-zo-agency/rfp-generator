@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from app.services import llm
+from app.services.evidence_trust.personnel_grounding import is_retired_team_member
 from app.services.company_qualification.schemas import (
     ProposalContext,
     RequiredTeamRole,
@@ -506,7 +507,11 @@ async def run_team_selection_agent(
 ) -> tuple[TeamSelectionResult, str]:
     """Two-pass selection: extract RFP needs → map superior roster fits only."""
     del roster_doc_label  # kept for call-site compatibility / logging upstream
-    roster_profiles = build_roster_profiles(roster_text)
+    roster_profiles = [
+        p
+        for p in build_roster_profiles(roster_text)
+        if not is_retired_team_member(str(p.get("name") or ""))
+    ]
     roster_names = [p["name"] for p in roster_profiles]
 
     role_requirements, provider_1 = await _extract_rfp_staffing_needs(

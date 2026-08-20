@@ -126,9 +126,16 @@ _ROLE_LEXICON: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ),
     (
         "public relations",
-        (r"\bpublic\s+relations\b", r"\bmedia\s+relations\b", r"\bpress\s+release\b",
-         r"\bcrisis\s+communication"),
-        "public relations media relations press crisis communications 04_Bio 03_CS",
+        (
+            r"\bpublic\s+relations\b",
+            r"\bmedia\s+relations\b",
+            r"\bpress\s+release\b",
+            r"\bpress\s+outreach\b",
+            r"\bearned\s+media\b",
+            r"\bcrisis\s+communication",
+        ),
+        "public relations media relations press release press outreach earned media "
+        "municipal communications 04_Bio 03_CS 06_WON",
     ),
     (
         "AI search",

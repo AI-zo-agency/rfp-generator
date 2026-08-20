@@ -48,14 +48,9 @@ and compliance obligations. Split bundled scope into separate requirements:
 requirements, not one. Do not merge, do not summarise, do not skip items you
 suspect the vendor lacks — those matter most.
 
-For EACH requirement give 1-3 kbQueries you would run in Supermemory, phrased
-the way zö's own materials describe that work — job titles, tools, deliverables.
-Always search for BOTH the PERSON (04_Bio) and the PROJECT (03_CS / 06_WON) that
-could prove it. Examples of query shape (adapt to THIS requirement — do not copy
-names from these examples):
-  "user experience (UX) design" -> "zö agency UX designer wireframes 04_Bio"
-  "CMS / platform implementation" -> "zö agency CMS platform developer 04_Bio 03_CS"
-Never use the buyer's name as the search subject.
+For EACH requirement give 1 short seed kbQuery (fallback only — a dedicated
+evidence agent plans the real searches). Phrase it the way zö materials are
+written (roles, tools, deliverables). Never use the buyer's name as subject.
 
 isCore=true when the RFP makes the requirement mandatory, scores it, or it is
 central to the scope of work. isCore=false for incidental or optional items.
@@ -65,7 +60,8 @@ category MUST be accurate — scoring depends on it:
   content migration, SEO, security, integrations, QA)
 - service = delivery work types (website redesign, brand campaign, training)
 - role = named staff titles to assign (project manager, UX designer, trainer)
-- compliance = certifications, insurance, registrations
+- compliance = certifications, insurance, registrations, EEO/policy affirmations,
+  ability to contract with the buyer (search 01_companyfacts — never the buyer name)
 - logistics = office location, geography, on-site presence
 Do NOT label a platform skill as "role" just because a person would do it.
 
@@ -75,7 +71,8 @@ Return ONLY JSON:
 
 
 _MAX_REQUIREMENTS = 24
-_MAX_QUERIES_PER_REQUIREMENT = 3
+# Seeds only — evidence query planner owns the real search set.
+_MAX_QUERIES_PER_REQUIREMENT = 2
 
 
 def _clean(value: Any, *, limit: int) -> str:
@@ -117,7 +114,17 @@ def parse_requirements(raw: dict[str, Any]) -> list[RfpRequirement]:
         # Always search the requirement's own wording too. Model-written queries
         # can drift off-target, and a document that is never retrieved cannot be
         # recovered later — the adjudicator can only judge what came back.
-        literal = f"zö agency {requirement} 03_CS 04_Bio 06_WON"
+        if category == "compliance":
+            literal = (
+                "zö agency 01_companyfacts WBENC WOSB women-owned certifications "
+                "insurance equal opportunity"
+            )
+        elif category == "logistics":
+            literal = (
+                "zö agency 01_companyfacts office location registration geography"
+            )
+        else:
+            literal = f"zö agency {requirement} 03_CS 04_Bio 06_WON"
         if literal.casefold() not in {q.casefold() for q in queries}:
             queries.append(literal)
 

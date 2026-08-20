@@ -4099,6 +4099,33 @@ def _span_for_staff_block(content: str) -> tuple[int, int] | None:
     return start, end
 
 
+def _locate_selection_span(content: str, selection_text: str | None) -> tuple[int, int] | None:
+    """Recover char offsets when the client sent excerpt text but lost start/end."""
+    needle = (selection_text or "").strip()
+    if len(needle) < 3:
+        return None
+    body = content or ""
+    idx = body.find(needle)
+    if idx < 0:
+        idx = body.lower().find(needle.lower())
+    if idx < 0:
+        # Preview/table selections often omit pipes — match distinctive endpoints.
+        tokens = [
+            t
+            for t in re.split(r"\s+", needle)
+            if len(t.strip()) >= 4
+        ]
+        if len(tokens) >= 2:
+            first, last = tokens[0], tokens[-1]
+            start = body.find(first)
+            if start >= 0:
+                end_at = body.find(last, start)
+                if end_at >= start:
+                    return start, end_at + len(last)
+        return None
+    return idx, idx + len(needle)
+
+
 def _selection_asks_to_fill_verify(user_message: str) -> bool:
     """True when the user wants [VERIFY] / gap tags filled (not a rewrite/truncate)."""
     from app.services.proposal_chat_structure import _is_in_place_kb_or_verify_edit
@@ -6715,8 +6742,13 @@ async def _try_manual_fill_resolution(
     Returns None when this path does not apply. Must run before LLM intent
     classification so fill requests never hit rewrite/classify paths (T2.4).
     """
+    from app.services.proposal_section_kb_evidence import user_asks_kb_fetch_or_fill
+
     latest_user_ask = (user_message or "").strip()
-    if not is_manual_fill_request(latest_user_ask):
+    wants_gap_fill = is_manual_fill_request(latest_user_ask) or (
+        selection_mode and user_asks_kb_fetch_or_fill(latest_user_ask)
+    )
+    if not wants_gap_fill:
         return None
 
     target_text = section.content or ""
@@ -6729,6 +6761,15 @@ async def _try_manual_fill_resolution(
         and sel_end > sel_start
     ):
         target_text = (section.content or "")[sel_start:sel_end]
+
+    from app.services.proposal_manuscript import (
+        convert_bare_confirmation_lines,
+        convert_inline_confirmation_phrases,
+    )
+
+    target_text = convert_inline_confirmation_phrases(
+        convert_bare_confirmation_lines(target_text)
+    )
 
     if not extract_manual_fill_tags(target_text):
         return None
@@ -7149,6 +7190,207 @@ async def _try_redraft_failed_section(
         True,
     )
 
+
+def _is_static_company_section(section: ProposalSection) -> bool:
+    sid = section.id or ""
+    return (
+        sid in STATIC_SECTION_IDS
+        or section.source == "template"
+        or sid.startswith("section-1-")
+        or sid.startswith("section-2-")
+        or sid.startswith("section-3-")
+    )
+
+
+async def _seed_empty_static_section(
+    *,
+    section: ProposalSection,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    rfp: RfpRecord,
+    rfp_context: str,
+    user_message: str,
+    persist: bool,
+) -> tuple[ProposalSection, ProposalDraft, ProposalResearchCache, str, str, bool]:
+    """Write one empty static tab without Phase-3/repair recursion."""
+    from datetime import datetime, timezone
+
+    from app.services.agency_facts import (
+        default_business_information_markdown,
+        enforce_agency_tenure,
+    )
+
+    provider = _provider_name()
+    if research is None:
+        research = ProposalResearchCache(
+            rfpId=rfp.id,
+            updatedAt=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
+        )
+
+    brief = (user_message or "").strip()[:600] or "Draft this section for the RFP."
+    updated = section
+
+    # Canonical 1.3 — never invent; seed companyfacts table immediately.
+    if section.id == "section-1-business-info":
+        content = enforce_agency_tenure(default_business_information_markdown())
+        updated = section.model_copy(
+            update={"content": content, "status": "generated"}
+        )
+        detail = "seeded Business Information from companyfacts"
+    else:
+        brand_voice = None
+        if research and research.brand_voice is not None:
+            try:
+                brand_voice = research.brand_voice.model_dump(by_alias=True)
+            except Exception:  # noqa: BLE001
+                brand_voice = None
+        updated, provider = await _improve_static_section(
+            section=section,
+            rfp=rfp,
+            rfp_context=rfp_context,
+            queries=[
+                f"zö agency {section.title} companyfacts business information",
+                f"zö agency {section.title} verified facts",
+            ],
+            user_message=(
+                f"{brief}\n\n"
+                "This section is EMPTY. Write full submission-ready content now "
+                "from KB / companyfacts. Do not leave blank. Do not invent staff, "
+                "rates, insurance carriers, or certifications."
+            ),
+            brand_voice=brand_voice,
+            kb_zo_voice="",
+        )
+        detail = "drafted via static section improve"
+        if not (updated.content or "").strip():
+            return (
+                section,
+                draft,
+                research,
+                provider,
+                (
+                    f"Could not draft \u201c{section.title}\u201d yet "
+                    f"({detail}: empty model response)."
+                ),
+                False,
+            )
+
+    merged = [
+        updated if s.id == section.id else s for s in draft.sections
+    ]
+    next_draft = draft.model_copy(
+        update={
+            "sections": merged,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "provider": provider,
+        }
+    )
+    research = research.model_copy(update={"provider": provider})
+    if persist:
+        next_draft = await _persist_section_improve_draft(
+            next_draft,
+            research,
+            section_title=section.title,
+        )
+        updated = next(
+            (s for s in next_draft.sections if s.id == section.id),
+            updated,
+        )
+    return (
+        updated,
+        next_draft,
+        research,
+        provider,
+        f"Drafted \u201c{section.title}\u201d ({detail}).",
+        True,
+    )
+
+
+async def _try_draft_empty_section(
+    *,
+    rfp_id: str,
+    section: ProposalSection,
+    draft: ProposalDraft,
+    research: ProposalResearchCache | None,
+    user_message: str,
+    rfp: RfpRecord,
+    rfp_context: str,
+    improve_section_pinned: bool,
+    apply_fix: bool,
+    persist: bool = True,
+    selection_mode: bool = False,
+):
+    """Draft a never-populated tab when the user explicitly asked to improve it.
+
+    Writes THAT tab only — never kicks off Sections 1–3 / full proposal, and
+    never re-enters improve_proposal_section (that caused an infinite loop).
+    """
+    from app.services.proposal_section_health import (
+        SectionHealth,
+        classify_section_health,
+    )
+
+    if selection_mode:
+        return None
+
+    if classify_section_health(section.content) is not SectionHealth.EMPTY:
+        return None
+    if not (improve_section_pinned or apply_fix or _wants_section_edit(user_message)):
+        return None
+
+    logger.info(
+        "chat drafting empty section %s for %s (improve_pin=%s static=%s)",
+        section.id,
+        rfp_id,
+        improve_section_pinned,
+        _is_static_company_section(section),
+    )
+
+    # Static 1–3 tabs: direct write. The Phase-3 isolated repair path used to
+    # call improve_proposal_section again on empty content → infinite loop.
+    if _is_static_company_section(section):
+        return await _seed_empty_static_section(
+            section=section,
+            draft=draft,
+            research=research,
+            rfp=rfp,
+            rfp_context=rfp_context,
+            user_message=user_message,
+            persist=persist,
+        )
+
+    from app.services.proposal_self_edit_loop import (
+        _redraft_section_via_phase3_isolated,
+    )
+
+    brief = (user_message or "").strip()[:600] or "Draft this section for the RFP."
+    next_draft, next_research, changed, detail = await _redraft_section_via_phase3_isolated(
+        rfp_id=rfp_id,
+        section_id=section.id,
+        rewrite_brief=brief,
+        rfp=rfp,
+        draft=draft,
+        research=research,
+    )
+    if not changed:
+        message = (
+            f"Could not draft \u201c{section.title}\u201d yet ({detail}). "
+            "Try again in a moment, or add the missing KB source and retry."
+        )
+        return (section, draft, research, "none", message, False)
+
+    rebuilt = next((s for s in next_draft.sections if s.id == section.id), section)
+    return (
+        rebuilt,
+        next_draft,
+        next_research,
+        "phase3",
+        f"Drafted \u201c{section.title}\u201d for this RFP.",
+        True,
+    )
+
+
 async def improve_proposal_section(
     rfp_id: str,
     section_id: str,
@@ -7179,6 +7421,24 @@ async def improve_proposal_section(
         and selection_end is not None
         and selection_end > selection_start
     )
+    if not selection_mode:
+        focus_body = next(
+            (s.content or "" for s in draft.sections if s.id == section_id),
+            "",
+        )
+        recovered = _locate_selection_span(focus_body, selection_text)
+        if recovered is not None:
+            selection_start, selection_end = recovered
+            selection_mode = True
+            if not (selection_text or "").strip():
+                selection_text = focus_body[selection_start:selection_end]
+            logger.info(
+                "Recovered selection span for %s / %s: chars %d-%d",
+                rfp_id,
+                section_id,
+                selection_start,
+                selection_end,
+            )
     # Non-selection chat always sees the whole proposal — never only the open tab.
     if not selection_mode:
         proposal_wide = True
@@ -7343,6 +7603,21 @@ async def improve_proposal_section(
         )
         if redraft is not None:
             return (*redraft, None)
+        empty_draft = await _try_draft_empty_section(
+            rfp_id=rfp_id,
+            section=failed_section,
+            draft=draft,
+            research=research,
+            user_message=raw_user_message,
+            rfp=rfp,
+            rfp_context=rfp_context,
+            improve_section_pinned=improve_section_pinned,
+            apply_fix=apply_fix,
+            persist=persist,
+            selection_mode=selection_mode,
+        )
+        if empty_draft is not None:
+            return (*empty_draft, None)
 
     # Explicit MANUAL FILL before LLM intent classify — never invent; skip rewrite.
     mfill_section = _find_draft_section(draft, section_id) or (
@@ -9267,6 +9542,90 @@ async def improve_proposal_section(
                 pre_fills,
             )
             return _improve_outcome(updated_section, updated_draft, research, provider, assistant_message, True)
+
+        from app.services.proposal_manual_flags import (
+            extract_manual_fill_tags,
+            fill_manual_fill_tags,
+        )
+        from app.services.proposal_manuscript import (
+            convert_bare_confirmation_lines,
+            convert_inline_confirmation_phrases,
+        )
+        from app.services.proposal_section_kb_evidence import user_asks_kb_fetch_or_fill
+
+        if user_asks_kb_fetch_or_fill(latest_user_ask) or _selection_asks_to_fill_verify(
+            latest_user_ask
+        ):
+            mfill_excerpt = convert_inline_confirmation_phrases(
+                convert_bare_confirmation_lines(working_excerpt)
+            )
+            if extract_manual_fill_tags(mfill_excerpt):
+                filled_mf, mfill_log, mfill_remaining = fill_manual_fill_tags(
+                    mfill_excerpt,
+                    user_message=latest_user_ask,
+                    kb_blob=fact_blob,
+                )
+                if filled_mf != working_excerpt or mfill_log:
+                    new_content = _splice_selection(
+                        full_content,
+                        start=selection_start,
+                        end=selection_end,
+                        replacement=filled_mf,
+                    )
+                    updated_section = section.model_copy(
+                        update={"content": new_content, "status": "generated"}
+                    )
+                    provider = "manual-fill"
+                    if research is None:
+                        research = ProposalResearchCache(
+                            rfpId=rfp_id,
+                            updatedAt=datetime.now(timezone.utc).isoformat(),
+                            provider=provider,
+                        )
+                    else:
+                        research = research.model_copy(update={"provider": provider})
+                    merged_sections = [
+                        updated_section if s.id == section_id else s for s in draft.sections
+                    ]
+                    now = datetime.now(timezone.utc).isoformat()
+                    updated_draft = draft.model_copy(
+                        update={
+                            "sections": merged_sections,
+                            "updated_at": now,
+                            "provider": provider,
+                        }
+                    )
+                    if persist:
+                        updated_draft = await _persist_section_improve_draft(
+                            updated_draft,
+                            research,
+                            section_title=section.title,
+                        )
+                    if mfill_log:
+                        assistant_message = (
+                            f"Resolved **{len(mfill_log)}** MANUAL FILL tag(s) in the "
+                            f"selected excerpt of **{section.title}** from KB / your message."
+                        )
+                    else:
+                        assistant_message = (
+                            f"I checked KB facts for the selected table in **{section.title}**. "
+                            "Addendum numbers/dates are not in the knowledge base — "
+                            "confirm them from the Bonfire portal before submit."
+                        )
+                    if mfill_remaining:
+                        assistant_message += (
+                            " Still open: "
+                            + ", ".join(f"`{t}`" for t in mfill_remaining[:6])
+                            + "."
+                        )
+                    return _improve_outcome(
+                        updated_section,
+                        updated_draft,
+                        research,
+                        provider,
+                        assistant_message,
+                        True,
+                    )
 
         updated_section, provider, kb_fills = await _improve_section_selection(
             section=section,

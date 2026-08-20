@@ -34,12 +34,15 @@ def _cell(text: str) -> str:
 def _status_display(row: GoNoGoCapabilityRow) -> str:
     icon = _STATUS_ICON.get(row.status, "🔴")
     label = _STATUS_LABEL.get(row.status, "Gap")
-    detail = (row.evidence or row.kb_source or row.downgrade_reason or "").strip()
+    # Evidence already has its own column — do not repeat it in Status.
     if row.status == "verified":
-        return f"{icon} {label}" + (f", {detail[:120]}" if detail else "")
+        return f"{icon} {label}"
     if row.status == "partial":
-        return f"{icon} {label}" + (f" — {detail[:140]}" if detail else "")
-    reason = row.downgrade_reason or detail or "no verifiable KB evidence"
+        reason = (row.downgrade_reason or "").strip()
+        return f"{icon} {label}" + (f" — {reason[:140]}" if reason else "")
+    reason = (
+        row.downgrade_reason or row.evidence or row.kb_source or "no verifiable KB evidence"
+    ).strip()
     return f"{icon} {label} — {reason[:160]}"
 
 
@@ -202,9 +205,14 @@ def build_stage_one_report(
         parts.append("")
         parts.append(cap_table)
 
-    if capability_summary.strip():
-        parts.append("")
-        parts.append(capability_summary.strip())
+    summary = (capability_summary or "").strip()
+    if summary:
+        from app.services.go_no_go_evidence_scrub import scrub_evidence_text
+
+        summary, _logs = scrub_evidence_text(summary)
+        if summary:
+            parts.append("")
+            parts.append(summary)
 
     eval_table = render_evaluation_criteria_table(
         evaluation_lines,

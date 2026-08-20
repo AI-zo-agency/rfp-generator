@@ -29,7 +29,10 @@ from typing import Any
 
 from app.models.go_no_go import GoNoGoCapabilityRow
 from app.services.go_no_go_capability import _tokens, build_source_index
-from app.services.evidence_trust.personnel_grounding import personnel_claim_failure
+from app.services.evidence_trust.personnel_grounding import (
+    personnel_claim_failure,
+    roster_names_in_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +63,11 @@ ignore retrieved proof):
   evidenceState="adjacent"; never treat them as "absent" for the skill itself.
 - Keep orthogonal gaps separate: missing hosting/SLA/office/registration must
   NOT be used to claim missing platform or craft capability, and vice versa.
+- WBENC / WOSB / women-owned ownership evidences CERTIFICATION / MWESB asks
+  only. It does NOT evidence equal-opportunity policy, ORS/statutory
+  contracting, bonding/insurance, audit/evaluation, or cooperative purchasing.
+  Leave those as gap or affirm-at-submission partial — never fill with a
+  non-sequitur badge.
 
 STRATEGIC COMMUNICATIONS / MEDIA / PUBLIC-HEALTH CAMPAIGNS (common RFP shape):
 - Won proposals (06_WON_*) and case studies (03_CS_*) that describe campaign
@@ -81,10 +89,59 @@ capability. Sector matters when the RFP requires it — private-sector work does
 not fully evidence "government website experience", though it does evidence
 generic "website redesign".
 
-NEVER invent or confirm staff names that are not verbatim in the cited excerpt.
-Known fabrications include Brittany Frazier, Drew Stone, Ben Edwards, Erica
-Schultz, Morgan Nivan — if a requirement or your reason names them, status=gap.
-The real Creative Director in zö materials is Curt Schultz when the roster says so.
+COMPLIANCE / POLICY / BUYER (these are not staffing rows and not crafts):
+- An ownership-certification ask that lists several classes with "or" is met
+  when the KB evidences ANY matching class. WBENC / WOSB / women-owned IS
+  "verified" for a women-owned / WBE / MWESB-style ask. Do not also require
+  minority, SDVOSB, or emerging-small-business certificates the KB does not have.
+- Agency certifications you may cite: WBENC and WOSB ONLY. Never invent or
+  list 1% for the Planet, B Corp / B-Corporate, LinkedIn Gold-Certified, MBE,
+  DBE, or any other badge not present verbatim in the cited document.
+- Never stitch metrics across case studies. Festival / campaign proof (e.g.
+  Rock the Locks ticket sales / PR reach) must not gain higher-ed enrollment
+  language ("accelerated early admissions") from another document.
+- Statutory compliance, university policies, EEO / non-discrimination, and
+  "ability to work or contract with [the buyer]" are bid affirmations / operating
+  commitments. They are not named people. Never read a statute title or the
+  buyer's name as a staff member. If 01_companyfacts does not contradict, mark
+  "partial" with evidenceState="adjacent" (affirm at submission) — not a
+  delivery "gap" — unless the KB shows a specific disqualifier.
+- Role / liaison / designated contact asks: evidence the FUNCTION from current
+  bios and case studies. Never invent staff. If no current person is named,
+  mark partial and FLAG SONJA to assign — that is staffing assignment, not a
+  missing delivery craft.
+- A quote must evidence THIS requirement only. A general preferred-vendor,
+  contract-status, or years-in-business sentence cannot prove an unrelated
+  craft, budget ceiling, audit obligation, launch timeline, or platform skill.
+- Insurance / COI / policy-limit text evidences ONLY insurance or COI asks.
+  Never cite insurance coverage, policy dollars, or expiration dates for
+  audit, evaluation, financial reporting, or programmatic compliance asks —
+  leave those a gap (or affirm-at-submission partial) instead of filling with
+  a non-sequitur.
+- Policy dollar amounts and expiration dates are zö facts ONLY when copied
+  verbatim from 01_companyfacts / insurance / COI documents. Never treat an
+  RFP's vendor insurance *requirements* ($1M/$2M the buyer demands) as zö's
+  own policies. Never invent numbers or dates. An expired coverage period
+  cannot prove current compliance.
+
+COMMUNICATIONS CRAFT (municipal / public-sector case studies count):
+- Media relations, press outreach/releases, stakeholder engagement, relationship
+  management, social media strategy, and communications project management ARE
+  evidenced by 03_CS / 06_WON work of that kind (cities, counties, labs, libraries).
+  A named social-media partner or subcontractor in the KB IS evidence.
+- For "media relations" / "press outreach" asks: prefer case studies that
+  describe press, media relations, or earned media. Brand strategy / visual
+  identity alone is PARTIAL at best — do not mark Strong unless press/media
+  outreach is in the quote.
+- Crisis / emergency / issues-response communications is verified only when a
+  document describes that work; otherwise leave it a gap (do not stretch brand
+  or media relations into crisis).
+
+NEVER invent staff. Copy names ONLY if they appear in the KB excerpts for
+this requirement (see STAFF NAMES PRESENT). If that list is empty, do not
+name anyone — FLAG SONJA. Never abbreviate a person (no "Rad S.").
+Retired staff (Ron Comer) must not be assigned as current lead even if an
+old bio still contains the name.
 
 If a document DISCLAIMS the skill ("Web Design/Development (Not Programming)"),
 that is a gap for the disclaimed part.
@@ -109,9 +166,9 @@ Return ONLY JSON:
   "kbSource":"...","quote":"...","evidenceState":"absent|contradicted|adjacent",
   "reason":"one short sentence"}]}"""
 
-_MAX_DOC_CHARS = 2_500
-_MAX_RECOVER_DOC_CHARS = 8_000
-_MAX_DOCS_PER_REQUIREMENT = 8
+_MAX_DOC_CHARS = 4_500
+_MAX_RECOVER_DOC_CHARS = 12_000
+_MAX_DOCS_PER_REQUIREMENT = 16
 # Quotes are normalized before comparison: models reliably alter whitespace even
 # when copying faithfully, and failing an honest quote on a line break would
 # push us straight back into false negatives.
@@ -138,12 +195,382 @@ def source_can_evidence_capability(kb_source: str) -> bool:
     return not _NON_CAPABILITY_SOURCE_RE.search(kb_source or "")
 
 
+def _requirement_is_pricing_ask(requirement: str) -> bool:
+    name = (requirement or "").casefold()
+    return any(
+        token in name
+        for token in (
+            "pricing",
+            "rate card",
+            "hourly rate",
+            "fee schedule",
+            "rate sheet",
+        )
+    )
+
+
+def _prefer_capability_candidates(
+    candidates: dict[str, tuple[str, str]],
+    *,
+    requirement: str,
+) -> dict[str, tuple[str, str]]:
+    """Drop rate sheets and rank docs by how well they match THIS requirement.
+
+    Showing 00_Guide_Pricing alongside case studies taught the model to cite
+    the guide. Prefer 03_CS / 04_Bio / 06_WON / companyfacts, then order by
+    requirement-term overlap so press/media docs beat brand-strategy-only
+    docs for a media-relations ask (and the same for every other craft).
+    """
+    if not candidates:
+        return candidates
+    if not _requirement_is_pricing_ask(requirement):
+        capable = {
+            key: value
+            for key, value in candidates.items()
+            if source_can_evidence_capability(value[0])
+        }
+        candidates = capable or candidates
+
+    req_terms = set(_tokens(requirement))
+    if not req_terms or len(candidates) < 2:
+        return candidates
+
+    ranked = sorted(
+        candidates.items(),
+        key=lambda item: (
+            sum(1 for t in req_terms if t in (item[1][1] or "").casefold()),
+            # Prefer case studies / bios / won proposals over templates.
+            (
+                1
+                if re.search(
+                    r"(?i)03_cs|04_bio|06_won|01_companyfacts|clientlist",
+                    item[1][0] or "",
+                )
+                else 0
+            ),
+        ),
+        reverse=True,
+    )
+    return {key: value for key, value in ranked}
+
+
 def quote_is_grounded(quote: str, source_text: str) -> bool:
     """True when ``quote`` really appears in ``source_text``."""
     needle = _normalize(quote)
     if len(needle) < _MIN_QUOTE_CHARS:
         return False
     return needle in _normalize(source_text)
+
+
+_QUOTE_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "a",
+        "an",
+        "of",
+        "to",
+        "for",
+        "in",
+        "on",
+        "with",
+        "zö",
+        "zo",
+        "agency",
+        "that",
+        "this",
+        "from",
+    }
+)
+_QUOTE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _distinctive_quote_anchors(quote: str) -> set[str]:
+    """Project / client name tokens that must stay with the salvaged sentence.
+
+    Stops a Rock the Locks paraphrase from salvaging a Benedictine 'early
+    admissions' sentence out of a combined case-study dump.
+    """
+    anchors: set[str] = set()
+    for match in re.finditer(
+        r"\b(?:Rock\s+the\s+Locks|Benedictine|Umatilla|Maricopa|"
+        r"Deschutes|Carbondale|University\s+of\s+\w+)\b",
+        quote or "",
+        re.I,
+    ):
+        for tok in _QUOTE_TOKEN_RE.findall(_normalize(match.group(0))):
+            if tok not in _QUOTE_STOPWORDS and len(tok) > 2:
+                anchors.add(tok)
+    return anchors
+
+
+def salvage_grounded_quote(quote: str, source_text: str) -> str | None:
+    """Return a verbatim source sentence when the model paraphrased a real span.
+
+    Combined case-study dumps often contain the proof; the model restates it
+    and the mechanical quote check would otherwise freeze a true gap on every
+    RFP. Never invent text — only a sentence already in the source that shares
+    enough of the model's tokens to be the same claim.
+    """
+    if quote_is_grounded(quote, source_text):
+        return (quote or "").strip()
+    source = source_text or ""
+    quote_tokens = {
+        tok
+        for tok in _QUOTE_TOKEN_RE.findall(_normalize(quote))
+        if tok not in _QUOTE_STOPWORDS and len(tok) > 2
+    }
+    if len(quote_tokens) < 3 or len(source) < _MIN_QUOTE_CHARS:
+        return None
+    anchors = _distinctive_quote_anchors(quote)
+    best = ""
+    best_score = 0.0
+    for part in re.split(r"(?<=[.!?])\s+|\n+", source):
+        span = part.strip()
+        if len(_normalize(span)) < _MIN_QUOTE_CHARS:
+            continue
+        if not quote_is_grounded(span, source):
+            continue
+        tokens = set(_QUOTE_TOKEN_RE.findall(_normalize(span)))
+        if anchors and not (anchors & tokens):
+            # Quote named a specific project; this sentence is about another one.
+            continue
+        overlap = len(quote_tokens & tokens)
+        score = overlap / len(quote_tokens)
+        if score > best_score:
+            best_score = score
+            best = span
+    if best and best_score >= 0.45:
+        return best[:400]
+    return None
+
+
+def _is_operational_commitment(requirement: str, category: str = "") -> bool:
+    """Bid process / contract terms — not a missing delivery craft.
+
+    Attendance, ownership transfer, and other logistics/compliance asks must
+    not become 'Real gap' because the model cited an empty source.
+    """
+    if (category or "").casefold() in {"logistics", "compliance"}:
+        return True
+    name = (requirement or "").casefold()
+    return any(
+        token in name
+        for token in (
+            "pre-application",
+            "pre-bid",
+            "pre application",
+            "ownership transfer",
+            "work made for hire",
+            "mandatory meeting",
+            "attend",
+        )
+    )
+
+
+def _is_staffing_assignment_row(requirement: str, category: str = "") -> bool:
+    """Role/liaison designation — a bad name is an assignment flag, not a craft gap.
+
+    Applies to every RFP: planner category ``role``, or wording that asks to
+    designate a liaison / director / point of contact.
+    """
+    if (category or "").casefold() == "role":
+        return True
+    name = (requirement or "").casefold()
+    return any(
+        token in name
+        for token in (
+            "program director",
+            "liaison",
+            "single point of contact",
+            "point of contact",
+            "designate",
+            "dedicated account",
+        )
+    )
+
+
+def _evidence_domain(text: str) -> set[str]:
+    """Coarse domains present in requirement or quote text.
+
+    Used only to reject orthogonal fills (insurance for audit, WBENC for EEO).
+    Not a capability synonym table — domain membership, not tool matching.
+    """
+    blob = (text or "").casefold()
+    domains: set[str] = set()
+    if any(
+        tok in blob
+        for tok in (
+            "insurance",
+            "certificate of insurance",
+            "coi",
+            "acord",
+            "general liability",
+            "professional liability",
+            "workers compensation",
+            "workers' compensation",
+            "policy limit",
+            "per occurrence",
+            "aggregate",
+            "additional insured",
+            "bonding",
+            "surety",
+            "bond requirement",
+        )
+    ):
+        if any(
+            tok in blob
+            for tok in (
+                "insurance",
+                "liability",
+                "coverage",
+                "coi",
+                "acord",
+                "policy",
+                "insured",
+                "bonding",
+                "surety",
+                "bond",
+            )
+        ):
+            domains.add("insurance_bonding")
+    if any(
+        tok in blob
+        for tok in (
+            "audit",
+            "evaluation requirement",
+            "programmatic evaluation",
+            "financial reporting",
+            "single audit",
+            "performance evaluation",
+            "monitoring and evaluation",
+        )
+    ):
+        domains.add("audit_evaluation")
+    if any(
+        tok in blob
+        for tok in (
+            "equal opportunity",
+            "non-discrimination",
+            "nondiscrimination",
+            "non discrimination",
+            "eeo",
+            "affirmative action",
+            "civil rights",
+        )
+    ):
+        domains.add("eeo_policy")
+    if any(
+        tok in blob
+        for tok in (
+            "oregon revised statutes",
+            " ors ",
+            "ors)",
+            "(ors",
+            "public sector contracting",
+            "public contracting",
+            "state contracting",
+            "statutory compliance",
+        )
+    ) or re.search(r"\bors\b", blob):
+        domains.add("statutory_contracting")
+    if any(
+        tok in blob
+        for tok in (
+            "cooperative purchasing",
+            "piggyback",
+            "multi-institution",
+            "other oregon public universities",
+            "participating agencies",
+        )
+    ):
+        domains.add("cooperative_purchasing")
+    if any(
+        tok in blob
+        for tok in (
+            "wbenc",
+            "wosb",
+            "women-owned",
+            "women owned",
+            "woman-owned",
+            "woman owned",
+            "minority",
+            "sdvosb",
+            "emerging small",
+            "mwesb",
+            "certification",
+            "% ownership",
+            "percent ownership",
+            "sole owner",
+        )
+    ):
+        domains.add("certification")
+    return domains
+
+
+def quote_evidences_requirement(requirement: str, quote: str) -> bool:
+    """False when the quote is an orthogonal non-sequitur for this requirement.
+
+    Principle (every RFP): a quote must address the ask's domain. Examples that
+    fail: insurance COI for audit; WBENC badge for EEO or ORS compliance;
+    "we serve municipalities" for bonding/insurance; ownership % for cooperative
+    purchasing.
+    """
+    req_domains = _evidence_domain(requirement)
+    quote_domains = _evidence_domain(quote)
+    if not req_domains:
+        # Craft / delivery asks — do not block on domain tags.
+        return True
+    if not quote_domains:
+        # Quote has no compliance-domain signal; if the requirement is a
+        # compliance/policy ask, that is not evidence of it.
+        compliance_asks = {
+            "insurance_bonding",
+            "audit_evaluation",
+            "eeo_policy",
+            "statutory_contracting",
+            "cooperative_purchasing",
+            "certification",
+        }
+        if req_domains & compliance_asks:
+            return False
+        return True
+
+    # Shared domain → ok (women-owned ask + WBENC quote, etc.).
+    if req_domains & quote_domains:
+        # Certification-only quote cannot satisfy EEO / statute / bonding /
+        # audit / cooperative asks even when both are "compliance-ish".
+        if quote_domains <= {"certification"} and req_domains & {
+            "eeo_policy",
+            "statutory_contracting",
+            "insurance_bonding",
+            "audit_evaluation",
+            "cooperative_purchasing",
+        }:
+            return False
+        return True
+
+    # No overlap between requirement domain and quote domain.
+    return False
+
+
+_EXPIRED_COVERAGE_RE = re.compile(
+    r"(?i)(?:expir\w*|valid\s+(?:through|until)|coverage\s+period|policy\s+period)"
+    r".{0,40}?(?:19\d{2}|20(?:0\d|1\d|2[0-3]))"
+    r"|"
+    r"(?:19\d{2}|20(?:0\d|1\d|2[0-3]))[-/]\d{1,2}[-/]\d{1,2}"
+)
+
+
+def quote_has_expired_coverage_date(quote: str) -> bool:
+    """True when evidence cites a coverage period that ended before 2024.
+
+    Invented or stale COI dates (e.g. 2019-02-13) cannot prove current compliance
+    for a 2026+ submission. Applies only when the quote looks like insurance.
+    """
+    if "insurance_bonding" not in _evidence_domain(quote):
+        return False
+    return bool(_EXPIRED_COVERAGE_RE.search(quote or ""))
 
 
 def _ground_quote(
@@ -238,6 +665,10 @@ def build_adjudication_payload(
                 break
             candidates.setdefault(key, value)
 
+        candidates = _prefer_capability_candidates(
+            candidates, requirement=name
+        )
+
         per_requirement: dict[str, str] = {}
         per_requirement_full: dict[str, str] = {}
         lines = [f"### REQUIREMENT: {name}"]
@@ -255,6 +686,18 @@ def build_adjudication_payload(
             per_requirement[display] = excerpt
             per_requirement_full[display] = text
             lines.append(f"--- DOCUMENT: {display}\n{excerpt}")
+        kb_blob = "\n".join(per_requirement_full.values() or per_requirement.values())
+        visible = roster_names_in_text(kb_blob)
+        if visible:
+            lines.append(
+                "STAFF NAMES PRESENT IN THESE KB EXCERPTS "
+                "(the only names you may write): " + ", ".join(visible)
+            )
+        else:
+            lines.append(
+                "STAFF NAMES PRESENT IN THESE KB EXCERPTS: none — "
+                "do not invent a person; FLAG SONJA."
+            )
         sources[name] = per_requirement
         full_sources[name] = per_requirement_full
         blocks.append("\n".join(lines))
@@ -338,6 +781,22 @@ def rows_from_assessments(
             return False
 
         if not _source_retrieved():
+            if _is_operational_commitment(name, category):
+                recoverable.add(name)
+                rows.append(
+                    GoNoGoCapabilityRow(
+                        requirement=name,
+                        status="partial",
+                        isCore=is_core,
+                        category=category,
+                        evidenceState="adjacent",
+                        downgradeReason=(
+                            "FLAG: confirm at bid — operational commitment, "
+                            "not a missing delivery craft"
+                        ),
+                    )
+                )
+                continue
             failure = f"cited source '{kb_source}' was not retrieved for this requirement"
         elif not source_can_evidence_capability(kb_source):
             failure = (
@@ -348,24 +807,70 @@ def rows_from_assessments(
             grounded, grounded_text = _ground_quote(
                 quote, kb_source, available, full_available=full_available
             )
+            salvage_pool = grounded_text or ""
+            if full_available:
+                salvage_pool = full_available.get(kb_source) or salvage_pool
+                if kb_source not in (full_available or {}):
+                    for display, text in full_available.items():
+                        if _normalize(display) == _normalize(kb_source):
+                            salvage_pool = text or salvage_pool
+                            break
+            usable_quote = quote
+            if not grounded:
+                salvaged = salvage_grounded_quote(quote, salvage_pool)
+                if salvaged:
+                    usable_quote = salvaged
+                    grounded = True
+                    grounded_text = salvage_pool
             if not grounded:
                 failure = f"quoted evidence does not appear in '{kb_source}'"
                 quote_recoverable.add(name)
             else:
                 personnel_fail = personnel_claim_failure(
                     requirement=name,
-                    quote=quote,
+                    quote=usable_quote,
                     source_text=grounded_text or "",
                 )
+                if personnel_fail and _is_staffing_assignment_row(name, category):
+                    # Inventing Brittany as Program Director is not proof we
+                    # lack a liaison — FLAG assignment, keep the row recoverable.
+                    rejected.append(f"{name}: {personnel_fail}")
+                    recoverable.add(name)
+                    rows.append(
+                        GoNoGoCapabilityRow(
+                            requirement=name,
+                            status="partial",
+                            isCore=is_core,
+                            category=category,
+                            evidenceState="adjacent",
+                            downgradeReason=(
+                                "FLAG SONJA: assign a current roster person as "
+                                "liaison — do not invent staff"
+                            ),
+                        )
+                    )
+                    continue
                 if personnel_fail:
                     failure = personnel_fail
+                elif not quote_evidences_requirement(name, usable_quote):
+                    failure = (
+                        "quoted evidence does not address this requirement "
+                        "(orthogonal fill — e.g. insurance text for an audit ask)"
+                    )
+                    quote_recoverable.add(name)
+                elif quote_has_expired_coverage_date(usable_quote):
+                    failure = (
+                        "quoted insurance coverage date is expired — "
+                        "cannot prove current compliance; FLAG SONJA for COI"
+                    )
+                    quote_recoverable.add(name)
                 else:
                     rows.append(
                         GoNoGoCapabilityRow(
                             requirement=name,
                             status=status,
                             kbSource=kb_source,
-                            evidence=quote[:400],
+                            evidence=usable_quote[:400],
                             isCore=is_core,
                             category=category,
                         )
@@ -373,6 +878,8 @@ def rows_from_assessments(
                     continue
 
         rejected.append(f"{name}: {failure}")
+        if available or full_available:
+            recoverable.add(name)
         rows.append(
             GoNoGoCapabilityRow(
                 requirement=name,
@@ -390,6 +897,9 @@ def rows_from_assessments(
             len(rejected),
             "; ".join(rejected[:8]),
         )
+    from app.services.go_no_go_evidence_scrub import scrub_capability_rows
+
+    rows = scrub_capability_rows(rows)
     return rows, rejected, recoverable
 
 
@@ -405,6 +915,18 @@ Judge by MEANING only — never by keyword lists:
   evidence media buying, placement, and health/education outreach requirements
   even when evaluation or toolkit sub-asks are not spelled out in the doc.
 - Do NOT require a separately titled case study when a bio already proves the skill.
+- Never cite a pricing/rate guide as delivery proof; use 03_CS / 04_Bio / 06_WON /
+  01_companyfacts instead.
+- Women-owned / WBENC / WOSB meets an OR-list MWESB certification ask.
+- Policy, EEO, and "work with [buyer]" rows are affirmations, not named people.
+- Role / liaison designation: never invent a person. Quote a current bio for
+  the function, or keep partial with FLAG SONJA.
+- A quote must evidence THIS requirement. Do not reuse a generic vendor-status
+  sentence for budget, audit, launch timing, or an unrelated platform skill.
+- Insurance / COI / policy dollars evidence ONLY insurance asks — never audit
+  or evaluation compliance. Never invent policy numbers or expired dates.
+- Copy quotes EXACTLY from the document text below.
+- Name people ONLY if STAFF NAMES PRESENT lists them. Never invent a name.
 - Do NOT invent. If nothing in the documents supports the ask, keep status=gap.
 - Copy quotes EXACTLY from the document text below — long proposals often place
   the proof outside the first paragraph; search the full excerpt carefully.
@@ -436,7 +958,14 @@ def build_gap_recover_payload(
         if not docs:
             continue
         lines = [f"### REQUIREMENT: {name}"]
-        for display, text in list(docs.items())[:_MAX_DOCS_PER_REQUIREMENT]:
+        usable = {
+            display: text
+            for display, text in docs.items()
+            if source_can_evidence_capability(display) or len(docs) == 1
+        }
+        if not usable:
+            continue
+        for display, text in list(usable.items())[:_MAX_DOCS_PER_REQUIREMENT]:
             lines.append(
                 f"--- DOCUMENT: {display}\n"
                 f"{(text or '')[:_MAX_RECOVER_DOC_CHARS]}"

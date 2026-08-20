@@ -1374,7 +1374,16 @@ async def get_proposal_key_personas(rfp_id: str) -> dict[str, object]:
     try:
         draft = await aget_proposal_draft(rfp_id)
         if draft and draft.selected_key_personas:
-            selected_ids = draft.selected_key_personas
+            retired_ids = {
+                str(p.get("id") or "")
+                for p in all_personas
+                if p.get("retired")
+            }
+            selected_ids = [
+                pid
+                for pid in draft.selected_key_personas
+                if pid not in retired_ids
+            ]
     except Exception:
         pass
 
@@ -1391,10 +1400,21 @@ async def save_proposal_key_personas(
     rfp_id: str, payload: ProposalKeyPersonasRequest
 ) -> dict[str, object]:
     from datetime import datetime, timezone
+    from app.services import team_personas_service
     from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
     from app.models.proposal import ProposalDraft
 
     logger = logging.getLogger(__name__)
+
+    all_personas = await team_personas_service.get_all_key_personas()
+    retired_ids = {
+        str(p.get("id") or "")
+        for p in all_personas
+        if p.get("retired")
+    }
+    selected_ids = [
+        pid for pid in payload.selected_persona_ids if pid not in retired_ids
+    ]
 
     draft = await aget_proposal_draft(rfp_id)
     now = datetime.now(timezone.utc).isoformat()
@@ -1404,12 +1424,12 @@ async def save_proposal_key_personas(
             rfp_id=rfp_id,
             sections=[],
             updated_at=now,
-            selected_key_personas=payload.selected_persona_ids,
+            selected_key_personas=selected_ids,
         )
     else:
         draft = draft.model_copy(
             update={
-                "selected_key_personas": payload.selected_persona_ids,
+                "selected_key_personas": selected_ids,
                 "updated_at": now,
             }
         )
@@ -1433,7 +1453,7 @@ async def save_proposal_key_personas(
             by_id = {p["id"]: p for p in all_personas}
             selected_personas = [
                 by_id[pid]
-                for pid in payload.selected_persona_ids
+                for pid in selected_ids
                 if pid in by_id
             ]
             synced, bios_synced = sync_draft_bios_to_key_personas(
@@ -1448,7 +1468,7 @@ async def save_proposal_key_personas(
                     update={
                         "sections": synced.sections,
                         "updated_at": now,
-                        "selected_key_personas": payload.selected_persona_ids,
+                        "selected_key_personas": selected_ids,
                     }
                 )
         except Exception as exc:
@@ -1461,7 +1481,7 @@ async def save_proposal_key_personas(
         from app.services import supabase_db
 
         if supabase_db.use_supabase_db():
-            note = f"Key Personas selected ({len(payload.selected_persona_ids)}): {', '.join(payload.selected_persona_ids)}"
+            note = f"Key Personas selected ({len(selected_ids)}): {', '.join(selected_ids)}"
             try:
                 supabase_db._get_client().table("rfps").update(
                     {

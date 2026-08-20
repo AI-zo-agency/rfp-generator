@@ -127,6 +127,17 @@ async def build_manuscript_locks(
     roster_excerpt: str = "",
 ) -> ManuscriptLocks:
     """LLM: lock one primary contact + extract exact RFQ-named KPIs."""
+    from app.services.evidence_trust.personnel_grounding import (
+        is_retired_team_member,
+        replace_listed_names,
+        retired_team_personnel,
+    )
+
+    roster_excerpt = replace_listed_names(
+        roster_excerpt or "",
+        retired_team_personnel(),
+        "[retired — do not assign]",
+    )
     plan_bits = ""
     if plan is not None:
         try:
@@ -149,14 +160,24 @@ async def build_manuscript_locks(
         except Exception as exc:  # noqa: BLE001
             logger.debug("plan excerpt for locks failed: %s", exc)
 
+    retired = retired_team_personnel()
+    retired_line = (
+        ", ".join(retired)
+        if retired
+        else "(none marked in Key Personas)"
+    )
+
     now = datetime.now(timezone.utc).isoformat()
     fallback = ManuscriptLocks(
-        primaryContactName="Ron Comer",
-        primaryContactTitle="Senior Account Manager",
+        primaryContactName="Sonja Anderson",
+        primaryContactTitle="Agency Director",
         primaryContactRole="primary liaison / dedicated account representative",
         executiveSponsorName="Todd Anderson",
         requiredKpis=[],
-        decisionRationale="Fallback lock — LLM parse failed; prefer SAM for day-to-day account work.",
+        decisionRationale=(
+            "Fallback lock — retired staff cannot be assigned; confirm the current "
+            "day-to-day account lead from live 04_Bio."
+        ),
         needsHumanConfirm=True,
         updatedAt=now,
     )
@@ -181,7 +202,9 @@ async def build_manuscript_locks(
                         "PRIMARY CONTACT RULES:\n"
                         "- Lock EXACTLY one day-to-day primary account contact.\n"
                         "- For multi-year media buying / retainers / high-touch account management RFQs: "
-                        "prefer Senior Account Manager (e.g. Ron Comer) over Agency Director/CEO.\n"
+                        "prefer a current Senior Account Manager from the roster over Agency Director/CEO.\n"
+                        f"- NEVER pick anyone on this retired list: {retired_line}. "
+                        "If the roster excerpt still lists them, ignore those names.\n"
                         "- For small municipal brand-strategy engagements: Agency Director (Sonja) may be primary.\n"
                         "- Executive sponsor is escalation only — never the same as day-to-day primary unless "
                         "the RFQ is tiny and clearly director-led.\n"
@@ -224,12 +247,20 @@ async def build_manuscript_locks(
         logger.warning("manuscript locks validation failed: %s — using fallback", exc)
         locks = fallback
 
-    if not locks.primary_contact_name.strip():
+    if (
+        not locks.primary_contact_name.strip()
+        or is_retired_team_member(locks.primary_contact_name)
+    ):
         locks = locks.model_copy(
             update={
-                "primary_contact_name": "Ron Comer",
-                "primary_contact_title": locks.primary_contact_title or "Senior Account Manager",
+                "primary_contact_name": fallback.primary_contact_name,
+                "primary_contact_title": locks.primary_contact_title
+                or fallback.primary_contact_title,
                 "needs_human_confirm": True,
+                "decision_rationale": (
+                    f"{locks.decision_rationale} "
+                    "Retired staff cannot be assigned — confirm current account lead."
+                ).strip(),
             }
         )
 

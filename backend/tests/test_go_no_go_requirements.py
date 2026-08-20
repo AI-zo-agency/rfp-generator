@@ -70,6 +70,27 @@ class ParseRequirementsTests(unittest.TestCase):
         )
         self.assertEqual(out[0].category, "service")
 
+    def test_compliance_searches_companyfacts_not_the_buyer_name(self) -> None:
+        """Literal 'zö agency {requirement}' searches turned PSU/ORS titles
+        into person-shaped KB queries and starved certification evidence."""
+        out = parse_requirements(
+            {
+                "requirements": [
+                    {
+                        "requirement": (
+                            "Ability to work with Portland State University "
+                            "and Oregon public universities"
+                        ),
+                        "category": "compliance",
+                        "kbQueries": ["zö agency 01_companyfacts certifications"],
+                    }
+                ]
+            }
+        )
+        blob = " | ".join(out[0].kb_queries).casefold()
+        self.assertIn("01_companyfacts", blob)
+        self.assertNotIn("portland state university", blob)
+
     def test_malformed_payload_is_empty(self) -> None:
         self.assertEqual(parse_requirements({}), [])
         self.assertEqual(parse_requirements({"requirements": "nope"}), [])

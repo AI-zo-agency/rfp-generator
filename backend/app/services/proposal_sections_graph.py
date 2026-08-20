@@ -2031,6 +2031,8 @@ async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, A
     for pid in selected_ids:
         persona = by_id.get(pid)
         if persona:
+            if persona.get("retired"):
+                continue
             resolved.append(persona)
             continue
         # Never silently drop a user pick — stub so Section 2 still gets a bio card.
@@ -2526,13 +2528,14 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
                 "- ONLY include agency certifications from verified KB (WBENC, WOSB)\n"
                 "- DO NOT include platform certifications (Google Ads, Meta Ads, Spotify API, ISO, Teaching License - these are individual, not agency certs)\n"
                 "- DO NOT embellish or add certifications not explicitly in 01_companyfacts_verified KB\n"
-                "- Keep it simple: certification name, certifying agency, number (if available), status\n"
+                "- Keep it simple: certification name, certifying agency, number if the KB states it\n"
+                "- If a certification number is not in KB, omit the number field — never write 'available upon request'\n"
                 "- One brief sentence on impact/benefit\n"
                 "- Total length: 3-5 sentences maximum\n\n"
                 "Format:\n"
                 "- **[Certification Name]**\n"
                 "  - Certifying Agency: [Agency name]\n"
-                "  - Certification Number: [Number or 'Available upon request']\n"
+                "  - Certification Number: [only if stated in KB; otherwise omit this line]\n"
                 "  - Impact: [One sentence benefit]\n\n"
                 "VERIFIED AGENCY CERTIFICATIONS ONLY: WBENC, WOSB"
             ),
@@ -2544,22 +2547,21 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
             "section-1-insurance",
             "1.5 — Insurance Information",
             (
-                "Write the 'Insurance Information' subsection for zö agency. Keep it SHORT, CONCISE, and CLEAR.\n\n"
-                "🚨 CRITICAL RULES:\n"
-                "- List coverage TYPES only (General Liability, Professional Liability, Workers Comp, etc.)\n"
-                "- Use [VERIFY: coverage amount] for dollar figures unless explicitly in KB\n"
-                "- DO NOT invent coverage amounts or policy details\n"
-                "- Keep it to essential facts only\n"
-                "- Total length: 4-6 sentences maximum\n\n"
+                "Write the 'Insurance Information' subsection for zö agency. Keep it SHORT and factual.\n\n"
+                "CRITICAL RULES:\n"
+                "- List coverage TYPES only when they appear in 01_companyfacts (General Liability, Professional Liability, Workers Compensation, Cyber, Auto, etc.).\n"
+                "- Do NOT invent dollar limits, carriers, NAIC numbers, policy numbers, or 'Compliant'.\n"
+                "- Do NOT write [VERIFY: amount] placeholders or 'per occurrence / aggregate' without a KB figure.\n"
+                "- NEVER write 'upon request', 'available on request', or 'will be provided separately'.\n"
+                "- If the RFP wants a limits table and KB has no limits, one sentence: "
+                "'Policy limits are those on the current certificate of insurance; the COI is issued to the buyer at award.'\n"
+                "- Max 80 words. No empty markdown tables.\n\n"
                 "Format:\n"
                 "We maintain the following insurance coverage:\n"
-                "- **General Liability:** [VERIFY: amount] per occurrence / [VERIFY: amount] aggregate\n"
-                "- **Professional Liability / E&O:** [VERIFY: per-occurrence amount] / [VERIFY: aggregate amount]\n"
-                "- When the RFP lists mandatory minimum limits (Section 11 or insurance exhibit), include "
-                "**every** required line in the limits table — especially E&O/Professional Liability if stated.\n"
-                "- **Workers' Compensation:** As required by state law\n"
-                "- **Commercial Auto:** [VERIFY: amount] (if applicable)\n\n"
-                "Certificates of insurance available upon request."
+                "- **General Liability**\n"
+                "- **Professional Liability / E&O**\n"
+                "- **Workers' Compensation** (as required by law)\n"
+                "- other types only if named in companyfacts\n"
             ),
             "pull",
             0.03,

@@ -821,20 +821,66 @@ async def _repair_one_section(
         return section_id, False, "missing section"
 
     if not (before.content or "").strip():
+        # Never call improve_proposal_section here — empty sections re-enter
+        # _try_draft_empty_section and loop forever.
+        from datetime import datetime, timezone
+
+        from app.services.agency_facts import (
+            default_business_information_markdown,
+            enforce_agency_tenure,
+        )
+        from app.services.proposal_section_isolation import replace_section_isolated
+
+        if before.id == "section-1-business-info":
+            content = enforce_agency_tenure(default_business_information_markdown())
+            updated = before.model_copy(
+                update={"content": content, "status": "generated"}
+            )
+            next_draft = replace_section_isolated(draft, updated)
+            next_draft = next_draft.model_copy(
+                update={"updated_at": datetime.now(timezone.utc).isoformat()}
+            )
+            await asave_proposal_draft(next_draft)
+            return section_id, True, "empty business info seeded from companyfacts"
+
         generate_msg = (
             "This section has no draft body yet. Search the knowledge base and write "
-            "full submission-ready prose for every RFP requirement. Use [E#] citations. "
-            "Do not return placeholders or an empty response."
+            "full submission-ready prose for every RFP requirement. "
+            "Do not return placeholders or an empty response. "
+            "Rewrite ONLY this section."
         )
-        return await _fallback_improve_section(
-            rfp_id=rfp_id,
-            section_id=section_id,
-            before=before,
-            message=generate_msg,
-            rfp=rfp,
-            budget=budget,
-            reason="Empty section — generate instead of repair",
-        )
+        try:
+            raw, _provider, _tool_log = await redraft_section_agent(
+                role=AgentRole.SECTION_REPAIR,
+                rfp_id=rfp_id,
+                rfp_title=rfp_title,
+                rfp_client=rfp_client,
+                rfp_sector=rfp.sector,
+                user_content=(
+                    f"Client: {rfp_client}\nRFP: {rfp_title}\n"
+                    f"Section: {before.title}\nWord target: {before.word_target}\n"
+                    f"Repair task:\n{generate_msg}\n\n"
+                    f"Previous draft:\n(empty)\n\n"
+                    "Evidence corpus (cite as [E#]):\n(search tools for facts)"
+                ),
+            )
+            content = str((raw or {}).get("content") or "").strip()
+            if not content:
+                return section_id, False, "empty section generate returned no content"
+            from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
+
+            content = scrub_client_facing_section_artifacts(content)
+            updated = before.model_copy(
+                update={"content": content, "status": "generated"}
+            )
+            next_draft = replace_section_isolated(draft, updated)
+            next_draft = next_draft.model_copy(
+                update={"updated_at": datetime.now(timezone.utc).isoformat()}
+            )
+            await asave_proposal_draft(next_draft)
+            return section_id, True, "empty section drafted via section repair agent"
+        except Exception as exc:  # noqa: BLE001
+            return section_id, False, f"empty section generate failed: {exc}"
 
     research = await aget_research_cache(rfp_id)
     rfp_section = None

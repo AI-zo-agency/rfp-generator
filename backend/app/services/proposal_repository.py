@@ -193,8 +193,22 @@ def _preserve_selected_key_personas(draft: ProposalDraft) -> None:
         )
 
 
+def _repair_markdown_tables_in_draft(draft: ProposalDraft) -> None:
+    """Keep stored section markdown as real tables, never one flattened line."""
+    from app.services.proposal_manuscript import repair_flattened_markdown_tables
+
+    for section in draft.sections or []:
+        content = section.content or ""
+        if "|" not in content:
+            continue
+        repaired = repair_flattened_markdown_tables(content)
+        if repaired != content:
+            section.content = repaired
+
+
 def save_proposal_draft(draft: ProposalDraft) -> None:
     _preserve_selected_key_personas(draft)
+    _repair_markdown_tables_in_draft(draft)
     if _use_supabase():
         _with_supabase_retry(
             "save_proposal_draft",

@@ -1,4 +1,4 @@
-import { humanizeGapTag, isManualFillTag } from "@/lib/gap-tag-humanize";
+import { humanizeGapTag, isInternalScanTag, isManualFillTag } from "@/lib/gap-tag-humanize";
 
 type Block =
   | { type: "heading"; level: number; text: string }
@@ -106,6 +106,9 @@ function pushParagraphBlock(blocks: Block[], paragraphLines: string[]) {
     }
     const gapTag = tryManualFillCallout(paragraphLines[0]!);
     if (gapTag) {
+      if (isInternalScanTag(gapTag)) {
+        return;
+      }
       blocks.push({ type: "gap_callout", tag: gapTag });
       return;
     }
@@ -152,26 +155,49 @@ export function stripEvidenceCitations(text: string): string {
     ""
   );
   t = t.replace(/\[PRICING FLAG:[^\]]*\]/gi, "");
+  t = t.replace(
+    /\s*\[MANUAL\s+FILL:[^\]]*(?:deterministic\.fabricated_fact|deterministic\.unverified|deferred information|upon_request)[^\]]*\]/gi,
+    ""
+  );
   t = t.replace(/[ \t]{2,}/g, " ");
   t = t.replace(/\n{3,}/g, "\n\n");
+  t = t
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed.includes("|")) return true;
+      const inner = trimmed.replace(/^\|/, "").replace(/\|$/, "");
+      const cells = inner.split("|").map((c) => c.trim());
+      if (cells.length >= 2 && cells.every((c) => !c)) return false;
+      return true;
+    })
+    .join("\n");
   return t.trim();
+}
+
+function isDashOnlyCell(cell: string): boolean {
+  const t = (cell || "").trim();
+  if (!t) return true;
+  return /^[-–—:*\s]+$/.test(t);
+}
+
+function isEmptyOrDashRow(cells: string[]): boolean {
+  return cells.length === 0 || cells.every(isDashOnlyCell);
 }
 
 function isTableRow(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed.includes("|")) return false;
-  const cells = trimmed
-    .replace(/^\|/, "")
-    .replace(/\|$/, "")
-    .split("|")
-    .map((c) => c.trim());
-  return cells.length >= 2;
+  const cells = parseTableRow(trimmed);
+  if (cells.length < 2) return false;
+  if (cells.every((c) => !(c || "").trim())) return false;
+  return true;
 }
 
 function isTableSeparator(line: string): boolean {
   const trimmed = line.trim();
-  // GFM alignment row: | --- | :---: | ---: |
-  return /^\|?[\s:\-–—]+\|[\s|:\-–—]+\|?$/.test(trimmed);
+  if (/^\|?[\s:\-–—]+\|[\s|:\-–—]+\|?$/.test(trimmed)) return true;
+  return isEmptyOrDashRow(parseTableRow(trimmed));
 }
 
 function parseTableRow(line: string): string[] {
@@ -346,14 +372,30 @@ function parseBlocks(body: string): Block[] {
 
     if (isTableRow(trimmed)) {
       const tableLines: string[] = [];
-      while (index < lines.length && isTableRow(lines[index]?.trim() ?? "")) {
-        tableLines.push(lines[index]!.trim());
+      while (index < lines.length) {
+        const current = lines[index]?.trim() ?? "";
+        if (!current) {
+          // Blank lines inside markdown tables (common after LLM edits) —
+          // keep scanning if the next non-empty line is still a pipe row.
+          let peek = index + 1;
+          while (peek < lines.length && !(lines[peek]?.trim() ?? "")) peek += 1;
+          if (peek < lines.length && isTableRow(lines[peek]!.trim())) {
+            index = peek;
+            continue;
+          }
+          break;
+        }
+        if (!isTableRow(current)) break;
+        tableLines.push(current);
         index += 1;
       }
       const dataLines = tableLines.filter((row) => !isTableSeparator(row));
-      if (dataLines.length > 0) {
-        const headers = parseTableRow(dataLines[0]);
-        const rows = dataLines.slice(1).map(parseTableRow);
+      const parsed = dataLines
+        .map(parseTableRow)
+        .filter((cells) => !isEmptyOrDashRow(cells));
+      if (parsed.length > 0) {
+        const headers = parsed[0]!;
+        const rows = parsed.slice(1);
         const sanitized = sanitizeTableBlock(headers, rows, tableLines);
         if ("headers" in sanitized) {
           blocks.push({
@@ -373,7 +415,19 @@ function parseBlocks(body: string): Block[] {
       const items: string[] = [];
       while (index < lines.length) {
         const current = lines[index]?.trim() ?? "";
-        if (!current) break;
+        if (!current) {
+          let peek = index + 1;
+          while (peek < lines.length && !(lines[peek]?.trim() ?? "")) peek += 1;
+          const next = peek < lines.length ? (lines[peek]?.trim() ?? "") : "";
+          if (
+            next &&
+            (ordered ? /^\d+\.\s+/.test(next) : /^[-*]\s+/.test(next))
+          ) {
+            index = peek;
+            continue;
+          }
+          break;
+        }
         if (ordered) {
           const match = current.match(/^\d+\.\s+(.+)$/);
           if (!match) break;
@@ -446,16 +500,20 @@ function buildInlinePattern(highlightTexts: string[]): RegExp {
 function renderInline(text: string | undefined | null, highlightTexts: string[] = []) {
   let markAssigned = false;
   const safe = text ?? "";
-  const parts = safe.split(buildInlinePattern(highlightTexts));
+  const highlights = highlightTexts.filter(
+    (h) => h?.trim() && !isInternalScanTag(h) && !/deterministic\./i.test(h)
+  );
+  const parts = safe.split(buildInlinePattern(highlights));
   const normalizedHighlights = new Set(
-    highlightTexts.map((h) => h.trim()).filter(Boolean)
+    highlights.map((h) => h.trim()).filter(Boolean)
   );
 
   return parts.map((part, index) => {
     if (!part) return null;
 
     if (/^\[MANUAL\s+FILL/i.test(part)) {
-      const highlighted = tagMatchesHighlight(part, highlightTexts);
+      if (isInternalScanTag(part)) return null;
+      const highlighted = tagMatchesHighlight(part, highlights);
       return <InlineGapTag key={index} tag={part} highlighted={highlighted} />;
     }
 
@@ -610,6 +668,7 @@ export function MarkdownReportBody({
           }
 
           if (block.type === "gap_callout") {
+            if (isInternalScanTag(block.tag)) return null;
             return (
               <GapCallout
                 key={index}
@@ -701,6 +760,7 @@ export function MarkdownReportBody({
         }
 
         if (block.type === "gap_callout") {
+          if (isInternalScanTag(block.tag)) return null;
           return (
             <GapCallout
               key={index}

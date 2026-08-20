@@ -100,11 +100,26 @@ export function humanizeGapTag(tag: string): HumanizedGap {
       };
     }
 
-    if (/deterministic\.|deterministic\s/i.test(code)) {
+    if (/deterministic\.|deterministic\s/i.test(code + inner)) {
+      const readable = (detailClean || code)
+        .replace(/deterministic(?:\.[a-z0-9_]+)+/gi, "")
+        .replace(/[_]+/g, " ")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+      if (/deferred|upon request/i.test(code + detailClean + inner)) {
+        return {
+          owner,
+          title: "Do not defer facts",
+          detail:
+            "Remove “upon request” and state the knowledge-base fact, or leave a single Sonja fill — not a scan code.",
+          action: "Edit this section or ask chat to replace the sentence from KB.",
+          rawTag,
+        };
+      }
       return {
         owner,
         title: "Needs your input",
-        detail: detailClean || code.replace(/^deterministic\./i, "").replace(/_/g, " "),
+        detail: (readable || detailClean || "Complete this handoff in Content.").slice(0, 220),
         action: "Fill in Content or send the value in section chat.",
         rawTag,
       };
@@ -165,6 +180,17 @@ export function gapChecklistLabel(tag: string): string {
   const detail =
     h.detail.length > 120 ? `${h.detail.slice(0, 117).trim()}…` : h.detail;
   return `${prefix}${h.title} — ${detail}`;
+}
+
+export function isInternalScanTag(tag: string): boolean {
+  const inner = stripBrackets(tag || "").toLowerCase();
+  return (
+    inner.includes("deterministic.fabricated_fact") ||
+    inner.includes("deterministic.unverified") ||
+    inner.includes("deferred information") ||
+    inner.includes("upon_request") ||
+    inner.includes("upon request is forbidden")
+  );
 }
 
 export function isManualFillTag(text: string): boolean {

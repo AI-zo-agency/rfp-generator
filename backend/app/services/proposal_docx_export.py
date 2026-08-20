@@ -117,6 +117,32 @@ def _add_subheading(doc: Document, text: str, *, level: int) -> None:
 _PAGE_INNER_INCHES = 6.5  # 8.5in letter minus 1in left/right margins
 _DXA_PER_INCH = 1440
 _WIDE_TABLE_COLS = 5
+_FEE_HEADER_MARKERS = frozenset(
+    {
+        "phase",
+        "deliverable",
+        "amount",
+        "item",
+        "detail",
+        "description",
+        "extended",
+        "hours",
+        "rate",
+        "cost",
+        "total",
+    }
+)
+
+
+def _looks_like_fee_or_form_table(headers: list[str]) -> bool:
+    keys = {(h or "").strip().casefold() for h in headers}
+    if "phase" in keys and ("amount" in keys or "deliverable" in keys):
+        return True
+    if "item" in keys and "detail" in keys and len(headers) <= 3:
+        return True
+    return len(keys & _FEE_HEADER_MARKERS) >= 2
+
+
 
 
 def _set_table_full_width(table, col_count: int) -> None:
@@ -194,14 +220,30 @@ def _shape_table_for_word(
     headers: list[str],
     rows: list[list[str]],
 ) -> tuple[list[str], list[list[str]]]:
-    """Wide one-row grids become a 2-column Item/Detail table so Word stays readable."""
+    """Wide one-row grids become a 2-column Item/Detail table so Word stays readable.
+
+    Never reshape fee/phase tables — Word must keep Phase | Deliverable | Amount.
+    """
     cols = max(len(headers), 1)
     hdr = (headers + [""] * cols)[:cols]
     data = [(list(row) + [""] * cols)[:cols] for row in rows]
+
+    # Header-only fragments (blank lines split a markdown table) — do not turn
+    # "Phase / Deliverable / Amount" into empty Item/Detail rows.
+    if not data:
+        return hdr, data
+
+    if _looks_like_fee_or_form_table(hdr):
+        return hdr, data
+
     if cols < _WIDE_TABLE_COLS:
         return hdr, data
+
     if len(data) <= 1:
         values = data[0] if data else [""] * cols
+        # All-empty values → leave as-is (broken parse); reshaping makes it worse.
+        if not any((v or "").strip() for v in values):
+            return hdr, data
         return ["Item", "Detail"], [
             [hdr[i], values[i] if i < len(values) else ""] for i in range(cols)
         ]

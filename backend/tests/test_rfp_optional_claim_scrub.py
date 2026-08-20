@@ -20,6 +20,17 @@ def test_strip_designer_notes() -> None:
     assert "Intro." in out and "Outro." in out
 
 
+def test_strip_auditor_echo_removes_deferred_upon_request_code() -> None:
+    body = (
+        "We maintain General Liability.\n\n"
+        "[MANUAL FILL: Sonja — deterministic.fabricated_fact.deferred_information_upon_request_is_forbidden | DEFERRED INFORMATION]\n"
+    )
+    out, n = strip_auditor_echo_manual_fills(body)
+    assert n == 1
+    assert "deterministic" not in out
+    assert "General Liability" in out
+
+
 def test_strip_auditor_echo_manual_fills_keeps_real_handoff() -> None:
     body = (
         "We deliver.\n\n"

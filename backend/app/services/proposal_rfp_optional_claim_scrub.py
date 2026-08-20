@@ -52,6 +52,9 @@ _AUDITOR_ECHO_HINTS = (
     "certification not in verified list",
     "deterministic.fabricated_fact",
     "deterministic.unverified",
+    "deferred information",
+    "upon request is forbidden",
+    "upon_request",
 )
 
 _RFP_PERCENT_TIME_RE = re.compile(
@@ -190,6 +193,21 @@ def scrub_named_subcontractors_when_rfp_silent(
     return out, len(matches)
 
 
+_COI_UPON_REQUEST_RE = re.compile(
+    r"(?im)^[ \t]*certificates?\s+of\s+insurance[^.!\n]*(?:upon|on)\s+request[^.!\n]*[.!]?\s*"
+)
+
+
+def strip_coi_upon_request(content: str) -> tuple[str, int]:
+    """Drop COI 'upon request' lines — they are not facts and they spawn scan tags."""
+    body = content or ""
+    out, n = _COI_UPON_REQUEST_RE.subn("", body)
+    if not n:
+        return body, 0
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out, n
+
+
 def scrub_section_optional_claims(
     content: str, *, rfp_text: str = ""
 ) -> tuple[str, list[str]]:
@@ -210,6 +228,10 @@ def scrub_section_optional_claims(
     body, n = strip_auditor_echo_manual_fills(body)
     if n:
         logs.append(f"removed {n} auditor-echo MANUAL FILL tag(s)")
+
+    body, n = strip_coi_upon_request(body)
+    if n:
+        logs.append(f"removed {n} COI 'upon request' line(s)")
 
     body, n = scrub_percent_time_when_rfp_silent(body, rfp_text=rfp_text)
     if n:

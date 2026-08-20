@@ -95,4 +95,24 @@ async def get_all_key_personas() -> list[dict[str, Any]]:
         except Exception as exc:
             logger.warning("Could not query Supermemory memories for personas: %s", exc)
 
+    from app.services.retired_staff_store import is_retired_id, retired_records
+
+    for person in personas_map.values():
+        person["retired"] = bool(is_retired_id(str(person.get("id") or "")))
+
+    for row in retired_records():
+        pid = row["id"]
+        if pid in personas_map:
+            personas_map[pid]["retired"] = True
+            continue
+        personas_map[pid] = {
+            "id": pid,
+            "name": row["name"],
+            "title": "Retired — do not assign",
+            "hasResume": False,
+            "sourceFile": "",
+            "bioSnippet": "Marked retired in Key Personas. Agents will not assign this person as current staff.",
+            "retired": True,
+        }
+
     return list(personas_map.values())

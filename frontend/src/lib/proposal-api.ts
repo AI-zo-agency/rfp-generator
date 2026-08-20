@@ -2170,6 +2170,7 @@ export interface KeyPersonaItem {
   hasResume: boolean;
   sourceFile: string;
   bioSnippet?: string;
+  retired?: boolean;
 }
 
 export interface KeyPersonasResponse {
@@ -2246,8 +2247,22 @@ export async function saveProposalKeyPersonas(
       biosSynced: Boolean(data.biosSynced),
       draft: data.draft ? apiDraftToOutline(data.draft) : undefined,
     };
-  } catch {
+  }   catch {
     return { ok: true };
   }
+}
+
+export async function setKeyPersonaRetired(input: {
+  personId: string;
+  name: string;
+  retired: boolean;
+}): Promise<KeyPersonasResponse | null> {
+  const res = await fetch("/api/knowledge-base/key-personas/retired", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as KeyPersonasResponse;
 }
 

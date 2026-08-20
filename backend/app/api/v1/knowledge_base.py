@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import settings
 from app.models.knowledge_base import (
@@ -237,5 +238,34 @@ async def get_key_personas() -> dict[str, object]:
     return {
         "total": len(personas),
         "personas": personas,
+    }
+
+
+class RetiredStaffRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    person_id: str = Field(..., alias="personId")
+    name: str = ""
+    retired: bool = True
+
+
+@router.patch("/key-personas/retired")
+async def set_key_persona_retired(payload: RetiredStaffRequest) -> dict[str, object]:
+    """Agency-wide: mark a team member retired so Go/No-Go and proposal agents skip them."""
+    from app.services import team_personas_service
+    from app.services.retired_staff_store import set_retired
+
+    name = (payload.name or "").strip() or payload.person_id
+    retired_rows = set_retired(
+        person_id=payload.person_id,
+        name=name,
+        retired=payload.retired,
+    )
+    personas = await team_personas_service.get_all_key_personas()
+    return {
+        "ok": True,
+        "retired": retired_rows,
+        "personas": personas,
+        "total": len(personas),
     }
 

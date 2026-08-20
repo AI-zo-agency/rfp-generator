@@ -25,7 +25,7 @@ export interface SourceRange {
   end: number;
 }
 
-import { humanizeGapTag } from "./gap-tag-humanize";
+import { humanizeGapTag, isInternalScanTag } from "./gap-tag-humanize";
 const THEMATIC_BREAK = /^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/;
 const CODE_FENCE = /^[ \t]*```/;
 const REFERENCES_ONLY =
@@ -51,6 +51,7 @@ const GAP_TAG =
   /\[(?:VERIFY|MANUAL FILL|FLAG|DESIGNER NOTE|TBD|INSERT|PLACEHOLDER)[^\]]*\]/iy;
 
 function visibleGapProjection(tag: string): string {
+  if (isInternalScanTag(tag)) return "";
   if (/^\[(?:VERIFY|MANUAL\s+FILL)/i.test(tag)) {
     const h = humanizeGapTag(tag);
     return h.detail ? `${h.title} — ${h.detail}` : h.title;
