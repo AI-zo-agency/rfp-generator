@@ -244,6 +244,19 @@ def test_collection_rate_severity_is_info_at_70_pct_and_above():
         **_base(),
         "billing_vs_cash": {
             "invoiced_total": 100_000,
+            "collection_rate_pct": 70,
+            "open_ar": 30_000,
+        },
+    })
+    assert signals[0]["id"] == "collection-rate"
+    assert signals[0]["severity"] == "info"
+
+
+def test_collection_rate_severity_is_info_well_above_70_pct():
+    signals = derive_signals({
+        **_base(),
+        "billing_vs_cash": {
+            "invoiced_total": 100_000,
             "collection_rate_pct": 75,
             "open_ar": 25_000,
         },
