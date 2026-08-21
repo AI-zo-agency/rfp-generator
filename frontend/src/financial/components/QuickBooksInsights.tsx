@@ -76,7 +76,7 @@ export function QuickBooksInsights({ year }: { year: number }) {
   };
 
   if (!data) {
-    return error ? <p className="qb-insights-error">{error}</p> : null;
+    return error ? <p className="qb-insights-error" role="status">{error}</p> : null;
   }
 
   return (
