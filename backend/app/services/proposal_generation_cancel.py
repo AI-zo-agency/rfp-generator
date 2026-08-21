@@ -33,6 +33,10 @@ def unbind_active_rfp(token: contextvars.Token[str | None]) -> None:
     _active_rfp_id.reset(token)
 
 
+def get_active_rfp_id() -> str:
+    return str(_active_rfp_id.get() or "")
+
+
 def request_generation_cancel(rfp_id: str) -> None:
     _cancel_requested.add(rfp_id)
     logger.warning("Generation cancel requested for %s", rfp_id)

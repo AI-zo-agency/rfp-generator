@@ -27,7 +27,7 @@ const TITLE_STOPWORDS = new Set([
 
 /** True when the user explicitly scopes to the open/pinned tab. */
 export function messagePointsAtOpenSection(message: string): boolean {
-  return /\b(here|this\s+section|this\s+tab|this\s+part|open\s+(?:section|tab)|in\s+this(?:\s+(?:section|tab|part))?|for\s+this\s+(?:section|tab)|improve\s+this\s+section)\b/i.test(
+  return /\b(here|this\s+section|this\s+tab|this\s+part|open\s+(?:section|tab)|in\s+this(?:\s+(?:section|tab|part))?|for\s+this\s+(?:section|tab)|improve\s+this\s+section|(?:fill|fix|update|complete|resolve|replace|correct)\s+this)\b/i.test(
     message || ""
   );
 }

@@ -224,7 +224,7 @@ def _clean_cert_punctuation(text: str) -> str:
     out = re.sub(r",\s*and\s*\.", ".", out)
     out = re.sub(r",\s*and\s*,", ",", out)
     out = re.sub(r"\s+,\s+\.", ".", out)
-    out = re.sub(r"\|\s*\|", "| |", out)
+    out = re.sub(r"\|[ \t]*\|", "| |", out)
     out = re.sub(r"  +", " ", out)
     return out
 
@@ -258,7 +258,7 @@ def scrub_section_cert_claims(section: ProposalSection) -> tuple[ProposalSection
         updated = pattern.sub("", updated)
         # Clean doubled delimiters / empty table cells debris
         updated = re.sub(r"\s*,\s*,", ",", updated)
-        updated = re.sub(r"\|\s*\|", "| |", updated)
+        updated = re.sub(r"\|[ \t]*\|", "| |", updated)
         updated = re.sub(r"  +", " ", updated)
         if updated != before:
             logs.append(f"removed fabricated cert ({code})")

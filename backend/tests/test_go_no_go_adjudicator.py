@@ -318,6 +318,90 @@ class NonCapabilitySourceTests(unittest.TestCase):
     REQS = [RfpRequirement(requirement="Discovery and stakeholder engagement",
                            isCore=True)]
 
+    def test_pricing_guide_is_not_shown_when_case_studies_exist(self) -> None:
+        """Live PSU bug: stakeholder/social rows cited 00_Guide_Pricing, then
+        the mechanical filter correctly rejected them — leaving a fake gap
+        even though municipal case studies were retrieved.
+        """
+        cs = _hit(
+            "03_CS_CityOfSantaClara.pdf",
+            "Ongoing stakeholder engagement and relationship management with "
+            "city leadership, plus social media strategy and press outreach.",
+        )
+        body, sources, _full = build_adjudication_payload(
+            self.REQS,
+            {"Discovery and stakeholder engagement": [self.GUIDE, cs]},
+        )
+        self.assertNotIn("00_Guide_Pricing", body)
+        self.assertIn("03_CS_CityOfSantaClara", body)
+        self.assertNotIn(
+            "00_Guide_Pricing.docx",
+            sources["Discovery and stakeholder engagement"],
+        )
+
+    def test_women_owned_cert_is_not_downgraded_as_a_named_person(self) -> None:
+        reqs = [
+            RfpRequirement(
+                requirement=(
+                    "Minority, Women, Service Disabled Veteran Owned, "
+                    "or Emerging Small Business certification"
+                ),
+                category="compliance",
+                isCore=True,
+            )
+        ]
+        facts = _hit(
+            "01_companyfacts.docx",
+            "Agency-level certifications: WBENC and WOSB (women-owned).",
+        )
+        _b, sources, _full = build_adjudication_payload(
+            reqs,
+            {reqs[0].requirement: [facts]},
+        )
+        rows, rejected, recoverable = rows_from_assessments(
+            reqs,
+            [{
+                "requirement": reqs[0].requirement,
+                "status": "verified",
+                "kbSource": "01_companyfacts.docx",
+                "quote": "Agency-level certifications: WBENC and WOSB (women-owned).",
+            }],
+            sources,
+        )
+        self.assertEqual(rejected, [])
+        self.assertEqual(rows[0].status, "verified")
+        self.assertEqual(recoverable, set())
+
+    def test_pricing_citation_is_recoverable_when_other_docs_exist(self) -> None:
+        cs = _hit(
+            "03_CS_CityOfBend.pdf",
+            "Multi-year stakeholder engagement with City of Bend leadership.",
+        )
+        reqs = self.REQS
+        _b, sources, _full = build_adjudication_payload(
+            reqs,
+            {"Discovery and stakeholder engagement": [self.GUIDE, cs]},
+        )
+        rows, rejected, recoverable = rows_from_assessments(
+            reqs,
+            [{
+                "requirement": "Discovery and stakeholder engagement",
+                "status": "verified",
+                "kbSource": "00_Guide_Pricing.docx",
+                "quote": "Discovery and stakeholder engagement workshops",
+            }],
+            sources,
+        )
+        self.assertEqual(rows[0].status, "gap")
+        reason = (rows[0].downgrade_reason or "").casefold()
+        self.assertTrue(
+            "pricing" in reason or "not retrieved" in reason,
+            rows[0].downgrade_reason,
+        )
+        self.assertIn("Discovery and stakeholder engagement", recoverable)
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("03_CS_CityOfBend.pdf", sources[reqs[0].requirement])
+
     def test_pricing_guide_cannot_evidence_capability(self) -> None:
         _b, sources, _full = build_adjudication_payload(
             self.REQS, {"Discovery and stakeholder engagement": [self.GUIDE]}
@@ -499,6 +583,130 @@ class FullDocumentQuoteGroundingTests(unittest.TestCase):
         )
         self.assertEqual(rows[0].status, "verified")
         self.assertEqual(rejected, [])
+
+
+class CalvertStyleGuardTests(unittest.TestCase):
+    def test_paraphrased_case_study_quote_is_salvaged(self) -> None:
+        from app.services.go_no_go_adjudicator import salvage_grounded_quote
+
+        source = (
+            "zö agency ran paid social media advertising campaigns for municipal "
+            "clients, including geo-targeted Facebook and Instagram placements."
+        )
+        paraphrased = (
+            "The agency executed social media advertising campaigns with "
+            "geo-targeted Facebook placements for city clients."
+        )
+        salvaged = salvage_grounded_quote(paraphrased, source)
+        self.assertIsNotNone(salvaged)
+        self.assertIn("paid social media advertising", salvaged or "")
+
+        reqs = [
+            RfpRequirement(
+                requirement="Social media advertising campaign design and implementation",
+                isCore=True,
+            )
+        ]
+        cs = _hit("03_CS_AllCaseStudies_LastUpdate2026-05-03.pdf", source)
+        _b, sources, full = build_adjudication_payload(
+            reqs, {reqs[0].requirement: [cs]}
+        )
+        rows, rejected, _rec = rows_from_assessments(
+            reqs,
+            [{
+                "requirement": reqs[0].requirement,
+                "status": "verified",
+                "kbSource": "03_CS_AllCaseStudies_LastUpdate2026-05-03.pdf",
+                "quote": paraphrased,
+            }],
+            sources,
+            full_sources=full,
+        )
+        self.assertEqual(rows[0].status, "verified", rejected)
+        self.assertTrue(quote_is_grounded(rows[0].evidence, source))
+
+    def test_program_director_invented_name_is_assignment_flag_not_craft_gap(self) -> None:
+        reqs = [
+            RfpRequirement(
+                requirement="Program Director designation as single liaison with Calvert County LBHA",
+                category="role",
+                isCore=True,
+            )
+        ]
+        master = _hit(
+            "02_MasterTemplate_OrgStructure_AllTeamBios.pdf",
+            "Sonja Anderson, Agency Director. Brittany Frazier, Creative Director.",
+        )
+        _b, sources, _full = build_adjudication_payload(
+            reqs, {reqs[0].requirement: [master]}
+        )
+        rows, rejected, recoverable = rows_from_assessments(
+            reqs,
+            [{
+                "requirement": reqs[0].requirement,
+                "status": "verified",
+                "kbSource": "02_MasterTemplate_OrgStructure_AllTeamBios.pdf",
+                "quote": "Brittany Frazier, Creative Director.",
+            }],
+            sources,
+        )
+        self.assertEqual(rows[0].status, "partial")
+        self.assertIn("FLAG SONJA", rows[0].downgrade_reason)
+        self.assertNotIn("Brittany Frazier", rows[0].downgrade_reason)
+        self.assertIn(reqs[0].requirement, recoverable)
+        self.assertTrue(rejected)
+
+    def test_any_role_category_invented_name_is_assignment_not_craft_gap(self) -> None:
+        """Every RFP: planner category 'role' — not a Calvert/PSU title match."""
+        reqs = [
+            RfpRequirement(
+                requirement="Named project lead for this engagement",
+                category="role",
+                isCore=True,
+            )
+        ]
+        master = _hit(
+            "02_MasterTemplate_OrgStructure_AllTeamBios.pdf",
+            "Sonja Anderson, Agency Director. Brittany Frazier, Creative Director.",
+        )
+        _b, sources, _full = build_adjudication_payload(
+            reqs, {reqs[0].requirement: [master]}
+        )
+        rows, _rejected, _rec = rows_from_assessments(
+            reqs,
+            [{
+                "requirement": reqs[0].requirement,
+                "status": "verified",
+                "kbSource": "02_MasterTemplate_OrgStructure_AllTeamBios.pdf",
+                "quote": "Brittany Frazier, Creative Director.",
+            }],
+            sources,
+        )
+        self.assertEqual(rows[0].status, "partial")
+        self.assertIn("FLAG SONJA", rows[0].downgrade_reason)
+
+    def test_empty_source_on_meeting_attendance_is_operational_not_craft_gap(self) -> None:
+        reqs = [
+            RfpRequirement(
+                requirement="Attendance at mandatory Pre-Application Meeting",
+                category="logistics",
+                isCore=True,
+            )
+        ]
+        _b, sources, _full = build_adjudication_payload(reqs, {reqs[0].requirement: []})
+        rows, _rej, _rec = rows_from_assessments(
+            reqs,
+            [{
+                "requirement": reqs[0].requirement,
+                "status": "verified",
+                "kbSource": "",
+                "quote": "",
+            }],
+            sources,
+        )
+        self.assertEqual(rows[0].status, "partial")
+        self.assertIn("operational", rows[0].downgrade_reason.casefold())
+        self.assertNotIn("not retrieved", rows[0].downgrade_reason.casefold())
 
 
 if __name__ == "__main__":

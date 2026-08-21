@@ -7,6 +7,8 @@
     "build": "next build",
     "start": "next start --hostname 0.0.0.0 --port ${PORT:-3001}",
     "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "sync:justwin": "echo 'JustWin sync disabled — see src/lib/justwin-config.ts' && exit 1",
     "sync:justwin:debug": "echo 'JustWin sync disabled — see src/lib/justwin-config.ts' && exit 1",
     "sync:justwin:debug-page": "tsx scripts/justwin-sync/debug-page.ts"
@@ -38,6 +40,7 @@
     "playwright": "^1.60.0",
     "tailwindcss": "^4",
     "tsx": "^4.22.4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3.2.7"
   }
 }

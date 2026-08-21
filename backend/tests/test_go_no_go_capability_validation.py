@@ -263,6 +263,45 @@ class CalibratedTechnicalScoreTests(unittest.TestCase):
         self.assertLessEqual(raw or 0, 3)
         self.assertGreaterEqual(calibrated or 0, 3)
 
+    def test_three_plus_core_craft_gaps_cannot_calibrate_to_four(self) -> None:
+        from app.services.go_no_go_capability import calibrate_technical_capability_score
+
+        rows = [
+            GoNoGoCapabilityRow(
+                requirement="Digital display", status="verified", isCore=True, category="service"
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Video", status="verified", isCore=True, category="service"
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Analytics", status="verified", isCore=True, category="service"
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Social", status="partial", isCore=True, category="service"
+            ),
+            GoNoGoCapabilityRow(
+                requirement="CTV", status="gap", isCore=True, category="service"
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Billboard", status="gap", isCore=True, category="service"
+            ),
+            GoNoGoCapabilityRow(
+                requirement="Website troubleshooting", status="gap", isCore=True, category="technical"
+            ),
+        ]
+        calibrated = calibrate_technical_capability_score(rows)
+        self.assertLessEqual(calibrated or 0, 3)
+
+    def test_written_cap_in_notes_clamps_displayed_score(self) -> None:
+        from app.services.go_no_go_capability import clamp_score_to_written_cap
+
+        notes = (
+            "Score capped at 2/5 due to geographic distance, unconfirmed "
+            "meeting attendance."
+        )
+        self.assertEqual(clamp_score_to_written_cap(4, notes), 2)
+        self.assertEqual(clamp_score_to_written_cap(2, notes), 2)
+        self.assertEqual(clamp_score_to_written_cap(4, "no cap stated"), 4)
 
 
 class EnforceCapabilityEvidenceTests(unittest.TestCase):

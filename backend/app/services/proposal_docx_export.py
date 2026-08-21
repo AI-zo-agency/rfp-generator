@@ -114,10 +114,154 @@ def _add_subheading(doc: Document, text: str, *, level: int) -> None:
             run.font.size = Pt(11)
 
 
-def _add_table(doc: Document, headers: list[str], rows: list[list[str]]) -> None:
+_PAGE_INNER_INCHES = 6.5  # 8.5in letter minus 1in left/right margins
+_DXA_PER_INCH = 1440
+_WIDE_TABLE_COLS = 5
+_FEE_HEADER_MARKERS = frozenset(
+    {
+        "phase",
+        "deliverable",
+        "amount",
+        "item",
+        "detail",
+        "description",
+        "extended",
+        "hours",
+        "rate",
+        "cost",
+        "total",
+    }
+)
+
+
+def _looks_like_fee_or_form_table(headers: list[str]) -> bool:
+    keys = {(h or "").strip().casefold() for h in headers}
+    if "phase" in keys and ("amount" in keys or "deliverable" in keys):
+        return True
+    if "item" in keys and "detail" in keys and len(headers) <= 3:
+        return True
+    return len(keys & _FEE_HEADER_MARKERS) >= 2
+
+
+
+
+def _set_table_full_width(table, col_count: int) -> None:
+    """Stop WPS/Word autofit from collapsing columns to one-character width."""
+    table.autofit = False
+    try:
+        table.allow_autofit = False
+    except (AttributeError, ValueError):
+        pass
+    total = int(_PAGE_INNER_INCHES * _DXA_PER_INCH)
+    tbl = table._tbl
+    tbl_pr = tbl.tblPr
+    if tbl_pr is None:
+        tbl_pr = OxmlElement("w:tblPr")
+        tbl.insert(0, tbl_pr)
+
+    def _set_child(tag: str, attrs: dict[str, str]) -> None:
+        el = tbl_pr.find(qn(tag))
+        if el is None:
+            el = OxmlElement(tag)
+            tbl_pr.append(el)
+        for key, value in attrs.items():
+            el.set(qn(key), value)
+
+    _set_child("w:tblW", {"w:w": str(total), "w:type": "dxa"})
+    _set_child("w:tblLayout", {"w:type": "fixed"})
+    _set_child("w:jc", {"w:val": "left"})
+
+    if col_count <= 2:
+        widths = [int(total * 0.34), total - int(total * 0.34)][:col_count]
+    else:
+        base = total // col_count
+        widths = [base] * col_count
+        widths[-1] += total - base * col_count
+
+    grid = tbl.find(qn("w:tblGrid"))
+    if grid is not None:
+        for child in list(grid):
+            grid.remove(child)
+    else:
+        grid = OxmlElement("w:tblGrid")
+        tbl_pr.addnext(grid)
+    for width in widths:
+        grid_col = OxmlElement("w:gridCol")
+        grid_col.set(qn("w:w"), str(width))
+        grid.append(grid_col)
+
+    for row in table.rows:
+        for idx, cell in enumerate(row.cells):
+            width = widths[idx] if idx < len(widths) else widths[-1]
+            tc_pr = cell._tc.get_or_add_tcPr()
+            tc_w = tc_pr.find(qn("w:tcW"))
+            if tc_w is None:
+                tc_w = OxmlElement("w:tcW")
+                tc_pr.append(tc_w)
+            tc_w.set(qn("w:w"), str(width))
+            tc_w.set(qn("w:type"), "dxa")
+            margins = tc_pr.find(qn("w:tcMar"))
+            if margins is None:
+                margins = OxmlElement("w:tcMar")
+                tc_pr.append(margins)
+            for edge, dxa in (("top", "60"), ("left", "80"), ("bottom", "60"), ("right", "80")):
+                node = margins.find(qn(f"w:{edge}"))
+                if node is None:
+                    node = OxmlElement(f"w:{edge}")
+                    margins.append(node)
+                node.set(qn("w:w"), dxa)
+                node.set(qn("w:type"), "dxa")
+            for paragraph in cell.paragraphs:
+                paragraph.paragraph_format.space_after = Pt(2)
+                paragraph.paragraph_format.space_before = Pt(2)
+
+
+def _shape_table_for_word(
+    headers: list[str],
+    rows: list[list[str]],
+) -> tuple[list[str], list[list[str]]]:
+    """Wide one-row grids become a 2-column Item/Detail table so Word stays readable.
+
+    Never reshape fee/phase tables — Word must keep Phase | Deliverable | Amount.
+    """
     cols = max(len(headers), 1)
     hdr = (headers + [""] * cols)[:cols]
     data = [(list(row) + [""] * cols)[:cols] for row in rows]
+
+    # Header-only fragments (blank lines split a markdown table) — do not turn
+    # "Phase / Deliverable / Amount" into empty Item/Detail rows.
+    if not data:
+        return hdr, data
+
+    if _looks_like_fee_or_form_table(hdr):
+        return hdr, data
+
+    if cols < _WIDE_TABLE_COLS:
+        return hdr, data
+
+    if len(data) <= 1:
+        values = data[0] if data else [""] * cols
+        # All-empty values → leave as-is (broken parse); reshaping makes it worse.
+        if not any((v or "").strip() for v in values):
+            return hdr, data
+        return ["Item", "Detail"], [
+            [hdr[i], values[i] if i < len(values) else ""] for i in range(cols)
+        ]
+    stacked: list[list[str]] = []
+    for row in data:
+        label = (row[0] or "").strip()
+        for i, heading in enumerate(hdr):
+            if i == 0:
+                continue
+            value = row[i] if i < len(row) else ""
+            key = f"{label} — {heading}".strip(" —") if label else heading
+            stacked.append([key, value])
+    return ["Item", "Detail"], stacked or data
+
+
+def _add_table(doc: Document, headers: list[str], rows: list[list[str]]) -> None:
+    hdr, data = _shape_table_for_word(headers, rows)
+    cols = max(len(hdr), 1)
     table = doc.add_table(rows=1 + len(data), cols=cols)
     table.style = "Table Grid"
     for c_idx, header in enumerate(hdr):
@@ -134,6 +278,7 @@ def _add_table(doc: Document, headers: list[str], rows: list[list[str]]) -> None
             for p in cell.paragraphs:
                 for run in p.runs:
                     run.font.size = Pt(10)
+    _set_table_full_width(table, cols)
     spacer = doc.add_paragraph()
     spacer.paragraph_format.space_after = Pt(8)
 

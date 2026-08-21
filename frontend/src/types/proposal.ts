@@ -39,6 +39,7 @@ export interface KeyPersona {
   hasResume: boolean;
   sourceFile: string;
   bioSnippet?: string;
+  retired?: boolean;
 }
 
 export interface ProposalOutline {

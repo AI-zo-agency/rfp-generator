@@ -38,8 +38,15 @@ def test_mechanical_stages_stay_cheap():
         "team_select",
         "case_select",
         "chat_structure_plan",
+        "section_improve_plan",
     ):
         assert classify_node(node) == "mechanical", node
+
+
+def test_chat_advisory_and_redraft_are_quality():
+    assert classify_node("section_chat_advisory") == "quality"
+    assert classify_node("chat_full_redraft") == "quality"
+    assert classify_node("chat_manuscript_intent") == "mechanical"
 
 
 def test_drafting_prefixes_are_quality():

@@ -32,7 +32,16 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "budget",
         "business",
         "campaign",
+        "case",
         "certifications",
+        "city",
+        "clients",
+        "county",
+        "digital",
+        "employment",
+        "example",
+        "examples",
+        "government",
         "closing",
         "company",
         "cover",
@@ -47,18 +56,30 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "insurance",
         "letter",
         "methodology",
+        "municipal",
+        "municipality",
+        "municapility",
         "of",
         "organizational",
         "our",
         "overview",
+        "past",
+        "performance",
+        "portfolio",
         "pricing",
         "promise",
         "qualifications",
         "references",
+        "sample",
+        "samples",
         "scope",
         "strategy",
         "structure",
+        "studies",
+        "study",
         "submission",
+        "summaries",
+        "summary",
         "team",
         "terms",
         "that",
@@ -66,6 +87,7 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "this",
         "timeline",
         "to",
+        "travel",
         "we",
         "who",
         "with",
@@ -80,7 +102,7 @@ def is_company_identity_title(title: str) -> bool:
 
 
 def is_plausible_person_name(label: str) -> bool:
-    """First Last (or First Middle Last). Rejects 'Who We Are' / 'Our Work'."""
+    """First Last (or First Middle Last). Rejects Who We Are / Our Work / Municipality Summaries."""
     raw = (label or "").strip()
     if not raw or is_company_identity_title(raw):
         return False
@@ -138,6 +160,27 @@ def expected_bio_pdf_filename(member: str) -> str:
     return f"04_Bio_{bio_file_slug(member)}.pdf"
 
 
+def bio_filename_matches_member(file_name: str, member: str) -> bool:
+    """True when a KB file is this person's 04_Bio, ignoring spaces/underscores.
+
+    Exact lookup uses 04_Bio_LetitiaHopper.pdf. Drive uploads often keep
+    04_Bio_Letitia_Hopper.pdf or 04_Bio_Letitia Hopper.pdf — those must still count.
+    """
+    base = str(file_name or "").strip().split("/")[-1].casefold()
+    compact = re.sub(r"[^a-z0-9]+", "", base)
+    if not compact.startswith("04bio"):
+        return False
+    tokens = [
+        re.sub(r"[^a-z0-9]+", "", part.casefold())
+        for part in (member or "").split()
+        if part
+    ]
+    tokens = [t for t in tokens if len(t) >= 3]
+    if len(tokens) < 2:
+        return False
+    return all(token in compact for token in tokens)
+
+
 def is_bio_pdf_designer_note(text: str) -> bool:
     """True when a designer-note (or section body) is a bio-PDF insert handoff."""
     return bool(_BIO_PDF_DESIGNER_NOTE_RE.search(text or ""))
@@ -152,6 +195,43 @@ def is_bio_stub_section(section_id: str, content: str | None = None) -> bool:
     if content is None:
         return True
     return is_bio_pdf_designer_note(content) or not (content or "").strip()
+
+
+def looks_like_bio_stub_body(content: str) -> bool:
+    """True when body is the short Role-on-engagement (+ optional 04_Bio) stub shape."""
+    body = (content or "").strip()
+    if not body:
+        return False
+    if "Role on this engagement" not in body:
+        return False
+    if is_bio_pdf_designer_note(body):
+        # Designer-note stubs are short; long narrative + note is a resume dump.
+        return len(body.split()) < 80
+    # Bare role line with almost no substance (Scan wrongly stubbed a TOC tab).
+    return len(body.split()) < 40
+
+
+def is_section2_bio_id(section_id: str) -> bool:
+    sid = section_id or ""
+    return sid.startswith("section-2-bio-") and not sid.endswith("placeholder")
+
+
+def prior_content_for_rewrite(section_id: str, content: str) -> str:
+    """Body to show the rewriter. Misplaced bio stubs on non-bio tabs are empty."""
+    body = content or ""
+    sid = section_id or ""
+    if looks_like_bio_stub_body(body) and not is_section2_bio_id(sid):
+        return ""
+    if is_bio_pdf_designer_note(body) and not is_section2_bio_id(sid):
+        return ""
+    return body
+
+
+MISPLACED_BIO_STUB_REWRITE_NOTE = (
+    "Current body is a misplaced 04_Bio / Role-on-engagement stub. Discard it. "
+    "This tab is not a team bio. Write the RFP ask for THIS section from verified "
+    "evidence. Do not keep a bio PDF handoff or Role-on-this-engagement line."
+)
 
 
 def extract_engagement_role(content: str) -> str:

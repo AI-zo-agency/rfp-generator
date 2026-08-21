@@ -1,22 +1,17 @@
-"""Ground named personnel claims against known fabrications + cited KB text.
+"""Ground personnel claims against known fabrications + cited KB text.
 
-Go/No-Go repeatedly marks invented people as Verified (Brittany Frazier as
-Creative Director citing MasterTemplate) while the Drew Stone scrub fires on
-the next row. The Drew-only regex was the inconsistency; known fabrications
-must be shared, and any First Last in a Verified claim must appear in the
-cited source (MasterTemplate naming Curt Schultz does not evidence Brittany).
+Names in Go/No-Go must come from retrieved knowledge-base excerpts only.
+Do not invent staff, and do not scan criterion titles for First Last patterns.
 """
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.proposal import ProposalDraft
 
-# Names already observed as LLM inventions (docs + live Go/No-Go / proposal runs).
-# Keep lowercase keys for matching; display uses canonical Title Case.
+# Observed LLM inventions. Not a scanner — only these strings are blocked.
 KNOWN_FABRICATED_PERSONNEL: tuple[str, ...] = (
     "Brittany Frazier",
     "Drew Stone",
@@ -25,15 +20,19 @@ KNOWN_FABRICATED_PERSONNEL: tuple[str, ...] = (
     "Morgan Nivan",
     "Olajide Ojoeyemi",
     "Murilo Mendes",
+    "Rad S",
 )
 
-# Documented zö leads commonly cited in Go/No-Go (bios / MasterTemplate).
-# Used only as a hint for role-replacement copy — grounding still requires the
-# name to appear in the cited source text for THIS claim.
+# Seed only. Live list comes from Key Personas UI (retired_staff.json).
+RETIRED_TEAM_PERSONNEL: tuple[str, ...] = (
+    "Ron Comer",
+)
+
+# Current roster. A name may be cited only when it also appears in THIS claim's KB excerpt.
 DOCUMENTED_TEAM_PERSONNEL: tuple[str, ...] = (
     "Sonja Anderson",
     "Todd Anderson",
-    "Ron Comer",
+    "Haley Neff",
     "Ella Lindau",
     "Curt Schultz",
     "Justin Bronson",
@@ -52,102 +51,136 @@ _FABRICATED_BY_KEY: dict[str, str] = {
     name.casefold(): name for name in KNOWN_FABRICATED_PERSONNEL
 }
 
-# First Last (optional middle initial). Skips ALL-CAPS acronyms.
-_PERSON_NAME_RE = re.compile(
-    r"\b([A-Z][a-z]+(?:\s+[A-Z]\.)?\s+[A-Z][a-z]+)\b"
+_PERSONNEL_MANUAL_FILL = (
+    "[MANUAL FILL: Sonja — assign verified team member; fabricated name removed]"
 )
 
-# Tokens that look like Title Case pairs but are roles/places, not people.
-_NON_PERSON_TOKENS = frozenset(
-    {
-        "creative",
-        "director",
-        "project",
-        "lead",
-        "account",
-        "manager",
-        "senior",
-        "junior",
-        "agency",
-        "director",
-        "new",
-        "york",
-        "north",
-        "carolina",
-        "south",
-        "carolina",
-        "los",
-        "angeles",
-        "san",
-        "francisco",
-        "master",
-        "template",
-        "public",
-        "sector",
-        "media",
-        "buying",
-        "united",
-        "states",
-        "case",
-        "study",
-        "knowledge",
-        "base",
-    }
+_RETIRED_MANUAL_FILL = (
+    "[MANUAL FILL: Sonja — assign current staff; retired team member removed]"
 )
+
+
+def _folded(text: str) -> str:
+    """Letters/digits/spaces only — no regex, no punctuation tricks."""
+    chars: list[str] = []
+    for ch in (text or "").casefold():
+        if ch.isalnum() or ch.isspace():
+            chars.append(ch)
+        else:
+            chars.append(" ")
+    return " ".join("".join(chars).split())
 
 
 def _name_key(name: str) -> str:
-    return re.sub(r"\s+", " ", (name or "").strip()).casefold()
+    return _folded(name)
 
 
-def find_known_fabricated_names(text: str) -> list[str]:
-    """Return canonical fabricated names present in ``text`` (order preserved)."""
-    blob = text or ""
-    if not blob.strip():
-        return []
+def phrase_in(needle: str, haystack: str) -> bool:
+    n = _folded(needle)
+    h = _folded(haystack)
+    if not n:
+        return False
+    return f" {n} " in f" {h} "
+
+
+def documented_name_in_text(name: str, text: str) -> bool:
+    """True when the roster name appears, allowing a one-token middle initial."""
+    if phrase_in(name, text):
+        return True
+    parts = _folded(name).split()
+    if len(parts) != 2:
+        return False
+    first, last = parts
+    hay = _folded(text).split()
+    for i, tok in enumerate(hay):
+        if tok != first:
+            continue
+        window = hay[i + 1 : i + 3]
+        if last in window:
+            return True
+    return False
+
+
+def retired_team_personnel() -> tuple[str, ...]:
+    """Names the UI marked retired — agents must never assign them as current staff."""
+    try:
+        from app.services.retired_staff_store import retired_names
+
+        names = retired_names()
+        if names:
+            return names
+    except Exception:
+        pass
+    return RETIRED_TEAM_PERSONNEL
+
+
+def _retired_by_key() -> dict[str, str]:
+    return {name.casefold(): name for name in retired_team_personnel()}
+
+
+def roster_names_in_text(text: str) -> list[str]:
+    """Documented staff whose names actually appear in this KB excerpt."""
+    retired = {name.casefold() for name in retired_team_personnel()}
+    found: list[str] = []
+    for name in DOCUMENTED_TEAM_PERSONNEL:
+        if name.casefold() in retired:
+            continue
+        if documented_name_in_text(name, text) and name not in found:
+            found.append(name)
+    return found
+
+
+def _names_from_list(text: str, table: dict[str, str]) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
-    for key, canonical in _FABRICATED_BY_KEY.items():
-        # Word-boundary-ish: allow hyphen/space variants via simple search.
-        if re.search(rf"\b{re.escape(canonical)}\b", blob, re.IGNORECASE):
+    for key, canonical in table.items():
+        if phrase_in(canonical, text) or phrase_in(key, text):
             if key not in seen:
                 seen.add(key)
                 found.append(canonical)
     return found
 
 
-def fabricated_personnel_regex() -> re.Pattern[str]:
-    """Single regex matching any known fabricated First Last."""
-    parts = [re.escape(n).replace(r"\ ", r"\s+") for n in KNOWN_FABRICATED_PERSONNEL]
-    return re.compile(r"\b(?:" + "|".join(parts) + r")\b", re.IGNORECASE)
+def find_known_fabricated_names(text: str) -> list[str]:
+    return _names_from_list(text, _FABRICATED_BY_KEY)
 
 
-def extract_person_name_candidates(text: str) -> list[str]:
-    """Heuristic First Last spans that are not obvious role/place pairs."""
-    out: list[str] = []
-    seen: set[str] = set()
-    for match in _PERSON_NAME_RE.finditer(text or ""):
-        name = re.sub(r"\s+", " ", match.group(1)).strip()
-        parts = name.replace(".", "").split()
-        if len(parts) < 2:
-            continue
-        if any(p.casefold() in _NON_PERSON_TOKENS for p in parts):
-            continue
-        key = _name_key(name)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(name)
+def find_retired_team_names(text: str) -> list[str]:
+    return _names_from_list(text, _retired_by_key())
+
+
+def is_retired_team_member(name: str) -> bool:
+    return _name_key(name) in _retired_by_key()
+
+
+def replace_listed_names(text: str, names: tuple[str, ...], replacement: str) -> str:
+    """Case-insensitive replace of whole listed names. No regex."""
+    if not text:
+        return text
+    out = text
+    for name in names:
+        variants = (name, f"{name}.")
+        for variant in variants:
+            folded_out = _folded(out)
+            folded_n = _folded(variant)
+            if not folded_n or f" {folded_n} " not in f" {folded_out} ":
+                continue
+            # Walk original string with same fold alignment is hard; replace
+            # by scanning case-insensitive on the original with stripped punct.
+            lower = out.casefold()
+            needle = variant.casefold()
+            pieces: list[str] = []
+            i = 0
+            while True:
+                j = lower.find(needle, i)
+                if j < 0:
+                    pieces.append(out[i:])
+                    break
+                pieces.append(out[i:j])
+                pieces.append(replacement)
+                i = j + len(variant)
+            out = "".join(pieces)
     return out
-
-
-def name_appears_in_source(name: str, source_text: str) -> bool:
-    """True when both name tokens appear (order-tolerant) in the source."""
-    parts = [p for p in re.split(r"\s+", (name or "").strip()) if p and p != "."]
-    if len(parts) < 2:
-        return False
-    blob = (source_text or "").casefold()
-    return all(p.casefold().rstrip(".") in blob for p in parts if len(p) > 1)
 
 
 def personnel_claim_failure(
@@ -156,12 +189,11 @@ def personnel_claim_failure(
     quote: str = "",
     source_text: str = "",
 ) -> str | None:
-    """Return a downgrade reason when a Verified claim invents or mis-cites a person.
+    """Fail when a Verified claim names invented, retired, or uncited staff.
 
-    - Known fabrications (Brittany Frazier, Drew Stone, …) always fail.
-    - Any First Last named in the requirement must appear in the cited source
-      text. Citing MasterTemplate for Creative Director does not evidence
-      Brittany Frazier when the roster names Curt Schultz.
+    Criterion titles are not scanned for people. Only listed fabrications,
+    retired staff, and documented roster names in the quote are checked —
+    and documented names must appear in the cited KB excerpt.
     """
     claim = f"{requirement}\n{quote}"
     fabricated = find_known_fabricated_names(claim)
@@ -172,64 +204,116 @@ def personnel_claim_failure(
             "FLAG SONJA; do not mark Verified"
         )
 
-    for person in extract_person_name_candidates(requirement):
-        if find_known_fabricated_names(person):
-            continue  # already handled above
-        if source_text and name_appears_in_source(person, source_text):
+    retired = find_retired_team_names(claim)
+    if retired:
+        who = retired[0]
+        return (
+            f"'{who}' is retired and is not current zö staff — do not assign "
+            "as account lead; FLAG SONJA for the live roster"
+        )
+
+    for name in DOCUMENTED_TEAM_PERSONNEL:
+        if not documented_name_in_text(name, quote):
+            continue
+        if source_text and documented_name_in_text(name, source_text):
             continue
         return (
-            f"named person '{person}' does not appear in the cited KB source — "
+            f"named person '{name}' does not appear in the cited KB source — "
             "cannot Verified a staffing claim without roster evidence"
         )
     return None
 
 
-_PERSONNEL_MANUAL_FILL = (
-    "[MANUAL FILL: Sonja — assign verified team member; fabricated name removed]"
-)
-
-
 def scrub_fabricated_personnel_from_draft(
     draft: "ProposalDraft",
 ) -> tuple["ProposalDraft", list[str]]:
-    """Remove known invented team members from every manuscript section."""
-    from app.models.proposal import ProposalDraft, ProposalSection
+    """Remove invented and retired team members from every manuscript section.
+
+    Fabrications (Brittany Frazier, …) and Key Personas–retired staff (Ron Comer,
+    plus anyone marked retired in the UI) must never ship as current assignees.
+    """
     from datetime import datetime, timezone
+
+    from app.models.proposal import ProposalSection
 
     if not draft.sections:
         return draft, []
 
-    pattern = fabricated_personnel_regex()
     logs: list[str] = []
     sections: list[ProposalSection] = []
     changed = False
+    retired = retired_team_personnel()
 
     for section in draft.sections:
         content = section.content or ""
-        found = find_known_fabricated_names(content)
-        if not found:
+        title = section.title or ""
+        fabricated = find_known_fabricated_names(content) or find_known_fabricated_names(
+            title
+        )
+        retired_hit = find_retired_team_names(content) or find_retired_team_names(title)
+        if not fabricated and not retired_hit:
             sections.append(section)
             continue
-        new_content = pattern.sub(_PERSONNEL_MANUAL_FILL, content)
-        if new_content != content:
-            changed = True
-            who = ", ".join(found[:3])
-            logs.append(
-                f"{section.title or section.id}: removed fabricated personnel ({who})"
+
+        new_content = content
+        new_title = title
+        if fabricated:
+            new_content = replace_listed_names(
+                new_content, KNOWN_FABRICATED_PERSONNEL, _PERSONNEL_MANUAL_FILL
             )
-            sections.append(section.model_copy(update={"content": new_content}))
+            new_title = replace_listed_names(
+                new_title, KNOWN_FABRICATED_PERSONNEL, "Team Member (assign)"
+            )
+        if retired_hit:
+            new_content = replace_listed_names(
+                new_content, retired, _RETIRED_MANUAL_FILL
+            )
+            new_title = replace_listed_names(
+                new_title, retired, "Team Member (assign current staff)"
+            )
+
+        if new_content != content or new_title != title:
+            changed = True
+            who = ", ".join([*(fabricated or [])[:2], *(retired_hit or [])[:2]])
+            kind = "retired" if retired_hit and not fabricated else "fabricated"
+            if fabricated and retired_hit:
+                kind = "fabricated/retired"
+            logs.append(f"{title or section.id}: removed {kind} personnel ({who})")
+            sections.append(
+                section.model_copy(
+                    update={"content": new_content, "title": new_title or section.title}
+                )
+            )
         else:
             sections.append(section)
+
+    update: dict = {}
+    if changed:
+        update["sections"] = sections
+        update["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    locks = getattr(draft, "manuscript_locks", None)
+    if locks is not None and is_retired_team_member(
+        getattr(locks, "primary_contact_name", "") or ""
+    ):
+        changed = True
+        logs.append(
+            f"manuscript locks: cleared retired primary "
+            f"'{locks.primary_contact_name}' → Sonja Anderson (confirm)"
+        )
+        update["manuscript_locks"] = locks.model_copy(
+            update={
+                "primary_contact_name": "Sonja Anderson",
+                "primary_contact_title": "Agency Director",
+                "needs_human_confirm": True,
+                "decision_rationale": (
+                    f"{getattr(locks, 'decision_rationale', '') or ''} "
+                    "Retired staff cannot be primary contact — confirm current lead."
+                ).strip(),
+            }
+        )
 
     if not changed:
         return draft, logs
 
-    return (
-        draft.model_copy(
-            update={
-                "sections": sections,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ),
-        logs,
-    )
+    return draft.model_copy(update=update), logs

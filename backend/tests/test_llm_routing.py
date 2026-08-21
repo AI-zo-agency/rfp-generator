@@ -76,6 +76,12 @@ class QualityCriticalPreferFireworksTests(unittest.TestCase):
     def test_light_planners_not_critical(self) -> None:
         self.assertFalse(is_quality_critical_node("plan_section_1"))
         self.assertFalse(is_quality_critical_node("select_team"))
+        self.assertFalse(is_quality_critical_node("execution_plan"))
+        self.assertFalse(is_quality_critical_node("writing_briefs"))
+
+    def test_merged_opportunity_pass_is_quality(self) -> None:
+        self.assertTrue(is_quality_critical_node("opportunity_extract"))
+        self.assertTrue(is_quality_critical_node("strategy_delivery"))
 
     def test_unnamed_node_now_defaults_to_quality(self) -> None:
         # Deliberate inversion. This previously returned False, so any call site

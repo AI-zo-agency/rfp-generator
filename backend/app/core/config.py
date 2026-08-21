@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     scheduler_timezone: str = "America/Los_Angeles"
     scheduler_run_on_start: bool = True
 
+    # Teamwork.com — read-only V3 API. Basic auth is API_KEY with an empty password.
+    # Never expose these to the frontend.
+    teamwork_base_url: str = ""
+    teamwork_api_key: str = ""
+
     # Legacy optional — prefer OAuth client id/secret above
     google_service_account_json: Path | None = None
     google_drive_shared_drive_name: str = "RFPs"
@@ -62,6 +67,10 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_model: str = "anthropic/claude-sonnet-4"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # Monid — server-side company enrichment only. Never expose this to the frontend.
+    monid_api_key: str = ""
+    monid_base_url: str = "https://api.monid.ai"
     # Role-tier router: heavy = Sonnet-class (writing/judgment); light = Haiku-class (plan/gate).
     # Empty heavy → fall back to openrouter_model. Empty light → fall back to heavy.
     llm_heavy_model: str = ""
@@ -161,9 +170,16 @@ class Settings(BaseSettings):
     fast_proposal_generation: bool = False
     phase3_llm_concurrency: int = 1
     designer_compact_in_generate: bool = True
-    designer_compact_max_sections: int = 25
-    senior_editor_max_tickets: int = 18
+    designer_compact_max_sections: int = 8
+    senior_editor_max_tickets: int = 6
+    # Lean generate skips duplicate blocker preflight. Ticket emit / per-tab
+    # rewrites are off during generate (mechanical trim only).
+    senior_editor_lean_in_generate: bool = True
+    senior_editor_skip_llm_emit_in_generate: bool = True
     self_edit_repair_parallel: int = 1
+    # Hard LLM run budgets (USD). 0 disables guard.
+    generate_proposal_max_cost_usd: float = 3.0
+    complete_scan_max_cost_usd: float = 3.0
 
     # LangSmith — process env is synced at startup (see langsmith_tracing.py).
     langsmith_tracing: bool = False
@@ -200,6 +216,11 @@ class Settings(BaseSettings):
             text = text[1:-1].strip()
         return text
 
+    @field_validator("teamwork_base_url", "teamwork_api_key")
+    @classmethod
+    def strip_teamwork_str(cls, value: str) -> str:
+        return (value or "").strip()
+
     @property
     def resolved_container_tag(self) -> str:
         if self.supermemory_container_tag != "zo-agency" or not self.supermemory_container_tags:
@@ -225,6 +246,10 @@ class Settings(BaseSettings):
             and self.quickbooks_refresh_token
             and self.quickbooks_realm_id
         )
+
+    @property
+    def teamwork_configured(self) -> bool:
+        return bool(self.teamwork_base_url.strip() and self.teamwork_api_key.strip())
 
 
 settings = Settings()

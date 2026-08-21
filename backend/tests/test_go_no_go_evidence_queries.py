@@ -71,6 +71,25 @@ class GoNoGoEvidenceQueryTests(unittest.TestCase):
         self.assertIn("san francisco travel", blob)
         self.assertIn("sonja", blob)
         self.assertIn("clientlist", blob)
+        self.assertNotIn("ron comer", blob)
+
+    def test_communications_rfp_queries_case_studies_not_pricing(self) -> None:
+        rfp = _rfp(
+            title="Public Relations Services",
+            client="Portland State University",
+            sector="Higher Education",
+            location="Oregon",
+        )
+        content = _content(
+            "Scope includes media relations and press outreach, stakeholder "
+            "engagement, social media strategy, and crisis communications."
+        )
+        queries = _deterministic_evidence_queries(rfp, content)  # type: ignore[arg-type]
+        blob = " | ".join(queries).casefold()
+        self.assertIn("media relations", blob)
+        self.assertIn("stakeholder engagement", blob)
+        self.assertIn("03_cs", blob)
+        self.assertNotIn("00_guide_pricing", blob)
 
     def test_health_coalition_rfp_queries_include_rno(self) -> None:
         rfp = _rfp(

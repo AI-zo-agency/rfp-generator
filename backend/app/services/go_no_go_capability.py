@@ -347,6 +347,7 @@ def gap_matrix_from_requirements(
                 requirement=name,
                 status="gap",
                 isCore=bool(getattr(requirement, "is_core", False)),
+                disqualifying=bool(getattr(requirement, "disqualifying", False)),
                 category=str(getattr(requirement, "category", "") or "service"),
                 downgradeReason=reason,
             )
@@ -373,6 +374,7 @@ def build_matrix_from_requirements(
             continue
         is_core = bool(getattr(requirement, "is_core", False))
         category = str(getattr(requirement, "category", "") or "service")
+        disqualifying = bool(getattr(requirement, "disqualifying", False))
         hits = hits_by_requirement.get(name, [])
         index = build_source_index(hits)
 
@@ -392,6 +394,7 @@ def build_matrix_from_requirements(
                     kbSource=best_source,
                     evidence=best_evidence,
                     isCore=is_core,
+                    disqualifying=disqualifying,
                     category=category,
                 )
             )
@@ -403,6 +406,7 @@ def build_matrix_from_requirements(
                     kbSource="",
                     evidence="",
                     isCore=is_core,
+                    disqualifying=disqualifying,
                     category=category,
                     downgradeReason=(
                         "no retrieved KB document evidences this requirement"
@@ -614,6 +618,54 @@ def derive_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | 
     return max(0, min(5, int((earned / possible) * 5 + 0.5)))
 
 
+def core_craft_rows(rows: list[GoNoGoCapabilityRow]) -> list[GoNoGoCapabilityRow]:
+    """Core craft/platform rows — the ones Technical Capability is scored on."""
+    return [
+        row
+        for row in rows
+        if row.is_core
+        and (row.category or "service").casefold() in _TECHNICAL_SCORE_CATEGORIES
+    ]
+
+
+def evidenced_core_craft_ratio(rows: list[GoNoGoCapabilityRow]) -> float:
+    """Share of core craft rows evidenced, counting "partial" as half.
+
+    A raw head-count ratio treats a half-credit "partial" row as full proof.
+    On the Exeter run that let 10 of 24 rows (5 verified design rows + 5 thin
+    partials) clear a 0.4 head-count floor and lift Technical from 2 to 3,
+    while the weighted base score — and the analyst — read the same evidence as
+    2/5. Floors now weight evidence exactly as ``derive_technical_capability_score``
+    does, so a floor can only fire when the evidence nearly supports the score
+    on its own.
+    """
+    cores = core_craft_rows(rows)
+    if not cores:
+        return 0.0
+    earned = sum(
+        1.0 if row.status == "verified" else 0.5 if row.status == "partial" else 0.0
+        for row in cores
+    )
+    return earned / len(cores)
+
+
+def unmet_disqualifying_requirements(rows: list[GoNoGoCapabilityRow]) -> list[str]:
+    """Stated minimum thresholds the KB cannot satisfy.
+
+    These are pass/fail responsiveness gates ("at least five comparable
+    California municipal projects in the past five years"), not scored rows.
+    Averaging one into a matrix produced a 2.8/5 "GO WITH CONDITIONS" on an RFP
+    the agency could not answer without inventing case studies. An unmet
+    disqualifier ends the pursuit regardless of what the other dimensions say.
+    """
+    return [
+        row.requirement
+        for row in rows
+        if getattr(row, "disqualifying", False)
+        and row.status not in {"verified", "partial"}
+    ]
+
+
 def calibrate_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | None:
     """Raise understated technical scores when KB proof is strong but uneven.
 
@@ -621,24 +673,22 @@ def calibrate_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int
     (campaign case studies, media bios) while evaluation-only sub-asks stay gap.
     The rubric calls for ~3/5 when craft is evidenced with real gaps, and ~4/5
     when multiple delivery rows align with the RFP's core scope.
+
+    Floors never fire while a stated minimum threshold is unmet — the agency
+    cannot be scored competent at scope it is not responsive for.
     """
     base = derive_technical_capability_score(rows)
     if base is None:
         return None
 
-    craft_cores = [
-        row
-        for row in rows
-        if row.is_core
-        and (row.category or "service").casefold() in _TECHNICAL_SCORE_CATEGORIES
-    ]
+    craft_cores = core_craft_rows(rows)
     if not craft_cores:
+        return base
+    if unmet_disqualifying_requirements(rows):
         return base
 
     verified = sum(1 for row in craft_cores if row.status == "verified")
-    partial = sum(1 for row in craft_cores if row.status == "partial")
-    evidenced = verified + partial
-    ratio = evidenced / len(craft_cores)
+    ratio = evidenced_core_craft_ratio(rows)
 
     service_verified = sum(
         1
@@ -657,7 +707,31 @@ def calibrate_technical_capability_score(rows: list[GoNoGoCapabilityRow]) -> int
     if service_verified >= 3 and ratio >= 0.45:
         floor = max(floor, 4)
 
+    # Multiple missing core crafts cannot be a 4. A live run scored Technical
+    # 4/5 while the notes said three material gaps "prevent a 4/5".
+    core_craft_gaps = sum(
+        1 for row in craft_cores if row.status not in {"verified", "partial"}
+    )
+    if core_craft_gaps >= 3:
+        floor = min(floor, 3)
+
     return max(0, min(5, floor))
+
+
+_WRITTEN_CAP_RE = re.compile(r"capped at\s+(\d)\s*/\s*5", re.IGNORECASE)
+
+
+def clamp_score_to_written_cap(score: int, notes: str) -> int:
+    """If notes say 'capped at N/5', the displayed score cannot exceed N.
+
+    Live runs showed Resource Availability 4/5 while the same cell said
+    'capped at 2/5'. The written cap is the intended score.
+    """
+    match = _WRITTEN_CAP_RE.search(notes or "")
+    if not match:
+        return score
+    cap = int(match.group(1))
+    return max(0, min(score, cap))
 
 
 def derive_resource_capability_score(rows: list[GoNoGoCapabilityRow]) -> int | None:

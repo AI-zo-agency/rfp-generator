@@ -68,6 +68,7 @@ from app.services.proposal_job_runner import (
 from app.services.rfp_repository import get_rfp, rfp_exists
 
 router = APIRouter(prefix="/rfps", tags=["proposals"])
+logger = logging.getLogger(__name__)
 
 
 async def _enqueue_pipeline_phase(
@@ -112,9 +113,16 @@ async def _enqueue_pipeline_phase(
     # Mark in-progress before returning so the first poll sees the phase.
     await record_phase_started(rfp_id, phase)
 
+    import uuid
+
+    from app.services.llm_call_context import llm_call_context
+
+    run_id = str(uuid.uuid4())
+
     async def _run() -> Any:
         async with pipeline_phase(rfp_id, phase):
-            return await work()
+            with llm_call_context(rfp_id=rfp_id, run_id=run_id, node_name=phase):
+                return await work()
 
     record = await start_proposal_job(rfp_id, phase, _run)
     return JSONResponse(
@@ -178,14 +186,41 @@ async def get_proposal(rfp_id: str) -> dict[str, object]:
     if draft is None and research is None and not rfp_exists(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
     if draft is not None:
+        from app.services.evidence_trust.personnel_grounding import (
+            scrub_fabricated_personnel_from_draft,
+        )
         from app.services.proposal_draft_snapshots import prune_clutter_snapshots
         from app.services.proposal_repository import asave_proposal_draft
 
         pruned = prune_clutter_snapshots(draft)
-        if [s.saved_at for s in (pruned.snapshots or [])] != [
+        scrubbed, personnel_logs = scrub_fabricated_personnel_from_draft(pruned)
+        from app.services.proposal_closing_hollow_repair import (
+            repair_hollow_closing_sections,
+        )
+
+        scrubbed, closing_logs = repair_hollow_closing_sections(scrubbed)
+        from app.services.proposal_capability_bio_grounding import (
+            repair_misplaced_bio_stub_sections,
+        )
+        from app.services.proposal_scan_fact_repairs import fill_hollow_project_team_from_bios
+
+        scrubbed, bio_stub_logs = repair_misplaced_bio_stub_sections(scrubbed)
+        # Cheap sync fallback only — LLM won-proposal fill runs on Generate + Scan.
+        scrubbed, team_logs = fill_hollow_project_team_from_bios(scrubbed)
+        snapshots_changed = [s.saved_at for s in (pruned.snapshots or [])] != [
             s.saved_at for s in (draft.snapshots or [])
-        ]:
-            await asave_proposal_draft(pruned)
+        ]
+        heal_logs = [*personnel_logs, *closing_logs, *bio_stub_logs, *team_logs]
+        if snapshots_changed or heal_logs:
+            await asave_proposal_draft(scrubbed)
+            draft = scrubbed
+            if heal_logs:
+                logger.info(
+                    "Draft heal on load for %s: %s",
+                    rfp_id,
+                    "; ".join(heal_logs[:6]),
+                )
+        else:
             draft = pruned
     job = await get_proposal_job(rfp_id)
     slim_research = _slim_research(research)
@@ -864,10 +899,23 @@ async def improve_section_endpoint(
     """Re-query KB with new detailed queries and re-draft one section from user feedback."""
     from app.services.proposal_repository import aget_proposal_draft, aget_research_cache
 
+    import uuid
+
+    from app.services.llm_call_context import llm_call_context
+
     prior_draft = await aget_proposal_draft(rfp_id)
+    chat_run_id = str(uuid.uuid4())
     try:
-        section, draft, research, _provider, assistant_message, draft_changed, suggested_fix = (
-            await improve_proposal_section(
+        with llm_call_context(rfp_id=rfp_id, run_id=chat_run_id, node_name="section_chat"):
+            (
+                section,
+                draft,
+                research,
+                _provider,
+                assistant_message,
+                draft_changed,
+                suggested_fix,
+            ) = await improve_proposal_section(
                 rfp_id,
                 section_id,
                 body.message,
@@ -881,7 +929,6 @@ async def improve_section_endpoint(
                 apply_fix=body.apply_fix,
                 improve_section_pinned=body.improve_section_pinned,
             )
-        )
     except ProposalError as exc:
         # Policy / rewrite checks must recap in chat — never 422 the UI.
         if exc.status_code in (400, 422) and prior_draft and prior_draft.sections:
@@ -1355,7 +1402,16 @@ async def get_proposal_key_personas(rfp_id: str) -> dict[str, object]:
     try:
         draft = await aget_proposal_draft(rfp_id)
         if draft and draft.selected_key_personas:
-            selected_ids = draft.selected_key_personas
+            retired_ids = {
+                str(p.get("id") or "")
+                for p in all_personas
+                if p.get("retired")
+            }
+            selected_ids = [
+                pid
+                for pid in draft.selected_key_personas
+                if pid not in retired_ids
+            ]
     except Exception:
         pass
 
@@ -1372,10 +1428,21 @@ async def save_proposal_key_personas(
     rfp_id: str, payload: ProposalKeyPersonasRequest
 ) -> dict[str, object]:
     from datetime import datetime, timezone
+    from app.services import team_personas_service
     from app.services.proposal_repository import aget_proposal_draft, asave_proposal_draft
     from app.models.proposal import ProposalDraft
 
     logger = logging.getLogger(__name__)
+
+    all_personas = await team_personas_service.get_all_key_personas()
+    retired_ids = {
+        str(p.get("id") or "")
+        for p in all_personas
+        if p.get("retired")
+    }
+    selected_ids = [
+        pid for pid in payload.selected_persona_ids if pid not in retired_ids
+    ]
 
     draft = await aget_proposal_draft(rfp_id)
     now = datetime.now(timezone.utc).isoformat()
@@ -1385,12 +1452,12 @@ async def save_proposal_key_personas(
             rfp_id=rfp_id,
             sections=[],
             updated_at=now,
-            selected_key_personas=payload.selected_persona_ids,
+            selected_key_personas=selected_ids,
         )
     else:
         draft = draft.model_copy(
             update={
-                "selected_key_personas": payload.selected_persona_ids,
+                "selected_key_personas": selected_ids,
                 "updated_at": now,
             }
         )
@@ -1414,7 +1481,7 @@ async def save_proposal_key_personas(
             by_id = {p["id"]: p for p in all_personas}
             selected_personas = [
                 by_id[pid]
-                for pid in payload.selected_persona_ids
+                for pid in selected_ids
                 if pid in by_id
             ]
             synced, bios_synced = sync_draft_bios_to_key_personas(
@@ -1429,7 +1496,7 @@ async def save_proposal_key_personas(
                     update={
                         "sections": synced.sections,
                         "updated_at": now,
-                        "selected_key_personas": payload.selected_persona_ids,
+                        "selected_key_personas": selected_ids,
                     }
                 )
         except Exception as exc:
@@ -1442,7 +1509,7 @@ async def save_proposal_key_personas(
         from app.services import supabase_db
 
         if supabase_db.use_supabase_db():
-            note = f"Key Personas selected ({len(payload.selected_persona_ids)}): {', '.join(payload.selected_persona_ids)}"
+            note = f"Key Personas selected ({len(selected_ids)}): {', '.join(selected_ids)}"
             try:
                 supabase_db._get_client().table("rfps").update(
                     {

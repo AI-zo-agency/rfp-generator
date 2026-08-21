@@ -71,17 +71,25 @@ class ClientBudgetRenderTests(unittest.TestCase):
         md = render_budget_markdown(b)
         self.assertIn("Proposed Investment", md)
         self.assertIn("Fee Detail by Phase", md)
+        self.assertIn("| Phase | Scope | Fee |", md)
         self.assertIn("Stakeholder interviews", md)
         self.assertNotIn("78,500", md)
         self.assertNotIn("agency revenue estimate", md.casefold())
-        # Deliverable kept — not collapsed to Role — Person
+        # Deliverable kept in phase Scope — not collapsed to Role — Person
         self.assertIn("messaging architecture", md.casefold())
         # Travel appears in header + investment sentence + fee table — once per place, not double-billed
         self.assertIn("Direct travel / reimbursables: $7,500", md)
         self.assertNotIn("directExpensesTotal", md)
-        self.assertIn("| Travel / Reimbursables | Travel — two Maine trips | $7,500 |", md)
+        self.assertIn("| Travel / Reimbursables |", md)
+        self.assertIn("Travel — two Maine trips", md)
+        self.assertIn("$7,500", md)
         # No second travel row as Direct expenses when already a Travel line
         self.assertNotIn("| Direct expenses | Travel / reimbursables | $7,500 |", md)
+        # One row per phase — Discovery lines rolled up (not one row per deliverable)
+        discovery_rows = [
+            ln for ln in md.splitlines() if ln.startswith("| Discovery |")
+        ]
+        self.assertEqual(len(discovery_rows), 1)
 
     def test_separates_professional_fees_from_travel(self) -> None:
         b = _budget(
@@ -298,6 +306,62 @@ class ClientBudgetRenderTests(unittest.TestCase):
         md = render_budget_markdown(b)
         self.assertNotIn("Discovery & Brand Foundation ($151,000)", md)
         self.assertIn("| Ongoing Brand Stewardship |", md)
+
+
+    def test_fee_detail_rolls_up_deliverables_per_phase(self) -> None:
+        b = _budget(
+            lineItems=[
+                BudgetLineItem(
+                    id="d1",
+                    category="Phase 1: Discovery",
+                    description="Stakeholder interviews with leadership",
+                    extended=6640,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="d2",
+                    category="Phase 1: Discovery",
+                    description="Audience segmentation and persona development",
+                    extended=6165,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="d3",
+                    category="Phase 1: Discovery",
+                    description="Competitive landscape analysis",
+                    extended=4000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="s1",
+                    category="Phase 2: Strategy",
+                    description="Messaging architecture",
+                    extended=8000,
+                    lineItemType="agency_fee",
+                ),
+            ],
+        )
+        md = render_budget_markdown(b)
+        self.assertIn("| Phase | Scope | Fee |", md)
+        discovery = [
+            ln for ln in md.splitlines() if ln.startswith("| Phase 1: Discovery |")
+        ]
+        strategy = [
+            ln for ln in md.splitlines() if ln.startswith("| Phase 2: Strategy |")
+        ]
+        self.assertEqual(len(discovery), 1)
+        self.assertEqual(len(strategy), 1)
+        self.assertIn("$16,805", discovery[0])  # 6640+6165+4000
+        self.assertIn("$8,000", strategy[0])
+        self.assertIn("Stakeholder interviews", discovery[0])
+        self.assertIn("Audience segmentation", discovery[0])
+        # Not one markdown row per deliverable
+        phase_data_rows = [
+            ln
+            for ln in md.splitlines()
+            if ln.startswith("| Phase 1:") or ln.startswith("| Phase 2:")
+        ]
+        self.assertEqual(len(phase_data_rows), 2)
 
 
 class QualifyingLanguageFormatTests(unittest.TestCase):

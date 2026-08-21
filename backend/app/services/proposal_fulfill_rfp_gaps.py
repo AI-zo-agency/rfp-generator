@@ -229,6 +229,7 @@ async def _draft_closing_section(
             ],
             max_tokens=2048,
             temperature=0.2,
+            node_name="fulfill_scan_closing_section",
         )
         content = str((raw or {}).get("content") or "").strip()
         return content or stub
@@ -379,18 +380,27 @@ async def run_fulfill_rfp_gaps(
         record_generation_stopped,
     )
     from app.services.proposal_verify_optional_scrub import run_verify_scrub_only_scan
+    import uuid
 
+    from app.services.llm_call_context import llm_call_context
+
+    scan_run_id = str(uuid.uuid4())
     token = bind_active_rfp(rfp_id)
     cancelled = False
     try:
-        if (mode or "full").strip().lower() in {
-            "verify_scrub_only",
-            "verify-scrub",
-            "verify_scrub",
-            "scrub",
-        }:
-            return await run_verify_scrub_only_scan(rfp_id)
-        return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
+        with llm_call_context(
+            rfp_id=rfp_id,
+            run_id=scan_run_id,
+            node_name="fulfill-scan",
+        ):
+            if (mode or "full").strip().lower() in {
+                "verify_scrub_only",
+                "verify-scrub",
+                "verify_scrub",
+                "scrub",
+            }:
+                return await run_verify_scrub_only_scan(rfp_id)
+            return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
     except ProposalGenerationCancelled:
         cancelled = True
         await record_generation_stopped(rfp_id, "fulfill-scan")
@@ -466,10 +476,14 @@ async def _run_fulfill_rfp_gaps_body(
         "Remove optional VERIFY/MANUAL FILL",
         "Compact manuscript (remove duplicates)",
         "Page limit & anti-invention (Ralph)",
-        "Review & quality gate (3 acts)",
         "Pre-submit refresh",
         "Submission readiness (triage + score)",
     )
+
+    # Final two stages always re-run on resume — they produce the ending report
+    # and designer-ready verification (hollow fill from won proposals).
+    _FINAL_ALWAYS_RUN_FROM = len(FULFILL_STEPS) - 1  # Pre-submit onward
+
 
     async def _ensure_not_stopped() -> None:
         from app.services.proposal_generation_cancel import check_generation_cancelled
@@ -498,7 +512,8 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].append(
             f"Resume: continuing from step {resume_at} — "
             f"earlier steps are already saved on the draft; "
-            f"review & quality gate plus the ending report still run in full."
+            f"pre-submit refresh and submission readiness still run in full "
+            f"(verify missing answers from past won proposals; designer-ready report)."
         )
         logger.info("Scan RFP resume %s from step %s", rfp_id, resume_at)
 
@@ -513,8 +528,9 @@ async def _run_fulfill_rfp_gaps_body(
 
     async def _scan_progress(step: int, label: str, detail: str | None = None) -> None:
         nonlocal draft
-        # Never skip 17+ — quality gate, pre-submit, and readiness ARE the report.
-        if step < resume_at and step < 17:
+        # Never skip the final stages — they produce the ending report and
+        # designer-ready verification (hollow fill from past won proposals).
+        if step < resume_at and step < _FINAL_ALWAYS_RUN_FROM:
             raise FulfillStepSkip(step)
         await record_pipeline_activity(
             rfp_id,
@@ -682,36 +698,8 @@ async def _run_fulfill_rfp_gaps_body(
             report["logs"].append(f"Scored stub draft skipped: {exc}")
 
     try:
-        from app.services.proposal_fulfill_fabrication_guard import (
-            repair_fabricated_qualifications_async,
-        )
-
-        draft, fab_logs, fab_human = await repair_fabricated_qualifications_async(
-            draft, research
-        )
-        report["logs"].extend(fab_logs)
-        report["humanDecisionGaps"].extend(fab_human)
-        if fab_logs:
-            await asave_proposal_draft(draft)
-    except ProposalGenerationCancelled:
-        raise
-    except FulfillStepSkip as skip:
-        _log_resume_skip(skip.step)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Fabrication guard skipped: %s", exc)
-        report["logs"].append(f"Fabrication guard skipped: {exc}")
-
-    try:
-        from app.services.proposal_integrity_guards import (
-            apply_manuscript_integrity_guards,
-            apply_reference_contact_evidence_guard,
-        )
         from app.services.proposal_zero_fabrication import apply_zero_fabrication_guards
 
-        draft, integrity_logs = apply_manuscript_integrity_guards(draft)
-        report["logs"].extend(integrity_logs[:16])
-        draft, phone_logs = apply_reference_contact_evidence_guard(draft, research)
-        report["logs"].extend(phone_logs[:12])
         draft, zf_report = apply_zero_fabrication_guards(
             draft,
             research=research,
@@ -720,7 +708,12 @@ async def _run_fulfill_rfp_gaps_body(
             label="scan-preflight",
         )
         report["logs"].extend(zf_report.logs[:16])
-        if integrity_logs or phone_logs or zf_report.logs:
+        report["humanDecisionGaps"].extend(
+            line.split("HUMAN_GAP:", 1)[1].strip()
+            for line in zf_report.logs
+            if "HUMAN_GAP:" in line
+        )
+        if zf_report.logs:
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
@@ -737,13 +730,17 @@ async def _run_fulfill_rfp_gaps_body(
             2,
             "Scan RFP: fact repairs",
             "Attach 04_Bio PDFs via designer note; scrub false vendor-registration / insurance "
-            "Compliant certifications, bio/org-chart conflicts, unverified carriers.",
+            "Compliant certifications; fill only tabs with missing answers from past won proposals.",
         )
         await _ensure_not_stopped()
         draft, fact_logs = await run_scan_fact_repairs(
             draft,
             research=research,
             rfp_text=rfp_text,
+            rfp_title=rfp.title or "",
+            rfp_client=rfp.client or "",
+            rfp_sector=getattr(rfp, "sector", None) or "",
+            rfp_id=rfp_id,
         )
         report["logs"].extend(fact_logs)
         for line in fact_logs:
@@ -963,7 +960,10 @@ async def _run_fulfill_rfp_gaps_body(
             "Delete clones, remove mega sections that restate sibling tabs.",
         )
         await _ensure_not_stopped()
-        sections, dedupe_logs = dedupe_manuscript_for_scan(list(draft.sections))
+        sections, dedupe_logs = dedupe_manuscript_for_scan(
+            list(draft.sections),
+            drop_clone_tabs=False,
+        )
         if dedupe_logs:
             draft = draft.model_copy(
                 update={
@@ -1003,7 +1003,8 @@ async def _run_fulfill_rfp_gaps_body(
         await _scan_progress(
             6,
             "Scan RFP: senior editor review",
-            "RFP proposal reviewer — dedupe, cross-refs, coverage gaps; no invented facts.",
+            "RFP proposal reviewer — coverage gaps from the outline; overlap already trimmed. "
+            "No second senior-editor LLM rewrite.",
         )
         await _ensure_not_stopped()
         from app.services.proposal_scan_senior_reviewer import (
@@ -1366,6 +1367,10 @@ async def _run_fulfill_rfp_gaps_body(
             draft,
             research=research,
             rfp_text=rfp_text,
+            rfp_title=rfp.title or "",
+            rfp_client=rfp.client or "",
+            rfp_sector=getattr(rfp, "sector", None) or "",
+            rfp_id=rfp_id,
         )
         for line in post_fc_logs:
             if line.startswith("HUMAN_GAP:"):
@@ -1637,10 +1642,13 @@ async def _run_fulfill_rfp_gaps_body(
         await _scan_progress(
             15,
             "Scan RFP: Compact manuscript",
-            "Final pass — remove leftover duplicate/restated tabs after adds/rewrites.",
+            "Final pass — trim leftover restated prose; collapse same-title twin tabs.",
         )
         await _ensure_not_stopped()
-        sections, final_logs = dedupe_manuscript_for_scan(list(draft.sections))
+        sections, final_logs = dedupe_manuscript_for_scan(
+            list(draft.sections),
+            drop_clone_tabs=False,
+        )
         if final_logs:
             draft = draft.model_copy(
                 update={
@@ -1740,65 +1748,51 @@ async def _run_fulfill_rfp_gaps_body(
     except ProposalGenerationCancelled:
         raise
     except Exception as extra:  # noqa: BLE001
-        logger.warning("Leak scrub before quality gate skipped: %s", extra)
+        logger.warning("Leak scrub before final verify skipped: %s", extra)
         report["logs"].append(f"Leak scrub skipped: {extra}")
 
-    # Stage 17 — the review agent. Runs before pre-submit refresh so the existing
-    # pre-submit pass still has the last word and reports on the gate's edits rather
-    # than a stale draft.
-    gate_report = None
+    # Quality gate (former step 17) removed — expensive 3-act rewrite loop.
+    # Designer-ready verify lives in the final stages: fill missing answers from
+    # past won proposals, zero-fabrication, pre-submit, submission readiness.
+    report["qualityGate"] = {
+        "ran": False,
+        "stoppedReason": "removed — final submission readiness verifies for designer",
+    }
+
     await _scan_progress(
         17,
-        "Scan RFP: review & quality gate",
-        "Verify every fact-bound claim, score against RFP criteria, then cut slop and repetition. "
-        "Leaked editor/system strings already stripped.",
+        "Scan RFP: pre-submit refresh",
+        "Designer-ready verify — inventory missing answers across the manuscript, "
+        "plan fills, query past won proposals, fill only those gaps.",
     )
+    await _ensure_not_stopped()
+
     try:
-        await _ensure_not_stopped()
-        from app.core.config import settings as _cfg
-        from app.services.proposal_quality_gate import run_quality_gate
+        from app.services.proposal_capability_bio_grounding import (
+            repair_misplaced_bio_stub_sections,
+        )
+        from app.services.proposal_hollow_kb_fill import fill_hollow_sections_for_pipeline
 
-        if not getattr(_cfg, "quality_gate_enabled", True):
-            # The expensive stage. Off means Scan stays quick while iterating; on is
-            # what you want for the pass before submission.
-            report["qualityGate"] = {
-                "ran": False,
-                "stoppedReason": "disabled by config (QUALITY_GATE_ENABLED=false)",
-            }
-            report["logs"].append("Quality gate disabled by config.")
-        else:
-            draft, gate_report = await run_quality_gate(
-                rfp=rfp,
-                draft=draft,
-                research=research,
-                rfp_text=rfp_text,
-                ensure_not_stopped=_ensure_not_stopped,
-            )
+        draft, misplaced = repair_misplaced_bio_stub_sections(draft)
+        draft, hollow = await fill_hollow_sections_for_pipeline(
+            draft,
+            rfp_title=rfp.title or "",
+            rfp_client=rfp.client or "",
+            rfp_sector=getattr(rfp, "sector", None) or "",
+            rfp_text=rfp_text,
+            rfp_id=rfp_id,
+        )
+        final_fill = misplaced + hollow
+        if final_fill:
             await asave_proposal_draft(draft)
-            report["qualityGate"] = gate_report.model_dump(by_alias=True)
-            report["logs"].extend(f"Gate: {line}" for line in gate_report.changes[:20])
-            report["logs"].append(
-                f"Gate: {gate_report.rounds_run} round(s), "
-                f"{sum(1 for t in gate_report.tickets if t.outcome == 'fixed')} fixed, "
-                f"{sum(1 for t in gate_report.tickets if t.outcome == 'manual_fill')} to manual fill, "
-                f"stopped because {gate_report.stopped_reason}"
-            )
-            from app.services.agency_facts import apply_canonical_agency_tenure_to_draft
-
-            draft, tenure_logs = apply_canonical_agency_tenure_to_draft(draft)
-            if tenure_logs:
-                report["logs"].extend(tenure_logs)
-                await asave_proposal_draft(draft)
+            report["logs"].extend(final_fill[:16])
     except ProposalGenerationCancelled:
         raise
-    except FulfillStepSkip as skip:
-        _log_resume_skip(skip.step)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Scan RFP quality gate skipped: %s", exc)
-        report["logs"].append(f"Quality gate skipped: {exc}")
-        report["qualityGate"] = {"ran": False, "stoppedReason": str(exc)}
+    except Exception as extra:  # noqa: BLE001
+        logger.warning("Final designer verify / hollow fill skipped: %s", extra)
+        report["logs"].append(f"Final designer verify skipped: {extra}")
 
-    # Final zero-fabrication pass — quality gate / stage 17 may reintroduce claims.
+    # Final zero-fabrication pass — keep claims grounded before ending report.
     try:
         from app.services.proposal_zero_fabrication import (
             apply_zero_fabrication_guards_before_persist,
@@ -1820,26 +1814,18 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Scan final zero-fabrication pass skipped: %s", exc)
         report["logs"].append(f"Final zero-fabrication pass skipped: {exc}")
 
-    await _scan_progress(
-        18,
-        "Scan RFP: pre-submit refresh",
-        "Checklist, manual flags, and ending report.",
-    )
-    await _ensure_not_stopped()
-
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp, draft=draft, research=research, finalized=False
     )
 
-    # Stage 18 — Submission readiness. Triage every open flag against the RFP text so
-    # each one carries a criticality and the clause justifying it, then score what is
-    # still open. Best-effort like the 17 stages above: a failure records "not run" and
-    # leaves the flags untriaged rather than dropping them.
+    # Final stage — triage flags + readiness for designer handoff.
     await _scan_progress(
-        19,
+        18,
         "Scan RFP: submission readiness",
-        "Triage manual flags against the RFP, then score what is still open.",
+        "Triage manual flags against the RFP, score what is still open, "
+        "and confirm the draft is accurate for designer.",
     )
+    gate_report = None
     try:
         await _ensure_not_stopped()
         from app.services.proposal_manual_fill_triage import triage_manual_fill_flags
@@ -1853,8 +1839,6 @@ async def _run_fulfill_rfp_gaps_body(
         )
         review = review.model_copy(update={"manual_fill_flags": triaged})
 
-        # The gate's Act 2 scorecard is what makes readiness measurable. Without it
-        # compute_readiness reports measured=False rather than a damning 0%.
         criterion_scores = [
             CriterionScore(
                 section_id=v.section_id,
@@ -1885,26 +1869,12 @@ async def _run_fulfill_rfp_gaps_body(
             f"(disqualifying={readiness.open_disqualifying}, "
             f"scored={readiness.open_scored})"
         )
-        # Everything the Submission Readiness Report needs, so the export endpoint
-        # renders from persisted data rather than re-running the scan.
         report["readinessReport"] = {
             "rfpTitle": rfp.title or "",
-            "scorecard": [
-                {
-                    "sectionId": v.section_id,
-                    "criterion": v.criterion,
-                    "weight": v.weight,
-                    "score": v.score,
-                    "whatWouldLosePoints": v.what_would_lose_points,
-                }
-                for v in (gate_report.scorecard if gate_report else [])
-            ],
-            "changes": list(gate_report.changes) if gate_report else [],
-            "unverifiedClaims": [
-                f"{c.claim} (section {c.section_id})"
-                for c in (gate_report.unresolved_claims if gate_report else [])
-            ],
-            "unfixed": list(gate_report.convergence) if gate_report else [],
+            "scorecard": [],
+            "changes": [],
+            "unverifiedClaims": [],
+            "unfixed": [],
         }
         for flag in triaged:
             if flag.criticality != "disqualifying":

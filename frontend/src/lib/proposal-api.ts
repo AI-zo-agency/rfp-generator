@@ -131,6 +131,7 @@ import {
   phaseCompleteOnServer,
   phaseIsComplete,
   shouldRunPhase,
+  shouldSkipCompletedPhase,
   type PipelinePhase,
   type PipelineInProgressPhase,
   type ProposalPipelineStatus,
@@ -233,6 +234,9 @@ export function validateStagedProposalComplete(
   }
   if (!research.rfpSections?.length) {
     return "Phase 2 incomplete — no proposal sections planned.";
+  }
+  if (!phaseIsComplete(draft, research, "phase-3")) {
+    return "Phase 3 incomplete — RFP tabs are not fully drafted.";
   }
   if (!research.proofPoints?.length && !planReady) {
     return "Phase 2 incomplete — no proof points matched (check case-study KB).";
@@ -921,6 +925,7 @@ export async function generateFullProposalStaged(
 
   const run = (phase: PipelinePhase) =>
     options?.forceRestart || shouldRunPhase(phase, resumeFrom);
+  let lastRanPhaseThisInvocation: PipelinePhase | null = null;
 
   async function skipIfPhaseAlreadyFinished(phase: PipelinePhase): Promise<boolean> {
     throwIfAborted(signal);
@@ -939,9 +944,13 @@ export async function generateFullProposalStaged(
     research = snap.research ?? research;
     pipelineStatus = snap.pipelineStatus ?? pipelineStatus;
     const fromServer = phaseCompleteOnServer(pipelineStatus, phase);
-    // Prefer server completedPhases. If status is missing, do not invent a skip.
-    if (fromServer !== null) return fromServer;
-    return false;
+    return shouldSkipCompletedPhase({
+      phase,
+      lastRanThisInvocation: lastRanPhaseThisInvocation,
+      lastCompletedPhase: research?.pipelineCheckpoint?.lastCompletedPhase ?? null,
+      completedOnServer: fromServer,
+      locallyComplete: phaseIsComplete(draft, research, phase),
+    });
   }
 
   if (run("sections-1-3")) {
@@ -960,6 +969,7 @@ export async function generateFullProposalStaged(
         options?.onResearchUpdate
       );
       ({ draft, research, pipelineStatus } = await refreshProposalSnapshot(rfpId));
+      lastRanPhaseThisInvocation = "sections-1-3";
     }
   }
 
@@ -1003,6 +1013,7 @@ export async function generateFullProposalStaged(
         options?.onDraftUpdate?.(draft);
         options?.onResearchUpdate?.(research);
       }
+      lastRanPhaseThisInvocation = "phase-2";
     }
   }
 
@@ -1018,6 +1029,7 @@ export async function generateFullProposalStaged(
       );
       draft = phase3.draft;
       research = phase3.research;
+      lastRanPhaseThisInvocation = "phase-3";
     }
   }
 
@@ -1028,6 +1040,7 @@ export async function generateFullProposalStaged(
       const budgeted = await runPhase3_5BudgetWithRecovery(rfpId, signal);
       research = budgeted.research;
       if (budgeted.draft) draft = budgeted.draft;
+      lastRanPhaseThisInvocation = "phase-3-5-budget";
     }
   }
 
@@ -1043,6 +1056,7 @@ export async function generateFullProposalStaged(
       );
       draft = edited.draft;
       research = edited.research;
+      lastRanPhaseThisInvocation = "phase-3-6-self-edit";
     }
   }
 
@@ -1052,6 +1066,7 @@ export async function generateFullProposalStaged(
       onProgress?.("phase-4-review");
       const reviewed = await runPhase4PreSubmitReview(rfpId, signal);
       research = reviewed.research;
+      lastRanPhaseThisInvocation = "phase-4-review";
     }
   }
 
@@ -1062,8 +1077,12 @@ export async function generateFullProposalStaged(
     throw new Error("Proposal draft missing after pipeline run.");
   }
 
-  // Prefer server completeness over local blocker heuristics for soft exit.
-  if (pipelineStatus?.isComplete || pipelineStatus?.resumeFromPhase === "complete") {
+  // Stale isComplete from a prior run must not exit after this click re-ran
+  // an earlier phase (e.g. Intelligence) while RFP tabs are still empty.
+  if (
+    (pipelineStatus?.isComplete || pipelineStatus?.resumeFromPhase === "complete") &&
+    !lastRanPhaseThisInvocation
+  ) {
     return { draft, research };
   }
 
@@ -2151,6 +2170,7 @@ export interface KeyPersonaItem {
   hasResume: boolean;
   sourceFile: string;
   bioSnippet?: string;
+  retired?: boolean;
 }
 
 export interface KeyPersonasResponse {
@@ -2227,8 +2247,22 @@ export async function saveProposalKeyPersonas(
       biosSynced: Boolean(data.biosSynced),
       draft: data.draft ? apiDraftToOutline(data.draft) : undefined,
     };
-  } catch {
+  }   catch {
     return { ok: true };
   }
+}
+
+export async function setKeyPersonaRetired(input: {
+  personId: string;
+  name: string;
+  retired: boolean;
+}): Promise<KeyPersonasResponse | null> {
+  const res = await fetch("/api/knowledge-base/key-personas/retired", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as KeyPersonasResponse;
 }
 

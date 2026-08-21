@@ -3914,3 +3914,40 @@ h4 {
     transition: none;
   }
 }
+
+/* Prospect Operations: the review step belongs to the light workspace, not a separate dark mode. */
+main .space-y-5 > .bg-\[\#274742\] {
+  background: #fffaf5;
+  border: 1px solid rgba(239, 80, 24, 0.2);
+  box-shadow: 0 10px 24px rgba(39, 71, 66, 0.05);
+  color: #0a0f1a;
+}
+
+main .space-y-5 > .bg-\[\#274742\] .text-\[\#d5e1d6\] {
+  color: #52635f;
+}
+
+main .space-y-5 > .bg-\[\#274742\] .text-\[\#ffd652\] {
+  color: #ef5018;
+}
+
+main .space-y-5 > .bg-\[\#274742\] button:last-child {
+  border-color: rgba(39, 71, 66, 0.25);
+  background: #ffffff;
+  color: #274742;
+}
+
+main .space-y-5 > .bg-\[\#274742\] button:last-child:hover {
+  background: #edf3f1;
+}
+
+main .space-y-5 > * + * {
+  margin-top: 1rem;
+}
+
+/* Show where the next verification pass can come from without overstating inferred data. */
+main .space-y-5 > section h3 + span::before {
+  content: "Monid verification available · ";
+  color: #274742;
+  font-weight: 700;
+}

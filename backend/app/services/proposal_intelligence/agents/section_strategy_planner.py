@@ -107,6 +107,20 @@ async def run_section_strategy_planner(
         max_tokens=4096,
         agent_name=AGENT,
     )
+    return apply_section_strategy_from_raw(
+        plan, raw, provider=provider, rfp_meta=rfp_meta
+    )
+
+
+def apply_section_strategy_from_raw(
+    plan: ProposalExecutionPlan,
+    raw: dict | None,
+    *,
+    provider: str,
+    rfp_meta: dict[str, str] | None = None,
+) -> ProposalExecutionPlan:
+    """Validate writer briefs and apply word-budget / attachment guards."""
+    page_limit = _parse_page_limit(rfp_meta)
     try:
         plans = SectionPlans.model_validate(raw or {})
     except Exception as exc:
@@ -155,7 +169,6 @@ async def run_section_strategy_planner(
         if existing and not section_plan.winning_pattern.confidence:
             section_plan.winning_pattern = existing
 
-        title = section_plan.title or ""
         sid = section_plan.section_id or ""
         if _is_checklist_tab(sid):
             section_plan.word_budget = min(section_plan.word_budget or 100, 120)

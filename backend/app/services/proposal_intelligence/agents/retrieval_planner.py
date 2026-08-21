@@ -62,6 +62,16 @@ async def run_retrieval_planner(
         max_tokens=3072,
         agent_name=AGENT,
     )
+    return apply_retrieval_plan_from_raw(plan, raw, provider=provider)
+
+
+def apply_retrieval_plan_from_raw(
+    plan: ProposalExecutionPlan,
+    raw: dict | None,
+    *,
+    provider: str,
+) -> ProposalExecutionPlan:
+    """Validate retrieval entries and fill fallbacks from section briefs."""
     # Strip any accidental content/excerpt keys
     if isinstance(raw, dict):
         for entry in raw.get("entries") or []:

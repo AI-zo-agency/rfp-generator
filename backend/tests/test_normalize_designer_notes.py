@@ -38,6 +38,16 @@ class NormalizeDesignerNotesTests(unittest.TestCase):
         raw = "Prose.\n\n**Designer Note:** Attach signed task-auth form as inset."
         out = scrub_client_facing_section_artifacts(raw)
         self.assertIn("[DESIGNER NOTE: Attach signed task-auth form as inset.]", out)
+
+    def test_scrub_repairs_flattened_markdown_table(self) -> None:
+        raw = (
+            "## Fee Detail by Phase\n\n"
+            "| Phase | Deliverable | Amount | | --- | --- | ---: | "
+            "| Phase 1 | Discovery | $1,000 |"
+        )
+        out = scrub_client_facing_section_artifacts(raw)
+        self.assertIn("| Phase | Deliverable | Amount |\n", out)
+        self.assertIn("| Phase 1 | Discovery | $1,000 |", out)
         self.assertNotIn("**Designer Note:**", out)
 
 

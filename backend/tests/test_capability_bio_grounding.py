@@ -122,6 +122,99 @@ class BioEducationGroundingTests(unittest.TestCase):
         self.assertFalse(is_named_person_bio_tab(section))
         self.assertFalse(is_personnel_bio_section(section))
 
+    def test_municipality_summaries_is_our_work_not_a_person(self) -> None:
+        from app.models.proposal import ProposalSection
+        from app.services.proposal_bio_stub import (
+            is_plausible_person_name,
+            prior_content_for_rewrite,
+        )
+        from app.services.proposal_capability_bio_grounding import (
+            is_named_person_bio_tab,
+        )
+
+        self.assertEqual(
+            person_name_from_tab_title("3.1 — Municipality Summaries"),
+            "",
+        )
+        self.assertFalse(is_plausible_person_name("Municipality Summaries"))
+        self.assertFalse(is_plausible_person_name("Municapility Summaries"))
+        self.assertTrue(is_plausible_person_name("Sonja Anderson"))
+        section = ProposalSection(
+            id="section-3-work-01-municipality-summaries",
+            title="3.1 — Municipality Summaries",
+            content=(
+                "### Municipality Summaries\n"
+                "**Role on this engagement:** Team member on this engagement.\n\n"
+                "[DESIGNER NOTE: Insert approved bio PDF — "
+                "04_Bio_MunicipalitySummaries.pdf. Do not rewrite Key Accounts "
+                "or work history in-manuscript.]\n"
+            ),
+        )
+        self.assertFalse(is_named_person_bio_tab(section))
+        self.assertFalse(is_personnel_bio_section(section))
+        self.assertEqual(prior_content_for_rewrite(section.id, section.content or ""), "")
+
+        from app.services.proposal_section_quality import prior_content_for_redraft
+
+        prior, full_rewrite = prior_content_for_redraft(section)
+        self.assertEqual(prior, "")
+        self.assertTrue(full_rewrite)
+
+    def test_closing_and_toc_titles_are_never_bio_tabs(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_capability_bio_grounding import (
+            is_named_person_bio_tab,
+            is_personnel_bio_section,
+            repair_misplaced_bio_stub_sections,
+        )
+
+        drug = ProposalSection(
+            id="rfp-closing-drug_free_workplace_program",
+            title="Drug-Free Workplace Program",
+            content=(
+                "### Drug-Free Workplace Program\n\n"
+                "**Role on this engagement:** Team member on this engagement"
+            ),
+        )
+        vendor = ProposalSection(
+            id="rfp-structure-vendor-application",
+            title="Vendor Application",
+            content=(
+                "### Vendor Application\n"
+                "**Role on this engagement:** Team member on this engagement\n\n"
+                "[DESIGNER NOTE: Insert approved bio PDF — 04_Bio_VendorApplication.pdf. "
+                "Do not rewrite Key Accounts or work history in-manuscript.]"
+            ),
+        )
+        real_bio = ProposalSection(
+            id="section-2-bio-sonja-anderson",
+            title="2.1 — Sonja Anderson",
+            content=(
+                "### Sonja Anderson\n"
+                "**Role on this engagement:** Agency Director\n\n"
+                "[DESIGNER NOTE: Insert approved bio PDF — 04_Bio_SonjaAnderson.pdf.]"
+            ),
+        )
+        self.assertFalse(is_named_person_bio_tab(drug))
+        self.assertFalse(is_named_person_bio_tab(vendor))
+        self.assertFalse(is_personnel_bio_section(drug))
+        self.assertFalse(is_personnel_bio_section(vendor))
+        self.assertTrue(is_named_person_bio_tab(real_bio))
+
+        draft = ProposalDraft(
+            rfpId="rfp-bio-guard",
+            updatedAt="2026-08-21T00:00:00Z",
+            sections=[drug, vendor, real_bio],
+        )
+        updated, logs = repair_misplaced_bio_stub_sections(draft)
+        self.assertEqual(len(logs), 2)
+        drug_body = updated.sections[0].content or ""
+        vendor_body = updated.sections[1].content or ""
+        self.assertIn("MANUAL FILL", drug_body)
+        self.assertNotIn("Role on this engagement", drug_body)
+        self.assertIn("MANUAL FILL", vendor_body)
+        self.assertIn("Role on this engagement", updated.sections[2].content or "")
+
 
 class PersonnelSectionBioTests(unittest.TestCase):
     def test_experience_of_personnel_is_personnel_section(self) -> None:
@@ -157,6 +250,20 @@ class PersonnelSectionBioTests(unittest.TestCase):
             ),
         )
         self.assertIn("Shawn DiCriscio", named_people_in_section(section))
+
+    def test_staffing_prose_name_comma_role_is_a_person(self) -> None:
+        from app.models.proposal import ProposalSection
+
+        section = ProposalSection(
+            id="rfp-staffing",
+            title="Staffing Plan and Project Infrastructure",
+            content=(
+                "Letitia Hopper, Digital Media Strategist, Manages media planning, "
+                "vendor negotiation, added-value securing, and placement monitoring."
+            ),
+        )
+        self.assertTrue(is_personnel_bio_section(section))
+        self.assertIn("Letitia Hopper", named_people_in_section(section))
 
     def test_user_message_names_person_when_heading_odd(self) -> None:
         from app.models.proposal import ProposalSection
@@ -405,6 +512,32 @@ class GroundBiosStubOnlyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.sections[0].content, prose)
         self.assertFalse(is_bio_pdf_designer_note(updated.sections[0].content or ""))
         self.assertFalse(any("designer-note stub" in line for line in logs))
+
+    async def test_ground_bios_does_not_stub_municipality_summaries_our_work(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+        from app.services.proposal_capability_bio_grounding import ground_bios_to_kb
+
+        prose = (
+            "City of Umatilla and City of Medford campaigns — paid media, "
+            "creative, and community outreach for municipal clients."
+        )
+        draft = ProposalDraft(
+            rfpId="rfp-muni",
+            updatedAt="2026-08-17T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="section-3-work-01-municipality-summaries",
+                    title="3.1 — Municipality Summaries",
+                    content=prose,
+                )
+            ],
+        )
+        updated, logs = await ground_bios_to_kb(draft)
+        self.assertEqual(updated.sections[0].content, prose)
+        self.assertFalse(is_bio_pdf_designer_note(updated.sections[0].content or ""))
+        self.assertFalse(any("designer-note stub" in line for line in logs))
+        self.assertFalse(any("04_Bio_Municipality" in line for line in logs))
 
     async def test_ground_bios_does_not_touch_who_we_are(self) -> None:
         from app.models.proposal import ProposalDraft, ProposalSection

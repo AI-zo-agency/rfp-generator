@@ -1,5 +1,6 @@
 import { findBudgetSection } from "@/lib/proposal-budget-content";
 import type { ProposalBudget, ProposalOutline, RfpSectionMap } from "@/types/proposal";
+import { isInternalScanTag } from "@/lib/gap-tag-humanize";
 
 /**
  * Bracket tags that must be filled or confirmed before submission.
@@ -252,6 +253,7 @@ export function scanManualFillFlagsInText(
   for (const match of text.matchAll(re)) {
     const tag = match[0];
     if (!tag) continue;
+    if (isInternalScanTag(tag)) continue;
     // Bio PDF insert notes are designer handoff — not submission-gap checklist rows.
     if (/^\[DESIGNER\s+NOTE:/i.test(tag)) continue;
     flags.push({

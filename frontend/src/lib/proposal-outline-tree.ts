@@ -76,11 +76,36 @@ function parseTitleMajorMinor(title: string): { major: number; minor: number } {
   return { major: 999, minor: 999 };
 }
 
-/** Stable proposal order: 1.x company → 2.x bios → 3.x work → RFP tabs → other. */
+const LEADING_OUTLINE_NUMBER = /^\s*\d+(?:\.\d+)?\s*[—\-–.:]\s*/;
+
+export function stripLeadingOutlineNumber(title: string): string {
+  const trimmed = (title || "").trim();
+  const stripped = trimmed.replace(LEADING_OUTLINE_NUMBER, "").trim();
+  return stripped || trimmed;
+}
+
+export function isZoStaticSubsection(section: Pick<OutlineSection, "id">): boolean {
+  const id = section.id;
+  return (
+    id.startsWith("section-1-") ||
+    id.startsWith("section-2-") ||
+    id.startsWith("section-3-")
+  );
+}
+
+function originalIndexMap(
+  sections: OutlineSection[],
+): Map<string, number> {
+  return new Map(sections.map((section, index) => [section.id, index]));
+}
+
+/** Stable proposal order: 1.x company → 2.x bios → 3.x work → RFP tabs (planner order). */
 export function compareManuscriptSections(
   a: OutlineSection,
   b: OutlineSection,
+  originalIndex?: ReadonlyMap<string, number>,
 ): number {
+  const origOf = (id: string) => originalIndex?.get(id) ?? 0;
   const rank = (s: OutlineSection): [number, number, number, string] => {
     const id = s.id;
     const { major, minor } = parseTitleMajorMinor(s.title);
@@ -110,9 +135,10 @@ export function compareManuscriptSections(
       return [5, major, minor, id];
     }
     if (s.source === "rfp" || id.startsWith("rfp-")) {
-      return [6, major, minor, id];
+      // Keep Intelligence / RFP TOC order — do not sort by buyer numbers or id.
+      return [6, origOf(id), 0, id];
     }
-    return [7, major, minor, id];
+    return [7, origOf(id), 0, id];
   };
 
   const ra = rank(a);
@@ -132,7 +158,10 @@ export function compareManuscriptSections(
 export function sortManuscriptSections(
   sections: OutlineSection[],
 ): OutlineSection[] {
-  return [...sections].sort(compareManuscriptSections);
+  const originalIndex = originalIndexMap(sections);
+  return [...sections].sort((a, b) =>
+    compareManuscriptSections(a, b, originalIndex),
+  );
 }
 
 export function normalizeOutlineSectionOrder(
@@ -197,6 +226,7 @@ export function buildOutlineSectionTree(
 ): OutlineTreeNode[] {
   const used = new Set<string>();
   const nodes: OutlineTreeNode[] = [];
+  const originalIndex = originalIndexMap(sections);
 
   for (const { id: groupId, label } of GROUP_ORDER) {
     const children = sections.filter(
@@ -206,7 +236,7 @@ export function buildOutlineSectionTree(
         matchesGroup(section, groupId),
     );
     if (children.length === 0) continue;
-    children.sort(compareManuscriptSections);
+    children.sort((a, b) => compareManuscriptSections(a, b, originalIndex));
     children.forEach((section) => used.add(section.id));
 
     if (children.length === 1 && (groupId === "section-4" || groupId === "section-5")) {
@@ -222,12 +252,41 @@ export function buildOutlineSectionTree(
     if (used.has(section.id) || isPlaceholder(section)) continue;
     leftovers.push(section);
   }
-  leftovers.sort(compareManuscriptSections);
+  leftovers.sort((a, b) => compareManuscriptSections(a, b, originalIndex));
   for (const section of leftovers) {
     nodes.push({ kind: "leaf", section });
   }
 
   return nodes;
+}
+
+/** RFP tabs continue 4, 5, 6… after static Sections 1–3. */
+export function buildRfpTabDisplayNumbers(
+  sections: OutlineSection[],
+): Map<string, number> {
+  const map = new Map<string, number>();
+  let n = 4;
+  for (const section of getManuscriptSections(sections)) {
+    if (isZoStaticSubsection(section)) continue;
+    if (section.id.startsWith("section-4-") || section.id.startsWith("section-5-")) {
+      continue;
+    }
+    map.set(section.id, n);
+    n += 1;
+  }
+  return map;
+}
+
+export function sectionListLabel(
+  section: OutlineSection,
+  rfpTabNumberById: ReadonlyMap<string, number>,
+): string {
+  const title = (section.title || "").trim();
+  if (isZoStaticSubsection(section)) return title;
+  const n = rfpTabNumberById.get(section.id);
+  const body = stripLeadingOutlineNumber(title);
+  if (n != null) return `${n}. ${body}`;
+  return title;
 }
 
 export function groupContainsSection(

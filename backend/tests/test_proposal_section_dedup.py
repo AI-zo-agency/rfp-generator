@@ -107,6 +107,90 @@ class SectionDedupTests(unittest.TestCase):
         self.assertEqual(campaign_kept, 1)
         self.assertTrue(dropped)
 
+    def test_senior_editor_compact_keeps_overlapping_campaign_tabs(self) -> None:
+        sections = [
+            _sec("section-1-who-we-are", "1.1 — Who We Are", "We are zö agency brand essence."),
+            _sec(
+                "section-3-work-01-umatilla",
+                "3.1 — City of Umatilla Digital Campaign",
+                _UMATILLA_BODY,
+            ),
+            _sec(
+                "rfp-tourism-accounts",
+                "Examples of Tourism or Destination Marketing Social Media Accounts Managed",
+                _UMATILLA_BODY
+                + " Meta Business Suite expertise supports destination marketing conversion.",
+            ),
+            _sec(
+                "rfp-successful-campaigns",
+                "Examples of Successful Campaigns",
+                _UMATILLA_BODY
+                + " Seasonal destination marketing campaigns extend visitor engagement.",
+            ),
+            _sec(
+                "rfp-references",
+                "Client References",
+                "San Francisco Travel Contact phone email for tourism reference verification "
+                "and municipal collaboration outcomes across multi year renewals.",
+            ),
+        ]
+        kept, _logs = dedupe_manuscript_for_scan(sections, drop_clone_tabs=False)
+        kept_ids = {s.id for s in kept}
+        self.assertIn("rfp-tourism-accounts", kept_ids)
+        self.assertIn("rfp-successful-campaigns", kept_ids)
+        self.assertIn("rfp-references", kept_ids)
+
+    def test_trim_overlap_keeps_tabs_and_strips_copied_paragraphs(self) -> None:
+        shared = (
+            "We staff a dedicated account team with weekly status meetings, "
+            "monthly reporting, and a named project manager for day-to-day "
+            "decisions across the full engagement window for this contract."
+        )
+        sections = [
+            _sec(
+                "rfp-capacity",
+                "Capacity",
+                shared + "\n\nUnique capacity table lists 40 creative hours per week.",
+            ),
+            _sec(
+                "rfp-staffing",
+                "Staffing Plan",
+                shared + "\n\nUnique staffing roster names roles without repeating the team essay.",
+            ),
+        ]
+        kept, logs = dedupe_manuscript_for_scan(sections, drop_clone_tabs=False)
+        self.assertEqual({s.id for s in kept}, {"rfp-capacity", "rfp-staffing"})
+        staffing = next(s for s in kept if s.id == "rfp-staffing")
+        capacity = next(s for s in kept if s.id == "rfp-capacity")
+        self.assertIn("Unique capacity table", capacity.content or "")
+        self.assertTrue(
+            any("trimmed" in line for line in logs)
+            or "See **" in (staffing.content or ""),
+        )
+        self.assertIn("See **", staffing.content or "")
+        self.assertNotIn(shared, staffing.content or "")
+
+    def test_trim_static_restates_in_rfp_tab(self) -> None:
+        who = (
+            "zö is a full-service independent creative agency founded in 2013 "
+            "with offices in Portland serving public-sector communications work."
+        )
+        sections = [
+            _sec("section-1-who-we-are", "1.1 Who We Are", who),
+            _sec(
+                "rfp-approach",
+                "Approach",
+                who + "\n\nWeekly sprints with a named PM and a shared content calendar.",
+            ),
+        ]
+        kept, logs = dedupe_manuscript_for_scan(sections, drop_clone_tabs=False)
+        approach = next(s for s in kept if s.id == "rfp-approach")
+        self.assertEqual(len(kept), 2)
+        self.assertIn("Weekly sprints", approach.content or "")
+        self.assertIn("See **", approach.content or "")
+        self.assertNotIn("founded in 2013", approach.content or "")
+        self.assertTrue(any("trimmed" in line for line in logs))
+
     def test_prune_deletes_overlapping_collab_tabs(self) -> None:
         body = (
             "We coordinate with the Tourism Program Manager weekly for content calendar "
@@ -262,6 +346,98 @@ class SectionDedupTests(unittest.TestCase):
         self.assertEqual(len([t for t in titles if "Reference" in t]), 1, msg=titles)
         self.assertTrue(any("near-duplicate" in d for d in dropped))
         self.assertTrue(any("Cost Proposal" in t for t in titles))
+
+    def test_scan_drop_clone_false_still_collapses_identical_title_twins(self) -> None:
+        """Complete Scan used drop_clone_tabs=False and left two §5.2 / §5.9 tabs."""
+        body_a = (
+            "North Miami Beach municipal brand development with comparable recreation "
+            "center and community outreach case studies for evaluator review. "
+        ) * 6
+        body_b = (
+            "OpenGov portal vendor registration fields completed with legal name FEIN "
+            "and contact details synced from Business Information Section 1.3. "
+        ) * 6
+        sections = [
+            _sec(
+                "rfp-structure-5-9",
+                "Section 5.9 — OpenGov Portal Vendor Registration",
+                body_b,
+            ),
+            _sec(
+                "rfp-structure-5-2",
+                "Section 5.2 — Sample Work Submission (Portfolio of Comparable Projects)",
+                body_a,
+            ),
+            _sec(
+                "rfp-structure-5-2-2",
+                "Section 5.2 — Sample Work Submission (Portfolio of Comparable Projects)",
+                body_a + " Extra twin paragraph.",
+            ),
+            _sec(
+                "rfp-structure-5-9-2",
+                "Section 5.9 — OpenGov Portal Vendor Registration",
+                body_b + " Extra twin paragraph.",
+            ),
+            _sec(
+                "rfp-addenda",
+                "Acknowledgment of Addenda",
+                "We acknowledge receipt of all addenda issued for this solicitation.",
+            ),
+        ]
+        kept, logs = dedupe_manuscript_for_scan(sections, drop_clone_tabs=False)
+        titles = [s.title or "" for s in kept]
+        self.assertEqual(
+            len([t for t in titles if "Sample Work" in t]),
+            1,
+            msg=titles,
+        )
+        self.assertEqual(
+            len([t for t in titles if "OpenGov" in t]),
+            1,
+            msg=titles,
+        )
+        self.assertTrue(any("near-duplicate" in line for line in logs))
+        self.assertTrue(any("Addenda" in t for t in titles))
+
+    def test_scan_drop_clone_false_keeps_soft_near_dup_toc_siblings(self) -> None:
+        """Complete Scan must not merge distinct TOC tabs that merely share words."""
+        body = (
+            "We manage destination marketing social accounts and successful campaign "
+            "examples with weekly reporting for municipal tourism clients. "
+        ) * 8
+        sections = [
+            _sec(
+                "rfp-tourism-accounts",
+                "Examples of Tourism or Destination Marketing Social Media Accounts Managed",
+                body,
+            ),
+            _sec(
+                "rfp-successful-campaigns",
+                "Examples of Successful Campaigns",
+                body + " Seasonal destination marketing campaigns extend visitor engagement.",
+            ),
+            _sec(
+                "rfp-refs-short",
+                "References",
+                "Contact phone email for tourism reference verification across renewals. " * 4,
+            ),
+            _sec(
+                "rfp-refs-past",
+                "References & Past Performance",
+                "Past performance contacts and outcomes across multi year renewals. " * 4,
+            ),
+        ]
+        kept, _logs = dedupe_manuscript_for_scan(sections, drop_clone_tabs=False)
+        kept_ids = {s.id for s in kept}
+        self.assertEqual(
+            kept_ids,
+            {
+                "rfp-tourism-accounts",
+                "rfp-successful-campaigns",
+                "rfp-refs-short",
+                "rfp-refs-past",
+            },
+        )
 
 
 if __name__ == "__main__":

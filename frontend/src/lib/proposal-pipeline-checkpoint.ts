@@ -160,7 +160,6 @@ export const FULFILL_SCAN_STEP_LABELS = [
   "Remove optional VERIFY/MANUAL FILL",
   "Compact manuscript (remove duplicates)",
   "Page limit & anti-invention (Ralph)",
-  "Review & quality gate (3 acts)",
   "Pre-submit refresh",
   "Submission readiness (triage + score)",
 ] as const;
@@ -231,9 +230,48 @@ function selfEditConsideredComplete(
   return false;
 }
 
-function phaseIndex(phase: PipelinePhase): number {
+export function phaseIndex(phase: PipelinePhase): number {
   if (phase === "complete") return PIPELINE_PHASE_ORDER.length;
   return PIPELINE_PHASE_ORDER.indexOf(phase);
+}
+
+/**
+ * Whether generateFullProposalStaged should skip a phase that looks finished.
+ *
+ * Stale completedPhases / leftover manuscript from a prior run must not skip
+ * later work after this click already re-ran an earlier phase, and must not
+ * skip a phase the checkpoint has not reached yet.
+ */
+export function shouldSkipCompletedPhase(options: {
+  phase: PipelinePhase;
+  lastRanThisInvocation: PipelinePhase | null;
+  lastCompletedPhase?: PipelinePhase | null;
+  completedOnServer: boolean | null;
+  locallyComplete: boolean;
+}): boolean {
+  const {
+    phase,
+    lastRanThisInvocation,
+    lastCompletedPhase,
+    completedOnServer,
+    locallyComplete,
+  } = options;
+  if (
+    lastRanThisInvocation &&
+    phaseIndex(phase) > phaseIndex(lastRanThisInvocation)
+  ) {
+    return false;
+  }
+  if (
+    lastCompletedPhase &&
+    lastCompletedPhase !== "complete" &&
+    phaseIndex(lastCompletedPhase) >= 0 &&
+    phaseIndex(phase) > phaseIndex(lastCompletedPhase)
+  ) {
+    return false;
+  }
+  if (completedOnServer === true) return locallyComplete;
+  return false;
 }
 
 export function phaseIsComplete(

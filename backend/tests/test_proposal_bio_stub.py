@@ -91,6 +91,16 @@ def test_resolve_filename_from_sources() -> None:
     assert name == "04_Bio_SonjaAnderson.pdf"
 
 
+def test_bio_filename_matches_spaced_and_underscored_uploads() -> None:
+    from app.services.proposal_bio_stub import bio_filename_matches_member
+
+    assert bio_filename_matches_member("04_Bio_LetitiaHopper.pdf", "Letitia Hopper")
+    assert bio_filename_matches_member("04_Bio_Letitia_Hopper.pdf", "Letitia Hopper")
+    assert bio_filename_matches_member("04_Bio_Letitia Hopper.pdf", "Letitia Hopper")
+    assert not bio_filename_matches_member("04_Bio_SonjaAnderson.pdf", "Letitia Hopper")
+    assert not bio_filename_matches_member("03_CS_LetitiaHopper.pdf", "Letitia Hopper")
+
+
 def test_scrub_preserves_bio_pdf_designer_note() -> None:
     body = (
         "### Sonja\n\n"

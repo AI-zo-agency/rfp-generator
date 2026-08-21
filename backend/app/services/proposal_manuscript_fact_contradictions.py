@@ -58,6 +58,14 @@ IS a contradiction (flag these):
   or companyfacts excerpt in the manuscript evidences that exact past delivery.
   Severity=critical/major. Rewrite to adjacent verified experience or [VERIFY] —
   never assert checkable past work that is not in the evidence.
+- STATE BUSINESS REGISTRATION: "registered / qualified / authorized to conduct
+  business in [State]" when that state is not on the companyfacts / Section 1.3
+  State Registrations list. Severity=critical. rewrite → MANUAL FILL for Sonja
+  (public-record filing) or delete the sentence. Never leave a signed letter
+  asserting an unlisted foreign qualification.
+- CASE STUDY NAME / URL: a project title, client name, or URL that does not
+  appear in Section 3 cards, 03_CS, or ClientList. Severity=critical. Remove or
+  VERIFY — never keep an invented case-study name or link.
 - CASE STUDY / SECTOR FRAMING MISMATCH: narrative claims government / utility /
   enterprise web proof while the included Section 3 case studies are private
   healthcare, retail, or otherwise do not demonstrate the claimed capability.

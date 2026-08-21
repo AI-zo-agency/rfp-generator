@@ -48,7 +48,7 @@ class IntentClassifierRetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def _classify(self):
         return await mod.classify_chat_edit_intent(
-            user_message="rewrite this section", draft=_draft()
+            user_message="check the compliance table and then rewrite it if anything is off", draft=_draft()
         )
 
     async def test_transient_failure_is_retried_and_succeeds(self) -> None:

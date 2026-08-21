@@ -532,9 +532,47 @@ def _hit_file_name(hit: dict[str, Any]) -> str:
 
 def _is_member_bio_file_hit(hit: dict[str, Any], member: str) -> bool:
     """True when hit is from this person's 04_Bio_* PDF (not proposals/case studies)."""
+    from app.services.proposal_bio_stub import bio_filename_matches_member
+
     file_name = _hit_file_name(hit)
     expected = f"04_Bio_{_bio_file_slug(member)}.pdf".casefold()
-    return file_name.strip().casefold() == expected
+    if file_name.strip().casefold() == expected:
+        return True
+    return bio_filename_matches_member(file_name, member)
+
+
+async def _find_member_bio_document(member: str) -> dict[str, Any] | None:
+    """Exact 04_Bio_FirstLast.pdf, then any 04_Bio file whose name contains the person."""
+    from app.services.proposal_bio_stub import (
+        bio_filename_matches_member,
+        expected_bio_pdf_filename,
+    )
+
+    candidates = [
+        f"04_Bio_{_bio_file_slug(member)}.pdf",
+        expected_bio_pdf_filename(member),
+    ]
+    seen: set[str] = set()
+    for name in candidates:
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            doc = await supermemory.find_document_by_file_name(name)
+        except supermemory.SupermemoryError:
+            doc = None
+        if doc:
+            return doc
+    try:
+        docs = await supermemory.list_all_container_documents()
+    except supermemory.SupermemoryError:
+        return None
+    for doc in docs or []:
+        file_name = _hit_file_name(doc)
+        if bio_filename_matches_member(file_name, member):
+            return doc
+    return None
 
 
 def _prefer_full_bio_text(full_text: str, search_text: str) -> str:
@@ -674,14 +712,13 @@ async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
     if not supermemory.is_configured():
         return "(Supermemory not configured.)", []
 
-    slug = _bio_file_slug(member)
-    target_file = f"04_Bio_{slug}.pdf"
     sources: list[str] = []
     full_text = ""
 
     # 1) Authoritative full document by filename (not fuzzy RFP-mixed search).
+    #    Also accept 04_Bio_First_Last.pdf / "04_Bio_First Last.pdf" variants.
     try:
-        doc = await supermemory.find_document_by_file_name(target_file)
+        doc = await _find_member_bio_document(member)
         if doc:
             custom_id = supermemory.document_fetch_key(doc)
             if custom_id:
@@ -1991,17 +2028,37 @@ async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, A
     by_id = {p["id"]: p for p in all_personas}
     resolved: list[dict[str, Any]] = []
     missing: list[str] = []
+    from app.services.evidence_trust.personnel_grounding import is_retired_team_member
+    from app.services.retired_staff_store import is_retired_id
+
     for pid in selected_ids:
+        if is_retired_id(pid):
+            logger.info("Skipping retired Key Persona id %s for rfp %s", pid, rfp_id)
+            continue
         persona = by_id.get(pid)
         if persona:
+            if persona.get("retired") or is_retired_team_member(
+                str(persona.get("name") or "")
+            ):
+                continue
             resolved.append(persona)
             continue
         # Never silently drop a user pick — stub so Section 2 still gets a bio card.
+        # But never stub a retired id as if they were current staff.
+        stub_name = _persona_name_from_id(pid)
+        if is_retired_team_member(stub_name):
+            logger.info(
+                "Skipping retired Key Persona stub %s (%s) for rfp %s",
+                pid,
+                stub_name,
+                rfp_id,
+            )
+            continue
         missing.append(pid)
         resolved.append(
             {
                 "id": pid,
-                "name": _persona_name_from_id(pid),
+                "name": stub_name,
                 "title": "Team Specialist",
                 "hasResume": False,
                 "sourceFile": "",
@@ -2022,6 +2079,8 @@ async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, A
 def _team_selection_from_personas(personas: list[dict[str, Any]]) -> TeamSelectionResult:
     """Build a TeamSelectionResult straight from the user's Key Persona picks —
     no RFP-needs matching, no roster re-scoring, no owner auto-insert."""
+    from app.services.evidence_trust.personnel_grounding import is_retired_team_member
+
     members = [
         TeamMemberSelection(
             name=str(p["name"]),
@@ -2030,6 +2089,8 @@ def _team_selection_from_personas(personas: list[dict[str, Any]]) -> TeamSelecti
         )
         for p in personas
         if str(p.get("name") or "").strip()
+        and not p.get("retired")
+        and not is_retired_team_member(str(p.get("name") or ""))
     ]
     return TeamSelectionResult(members=members)
 
@@ -2413,7 +2474,7 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
                 "with feeling — why this relationship matters — NOT how you'll run the work.\n"
                 "Do not let the RFP pitch crowd out Who We Are + Our Promise.\n\n"
                 "🚨 CRITICAL — KEEP SECTION 1.1 CLEAN (put these elsewhere):\n"
-                "- DO NOT name staff (Ron Comer, Sonja Anderson, Curt Schultz, etc.) — bios are Section 2\n"
+                "- DO NOT name staff in Section 1 — bios belong in Section 2\n"
                 "- DO NOT name titles/roles as assignments ('dedicated client manager', 'executive sponsor')\n"
                 "- DO NOT list channels or tactics (SEM, SEO, PPC, paid social, remarketing, CRM, dashboards)\n"
                 "- DO NOT promise report cadences, deliverable SLAs, or mid-campaign process detail\n"
@@ -2489,13 +2550,14 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
                 "- ONLY include agency certifications from verified KB (WBENC, WOSB)\n"
                 "- DO NOT include platform certifications (Google Ads, Meta Ads, Spotify API, ISO, Teaching License - these are individual, not agency certs)\n"
                 "- DO NOT embellish or add certifications not explicitly in 01_companyfacts_verified KB\n"
-                "- Keep it simple: certification name, certifying agency, number (if available), status\n"
+                "- Keep it simple: certification name, certifying agency, number if the KB states it\n"
+                "- If a certification number is not in KB, omit the number field — never write 'available upon request'\n"
                 "- One brief sentence on impact/benefit\n"
                 "- Total length: 3-5 sentences maximum\n\n"
                 "Format:\n"
                 "- **[Certification Name]**\n"
                 "  - Certifying Agency: [Agency name]\n"
-                "  - Certification Number: [Number or 'Available upon request']\n"
+                "  - Certification Number: [only if stated in KB; otherwise omit this line]\n"
                 "  - Impact: [One sentence benefit]\n\n"
                 "VERIFIED AGENCY CERTIFICATIONS ONLY: WBENC, WOSB"
             ),
@@ -2507,22 +2569,21 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
             "section-1-insurance",
             "1.5 — Insurance Information",
             (
-                "Write the 'Insurance Information' subsection for zö agency. Keep it SHORT, CONCISE, and CLEAR.\n\n"
-                "🚨 CRITICAL RULES:\n"
-                "- List coverage TYPES only (General Liability, Professional Liability, Workers Comp, etc.)\n"
-                "- Use [VERIFY: coverage amount] for dollar figures unless explicitly in KB\n"
-                "- DO NOT invent coverage amounts or policy details\n"
-                "- Keep it to essential facts only\n"
-                "- Total length: 4-6 sentences maximum\n\n"
+                "Write the 'Insurance Information' subsection for zö agency. Keep it SHORT and factual.\n\n"
+                "CRITICAL RULES:\n"
+                "- List coverage TYPES only when they appear in 01_companyfacts (General Liability, Professional Liability, Workers Compensation, Cyber, Auto, etc.).\n"
+                "- Do NOT invent dollar limits, carriers, NAIC numbers, policy numbers, or 'Compliant'.\n"
+                "- Do NOT write [VERIFY: amount] placeholders or 'per occurrence / aggregate' without a KB figure.\n"
+                "- NEVER write 'upon request', 'available on request', or 'will be provided separately'.\n"
+                "- If the RFP wants a limits table and KB has no limits, one sentence: "
+                "'Policy limits are those on the current certificate of insurance; the COI is issued to the buyer at award.'\n"
+                "- Max 80 words. No empty markdown tables.\n\n"
                 "Format:\n"
                 "We maintain the following insurance coverage:\n"
-                "- **General Liability:** [VERIFY: amount] per occurrence / [VERIFY: amount] aggregate\n"
-                "- **Professional Liability / E&O:** [VERIFY: per-occurrence amount] / [VERIFY: aggregate amount]\n"
-                "- When the RFP lists mandatory minimum limits (Section 11 or insurance exhibit), include "
-                "**every** required line in the limits table — especially E&O/Professional Liability if stated.\n"
-                "- **Workers' Compensation:** As required by state law\n"
-                "- **Commercial Auto:** [VERIFY: amount] (if applicable)\n\n"
-                "Certificates of insurance available upon request."
+                "- **General Liability**\n"
+                "- **Professional Liability / E&O**\n"
+                "- **Workers' Compensation** (as required by law)\n"
+                "- other types only if named in companyfacts\n"
             ),
             "pull",
             0.03,

@@ -171,23 +171,21 @@ async def extract_rfp_scored_section_specs(
                         "(no canned cover-letter / technical / cost sequence).\n"
                         "If this RFP states an order, the JSON array must match that order.\n"
                         "Do NOT list evaluation-category labels that duplicate a TOC tab.\n"
-                        "If the TOC already has References, do NOT also emit "
-                        "References & Past Performance.\n"
-                        "zö already keeps static company/team/experience tabs (Sections 1.1–1.5, "
-                        "bios, our work). Those tabs stay as-is — do not ask to rewrite them.\n"
-                        "If a TOC item is ONLY the firm's identity block (Company Background, "
-                        "Business Information) already in 1.1–1.5, set satisfiedByStaticCompanyBlock "
-                        "true — that is a header label only.\n"
-                        "If a TOC item is a scored narrative (Background and Experience, "
-                        "Qualifications and Experience, Firm Experience), set "
-                        "satisfiedByStaticCompanyBlock false — evaluators need a full tab.\n"
+                        "Do NOT emit two titles that are the same ask (near-duplicate labels for "
+                        "one requirement) — keep the RFP's primary TOC wording only.\n"
+                        "The draft already keeps static company/team/experience tabs. Those stay "
+                        "as-is — do not ask to rewrite them.\n"
+                        "If a TOC item is ONLY the firm's identity block already covered by those "
+                        "static tabs, set satisfiedByStaticCompanyBlock true — header label only.\n"
+                        "If a TOC item is a scored narrative evaluators read as its own tab, set "
+                        "satisfiedByStaticCompanyBlock false — substance is required.\n"
                         "Dynamic tabs are whatever else THIS RFP asks the proposer to submit.\n"
                         "sameAskAs = existing draft titles that are the SAME ask by meaning — "
                         "not a keyword synonym list.\n"
                         "Return JSON:\n"
                         '{"sections":[{"rfpTitle":"...","requiredHeadings":["A. ..."],'
                         '"instructions":"how to align prose","evaluationWeight":"35 pts",'
-                        '"sameAskAs":["Who We Are"],'
+                        '"sameAskAs":["existing draft title if same ask"],'
                         '"satisfiedByStaticCompanyBlock":false}]}'
                     ),
                 },
@@ -606,6 +604,8 @@ def ensure_missing_scored_section_stubs(
     Structure Scan historically only reframed existing tabs — missing TOC/scored
     sections never appeared. Stubs make the gap visible and draftable.
     """
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
     skip = skip_section_ids or set()
     logs: list[str] = []
     sections = list(draft.sections)
@@ -623,11 +623,21 @@ def ensure_missing_scored_section_stubs(
         if _match_section_for_spec(working, spec):
             continue
         sid = f"rfp-structure-{_slug_section_id(spec.rfp_title)}"
-        if sid in existing_ids or sid in skip:
+        # Never mint a -2 twin of an existing stub id — that produced duplicate
+        # sidebar tabs with the same RFP title.
+        if sid in existing_ids:
+            continue
+        if sid in skip:
             n = 2
-            while f"{sid}-{n}" in existing_ids:
+            while f"{sid}-{n}" in existing_ids or f"{sid}-{n}" in skip:
                 n += 1
             sid = f"{sid}-{n}"
+            # If an alternate id still collides on title meaning, skip entirely.
+            if any(
+                outline_titles_near_duplicate(spec.rfp_title, s.title or "")
+                for s in sections
+            ):
+                continue
         heading_lines = "\n".join(f"- {h}" for h in (spec.required_headings or [])[:12])
         body_parts = [
             f"## {spec.rfp_title}",
@@ -677,16 +687,17 @@ async def _reframe_section_to_rfp_spec(
 
     system = (
         "Rewrite ONE proposal section so it matches THIS RFP's required structure and scoring "
-        "criteria — not zö's generic template.\n"
+        "criteria — not a generic agency template.\n"
         "Rules:\n"
         "- Use the required headings/outline exactly (markdown ## with RFP labels).\n"
         "- Preserve verified facts, team names, and numbers from the current draft.\n"
         "- Do NOT recopy full case-study narratives or the same example in new words — "
-        "one-line cross-ref to Sample Work / Our Work, then NEW detail only.\n"
-        "- Do NOT invent clients, case studies, reference contacts, metrics, or Oceania/Hawaii work.\n"
+        "one-line cross-ref to the draft's dedicated portfolio / past-work tab, then NEW detail only.\n"
+        "- Do NOT invent clients, case studies, reference contacts, metrics, or geographies "
+        "not evidenced in the draft or knowledge base.\n"
         "- If evidence is missing, use [VERIFY: …] — never fabricate named engagements.\n"
-        "- Fold timeline/phases INTO this section when the RFP expects schedule here (e.g. BMP).\n"
-        "- Do NOT rewrite team bios (Section 2.x) or static company tabs.\n"
+        "- Fold timeline/phases INTO this section when THIS RFP embeds schedule in this tab.\n"
+        "- Do NOT rewrite team bios or static company-identity tabs already in the draft.\n"
         "- Stay CONCISE: prefer short paragraphs, markdown bullets, and markdown tables over long essays. "
         "Respect the Word target when provided — never pad.\n"
         "- When a table/timeline/swimlane would help evaluators, add "

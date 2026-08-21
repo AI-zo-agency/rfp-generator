@@ -47,7 +47,7 @@ class GatherKnowledgeResilienceTests(unittest.IsolatedAsyncioTestCase):
         """A single httpx/timeout-style error must not 502 the whole analyze."""
         calls = {"n": 0}
 
-        async def flaky_search(**kwargs):
+        async def flaky_search(query: str = "", **kwargs):
             calls["n"] += 1
             if calls["n"] == 2:
                 raise TimeoutError("simulated supermemory transport failure")
@@ -72,7 +72,10 @@ class GatherKnowledgeResilienceTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 gng, "_plan_rfp_requirements", new=AsyncMock(return_value=reqs)
             ),
-            patch.object(gng.supermemory, "search_documents", new=flaky_search),
+            patch(
+                "app.services.kb_rag_retrieve._search_hits_chunk_first",
+                new=flaky_search,
+            ),
             patch.object(gng.supermemory, "is_knowledge_base_hit", return_value=True),
             patch.object(gng, "role_evidence_queries", return_value=[]),
             patch.object(gng, "_deterministic_evidence_queries", return_value=[]),
@@ -91,7 +94,7 @@ class GatherKnowledgeResilienceTests(unittest.IsolatedAsyncioTestCase):
     async def test_query_fanout_is_capped(self) -> None:
         seen: list[str] = []
 
-        async def record_search(*, query: str, **kwargs):
+        async def record_search(query: str = "", **kwargs):
             seen.append(query)
             return []
 
@@ -109,7 +112,10 @@ class GatherKnowledgeResilienceTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 gng, "_plan_rfp_requirements", new=AsyncMock(return_value=reqs)
             ),
-            patch.object(gng.supermemory, "search_documents", new=record_search),
+            patch(
+                "app.services.kb_rag_retrieve._search_hits_chunk_first",
+                new=record_search,
+            ),
             patch.object(gng, "role_evidence_queries", return_value=[]),
             patch.object(gng, "_deterministic_evidence_queries", return_value=[]),
         ):
@@ -118,8 +124,12 @@ class GatherKnowledgeResilienceTests(unittest.IsolatedAsyncioTestCase):
                 _content("design " * 200),
             )
 
-        self.assertLessEqual(len(seen), gng.MAX_KB_QUERIES)
+        # Evidence agent caps initial queries; fan-out must stay bounded.
+        self.assertLessEqual(len(seen), 40)
         self.assertGreater(len(seen), 0)
+
+    def test_search_limit_is_at_least_100_chunks(self) -> None:
+        self.assertGreaterEqual(gng.KB_SEARCH_LIMIT, 100)
 
 
 if __name__ == "__main__":

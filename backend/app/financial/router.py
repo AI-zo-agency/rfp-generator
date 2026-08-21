@@ -11,6 +11,19 @@ import logging
 from app.financial import google_sheets, ai_classifier
 from app.financial.qb_repository import get_panel_cache, get_sync_state
 from app.financial.qb_sync import LeaseHeld, run_sync
+from app.financial.teamwork.status import connection_status as teamwork_connection_status
+from app.financial.teamwork.teamwork_repository import (
+    get_panel_cache as get_teamwork_panel_cache,
+)
+from app.financial.teamwork.teamwork_repository import (
+    get_sync_state as get_teamwork_sync_state,
+)
+from app.financial.teamwork.teamwork_map import site_id_from_base_url
+from app.financial.teamwork.client import origin as teamwork_origin
+from app.financial.teamwork.teamwork_sync import (
+    LeaseHeld as TeamworkLeaseHeld,
+)
+from app.financial.teamwork.teamwork_sync import run_sync as run_teamwork_sync
 from app.services import quickbooks_oauth
 from app.services.llm import chat_json
 from app.core.config import settings
@@ -695,15 +708,119 @@ def get_sources_status():
                 "last_sync": "N/A"
             },
             {
-                "name": "PM Tool (ClickUp/Asana)",
+                "name": "Teamwork.com",
                 "type": "Project Management",
-                "status": "Pending Integration (Phase 2)",
-                "active_data": False,
-                "details": "Not connected yet. Dummy data disabled.",
-                "last_sync": "N/A"
-            }
+                "status": "Connected" if settings.teamwork_configured else "Pending Integration",
+                "active_data": bool(settings.teamwork_configured),
+                "details": (
+                    "Projects, tasks, time, milestones, and people via Teamwork API V3."
+                    if settings.teamwork_configured
+                    else "Not connected yet. Set TEAMWORK_BASE_URL and TEAMWORK_API_KEY on the backend."
+                ),
+                "last_sync": "Nightly Supabase mirror" if settings.teamwork_configured else "N/A",
+            },
         ]
     }
+
+
+@router.get("/teamwork/status")
+def get_teamwork_status():
+    """Safe health probe for Teamwork. Never returns the API key."""
+    connection = teamwork_connection_status()
+    site_id = site_id_from_base_url(settings.teamwork_base_url)
+    try:
+        state = get_teamwork_sync_state(site_id) or {}
+    except Exception:
+        state = {}
+    return {
+        **connection,
+        "last_success_at": state.get("last_success_at"),
+        "last_error": state.get("last_error"),
+        "backfill_completed": bool(state.get("backfill_completed_at")),
+    }
+
+
+@router.get("/teamwork/overview")
+def get_teamwork_overview():
+    """Return the latest persisted Teamwork snapshot without calling Teamwork live."""
+    site_id = site_id_from_base_url(settings.teamwork_base_url)
+    state = get_teamwork_sync_state(site_id) or {}
+    cache = get_teamwork_panel_cache(site_id)
+    if cache is None:
+        payload = {
+            "connected": settings.teamwork_configured,
+            "generated_at": None,
+            "as_of": None,
+            "cache_ttl_seconds": 0,
+            "errors": {"overview": "no snapshot available"},
+            "summary": {
+                "project_count": 0,
+                "overdue_task_count": 0,
+                "upcoming_task_count": 0,
+                "late_milestone_count": 0,
+                "hours_this_month": 0.0,
+                "people_count": 0,
+            },
+            "projects": [],
+            "overdue_tasks": [],
+            "upcoming_tasks": [],
+            "milestones": [],
+            "people": [],
+            "time": {
+                "period_start": "",
+                "period_end": "",
+                "total_minutes": 0,
+                "billable_minutes": 0,
+                "by_person": [],
+                "by_project": [],
+            },
+            "synced_at": state.get("last_success_at"),
+            "sync_status": "backfill_pending" if not state.get("backfill_completed_at") else "missing",
+        }
+    else:
+        payload = {
+            **(cache.get("payload") or {}),
+            "as_of": cache.get("as_of"),
+            "generated_at": cache.get("computed_at"),
+            "synced_at": state.get("last_success_at") or cache.get("computed_at"),
+            "sync_status": "failed" if state.get("last_error") and state.get("last_success_at") else "ok",
+        }
+    payload["base_url"] = teamwork_origin() if settings.teamwork_configured else None
+    logger.info(
+        "operation=teamwork_overview_route connected=%s error_keys=%s",
+        payload.get("connected"),
+        sorted((payload.get("errors") or {}).keys()),
+    )
+    return payload
+
+
+class TeamworkSyncBody(BaseModel):
+    mode: str = "auto"
+
+
+@router.post("/teamwork/sync")
+def teamwork_sync(
+    request: Request,
+    payload: TeamworkSyncBody | None = None,
+):
+    mode = payload.mode if payload else "auto"
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        logger.warning("operation=teamwork_sync mode=%s status=unauthorized", mode)
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+
+    logger.info("operation=teamwork_sync mode=%s status=started", mode)
+    try:
+        result = run_teamwork_sync(mode)
+    except TeamworkLeaseHeld as exc:
+        logger.warning("operation=teamwork_sync mode=%s status=lease_held", mode)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    logger.info(
+        "operation=teamwork_sync mode=%s status=completed run_id=%s",
+        result.get("mode", mode),
+        result.get("run_id"),
+    )
+    return result
+
 
 # ── QuickBooks ────────────────────────────────────────────────────────────────
 _QB_PANEL_KEYS = (
