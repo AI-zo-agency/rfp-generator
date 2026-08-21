@@ -101,14 +101,19 @@ function DeliveryLine({
 }) {
   const overdueSub = describeOverdueHeat(data.overdue_tasks, oldestLate);
   const budget = budgetPortfolio(data.projects);
-  const budgetValue =
-    budget.capacity > 0
-      ? `${formatUsdFromCents(budget.used)} of ${formatUsdFromCents(budget.capacity)}`
-      : "—";
   const budgetSub =
     budget.projectCount > 0
       ? `${budget.budgetedCount} of ${budget.projectCount} projects budgeted`
       : "No active projects";
+  const budgetValue =
+    budget.capacity > 0 ? (
+      <>
+        {formatUsdFromCents(budget.used)}
+        <span className="qb-figure-rest"> of {formatUsdFromCents(budget.capacity)}</span>
+      </>
+    ) : (
+      "—"
+    );
 
   return (
     <>
