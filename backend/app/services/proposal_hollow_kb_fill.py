@@ -59,9 +59,17 @@ def _skip_section(section: ProposalSection) -> bool:
         return True
     if sid.startswith("section-3-"):
         from app.services.proposal_bio_stub import looks_like_bio_stub_body
+        from app.services.proposal_case_study_stub import (
+            looks_like_case_study_stub_body,
+        )
 
+        body = section.content or ""
+        # Our Work designer-note cards are finished, not hollow — the approved
+        # case study asset is the deliverable, so there is nothing to fill.
+        if looks_like_case_study_stub_body(body):
+            return True
         # Only treat as a gap if a bio stub wrongly landed on Our Work.
-        return not looks_like_bio_stub_body(section.content or "")
+        return not looks_like_bio_stub_body(body)
     return False
 
 

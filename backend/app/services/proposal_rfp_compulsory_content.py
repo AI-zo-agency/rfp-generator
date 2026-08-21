@@ -30,8 +30,10 @@ _KNOWN_KINDS = frozenset(
     {KIND_CASE_STUDIES, KIND_REFERENCES, KIND_KEY_PERSONNEL, KIND_SAMPLE_WORK}
 )
 
-# When the RFP is silent, Section 3 still prefers two real studies — not a DQ.
-DEFAULT_CASE_STUDY_PREFERENCE = 2
+# Silent floor when the RFP names no minimum — a preference, never a DQ. Four
+# is the smallest set that reads as a portfolio rather than a sample: Our Work
+# cards are designer-placed assets, so a fourth costs selection, not drafting.
+DEFAULT_CASE_STUDY_PREFERENCE = 4
 
 _CACHE: dict[str, list["CompulsoryContentAsk"]] = {}
 
@@ -156,7 +158,7 @@ async def stated_case_study_minimum(rfp_text: str) -> int | None:
 
 
 async def required_case_study_minimum(rfp_text: str) -> int:
-    """RFP-stated case-study / sample-work floor, else the silent preference of 2."""
+    """RFP-stated case-study / sample-work floor, else the silent preference."""
     stated = await stated_case_study_minimum(rfp_text)
     return stated if stated else DEFAULT_CASE_STUDY_PREFERENCE
 

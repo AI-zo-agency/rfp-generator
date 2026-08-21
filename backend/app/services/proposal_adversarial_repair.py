@@ -820,9 +820,15 @@ async def run_adversarial_repair_loop(
             # do not rewrite or append Key Accounts MANUAL FILL tags.
             try:
                 from app.services.proposal_bio_stub import is_bio_stub_section
+                from app.services.proposal_case_study_stub import (
+                    is_case_study_stub_section,
+                )
 
-                if section is not None and is_bio_stub_section(
-                    section.id, section.content or ""
+                if section is not None and (
+                    is_bio_stub_section(section.id, section.content or "")
+                    # Our Work cards are designer-placed assets under Option B —
+                    # rewriting one puts invented narrative back in the manuscript.
+                    or is_case_study_stub_section(section.id, section.content or "")
                 ):
                     report_attempts.append(
                         _attempt_entry(
