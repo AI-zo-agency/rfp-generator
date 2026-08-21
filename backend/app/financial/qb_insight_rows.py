@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.financial.qb_signals import usd
+from app.financial.qb_signals import coverage_gap, slow_payer_threshold, usd
 
 _CHASE_LIMIT = 5
 _HYGIENE_LIMIT = 5
@@ -43,8 +43,8 @@ def chase_rows(data: dict[str, Any], limit: int = _CHASE_LIMIT) -> list[dict[str
 
     dso_days = dso.get("dso_days")
     slow: set[str] = set()
-    if dso_days is not None:
-        threshold = max(float(dso_days) * 1.75, 40)
+    threshold = slow_payer_threshold(dso_days)
+    if threshold is not None:
         slow = {
             _slug(c.get("client", ""))
             for c in (dso.get("slowest_clients") or [])
@@ -95,20 +95,14 @@ def hygiene_rows(
             "kind": "untagged_cost",
         })
 
-    rbc = data.get("revenue_by_class") or {}
-    cc = data.get("class_coverage") or {}
-    coverage = rbc.get("coverage_pct")
-    if coverage is None:
-        coverage = cc.get("coverage_pct")
-    unclassified = rbc.get("unclassified")
-    if unclassified is None:
-        unclassified = cc.get("unclassified") or 0
-    if coverage is not None and float(coverage) < 90 and float(unclassified) > 0:
+    gap = coverage_gap(data)
+    if gap is not None:
+        _coverage, unclassified = gap
         rows.append({
             "id": "hygiene:unclassified-income",
             "label": "Unclassified income",
-            "amount": float(unclassified),
-            "figure": usd(float(unclassified)),
+            "amount": unclassified,
+            "figure": usd(unclassified),
             "kind": "unclassified_income",
         })
 

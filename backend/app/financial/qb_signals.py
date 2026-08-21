@@ -37,6 +37,40 @@ def _plural(count: int, one: str, many: str | None = None) -> str:
     return one if count == 1 else (many or f"{one}s")
 
 
+def slow_payer_threshold(dso_days: float | None) -> float | None:
+    """Days-late cutoff for a "slow payer": 1.75x the fleet average, floored at 40.
+
+    Shared by the slow-payers signal and the chase rows so tuning one always
+    tunes the other.
+    """
+    if dso_days is None:
+        return None
+    return max(float(dso_days) * 1.75, 40)
+
+
+def coverage_gap(data: dict[str, Any]) -> tuple[float, float] | None:
+    """Resolve (coverage_pct, unclassified) for the revenue-segment gap.
+
+    Reads `revenue_by_class` first, falling back to `class_coverage`. Returns
+    None when there's no gap worth reporting: coverage missing, coverage at or
+    above 90%, or nothing unclassified.
+
+    The `is None` checks are load-bearing — a legitimate coverage_pct of 0 must
+    be used as-is, not treated as absent and fallen back from.
+    """
+    rbc = data.get("revenue_by_class") or {}
+    cc = data.get("class_coverage") or {}
+    coverage = rbc.get("coverage_pct")
+    if coverage is None:
+        coverage = cc.get("coverage_pct")
+    unclassified = rbc.get("unclassified")
+    if unclassified is None:
+        unclassified = cc.get("unclassified") or 0
+    if coverage is None or float(coverage) >= 90 or float(unclassified) <= 0:
+        return None
+    return float(coverage), float(unclassified)
+
+
 def derive_signals(data: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
@@ -93,8 +127,8 @@ def derive_signals(data: dict[str, Any]) -> list[dict[str, Any]]:
     dso = data.get("dso") or {}
     dso_days = dso.get("dso_days")
     slowest = dso.get("slowest_clients") or []
-    if dso_days is not None and slowest:
-        threshold = max(float(dso_days) * 1.75, 40)
+    threshold = slow_payer_threshold(dso_days)
+    if threshold is not None and slowest:
         slow = [c for c in slowest if float(c.get("avg_days") or 0) >= threshold]
         if slow:
             tied = sum(float(c.get("amount") or 0) for c in slow)
@@ -132,22 +166,16 @@ def derive_signals(data: dict[str, Any]) -> list[dict[str, Any]]:
         })
 
     # 5. Income landing outside any revenue segment.
-    rbc = data.get("revenue_by_class") or {}
-    cc = data.get("class_coverage") or {}
-    coverage = rbc.get("coverage_pct")
-    if coverage is None:
-        coverage = cc.get("coverage_pct")
-    unclassified = rbc.get("unclassified")
-    if unclassified is None:
-        unclassified = cc.get("unclassified") or 0
-    if coverage is not None and float(coverage) < 90 and float(unclassified) > 0:
+    gap = coverage_gap(data)
+    if gap is not None:
+        coverage, unclassified = gap
         out.append({
             "id": "segment-gap",
-            "severity": "warn" if float(coverage) < 70 else "info",
+            "severity": "warn" if coverage < 70 else "info",
             "headline": "Some income isn't assigned to a segment",
-            "figure": usd(float(unclassified)),
+            "figure": usd(unclassified),
             "detail": (
-                f"{js_round(float(coverage))}% of income is classified — "
+                f"{js_round(coverage)}% of income is classified — "
                 "the rest can't be split by line of business."
             ),
             "go_to": "revenue",

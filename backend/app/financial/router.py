@@ -1015,36 +1015,70 @@ def _insight_response(overview: dict[str, Any], row: dict[str, Any] | None) -> d
     }
 
 
+def _safe_get_latest_insight(realm_id: str) -> dict[str, Any] | None:
+    """`get_latest_insight` with the Supabase table unreachable, e.g. before the
+    migration is applied. The chase and hygiene rows are pure computations over
+    the overview and must still render, so a lookup failure degrades to the
+    empty-brief state rather than a 500 that collapses the whole panel."""
+    try:
+        return get_latest_insight(QB_INSIGHT_SOURCE, realm_id)
+    except Exception as exc:  # noqa: BLE001 — a missing table must not break the panel
+        logger.warning(
+            "operation=quickbooks_ai_insights status=insight_lookup_failed realm_id=%s error=%s",
+            realm_id,
+            str(exc)[:200],
+        )
+        return None
+
+
 @router.get("/quickbooks/ai-insights")
-def quickbooks_ai_insights(
-    year: int = Query(default_factory=lambda: datetime.now().year),
-):
-    """Latest successful brief, with the chase and hygiene rows recomputed now."""
-    overview = _load_overview(year)
-    row = get_latest_insight(QB_INSIGHT_SOURCE, settings.quickbooks_realm_id)
+def quickbooks_ai_insights():
+    """Latest successful brief, with the chase and hygiene rows recomputed now.
+
+    Always today's position for the current year — there is no query parameter
+    for year. The nightly sync only ever generates a brief for the current
+    year, so no brief exists for a past one; offering a year selector here
+    would just invite the regenerate route to overwrite tonight's real brief
+    with one derived from stale evidence.
+    """
+    realm_id = settings.quickbooks_realm_id
+    overview = _load_overview(datetime.now().year)
+    row = _safe_get_latest_insight(realm_id)
     logger.info(
-        "operation=quickbooks_ai_insights year=%s found=%s",
-        year,
+        "operation=quickbooks_ai_insights found=%s",
         row is not None,
     )
     return _insight_response(overview, row)
 
 
 @router.post("/quickbooks/ai-insights/regenerate")
-def quickbooks_ai_insights_regenerate(
-    year: int = Query(default_factory=lambda: datetime.now().year),
-):
-    """Generate today's brief on demand, upserting over any existing row."""
+def quickbooks_ai_insights_regenerate():
+    """Generate today's brief on demand, upserting over any existing row.
+
+    Always today's position for the current year, for the same reason as the
+    GET route above. Skips the model call entirely when there's no panel cache
+    to reason about — an all-None skeleton has nothing worth spending a call on.
+    """
     realm_id = settings.quickbooks_realm_id
-    overview = _load_overview(year)
+    overview = _load_overview(datetime.now().year)
+    row = _safe_get_latest_insight(realm_id)
+
+    if overview.get("sync_status") in ("missing", "backfill_pending"):
+        logger.info(
+            "operation=quickbooks_ai_insights_regenerate status=skipped sync_status=%s",
+            overview.get("sync_status"),
+        )
+        return _insight_response(overview, row)
+
     status = generate_and_store(realm_id, overview, _today_iso())
     logger.info(
-        "operation=quickbooks_ai_insights_regenerate year=%s status=%s",
-        year,
+        "operation=quickbooks_ai_insights_regenerate status=%s",
         status,
     )
-    row = get_latest_insight(QB_INSIGHT_SOURCE, realm_id)
-    return _insight_response(overview, row)
+    row = _safe_get_latest_insight(realm_id)
+    result = _insight_response(overview, row)
+    result["generated"] = status
+    return result
 
 
 @router.get("/audit-queue")

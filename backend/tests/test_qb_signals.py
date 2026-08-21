@@ -1,4 +1,10 @@
-from app.financial.qb_signals import derive_signals, js_round, usd
+from app.financial.qb_signals import (
+    coverage_gap,
+    derive_signals,
+    js_round,
+    slow_payer_threshold,
+    usd,
+)
 
 
 def _base() -> dict:
@@ -263,6 +269,47 @@ def test_collection_rate_severity_is_info_well_above_70_pct():
     })
     assert signals[0]["id"] == "collection-rate"
     assert signals[0]["severity"] == "info"
+
+
+def test_slow_payer_threshold_is_dso_multiple_with_forty_day_floor():
+    assert slow_payer_threshold(30) == 52.5
+    assert slow_payer_threshold(10) == 40  # floor kicks in below ~22.9
+
+
+def test_slow_payer_threshold_is_none_when_dso_days_is_none():
+    assert slow_payer_threshold(None) is None
+
+
+def test_coverage_gap_resolves_revenue_by_class_first():
+    assert coverage_gap({
+        "revenue_by_class": {"coverage_pct": 80, "unclassified": 5_000},
+        "class_coverage": {"coverage_pct": 50, "unclassified": 9_000},
+    }) == (80.0, 5_000.0)
+
+
+def test_coverage_gap_falls_back_to_class_coverage_when_absent():
+    assert coverage_gap({
+        "class_coverage": {"coverage_pct": 80, "unclassified": 3_000},
+    }) == (80.0, 3_000.0)
+
+
+def test_coverage_gap_does_not_fall_back_when_coverage_pct_is_zero():
+    # coverage_pct of 0 is a valid value (not None/missing), so it must be used
+    # as-is rather than treated as absent and falling back to class_coverage.
+    assert coverage_gap({
+        "revenue_by_class": {"coverage_pct": 0, "unclassified": 5_000},
+        "class_coverage": {"coverage_pct": 50, "unclassified": 5_000},
+    }) == (0.0, 5_000.0)
+
+
+def test_coverage_gap_is_none_when_coverage_missing_or_at_or_above_ninety():
+    assert coverage_gap({}) is None
+    assert coverage_gap({
+        "revenue_by_class": {"coverage_pct": 90, "unclassified": 5_000},
+    }) is None
+    assert coverage_gap({
+        "revenue_by_class": {"coverage_pct": 80, "unclassified": 0},
+    }) is None
 
 
 def test_vendor_concentration_directly_asserted():

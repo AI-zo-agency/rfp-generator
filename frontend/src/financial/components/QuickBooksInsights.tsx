@@ -34,6 +34,8 @@ interface InsightsData {
   generated_at: string | null;
   provider: string | null;
   stale: boolean;
+  /** Only present on the regenerate response: "ok" | "failed". */
+  generated?: string;
 }
 
 export function QuickBooksInsights({ year }: { year: number }) {
@@ -67,7 +69,11 @@ export function QuickBooksInsights({ year }: { year: number }) {
         { method: "POST" },
       );
       if (!res.ok) throw new Error(`${res.status}`);
-      setData(await res.json());
+      const next: InsightsData = await res.json();
+      setData(next);
+      if (next.generated === "failed") {
+        setError("Couldn't generate a new brief. The figures below are current.");
+      }
     } catch {
       setError("Couldn't generate a new brief. The figures below are current.");
     } finally {
