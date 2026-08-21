@@ -1,6 +1,11 @@
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 from app.financial import router as fin_router
+from app.main import app
+
+client = TestClient(app)
 
 
 def _overview():
@@ -28,6 +33,8 @@ def test_empty_state_when_no_insight_row_exists():
     assert result["notes"] == {}
     # Rows still render without a brief — they are computed, not generated.
     assert result["chase"][0]["client"] == "City of Umatilla"
+    # A brief that does not exist is never stale.
+    assert result["stale"] is False
 
 
 def test_serves_the_stored_brief_and_joins_notes_to_recomputed_rows():
@@ -77,3 +84,50 @@ def test_regenerate_writes_today_and_returns_the_fresh_brief():
 
     assert gen.called
     assert result["brief"] == "fresh"
+
+
+# ── HTTP wiring ───────────────────────────────────────────────────────────────
+# The tests above call the route functions directly, which never exercises
+# FastAPI's route registration, verb, path (including the /api/v1/financials
+# prefix), or Query() parameter parsing. These go through TestClient instead,
+# patching the same seams (_load_overview / get_latest_insight /
+# generate_and_store) so nothing reaches Supabase or an LLM provider.
+
+
+def test_http_get_ai_insights_returns_expected_shape(monkeypatch):
+    monkeypatch.setattr(fin_router, "_load_overview", lambda year: _overview())
+    monkeypatch.setattr(
+        fin_router, "get_latest_insight", lambda source, scope_key: None
+    )
+    response = client.get("/api/v1/financials/quickbooks/ai-insights?year=2026")
+    assert response.status_code == 200
+    body = response.json()
+    for key in ("brief", "notes", "chase", "hygiene", "as_of", "stale", "status"):
+        assert key in body
+
+
+def test_http_post_regenerate_calls_generate_and_store(monkeypatch):
+    monkeypatch.setattr(fin_router, "_load_overview", lambda year: _overview())
+    monkeypatch.setattr(
+        fin_router, "get_latest_insight", lambda source, scope_key: None
+    )
+    generate_calls = []
+    monkeypatch.setattr(
+        fin_router,
+        "generate_and_store",
+        lambda realm_id, overview, as_of: generate_calls.append(as_of) or "ok",
+    )
+    response = client.post(
+        "/api/v1/financials/quickbooks/ai-insights/regenerate?year=2026"
+    )
+    assert response.status_code == 200
+    assert len(generate_calls) == 1
+
+
+def test_http_get_ai_insights_defaults_year_when_omitted(monkeypatch):
+    monkeypatch.setattr(fin_router, "_load_overview", lambda year: _overview())
+    monkeypatch.setattr(
+        fin_router, "get_latest_insight", lambda source, scope_key: None
+    )
+    response = client.get("/api/v1/financials/quickbooks/ai-insights")
+    assert response.status_code == 200
