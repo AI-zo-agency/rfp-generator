@@ -26,8 +26,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AnimatedNumber } from "./AnimatedNumber";
 import { AgingBar, DataTable, Empty, Figure, Note, Panel, compact, usd } from "./qb-ui";
-import { deriveSignals, type Signal } from "../lib/qb-signals";
-import type { QuickBooksOverview } from "../types/quickbooks";
+import type { QuickBooksOverview, Signal } from "../types/quickbooks";
 import "./QuickBooksLedger.css";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
@@ -208,9 +207,9 @@ function Attention({ signals, onGo }: { signals: Signal[]; onGo: (view: string) 
               {s.detail ? <p className="qb-signal-detail">{s.detail}</p> : null}
             </div>
             {s.figure ? <span className="qb-signal-figure">{s.figure}</span> : null}
-            {s.goTo ? (
-              <button type="button" className="qb-signal-go" onClick={() => onGo(s.goTo!)}>
-                <span>{VIEWS.find((v) => v.id === s.goTo)?.label ?? "Detail"}</span>
+            {s.go_to ? (
+              <button type="button" className="qb-signal-go" onClick={() => onGo(s.go_to!)}>
+                <span>{VIEWS.find((v) => v.id === s.go_to)?.label ?? "Detail"}</span>
                 <ArrowRight size={13} strokeWidth={2.25} aria-hidden />
               </button>
             ) : (
@@ -418,7 +417,7 @@ export function QuickBooksPanels() {
   }, [load, year]);
 
   const net = (data?.ar?.total ?? 0) - (data?.ap?.total ?? 0);
-  const signals = useMemo(() => (data ? deriveSignals(data) : []), [data]);
+  const signals = data?.signals ?? [];
   const clientRows = useMemo(() => (data ? buildClientRows(data) : []), [data]);
   const trend = data?.monthly_trend;
   const rc = data?.revenue_by_class;

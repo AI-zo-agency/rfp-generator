@@ -10,6 +10,7 @@ from pydantic import BaseModel
 import logging
 from app.financial import google_sheets, ai_classifier
 from app.financial.qb_repository import get_panel_cache, get_sync_state
+from app.financial.qb_signals import derive_signals
 from app.financial.qb_sync import LeaseHeld, run_sync
 from app.financial.teamwork.status import connection_status as teamwork_connection_status
 from app.financial.teamwork.teamwork_repository import (
@@ -943,7 +944,7 @@ def quickbooks_overview(
             year,
             sync_status,
         )
-        return {
+        empty = {
             "year": year,
             **dict.fromkeys(_QB_PANEL_KEYS),
             "errors": {"overview": "no snapshot for year"},
@@ -951,6 +952,8 @@ def quickbooks_overview(
             "synced_at": state.get("last_success_at"),
             "sync_status": sync_status,
         }
+        empty["signals"] = derive_signals(empty)
+        return empty
 
     result = {
         **(cache.get("payload") or {}),
@@ -962,6 +965,7 @@ def quickbooks_overview(
             else "ok"
         ),
     }
+    result["signals"] = derive_signals(result)
     logger.info(
         "operation=quickbooks_overview realm_id=%s year=%s "
         "status=%s cache_found=true refresh_ignored=%s since_ignored=%s",
