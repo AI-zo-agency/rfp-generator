@@ -8,15 +8,18 @@ const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 interface ChaseRow {
   id: string;
   client: string;
+  amount: number;
   figure: string;
   oldest_days: number;
   invoices: number;
   slow_payer: boolean;
+  dollar_days: number;
 }
 
 interface HygieneRow {
   id: string;
   label: string;
+  amount: number;
   figure: string;
   kind: string;
 }
@@ -29,6 +32,7 @@ interface InsightsData {
   hygiene: HygieneRow[];
   as_of: string | null;
   generated_at: string | null;
+  provider: string | null;
   stale: boolean;
 }
 
@@ -71,10 +75,12 @@ export function QuickBooksInsights({ year }: { year: number }) {
     }
   };
 
-  if (!data) return null;
+  if (!data) {
+    return error ? <p className="qb-insights-error">{error}</p> : null;
+  }
 
   return (
-    <section className="qb-insights" aria-busy={busy || undefined}>
+    <section className="qb-insights" aria-busy={busy || undefined} aria-live="polite">
       <header className="qb-insights-head">
         <h3>
           <Sparkles size={14} strokeWidth={2.25} aria-hidden /> This week

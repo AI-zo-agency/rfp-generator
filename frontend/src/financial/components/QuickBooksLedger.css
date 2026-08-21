@@ -1926,7 +1926,7 @@ a.tw-task-card__name:hover {
 }
 
 .qb-insights-meta [data-stale] {
-  color: var(--zo-warn, #b45309);
+  color: var(--zo-orange);
 }
 
 .qb-insights-meta button {
@@ -1959,7 +1959,7 @@ a.tw-task-card__name:hover {
 
 .qb-insights-error {
   font-size: 12px;
-  color: var(--zo-warn, #b45309);
+  color: var(--zo-orange);
   margin: 0 0 10px;
 }
 
