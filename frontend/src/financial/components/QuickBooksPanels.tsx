@@ -25,6 +25,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AnimatedNumber } from "./AnimatedNumber";
+import { QuickBooksInsights } from "./QuickBooksInsights";
 import { AgingBar, DataTable, Empty, Figure, Note, Panel, compact, usd } from "./qb-ui";
 import type { QuickBooksOverview, Signal } from "../types/quickbooks";
 import "./QuickBooksLedger.css";
@@ -489,6 +490,7 @@ export function QuickBooksPanels() {
           {/* ── position ── */}
           <TabsContent value="today" className="qb-view">
             <MoneyLine data={data} net={net} />
+            <QuickBooksInsights year={year} />
             <Attention signals={signals} onGo={setView} />
             {data.billing_vs_cash ? (
               <CashChart bvc={data.billing_vs_cash} />

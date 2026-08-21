@@ -1890,3 +1890,132 @@ a.tw-task-card__name:hover {
   color: var(--qb-text-muted, #888);
   white-space: nowrap;
 }
+
+.qb-insights {
+  border: 1px solid var(--zo-border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 14px;
+  background: var(--zo-surface);
+}
+
+.qb-insights-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.qb-insights-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+.qb-insights-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--zo-text-muted);
+}
+
+.qb-insights-meta [data-stale] {
+  color: var(--zo-warn, #b45309);
+}
+
+.qb-insights-meta button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--zo-border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  background: transparent;
+  color: inherit;
+}
+
+.qb-insights-meta button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.qb-insights-brief {
+  font-size: 13.5px;
+  line-height: 1.55;
+  margin: 0 0 14px;
+}
+
+.qb-insights-empty {
+  color: var(--zo-text-muted);
+}
+
+.qb-insights-error {
+  font-size: 12px;
+  color: var(--zo-warn, #b45309);
+  margin: 0 0 10px;
+}
+
+.qb-insights-list + .qb-insights-list {
+  margin-top: 14px;
+}
+
+.qb-insights-list h4 {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--zo-text-muted);
+  margin: 0 0 6px;
+}
+
+.qb-insights-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.qb-insights-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 7px 0;
+  border-top: 1px solid var(--zo-border);
+}
+
+.qb-insights-row-head {
+  font-size: 13px;
+  font-weight: 500;
+  margin: 0;
+}
+
+.qb-insights-row-sub {
+  font-size: 11.5px;
+  color: var(--zo-text-muted);
+  margin: 2px 0 0;
+}
+
+.qb-insights-tag {
+  margin-left: 7px;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--zo-border);
+  color: var(--zo-text-muted);
+  font-weight: 500;
+}
+
+.qb-insights-figure {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
