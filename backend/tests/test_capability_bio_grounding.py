@@ -160,6 +160,61 @@ class BioEducationGroundingTests(unittest.TestCase):
         self.assertEqual(prior, "")
         self.assertTrue(full_rewrite)
 
+    def test_closing_and_toc_titles_are_never_bio_tabs(self) -> None:
+        from app.models.proposal import ProposalDraft, ProposalSection
+        from app.services.proposal_capability_bio_grounding import (
+            is_named_person_bio_tab,
+            is_personnel_bio_section,
+            repair_misplaced_bio_stub_sections,
+        )
+
+        drug = ProposalSection(
+            id="rfp-closing-drug_free_workplace_program",
+            title="Drug-Free Workplace Program",
+            content=(
+                "### Drug-Free Workplace Program\n\n"
+                "**Role on this engagement:** Team member on this engagement"
+            ),
+        )
+        vendor = ProposalSection(
+            id="rfp-structure-vendor-application",
+            title="Vendor Application",
+            content=(
+                "### Vendor Application\n"
+                "**Role on this engagement:** Team member on this engagement\n\n"
+                "[DESIGNER NOTE: Insert approved bio PDF — 04_Bio_VendorApplication.pdf. "
+                "Do not rewrite Key Accounts or work history in-manuscript.]"
+            ),
+        )
+        real_bio = ProposalSection(
+            id="section-2-bio-sonja-anderson",
+            title="2.1 — Sonja Anderson",
+            content=(
+                "### Sonja Anderson\n"
+                "**Role on this engagement:** Agency Director\n\n"
+                "[DESIGNER NOTE: Insert approved bio PDF — 04_Bio_SonjaAnderson.pdf.]"
+            ),
+        )
+        self.assertFalse(is_named_person_bio_tab(drug))
+        self.assertFalse(is_named_person_bio_tab(vendor))
+        self.assertFalse(is_personnel_bio_section(drug))
+        self.assertFalse(is_personnel_bio_section(vendor))
+        self.assertTrue(is_named_person_bio_tab(real_bio))
+
+        draft = ProposalDraft(
+            rfpId="rfp-bio-guard",
+            updatedAt="2026-08-21T00:00:00Z",
+            sections=[drug, vendor, real_bio],
+        )
+        updated, logs = repair_misplaced_bio_stub_sections(draft)
+        self.assertEqual(len(logs), 2)
+        drug_body = updated.sections[0].content or ""
+        vendor_body = updated.sections[1].content or ""
+        self.assertIn("MANUAL FILL", drug_body)
+        self.assertNotIn("Role on this engagement", drug_body)
+        self.assertIn("MANUAL FILL", vendor_body)
+        self.assertIn("Role on this engagement", updated.sections[2].content or "")
+
 
 class PersonnelSectionBioTests(unittest.TestCase):
     def test_experience_of_personnel_is_personnel_section(self) -> None:

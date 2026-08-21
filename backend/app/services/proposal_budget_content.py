@@ -1465,6 +1465,129 @@ def _client_phase_from_deliverable(description: str, *, fallback: str = "Profess
     return fallback
 
 
+def _md_cell(text: str) -> str:
+    """Keep markdown table cells single-line and pipe-safe."""
+    cleaned = re.sub(r"\s+", " ", (text or "").replace("|", "/")).strip()
+    return cleaned or "—"
+
+
+def _rollup_phase_fee_rows(
+    budget: ProposalBudget,
+) -> list[tuple[str, str, float | None]]:
+    """Collapse line items into one client row per phase.
+
+    Returns (phase, scope_summary, amount). Pass-through media is omitted here
+    (shown in Proposed Investment header only). Travel/reimbursable lines keep
+    their own phase bucket.
+    """
+    from collections import OrderedDict
+
+    from app.services.proposal_budget_validation import infer_line_item_type
+
+    buckets: OrderedDict[str, dict[str, object]] = OrderedDict()
+    for item in budget.line_items or []:
+        kind = infer_line_item_type(item)
+        desc_raw = (item.description or "").strip()
+        is_manual_fill = desc_raw.startswith("[MANUAL FILL")
+        # Pass-through dollars live in the investment header — except MANUAL FILL
+        # placeholders, which must remain visible until a human confirms them.
+        if kind == "client_passthrough" and not is_manual_fill:
+            continue
+        phase, desc = _client_line_label(item)
+        phase = _md_cell(phase)
+        bucket = buckets.get(phase)
+        if bucket is None:
+            bucket = {"descs": [], "amount": 0.0, "has_amount": False}
+            buckets[phase] = bucket
+        descs = bucket["descs"]
+        assert isinstance(descs, list)
+        label = _md_cell(desc)
+        if label and label not in descs and label != "—":
+            descs.append(label)
+        if isinstance(item.extended, (int, float)):
+            bucket["amount"] = float(bucket["amount"]) + float(item.extended)
+            bucket["has_amount"] = True
+
+    rows: list[tuple[str, str, float | None]] = []
+    for phase, data in buckets.items():
+        descs = list(data["descs"])  # type: ignore[arg-type]
+        if len(descs) > 4:
+            scope = "; ".join(descs[:4]) + f"; +{len(descs) - 4} more"
+        else:
+            scope = "; ".join(descs) if descs else "Professional services"
+        if len(scope) > 200:
+            scope = scope[:197].rstrip("; ") + "…"
+        amount: float | None
+        if data["has_amount"]:
+            amount = round(float(data["amount"]), 2)
+        else:
+            amount = None
+        rows.append((phase, scope, amount))
+    return rows
+
+
+def _append_fee_detail_by_phase_table(
+    lines: list[str],
+    budget: ProposalBudget,
+    *,
+    heading: str,
+    include_residual_direct: bool = False,
+) -> None:
+    """Append a clean Phase | Scope | Fee rollup table to ``lines``.
+
+    Professional-fee phases only. Travel and media pass-through stay in the
+    Proposed Investment header so the table total matches professional fees
+    (and does not fight the client grand total that includes pass-through).
+    Explicit travel *line items* still appear as their own phase row.
+    """
+    rows = _rollup_phase_fee_rows(budget)
+    fees, direct = _professional_fees_and_direct(budget)
+    if not rows and not (include_residual_direct and direct > 0):
+        return
+
+    lines.append(heading)
+    lines.append("")
+    lines.append("| Phase | Scope | Fee |")
+    lines.append("| --- | --- | ---: |")
+
+    subtotal = 0.0
+    for phase, scope, amount in rows:
+        if amount is None:
+            fee_cell = "—"
+        else:
+            fee_cell = _usd(amount)
+            subtotal += amount
+        lines.append(f"| {phase} | {scope} | {fee_cell} |")
+
+    travel_already = any(
+        "travel" in phase.casefold() or "reimburs" in phase.casefold()
+        for phase, _, _ in rows
+    )
+    if include_residual_direct and direct > 0 and not travel_already:
+        lines.append(
+            f"| Travel / Reimbursables | Approved travel billed at cost | {_usd(direct)} |"
+        )
+        subtotal += direct
+
+    table_total = round(subtotal, 2)
+    if fees > 0 and not travel_already and not include_residual_direct:
+        # Prefer canonical professional fees when the rollup is fee-only.
+        fee_only_rows = [
+            (p, s, a)
+            for p, s, a in rows
+            if "travel" not in p.casefold() and "reimburs" not in p.casefold()
+        ]
+        fee_sum = round(
+            sum(float(a) for _, _, a in fee_only_rows if a is not None), 2
+        )
+        if abs(fee_sum - fees) <= max(1.0, fees * 0.02):
+            table_total = fees
+    elif fees > 0 and table_total <= 0:
+        table_total = round(fees + (direct if include_residual_direct else 0), 2)
+    lines.append(f"| **Total** | | **{_usd(table_total)}** |")
+    lines.append("")
+
+
 def _professional_zo_budget_framing(*, client_name: str = "") -> str:
     buyer = client_name.strip() or "the client"
     return (
@@ -1810,25 +1933,7 @@ def render_budget_markdown(
         heading = (
             "## Fee Detail by Phase" if not wants_form else "## Supporting Fee Detail"
         )
-        lines.append(heading)
-        lines.append("")
-        lines.append("| Phase | Deliverable | Amount |")
-        lines.append("| --- | --- | ---: |")
-        subtotal = 0.0
-        for item in budget.line_items:
-            phase, desc = _client_line_label(item)
-            extended = _usd(item.extended) if item.extended is not None else "—"
-            if isinstance(item.extended, (int, float)):
-                subtotal += float(item.extended)
-            lines.append(f"| {phase} | {desc} | {extended} |")
-        direct = round(float(budget.direct_expenses_total or 0), 2)
-        if direct > 0:
-            lines.append(
-                f"| Direct expenses | Travel / reimbursables | {_usd(direct)} |"
-            )
-        grand = round(subtotal + direct, 2)
-        lines.append(f"| **Total** | | **{_usd(grand)}** |")
-        lines.append("")
+        _append_fee_detail_by_phase_table(lines, budget, heading=heading)
 
     opt = (budget.option_term_notes or "").strip()
     if opt:
@@ -1878,24 +1983,11 @@ def render_embedded_budget_table_markdown(budget: ProposalBudget) -> str:
         lines.append(f"**Total proposed investment:** {_usd(total)}")
     lines.append("")
     if budget.line_items:
-        lines.append("### Fee Detail by Phase")
-        lines.append("")
-        lines.append("| **Phase** | **Deliverable** | **Amount** |")
-        lines.append("| --- | --- | ---: |")
-        subtotal = 0.0
-        for item in budget.line_items:
-            phase, desc = _client_line_label(item)
-            extended = _usd(item.extended) if item.extended is not None else "—"
-            if isinstance(item.extended, (int, float)):
-                subtotal += float(item.extended)
-            lines.append(f"| {phase} | {desc} | {extended} |")
-        if direct > 0:
-            lines.append(
-                f"| Direct expenses | Travel / reimbursables | {_usd(direct)} |"
-            )
-        grand = round(subtotal + direct, 2)
-        lines.append(f"| **Total** | | **{_usd(grand)}** |")
-        lines.append("")
+        _append_fee_detail_by_phase_table(
+            lines,
+            budget,
+            heading="### Fee Detail by Phase",
+        )
     rendered = "\n".join(lines).strip() + "\n"
     from app.services.proposal_manuscript import scrub_client_facing_section_artifacts
 

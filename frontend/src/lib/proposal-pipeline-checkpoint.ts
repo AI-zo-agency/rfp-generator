@@ -160,7 +160,6 @@ export const FULFILL_SCAN_STEP_LABELS = [
   "Remove optional VERIFY/MANUAL FILL",
   "Compact manuscript (remove duplicates)",
   "Page limit & anti-invention (Ralph)",
-  "Review & quality gate (3 acts)",
   "Pre-submit refresh",
   "Submission readiness (triage + score)",
 ] as const;

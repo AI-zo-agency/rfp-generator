@@ -735,6 +735,7 @@ def rows_from_assessments(
             continue
         is_core = bool(getattr(requirement, "is_core", False))
         category = str(getattr(requirement, "category", "") or "service").casefold()
+        disqualifying = bool(getattr(requirement, "disqualifying", False))
         item = by_requirement.get(name.casefold())
         available = sources.get(name, {})
 
@@ -753,6 +754,7 @@ def rows_from_assessments(
                     requirement=name,
                     status="gap",
                     isCore=is_core,
+                    disqualifying=disqualifying,
                     category=category,
                     evidenceState=evidence_state,
                     downgradeReason=reason
@@ -788,6 +790,7 @@ def rows_from_assessments(
                         requirement=name,
                         status="partial",
                         isCore=is_core,
+                        disqualifying=disqualifying,
                         category=category,
                         evidenceState="adjacent",
                         downgradeReason=(
@@ -841,6 +844,7 @@ def rows_from_assessments(
                             requirement=name,
                             status="partial",
                             isCore=is_core,
+                            disqualifying=disqualifying,
                             category=category,
                             evidenceState="adjacent",
                             downgradeReason=(
@@ -872,6 +876,7 @@ def rows_from_assessments(
                             kbSource=kb_source,
                             evidence=usable_quote[:400],
                             isCore=is_core,
+                            disqualifying=disqualifying,
                             category=category,
                         )
                     )
@@ -885,6 +890,7 @@ def rows_from_assessments(
                 requirement=name,
                 status="gap",
                 isCore=is_core,
+                disqualifying=disqualifying,
                 category=category,
                 downgradeReason=failure,
             )

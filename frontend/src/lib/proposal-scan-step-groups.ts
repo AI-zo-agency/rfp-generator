@@ -43,7 +43,6 @@ export const FULFILL_SCAN_STEP_GROUPS: {
     steps: [
       "Compact manuscript (remove duplicates)",
       "Page limit & anti-invention (Ralph)",
-      "Review & quality gate (3 acts)",
       "Pre-submit refresh",
       "Submission readiness (triage + score)",
     ],

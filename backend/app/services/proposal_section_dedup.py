@@ -616,12 +616,18 @@ def _is_protected_scan_section(section: Any) -> bool:
 
 def collapse_title_near_duplicate_sections(
     sections: list[Any],
+    *,
+    exact_normalized_only: bool = False,
 ) -> tuple[list[Any], list[str]]:
     """Keep one tab when titles are the same ask — including protected References twins.
 
     Scan historically skipped any title containing 'reference' / 'experience', so
     'References' and 'References & Past Performance' both survived and the writer
     restated the same examples in each. Title-near-dup collapse is the exception.
+
+    ``exact_normalized_only=True`` (Complete Scan): only drop identical twins after
+    title normalize (same RFP label twice). Does not merge soft near-dups like distinct
+    TOC siblings — that stays gated behind drop_clone_tabs.
     """
     from app.services.proposal_outline_dedup import (
         normalize_outline_title,
@@ -642,12 +648,16 @@ def collapse_title_near_duplicate_sections(
         if sid_a in drop_ids or sid_a == canon_budget_id or _is_protected_budget_section(sec_a):
             continue
         title_a = _section_title(sec_a)
+        norm_a = normalize_outline_title(title_a)
         for idx_b, sec_b in indexed[i + 1 :]:
             sid_b = _section_id(sec_b)
             if sid_b in drop_ids or sid_b == canon_budget_id or _is_protected_budget_section(sec_b):
                 continue
             title_b = _section_title(sec_b)
-            if not outline_titles_near_duplicate(title_a, title_b, threshold=0.55):
+            if exact_normalized_only:
+                if not norm_a or norm_a != normalize_outline_title(title_b):
+                    continue
+            elif not outline_titles_near_duplicate(title_a, title_b, threshold=0.55):
                 continue
             pts_a = _section_eval_points(sec_a)
             pts_b = _section_eval_points(sec_b)
@@ -663,9 +673,7 @@ def collapse_title_near_duplicate_sections(
             )
             # Prefer the fuller RFP-phrased title when scores/length tie-break is weak.
             if wc_a == wc_b and pts_a == pts_b:
-                drop_b = len(normalize_outline_title(title_b)) <= len(
-                    normalize_outline_title(title_a)
-                )
+                drop_b = len(normalize_outline_title(title_b)) <= len(norm_a)
             if drop_b:
                 drop_ids.add(sid_b)
                 dropped_labels.append(
@@ -893,8 +901,10 @@ def dedupe_manuscript_for_scan(
 ) -> tuple[list[Any], list[str]]:
     """Manuscript compact: compress restates; optionally prune clone tabs.
 
-    ``drop_clone_tabs=False`` (senior editor) keeps every TOC heading and only
-    trims copied paragraphs (case-study rewrites, identity forms, overlap).
+    ``drop_clone_tabs=False`` (Complete Scan) keeps distinct TOC siblings and only
+    trims copied paragraphs — plus exact same-title twins (identical normalized
+    RFP labels). Soft near-dup / content-overlap tab deletion stays off so Scan does
+    not drop legitimate RFP headings the way aggressive compact used to.
     """
     from app.models.proposal import ProposalDraft
 
@@ -912,7 +922,6 @@ def dedupe_manuscript_for_scan(
                 logs.extend(cost_logs)
         except Exception:  # noqa: BLE001
             pass
-    if drop_clone_tabs:
         sections, title_dups = collapse_title_near_duplicate_sections(sections)
         logs.extend(title_dups)
         # Mega parents first so pairwise prune sees the dedicated siblings cleanly.
@@ -920,6 +929,13 @@ def dedupe_manuscript_for_scan(
         logs.extend(removed)
         sections, pruned = prune_near_duplicate_sections(sections)
         logs.extend(pruned)
+    else:
+        # Complete Scan: identical-title twins only — never soft near-dup / prune.
+        sections, title_dups = collapse_title_near_duplicate_sections(
+            sections,
+            exact_normalized_only=True,
+        )
+        logs.extend(title_dups)
     # Offeror/Company Information forms that restate 1.3 → cross-ref only (no table copy)
     draft_like = ProposalDraft(
         rfpId="dedupe-scan",

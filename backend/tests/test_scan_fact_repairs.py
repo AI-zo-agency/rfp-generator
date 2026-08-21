@@ -159,6 +159,67 @@ class RebuildBioStubTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("40 years of experience", body)
         self.assertTrue(is_bio_pdf_designer_note(body))
 
+    def test_fill_hollow_project_team_from_section2_bios(self) -> None:
+        from app.services.proposal_scan_fact_repairs import (
+            fill_hollow_project_team_from_bios,
+            team_role_skeleton_is_hollow,
+        )
+
+        hollow = (
+            "## Section 5.4 — Project Team and Key Personnel\n\n"
+            "**Project Leadership**\n\n"
+            "- Role: Overall project direction\n"
+            "- Qualifications:\n"
+            "- Municipal branding experience:\n\n"
+            "**Strategic Branding Lead**\n\n"
+            "- Role: Brand strategy\n"
+            "- Qualifications:\n"
+            "- Relevant projects:\n"
+        )
+        self.assertTrue(team_role_skeleton_is_hollow(hollow))
+        draft = ProposalDraft(
+            rfpId="rfp-team",
+            updatedAt="2026-08-21T00:00:00Z",
+            sections=[
+                ProposalSection(
+                    id="section-2-bio-sonja-anderson",
+                    title="2.1 — Sonja Anderson",
+                    content=(
+                        "### Sonja Anderson\n"
+                        "**Role on this engagement:** Agency Director\n\n"
+                        "[DESIGNER NOTE: Insert approved bio PDF — 04_Bio_SonjaAnderson.pdf.]"
+                    ),
+                ),
+                ProposalSection(
+                    id="section-2-bio-todd-anderson",
+                    title="2.2 — Todd Anderson",
+                    content=(
+                        "### Todd Anderson\n"
+                        "**Role on this engagement:** Creative Director\n\n"
+                        "[DESIGNER NOTE: Insert approved bio PDF — 04_Bio_ToddAnderson.pdf.]"
+                    ),
+                ),
+                ProposalSection(
+                    id="section-3-work-01",
+                    title="3.1 — Municipality Summaries",
+                    content="### Challenge\nMunicipal brand work.",
+                ),
+                ProposalSection(
+                    id="rfp-structure-section-5-4-project-team",
+                    title="Section 5.4 — Project Team and Key Personnel",
+                    content=hollow,
+                ),
+            ],
+        )
+        updated, logs = fill_hollow_project_team_from_bios(draft)
+        self.assertTrue(logs)
+        body = updated.sections[-1].content or ""
+        self.assertIn("Sonja Anderson", body)
+        self.assertIn("Todd Anderson", body)
+        self.assertIn("Agency Director", body)
+        self.assertNotIn("- Qualifications:\n", body)
+        self.assertIn("Municipality Summaries", body)
+
 
 if __name__ == "__main__":
     unittest.main()
