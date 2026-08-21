@@ -21,3 +21,7 @@ CREATE TABLE IF NOT EXISTS ai_insights (
 
 CREATE INDEX IF NOT EXISTS ai_insights_latest_idx
   ON ai_insights (source, scope_key, as_of DESC);
+
+ALTER TABLE ai_insights ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE ai_insights FROM anon, authenticated;
+GRANT ALL ON TABLE ai_insights TO service_role;
