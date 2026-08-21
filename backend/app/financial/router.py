@@ -9,6 +9,10 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 import logging
 from app.financial import google_sheets, ai_classifier
+from app.financial.ai_insights_repository import get_latest_insight
+from app.financial.qb_insight_rows import chase_rows, hygiene_rows
+from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
+from app.financial.qb_insights import generate_and_store
 from app.financial.qb_repository import get_panel_cache, get_sync_state
 from app.financial.qb_signals import derive_signals
 from app.financial.qb_sync import LeaseHeld, run_sync
@@ -921,28 +925,14 @@ def quickbooks_status():
     return result
 
 
-@router.get("/quickbooks/overview")
-def quickbooks_overview(
-    year: int = Query(default_factory=lambda: datetime.now().year),
-    since: Optional[str] = Query(None, description="ISO timestamp for the activity feed"),
-    refresh: bool = Query(False, description="Deprecated; snapshots refresh during sync"),
-):
-    """Return the latest persisted panel snapshot without calling Intuit."""
+def _load_overview(year: int) -> dict[str, Any]:
+    """The persisted panel snapshot with sync metadata and signals attached."""
     realm_id = settings.quickbooks_realm_id
     state = get_sync_state(realm_id) or {}
     cache = get_panel_cache(realm_id, year)
     if cache is None:
         sync_status = (
-            "missing"
-            if state.get("backfill_completed_at")
-            else "backfill_pending"
-        )
-        logger.warning(
-            "operation=quickbooks_overview realm_id=%s year=%s "
-            "status=%s cache_found=false",
-            realm_id,
-            year,
-            sync_status,
+            "missing" if state.get("backfill_completed_at") else "backfill_pending"
         )
         empty = {
             "year": year,
@@ -966,16 +956,95 @@ def quickbooks_overview(
         ),
     }
     result["signals"] = derive_signals(result)
-    logger.info(
-        "operation=quickbooks_overview realm_id=%s year=%s "
-        "status=%s cache_found=true refresh_ignored=%s since_ignored=%s",
-        realm_id,
-        year,
-        result["sync_status"],
-        refresh,
-        since is not None,
-    )
     return result
+
+
+@router.get("/quickbooks/overview")
+def quickbooks_overview(
+    year: int = Query(default_factory=lambda: datetime.now().year),
+    since: Optional[str] = Query(None, description="ISO timestamp for the activity feed"),
+    refresh: bool = Query(False, description="Deprecated; snapshots refresh during sync"),
+):
+    """Return the latest persisted panel snapshot without calling Intuit."""
+    realm_id = settings.quickbooks_realm_id
+    result = _load_overview(year)
+    cache_found = result["sync_status"] not in ("missing", "backfill_pending")
+    if not cache_found:
+        logger.warning(
+            "operation=quickbooks_overview realm_id=%s year=%s "
+            "status=%s cache_found=false",
+            realm_id,
+            year,
+            result["sync_status"],
+        )
+    else:
+        logger.info(
+            "operation=quickbooks_overview realm_id=%s year=%s "
+            "status=%s cache_found=true refresh_ignored=%s since_ignored=%s",
+            realm_id,
+            year,
+            result["sync_status"],
+            refresh,
+            since is not None,
+        )
+    return result
+
+
+def _today_iso() -> str:
+    return datetime.now().date().isoformat()
+
+
+def _insight_response(overview: dict[str, Any], row: dict[str, Any] | None) -> dict[str, Any]:
+    """Stored prose joined to freshly computed rows.
+
+    Rows are recomputed rather than read back from `evidence` so the tables stay
+    consistent with the rest of the tab. Row ids are stable, so last night's note
+    still lands on today's number; a note whose row has gone is simply unused.
+    """
+    payload = (row or {}).get("payload") or {}
+    return {
+        "status": "ok" if row else "empty",
+        "brief": payload.get("brief", ""),
+        "notes": payload.get("notes", {}),
+        "chase": chase_rows(overview),
+        "hygiene": hygiene_rows(overview),
+        "as_of": (row or {}).get("as_of"),
+        "generated_at": (row or {}).get("generated_at"),
+        "provider": (row or {}).get("provider"),
+        "stale": bool(row) and (row or {}).get("as_of") != _today_iso(),
+    }
+
+
+@router.get("/quickbooks/ai-insights")
+def quickbooks_ai_insights(
+    year: int = Query(default_factory=lambda: datetime.now().year),
+):
+    """Latest successful brief, with the chase and hygiene rows recomputed now."""
+    overview = _load_overview(year)
+    row = get_latest_insight(QB_INSIGHT_SOURCE, settings.quickbooks_realm_id)
+    logger.info(
+        "operation=quickbooks_ai_insights year=%s found=%s",
+        year,
+        row is not None,
+    )
+    return _insight_response(overview, row)
+
+
+@router.post("/quickbooks/ai-insights/regenerate")
+def quickbooks_ai_insights_regenerate(
+    year: int = Query(default_factory=lambda: datetime.now().year),
+):
+    """Generate today's brief on demand, upserting over any existing row."""
+    realm_id = settings.quickbooks_realm_id
+    overview = _load_overview(year)
+    status = generate_and_store(realm_id, overview, _today_iso())
+    logger.info(
+        "operation=quickbooks_ai_insights_regenerate year=%s status=%s",
+        year,
+        status,
+    )
+    row = get_latest_insight(QB_INSIGHT_SOURCE, realm_id)
+    return _insight_response(overview, row)
 
 
 @router.get("/audit-queue")
