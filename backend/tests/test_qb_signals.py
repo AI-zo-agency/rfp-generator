@@ -118,3 +118,155 @@ def test_panel_errors_are_reported_as_info():
     assert signals[0]["id"] == "sync"
     assert signals[0]["severity"] == "info"
     assert "2 panels" in signals[0]["headline"]
+
+
+def test_segment_gap_fires_below_90_pct_coverage():
+    signals = derive_signals({
+        **_base(),
+        "revenue_by_class": {
+            "coverage_pct": 80,
+            "unclassified": 5_000,
+        },
+    })
+    assert signals[0]["id"] == "segment-gap"
+    assert signals[0]["figure"] == "$5,000"
+    assert "80%" in signals[0]["detail"]
+
+
+def test_segment_gap_stays_quiet_at_exactly_90_pct():
+    signals = derive_signals({
+        **_base(),
+        "revenue_by_class": {
+            "coverage_pct": 90,
+            "unclassified": 5_000,
+        },
+    })
+    assert not any(s["id"] == "segment-gap" for s in signals)
+
+
+def test_segment_gap_severity_is_warn_below_70_pct():
+    signals = derive_signals({
+        **_base(),
+        "revenue_by_class": {
+            "coverage_pct": 65,
+            "unclassified": 5_000,
+        },
+    })
+    assert signals[0]["id"] == "segment-gap"
+    assert signals[0]["severity"] == "warn"
+
+
+def test_segment_gap_severity_is_info_at_70_pct_and_above():
+    signals = derive_signals({
+        **_base(),
+        "revenue_by_class": {
+            "coverage_pct": 70,
+            "unclassified": 5_000,
+        },
+    })
+    assert signals[0]["id"] == "segment-gap"
+    assert signals[0]["severity"] == "info"
+
+
+def test_segment_gap_falls_back_to_class_coverage_when_revenue_by_class_absent():
+    signals = derive_signals({
+        **_base(),
+        "class_coverage": {
+            "coverage_pct": 80,
+            "unclassified": 3_000,
+        },
+    })
+    assert signals[0]["id"] == "segment-gap"
+    assert signals[0]["figure"] == "$3,000"
+
+
+def test_segment_gap_does_not_fall_back_when_coverage_pct_is_zero():
+    # Critical test: coverage_pct of 0 is a valid value (not None), so it must be
+    # used, not fallen back. This would fail if the port had used `or` instead of
+    # the TypeScript's `??` (which only checks for null/undefined).
+    signals = derive_signals({
+        **_base(),
+        "revenue_by_class": {
+            "coverage_pct": 0,
+            "unclassified": 5_000,
+        },
+        "class_coverage": {
+            "coverage_pct": 50,
+            "unclassified": 5_000,
+        },
+    })
+    # With coverage_pct = 0 (not None), it should fire and show 0%
+    assert signals[0]["id"] == "segment-gap"
+    assert "0%" in signals[0]["detail"]
+
+
+def test_collection_rate_fires_below_85_pct():
+    signals = derive_signals({
+        **_base(),
+        "billing_vs_cash": {
+            "invoiced_total": 100_000,
+            "collection_rate_pct": 80,
+            "open_ar": 20_000,
+        },
+    })
+    assert signals[0]["id"] == "collection-rate"
+    assert signals[0]["figure"] == "80%"
+    assert "$20,000" in signals[0]["detail"]
+
+
+def test_collection_rate_stays_quiet_at_exactly_85_pct():
+    signals = derive_signals({
+        **_base(),
+        "billing_vs_cash": {
+            "invoiced_total": 100_000,
+            "collection_rate_pct": 85,
+            "open_ar": 15_000,
+        },
+    })
+    assert not any(s["id"] == "collection-rate" for s in signals)
+
+
+def test_collection_rate_severity_is_warn_below_70_pct():
+    signals = derive_signals({
+        **_base(),
+        "billing_vs_cash": {
+            "invoiced_total": 100_000,
+            "collection_rate_pct": 65,
+            "open_ar": 35_000,
+        },
+    })
+    assert signals[0]["id"] == "collection-rate"
+    assert signals[0]["severity"] == "warn"
+
+
+def test_collection_rate_severity_is_info_at_70_pct_and_above():
+    signals = derive_signals({
+        **_base(),
+        "billing_vs_cash": {
+            "invoiced_total": 100_000,
+            "collection_rate_pct": 75,
+            "open_ar": 25_000,
+        },
+    })
+    assert signals[0]["id"] == "collection-rate"
+    assert signals[0]["severity"] == "info"
+
+
+def test_vendor_concentration_directly_asserted():
+    # Payload where vendor-concentration is the only signal
+    signals = derive_signals({
+        **_base(),
+        "expenses_by_vendor": {
+            "total": 200_000,
+            "vendor_count": 20,
+            "top3_concentration_pct": 60,
+            "vendors": [],
+        },
+    })
+    assert len(signals) == 1
+    assert signals[0]["id"] == "vendor-concentration"
+    assert signals[0]["severity"] == "info"
+    assert signals[0]["figure"] == "$200,000"
+    assert "20" in signals[0]["detail"]
+    assert "60%" in signals[0]["headline"]
+    assert signals[0]["go_to"] == "costs"
