@@ -2,8 +2,11 @@
 
 The model's entire output is prose: a short brief and one line per row. Every
 number the reader sees was computed in Python and handed to the model as a
-pre-formatted string, so a wrong figure in a leadership brief is not a risk that
-has to be managed — there is no field the model could put one in.
+pre-formatted string. The `notes` surface is structurally constrained — Python
+generates the row ids and validates each note, so it cannot carry a fabricated
+row, client, or figure. The `brief` is unconstrained prose: its accuracy rests
+on the system-prompt instruction below plus the fact that it is only ever
+given already-formatted figures to describe, not on any check in this module.
 """
 
 from __future__ import annotations

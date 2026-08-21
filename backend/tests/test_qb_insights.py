@@ -44,6 +44,32 @@ def test_validate_keeps_notes_for_known_rows():
     assert out["notes"] == {"chase:cityofumatilla": "95 days out, largest balance."}
 
 
+def test_validate_drops_notes_with_bad_values_for_a_known_row():
+    evidence = qb_insights.build_evidence(_overview())
+    known_id = "chase:cityofumatilla"
+    for bad_value in (42, "", "   "):
+        out = qb_insights.validate_response(
+            {"brief": "ok", "notes": {known_id: bad_value}}, evidence
+        )
+        assert out["notes"] == {}
+
+
+def test_validate_keeps_a_valid_note_while_dropping_a_bad_sibling():
+    overview = _overview()
+    overview["ar"]["clients"].append(
+        {"client": "Second Client", "amount": 5_000, "invoices": 1, "oldest_days": 10}
+    )
+    evidence = qb_insights.build_evidence(overview)
+    ids = sorted(qb_insights.row_ids(evidence["chase"]))
+    assert len(ids) == 2
+    good_id, bad_id = ids
+    out = qb_insights.validate_response(
+        {"brief": "ok", "notes": {good_id: "worth a call today.", bad_id: 42}},
+        evidence,
+    )
+    assert out["notes"] == {good_id: "worth a call today."}
+
+
 def test_validate_drops_notes_for_rows_that_were_never_sent():
     evidence = qb_insights.build_evidence(_overview())
     out = qb_insights.validate_response(
