@@ -146,3 +146,13 @@ def test_generate_and_store_never_raises_when_persistence_itself_fails():
     with patch.object(qb_insights, "chat_json_soft", fake_chat), \
          patch.object(qb_insights, "upsert_insight", boom):
         assert qb_insights.generate_and_store("r1", _overview(), "2026-08-21") == "failed"
+
+
+def test_nightly_hook_swallows_every_failure():
+    """generate_and_store is the sync's only contract: it returns, never raises."""
+    async def explode(*args, **kwargs):
+        raise RuntimeError("provider on fire")
+
+    with patch.object(qb_insights, "chat_json_soft", explode), \
+         patch.object(qb_insights, "upsert_insight"):
+        assert qb_insights.generate_and_store("r1", {}, "2026-08-21") == "failed"

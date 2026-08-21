@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.config import settings
+from app.financial.qb_insights import generate_and_store
 from app.financial.qb_map import params_hash
 from app.financial.qb_panels_from_db import build_overview
 from app.financial.qb_repository import (
@@ -219,7 +220,7 @@ def _write_panel_cache(
     as_of: date,
     activity_since: str,
     computed_at: str,
-) -> None:
+) -> dict[int, dict[str, Any]]:
     payloads = [
         (
             year,
@@ -245,6 +246,7 @@ def _write_panel_cache(
             realm_id,
             year,
         )
+    return dict(payloads)
 
 
 def _backfill_entity(realm_id: str, entity: str, synced_at: str, owner: str) -> int:
@@ -398,13 +400,27 @@ def _run_nightly(
         run_id,
         year,
     )
-    _write_panel_cache(
+    payloads = _write_panel_cache(
         realm_id,
         [year],
         as_of,
         _activity_since(started),
         datetime.now(timezone.utc).isoformat(),
     )
+    overview = payloads.get(year)
+    if overview is not None:
+        # sync_status is merged in by the overview route, not by build_overview.
+        # Signal 8 needs it, and a completed nightly run is by definition ok.
+        insight_status = generate_and_store(
+            realm_id,
+            {**overview, "sync_status": "ok"},
+            as_of.isoformat(),
+        )
+        logger.info(
+            "operation=_run_nightly step=ai_insights run_id=%s status=%s",
+            run_id,
+            insight_status,
+        )
     now = datetime.now(timezone.utc).isoformat()
     logger.info(
         "operation=_run_nightly step=cursor_advanced run_id=%s cursor=%s",
