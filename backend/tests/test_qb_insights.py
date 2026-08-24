@@ -20,7 +20,7 @@ def _overview():
 
 def test_build_evidence_carries_signals_and_both_row_lists():
     evidence = qb_insights.build_evidence(_overview())
-    assert {"position", "signals", "derived", "chase", "hygiene"} == set(evidence)
+    assert {"position", "signals", "derived", "chase", "margin", "hygiene"} == set(evidence)
     assert evidence["chase"][0]["id"] == "chase:cityofumatilla"
     assert any(s["id"] == "ar-late" for s in evidence["signals"])
 

@@ -1,12 +1,21 @@
 from datetime import datetime
 from unittest.mock import patch
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from app.financial import router as fin_router
 from app.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _no_prior_year(monkeypatch):
+    """Both routes read last year's panel cache. Left unpatched that is a live
+    Supabase call from every test in this file."""
+    monkeypatch.setattr(fin_router, "get_panel_cache", lambda *a, **k: None)
 
 
 def _overview():
@@ -207,7 +216,7 @@ def test_http_post_regenerate_calls_generate_and_store(monkeypatch):
     monkeypatch.setattr(
         fin_router,
         "generate_and_store",
-        lambda realm_id, overview, as_of: generate_calls.append(as_of) or "ok",
+        lambda realm_id, overview, as_of, prior=None: generate_calls.append(as_of) or "ok",
     )
     response = client.post("/api/v1/financials/quickbooks/ai-insights/regenerate")
     assert response.status_code == 200
@@ -230,7 +239,7 @@ def test_http_post_regenerate_skips_generate_and_store_when_cache_is_missing(
     monkeypatch.setattr(
         fin_router,
         "generate_and_store",
-        lambda realm_id, overview, as_of: generate_calls.append(as_of) or "ok",
+        lambda realm_id, overview, as_of, prior=None: generate_calls.append(as_of) or "ok",
     )
     response = client.post("/api/v1/financials/quickbooks/ai-insights/regenerate")
     assert response.status_code == 200

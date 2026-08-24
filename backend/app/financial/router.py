@@ -12,6 +12,7 @@ from app.financial import google_sheets, ai_classifier
 from app.financial.ai_insights_repository import get_latest_insight
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows
 from app.financial.qb_position import position
+from app.financial.qb_trend import margin_rows
 from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
 from app.financial.qb_insights import generate_and_store
 from app.financial.qb_repository import get_panel_cache, get_sync_state
@@ -995,7 +996,11 @@ def _today_iso() -> str:
     return datetime.now().date().isoformat()
 
 
-def _insight_response(overview: dict[str, Any], row: dict[str, Any] | None) -> dict[str, Any]:
+def _insight_response(
+    overview: dict[str, Any],
+    row: dict[str, Any] | None,
+    prior: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Stored prose joined to freshly computed rows.
 
     Rows are recomputed rather than read back from `evidence` so the tables stay
@@ -1009,6 +1014,7 @@ def _insight_response(overview: dict[str, Any], row: dict[str, Any] | None) -> d
         "notes": payload.get("notes", {}),
         "position": position(overview),
         "chase": chase_rows(overview),
+        "margin": margin_rows(overview, prior),
         "hygiene": hygiene_rows(overview),
         "as_of": (row or {}).get("as_of"),
         "generated_at": (row or {}).get("generated_at"),
@@ -1033,6 +1039,27 @@ def _safe_get_latest_insight(realm_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _safe_prior_payload(realm_id: str, year: int) -> dict[str, Any] | None:
+    """Last year's cached panels, for same-months-both-years comparison.
+
+    Same defensive shape as `_safe_get_latest_insight`: a realm with only one
+    year of history, or an unreachable cache, drops the two trend rows and
+    leaves the rest of the panel standing.
+    """
+    try:
+        cache = get_panel_cache(realm_id, year - 1)
+    except Exception as exc:  # noqa: BLE001 — no prior year must not break the panel
+        logger.warning(
+            "operation=quickbooks_ai_insights status=prior_year_failed "
+            "realm_id=%s year=%s error=%s",
+            realm_id,
+            year - 1,
+            str(exc)[:200],
+        )
+        return None
+    return (cache or {}).get("payload") or None
+
+
 @router.get("/quickbooks/ai-insights")
 def quickbooks_ai_insights():
     """Latest successful brief, with the chase and hygiene rows recomputed now.
@@ -1044,13 +1071,16 @@ def quickbooks_ai_insights():
     with one derived from stale evidence.
     """
     realm_id = settings.quickbooks_realm_id
-    overview = _load_overview(datetime.now().year)
+    year = datetime.now().year
+    overview = _load_overview(year)
     row = _safe_get_latest_insight(realm_id)
+    prior = _safe_prior_payload(realm_id, year)
     logger.info(
-        "operation=quickbooks_ai_insights found=%s",
+        "operation=quickbooks_ai_insights found=%s prior_year=%s",
         row is not None,
+        prior is not None,
     )
-    return _insight_response(overview, row)
+    return _insight_response(overview, row, prior)
 
 
 @router.post("/quickbooks/ai-insights/regenerate")
@@ -1062,23 +1092,25 @@ def quickbooks_ai_insights_regenerate():
     to reason about — an all-None skeleton has nothing worth spending a call on.
     """
     realm_id = settings.quickbooks_realm_id
-    overview = _load_overview(datetime.now().year)
+    year = datetime.now().year
+    overview = _load_overview(year)
     row = _safe_get_latest_insight(realm_id)
+    prior = _safe_prior_payload(realm_id, year)
 
     if overview.get("sync_status") in ("missing", "backfill_pending"):
         logger.info(
             "operation=quickbooks_ai_insights_regenerate status=skipped sync_status=%s",
             overview.get("sync_status"),
         )
-        return _insight_response(overview, row)
+        return _insight_response(overview, row, prior)
 
-    status = generate_and_store(realm_id, overview, _today_iso())
+    status = generate_and_store(realm_id, overview, _today_iso(), prior=prior)
     logger.info(
         "operation=quickbooks_ai_insights_regenerate status=%s",
         status,
     )
     row = _safe_get_latest_insight(realm_id)
-    result = _insight_response(overview, row)
+    result = _insight_response(overview, row, prior)
     result["generated"] = status
     return result
 

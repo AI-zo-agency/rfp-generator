@@ -131,9 +131,13 @@ def derive_signals(data: dict[str, Any]) -> list[dict[str, Any]]:
         pct = js_round(share * 100)
         detail = f"{pct}% of what's owed."
         if worst:
+            # "Oldest is X at 73 days" reads as though X's whole balance were 73
+            # days old, and the model duly welded that age to X's amount from
+            # the chase row. Naming the invoice rather than the client is both
+            # more accurate and harder to misread.
             detail = (
-                f"{pct}% of what's owed. "
-                f"Oldest is {worst['client']} at {worst['oldest_days']} days."
+                f"{pct}% of what's owed. Oldest single invoice is "
+                f"{worst['client']}'s, at {worst['oldest_days']} days."
             )
         out.append({
             "id": "ar-late",

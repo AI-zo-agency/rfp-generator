@@ -20,6 +20,14 @@ interface ChaseRow {
   slow_payer: boolean;
 }
 
+interface MarginRow {
+  id: string;
+  label: string;
+  figure: string;
+  detail: string;
+  kind: string;
+}
+
 interface HygieneRow {
   id: string;
   label: string;
@@ -43,6 +51,7 @@ interface InsightsData {
   /** Null when there is no cash figure to anchor the strip. */
   position: PositionData | null;
   chase: ChaseRow[];
+  margin: MarginRow[];
   hygiene: HygieneRow[];
   as_of: string | null;
   generated_at: string | null;
@@ -151,7 +160,7 @@ export function QuickBooksInsights({ year }: { year: number }) {
 
       {data.chase.length ? (
         <div className="qb-insights-list">
-          <h4>Call this week</h4>
+          <h4>Get cash in</h4>
           <ul>
             {data.chase.map((row) => (
               <li key={row.id}>
@@ -179,6 +188,26 @@ export function QuickBooksInsights({ year }: { year: number }) {
                   </p>
                 </div>
                 <span className="qb-insights-figure">{row.overdue_figure}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {data.margin.length ? (
+        <div className="qb-insights-list">
+          <h4>Watch margin</h4>
+          <ul>
+            {data.margin.map((row) => (
+              <li key={row.id}>
+                <div>
+                  <p className="qb-insights-row-head">{row.label}</p>
+                  <p className="qb-insights-row-sub">
+                    {row.detail}
+                    {data.notes[row.id] ? ` ${data.notes[row.id]}` : ""}
+                  </p>
+                </div>
+                <span className="qb-insights-figure">{row.figure}</span>
               </li>
             ))}
           </ul>

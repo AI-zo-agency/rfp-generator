@@ -50,6 +50,9 @@ def test_aged_ar_surfaces_as_critical_and_names_oldest_debtor():
     assert signals[0]["figure"] == "$30,000"
     assert "Acme" in signals[0]["detail"]
     assert "120 days" in signals[0]["detail"]
+    # "Oldest is Acme at 120 days" reads as Acme's whole balance being 120 days
+    # old; the model welded that age to Acme's amount from the chase row.
+    assert "Oldest single invoice" in signals[0]["detail"]
 
 
 def test_payables_over_cash_is_critical_and_sorts_first():

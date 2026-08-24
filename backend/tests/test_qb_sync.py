@@ -494,7 +494,7 @@ def test_nightly_reuses_panel_payload_for_insight_and_survives_a_failed_brief(mo
     monkeypatch.setattr(
         qb_sync,
         "generate_and_store",
-        lambda realm_id, overview, as_of: calls.append((realm_id, overview, as_of)) or "failed",
+        lambda realm_id, overview, as_of, prior=None: calls.append((realm_id, overview, as_of)) or "failed",
     )
 
     started = datetime(2026, 8, 13, tzinfo=timezone.utc)

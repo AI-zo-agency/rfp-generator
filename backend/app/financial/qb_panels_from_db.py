@@ -832,11 +832,32 @@ def monthly_trend(realm_id: str, year: int) -> dict[str, Any]:
     )
     columns = _columns(payload)
     income = _find_row(payload, "Total Income") or []
+    # The same Month-summarized snapshot carries these, and pl_summary already
+    # proves both rows resolve. Carrying them per month is what lets a
+    # year-over-year margin comparison use the same months on both sides
+    # instead of eight months against twelve.
+    gross = _find_row(payload, "Gross Profit") or []
+    cost = _find_row(payload, "Total Cost of Goods Sold") or []
+
+    def _cell(row: list[Any], index: int) -> float | None:
+        return round(_money(row[index]), 2) if index < len(row) else None
+
     months = []
-    for column, value in zip(columns[1:], income[1:]):
+    for index, (column, value) in enumerate(zip(columns[1:], income[1:]), start=1):
         if column.strip().upper() == "TOTAL":
             continue
-        months.append({"month": column.strip(), "amount": round(_money(value), 2)})
+        entry: dict[str, Any] = {
+            "month": column.strip(), "amount": round(_money(value), 2),
+        }
+        # Absent rather than zero when the snapshot has no such row, so a
+        # consumer can tell "no margin data" from "margin was nil".
+        gross_profit = _cell(gross, index)
+        if gross_profit is not None:
+            entry["gross_profit"] = gross_profit
+        cost_of_services = _cell(cost, index)
+        if cost_of_services is not None:
+            entry["cost_of_services"] = cost_of_services
+        months.append(entry)
     booked = [m for m in months if m["amount"]]
     logger.info(
         "operation=monthly_trend realm_id=%s year=%s month_count=%s",

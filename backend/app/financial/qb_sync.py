@@ -19,6 +19,7 @@ from app.financial.qb_repository import (
     clear_backfill_progress,
     finish_sync_run,
     get_backfill_progress,
+    get_panel_cache,
     get_sync_state,
     insert_sync_run,
     release_lease,
@@ -411,10 +412,15 @@ def _run_nightly(
     if overview is not None:
         # sync_status is merged in by the overview route, not by build_overview.
         # Signal 8 needs it, and a completed nightly run is by definition ok.
+        # Last year's panels come from cache, not from this run — the nightly
+        # only rebuilds the current year. Without them the trend rows drop out
+        # and the rest of the brief is unaffected.
+        prior_cache = get_panel_cache(realm_id, year - 1)
         insight_status = generate_and_store(
             realm_id,
             {**overview, "sync_status": "ok"},
             as_of.isoformat(),
+            prior=(prior_cache or {}).get("payload") or None,
         )
         logger.info(
             "operation=_run_nightly step=ai_insights run_id=%s status=%s",

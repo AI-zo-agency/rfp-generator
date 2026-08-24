@@ -32,12 +32,16 @@ from app.financial.figure_guard import (
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows, row_ids
 from app.financial.qb_position import position
 from app.financial.qb_signals import derive_signals, derived_figures
+from app.financial.qb_trend import margin_rows
 from app.services.llm import chat_json_soft
 
 logger = logging.getLogger(__name__)
 
 SOURCE = "quickbooks"
-_MAX_TOKENS = 900
+# Fourteen rows now, and notes that give a consequence rather than a
+# description run two sentences. At 900 the reply was truncated mid-note and
+# the salvage path served half a sentence to the reader. One call a night.
+_MAX_TOKENS = 2200
 _TEMPERATURE = 0.3
 
 _SYSTEM = (
@@ -87,7 +91,21 @@ def _model_facing(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def build_evidence(overview: dict[str, Any]) -> dict[str, Any]:
+def _known_ids(evidence: dict[str, Any]) -> set[str]:
+    """Every row the model may annotate, derived from the evidence itself.
+
+    Reading the row lists rather than hard-coding the `chase:` / `hygiene:`
+    prefixes means a new list is annotatable the moment it joins the evidence.
+    """
+    ids: set[str] = set()
+    for key in ("chase", "margin", "hygiene"):
+        ids |= row_ids(evidence.get(key) or [])
+    return ids
+
+
+def build_evidence(
+    overview: dict[str, Any], prior: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Exactly what the model is shown, which is also what gets stored.
 
     Rows are projected down to the fields worth writing about. `figure` already
@@ -99,12 +117,13 @@ def build_evidence(overview: dict[str, Any]) -> dict[str, Any]:
         "signals": derive_signals(overview),
         "derived": derived_figures(overview),
         "chase": _model_facing(chase_rows(overview)),
+        "margin": margin_rows(overview, prior),
         "hygiene": _model_facing(hygiene_rows(overview)),
     }
 
 
 def build_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
-    ids = sorted(row_ids(evidence["chase"]) | row_ids(evidence["hygiene"]))
+    ids = sorted(_known_ids(evidence))
     user = (
         "Here is tonight's QuickBooks position.\n\n"
         f"{json.dumps(evidence, indent=2)}\n\n"
@@ -112,8 +131,13 @@ def build_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
         "1. `brief`: four or five sentences. Connect the signals to each other "
         "rather than restating them one by one — say what the combination means "
         "for the week ahead.\n"
-        "2. `notes`: an object keyed by row id, each value one short sentence "
-        "saying why that row matters now. Use only these ids, and omit any row "
+        "2. `notes`: an object keyed by row id, one or two sentences each. Do "
+        "not describe the row — the reader can see it. Say what follows from "
+        "it: what it means for the business, and what to do about it. "
+        '"Largest untagged cost bucket" describes; "until this is assigned, '
+        "client profitability is guesswork and you may be underpricing the "
+        'work" is worth reading. Where you name the dollars at stake, copy '
+        "that row's own figure exactly. Use only these ids, and omit any row "
         f"you have nothing useful to say about: {ids}\n\n"
         'Reply with JSON shaped exactly: {"brief": "...", "notes": {"<id>": "..."}}'
     )
@@ -151,7 +175,7 @@ def validate_response(
     if offender:
         raise ValueError(f"brief states an unsupported quantity: {offender!r}")
 
-    known = row_ids(evidence["chase"]) | row_ids(evidence["hygiene"])
+    known = _known_ids(evidence)
     raw_notes = raw.get("notes")
     notes: dict[str, str] = {}
     if isinstance(raw_notes, dict):
@@ -191,7 +215,10 @@ async def _generate(evidence: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
 
 def generate_and_store(
-    realm_id: str, overview: dict[str, Any], as_of: str
+    realm_id: str,
+    overview: dict[str, Any],
+    as_of: str,
+    prior: dict[str, Any] | None = None,
 ) -> str:
     """Generate tonight's brief and persist it. Returns "ok" or "failed".
 
@@ -201,7 +228,7 @@ def generate_and_store(
     """
     evidence: dict[str, Any] = {}
     try:
-        evidence = build_evidence(overview)
+        evidence = build_evidence(overview, prior)
         payload, provider = asyncio.run(_generate(evidence))
     except Exception as exc:  # noqa: BLE001 — a bad brief must not fail the sync
         logger.warning(
