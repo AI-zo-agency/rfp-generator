@@ -223,11 +223,26 @@ def ar_aging(realm_id: str, *, as_of: date) -> dict[str, Any]:
 
         name = invoice.get("customer_name") or "Unknown"
         entry = by_client.setdefault(
-            name, {"client": name, "amount": 0.0, "invoices": 0, "oldest_days": 0},
+            name,
+            {
+                "client": name, "amount": 0.0, "invoices": 0, "oldest_days": 0,
+                "overdue_amount": 0.0, "overdue_days": 0,
+                "overdue_dollar_days": 0.0,
+            },
         )
         entry["amount"] += balance
         entry["invoices"] += 1
         entry["oldest_days"] = max(entry["oldest_days"], days)
+        # `amount` sums every open invoice while `oldest_days` keeps only the
+        # worst age, so the pair can describe invoices with nothing in common.
+        # Splitting off the overdue portion fixes half of that; the other half
+        # is that one 73-day invoice makes a client's whole overdue balance look
+        # 73 days late. Only the exact per-invoice sum settles it, and this loop
+        # is already standing on every invoice with its own age in hand.
+        if days > 0:
+            entry["overdue_amount"] += balance
+            entry["overdue_days"] = max(entry["overdue_days"], days)
+            entry["overdue_dollar_days"] += balance * days
 
     total = sum(b["amount"] for b in buckets.values())
     clients = sorted(by_client.values(), key=lambda c: -c["amount"])
@@ -251,7 +266,15 @@ def ar_aging(realm_id: str, *, as_of: date) -> dict[str, Any]:
             }
             for label, values in buckets.items()
         ],
-        "clients": [{**c, "amount": round(c["amount"], 2)} for c in clients[:12]],
+        "clients": [
+            {
+                **c,
+                "amount": round(c["amount"], 2),
+                "overdue_amount": round(c["overdue_amount"], 2),
+                "overdue_dollar_days": round(c["overdue_dollar_days"], 2),
+            }
+            for c in clients[:12]
+        ],
     }
 
 

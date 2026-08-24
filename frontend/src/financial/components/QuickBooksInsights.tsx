@@ -8,12 +8,16 @@ const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 interface ChaseRow {
   id: string;
   client: string;
-  amount: number;
-  figure: string;
-  oldest_days: number;
-  invoices: number;
+  /** The past-due portion only — not the whole balance. */
+  overdue_figure: string;
+  /** Age of the oldest overdue invoice. */
+  overdue_days: number;
+  /** Dollar-weighted mean age. This is the one that pairs truthfully with the
+   *  amount: OCF's invoices run 24–73 days, so "$11,966, 73d late" is false. */
+  avg_overdue_days: number;
+  balance_figure: string;
+  invoice_count: number;
   slow_payer: boolean;
-  dollar_days: number;
 }
 
 interface HygieneRow {
@@ -128,12 +132,22 @@ export function QuickBooksInsights({ year }: { year: number }) {
                     ) : null}
                   </p>
                   <p className="qb-insights-row-sub">
-                    {row.oldest_days}d late ·{" "}
-                    {row.invoices} {row.invoices === 1 ? "invoice" : "invoices"}
+                    {row.avg_overdue_days}d overdue
+                    {/* One invoice cannot have a spread, so avg == oldest. */}
+                    {row.overdue_days !== row.avg_overdue_days
+                      ? ` (oldest ${row.overdue_days}d)`
+                      : ""}
+                    {" · "}
+                    {row.invoice_count}{" "}
+                    {row.invoice_count === 1 ? "invoice" : "invoices"}
+                    {/* Only worth saying when part of the balance isn't due yet. */}
+                    {row.balance_figure !== row.overdue_figure
+                      ? ` · ${row.balance_figure} owed`
+                      : ""}
                     {data.notes[row.id] ? ` · ${data.notes[row.id]}` : ""}
                   </p>
                 </div>
-                <span className="qb-insights-figure">{row.figure}</span>
+                <span className="qb-insights-figure">{row.overdue_figure}</span>
               </li>
             ))}
           </ul>
