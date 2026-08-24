@@ -2,11 +2,18 @@
 
 The model's entire output is prose: a short brief and one line per row. Every
 number the reader sees was computed in Python and handed to the model as a
-pre-formatted string. The `notes` surface is structurally constrained — Python
-generates the row ids and validates each note, so it cannot carry a fabricated
-row, client, or figure. The `brief` is unconstrained prose: its accuracy rests
-on the system-prompt instruction below plus the fact that it is only ever
-given already-formatted figures to describe, not on any check in this module.
+pre-formatted string.
+
+`notes` is structurally constrained — Python generates the row ids and validates
+each note, so a note cannot carry a fabricated row or client.
+
+`brief` is free prose and cannot be constrained that way. Three things defend
+it, in descending order of how much work they do: the prohibitions in `_SYSTEM`,
+the pre-computed quantities in `derived_figures` (so the model never has a
+reason to derive one itself), and `figure_guard`, which rejects prose stating a
+quantity the evidence cannot back — in verbal form as well as digit form,
+because the first live brief got all three of its figures wrong without writing
+a single digit. See `figure_guard` for what that check cannot catch.
 """
 
 from __future__ import annotations
@@ -17,8 +24,13 @@ import logging
 from typing import Any
 
 from app.financial.ai_insights_repository import upsert_insight
+from app.financial.figure_guard import (
+    check_magnitude_claims,
+    check_quantities,
+    evidence_numbers,
+)
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows, row_ids
-from app.financial.qb_signals import derive_signals
+from app.financial.qb_signals import derive_signals, derived_figures
 from app.services.llm import chat_json_soft
 
 logger = logging.getLogger(__name__)
@@ -30,17 +42,51 @@ _TEMPERATURE = 0.3
 _SYSTEM = (
     "You are the financial controller for a creative agency, writing a short "
     "morning note for the owner. Plain sentences, no jargon, no metric names, "
-    "no bullet lists inside the brief. Never state a number, a percentage, or a "
-    "client name that does not appear in the data you were given. If nothing is "
-    "wrong, say so plainly rather than manufacturing concern."
+    "no bullet lists inside the brief.\n\n"
+    "Three rules about figures:\n"
+    "1. Reuse figures verbatim or not at all. Copy the string you were given "
+    'exactly — "$288,199", never "roughly $288k" and never "nearly '
+    'three-quarters of a million". Do not round a figure, do not approximate '
+    "one, and never write one out in words.\n"
+    "2. Never derive a new quantity. No ratios, multiples, differences, sums, "
+    "percentages or day-counts beyond the ones you were handed. Where a ratio "
+    "is the natural way to put something it has already been computed for you; "
+    "use that or say nothing.\n"
+    '3. Never characterise magnitude across rows — "the bulk of", "most of", '
+    '"the majority of" — unless the data states that share. Quote the stated '
+    "share instead.\n\n"
+    "Client names come from the data as well; never name one that is not in it. "
+    "If nothing is wrong, say so plainly rather than manufacturing concern."
 )
 
 
+# Keys the rows carry for ranking and for the frontend, which the model has no
+# use for. Sending them is not neutral: `dollar_days` is amount x days, a number
+# in the hundreds of thousands that resembles nothing the reader should ever see,
+# and every number in the evidence is a number the guard will accept. OCF's
+# 861,552 sat close enough to 750,000 to license "nearly three-quarters of a
+# million" as a description of $288,199.
+_INTERNAL_ROW_KEYS = {"amount", "overdue_amount", "dollar_days"}
+
+
+def _model_facing(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {k: v for k, v in row.items() if k not in _INTERNAL_ROW_KEYS} for row in rows
+    ]
+
+
 def build_evidence(overview: dict[str, Any]) -> dict[str, Any]:
+    """Exactly what the model is shown, which is also what gets stored.
+
+    Rows are projected down to the fields worth writing about. `figure` already
+    carries every amount as a formatted string, so the raw numbers behind it add
+    nothing to the prose and cost the guard its precision.
+    """
     return {
         "signals": derive_signals(overview),
-        "chase": chase_rows(overview),
-        "hygiene": hygiene_rows(overview),
+        "derived": derived_figures(overview),
+        "chase": _model_facing(chase_rows(overview)),
+        "hygiene": _model_facing(hygiene_rows(overview)),
     }
 
 
@@ -64,30 +110,57 @@ def build_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def _unsupported_figure(text: str, allowed: set[float]) -> str | None:
+    """The first quantity or magnitude claim in `text` the evidence cannot back."""
+    return check_quantities(text, allowed) or check_magnitude_claims(text)
+
+
 def validate_response(
     raw: dict[str, Any], evidence: dict[str, Any]
 ) -> dict[str, Any]:
-    """Keep the brief and the notes whose ids we actually sent. Discard the rest.
+    """Keep the brief and the notes whose ids and figures both check out.
 
-    Raises ValueError when there is no usable brief — that is a failed call.
+    A note whose prose states a figure the evidence cannot back is dropped, the
+    same way a note for an unknown row is — rows already render without notes,
+    so the cost is one missing sentence.
+
+    Raises ValueError when there is no usable brief, or when the brief itself
+    states such a figure. Either is a failed call: `generate_and_store` records
+    the reason and reads keep serving the last good brief.
     """
     brief = raw.get("brief")
     if not isinstance(brief, str) or not brief.strip():
         raise ValueError("response has no usable brief")
+    brief = brief.strip()
+
+    allowed = evidence_numbers(evidence)
+    offender = _unsupported_figure(brief, allowed)
+    if offender:
+        raise ValueError(f"brief states an unsupported quantity: {offender!r}")
 
     known = row_ids(evidence["chase"]) | row_ids(evidence["hygiene"])
     raw_notes = raw.get("notes")
     notes: dict[str, str] = {}
     if isinstance(raw_notes, dict):
         for key, value in raw_notes.items():
-            if key in known and isinstance(value, str) and value.strip():
-                notes[key] = value.strip()
-            else:
+            if key not in known or not isinstance(value, str) or not value.strip():
                 logger.info(
                     "operation=qb_insights_validate status=note_dropped key=%s",
                     key,
                 )
-    return {"brief": brief.strip(), "notes": notes}
+                continue
+            text = value.strip()
+            bad = _unsupported_figure(text, allowed)
+            if bad:
+                logger.info(
+                    "operation=qb_insights_validate status=note_dropped_figure "
+                    "key=%s figure=%s",
+                    key,
+                    bad,
+                )
+                continue
+            notes[key] = text
+    return {"brief": brief, "notes": notes}
 
 
 async def _generate(evidence: dict[str, Any]) -> tuple[dict[str, Any], str]:

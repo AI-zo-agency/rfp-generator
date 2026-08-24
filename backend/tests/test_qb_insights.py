@@ -20,7 +20,7 @@ def _overview():
 
 def test_build_evidence_carries_signals_and_both_row_lists():
     evidence = qb_insights.build_evidence(_overview())
-    assert {"signals", "chase", "hygiene"} == set(evidence)
+    assert {"signals", "derived", "chase", "hygiene"} == set(evidence)
     assert evidence["chase"][0]["id"] == "chase:cityofumatilla"
     assert any(s["id"] == "ar-late" for s in evidence["signals"])
 
@@ -156,3 +156,102 @@ def test_nightly_hook_swallows_every_failure():
     with patch.object(qb_insights, "chat_json_soft", explode), \
          patch.object(qb_insights, "upsert_insight"):
         assert qb_insights.generate_and_store("r1", {}, "2026-08-21") == "failed"
+
+
+# ── figure guard ─────────────────────────────────────────────────────────────
+# The evidence built from _overview() carries 14,419 / 95 / 3 and nothing else,
+# so anything outside that set is unsupported.
+
+def test_validate_drops_a_note_stating_a_figure_the_evidence_cannot_back():
+    evidence = qb_insights.build_evidence(_overview())
+    out = qb_insights.validate_response(
+        {"brief": "ok",
+         "notes": {"chase:cityofumatilla": "Nearly half a million is outstanding."}},
+        evidence,
+    )
+    assert out["notes"] == {}
+
+
+def test_validate_keeps_a_clean_note_while_dropping_one_with_a_bad_figure():
+    overview = _overview()
+    overview["ar"]["clients"].append(
+        {"client": "Second Client", "amount": 5_000, "invoices": 1, "oldest_days": 10}
+    )
+    evidence = qb_insights.build_evidence(overview)
+    good, bad = sorted(qb_insights.row_ids(evidence["chase"]))
+    out = qb_insights.validate_response(
+        {"brief": "ok",
+         "notes": {good: "Ninety-five days out.", bad: "Nearly four times what we hold."}},
+        evidence,
+    )
+    assert out["notes"] == {good: "Ninety-five days out."}
+
+
+def test_validate_rejects_a_brief_stating_an_unsupported_figure():
+    evidence = qb_insights.build_evidence(_overview())
+    with pytest.raises(ValueError, match="unsupported quantity"):
+        qb_insights.validate_response(
+            {"brief": "Nearly three-quarters of a million sits unclassified.",
+             "notes": {}},
+            evidence,
+        )
+
+
+def test_validate_rejects_a_brief_claiming_magnitude_without_a_share():
+    evidence = qb_insights.build_evidence(_overview())
+    with pytest.raises(ValueError, match="unsupported quantity"):
+        qb_insights.validate_response(
+            {"brief": "Umatilla is the bulk of the aging book.", "notes": {}}, evidence
+        )
+
+
+def test_validate_accepts_a_brief_that_quotes_its_figures_correctly():
+    evidence = qb_insights.build_evidence(_overview())
+    out = qb_insights.validate_response(
+        {"brief": "$14,419 is outstanding and the oldest invoice is 95 days out.",
+         "notes": {}},
+        evidence,
+    )
+    assert out["brief"].startswith("$14,419")
+
+
+def test_a_guarded_brief_failure_is_stored_with_the_offending_text():
+    async def fake_chat(*args, **kwargs):
+        return {"brief": "Nearly three-quarters of a million is unclassified.",
+                "notes": {}}, "openrouter"
+
+    with patch.object(qb_insights, "chat_json_soft", fake_chat), \
+         patch.object(qb_insights, "upsert_insight") as upsert:
+        status = qb_insights.generate_and_store("r1", _overview(), "2026-08-21")
+
+    assert status == "failed"
+    kwargs = upsert.call_args.kwargs
+    assert kwargs["status"] == "failed"
+    assert "three-quarters" in kwargs["error"]
+
+
+def test_evidence_hides_the_internal_ranking_keys_from_the_model():
+    """`dollar_days` licensed a wrong figure, so it must not reach the model.
+
+    OCF's dollar_days is 11,966 x 72 = 861,552. With that in the evidence the
+    guard accepted "nearly three-quarters of a million" as a description of
+    $288,199, because 750,000 sits inside the verbal tolerance of 861,552.
+    """
+    evidence = qb_insights.build_evidence(_overview())
+    for row in evidence["chase"] + evidence["hygiene"]:
+        assert "dollar_days" not in row
+        assert "amount" not in row
+    # The rows themselves keep the keys; only the model's copy is projected.
+    assert "dollar_days" in qb_insights.chase_rows(_overview())[0]
+
+
+def test_the_verbal_tolerance_cannot_be_widened_by_a_derived_internal_number():
+    overview = _overview()
+    overview["ar"]["clients"][0].update(amount=11_966, oldest_days=72)
+    evidence = qb_insights.build_evidence(overview)
+    with pytest.raises(ValueError, match="unsupported quantity"):
+        qb_insights.validate_response(
+            {"brief": "Nearly three-quarters of a million sits unclassified.",
+             "notes": {}},
+            evidence,
+        )

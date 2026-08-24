@@ -1,6 +1,8 @@
 from app.financial.qb_signals import (
+    aged_ar,
     coverage_gap,
     derive_signals,
+    derived_figures,
     js_round,
     slow_payer_threshold,
     usd,
@@ -330,3 +332,69 @@ def test_vendor_concentration_directly_asserted():
     assert "20" in signals[0]["detail"]
     assert "60%" in signals[0]["headline"]
     assert signals[0]["go_to"] == "costs"
+
+
+# ── derived figures ──────────────────────────────────────────────────────────
+# The model is forbidden from deriving quantities, so anything worth stating has
+# to be computed here. Figures below are the live 2026-08-24 position.
+
+def test_ap_to_cash_ratio_is_the_real_multiple_not_a_rounded_one():
+    data = _base() | {
+        "ap": {"total": 38_643.22},
+        "liquidity": {"cash": 7_742.33},
+    }
+    # 4.99x. The first live brief called this "nearly four times".
+    assert derived_figures(data)["ap_to_cash_ratio"] == "5.0x"
+
+
+def test_ap_to_cash_ratio_is_omitted_when_there_is_no_cash_to_divide_by():
+    for cash in (0, None, -100):
+        data = _base() | {"ap": {"total": 38_643.22}, "liquidity": {"cash": cash}}
+        assert "ap_to_cash_ratio" not in derived_figures(data)
+
+
+def test_ap_to_cash_ratio_is_omitted_when_there_are_no_payables():
+    data = _base() | {"ap": {"total": 0}, "liquidity": {"cash": 7_742.33}}
+    assert "ap_to_cash_ratio" not in derived_figures(data)
+
+
+def _aged_ar_payload() -> dict:
+    return _base() | {
+        "ar": {
+            "total": 51_244.06,
+            "buckets": [
+                {"label": "Not yet due", "amount": 22_745.83},
+                {"label": "1-30 days", "amount": 13_331.83},
+                {"label": "31-60 days", "amount": 13_966.40},
+                {"label": "61-90 days", "amount": 1_200.00},
+                {"label": "90+ days", "amount": 0.0},
+            ],
+            "clients": [{"client": "OCF", "amount": 11_966, "oldest_days": 72}],
+        },
+    }
+
+
+def test_aged_share_pct_matches_the_percentage_the_signal_displays():
+    data = _aged_ar_payload()
+    pct = derived_figures(data)["aged_share_pct"]
+    signal = next(s for s in derive_signals(data) if s["id"] == "ar-late")
+    assert pct == "2%"
+    assert signal["detail"].startswith("2% of what's owed.")
+
+
+def test_aged_ar_returns_both_the_amount_and_the_share():
+    late, share = aged_ar(_aged_ar_payload())
+    assert late == 1_200.00
+    assert round(share, 4) == 0.0234
+
+
+def test_aged_ar_is_none_when_nothing_is_past_sixty_days():
+    data = _base() | {
+        "ar": {"total": 51_244.06, "buckets": [{"label": "1-30 days", "amount": 51_244.06}]}
+    }
+    assert aged_ar(data) is None
+    assert "aged_share_pct" not in derived_figures(data)
+
+
+def test_aged_ar_is_none_when_there_are_no_receivables_at_all():
+    assert aged_ar(_base() | {"ar": {"total": 0, "buckets": []}}) is None

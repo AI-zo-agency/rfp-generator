@@ -48,6 +48,49 @@ def slow_payer_threshold(dso_days: float | None) -> float | None:
     return max(float(dso_days) * 1.75, 40)
 
 
+def aged_ar(data: dict[str, Any]) -> tuple[float, float] | None:
+    """Resolve (late_amount, share_of_total) for receivables past 60 days.
+
+    Returns None when there is nothing to report: no receivables at all, or
+    none of them aged. Shared by the ar-late signal and by `derived_figures`,
+    so the percentage the brief may quote is the one the signal displays.
+    """
+    ar = data.get("ar") or {}
+    ar_total = float(ar.get("total") or 0)
+    if ar_total <= 0:
+        return None
+    late = sum(
+        float(b.get("amount") or 0)
+        for b in (ar.get("buckets") or [])
+        if b.get("label") in _LATE_BUCKETS
+    )
+    if late <= 0:
+        return None
+    return late, late / ar_total
+
+
+def derived_figures(data: dict[str, Any]) -> dict[str, str]:
+    """The quantities worth stating, computed here so the model never has to.
+
+    Forbidding the model to derive a ratio while handing it two numbers and an
+    obvious reason to divide them is how a 4.99x payables-to-cash position gets
+    written up as "nearly four times". Pre-formatted strings, like every other
+    figure that crosses the wire.
+    """
+    out: dict[str, str] = {}
+
+    cash = (data.get("liquidity") or {}).get("cash")
+    ap_total = float((data.get("ap") or {}).get("total") or 0)
+    if cash is not None and float(cash) > 0 and ap_total > 0:
+        out["ap_to_cash_ratio"] = f"{ap_total / float(cash):.1f}x"
+
+    aged = aged_ar(data)
+    if aged is not None:
+        out["aged_share_pct"] = f"{js_round(aged[1] * 100)}%"
+
+    return out
+
+
 def coverage_gap(data: dict[str, Any]) -> tuple[float, float] | None:
     """Resolve (coverage_pct, unclassified) for the revenue-segment gap.
 
@@ -76,36 +119,30 @@ def derive_signals(data: dict[str, Any]) -> list[dict[str, Any]]:
 
     # 1. Receivables aged past the point of "they'll get to it".
     ar = data.get("ar") or {}
-    ar_total = float(ar.get("total") or 0)
-    if ar_total > 0:
-        late = sum(
-            float(b.get("amount") or 0)
-            for b in (ar.get("buckets") or [])
-            if b.get("label") in _LATE_BUCKETS
+    aged = aged_ar(data)
+    if aged is not None:
+        late, share = aged
+        clients = sorted(
+            ar.get("clients") or [],
+            key=lambda c: c.get("oldest_days") or 0,
+            reverse=True,
         )
-        if late > 0:
-            share = late / ar_total
-            clients = sorted(
-                ar.get("clients") or [],
-                key=lambda c: c.get("oldest_days") or 0,
-                reverse=True,
+        worst = clients[0] if clients else None
+        pct = js_round(share * 100)
+        detail = f"{pct}% of what's owed."
+        if worst:
+            detail = (
+                f"{pct}% of what's owed. "
+                f"Oldest is {worst['client']} at {worst['oldest_days']} days."
             )
-            worst = clients[0] if clients else None
-            pct = js_round(share * 100)
-            detail = f"{pct}% of what's owed."
-            if worst:
-                detail = (
-                    f"{pct}% of what's owed. "
-                    f"Oldest is {worst['client']} at {worst['oldest_days']} days."
-                )
-            out.append({
-                "id": "ar-late",
-                "severity": "critical" if share >= 0.1 else "warn",
-                "headline": "Receivables have aged past 60 days",
-                "figure": usd(late),
-                "detail": detail,
-                "go_to": "open",
-            })
+        out.append({
+            "id": "ar-late",
+            "severity": "critical" if share >= 0.1 else "warn",
+            "headline": "Receivables have aged past 60 days",
+            "figure": usd(late),
+            "detail": detail,
+            "go_to": "open",
+        })
 
     # 2. Payables exceed the cash on hand to cover them.
     cash = (data.get("liquidity") or {}).get("cash")
