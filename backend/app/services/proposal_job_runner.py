@@ -29,7 +29,11 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-JobStatus = Literal["running", "completed", "failed", "cancelled"]
+JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+
+# Both mean "still in flight, holds the lock, blocks a duplicate start" —
+# only the display differs (queued = dispatched but no free worker slot yet).
+_IN_FLIGHT: frozenset[str] = frozenset({"queued", "running"})
 
 _REDIS_KEY_PREFIX = "zo:job:"
 _REDIS_LOCK_TTL_SEC = 3600  # matches celery_app.py's task_time_limit
@@ -85,7 +89,11 @@ async def _redis_get_job(rfp_id: str, lock_key: str) -> ProposalJobRecord | None
 
     result = AsyncResult(task_id, app=celery_app)
     state = result.state
-    if state in ("PENDING", "STARTED", "RETRY"):
+    if state == "PENDING":
+        # Dispatched but no worker slot free yet (task_track_started=True in
+        # celery_app.py means a picked-up task moves to STARTED, not PENDING).
+        record.status = "queued"
+    elif state in ("STARTED", "RETRY"):
         record.status = "running"
     elif state == "SUCCESS":
         record.status = "completed"
@@ -105,7 +113,7 @@ async def get_proposal_job(rfp_id: str, *, lock_key: str | None = None) -> Propo
     key = lock_key or rfp_id
     if settings.celery_enabled:
         record = await _redis_get_job(rfp_id, key)
-        if record is not None and record.status != "running":
+        if record is not None and record.status not in _IN_FLIGHT:
             # Job finished — drop the lock so the next start isn't blocked.
             await _redis_clear_job(key)
         return record
@@ -121,7 +129,7 @@ async def _redis_clear_job(lock_key: str) -> None:
 
 async def is_proposal_job_running(rfp_id: str, *, lock_key: str | None = None) -> bool:
     job = await get_proposal_job(rfp_id, lock_key=lock_key)
-    return job is not None and job.status == "running"
+    return job is not None and job.status in _IN_FLIGHT
 
 
 async def start_proposal_job(
@@ -170,7 +178,7 @@ async def _start_celery_job(
     from app.services.redis_client import get_redis
 
     existing = await get_proposal_job(rfp_id, lock_key=lock_key)
-    if existing and existing.status == "running" and not replace:
+    if existing and existing.status in _IN_FLIGHT and not replace:
         return existing
 
     started_at = _now()
@@ -250,7 +258,7 @@ async def cancel_proposal_job(rfp_id: str, *, lock_key: str | None = None) -> bo
     key = lock_key or rfp_id
     if settings.celery_enabled:
         record = await _redis_get_job(rfp_id, key)
-        if not record or record.status != "running" or not record.celery_task_id:
+        if not record or record.status not in _IN_FLIGHT or not record.celery_task_id:
             return False
         from app.celery_app import celery_app
 
@@ -264,6 +272,35 @@ async def cancel_proposal_job(rfp_id: str, *, lock_key: str | None = None) -> bo
         return False
     task.cancel()
     return True
+
+
+async def list_active_proposal_jobs() -> list[ProposalJobRecord]:
+    """Every in-flight (queued or running) job across all RFPs — lets the UI
+    show "these are ahead of you" when a new job queues behind a full worker.
+    """
+    if settings.celery_enabled:
+        import json
+
+        from app.services.redis_client import get_redis
+
+        redis = get_redis()
+        records: list[ProposalJobRecord] = []
+        async for raw_key in redis.scan_iter(match=f"{_REDIS_KEY_PREFIX}*"):
+            lock_key = raw_key[len(_REDIS_KEY_PREFIX):]
+            raw = await redis.get(raw_key)
+            if not raw:
+                continue
+            data = json.loads(raw)
+            # lock_key is "{rfp_id}" for proposal-pipeline jobs or
+            # "{rfp_id}:go-no-go" for Go/No-Go (see rfps.py's lock_key) —
+            # strip a trailing ":go-no-go" back to the real rfp_id.
+            rfp_id = lock_key.split(":go-no-go", 1)[0]
+            record = await _redis_get_job(rfp_id, lock_key)
+            if record is not None and record.status in _IN_FLIGHT:
+                records.append(record)
+        return records
+    async with _lock:
+        return [r for r in _jobs.values() if r.status in _IN_FLIGHT]
 
 
 def proposal_job_to_dict(record: ProposalJobRecord | None) -> dict[str, Any] | None:

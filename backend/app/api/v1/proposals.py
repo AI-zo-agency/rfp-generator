@@ -1601,6 +1601,33 @@ async def save_proposal_key_personas(
 proposals_direct_router = APIRouter(prefix="/proposals", tags=["proposals"])
 
 
+@proposals_direct_router.get("/jobs/active")
+async def list_active_proposal_jobs_endpoint() -> dict[str, object]:
+    """Every proposal-pipeline job currently queued or running, across all
+    RFPs — so a newly-queued job's UI can show what's ahead of it instead of
+    just "generating..." with no explanation of why nothing is happening
+    yet. Excludes Go/No-Go (tracked here too, but under its own lock — not
+    what occupies a proposal-pipeline worker slot)."""
+    from app.services.proposal_job_runner import list_active_proposal_jobs
+
+    records = await list_active_proposal_jobs()
+    jobs = []
+    for record in records:
+        if record.job_type == "go-no-go":
+            continue
+        rfp = get_rfp(record.rfp_id)
+        jobs.append(
+            {
+                "rfpId": record.rfp_id,
+                "title": rfp.title if rfp else record.rfp_id,
+                "jobType": record.job_type,
+                "status": record.status,
+                "startedAt": record.started_at,
+            }
+        )
+    return {"jobs": jobs}
+
+
 @proposals_direct_router.get("/{rfp_id}/key-personas")
 @proposals_direct_router.get("/{rfp_id}/proposal/key-personas")
 async def get_proposal_key_personas_direct(rfp_id: str) -> dict[str, object]:

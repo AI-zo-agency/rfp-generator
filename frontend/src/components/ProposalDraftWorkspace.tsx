@@ -21,6 +21,7 @@ import {
 } from "@/lib/proposal-section-health";
 import { buildScanRfpSummary, type ScanRfpFulfillReport, type ScanRfpSummary } from "@/lib/proposal-scan-report";
 import { ScanRfpSummaryBanner } from "@/components/ScanRfpSummaryBanner";
+import { QueuedJobBanner } from "@/components/QueuedJobBanner";
 import {
   buildPipelineStatus,
   fetchProposalDraft,
@@ -2544,6 +2545,10 @@ function ProposalDraftWorkspaceInner({
         resolveNotice={gapResolveNotice}
         resolveError={gapResolveError}
       />
+
+      {(isFullProposalRunning || isFulfillingRfpGaps) && (
+        <QueuedJobBanner rfpId={rfp.id} />
+      )}
 
       <ProposalPipelineProgressStrip
         checkpoint={research?.pipelineCheckpoint}

@@ -457,11 +457,37 @@ function sleep(ms: number): Promise<void> {
 type ProposalJobStatus = {
   rfpId?: string;
   jobType?: string;
-  status?: "running" | "completed" | "failed" | "cancelled";
+  status?: "queued" | "running" | "completed" | "failed" | "cancelled";
   error?: string | null;
   startedAt?: string;
   finishedAt?: string | null;
 };
+
+export type ActiveProposalJob = {
+  rfpId: string;
+  title: string;
+  jobType: string;
+  status: "queued" | "running";
+  startedAt: string;
+};
+
+/** Every proposal-pipeline job currently queued or running, across all RFPs
+ * — lets the UI explain a queued job instead of showing "Generating..."
+ * with no visible progress and no reason why. */
+export async function listActiveProposalJobs(): Promise<ActiveProposalJob[]> {
+  try {
+    const res = await fetchWithTimeout(
+      `/api/proposals/jobs/active`,
+      { cache: "no-store" },
+      15_000
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as { jobs?: ActiveProposalJob[] };
+    return data.jobs ?? [];
+  } catch {
+    return [];
+  }
+}
 
 export type { ProposalJobStatus };
 
