@@ -26,9 +26,11 @@ export function UploadKnowledgeDocModal({
   const [mounted, setMounted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const resetForm = useCallback(() => {
     setError(null);
+    setNotice(null);
     setSubmitting(false);
   }, []);
 
@@ -80,7 +82,10 @@ export function UploadKnowledgeDocModal({
       }
 
       if (data.noteError) {
-        setError(`Document uploaded, but the note was not saved: ${data.noteError}`);
+        setNotice(`Document uploaded, but the note was not saved: ${data.noteError}`);
+        form.reset();
+        onSuccess?.();
+        router.refresh();
         setSubmitting(false);
         return;
       }
@@ -207,6 +212,12 @@ export function UploadKnowledgeDocModal({
             {error && (
               <p className="rounded-xl border border-zo-error/30 bg-zo-error/10 px-4 py-3 text-sm text-zo-error">
                 {error}
+              </p>
+            )}
+
+            {notice && (
+              <p className="rounded-xl border border-amber-200 bg-amber-50/40 px-4 py-3 text-sm text-amber-800">
+                {notice}
               </p>
             )}
           </div>
