@@ -28,6 +28,34 @@ _EXHIBIT_A_BMP_RE = re.compile(
     re.I | re.S,
 )
 
+# A TOC ask for personnel resumes/CVs/key-staff qualifications is already met by
+# the per-person Section 2 bio tabs (section-2-bio-*) — those ARE the resumes,
+# just filed one per person instead of under one combined heading. Title-string
+# matching against a single bio never catches this (bio titles are people's
+# names), which used to mint a redundant, forever-empty stub section for it.
+_PERSONNEL_RESUME_ASK_PHRASES = (
+    "resumes of key personnel",
+    "resumes of personnel",
+    "resumes of staff",
+    "resumes of the project team",
+    "resumes of project team",
+    "key personnel",
+    "key staff",
+    "staff qualifications",
+    "staff resumes",
+    "team resumes",
+    "personnel resumes",
+    "staff cvs",
+    "personnel cvs",
+    "project team qualifications",
+    "project team bios",
+)
+
+
+def _spec_is_personnel_resume_ask(title: str) -> bool:
+    t = (title or "").casefold()
+    return any(phrase in t for phrase in _PERSONNEL_RESUME_ASK_PHRASES)
+
 _DEFAULT_BMP_HEADINGS = (
     "A. Vision",
     "B. Market Analysis",
@@ -621,6 +649,17 @@ def ensure_missing_scored_section_stubs(
         if _spec_is_static_company_ask(working, spec):
             continue
         if _match_section_for_spec(working, spec):
+            continue
+        # A TOC ask for personnel resumes/CVs/key-staff qualifications is
+        # already met by the per-person Section 2 bio tabs — those ARE the
+        # resumes, just filed one per person instead of under one combined
+        # heading. Scoped to stub creation only (never the shared
+        # _spec_is_static_company_ask predicate, which a different caller
+        # also uses to decide whether to DELETE an existing thin section —
+        # this check must never be able to cause that).
+        if _spec_is_personnel_resume_ask(spec.rfp_title or "") and any(
+            (s.id or "").startswith("section-2-bio-") for s in sections
+        ):
             continue
         sid = f"rfp-structure-{_slug_section_id(spec.rfp_title)}"
         # Never mint a -2 twin of an existing stub id — that produced duplicate

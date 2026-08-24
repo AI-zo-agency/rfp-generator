@@ -697,12 +697,18 @@ async function waitForFulfillScan(
     }
 
     if (observedRunning && cp?.inProgressPhase !== FULFILL_SCAN_PHASE) {
+      // record_generation_stopped's fulfill-scan branch (backend) never
+      // stamps lastFailedPhase with "fulfill-scan" — it only carries the
+      // prior value forward — so checking lastFailedPhase alone missed a
+      // stop whenever the job-status check above didn't already catch it
+      // first (e.g. job entry cleared/replaced), and a stopped run got
+      // treated as a successful one. lastError is the field the stop path
+      // actually always sets, so check that first regardless of phase name.
+      if (cp?.lastError && /stopped|cancel/i.test(cp.lastError)) {
+        throw new DOMException(cp.lastError, "AbortError");
+      }
       if (cp?.lastFailedPhase === FULFILL_SCAN_PHASE) {
-        const err = cp.lastError ?? "Complete & clean failed";
-        if (/stopped|cancel/i.test(err)) {
-          throw new DOMException(err, "AbortError");
-        }
-        throw new Error(err);
+        throw new Error(cp.lastError ?? "Complete & clean failed");
       }
       return { draft: snapshot.draft, research: snapshot.research };
     }
