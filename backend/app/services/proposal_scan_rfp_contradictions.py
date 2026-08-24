@@ -17,6 +17,22 @@ from app.services import llm
 
 logger = logging.getLogger(__name__)
 
+# Section 1 Builder assembles these directly from CompanyTruth / the Master
+# Team Roster — "Facts/table only" (see SECTION_SPECS in section_1_builder.py).
+# They carry no RFP-response narrative, so they cannot logically contain the
+# kind of contradiction these audits look for (schedule overruns, budget
+# ceilings, eligibility prose). Burning a rewrite call "fixing" a false
+# positive here is pure waste and risks corrupting already-correct content
+# (the exact "Business Information wiped" failure mode seen before).
+STATIC_COMPANY_FACT_SECTION_IDS = frozenset(
+    {
+        "section-1-org-structure",
+        "section-1-business-info",
+        "section-1-certifications",
+        "section-1-insurance",
+    }
+)
+
 _SYSTEM = """You are a proposal compliance editor for zö agency.
 
 TASK: Compare the proposal MANUSCRIPT against the RFP. Find ONLY real
@@ -314,6 +330,12 @@ async def run_scan_rfp_contradiction_pass(
     for finding in findings:
         idx = by_id.get(finding.section_id)
         if idx is None:
+            continue
+        if finding.section_id in STATIC_COMPANY_FACT_SECTION_IDS:
+            result.logs.append(
+                f"{finding.section_id}: skipped rewrite — protected static "
+                "company-fact section (likely false positive)"
+            )
             continue
         section = sections[idx]
         # Always attempt a real rewrite for critical/major — tagging VERIFY is

@@ -15,7 +15,10 @@ from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSe
 from app.models.rfp import RfpRecord
 from app.services import llm
 from app.services.proposal_budget_content import find_budget_section_index
-from app.services.proposal_scan_rfp_contradictions import _manuscript_digest
+from app.services.proposal_scan_rfp_contradictions import (
+    STATIC_COMPANY_FACT_SECTION_IDS,
+    _manuscript_digest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +346,12 @@ async def run_manuscript_budget_contradiction_pass(
     for finding in findings:
         idx = by_id.get(finding.section_id)
         if idx is None:
+            continue
+        if finding.section_id in STATIC_COMPANY_FACT_SECTION_IDS:
+            result.logs.append(
+                f"{finding.section_id}: skipped budget-contradiction rewrite — "
+                "protected static company-fact section (likely false positive)"
+            )
             continue
         section = sections[idx]
         if finding.fix_action == "rewrite" and finding.severity in {"critical", "major"}:
