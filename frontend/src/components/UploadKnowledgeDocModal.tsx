@@ -70,10 +70,17 @@ export function UploadKnowledgeDocModal({
       const data = (await response.json()) as {
         error?: string;
         detail?: string;
+        noteError?: string;
       };
 
       if (!response.ok) {
         setError(data.detail ?? data.error ?? "Upload failed.");
+        setSubmitting(false);
+        return;
+      }
+
+      if (data.noteError) {
+        setError(`Document uploaded, but the note was not saved: ${data.noteError}`);
         setSubmitting(false);
         return;
       }
@@ -179,6 +186,21 @@ export function UploadKnowledgeDocModal({
               <span className="mt-1.5 block text-xs text-zo-text-muted">
                 PDF, Word, Excel, Markdown, or text — max 25 MB. Large PDFs may
                 take up to a minute to index in Supermemory.
+              </span>
+            </label>
+
+            <label className="block text-sm font-medium text-foreground">
+              Notes / corrections (optional)
+              <textarea
+                name="notes"
+                rows={3}
+                placeholder='e.g. "Ron Comer has retired" - anything in the knowledge base this makes out of date'
+                className={`${fieldClass} resize-y`}
+              />
+              <span className="mt-1.5 block text-xs text-zo-text-muted">
+                Notes are treated as authoritative — agents follow them over any
+                older document that says otherwise. Manage them in Standing
+                corrections.
               </span>
             </label>
 
