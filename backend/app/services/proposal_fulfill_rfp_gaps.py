@@ -505,11 +505,29 @@ async def _run_fulfill_rfp_gaps_body(
 
     from app.services.proposal_pipeline_checkpoint import (
         complete_fulfill_scan,
+        compute_fulfill_scan_hash,
         fulfill_resume_step,
+        fulfill_scan_is_already_clean,
         record_pipeline_activity,
     )
 
     resume_at = fulfill_resume_step(research)
+    scan_hash = compute_fulfill_scan_hash(draft, rfp_text)
+    if (
+        fulfill_scan_is_already_clean(
+            research=research, resume_at=resume_at, current_hash=scan_hash
+        )
+        and research is not None
+        and research.presubmit_review is not None
+        and draft.last_fulfill_report
+    ):
+        logger.info(
+            "Scan RFP %s: draft + RFP text unchanged since last completed scan — "
+            "skipping the 18-step pass (nothing new to check).",
+            rfp_id,
+        )
+        return research.presubmit_review, research, draft, dict(draft.last_fulfill_report)
+
     if resume_at <= 1:
         draft = push_proposal_snapshot(draft, label="Before Scan RFP")
         await asave_proposal_draft(draft)
@@ -2069,7 +2087,8 @@ async def _run_fulfill_rfp_gaps_body(
     draft = attach_scan_summary_to_latest_before_scan(draft, report)
     await asave_proposal_draft(draft)
     await asave_research_cache(updated_research)
-    await complete_fulfill_scan(rfp_id)
+    final_scan_hash = compute_fulfill_scan_hash(draft, rfp_text)
+    await complete_fulfill_scan(rfp_id, scan_hash=final_scan_hash)
 
     logger.info(
         "Fulfill RFP gaps for %s: closing+%s, issues=%d, ready=%s",

@@ -331,29 +331,69 @@ def fulfill_resume_step(research: ProposalResearchCache | None) -> int:
     return 1
 
 
-async def complete_fulfill_scan(rfp_id: str) -> None:
-    """Scan finished — drop resume pointer so the next run starts fresh."""
+async def complete_fulfill_scan(rfp_id: str, *, scan_hash: str | None = None) -> None:
+    """Scan finished — drop resume pointer so the next run starts fresh.
+
+    ``scan_hash`` (when given) is the fingerprint of the draft + RFP text this
+    run just finished checking, saved so the next *fresh* (non-resume) run can
+    tell there is nothing new to check — see ``fulfill_scan_is_already_clean``.
+    """
     research = await aget_research_cache(rfp_id)
     if not research or not research.pipeline_checkpoint:
         return
     cp = research.pipeline_checkpoint
-    await _save_checkpoint(
-        rfp_id,
-        cp.model_copy(
-            update={
-                "in_progress_phase": (
-                    None if cp.in_progress_phase == "fulfill-scan" else cp.in_progress_phase
-                ),
-                "activity_label": None,
-                "activity_detail": None,
-                "step_index": None,
-                "step_total": None,
-                "resume_fulfill_step": None,
-                "last_completed_fulfill_step": None,
-                "updated_at": _now_iso(),
-            }
+    updates: dict[str, object] = {
+        "in_progress_phase": (
+            None if cp.in_progress_phase == "fulfill-scan" else cp.in_progress_phase
         ),
-    )
+        "activity_label": None,
+        "activity_detail": None,
+        "step_index": None,
+        "step_total": None,
+        "resume_fulfill_step": None,
+        "last_completed_fulfill_step": None,
+        "updated_at": _now_iso(),
+    }
+    if scan_hash:
+        updates["last_clean_fulfill_scan_hash"] = scan_hash
+    await _save_checkpoint(rfp_id, cp.model_copy(update=updates))
+
+
+def compute_fulfill_scan_hash(draft: ProposalDraft, rfp_text: str) -> str:
+    """Fingerprint of everything a Complete & clean draft run inspects.
+
+    Deliberately conservative: any section content/id change or RFP text
+    change produces a different hash. When in doubt this must change, not
+    stay stable — a stale-but-matching hash would wrongly skip a real check.
+    """
+    import hashlib
+
+    parts = [f"{s.id}\x00{s.content or ''}" for s in draft.sections]
+    parts.append(f"RFP\x00{rfp_text or ''}")
+    blob = "\x01".join(parts).encode("utf-8", errors="ignore")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def fulfill_scan_is_already_clean(
+    *,
+    research: ProposalResearchCache | None,
+    resume_at: int,
+    current_hash: str,
+) -> bool:
+    """True only for a fresh (non-resuming) run whose content exactly matches
+    the last fully-completed Complete & clean draft run — nothing changed, so
+    every one of the 18 steps would find the same (already-fixed) state again.
+
+    Never true when resuming a stopped/interrupted run (``resume_at`` > 1) —
+    that path has its own well-tested step-skip logic and must not be touched
+    here; this only short-circuits a brand-new invocation.
+    """
+    if resume_at > 1:
+        return False
+    if not research or not research.pipeline_checkpoint:
+        return False
+    saved = research.pipeline_checkpoint.last_clean_fulfill_scan_hash
+    return bool(saved) and saved == current_hash
 
 
 async def clear_fulfill_scan_activity(rfp_id: str) -> None:

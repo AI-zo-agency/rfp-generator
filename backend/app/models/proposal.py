@@ -564,6 +564,15 @@ class ProposalPipelineCheckpoint(BaseModel):
         alias="resumeFulfillStep",
         description="Complete & clean draft step to resume from after stop.",
     )
+    last_clean_fulfill_scan_hash: str | None = Field(
+        default=None,
+        alias="lastCleanFulfillScanHash",
+        description=(
+            "Hash of the draft + RFP text as of the last fully-completed "
+            "Complete & clean draft run. A fresh (non-resume) run whose "
+            "current hash matches has nothing new to check."
+        ),
+    )
     updated_at: str = Field(alias="updatedAt")
 
 

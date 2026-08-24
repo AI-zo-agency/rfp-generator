@@ -255,6 +255,7 @@ async def run_compliance_fabrication_repairs(
     from app.services.evidence_trust.legal_attestation_gate import (
         apply_legal_attestation_gates,
     )
+    from app.services.proposal_bio_stub import is_plausible_person_name
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
     from app.services.proposal_scan_fact_repairs import parse_org_chart_roles
     from app.services.proposal_sections_graph import _fetch_member_bio_kb
@@ -294,7 +295,14 @@ async def run_compliance_fabrication_repairs(
         section_logs: list[str] = []
 
         if sid.startswith("section-2-bio-") and sid != "section-2-bio-placeholder":
-            member = _member_name_from_bio_section(section.title or "")
+            # A section-2-bio-* id does not guarantee the title actually names a
+            # person — an id can be minted from whatever text a prior step used
+            # (e.g. an RFP forms/acknowledgement tab). Gate the same way the
+            # else-branch already does, or a non-person title like "RFP
+            # Amendments Acknowledgement" gets treated as a bio (and produces a
+            # bogus 04_Bio_RfpAcknowledgement.pdf KB lookup).
+            candidate = _member_name_from_bio_section(section.title or "")
+            member = candidate if is_plausible_person_name(candidate) else ""
         else:
             member = person_name_from_tab_title(section.title or "")
         if member:

@@ -365,6 +365,7 @@ async def rebuild_team_bios_from_kb(
 
 
 def _bio_index_by_name(draft: ProposalDraft) -> dict[str, str]:
+    from app.services.proposal_bio_stub import is_plausible_person_name
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
 
     out: dict[str, str] = {}
@@ -372,7 +373,7 @@ def _bio_index_by_name(draft: ProposalDraft) -> dict[str, str]:
         if not (section.id or "").startswith("section-2-bio-"):
             continue
         member = _member_name_from_bio_section(section.title or "")
-        if member:
+        if member and is_plausible_person_name(member):
             out[member.casefold()] = section.content or ""
     return out
 
@@ -411,7 +412,10 @@ def _named_roster_from_section2(
     draft: ProposalDraft,
     org_roles: dict[str, str],
 ) -> list[tuple[str, str]]:
-    from app.services.proposal_bio_stub import extract_engagement_role
+    from app.services.proposal_bio_stub import (
+        extract_engagement_role,
+        is_plausible_person_name,
+    )
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
 
     rows: list[tuple[str, str]] = []
@@ -421,7 +425,7 @@ def _named_roster_from_section2(
         if (section.id or "").endswith("placeholder"):
             continue
         name = _member_name_from_bio_section(section.title or "")
-        if not name:
+        if not name or not is_plausible_person_name(name):
             continue
         role = extract_engagement_role(section.content or "")
         if not role or role.casefold().startswith("bio "):
