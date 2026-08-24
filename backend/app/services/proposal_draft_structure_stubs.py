@@ -99,7 +99,19 @@ def section_needs_presubmit_fill(section: ProposalSection) -> bool:
     """
     sid = section.id or ""
     if sid.startswith("section-1-"):
-        return False
+        # Section 1 is otherwise fully protected from this pass (real content
+        # here must never get rewritten) — but that same protection used to
+        # mean a genuinely broken Section 1 subsection (e.g. initial
+        # generation truncated to just the heading, no body at all — see
+        # company_qualification/agents/section_1_builder.py's own
+        # near-empty-content guard) could never be repaired here either, no
+        # matter how many times this pass ran. Only let a section-1-* id
+        # through when it's genuinely hollow (the same bar
+        # _is_thin_unfilled_shell already uses), never the broader
+        # classify_section_health check below — that one exists to catch
+        # subtler quality issues in RFP-specific tabs and is too aggressive
+        # to run against protected static content.
+        return _is_thin_unfilled_shell(section)
     if sid.startswith(_SKIP_FILL_ID_PREFIXES):
         return False
     try:

@@ -1337,7 +1337,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     extras = parse_budget_extras(raw)
     from app.services.evidence_trust.rfp_money_constraints import (
         apply_constraints_to_budget_fields,
-        extract_rfp_money_constraints,
+        extract_rfp_money_constraints_with_llm_fallback,
     )
     forced_format = str(raw.get("budgetFormat") or "phased")
     try:
@@ -1362,7 +1362,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
     except Exception as exc:  # noqa: BLE001
         logger.warning("Budget format judge skipped during pricing for %s: %s", rfp_id, exc)
 
-    money_constraints = extract_rfp_money_constraints(rfp_context)
+    money_constraints = await extract_rfp_money_constraints_with_llm_fallback(rfp_context)
     budget = ProposalBudget(
         rfpId=rfp_id,
         rfpBudgetCap=_parse_budget_cap(raw.get("rfpBudgetCap")),

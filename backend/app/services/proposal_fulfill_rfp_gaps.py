@@ -573,6 +573,24 @@ async def _run_fulfill_rfp_gaps_body(
             f"(verify missing answers from past won proposals; designer-ready report)."
         )
         logger.info("Scan RFP resume %s from step %s", rfp_id, resume_at)
+        # One checkpoint write, up front, with the TRUE resume target —
+        # not one write per skipped step. That per-step version (removed)
+        # took several sequential DB round-trips to walk from step 1 up to
+        # resume_at before any real work began; if anything interrupted the
+        # process mid-walk (a worker restart, a stop landing at the wrong
+        # instant), the checkpoint was left holding whatever low number it
+        # last wrote — not the real position — so the *next* resume started
+        # from that stale low step instead of where the run actually was.
+        # A single write of the real target is immune to that: even an
+        # interruption a moment later still leaves the correct step behind.
+        await record_pipeline_activity(
+            rfp_id,
+            label=f"Resuming from step {resume_at} (already-done steps saved)",
+            detail=None,
+            step_index=min(resume_at, len(FULFILL_STEPS)),
+            step_total=len(FULFILL_STEPS),
+            in_progress_phase="fulfill-scan",
+        )
 
     def _log_resume_skip(step: int) -> None:
         label = (
@@ -588,19 +606,14 @@ async def _run_fulfill_rfp_gaps_body(
         # Never skip the final stages — they produce the ending report and
         # designer-ready verification (hollow fill from past won proposals).
         if step < resume_at and step < _FINAL_ALWAYS_RUN_FROM:
-            # Still tick the checkpoint even on a skip — otherwise a resume
-            # that skips several already-done steps leaves the UI showing
-            # whatever generic status record_phase_started set at the very
-            # start, with zero visible progress until the first step that
-            # actually runs (which can be many steps, and minutes, later).
-            await record_pipeline_activity(
-                rfp_id,
-                label=f"Resuming — skipping step {step} (already done): {label}",
-                detail=None,
-                step_index=step,
-                step_total=len(FULFILL_STEPS),
-                in_progress_phase="fulfill-scan",
-            )
+            # No checkpoint write here on purpose — the single upfront
+            # "Resuming from step {resume_at}" write (above, at function
+            # start) already reflects the true target. Writing per skipped
+            # step used to require several sequential DB round-trips just to
+            # walk from step 1 up to resume_at, and an interruption mid-walk
+            # left the checkpoint on a stale, too-low step instead of the
+            # real position. This local log call is enough for visibility —
+            # _log_resume_skip only touches in-memory `report["logs"]`.
             raise FulfillStepSkip(step)
         await record_pipeline_activity(
             rfp_id,
