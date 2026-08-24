@@ -490,7 +490,7 @@ export function QuickBooksPanels() {
           {/* ── position ── */}
           <TabsContent value="today" className="qb-view">
             <MoneyLine data={data} net={net} />
-            <QuickBooksInsights year={year} />
+            <QuickBooksInsights />
             <Attention signals={signals} onGo={setView} />
             {data.billing_vs_cash ? (
               <CashChart bvc={data.billing_vs_cash} />

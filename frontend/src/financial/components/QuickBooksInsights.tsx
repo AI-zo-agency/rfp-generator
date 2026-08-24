@@ -61,7 +61,7 @@ interface InsightsData {
   generated?: string;
 }
 
-export function QuickBooksInsights({ year }: { year: number }) {
+export function QuickBooksInsights() {
   const [data, setData] = useState<InsightsData | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -69,7 +69,7 @@ export function QuickBooksInsights({ year }: { year: number }) {
   const load = useCallback(async () => {
     try {
       const res = await fetch(
-        `${API_BASE}/api/v1/financials/quickbooks/ai-insights?year=${year}`,
+        `${API_BASE}/api/v1/financials/quickbooks/ai-insights`,
       );
       if (!res.ok) throw new Error(`${res.status}`);
       setData(await res.json());
@@ -77,7 +77,7 @@ export function QuickBooksInsights({ year }: { year: number }) {
     } catch {
       setError("Couldn't load insights.");
     }
-  }, [year]);
+  }, []);
 
   useEffect(() => {
     void load();
@@ -88,7 +88,7 @@ export function QuickBooksInsights({ year }: { year: number }) {
     setError(null);
     try {
       const res = await fetch(
-        `${API_BASE}/api/v1/financials/quickbooks/ai-insights/regenerate?year=${year}`,
+        `${API_BASE}/api/v1/financials/quickbooks/ai-insights/regenerate`,
         { method: "POST" },
       );
       if (!res.ok) throw new Error(`${res.status}`);
