@@ -733,9 +733,16 @@ async def gather_proposal_kb_for_sections(
 
     Pass buckets=(...) to gather only specific buckets (e.g. voice-only for chat).
     """
+    from app.services.kb_corrections import corrections_prompt_block
+
+    corrections_text = await corrections_prompt_block()
+    corrections_entry = (corrections_text, [])
+
     if not supermemory.is_configured():
         empty = "(Supermemory not configured.)", []
-        return {key: empty for key in PROPOSAL_KB_BUCKETS}
+        result = {key: empty for key in PROPOSAL_KB_BUCKETS}
+        result["corrections"] = corrections_entry
+        return result
 
     if buckets is not None:
         active_buckets = tuple(b for b in buckets if b in PROPOSAL_KB_BUCKETS)
@@ -744,7 +751,9 @@ async def gather_proposal_kb_for_sections(
     else:
         active_buckets = PROPOSAL_KB_BUCKETS
     if not active_buckets:
-        return {key: ("", []) for key in PROPOSAL_KB_BUCKETS}
+        result = {key: ("", []) for key in PROPOSAL_KB_BUCKETS}
+        result["corrections"] = corrections_entry
+        return result
 
     voice_only = active_buckets == ("zo_voice",)
     if voice_only:
@@ -810,6 +819,7 @@ async def gather_proposal_kb_for_sections(
         rfp_client,
         ", ".join(f"{b}={len(gathered[b][0])} chars" for b in active_buckets),
     )
+    gathered["corrections"] = corrections_entry
     return gathered
 
 
