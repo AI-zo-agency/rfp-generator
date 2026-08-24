@@ -668,11 +668,16 @@ async def retrieve_for_question(
     # is not enough: one memory from an adjacent document (e.g. a pricing guide)
     # would satisfy it while the memory actually holding the answer (the rate
     # card) stays cut. Fact-level answers usually need several memories, not one.
-    kept_memories = sum(1 for hit in ranked if supermemory.is_memory_hit(hit))
-    if kept_memories < MEMORY_FLOOR:
-        cut_off = full_ranked[len(ranked) :]
-        dropped_memories = [hit for hit in cut_off if supermemory.is_memory_hit(hit)]
-        ranked = ranked + dropped_memories[: MEMORY_FLOOR - kept_memories]
+    # Counting memories is not enough: three memories from an adjacent document
+    # (a pricing guide) would satisfy a numeric floor while the best-matching
+    # memory — the rate card holding the actual answer — stays below the cut.
+    # Take the top MEMORY_FLOOR memories by rank and guarantee those specific
+    # hits are present, appended after the chunks.
+    top_memories = [hit for hit in full_ranked if supermemory.is_memory_hit(hit)][
+        :MEMORY_FLOOR
+    ]
+    already = {id(hit) for hit in ranked}
+    ranked = ranked + [hit for hit in top_memories if id(hit) not in already]
 
     parts: list[str] = []
     sources: list[str] = []
@@ -695,7 +700,11 @@ async def retrieve_for_question(
         else:
             remaining = chunk_max_chars - total
             if remaining < 400:
-                break
+                # Skip this chunk, do NOT break: memories are appended after the
+                # chunks, and breaking here would strand every one of them once
+                # the chunk budget ran out — which is exactly how the rate card
+                # kept missing from rate answers.
+                continue
             budget = min(per_doc, remaining)
         full = ""
         try:
