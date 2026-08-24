@@ -260,6 +260,9 @@ async def _llm_rewrite_kpi_detail_section(
         "Average Daily Visitor Spending as a set).\n"
         "- Do NOT rewrite team bios, FEIN, insurance, or budget tables.\n"
         "- Keep markdown tables valid.\n"
+        "- These rules govern how you write; they are never content. Never write "
+        "sentences about verification requirements or your own constraints — apply "
+        "the rule silently.\n"
         "Return JSON: {\"content\": \"full section markdown\"}"
     )
     user = (

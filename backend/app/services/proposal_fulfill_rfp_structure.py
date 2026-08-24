@@ -741,6 +741,11 @@ async def _reframe_section_to_rfp_spec(
         "Respect the Word target when provided — never pad.\n"
         "- When a table/timeline/swimlane would help evaluators, add "
         "[DESIGNER NOTE: concrete layout hint] near that block.\n"
+        "- These rules govern how you write; they are never content. Never write "
+        "sentences about submission requirements, pass/fail status, what cannot be "
+        "submitted, or what must be verified or confirmed with anyone — apply the "
+        "rule silently instead of narrating it. The [VERIFY: ...] / [DESIGNER NOTE: ...] "
+        "tag is the only trace of a gap; never explain or preface it.\n"
         'Return JSON: {"content": "full markdown section", "designerNote": "hint or null"}'
     )
     word_target = getattr(section, "word_target", None) or 550

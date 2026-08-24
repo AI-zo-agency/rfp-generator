@@ -384,6 +384,10 @@ async def _llm_fill_section(
         "draft roster. Never invent clients, metrics, degrees, or contacts.\n"
         "- If evidence is thin for a field, use [VERIFY: …] — never fabricate.\n"
         "- No full resume dumps. Evaluator-ready markdown for THIS section only.\n"
+        "- These rules govern how you write; they are never content. Never write "
+        "sentences about verification requirements or your own constraints — apply "
+        "the rule silently. The tag is the only trace of a gap; never explain or "
+        "preface it.\n"
         'Return JSON: {"content": "full markdown"}'
     )
     user = (

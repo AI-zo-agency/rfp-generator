@@ -462,6 +462,13 @@ async def _draft_generic_deliverable(
                         "If kind is signed_form or attachment: write a short compliance checklist "
                         "with [MANUAL FILL: attach …] — do NOT invent signatures or file contents.\n"
                         "If kind is narrative_proposal: write substantive prose.\n"
+                        "These rules govern how you write; they are never content. Never write "
+                        "sentences about submission requirements, pass/fail status, what cannot be "
+                        "submitted, or what must be verified or confirmed with anyone — apply the "
+                        "rule silently instead of narrating it. When something is missing or needs a "
+                        "human, emit exactly one tag — [MANUAL FILL: Sonja — <what is needed>] — and "
+                        "nothing else. Never explain the tag, never preface it, never restate the "
+                        "rule that produced it.\n"
                         'Return JSON: {"content": "markdown"}'
                     ),
                 },

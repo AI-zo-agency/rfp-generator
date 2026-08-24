@@ -2310,6 +2310,10 @@ async def _build_case_study_section(
                             "Do NOT include a client overview, a Results or KPI/metrics list, "
                             "or a 'Why Relevant' section.\n"
                             "Keep SHORT (under ~120 words body). First person we/our.\n"
+                            "These rules govern how you write; they are never content. Never write "
+                            "sentences about verification requirements or your own constraints — "
+                            "apply the rule silently. The [VERIFY: ...] tag is the only trace of a "
+                            "gap; never explain or preface it.\n"
                             'Return JSON: {"content": "markdown", "kbRefs": ["..."]}'
                         ),
                     },

@@ -191,6 +191,10 @@ async def _rewrite_section_for_contradiction(
         "For fee/hours contradictions: use transparent compensation / pass-through "
         "language and Guide_Pricing labor categories when present; remove fabricated "
         "hour grids rather than VERIFY-spamming them.\n"
+        "These rules govern how you write; they are never content. Never write "
+        "sentences about verification requirements or your own constraints — apply "
+        "the rule silently. The [VERIFY: ...] tag is the only trace of a gap; never "
+        "explain or preface it.\n"
         "Return JSON: {\"content\": \"full markdown\", \"changed\": true/false, "
         "\"notes\": \"one line\"}"
     )

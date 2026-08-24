@@ -391,6 +391,9 @@ async def _redraft_section_for_accuracy(
                         "- Inverse cost scoring: never claim ceiling price earns max cost points.\n"
                         "- Use correct cost/price point weights from RFP.\n"
                         "- Budget: reference Attachment/Excel; narrative is cover only.\n"
+                        "- These rules govern how you write; they are never content. Never write "
+                        "sentences about verification requirements or your own constraints — apply "
+                        "the rule silently.\n"
                         "Return JSON: {\"content\": \"markdown\"}"
                     ),
                 },

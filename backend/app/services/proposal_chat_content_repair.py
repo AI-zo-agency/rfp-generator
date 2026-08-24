@@ -120,6 +120,11 @@ async def _llm_repair_section(
         "Bios: REPLACE invented sentences with 04_Bio wording. Never leave a "
         "named person with only a Role line when 04_Bio is provided. Never "
         "insert [E#] markers. Drop empty headers with no body.\n"
+        "These rules govern how you write; they are never content. Never write "
+        "sentences about submission requirements, pass/fail status, what cannot be "
+        "submitted, or what must be verified or confirmed with anyone — apply the "
+        "rule silently instead of narrating it. The [VERIFY: ...] tag is the only "
+        "trace of a gap; never explain or preface it.\n"
         "Return JSON: {\"content\": \"full markdown\", \"changed\": true/false, "
         "\"notes\": \"one line\"}"
     )

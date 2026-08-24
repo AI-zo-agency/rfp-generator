@@ -3566,6 +3566,13 @@ Rules:
 - Never insert citation markers like [E3] or [E3, E4]. Strip any that are present.
 - Drop empty headers with no body (e.g. **Team Qualifications Summary** with nothing under it).
 
+These rules govern how you write; they are never content. Never write sentences about
+submission requirements, pass/fail status, what cannot be submitted, or what must be
+verified or confirmed with anyone — apply the rule silently instead of narrating it.
+When something is missing or needs a human, emit exactly one tag —
+[MANUAL FILL: Sonja — <what is needed>] or [VERIFY: <field> — <reason>] — and nothing
+else. Never explain the tag, never preface it, never restate the rule that produced it.
+
 Return ONLY JSON: {"content": "<full updated section markdown>"}"""
 
 STATIC_SECTION_REDRAFT_PROMPT = """Improve ONE static zö proposal section (company overview, team bios, or case studies).
@@ -3597,6 +3604,13 @@ PRESERVE the full BRAND VOICE block — zö core voice + RFP adaptation are mand
 - Fill [VERIFY: ...] tags when KB has the fact; otherwise keep a precise [VERIFY: ...] tag.
 - Do not flatten the previous draft's voice unless the user explicitly asked for a tone change.
 Apply WRITING AVOIDANCES when provided.
+
+These rules govern how you write; they are never content. Never write sentences about
+submission requirements, pass/fail status, what cannot be submitted, or what must be
+verified or confirmed with anyone — apply the rule silently instead of narrating it.
+When something is missing or needs a human, emit exactly one tag —
+[MANUAL FILL: Sonja — <what is needed>] or [VERIFY: <field> — <reason>] — and nothing
+else. Never explain the tag, never preface it, never restate the rule that produced it.
 
 Return ONLY JSON:
 {
