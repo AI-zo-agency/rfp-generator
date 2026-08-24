@@ -148,6 +148,7 @@ def test_update_correction_reuses_custom_id_and_preserves_created_at(monkeypatch
         "linkedDocumentId": None,
     }
     calls: dict[str, object] = {}
+    cleared: list[bool] = []
 
     async def fake_list():
         return [existing]
@@ -159,7 +160,11 @@ def test_update_correction_reuses_custom_id_and_preserves_created_at(monkeypatch
 
     monkeypatch.setattr(kb_corrections, "list_corrections", fake_list)
     monkeypatch.setattr(kb_corrections.supermemory, "add_text_document", fake_add)
-    monkeypatch.setattr(kb_corrections.supermemory, "invalidate_document_cache", lambda: None)
+    monkeypatch.setattr(
+        kb_corrections.supermemory,
+        "invalidate_document_cache",
+        lambda: cleared.append(True),
+    )
 
     row = asyncio.run(
         kb_corrections.update_correction(
@@ -173,15 +178,18 @@ def test_update_correction_reuses_custom_id_and_preserves_created_at(monkeypatch
     assert metadata["note"] == "Ron Comer has retired."
     assert metadata["updatedAt"]
     assert row["note"] == "Ron Comer has retired."
+    assert cleared == [True]
 
 
 def test_delete_correction_soft_deletes_when_hard_delete_unsupported(monkeypatch) -> None:
     calls: dict[str, object] = {}
+    cleared: list[bool] = []
 
     async def fake_delete(document_id):
         return False
 
     async def fake_add(*, content, custom_id, metadata=None):
+        calls["custom_id"] = custom_id
         calls["metadata"] = metadata
         return {"id": "sm-1"}
 
@@ -201,8 +209,34 @@ def test_delete_correction_soft_deletes_when_hard_delete_unsupported(monkeypatch
     monkeypatch.setattr(kb_corrections.supermemory, "delete_document", fake_delete)
     monkeypatch.setattr(kb_corrections.supermemory, "add_text_document", fake_add)
     monkeypatch.setattr(kb_corrections, "list_corrections", fake_list)
-    monkeypatch.setattr(kb_corrections.supermemory, "invalidate_document_cache", lambda: None)
+    monkeypatch.setattr(
+        kb_corrections.supermemory,
+        "invalidate_document_cache",
+        lambda: cleared.append(True),
+    )
 
     asyncio.run(kb_corrections.delete_correction(custom_id="kbnote:abc", document_id="sm-1"))
 
+    assert calls["custom_id"] == "kbnote:abc"
     assert calls["metadata"]["active"] is False
+    assert cleared == [True]
+
+
+def test_delete_correction_hard_deletes_without_soft_delete_rewrite(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_delete(document_id):
+        calls["document_id"] = document_id
+        return True
+
+    async def fake_add(*, content, custom_id, metadata=None):
+        calls["add_called"] = True
+        return {"id": "sm-1"}
+
+    monkeypatch.setattr(kb_corrections.supermemory, "delete_document", fake_delete)
+    monkeypatch.setattr(kb_corrections.supermemory, "add_text_document", fake_add)
+
+    asyncio.run(kb_corrections.delete_correction(custom_id="kbnote:abc", document_id="sm-1"))
+
+    assert calls["document_id"] == "sm-1"
+    assert "add_called" not in calls
