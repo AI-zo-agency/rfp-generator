@@ -181,14 +181,59 @@ def is_our_work_section(section: ProposalSection) -> bool:
 
 
 def is_named_person_bio_tab(section: ProposalSection) -> bool:
-    sid = (section.id or "")
+    """True for Section 2 bio cards, or numbered person cards («2.2 — First Last»).
+
+    Never treat a bare TOC / closing label as a person — that wrongly replaced
+    program / application / policy tabs with Role-on-engagement bio stubs.
+    """
+    sid = section.id or ""
     if sid.startswith("section-1-") or is_who_we_are_section(section):
         return False
     if is_our_work_section(section):
         return False
     if sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
         return True
-    return bool(person_name_from_tab_title(section.title or ""))
+    title = section.title or ""
+    # Require dotted section number + separator (2.1 — Name), not "Drug-Free …".
+    if not re.search(r"(?i)^\s*(?:section\s+)?\d+\.\d+\s*[—\-–:]", title):
+        return False
+    return bool(person_name_from_tab_title(title))
+
+
+def repair_misplaced_bio_stub_sections(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """Replace Role-on-engagement bio stubs that landed on non–Section-2 tabs."""
+    from app.services.proposal_bio_stub import looks_like_bio_stub_body
+
+    logs: list[str] = []
+    sections: list[ProposalSection] = []
+    changed = False
+    for section in draft.sections:
+        if is_named_person_bio_tab(section):
+            sections.append(section)
+            continue
+        body = section.content or ""
+        if not looks_like_bio_stub_body(body):
+            sections.append(section)
+            continue
+        title = (section.title or "this section").strip()
+        replacement = (
+            f"## {title}\n\n"
+            f"[MANUAL FILL: Draft full «{title}» for this RFP. Cover every scored ask "
+            "in the RFP for this tab. A prior pass wrongly replaced this body with a "
+            "team-bio stub — rewrite the actual requirement here.]"
+        )
+        sections.append(
+            section.model_copy(update={"content": replacement, "status": "generated"})
+        )
+        logs.append(
+            f"Restored misplaced bio stub on «{title}» — tab is not a Section 2 bio."
+        )
+        changed = True
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs
 
 
 def is_personnel_bio_section(section: ProposalSection) -> bool:
@@ -197,12 +242,17 @@ def is_personnel_bio_section(section: ProposalSection) -> bool:
         return False
     if is_our_work_section(section):
         return False
-    if sid.startswith("section-2-bio-") and not sid.endswith("placeholder"):
+    if is_named_person_bio_tab(section):
         return True
-    if person_name_from_tab_title(section.title or ""):
+    title = section.title or ""
+    # Numbered person cards ("2.1 — Sonja Anderson") only — not bare TOC labels.
+    if person_name_from_tab_title(title) and re.search(
+        r"(?i)^\s*(?:section\s+)?\d+\.\d+\s*[—\-–:]",
+        title,
+    ):
         return True
-    title = (section.title or "").casefold()
-    return any(hint in title for hint in _PERSONNEL_TITLE_HINTS)
+    title_cf = title.casefold()
+    return any(hint in title_cf for hint in _PERSONNEL_TITLE_HINTS)
 
 
 def section_or_instruction_needs_bio_kb(
@@ -840,9 +890,11 @@ async def ground_bios_to_kb(
         else:
             sections.append(section)
 
-    if not changed:
-        return draft, logs
-    return draft.model_copy(update={"sections": sections}), logs
+    if changed:
+        draft = draft.model_copy(update={"sections": sections})
+    draft, misplaced_logs = repair_misplaced_bio_stub_sections(draft)
+    logs.extend(misplaced_logs)
+    return draft, logs
 
 
 async def persist_collapsed_bio_stubs(

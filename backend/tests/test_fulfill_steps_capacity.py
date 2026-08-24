@@ -13,10 +13,10 @@ import re
 
 from app.services import proposal_fulfill_rfp_gaps as mod
 
-# The 17 stages exactly as they existed before the readiness work.
+# Core stages that must remain present (order matches FULFILL_STEPS).
 ORIGINAL_STEPS = [
-    "Closing & submission tabs",
     "RFP structure (all scored sections)",
+    "Closing & submission tabs",
     "Requirement ledger (merge / cut / add)",
     "DQ & gov-policy gate (agentic loop)",
     "Remove duplicate sections",
@@ -27,8 +27,8 @@ ORIGINAL_STEPS = [
     "Contractor KPIs (Section 2.3)",
     "KB fact-check (Supermemory)",
     "RFP contradiction check (LLM)",
-    "Remove optional VERIFY/MANUAL FILL",
     "Line-by-line KB grounding (async)",
+    "Remove optional VERIFY/MANUAL FILL",
     "Compact manuscript (remove duplicates)",
     "Page limit & anti-invention (Ralph)",
     "Pre-submit refresh",
@@ -99,14 +99,17 @@ def test_no_standalone_repetition_sweep_stage():
 
 
 def test_pipeline_starts_with_structure():
-    assert _current_steps()[0] == "Closing & submission tabs"
+    assert _current_steps()[0] == "RFP structure (all scored sections)"
 
 
-def test_quality_gate_runs_before_pre_submit():
+def test_quality_gate_removed_from_scan():
+    """Former 3-act quality gate is gone — final readiness verifies for designer."""
     current = _current_steps()
-    assert current.index("Review & quality gate (3 acts)") < current.index(
-        "Pre-submit refresh"
+    assert "Review & quality gate (3 acts)" not in current
+    assert current.index("Pre-submit refresh") < current.index(
+        "Submission readiness (triage + score)"
     )
+    assert current[-1] == "Submission readiness (triage + score)"
 
 
 def _progress_indices() -> list[int]:

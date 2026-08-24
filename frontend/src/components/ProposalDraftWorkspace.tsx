@@ -1618,7 +1618,7 @@ function ProposalDraftWorkspaceInner({
             title: "Resume complete & clean?",
             description:
               `Continue from step ${fulfillResumeStep} — ${fulfillResumeLabel}.\n\n` +
-              "Earlier steps are already saved on the draft. The review & quality gate (all 3 acts) and the ending report still run in full.",
+              "Earlier steps are already saved on the draft. Pre-submit refresh and submission readiness still run in full — missing answers are filled from past won proposals and the ending report is rebuilt for designer handoff.",
             confirmLabel: "Resume",
             tone: "default",
           }

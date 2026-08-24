@@ -43,6 +43,12 @@ class GoNoGoCapabilityRow(BaseModel):
     evidence: str = ""
     # True when the RFP treats this requirement as mandatory or scored.
     is_core: bool = Field(default=False, alias="isCore")
+    # True when failing this requirement makes the proposal non-responsive —
+    # a stated minimum threshold ("at least five comparable projects"), not a
+    # scored preference. Unmet disqualifiers force NO-GO regardless of the
+    # matrix average: a threshold the agency cannot meet honestly is not a
+    # gap good writing can close.
+    disqualifying: bool = False
     # service|role|technical|compliance|logistics — Technical Capability score
     # uses craft/platform categories; role/logistics feed Resource Availability.
     category: str = "service"

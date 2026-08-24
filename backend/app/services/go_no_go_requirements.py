@@ -29,6 +29,7 @@ class RfpRequirement(BaseModel):
     requirement: str
     category: str = "service"
     is_core: bool = Field(default=False, alias="isCore")
+    disqualifying: bool = False
     rfp_quote: str = Field(default="", alias="rfpQuote")
     kb_queries: list[str] = Field(default_factory=list, alias="kbQueries")
 
@@ -55,6 +56,15 @@ written (roles, tools, deliverables). Never use the buyer's name as subject.
 isCore=true when the RFP makes the requirement mandatory, scores it, or it is
 central to the scope of work. isCore=false for incidental or optional items.
 
+disqualifying=true ONLY for a stated minimum threshold that makes a proposal
+non-responsive when unmet — a counted track record ("at least five comparable
+municipal projects completed within the past five years"), a mandatory license,
+registration, certification, or bond required to bid, or a mandatory reference
+count. These are pass/fail, not scored preferences: a vendor that cannot meet
+one cannot win by writing well. Everything the RFP merely scores, weights, or
+prefers is disqualifying=false — do NOT flag a capability just because it is
+important or heavily weighted.
+
 category MUST be accurate — scoring depends on it:
 - technical = platforms/tools/methods (CMS, WordPress, ADA/WCAG audit, hosting,
   content migration, SEO, security, integrations, QA)
@@ -67,7 +77,8 @@ Do NOT label a platform skill as "role" just because a person would do it.
 
 Return ONLY JSON:
 {"requirements":[{"requirement":"...","category":"service|role|technical|compliance|logistics",
-  "isCore":true,"rfpQuote":"short verbatim phrase from the RFP","kbQueries":["...","..."]}]}"""
+  "isCore":true,"disqualifying":false,"rfpQuote":"short verbatim phrase from the RFP",
+  "kbQueries":["...","..."]}]}"""
 
 
 _MAX_REQUIREMENTS = 24
@@ -133,6 +144,7 @@ def parse_requirements(raw: dict[str, Any]) -> list[RfpRequirement]:
                 requirement=requirement,
                 category=category,
                 isCore=bool(row.get("isCore") or row.get("is_core")),
+                disqualifying=bool(row.get("disqualifying")),
                 rfpQuote=_clean(row.get("rfpQuote") or row.get("rfp_quote"), limit=240),
                 kbQueries=queries,
             )
@@ -141,9 +153,10 @@ def parse_requirements(raw: dict[str, Any]) -> list[RfpRequirement]:
             break
 
     logger.info(
-        "go_no_go requirements parsed=%d core=%d",
+        "go_no_go requirements parsed=%d core=%d disqualifying=%d",
         len(out),
         sum(1 for r in out if r.is_core),
+        sum(1 for r in out if r.disqualifying),
     )
     return out
 

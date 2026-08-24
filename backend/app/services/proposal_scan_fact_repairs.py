@@ -377,13 +377,126 @@ def _bio_index_by_name(draft: ProposalDraft) -> dict[str, str]:
     return out
 
 
+_EMPTY_TEAM_FIELD_RE = re.compile(
+    r"(?im)^-\s*(?:"
+    r"Qualifications|Relevant projects|Relevant work|Relevant experience|"
+    r"Municipal branding experience"
+    r"):\s*$"
+)
+
+
+def team_role_skeleton_is_hollow(content: str) -> bool:
+    """True when a Project Team / Key Personnel tab left role fields blank."""
+    return len(_EMPTY_TEAM_FIELD_RE.findall(content or "")) >= 2
+
+
+def _case_study_labels(draft: ProposalDraft, *, limit: int = 4) -> list[str]:
+    labels: list[str] = []
+    for section in draft.sections:
+        sid = section.id or ""
+        title = (section.title or "").strip()
+        if not title:
+            continue
+        if sid.startswith("section-3-") or "sample work" in title.casefold():
+            # Prefer the display title after an em dash / number prefix.
+            label = re.sub(r"^\s*(?:\d+(?:\.\d+)*\s*[—\-–:]\s*)", "", title).strip()
+            if label and label not in labels:
+                labels.append(label)
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+def _named_roster_from_section2(
+    draft: ProposalDraft,
+    org_roles: dict[str, str],
+) -> list[tuple[str, str]]:
+    from app.services.proposal_bio_stub import extract_engagement_role
+    from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
+
+    rows: list[tuple[str, str]] = []
+    for section in draft.sections:
+        if not (section.id or "").startswith("section-2-bio-"):
+            continue
+        if (section.id or "").endswith("placeholder"):
+            continue
+        name = _member_name_from_bio_section(section.title or "")
+        if not name:
+            continue
+        role = extract_engagement_role(section.content or "")
+        if not role or role.casefold().startswith("bio "):
+            role = org_roles.get(name.casefold(), "") or "Assigned to this engagement"
+        rows.append((name, role))
+    return rows
+
+
+def fill_hollow_project_team_from_bios(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """Replace empty role-skeleton team tabs with the named Section 2 roster.
+
+    Writers sometimes emit untitled role shells (Qualifications: with no body).
+    Past-proposal / bio substance already lives in Section 2 + Our Work — reuse it
+    instead of leaving blank bullets.
+    """
+    org_roles = parse_org_chart_roles(draft)
+    roster = _named_roster_from_section2(draft, org_roles)
+    if len(roster) < 2:
+        return draft, []
+    projects = _case_study_labels(draft)
+    logs: list[str] = []
+    sections: list[ProposalSection] = []
+    changed = False
+    for section in draft.sections:
+        body = section.content or ""
+        if not team_role_skeleton_is_hollow(body):
+            sections.append(section)
+            continue
+        title = (section.title or "Project Team").strip()
+        lines = [
+            f"## {title}",
+            "",
+            "### Named project team",
+            "",
+            "The engagement team below matches the Section 2 bios selected for this "
+            "proposal. Full résumés / 04_Bio PDFs are attached per the RFP; manuscript "
+            "entries stay concise.",
+            "",
+        ]
+        for name, role in roster:
+            lines.append(f"**{name}**")
+            lines.append(f"- Role: {role}")
+            lines.append(
+                f"- Qualifications: See Section 2 — {name} (approved bio PDF). "
+                "Public-sector brand and communications experience is documented in "
+                "Our Work / Sample Work."
+            )
+            if projects:
+                lines.append(f"- Relevant projects: {'; '.join(projects)}")
+            lines.append("")
+        new_body = "\n".join(lines).strip()
+        sections.append(section.model_copy(update={"content": new_body, "status": "generated"}))
+        logs.append(
+            f"«{title}»: filled hollow role skeleton from {len(roster)} Section 2 bio(s)"
+            + (f" + {len(projects)} work sample(s)" if projects else "")
+        )
+        changed = True
+    if not changed:
+        return draft, []
+    return draft.model_copy(update={"sections": sections}), logs
+
+
 async def run_scan_fact_repairs(
     draft: ProposalDraft,
     *,
     research: ProposalResearchCache | None,
     rfp_text: str = "",
+    rfp_title: str = "",
+    rfp_client: str = "",
+    rfp_sector: str = "",
+    rfp_id: str = "",
 ) -> tuple[ProposalDraft, list[str]]:
-    """Run all deterministic scan repairs — no LLM invention."""
+    """Deterministic scan repairs + hollow-answer fill from past won proposals."""
     logs: list[str] = []
     evidence = _evidence_blob(research)
 
@@ -394,6 +507,18 @@ async def run_scan_fact_repairs(
 
     draft, bio_logs = await rebuild_team_bios_from_kb(draft, rfp_text=rfp_text)
     logs.extend(bio_logs)
+
+    from app.services.proposal_hollow_kb_fill import fill_hollow_sections_for_pipeline
+
+    draft, hollow_logs = await fill_hollow_sections_for_pipeline(
+        draft,
+        rfp_title=rfp_title,
+        rfp_client=rfp_client,
+        rfp_sector=rfp_sector,
+        rfp_text=rfp_text,
+        rfp_id=rfp_id or (draft.rfp_id if draft else ""),
+    )
+    logs.extend(hollow_logs)
 
     from app.services.proposal_scan_compliance_fabrication import (
         run_compliance_fabrication_repairs,

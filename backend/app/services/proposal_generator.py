@@ -1115,6 +1115,12 @@ async def _persist_sections_1_3_partial(
         snapshots=list(existing.snapshots) if existing else [],
         lastFulfillReport=existing.last_fulfill_report if existing else None,
     )
+    # Never persist retired/fabricated staff (e.g. Ron Comer) from Sections 1–3.
+    from app.services.evidence_trust.personnel_grounding import (
+        scrub_fabricated_personnel_from_draft,
+    )
+
+    draft, _personnel_logs = scrub_fabricated_personnel_from_draft(draft)
     await asave_proposal_draft(draft)
 
     if brand_voice is not None:
@@ -2366,6 +2372,24 @@ async def _run_phase3_drafting_inner(
     )
     if collapsed is not None:
         draft = collapsed
+
+    # Fill only tabs with missing answers — query past won proposals (06_WON / 07_FIN).
+    try:
+        from app.services.proposal_hollow_kb_fill import fill_hollow_sections_for_pipeline
+
+        draft, hollow_logs = await fill_hollow_sections_for_pipeline(
+            draft,
+            rfp_title=rfp.title or "",
+            rfp_client=rfp.client or "",
+            rfp_sector=getattr(rfp, "sector", None) or "",
+            rfp_text=rfp_source_text or "",
+            rfp_id=rfp_id,
+        )
+        for line in hollow_logs[:12]:
+            logger.info("Phase 3 hollow KB fill: %s — %s", rfp_id, line)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Phase 3 hollow KB fill skipped for %s: %s", rfp_id, exc)
+
     await asave_proposal_draft(draft)
 
     updated_research = research.model_copy(

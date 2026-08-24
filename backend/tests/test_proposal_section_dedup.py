@@ -347,6 +347,98 @@ class SectionDedupTests(unittest.TestCase):
         self.assertTrue(any("near-duplicate" in d for d in dropped))
         self.assertTrue(any("Cost Proposal" in t for t in titles))
 
+    def test_scan_drop_clone_false_still_collapses_identical_title_twins(self) -> None:
+        """Complete Scan used drop_clone_tabs=False and left two §5.2 / §5.9 tabs."""
+        body_a = (
+            "North Miami Beach municipal brand development with comparable recreation "
+            "center and community outreach case studies for evaluator review. "
+        ) * 6
+        body_b = (
+            "OpenGov portal vendor registration fields completed with legal name FEIN "
+            "and contact details synced from Business Information Section 1.3. "
+        ) * 6
+        sections = [
+            _sec(
+                "rfp-structure-5-9",
+                "Section 5.9 — OpenGov Portal Vendor Registration",
+                body_b,
+            ),
+            _sec(
+                "rfp-structure-5-2",
+                "Section 5.2 — Sample Work Submission (Portfolio of Comparable Projects)",
+                body_a,
+            ),
+            _sec(
+                "rfp-structure-5-2-2",
+                "Section 5.2 — Sample Work Submission (Portfolio of Comparable Projects)",
+                body_a + " Extra twin paragraph.",
+            ),
+            _sec(
+                "rfp-structure-5-9-2",
+                "Section 5.9 — OpenGov Portal Vendor Registration",
+                body_b + " Extra twin paragraph.",
+            ),
+            _sec(
+                "rfp-addenda",
+                "Acknowledgment of Addenda",
+                "We acknowledge receipt of all addenda issued for this solicitation.",
+            ),
+        ]
+        kept, logs = dedupe_manuscript_for_scan(sections, drop_clone_tabs=False)
+        titles = [s.title or "" for s in kept]
+        self.assertEqual(
+            len([t for t in titles if "Sample Work" in t]),
+            1,
+            msg=titles,
+        )
+        self.assertEqual(
+            len([t for t in titles if "OpenGov" in t]),
+            1,
+            msg=titles,
+        )
+        self.assertTrue(any("near-duplicate" in line for line in logs))
+        self.assertTrue(any("Addenda" in t for t in titles))
+
+    def test_scan_drop_clone_false_keeps_soft_near_dup_toc_siblings(self) -> None:
+        """Complete Scan must not merge distinct TOC tabs that merely share words."""
+        body = (
+            "We manage destination marketing social accounts and successful campaign "
+            "examples with weekly reporting for municipal tourism clients. "
+        ) * 8
+        sections = [
+            _sec(
+                "rfp-tourism-accounts",
+                "Examples of Tourism or Destination Marketing Social Media Accounts Managed",
+                body,
+            ),
+            _sec(
+                "rfp-successful-campaigns",
+                "Examples of Successful Campaigns",
+                body + " Seasonal destination marketing campaigns extend visitor engagement.",
+            ),
+            _sec(
+                "rfp-refs-short",
+                "References",
+                "Contact phone email for tourism reference verification across renewals. " * 4,
+            ),
+            _sec(
+                "rfp-refs-past",
+                "References & Past Performance",
+                "Past performance contacts and outcomes across multi year renewals. " * 4,
+            ),
+        ]
+        kept, _logs = dedupe_manuscript_for_scan(sections, drop_clone_tabs=False)
+        kept_ids = {s.id for s in kept}
+        self.assertEqual(
+            kept_ids,
+            {
+                "rfp-tourism-accounts",
+                "rfp-successful-campaigns",
+                "rfp-refs-short",
+                "rfp-refs-past",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

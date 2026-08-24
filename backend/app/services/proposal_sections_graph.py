@@ -2474,7 +2474,7 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
                 "with feeling — why this relationship matters — NOT how you'll run the work.\n"
                 "Do not let the RFP pitch crowd out Who We Are + Our Promise.\n\n"
                 "🚨 CRITICAL — KEEP SECTION 1.1 CLEAN (put these elsewhere):\n"
-                "- DO NOT name staff (Ron Comer, Sonja Anderson, Curt Schultz, etc.) — bios are Section 2\n"
+                "- DO NOT name staff in Section 1 — bios belong in Section 2\n"
                 "- DO NOT name titles/roles as assignments ('dedicated client manager', 'executive sponsor')\n"
                 "- DO NOT list channels or tactics (SEM, SEO, PPC, paid social, remarketing, CRM, dashboards)\n"
                 "- DO NOT promise report cadences, deliverable SLAs, or mid-campaign process detail\n"

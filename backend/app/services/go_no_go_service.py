@@ -43,8 +43,10 @@ from app.services.go_no_go_capability import (
     derive_technical_capability_score,
     calibrate_technical_capability_score,
     clamp_score_to_written_cap,
+    evidenced_core_craft_ratio,
     gap_matrix_from_requirements,
     reconcile_narrative,
+    unmet_disqualifying_requirements,
     unverified_core_requirements,
 )
 from app.services.go_no_go_compliance_brief import fetch_compliance_brief
@@ -199,6 +201,12 @@ EVIDENCE CALIBRATION (accurate — neither reject-everything NOR invent pessimis
   roles → [FLAG FOR SONJA: assign …], never a fabricated name.
 - Fixable gaps (state registration, insurance verify, assign social lead) → prefer recommendation=review
   with conditions; do not tank Overall into the 2.x range solely for those.
+- MINIMUM QUALIFICATION THRESHOLDS are different from gaps. When the RFP states a counted or
+  licensed threshold to be responsive ("at least five comparable municipal projects in the past
+  five years", "three client references", a required license/registration/bond) and the KB cannot
+  evidence it, say so plainly, score Win Probability on that reality, and recommend no_go — it is
+  not a positioning problem a well-written proposal closes, and the only way to "meet" it is to
+  invent past work. Do not soften it to review-with-conditions.
 - Do not auto-recommend no_go solely because Overall < 3; use "review" when gaps are fixable.
 - Prefer "no_go" only for: out-of-lane scope, disqualifying verified compliance failure, deadline passed
   with late-submission DQ, or clearly poor fit+worth with no credible path.
@@ -277,7 +285,10 @@ EVIDENCE HYGIENE (mandatory — these errors have changed real Go/No-Go outcomes
 RECOMMENDATION:
 - "go": strong fit and worthwhile; deadline not passed (or extension confirmed); no unresolved
   Offeror-office structural gap; tourism/destination proof is 03_CS/06_WON (not 07_FIN alone)
-- "no_go": out-of-lane OR disqualifying verified compliance gap OR poor fit + low worth OR proposal deadline passed with late-submission disqualification
+- "no_go": out-of-lane OR disqualifying verified compliance gap OR an unmet stated minimum
+  qualification threshold (counted track record, mandatory license/registration, required
+  reference count) OR poor fit + low worth OR proposal deadline passed with late-submission
+  disqualification
 - "review": Go With Conditions — fixable gaps or mixed signals; DEFAULT when Offeror-office
   requirement needs legal read, or when sector proof is thin after stripping MCI-mismatched /
   07_FIN citations; also use when deadline passed but re-solicit/override may be possible
@@ -2063,7 +2074,9 @@ def align_recommendation_with_score(analysis: GoNoGoAnalysis) -> GoNoGoAnalysis:
     ``no_go`` whenever *any* core KB gap existed, even when the matrix still
     averaged 3.8/5. That produced the live contradiction (Worth 4, Overall 3.8,
     red No-Go badge). Scores are the pipeline's stated go threshold — the label
-    must follow them unless a true deadline disqualifier applies.
+    must follow them unless a true disqualifier applies — a passed deadline, or
+    a stated minimum qualification the KB cannot satisfy. Those are pass/fail
+    and outrank the average.
     """
     if analysis.insufficient_data or analysis.recommendation is None:
         return analysis
@@ -2076,6 +2089,7 @@ def align_recommendation_with_score(analysis: GoNoGoAnalysis) -> GoNoGoAnalysis:
         analysis.recommendation == "no_go"
         and overall >= _SCORE_BLOCKS_NO_GO
         and not _deadline_is_disqualifying(analysis)
+        and not unmet_disqualifying_requirements(analysis.capability_matrix or [])
     ):
         summary = str(analysis.summary or "").strip()
         if _LEADING_NO_GO_RE.search(summary):
@@ -2257,8 +2271,10 @@ def _enforce_capability_evidence(
     Nothing here trusts the model's own "Verified" label. A claim survives only
     when the cited KB document was retrieved for this RFP and its text supports
     the requirement; otherwise the row is downgraded and listed as a critical
-    gap. Hard NO-GO is reserved for capability collapse (derived technical ≤1);
-    partial core gaps with a still-viable composite become GO WITH CONDITIONS.
+    gap. Hard NO-GO is reserved for capability collapse (derived technical ≤1)
+    or an unmet disqualifying requirement — a stated minimum qualification the
+    KB cannot satisfy; partial core gaps with a still-viable composite become
+    GO WITH CONDITIONS.
     """
     if analysis.insufficient_data:
         # Thin-RFP path already suppresses scores and recommendation.
@@ -2379,6 +2395,17 @@ def _enforce_capability_evidence(
             gaps.append(gap)
 
     core_gaps = unverified_core_requirements(validated)
+    # Stated minimum thresholds the KB cannot satisfy. Pass/fail, not scored:
+    # these end the pursuit no matter how the matrix averages.
+    blocked = unmet_disqualifying_requirements(validated)
+    for requirement in blocked:
+        gap = (
+            f"DISQUALIFYING — {requirement}: the RFP states this as a minimum "
+            "responsiveness threshold and no KB evidence satisfies it. "
+            "Meeting it cannot be written around."
+        )
+        if gap not in gaps:
+            gaps.append(gap)
     derived = calibrate_technical_capability_score(validated)
     derived_resource = derive_resource_capability_score(validated)
 
@@ -2433,10 +2460,16 @@ def _enforce_capability_evidence(
         evidenced_core = sum(
             1 for r in craft_cores if r.status in {"verified", "partial"}
         )
+        # Weighted like the base score: five half-credit "partial" rows are not
+        # the same proof as five verified ones, and a head-count ratio let them
+        # overrule an analyst's defended 2/5. A failed minimum threshold blocks
+        # the floor outright — Win cannot be floored on scope we are not
+        # responsive for.
         if (
             derived >= 3
             and craft_cores
-            and evidenced_core / len(craft_cores) >= 0.4
+            and evidenced_core_craft_ratio(validated) >= 0.4
+            and not unmet_disqualifying_requirements(validated)
         ):
             win_floor = min(3, derived)
             for row in matrix:
@@ -2460,31 +2493,32 @@ def _enforce_capability_evidence(
                 row.score = clamped
         updates["decision_matrix"] = matrix
 
-    if core_gaps:
-        # Any core gap blocks a clean "go", but absolute NO-GO is reserved for
-        # capability collapse (technical ≤1). Partial gaps with a still-healthy
-        # composite (e.g. 3.8/5) are GO WITH CONDITIONS — the live label bug was
-        # forcing NO-GO while scores stayed high.
+    if core_gaps or blocked:
+        # Any core gap blocks a clean "go". NO-GO is reserved for capability
+        # collapse (technical <= 1) or an unmet responsiveness threshold —
+        # partial gaps with a healthy composite stay GO WITH CONDITIONS.
         provisional = analysis.model_copy(
             update={**updates, "decision_matrix": matrix}
         )
         overall = compute_overall_go_score(provisional)
         hard_capability_fail = derived is not None and derived <= 1
-        if hard_capability_fail:
+        if hard_capability_fail or blocked:
             updates["recommendation"] = "no_go"
         else:
             updates["recommendation"] = "review"
-        summary_gap = (
-            "Core RFP requirements with no verifiable KB evidence: "
-            + ", ".join(core_gaps[:6])
-        )
-        if summary_gap not in gaps:
-            gaps.append(summary_gap)
+        if core_gaps:
+            summary_gap = (
+                "Core RFP requirements with no verifiable KB evidence: "
+                + ", ".join(core_gaps[:6])
+            )
+            if summary_gap not in gaps:
+                gaps.append(summary_gap)
         logger.info(
-            "go_no_go capability gaps for %s: %d unverified core requirement(s); "
-            "derived_tech=%s overall=%s → recommendation=%s",
+            "go_no_go capability gaps for %s: %d unverified core requirement(s), "
+            "%d unmet disqualifier(s); derived_tech=%s overall=%s → recommendation=%s",
             analysis.__dict__.get("rfp_id", "?"),
             len(core_gaps),
+            len(blocked),
             derived,
             overall,
             updates["recommendation"],
@@ -2499,15 +2533,26 @@ def _enforce_capability_evidence(
         recommendation=reconciled.recommendation,
         overall_score=compute_overall_go_score(reconciled),
     )
-    if core_gaps:
+    if core_gaps or blocked:
         # Substitution cannot fix a claim that is not phrased as a verdict —
         # the live summary simply asserted "strong technical capability match"
         # with no verdict word to replace. Lead with the finding instead.
         if reconciled.recommendation == "no_go":
-            verdict = (
-                f"NO-GO — {len(core_gaps)} of {len(validated)} required "
-                "capabilities lack verifiable knowledge-base evidence."
-            )
+            if blocked:
+                # Name the threshold. "14 of 24 capabilities lack evidence"
+                # reads as a writing problem; "five comparable California
+                # municipal projects" is why the bid cannot be submitted.
+                verdict = (
+                    "NO-GO — unmet minimum qualification: "
+                    + "; ".join(blocked[:3])
+                    + ". This is a responsiveness threshold, not a gap the "
+                    "proposal can close."
+                )
+            else:
+                verdict = (
+                    f"NO-GO — {len(core_gaps)} of {len(validated)} required "
+                    "capabilities lack verifiable knowledge-base evidence."
+                )
             if not summary.startswith("NO-GO"):
                 summary = f"{verdict} {summary}".strip()
         else:

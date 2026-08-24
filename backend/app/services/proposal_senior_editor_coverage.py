@@ -42,6 +42,16 @@ def _section_needs_coverage_ticket(section: ProposalSection) -> tuple[bool, str]
         return True, "Section is empty."
     if is_pointer_only_company_delegation(body):
         return True, "Tab is only a cross-reference to Sections 1–3 — evaluators need full content here."
+    title_cf = (section.title or "").casefold()
+    if "reference" in title_cf:
+        from app.services.proposal_closing_hollow_repair import (
+            references_section_is_hollow,
+        )
+
+        if references_section_is_hollow(body):
+            return True, "References tab promises contacts but lists none."
+    if "addend" in title_cf and body.count("[MANUAL FILL") >= 3:
+        return True, "Addenda table is still a MANUAL FILL stub — needs a clean acknowledgment."
     wc = word_count(body)
     if wc < _MIN_SUBSTANTIVE_WORDS:
         return True, f"Tab is too thin (~{wc} words) for an RFP-required section."
@@ -66,7 +76,11 @@ async def apply_senior_editor_section_coverage_audit(
     logs.extend(pointer_logs)
 
     from app.services.proposal_budget_content import reformat_budget_terms_in_markdown
+    from app.services.proposal_closing_hollow_repair import repair_hollow_closing_sections
     from app.services.proposal_verify_optional_scrub import restore_empty_money_table_cells
+
+    draft, closing_logs = repair_hollow_closing_sections(draft)
+    logs.extend(closing_logs)
 
     rewritten: list[ProposalSection] = []
     changed = False
@@ -74,18 +88,22 @@ async def apply_senior_editor_section_coverage_audit(
         body = section.content or ""
         updated = body
         title_cf = (section.title or "").casefold()
-        if "budget" in title_cf or "pricing" in title_cf or "fee" in title_cf:
+        is_money_tab = any(
+            token in title_cf
+            for token in ("budget", "pricing", "fee", "cost proposal", "price")
+        )
+        if is_money_tab:
             formatted = reformat_budget_terms_in_markdown(updated)
             if formatted != updated:
                 logs.append(f"Reformatted Terms in «{section.title}» to tables/bullets.")
                 updated = formatted
-        filled, n_fill = restore_empty_money_table_cells(updated)
-        if n_fill:
-            logs.append(
-                f"Restored {n_fill} empty cost cell(s) in «{section.title}» "
-                "with MANUAL FILL so the gap stays visible."
-            )
-            updated = filled
+            filled, n_fill = restore_empty_money_table_cells(updated)
+            if n_fill:
+                logs.append(
+                    f"Restored {n_fill} empty cost cell(s) in «{section.title}» "
+                    "with MANUAL FILL so the gap stays visible."
+                )
+                updated = filled
         if updated != body:
             rewritten.append(section.model_copy(update={"content": updated}))
             changed = True

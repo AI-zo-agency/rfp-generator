@@ -95,4 +95,25 @@ describe("markdown table rendering", () => {
     expect(visibleText(html)).toContain("Creative Director");
     expect(visibleText(html)).toContain("$185");
   });
+
+  it("rolls up stair-step Fee Detail tables into one row per phase", () => {
+    const html = renderDoc(`## Fee Detail by Phase
+
+| Phase | Deliverable / Service | Fee |
+| --- | --- | ---: |
+| Phase 1: Discovery | Stakeholder interviews with MCECS leadership | $6,640 |
+| | Audience segmentation and persona development | $6,165 |
+| | Competitive landscape analysis | $4,000 |
+| Phase 2: Strategy | Messaging architecture | $8,000 |
+`);
+    expect(html).toContain("<table");
+    expect(visibleText(html)).toContain("Phase 1: Discovery");
+    expect(visibleText(html)).toContain("Phase 2: Strategy");
+    expect(visibleText(html)).toContain("Scope");
+    expect(visibleText(html)).toContain("$16,805");
+    expect(visibleText(html)).toContain("$8,000");
+    // Not one visible fee cell per original deliverable row for discovery
+    const discoveryHits = visibleText(html).match(/Phase 1: Discovery/g) ?? [];
+    expect(discoveryHits.length).toBe(1);
+  });
 });

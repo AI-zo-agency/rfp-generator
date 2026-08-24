@@ -197,19 +197,40 @@ def is_bio_stub_section(section_id: str, content: str | None = None) -> bool:
     return is_bio_pdf_designer_note(content) or not (content or "").strip()
 
 
+def looks_like_bio_stub_body(content: str) -> bool:
+    """True when body is the short Role-on-engagement (+ optional 04_Bio) stub shape."""
+    body = (content or "").strip()
+    if not body:
+        return False
+    if "Role on this engagement" not in body:
+        return False
+    if is_bio_pdf_designer_note(body):
+        # Designer-note stubs are short; long narrative + note is a resume dump.
+        return len(body.split()) < 80
+    # Bare role line with almost no substance (Scan wrongly stubbed a TOC tab).
+    return len(body.split()) < 40
+
+
+def is_section2_bio_id(section_id: str) -> bool:
+    sid = section_id or ""
+    return sid.startswith("section-2-bio-") and not sid.endswith("placeholder")
+
+
 def prior_content_for_rewrite(section_id: str, content: str) -> str:
-    """Body to show the rewriter. Misplaced bio-PDF stubs on Our Work are empty."""
+    """Body to show the rewriter. Misplaced bio stubs on non-bio tabs are empty."""
     body = content or ""
     sid = section_id or ""
-    if is_bio_pdf_designer_note(body) and not sid.startswith("section-2-bio-"):
+    if looks_like_bio_stub_body(body) and not is_section2_bio_id(sid):
+        return ""
+    if is_bio_pdf_designer_note(body) and not is_section2_bio_id(sid):
         return ""
     return body
 
 
 MISPLACED_BIO_STUB_REWRITE_NOTE = (
-    "Current body is a misplaced 04_Bio designer-note stub. Discard it. "
-    "This tab is not a team bio. Write Our Work / case-study content from 03_CS "
-    "and the RFP ask. Do not keep a bio PDF handoff or Role-on-this-engagement line."
+    "Current body is a misplaced 04_Bio / Role-on-engagement stub. Discard it. "
+    "This tab is not a team bio. Write the RFP ask for THIS section from verified "
+    "evidence. Do not keep a bio PDF handoff or Role-on-this-engagement line."
 )
 
 

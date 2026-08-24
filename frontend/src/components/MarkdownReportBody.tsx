@@ -28,8 +28,28 @@ function tryManualFillCallout(text: string): string | null {
   return trimmed.endsWith("]") ? trimmed : `${trimmed}]`;
 }
 
-function InlineGapTag({ tag, highlighted = false }: { tag: string; highlighted?: boolean }) {
+function InlineGapTag({
+  tag,
+  highlighted = false,
+  compact = false,
+}: {
+  tag: string;
+  highlighted?: boolean;
+  compact?: boolean;
+}) {
   const h = humanizeGapTag(tag);
+  if (compact) {
+    return (
+      <span
+        className={`inline text-[0.85em] italic ${
+          highlighted ? "text-amber-800" : "text-zo-text-muted"
+        }`}
+        title={h.action || h.detail || h.title}
+      >
+        TBD — {h.title}
+      </span>
+    );
+  }
   return (
     <span
       className={`inline rounded-md border px-1.5 py-0.5 text-[0.85em] leading-relaxed ${
@@ -248,12 +268,20 @@ function trimEmptyEdgeCells(cells: string[]): string[] {
 
 function normalizeTableRows(headers: string[], rows: string[][]): string[][] {
   const colCount = Math.max(headers.length, 1);
+  // Fee Detail "stair-step" rows leave Phase blank (`| | Deliverable | $X |`).
+  // Never strip that leading blank or the deliverable shifts into the Phase column.
+  const preserveLeadingBlank = /phase/i.test((headers[0] || "").replace(/\*\*/g, "").trim());
   return rows.map((row) => {
-    const cells = trimEmptyEdgeCells(row);
+    const cells = preserveLeadingBlank
+      ? row.map((c) => (c || "").trim())
+      : trimEmptyEdgeCells(row);
     if (cells.length === colCount) {
       return cells;
     }
     if (cells.length < colCount) {
+      if (preserveLeadingBlank) {
+        return [...Array(colCount - cells.length).fill(""), ...cells];
+      }
       return [...cells, ...Array(colCount - cells.length).fill("")];
     }
     const head = cells.slice(0, colCount - 1);
@@ -407,8 +435,137 @@ function sanitizeTableBlock(
 ): { headers: string[]; rows: string[][] } | null {
   const hadSeparator = rawLines.some((line) => isTableSeparator(line));
   const repaired = repairTableBlock(headers, rows, { hadSeparator });
-  if (repaired) return repaired;
-  return tableFromRawLines(rawLines);
+  const base = repaired ?? tableFromRawLines(rawLines);
+  if (!base) return null;
+  return rollupFeeDetailTableForDisplay(base.headers, base.rows);
+}
+
+function _stripMdBold(text: string): string {
+  return text.replace(/\*\*/g, "").trim();
+}
+
+function _parseFeeCell(cell: string): number | null {
+  const cleaned = _stripMdBold(cell).replace(/,/g, "");
+  const match = cleaned.match(/\$?\s*(-?\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function _formatFeeUsd(amount: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: Number.isInteger(amount) ? 0 : 2,
+  }).format(amount);
+}
+
+function _isFeeDetailHeader(headers: string[]): boolean {
+  const labels = headers.map((h) => _stripMdBold(h).toLowerCase());
+  const hasPhase = labels.some((h) => h.includes("phase"));
+  const hasFee = labels.some((h) => /^(fee|amount|cost|price)\b/.test(h) || h.includes("fee"));
+  return hasPhase && hasFee;
+}
+
+function _isTotalPhaseLabel(label: string): boolean {
+  const t = _stripMdBold(label).toLowerCase();
+  return t === "total" || t.startsWith("total ") || t.includes("professional fees total");
+}
+
+/**
+ * Client display: collapse stair-step Fee Detail tables (blank Phase cells
+ * continuing the prior phase) into one Phase | Scope | Fee row per phase.
+ * Does not change stored markdown — view-only polish for Review / manuscript.
+ */
+function rollupFeeDetailTableForDisplay(
+  headers: string[],
+  rows: string[][]
+): { headers: string[]; rows: string[][] } {
+  if (!_isFeeDetailHeader(headers) || rows.length === 0) {
+    return { headers, rows };
+  }
+
+  const phaseIdx = headers.findIndex((h) => /phase/i.test(_stripMdBold(h)));
+  const feeIdx = headers.findIndex((h) => {
+    const t = _stripMdBold(h).toLowerCase();
+    return /^(fee|amount|cost|price)\b/.test(t) || t.includes("fee");
+  });
+  if (phaseIdx < 0 || feeIdx < 0) return { headers, rows };
+
+  const hadBlankPhase = rows.some((row, i) => {
+    const phase = (row[phaseIdx] || "").trim();
+    if (_isTotalPhaseLabel(phase)) return false;
+    return i > 0 && !phase;
+  });
+  const uniquePhases = new Set(
+    rows
+      .map((row) => _stripMdBold(row[phaseIdx] || ""))
+      .filter((p) => p && !_isTotalPhaseLabel(p))
+  );
+  // Roll up when blank phases exist, or many deliverable rows for few phases.
+  if (!hadBlankPhase && rows.length <= uniquePhases.size + 1) {
+    // Still normalize header labels for consistency.
+    const normalizedHeaders = headers.map((h, i) => {
+      if (i === phaseIdx) return "Phase";
+      if (i === feeIdx) return "Fee";
+      if (/deliverable|service|description|scope/i.test(_stripMdBold(h))) return "Scope";
+      return h;
+    });
+    return { headers: normalizedHeaders, rows };
+  }
+
+  type Bucket = { phase: string; scopes: string[]; amount: number; hasAmount: boolean };
+  const order: string[] = [];
+  const buckets = new Map<string, Bucket>();
+  let currentPhase = "";
+
+  for (const row of rows) {
+    const phaseRaw = _stripMdBold(row[phaseIdx] || "");
+    if (_isTotalPhaseLabel(phaseRaw)) continue;
+    if (phaseRaw) currentPhase = phaseRaw;
+    if (!currentPhase) continue;
+
+    let bucket = buckets.get(currentPhase);
+    if (!bucket) {
+      bucket = { phase: currentPhase, scopes: [], amount: 0, hasAmount: false };
+      buckets.set(currentPhase, bucket);
+      order.push(currentPhase);
+    }
+
+    for (let i = 0; i < row.length; i += 1) {
+      if (i === phaseIdx || i === feeIdx) continue;
+      const cell = _stripMdBold(row[i] || "");
+      if (cell && !bucket.scopes.includes(cell)) bucket.scopes.push(cell);
+    }
+    const fee = _parseFeeCell(row[feeIdx] || "");
+    if (fee != null) {
+      bucket.amount += fee;
+      bucket.hasAmount = true;
+    }
+  }
+
+  if (order.length === 0) return { headers, rows };
+
+  const rolled: string[][] = order.map((phase) => {
+    const b = buckets.get(phase)!;
+    let scope =
+      b.scopes.length > 4
+        ? `${b.scopes.slice(0, 4).join("; ")}; +${b.scopes.length - 4} more`
+        : b.scopes.join("; ");
+    if (scope.length > 200) scope = `${scope.slice(0, 197).replace(/;?\s*$/, "")}…`;
+    if (!scope) scope = "Professional services";
+    return [phase, scope, b.hasAmount ? _formatFeeUsd(b.amount) : "—"];
+  });
+
+  const total = order.reduce((sum, phase) => {
+    const b = buckets.get(phase);
+    return sum + (b?.hasAmount ? b.amount : 0);
+  }, 0);
+  if (total > 0) {
+    rolled.push(["**Total**", "", `**${_formatFeeUsd(total)}**`]);
+  }
+
+  return { headers: ["Phase", "Scope", "Fee"], rows: rolled };
 }
 
 function ProposalTable({
@@ -428,16 +585,25 @@ function ProposalTable({
   const headPad = compact ? "px-3 py-2" : "px-4 py-2.5";
   const textSize = compact ? "text-sm" : "text-[13px]";
   const showHeader = headers.some((h) => !isPlaceholderCell(h));
+  const feeColIndexes = new Set(
+    headers
+      .map((h, i) => (/fee|amount|cost|price|\$/i.test(_stripMdBold(h)) ? i : -1))
+      .filter((i) => i >= 0)
+  );
   return (
-    <div className="my-4 overflow-x-auto rounded-xl border border-zo-border bg-white">
-      <table className={`w-full min-w-[min(100%,480px)] border-collapse text-left ${textSize}`}>
+    <div className="my-4 overflow-x-auto rounded-xl border border-zo-border bg-white shadow-sm">
+      <table
+        className={`w-full min-w-[min(100%,480px)] border-collapse text-left ${textSize}`}
+      >
         {showHeader ? (
           <thead>
-            <tr className="border-b border-zo-border bg-[var(--zo-surface)] text-xs uppercase tracking-wide text-zo-text-muted">
+            <tr className="border-b-2 border-zo-border bg-[var(--zo-surface)] text-xs uppercase tracking-wide text-zo-text-muted">
               {headers.map((header, headerIndex) => (
                 <th
                   key={`${blockIndex}-h-${headerIndex}`}
-                  className={`min-w-[5.5rem] max-w-[22rem] align-top whitespace-normal ${headPad} font-bold`}
+                  className={`min-w-[5.5rem] max-w-[28rem] border-r border-zo-border/50 align-top whitespace-normal last:border-r-0 ${headPad} font-bold ${
+                    feeColIndexes.has(headerIndex) ? "text-right" : ""
+                  }`}
                 >
                   {renderInline(header, highlights)}
                 </th>
@@ -446,23 +612,34 @@ function ProposalTable({
           </thead>
         ) : null}
         <tbody>
-          {rows.map((row, rowIndex) => (
-            <tr
-              key={rowIndex}
-              className="border-b border-zo-border/60 align-top last:border-0"
-            >
-              {headers.map((_, cellIndex) => (
-                <td
-                  key={cellIndex}
-                  className={`min-w-[5.5rem] max-w-[22rem] align-top whitespace-normal ${cellPad} ${
-                    compact ? "text-zo-text-secondary" : ""
-                  } ${cellIndex === 0 && !showHeader ? "font-semibold text-foreground" : ""}`}
-                >
-                  {renderInline(row[cellIndex] || "", highlights)}
-                </td>
-              ))}
-            </tr>
-          ))}
+          {rows.map((row, rowIndex) => {
+            const isTotal = _isTotalPhaseLabel(row[0] || "");
+            return (
+              <tr
+                key={rowIndex}
+                className={`border-b border-zo-border/70 align-top last:border-0 ${
+                  isTotal ? "bg-[var(--zo-surface)] font-semibold" : ""
+                }`}
+              >
+                {headers.map((_, cellIndex) => (
+                  <td
+                    key={cellIndex}
+                    className={`min-w-[5.5rem] max-w-[28rem] border-r border-zo-border/40 align-top whitespace-normal last:border-r-0 ${cellPad} ${
+                      compact && !isTotal ? "text-zo-text-secondary" : ""
+                    } ${
+                      cellIndex === 0 && !showHeader ? "font-semibold text-foreground" : ""
+                    } ${feeColIndexes.has(cellIndex) ? "text-right tabular-nums" : ""} ${
+                      cellIndex === 0 && showHeader ? "font-medium text-foreground" : ""
+                    }`}
+                  >
+                    {renderInline(row[cellIndex] || "", highlights, {
+                      compactHandoff: true,
+                    })}
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -654,7 +831,11 @@ function buildInlinePattern(highlightTexts: string[]): RegExp {
   return new RegExp(`(${highlights}|${tagPattern})`, "gi");
 }
 
-function renderInline(text: string | undefined | null, highlightTexts: string[] = []) {
+function renderInline(
+  text: string | undefined | null,
+  highlightTexts: string[] = [],
+  options: { compactHandoff?: boolean } = {}
+) {
   let markAssigned = false;
   const safe = text ?? "";
   const highlights = highlightTexts.filter(
@@ -671,7 +852,14 @@ function renderInline(text: string | undefined | null, highlightTexts: string[] 
     if (/^\[MANUAL\s+FILL/i.test(part)) {
       if (isInternalScanTag(part)) return null;
       const highlighted = tagMatchesHighlight(part, highlights);
-      return <InlineGapTag key={index} tag={part} highlighted={highlighted} />;
+      return (
+        <InlineGapTag
+          key={index}
+          tag={part}
+          highlighted={highlighted}
+          compact={options.compactHandoff === true}
+        />
+      );
     }
 
     if (normalizedHighlights.has(part.trim()) || normalizedHighlights.has(part)) {

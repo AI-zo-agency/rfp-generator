@@ -68,6 +68,7 @@ from app.services.proposal_job_runner import (
 from app.services.rfp_repository import get_rfp, rfp_exists
 
 router = APIRouter(prefix="/rfps", tags=["proposals"])
+logger = logging.getLogger(__name__)
 
 
 async def _enqueue_pipeline_phase(
@@ -185,14 +186,41 @@ async def get_proposal(rfp_id: str) -> dict[str, object]:
     if draft is None and research is None and not rfp_exists(rfp_id):
         raise HTTPException(status_code=404, detail="RFP not found")
     if draft is not None:
+        from app.services.evidence_trust.personnel_grounding import (
+            scrub_fabricated_personnel_from_draft,
+        )
         from app.services.proposal_draft_snapshots import prune_clutter_snapshots
         from app.services.proposal_repository import asave_proposal_draft
 
         pruned = prune_clutter_snapshots(draft)
-        if [s.saved_at for s in (pruned.snapshots or [])] != [
+        scrubbed, personnel_logs = scrub_fabricated_personnel_from_draft(pruned)
+        from app.services.proposal_closing_hollow_repair import (
+            repair_hollow_closing_sections,
+        )
+
+        scrubbed, closing_logs = repair_hollow_closing_sections(scrubbed)
+        from app.services.proposal_capability_bio_grounding import (
+            repair_misplaced_bio_stub_sections,
+        )
+        from app.services.proposal_scan_fact_repairs import fill_hollow_project_team_from_bios
+
+        scrubbed, bio_stub_logs = repair_misplaced_bio_stub_sections(scrubbed)
+        # Cheap sync fallback only — LLM won-proposal fill runs on Generate + Scan.
+        scrubbed, team_logs = fill_hollow_project_team_from_bios(scrubbed)
+        snapshots_changed = [s.saved_at for s in (pruned.snapshots or [])] != [
             s.saved_at for s in (draft.snapshots or [])
-        ]:
-            await asave_proposal_draft(pruned)
+        ]
+        heal_logs = [*personnel_logs, *closing_logs, *bio_stub_logs, *team_logs]
+        if snapshots_changed or heal_logs:
+            await asave_proposal_draft(scrubbed)
+            draft = scrubbed
+            if heal_logs:
+                logger.info(
+                    "Draft heal on load for %s: %s",
+                    rfp_id,
+                    "; ".join(heal_logs[:6]),
+                )
+        else:
             draft = pruned
     job = await get_proposal_job(rfp_id)
     slim_research = _slim_research(research)

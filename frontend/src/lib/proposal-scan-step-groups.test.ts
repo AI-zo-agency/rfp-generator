@@ -21,7 +21,6 @@ const PIPELINE_ORDER = [
   "Line-by-line KB grounding (async)",
   "Compact manuscript (remove duplicates)",
   "Page limit & anti-invention (Ralph)",
-  "Review & quality gate (3 acts)",
   "Pre-submit refresh",
   "Submission readiness (triage + score)",
 ];
@@ -51,7 +50,8 @@ describe("FULFILL_SCAN_STEP_GROUPS", () => {
 
   it("ends with the stages that decide submission", () => {
     const last = FULFILL_SCAN_STEP_GROUPS[FULFILL_SCAN_STEP_GROUPS.length - 1];
-    expect(last.steps).toContain("Review & quality gate (3 acts)");
+    expect(last.steps).toContain("Pre-submit refresh");
     expect(last.steps).toContain("Submission readiness (triage + score)");
+    expect(last.steps).not.toContain("Review & quality gate (3 acts)");
   });
 });
