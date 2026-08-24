@@ -14,6 +14,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Memories carry one-line facts (a rate, a correction) that chunk search never
+# surfaces on its own. Left to compete with chunks on raw rank or per-doc budget,
+# a handful of long proposal chunks fill the rank cut and the context budget
+# before a short memory fact is ever reached — so memories get a reserved floor
+# in the rank cut (MEMORY_FLOOR) and a small dedicated budget in the packing
+# loop (MEMORY_BUDGET_CHARS) that chunk hits may not spend.
+MEMORY_FLOOR = 3
+MEMORY_BUDGET_CHARS = 1_500
+
 # Minimal function words for overlap scoring only — not used to invent queries.
 _STOP = {
     "a",
@@ -627,10 +636,15 @@ async def retrieve_for_question(
     async def _collect(thresh: float) -> list[dict[str, Any]]:
         groups = await asyncio.gather(*[_search_one(q, thresh) for q in queries])
         merged_local: list[dict[str, Any]] = []
-        seen_local: set[str] = set()
+        seen_local: set[tuple[str, bool]] = set()
         for hits in groups:
             for hit in hits:
-                key = supermemory.document_dedupe_key(hit) or str(hit.get("id") or id(hit))
+                doc_key = supermemory.document_dedupe_key(hit) or str(hit.get("id") or id(hit))
+                # Include the hit kind in the key so a memory and a chunk from the
+                # same document don't collide a second time (see merge_chunk_first_hits,
+                # which already keeps both) — otherwise the cross-query merge here
+                # would re-discard the memory that Task 1 stopped dropping upstream.
+                key = (doc_key, supermemory.is_memory_hit(hit))
                 if key in seen_local:
                     continue
                 seen_local.add(key)
@@ -646,19 +660,52 @@ async def retrieve_for_question(
         )
         merged = await _collect(fallback_threshold)
 
-    ranked = rank_hits_for_question(merged, question)[: max(limit, 6)]
+    full_ranked = rank_hits_for_question(merged, question)
+    ranked = full_ranked[: max(limit, 6)]
+    # Chunks keep their positions from rank_hits_for_question — never reordered
+    # above chunks. Then TOP UP to MEMORY_FLOOR memory hits from the ones the cut
+    # dropped, appended after the chunks. A plain "did any memory survive?" check
+    # is not enough: one memory from an adjacent document (e.g. a pricing guide)
+    # would satisfy it while the memory actually holding the answer (the rate
+    # card) stays cut. Fact-level answers usually need several memories, not one.
+    # Counting memories is not enough: three memories from an adjacent document
+    # (a pricing guide) would satisfy a numeric floor while the best-matching
+    # memory — the rate card holding the actual answer — stays below the cut.
+    # Take the top MEMORY_FLOOR memories by rank and guarantee those specific
+    # hits are present, appended after the chunks.
+    top_memories = [hit for hit in full_ranked if supermemory.is_memory_hit(hit)][
+        :MEMORY_FLOOR
+    ]
+    already = {id(hit) for hit in ranked}
+    ranked = ranked + [hit for hit in top_memories if id(hit) not in already]
 
     parts: list[str] = []
     sources: list[str] = []
     total = 0
     # Give each top hit enough room for a full small/medium case-study PDF
     per_doc = max(12_000, max_chars // max(min(len(ranked), 4), 1))
+    # Reserve a slice of the total budget that only memory hits may spend, so
+    # long chunks packed earlier in the loop can't exhaust max_chars before a
+    # short memory fact is ever reached.
+    memory_reserve = MEMORY_FLOOR * MEMORY_BUDGET_CHARS
+    chunk_max_chars = max(max_chars - memory_reserve, 0)
 
     for hit in ranked:
-        remaining = max_chars - total
-        if remaining < 400:
-            break
-        budget = min(per_doc, remaining)
+        is_memory = supermemory.is_memory_hit(hit)
+        if is_memory:
+            remaining = max_chars - total
+            if remaining <= 0:
+                continue
+            budget = min(MEMORY_BUDGET_CHARS, remaining)
+        else:
+            remaining = chunk_max_chars - total
+            if remaining < 400:
+                # Skip this chunk, do NOT break: memories are appended after the
+                # chunks, and breaking here would strand every one of them once
+                # the chunk budget ran out — which is exactly how the rate card
+                # kept missing from rate answers.
+                continue
+            budget = min(per_doc, remaining)
         full = ""
         try:
             full = await supermemory.resolve_hit_document_content(hit)
@@ -672,9 +719,13 @@ async def retrieve_for_question(
         )
         if not block.strip():
             continue
-        terms = _question_terms(question)
-        if terms and _term_overlap(block, terms) < 0.15:
-            continue
+        # A one-line memory fact is short enough that the term-overlap ratio is
+        # noise, and a memory that made it into `ranked` already matched the
+        # question — so it skips the overlap filter that chunks still go through.
+        if not is_memory:
+            terms = _question_terms(question)
+            if terms and _term_overlap(block, terms) < 0.15:
+                continue
         label = _hit_label(hit) or "document"
         parts.append(block)
         if label not in sources:

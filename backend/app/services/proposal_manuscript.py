@@ -186,6 +186,170 @@ def convert_unresolved_template_tokens(text: str) -> str:
     return _TEMPLATE_TOKEN_RE.sub(_repl, text)
 
 
+# Instruction-shaped blocks the LLM narrates into the proposal body instead of
+# following — the Carson draft shipped a whole blockquote of the model's own
+# rules ("ACTION REQUIRED BEFORE SUBMISSION, PASS/FAIL ITEM ... Do not invent
+# contacts, organizations, or project details.") as ordinary client-facing
+# prose. `_BARE_CONFIRMATION_LINE_RE` above only catches single lines that
+# START with a trigger phrase; this catches whole paragraphs/blockquotes
+# anywhere the trigger phrases appear.
+#
+# Detection markers (case-insensitive substring match against the collapsed
+# block): any of these means the block is instruction-shaped prose, not
+# authored content.
+_INSTRUCTION_BLOCK_MARKERS: tuple[str, ...] = (
+    "action required",
+    "pass/fail",
+    "cannot be submitted",
+    "must be confirmed with",
+    "do not invent",
+)
+
+# Routing keywords. A block that names one of these concrete RFP deliverables,
+# or a person to confirm with, becomes a [MANUAL FILL: Sonja — …] tag. Checked
+# with plain substring containment, not regex — per the module's own house
+# rule, new regex is reserved for structural/detection work, not keyword
+# tests. "forms" (not bare "form") avoids colliding with the design keyword
+# "format".
+_INSTRUCTION_MANUAL_FILL_KEYWORDS: tuple[str, ...] = (
+    "reference",
+    "attachment",
+    "certification",
+    "insurance",
+    "signature",
+    "w-9",
+    "addendum",
+    "forms",
+    "licence",
+    "license",
+    "bond",
+    "confirmed with",
+    "sonja",
+)
+
+# A block that is about layout/imagery/presentation (and names no concrete
+# deliverable above) becomes a [DESIGNER NOTE: …] tag instead.
+_INSTRUCTION_DESIGNER_KEYWORDS: tuple[str, ...] = (
+    "layout",
+    "design",
+    "image",
+    "logo",
+    "spread",
+    "page",
+    "format",
+)
+
+_INSTRUCTION_BLOCK_SPLIT_RE = re.compile(r"(\n[ \t]*\n+)")
+_INSTRUCTION_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _instruction_block_matches(lowered_block: str) -> bool:
+    if any(marker in lowered_block for marker in _INSTRUCTION_BLOCK_MARKERS):
+        return True
+    return "before submission" in lowered_block and "verify" in lowered_block
+
+
+def _strip_instruction_line_prefix(line: str) -> str:
+    """Strip leading '>' / '⚠' markers (and the whitespace around them)."""
+    stripped = line.strip()
+    while stripped[:1] in ("⚠", ">"):
+        stripped = stripped[1:].strip()
+    return stripped
+
+
+def _classify_instruction_block(lowered_block: str) -> str | None:
+    """Return "manual", "designer", or None (pure meta-commentary, drop it)."""
+    if any(keyword in lowered_block for keyword in _INSTRUCTION_MANUAL_FILL_KEYWORDS):
+        return "manual"
+    if any(keyword in lowered_block for keyword in _INSTRUCTION_DESIGNER_KEYWORDS):
+        return "designer"
+    return None
+
+
+def _instruction_sentence_is_actionable(lowered_sentence: str) -> bool:
+    """A sentence survives only if it names a deliverable/person/presentation
+    detail someone must act on. Pure narration about the model's own rules
+    ("Do not invent contacts…", "This section is a pass/fail responsiveness
+    requirement") has none of these keywords and is dropped."""
+    return any(
+        keyword in lowered_sentence
+        for keyword in (*_INSTRUCTION_MANUAL_FILL_KEYWORDS, *_INSTRUCTION_DESIGNER_KEYWORDS)
+    )
+
+
+def convert_instruction_blocks(text: str) -> str:
+    """Turn narrated-instruction paragraphs/blockquotes into visible handoff tags.
+
+    Unlike `convert_bare_confirmation_lines` (single lines starting with a
+    trigger phrase), this scans whole blank-line-delimited blocks for
+    instruction markers anywhere inside them — the shape the Carson leak
+    actually had (a multi-line blockquote of the model's own submission
+    rules).
+
+    Routing is three-way per block, and the "keep or drop" decision inside a
+    matched block is made per SENTENCE, not per block:
+      1. Sentences naming a concrete RFP deliverable (references, forms,
+         attachments, certifications, insurance, signatures, addenda,
+         licences, bonds) or a person to confirm with -> kept, block becomes
+         [MANUAL FILL: Sonja — <surviving sentences>].
+      2. Otherwise, sentences about layout/imagery/presentation -> kept,
+         block becomes [DESIGNER NOTE: <surviving sentences> — edit if it
+         needs changing, or delete this note if the RFP does not require it].
+      3. Pure meta-commentary with no deliverable behind it ("Do not invent
+         contacts…") has no keywords in either list and is dropped — not
+         flagged, just removed, so it never buries a real flag.
+
+    If nothing in a matched block survives rule 3, the whole block is
+    removed. A block already containing `[` or `]` is left untouched — it is
+    probably already tagged.
+    """
+    if not text:
+        return text
+
+    parts = _INSTRUCTION_BLOCK_SPLIT_RE.split(text)
+    out_parts: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            # This is a blank-line separator between blocks — pass through.
+            out_parts.append(part)
+            continue
+
+        block = part
+        lowered_block = block.lower()
+        if "[" in block or "]" in block or not _instruction_block_matches(lowered_block):
+            out_parts.append(block)
+            continue
+
+        stripped_lines = [_strip_instruction_line_prefix(ln) for ln in block.split("\n")]
+        collapsed = " ".join(ln for ln in stripped_lines if ln)
+        collapsed = re.sub(r"[ \t]{2,}", " ", collapsed).strip()
+
+        category = _classify_instruction_block(collapsed.lower())
+        if category is None:
+            out_parts.append("")
+            continue
+
+        sentences = _INSTRUCTION_SENTENCE_SPLIT_RE.split(collapsed)
+        kept = [s.strip() for s in sentences if _instruction_sentence_is_actionable(s.lower())]
+        body = " ".join(s for s in kept if s).strip().rstrip(".")
+        if not body:
+            out_parts.append("")
+            continue
+
+        if category == "manual":
+            out_parts.append(f"[MANUAL FILL: Sonja — {body}]")
+        else:
+            body = (
+                f"{body} — edit if it needs changing, or delete this note "
+                "if the RFP does not require it"
+            )
+            out_parts.append(f"[DESIGNER NOTE: {body}]")
+
+    result = "".join(out_parts)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result
+
+
 # Bare "Confirm before submit —" / "Needs your input —" / "Action needed —" lines
 # that the LLM writes as ordinary prose. In DuPage they shipped as plain visible
 # text ("Confirm before submit — Primary case study, workforce board …"). Convert
@@ -367,6 +531,9 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
     handoff tags this function preserves.
 
     Order matters:
+      0. convert instruction-shaped paragraphs/blockquotes ("ACTION REQUIRED
+         BEFORE SUBMISSION…") INTO real MANUAL FILL / DESIGNER NOTE tags
+         before the line-level rule below can re-match a leftover line of one
       1. convert bare "Confirm before submit — X" / template tokens INTO real
          MANUAL FILL tags so writers see them in the flag panel
       2. sanitize any MANUAL FILL tags that already contain leaked internal
@@ -381,6 +548,7 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
          one-row-per-line tables so Word / Google Doc / in-app stay in sync
     """
     cleaned = text or ""
+    cleaned = convert_instruction_blocks(cleaned)
     cleaned = convert_bare_confirmation_lines(cleaned)
     cleaned = convert_unresolved_template_tokens(cleaned)
     cleaned = strip_leaked_manual_fill_identifiers(cleaned)
@@ -460,6 +628,49 @@ def strip_internal_handoff_tags(text: str) -> str:
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned
+
+
+def find_instruction_leaks(text: str) -> list[str]:
+    """Export tripwire: report blocks of narrated-instruction prose that would
+    otherwise ship untagged into a client-facing export.
+
+    `convert_instruction_blocks` (above) is pattern matching and cannot
+    anticipate every phrasing the model might invent. This is the safety net:
+    it reuses the exact same marker list, so it never disagrees with the
+    converter about what counts as a leak, but it does NOT rewrite or block
+    anything. It only reports. Per product decision, an instruction leak must
+    WARN LOUDLY at export time, never hard-fail — a false positive here must
+    never strand a submission against a deadline.
+
+    Text already inside an internal handoff tag ([MANUAL FILL …],
+    [DESIGNER NOTE …], [VERIFY …], [FLAG …]) is ignored: those tags are
+    stripped at export by strip_internal_handoff_tags, so a marker phrase
+    quoted inside one (e.g. a MANUAL FILL body that repeats "cannot be
+    submitted") is not a leak — it never reaches the client.
+
+    Returns the offending excerpts (the matched block, collapsed to a single
+    line), empty when the text is clean.
+    """
+    if not text:
+        return []
+
+    # Blank out already-tagged spans first so a marker phrase quoted inside a
+    # legitimate tag body isn't reported as a leak.
+    masked = INTERNAL_HANDOFF_TAG_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+    leaks: list[str] = []
+    for part in _INSTRUCTION_BLOCK_SPLIT_RE.split(masked):
+        if not part.strip():
+            continue
+        lowered = part.lower()
+        if not _instruction_block_matches(lowered):
+            continue
+        stripped_lines = [_strip_instruction_line_prefix(ln) for ln in part.split("\n")]
+        collapsed = " ".join(ln for ln in stripped_lines if ln)
+        collapsed = re.sub(r"[ \t]{2,}", " ", collapsed).strip()
+        if collapsed:
+            leaks.append(collapsed)
+    return leaks
 
 
 def scrub_text_for_client_export(text: str) -> str:

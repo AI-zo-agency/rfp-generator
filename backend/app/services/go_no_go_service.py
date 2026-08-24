@@ -2608,6 +2608,7 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
         rfp_requirements,
         hits_by_requirement,
     ), opportunity = await asyncio.gather(kb_task, opp_task)
+
     # Judge each RFP requirement against retrieved KB evidence BEFORE the
     # narrative analyst runs, so Technical/Win scores follow requirement needs.
     capability_rows: list[GoNoGoCapabilityRow] = []

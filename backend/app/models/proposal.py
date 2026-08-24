@@ -942,6 +942,18 @@ class ProposalRestoreSnapshotResponse(BaseModel):
     draft: ProposalDraft
 
 
+class ProposalInstructionLeak(BaseModel):
+    """A block of narrated-instruction prose the generator wrote as client-facing
+    copy instead of following. Caught by the export tripwire (find_instruction_leaks)
+    on top of convert_instruction_blocks — this is the safety net for phrasing the
+    pattern-matching converter didn't anticipate. Reported, never blocking."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    section: str
+    excerpt: str
+
+
 class ProposalGoogleDocExportResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
 
@@ -950,3 +962,6 @@ class ProposalGoogleDocExportResponse(BaseModel):
     document_url: str = Field(alias="documentUrl")
     title: str
     section_count: int = Field(alias="sectionCount")
+    instruction_leaks: list[ProposalInstructionLeak] = Field(
+        default_factory=list, alias="instructionLeaks"
+    )

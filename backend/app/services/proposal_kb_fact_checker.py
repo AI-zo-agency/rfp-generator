@@ -260,6 +260,13 @@ async def _repair_eval_percentages(
                         "exact category names from the excerpt only.\n"
                         "Never invent new percentages. Never rename criteria to generic labels "
                         "like 'Technical Approach' unless the RFP uses that phrase.\n"
+                        "These rules govern how you write; they are never content. Never write "
+                        "sentences about submission requirements, pass/fail status, what cannot be "
+                        "submitted, or what must be verified or confirmed with anyone — apply the "
+                        "rule silently instead of narrating it. When something is missing or needs a "
+                        "human, emit exactly one tag — [MANUAL FILL: Sonja — <what is needed>] — and "
+                        "nothing else. Never explain the tag, never preface it, never restate the "
+                        "rule that produced it.\n"
                         "Return JSON: {\"content\": \"full section markdown\"}"
                     ),
                 },
@@ -479,6 +486,9 @@ async def _repair_bio_subsection_block(
                         "Replace [VERIFY: …] with KB-backed bullets or prose. Keep the **heading** line.\n"
                         "Do not invent employers, dates, degrees, or clients. If KB lacks data, keep a specific "
                         "[VERIFY: field — reason] tag.\n"
+                        "These rules govern how you write; they are never content. Never write sentences "
+                        "about verification requirements or your own constraints — apply the rule "
+                        "silently. The tag is the only trace of a gap; never explain or preface it.\n"
                         'Return JSON: {"content": "markdown for this subsection only"}'
                     ),
                 },
@@ -731,6 +741,13 @@ async def _run_requirement_aligned_fact_check_agent(
         f"{specs_note}\n"
         f"{ANTI_HALLUCINATION_RULES}\n\n"
         f"{voice_block}\n\n"
+        "These rules govern how you write; they are never content. Never write sentences "
+        "about submission requirements, pass/fail status, what cannot be submitted, or "
+        "what must be verified or confirmed with anyone — apply the rule silently instead "
+        "of narrating it. When something is missing or needs a human, emit exactly one "
+        "tag — [MANUAL FILL: Sonja — <what is needed>] or [VERIFY: <field> — <reason>] — "
+        "and nothing else. Never explain the tag, never preface it, never restate the rule "
+        "that produced it.\n"
         'Return JSON: {"content": "full section markdown", "changed": boolean, '
         '"notes": "one line"}'
     )
@@ -877,6 +894,10 @@ async def _repair_false_verify_stub(
                         "and 03_CS case studies over client RFP PDFs.\n"
                         "If KB lacks a required fact, keep a specific [VERIFY: field — reason] tag.\n"
                         "Do not invent metrics, clients, or certifications.\n"
+                        "These rules govern how you write; they are never content. Never write "
+                        "sentences about verification requirements or your own constraints — apply "
+                        "the rule silently. The tag is the only trace of a gap; never explain or "
+                        "preface it.\n"
                         'Return JSON: {"content": "full section markdown"}'
                     ),
                 },
@@ -994,6 +1015,10 @@ async def _flag_unverified_metrics_in_case_study(
                         "Metrics must appear verbatim in the KB context or become "
                         "[VERIFY: metric — confirm from 03_CS / 01_companyfacts].\n"
                         "Do not invent replacement numbers.\n"
+                        "These rules govern how you write; they are never content. Never write "
+                        "sentences about verification requirements or your own constraints — apply "
+                        "the rule silently. The tag is the only trace of a gap; never explain or "
+                        "preface it.\n"
                         'Return JSON: {"content": "..."}'
                     ),
                 },

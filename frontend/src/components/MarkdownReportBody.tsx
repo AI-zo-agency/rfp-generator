@@ -739,6 +739,8 @@ function parseBlocks(body: string): Block[] {
             headers: sanitized.headers,
             rows: sanitized.rows,
           });
+        } else {
+          blocks.push({ type: "table_raw", lines: sanitized.lines });
         }
       }
       continue;

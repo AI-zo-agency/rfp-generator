@@ -16,3 +16,4 @@ langgraph>=0.2.0
 langsmith>=0.3.0
 python-docx>=1.1.2
 playwright>=1.49.0
+celery[redis]>=5.4.0

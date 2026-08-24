@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -33,10 +32,6 @@ from app.services.rfp_repository import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/rfps", tags=["rfps"])
-
-# In-flight Go/No-Go jobs — request returns immediately; client polls status.
-_analyze_jobs: dict[str, dict[str, object]] = {}
-_analyze_lock = asyncio.Lock()
 
 
 def _optional_form_int(value: object | None) -> int | None:
@@ -318,6 +313,15 @@ def mark_go(rfp_id: str) -> dict[str, str]:
     return {"ok": "true", "goNoGo": "go"}
 
 
+def _go_no_go_lock_key(rfp_id: str) -> str:
+    # Independent of the proposal-pipeline lock (proposal_job_runner.py
+    # defaults to lock_key=rfp_id for those 7 phases) — Go/No-Go and proposal
+    # generation have always been able to run concurrently on the same RFP,
+    # tracked in separate dicts before this migration; this key preserves
+    # that instead of accidentally coupling them under one lock.
+    return f"{rfp_id}:go-no-go"
+
+
 @router.post("/{rfp_id}/analyze")
 async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
     """Start Go/No-Go in the background and return immediately.
@@ -325,24 +329,26 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
     Long LLM calls (60–120s+) used to hold the Next.js proxy open until the
     connection died ("Could not reach" / "Invalid JSON"). Clients poll
     GET /{id}/analyze/status instead.
+
+    Dispatched through the same job tracker the proposal pipeline uses
+    (proposal_job_runner.py) — Celery/Redis in production, in-process
+    asyncio locally without Redis — instead of a second, separate in-memory
+    dict that could get orphaned on a restart.
     """
+    from app.services.proposal_job_runner import get_proposal_job, start_proposal_job
+
     rfp = get_rfp(rfp_id)
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
-    async with _analyze_lock:
-        existing = _analyze_jobs.get(rfp_id)
-        if existing and existing.get("status") == "running":
-            return {
-                "ok": True,
-                "status": "running",
-                "rfpId": rfp_id,
-                "message": "Go/No-Go analysis already running",
-            }
-        _analyze_jobs[rfp_id] = {
+    lock_key = _go_no_go_lock_key(rfp_id)
+    existing = await get_proposal_job(rfp_id, lock_key=lock_key)
+    if existing and existing.status == "running":
+        return {
+            "ok": True,
             "status": "running",
-            "error": None,
-            "startedAt": datetime.now(timezone.utc).isoformat(),
+            "rfpId": rfp_id,
+            "message": "Go/No-Go analysis already running",
         }
 
     # Drop stale Stage 1 results so re-runs never show the prior GO panel.
@@ -366,20 +372,28 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
             updated = save_go_no_go_analysis(rfp_id, analysis)
             if not updated:
                 raise GoNoGoError("RFP not found after save", status_code=404)
-            _analyze_jobs[rfp_id] = {
-                "status": "completed",
-                "error": None,
-                "finishedAt": datetime.now(timezone.utc).isoformat(),
-            }
             logger.info("Go/No-Go background job completed for %s", rfp_id)
         except GoNoGoError as exc:
             logger.error("Go/No-Go failed for %s: %s", rfp_id, exc)
             _mark_analyze_failed(rfp_id, str(exc))
+            raise
         except Exception as exc:
             logger.exception("Go/No-Go unexpected failure for %s", rfp_id)
             _mark_analyze_failed(rfp_id, f"Go/No-Go analysis failed: {exc}")
+            raise
 
-    asyncio.create_task(_run())
+    def _celery_dispatch() -> object:
+        from app.celery_app import run_go_no_go_task
+
+        return run_go_no_go_task.delay(rfp_id)
+
+    await start_proposal_job(
+        rfp_id,
+        "go-no-go",
+        _run,
+        celery_dispatch=_celery_dispatch,
+        lock_key=lock_key,
+    )
     return {
         "ok": True,
         "status": "running",
@@ -389,23 +403,25 @@ async def analyze_go_no_go(rfp_id: str) -> dict[str, object]:
 
 
 @router.get("/{rfp_id}/analyze/status")
-def analyze_go_no_go_status(rfp_id: str) -> dict[str, object]:
+async def analyze_go_no_go_status(rfp_id: str) -> dict[str, object]:
+    from app.services.proposal_job_runner import get_proposal_job
+
     rfp = get_rfp(rfp_id)
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
-    job = _analyze_jobs.get(rfp_id)
-    if job and job.get("status") == "running":
+    job = await get_proposal_job(rfp_id, lock_key=_go_no_go_lock_key(rfp_id))
+    if job and job.status == "running":
         return {
             "status": "running",
             "rfpId": rfp_id,
-            "startedAt": job.get("startedAt"),
+            "startedAt": job.started_at,
         }
-    if job and job.get("status") == "failed":
+    if job and job.status == "failed":
         return {
             "status": "failed",
             "rfpId": rfp_id,
-            "error": job.get("error") or "Go/No-Go analysis failed",
+            "error": job.error or "Go/No-Go analysis failed",
         }
     if rfp.go_no_go_analysis:
         return {
@@ -413,7 +429,7 @@ def analyze_go_no_go_status(rfp_id: str) -> dict[str, object]:
             "rfpId": rfp_id,
             "recommendation": rfp.go_no_go,
         }
-    if job and job.get("status") == "completed":
+    if job and job.status == "completed":
         return {"status": "completed", "rfpId": rfp_id}
 
     note = (rfp.last_activity_note or "").lower()
@@ -430,11 +446,9 @@ def analyze_go_no_go_status(rfp_id: str) -> dict[str, object]:
 
 
 def _mark_analyze_failed(rfp_id: str, error: str) -> None:
-    _analyze_jobs[rfp_id] = {
-        "status": "failed",
-        "error": error,
-        "finishedAt": datetime.now(timezone.utc).isoformat(),
-    }
+    """Persist a failure note so GET /analyze/status has a durable fallback
+    signal even if job-tracker state itself is unavailable (matches the
+    existing rfp.last_activity_note fallback path above)."""
     try:
         if sb.use_supabase_db():
             now = datetime.now(timezone.utc).isoformat()

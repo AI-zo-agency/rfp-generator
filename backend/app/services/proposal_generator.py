@@ -3592,6 +3592,54 @@ async def generate_full_proposal(
 
         draft, research, edit_report = await run_phase3_6_self_edit(rfp_id)
 
+        # Senior-editor rewrites have no truncation safety net of their own,
+        # unlike the Phase 3 draft pass above (repair_truncated_manuscript_
+        # sections, called inside _run_phase3_drafting_inner) — a rewrite cut
+        # off mid-sentence used to ship as-is. Reuses the same KB-grounded
+        # repair the Scan-RFP button already relies on: detects with the T1
+        # scanner, only ever appends a completion after the section's
+        # existing verbatim prefix (never a rewrite — see
+        # proposal_fulfill_truncation_repair.py), and covers bios/case
+        # studies too, which repair_truncated_manuscript_sections above
+        # deliberately skips.
+        try:
+            from app.services.proposal_fulfill_truncation_repair import (
+                repair_truncated_sections_from_kb,
+            )
+
+            rfp_for_repair = get_rfp(rfp_id) or rfp
+            repair_rfp_text = (
+                load_rfp_for_proposal(rfp_id)[2] if rfp_for_repair else ""
+            )
+            (
+                draft,
+                trunc_repaired_ids,
+                trunc_still_truncated_ids,
+                trunc_repair_logs,
+            ) = await repair_truncated_sections_from_kb(
+                draft=draft, rfp=rfp_for_repair, rfp_context=repair_rfp_text
+            )
+            if trunc_repaired_ids:
+                await asave_proposal_draft(draft)
+                for line in trunc_repair_logs[:12]:
+                    logger.info(
+                        "Full proposal post-self-edit truncation repair: %s — %s",
+                        rfp_id,
+                        line,
+                    )
+                step_trace(
+                    "post_self_edit_truncation_repair",
+                    rfp_id=rfp_id,
+                    repaired=len(trunc_repaired_ids),
+                    still_truncated=len(trunc_still_truncated_ids),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Full proposal post-self-edit truncation repair skipped for %s: %s",
+                rfp_id,
+                exc,
+            )
+
         # Final zero-fabrication pass — canonical budget, reference phones, flags.
         try:
             from app.services.proposal_zero_fabrication import (
@@ -3670,6 +3718,34 @@ async def generate_full_proposal(
         if rfp:
             extra_issues = self_edit_exhausted_issues(edit_report.section_logs, draft)
             from app.core.config import settings as app_settings
+
+            # Fill any RFP-required stub left as [MANUAL FILL: ...] by the earlier
+            # structure-coverage pass. Complete & Clean Draft already does this
+            # (run_phase4_presubmit_review) — Generate must too, or a stub ships
+            # as a permanently empty "ACTION NEEDED" card with no real content.
+            try:
+                from app.services.proposal_draft_structure_stubs import (
+                    draft_rfp_structure_stubs,
+                    section_needs_presubmit_fill,
+                )
+
+                unfilled = [s for s in draft.sections if section_needs_presubmit_fill(s)]
+                if unfilled:
+                    draft, stub_logs = await draft_rfp_structure_stubs(
+                        draft, rfp_id=rfp_id, rfp=rfp, max_sections=8
+                    )
+                    if stub_logs:
+                        await asave_proposal_draft(draft)
+                        for line in stub_logs[:12]:
+                            logger.info("Full proposal stub fill %s: %s", rfp_id, line)
+                        step_trace(
+                            "structure_stub_fill",
+                            rfp_id=rfp_id,
+                            log_count=len(stub_logs),
+                            samples=stub_logs[:8],
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Full proposal stub fill skipped for %s: %s", rfp_id, exc)
 
             run_adversarial = (
                 app_settings.adversarial_repair_loop

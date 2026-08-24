@@ -85,6 +85,9 @@ async def _llm_complete_truncated_section(
         "- Do NOT invent clients, case studies, metrics, or reference contacts.\n"
         "- Do NOT add new Case Study blocks.\n"
         "- Keep existing facts; append the minimum text needed for a complete section.\n"
+        "- These rules govern how you write; they are never content. Never write "
+        "sentences about verification requirements or your own constraints — apply "
+        "the rule silently.\n"
         'Return JSON: {"content": "full markdown section"}'
     )
     user = (
@@ -330,7 +333,11 @@ async def _complete_one_truncated_section_from_kb(
         "date, certification, or client.\n"
         "5. Do not add new paragraphs, sections, bullet points, or case studies beyond "
         "what is needed to close the existing cut-off.\n"
-        '6. Return JSON only: {"content": "full corrected section markdown"}'
+        "6. These rules govern how you write; they are never content. Never write "
+        "sentences about verification requirements or your own constraints — apply "
+        "the rule silently. The [VERIFY: ...] tag is the only trace of a gap; never "
+        "explain or preface it.\n"
+        '7. Return JSON only: {"content": "full corrected section markdown"}'
     )
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\nSection: {section.title}\n\n"

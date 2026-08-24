@@ -673,7 +673,12 @@ async def scrub_optional_verify_tags(
         "7. Preserve useful tables/structure; only change what placeholders force. Do not "
         "expand the section with AI filler or restated company boilerplate.\n"
         "8. zö voice: concrete, human, no corporate AI-slop.\n"
-        "9. Return JSON only."
+        "9. These rules govern how you write; they are never content. Never write sentences "
+        "about submission requirements, pass/fail status, what cannot be submitted, or what "
+        "must be verified/confirmed with anyone — apply the rule silently instead of "
+        "narrating it. The [VERIFY: ...] / [MANUAL FILL: Owner — ...] tag is the only trace "
+        "of a gap; never explain, preface, or restate the rule that produced it.\n"
+        "10. Return JSON only."
     )
     user = (
         f"Section title: {section_title}\n\n"

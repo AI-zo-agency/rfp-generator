@@ -82,15 +82,23 @@ def strip_handoff_tags_for_scan(content: str) -> str:
 
 
 def strip_designer_notes(content: str) -> tuple[str, int]:
-    """Remove [DESIGNER NOTE: …] except bio-PDF insert handoffs (Option B stubs)."""
+    """Remove [DESIGNER NOTE: …] except bio-PDF and case-study insert handoffs
+    (Option B stubs)."""
+    from app.services.proposal_case_study_stub import is_case_study_designer_note
+
     body = content or ""
     removed = 0
 
     def _repl(match: re.Match[str]) -> str:
         nonlocal removed
         tag = match.group(0)
-        # Keep intentional bio PDF insert notes — scrub must not undo Section 2 stubs.
+        # Keep intentional bio PDF / case-study asset insert notes — scrub must
+        # not undo Section 2/3 stubs (this used to only recognize the bio
+        # wording, silently stripping the case-study asset-linking note added
+        # when case studies moved to the same stub-template convention).
         if re.search(r"Insert approved bio PDF|04_Bio_", tag, re.IGNORECASE):
+            return tag
+        if is_case_study_designer_note(tag):
             return tag
         removed += 1
         return ""

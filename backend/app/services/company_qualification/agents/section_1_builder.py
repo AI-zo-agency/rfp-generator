@@ -197,6 +197,26 @@ async def _write_one_subsection(
     if sec.id != sec_id:
         sec = sec.model_copy(update={"id": sec_id, "title": title})
     content = sec.content or ""
+    # A response cut off mid-generation can still parse as valid JSON — the
+    # provider truncates the raw text, but the generic truncated-JSON repair
+    # (llm.py) closes the dangling string/braces cleanly, so no exception
+    # reaches the except-block above. The result is silently near-empty (e.g.
+    # just the "## Business Information" heading, nothing after it) instead
+    # of the visible VERIFY stub the actual-exception path already gives.
+    # Same substantiveness floor as that stub — anything shorter is content
+    # that couldn't possibly satisfy this subsection's own spec.
+    if _word_count(content) < 10:
+        logger.warning(
+            "Section 1 Builder %s returned near-empty content (%d word(s)) "
+            "despite a successful parse — likely truncated mid-generation; "
+            "VERIFY stub",
+            sec_id,
+            _word_count(content),
+        )
+        content = (
+            f"[VERIFY: complete {title} from CompanyTruth / Master Team Roster — "
+            f"generation returned incomplete content]"
+        )
     if sec_id in {"section-1-who-we-are", "section-1-business-info"}:
         content = enforce_agency_tenure(content)
     return sec.model_copy(update={"content": content, "wordCount": _word_count(content)}), provider
