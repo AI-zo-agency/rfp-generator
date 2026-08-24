@@ -663,14 +663,16 @@ async def retrieve_for_question(
     full_ranked = rank_hits_for_question(merged, question)
     ranked = full_ranked[: max(limit, 6)]
     # Chunks keep their positions from rank_hits_for_question — never reordered
-    # above chunks. If the rank cut above dropped every memory hit, append back
-    # up to MEMORY_FLOOR of the highest-ranked ones that were cut, after the
-    # chunks, so a fact-only answer (no chunk ever mentions it) still has a
-    # chance to reach the prompt.
-    if not any(supermemory.is_memory_hit(hit) for hit in ranked):
+    # above chunks. Then TOP UP to MEMORY_FLOOR memory hits from the ones the cut
+    # dropped, appended after the chunks. A plain "did any memory survive?" check
+    # is not enough: one memory from an adjacent document (e.g. a pricing guide)
+    # would satisfy it while the memory actually holding the answer (the rate
+    # card) stays cut. Fact-level answers usually need several memories, not one.
+    kept_memories = sum(1 for hit in ranked if supermemory.is_memory_hit(hit))
+    if kept_memories < MEMORY_FLOOR:
         cut_off = full_ranked[len(ranked) :]
         dropped_memories = [hit for hit in cut_off if supermemory.is_memory_hit(hit)]
-        ranked = ranked + dropped_memories[:MEMORY_FLOOR]
+        ranked = ranked + dropped_memories[: MEMORY_FLOOR - kept_memories]
 
     parts: list[str] = []
     sources: list[str] = []

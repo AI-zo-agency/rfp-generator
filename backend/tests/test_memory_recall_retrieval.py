@@ -100,3 +100,41 @@ def test_retrieve_for_question_keeps_a_memory_behind_many_chunks(monkeypatch) ->
     )
 
     assert "$275.00" in context, "memory fact was cut before reaching the context"
+
+
+def test_memory_floor_tops_up_when_some_memories_survived(monkeypatch) -> None:
+    """One surviving memory must not block the rest from being topped up.
+
+    Regression: for a rate question, a memory from an adjacent pricing guide
+    survived the rank cut and satisfied a naive "did any memory survive?" check,
+    while the memory actually holding the rate card stayed cut. Ranking is
+    stubbed to identity here so the cut boundary is deterministic: 7 chunks plus
+    the adjacent memory fill the 8-hit cut, leaving the rate card just outside.
+    """
+    from app.services import supermemory as sm
+
+    chunks = [_chunk(f"proposal-{i}", f"Proposal {i} narrative text. " * 20) for i in range(7)]
+    adjacent = _memory("pricing-guide", "zo agency pricing tiers for bundled engagements")
+    rate_card = _memory(
+        "rate-card", "The billable rate for an Account Manager at zo agency is $275.00"
+    )
+    ordered = chunks + [adjacent, rate_card]
+
+    async def fake_chunk_first(query, *, limit, filters, threshold):
+        return list(ordered)
+
+    async def fake_resolve(hit):
+        return ""
+
+    monkeypatch.setattr(kb_rag_retrieve, "_search_hits_chunk_first", fake_chunk_first)
+    monkeypatch.setattr(kb_rag_retrieve, "rank_hits_for_question", lambda hits, q: list(hits))
+    monkeypatch.setattr(sm, "resolve_hit_document_content", fake_resolve)
+
+    context, _sources, _queries = asyncio.run(
+        kb_rag_retrieve.retrieve_for_question(
+            "What is the billable rate for an Account Manager?", limit=8
+        )
+    )
+
+    assert "pricing tiers" in context, "sanity: the adjacent memory should survive the cut"
+    assert "$275.00" in context, "rate-card memory was cut because one other memory survived"
