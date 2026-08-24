@@ -6,7 +6,7 @@ import re
 import time
 from email.utils import parsedate_to_datetime
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -41,6 +41,27 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 LlmTier = Literal["heavy", "light"]
+
+
+class CostSink(Protocol):
+    """Records one successful call for a domain that keeps its own cost ledger.
+
+    Passing one to `chat_text` diverts accounting away from `llm_call_log` and
+    away from the proposal run-budget guard. It exists because `llm_call_log`
+    is proposal-shaped — every reader on it assumes a row belongs to an RFP —
+    and the financial workspace has no RFP to name.
+    """
+
+    def __call__(
+        self,
+        *,
+        model: str,
+        tier: LlmTier,
+        provider: str,
+        usage: dict[str, Any],
+        latency_ms: int,
+    ) -> None: ...
+
 
 # content, usage dict (prompt_tokens / completion_tokens / estimated)
 _LlmPostResult = tuple[str, dict[str, Any]]
@@ -926,6 +947,7 @@ async def chat_text(
     rfp_id: str | None = None,
     run_id: str | None = None,
     cache_prefix: str | Sequence[str] | None = None,
+    cost_sink: CostSink | None = None,
 ) -> tuple[str, str]:
     """Plain-text chat completion (no JSON response format)."""
     global _FIREWORKS_SUSPENDED
@@ -939,7 +961,36 @@ async def chat_text(
     )
     if node_name is None:
         node_name = _resolved_node or None
-    _enforce_run_cost_cap(node_name, run_id)
+    # A caller that accounts for itself is not part of the proposal run budget
+    # and must not inherit one. _resolve_run_cost_cap_usd reads the pipeline
+    # phase off a contextvar, so without this guard a financial call made while
+    # a proposal is in flight could pick up that proposal's cap.
+    if cost_sink is None:
+        _enforce_run_cost_cap(node_name, run_id)
+
+    def _record(
+        *, model: str, provider: str, usage: dict[str, Any], latency_ms: int
+    ) -> None:
+        """Route one call's usage to whoever owns this domain's cost ledger."""
+        if cost_sink is not None:
+            cost_sink(
+                model=model,
+                tier=tier,
+                provider=provider,
+                usage=usage,
+                latency_ms=latency_ms,
+            )
+            return
+        _record_successful_call(
+            model=model,
+            tier=tier,
+            provider=provider,
+            usage=usage,
+            latency_ms=latency_ms,
+            node_name=node_name,
+            rfp_id=rfp_id,
+            run_id=run_id,
+        )
 
     gemini_key = settings.gemini_api_key.strip()
     if gemini_key and not _is_placeholder_key(gemini_key) and not skip_gemini:
@@ -952,15 +1003,11 @@ async def chat_text(
                 temperature=temperature,
                 json_mode=False,
             )
-            _record_successful_call(
+            _record(
                 model=settings.gemini_model,
-                tier=tier,
                 provider="gemini",
                 usage=usage,
                 latency_ms=int((time.perf_counter() - started) * 1000),
-                node_name=node_name,
-                rfp_id=rfp_id,
-                run_id=run_id,
             )
             return raw, "gemini"
         except LlmError as exc:
@@ -985,15 +1032,11 @@ async def chat_text(
                 temperature=temperature,
                 json_mode=False,
             )
-            _record_successful_call(
+            _record(
                 model=openrouter_model,
-                tier=tier,
                 provider="openrouter",
                 usage=usage,
                 latency_ms=int((time.perf_counter() - started) * 1000),
-                node_name=node_name,
-                rfp_id=rfp_id,
-                run_id=run_id,
             )
             return raw, "openrouter"
         except LlmError as exc:
@@ -1017,15 +1060,11 @@ async def chat_text(
                 temperature=temperature,
                 json_mode=False,
             )
-            _record_successful_call(
+            _record(
                 model=settings.fireworks_model,
-                tier=tier,
                 provider="fireworks",
                 usage=usage,
                 latency_ms=int((time.perf_counter() - started) * 1000),
-                node_name=node_name,
-                rfp_id=rfp_id,
-                run_id=run_id,
             )
             return raw, "fireworks"
         except LlmError as exc:
@@ -1058,15 +1097,11 @@ async def chat_text(
                     temperature=temperature,
                     json_mode=False,
                 )
-                _record_successful_call(
+                _record(
                     model=openrouter_model,
-                    tier=tier,
                     provider="openrouter",
                     usage=usage,
                     latency_ms=int((time.perf_counter() - started) * 1000),
-                    node_name=node_name,
-                    rfp_id=rfp_id,
-                    run_id=run_id,
                 )
                 return raw, "openrouter"
             except LlmError as exc:
@@ -1083,15 +1118,11 @@ async def chat_text(
                     temperature=temperature,
                     json_mode=False,
                 )
-                _record_successful_call(
+                _record(
                     model=settings.gemini_model,
-                    tier=tier,
                     provider="gemini",
                     usage=usage,
                     latency_ms=int((time.perf_counter() - started) * 1000),
-                    node_name=node_name,
-                    rfp_id=rfp_id,
-                    run_id=run_id,
                 )
                 return raw, "gemini"
             except LlmError as exc:

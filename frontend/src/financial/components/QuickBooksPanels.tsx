@@ -18,15 +18,17 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Sparkles } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AnimatedNumber } from "./AnimatedNumber";
-import { QuickBooksInsights } from "./QuickBooksInsights";
+import { AiIntelligenceDrawer } from "./AiIntelligenceDrawer";
 import { AgingBar, DataTable, Empty, Figure, Note, Panel, compact, usd } from "./qb-ui";
+import { useQbChat } from "../lib/use-qb-chat";
+import { useQbInsights } from "../lib/use-qb-insights";
 import type { QuickBooksOverview } from "../types/quickbooks";
 import "./QuickBooksLedger.css";
 
@@ -374,7 +376,10 @@ export function QuickBooksPanels() {
   }, [load, year]);
 
   const net = (data?.ar?.total ?? 0) - (data?.ap?.total ?? 0);
-  const signals = data?.signals ?? [];
+  const signals = useMemo(() => data?.signals ?? [], [data]);
+  const insights = useQbInsights(signals);
+  const chat = useQbChat();
+  const [aiOpen, setAiOpen] = useState(false);
   const clientRows = useMemo(() => (data ? buildClientRows(data) : []), [data]);
   const trend = data?.monthly_trend;
   const rc = data?.revenue_by_class;
@@ -407,6 +412,19 @@ export function QuickBooksPanels() {
               <span className="qb-sync-meta">{data.activity.total} ledger changes</span>
             ) : null}
           </p>
+          <button
+            type="button"
+            className="qb-ai-trigger"
+            onClick={() => setAiOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={aiOpen}
+          >
+            <Sparkles size={14} strokeWidth={2.25} aria-hidden />
+            AI Intelligence
+            {insights.highImpact ? (
+              <span className="qb-ai-trigger-count">{insights.highImpact}</span>
+            ) : null}
+          </button>
           <ToggleGroup
             type="single"
             value={String(year)}
@@ -446,7 +464,6 @@ export function QuickBooksPanels() {
           {/* ── position ── */}
           <TabsContent value="today" className="qb-view">
             <MoneyLine data={data} net={net} />
-            <QuickBooksInsights signals={signals} onGo={setView} />
             {data.billing_vs_cash ? (
               <CashChart bvc={data.billing_vs_cash} />
             ) : (
@@ -824,6 +841,14 @@ export function QuickBooksPanels() {
             </>
           ) : null}
         </Tabs>
+
+        <AiIntelligenceDrawer
+          open={aiOpen}
+          onClose={() => setAiOpen(false)}
+          insights={insights}
+          chat={chat}
+          onGo={setView}
+        />
       </div>
     </TooltipProvider>
   );

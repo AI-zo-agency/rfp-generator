@@ -181,6 +181,12 @@ class Settings(BaseSettings):
     generate_proposal_max_cost_usd: float = 3.0
     complete_scan_max_cost_usd: float = 3.0
 
+    # Financial workspace chat budgets (USD). Enforced in qb_chat against
+    # financial_llm_calls, not against the proposal run budget above — the two
+    # domains share no ledger. 0 disables.
+    financial_chat_max_cost_usd: float = 0.50
+    financial_chat_turn_max_cost_usd: float = 0.15
+
     # LangSmith — process env is synced at startup (see langsmith_tracing.py).
     langsmith_tracing: bool = False
     langsmith_endpoint: str = "https://api.smith.langchain.com"

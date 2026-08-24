@@ -3,6 +3,7 @@ from hmac import compare_digest
 import json
 import re
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -13,6 +14,7 @@ from app.financial.ai_insights_repository import get_latest_insight
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows
 from app.financial.qb_position import position
 from app.financial.qb_trend import margin_rows
+from app.financial import financial_llm_cost, qb_chat
 from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
 from app.financial.qb_insights import generate_and_store
 from app.financial.qb_repository import get_panel_cache, get_sync_state
@@ -1113,6 +1115,53 @@ def quickbooks_ai_insights_regenerate():
     result = _insight_response(overview, row, prior)
     result["generated"] = status
     return result
+
+
+
+class QbChatRequest(BaseModel):
+    message: str
+    # Absent on the first question of a conversation; the server mints one.
+    thread_id: Optional[str] = None
+    # The note card the reader pinned, if any.
+    focus_id: Optional[str] = None
+    # Phase 1 only: the drawer holds the thread in React state. Once threads are
+    # persisted this is ignored in favor of the stored history.
+    messages: List[Dict[str, str]] = []
+
+
+@router.post("/quickbooks/ai-insights/chat")
+async def quickbooks_ai_insights_chat(payload: QbChatRequest):
+    """Answer one question against the same evidence the brief was written from.
+
+    Current year only, for the same reason the brief is: chat that could be
+    asked about 2024 would be answering from evidence no card on screen shows.
+    """
+    year = datetime.now().year
+    overview = _load_overview(year)
+    prior = _safe_prior_payload(settings.quickbooks_realm_id, year)
+    thread_id = (payload.thread_id or "").strip() or uuid.uuid4().hex
+
+    result = await qb_chat.answer(
+        thread_id=thread_id,
+        question=payload.message,
+        overview=overview,
+        prior=prior,
+        history=payload.messages,
+        focus_id=payload.focus_id,
+    )
+    logger.info(
+        "operation=quickbooks_ai_insights_chat thread=%s guarded=%s capped=%s",
+        thread_id,
+        result["guarded"],
+        result["capped"],
+    )
+    return result
+
+
+@router.get("/quickbooks/ai-insights/chat/cost")
+def quickbooks_ai_insights_chat_cost(thread_id: str = Query(...)):
+    """This thread's LLM spend. Reads financial_llm_calls, never llm_call_log."""
+    return financial_llm_cost.thread_breakdown(thread_id)
 
 
 @router.get("/audit-queue")
