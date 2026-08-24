@@ -77,16 +77,26 @@ async def _enqueue_pipeline_phase(
     work: Callable[[], Awaitable[Any]],
     *,
     timeout_sec: float | None = None,
+    job_kwargs: dict[str, Any] | None = None,
 ) -> JSONResponse:
-    """Start a long phase in-process and return immediately (202).
+    """Start a long phase and return immediately (202).
 
     Clients poll GET /proposal (checkpoint + draft) until the phase completes.
     Does not cancel on HTTP disconnect — Stop is explicit via POST /stop.
 
-    timeout_sec is a last-resort safety net: if the phase is still running
-    past this ceiling, it is cancelled and recorded as a failed/resumable
-    checkpoint instead of running forever and holding the per-rfp job lock
-    (the 409 other-operations-blocked behavior) indefinitely.
+    In production (settings.celery_enabled — REDIS_URL set), the phase runs
+    on a separate Celery worker, dispatched via app.celery_app.
+    run_pipeline_phase_task with `job_kwargs` as its JSON-serializable
+    arguments (a plain Python closure like `work` can't cross the process
+    boundary to a worker). Locally without Redis, `work` runs in-process via
+    asyncio.create_task exactly as before Celery existed.
+
+    timeout_sec is a last-resort safety net for the in-process path only —
+    Celery's own task_time_limit (app/celery_app.py) covers the worker path.
+    If the phase is still running past this ceiling, it is cancelled and
+    recorded as a failed/resumable checkpoint instead of running forever and
+    holding the per-rfp job lock (the 409 other-operations-blocked behavior)
+    indefinitely.
     """
     existing = await get_proposal_job(rfp_id)
     if existing and existing.status == "running":
@@ -151,7 +161,14 @@ async def _enqueue_pipeline_phase(
             )
             raise
 
-    record = await start_proposal_job(rfp_id, phase, _run)
+    def _celery_dispatch() -> Any:
+        from app.celery_app import run_pipeline_phase_task
+
+        return run_pipeline_phase_task.delay(rfp_id, phase, job_kwargs or {})
+
+    record = await start_proposal_job(
+        rfp_id, phase, _run, celery_dispatch=_celery_dispatch
+    )
     return JSONResponse(
         status_code=202,
         content={
@@ -738,7 +755,12 @@ async def generate_sections_1_3_endpoint(
     async def work() -> None:
         await generate_sections_1_3(rfp_id, force_regenerate=force_regenerate)
 
-    return await _enqueue_pipeline_phase(rfp_id, "sections-1-3", work)
+    return await _enqueue_pipeline_phase(
+        rfp_id,
+        "sections-1-3",
+        work,
+        job_kwargs={"force_regenerate": force_regenerate},
+    )
 
 
 @router.post(
@@ -1160,8 +1182,13 @@ async def fulfill_rfp_gaps_endpoint(
     # Safety net so "Complete & clean draft" can never freeze the app forever:
     # generously above the ~19min bounded worst case of the final steps, well
     # below the frontend's 90-minute poll give-up (proposal-api.ts FULFILL_POLL_MAX_MS).
+    # (Celery path: covered by task_time_limit in app/celery_app.py instead.)
     return await _enqueue_pipeline_phase(
-        rfp_id, "fulfill-scan", work, timeout_sec=60 * 60
+        rfp_id,
+        "fulfill-scan",
+        work,
+        timeout_sec=60 * 60,
+        job_kwargs={"use_llm": use_llm, "mode": mode},
     )
 
 
