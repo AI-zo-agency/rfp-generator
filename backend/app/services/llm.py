@@ -675,6 +675,56 @@ def _record_successful_call(
         logger.warning("LLM cost record failed (non-fatal): %s", str(exc)[:200])
 
 
+#: Utility calls that emit queries or JSON structure, never prose about the
+#: agency — corrections have nothing to correct there, so they are skipped.
+CORRECTIONS_EXEMPT_NODES: frozenset[str] = frozenset({
+    "go_no_go_opportunity_classifier",
+    "go_no_go_evidence_query_plan",
+    "chat_manuscript_intent",
+    "manual_fill_triage",
+    "query_planner",
+    "ledger_add_query_planner",
+    "retrieval_query_planner_batch",
+})
+
+_CORRECTIONS_MARKER = "## STANDING CORRECTIONS"
+
+
+async def apply_standing_corrections(
+    messages: list[dict[str, str]],
+    *,
+    node_name: str | None,
+    include_corrections: bool,
+) -> list[dict[str, str]]:
+    """Append the standing-corrections block to `messages`, without mutating the input.
+
+    This is the single choke point for corrections: every model call in the
+    backend passes through `chat_json`/`chat_text`, which call this first, so
+    no knowledge-base path can answer from a superseded fact.
+    """
+    if not include_corrections:
+        return messages
+    if node_name in CORRECTIONS_EXEMPT_NODES:
+        return messages
+    if any(_CORRECTIONS_MARKER in (m.get("content") or "") for m in messages):
+        return messages
+
+    import app.services.kb_corrections as kb_corrections
+
+    block = await kb_corrections.corrections_prompt_block()
+    if not block:
+        return messages
+
+    new_messages = [dict(m) for m in messages]
+    for m in new_messages:
+        if m.get("role") == "system":
+            m["content"] = f"{m.get('content') or ''}\n\n{block}"
+            return new_messages
+
+    new_messages.insert(0, {"role": "system", "content": block})
+    return new_messages
+
+
 @_langsmith_traceable(name="llm.chat_json", run_type="chain")
 async def chat_json(
     messages: list[dict[str, str]],
@@ -686,7 +736,11 @@ async def chat_json(
     rfp_id: str | None = None,
     run_id: str | None = None,
     cache_prefix: str | Sequence[str] | None = None,
+    include_corrections: bool = True,
 ) -> tuple[dict[str, Any], str]:
+    messages = await apply_standing_corrections(
+        messages, node_name=node_name, include_corrections=include_corrections
+    )
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
     openrouter_model = resolve_llm_model(tier)
@@ -897,6 +951,7 @@ async def chat_json_soft(
     rfp_id: str | None = None,
     run_id: str | None = None,
     cache_prefix: str | Sequence[str] | None = None,
+    include_corrections: bool = True,
 ) -> tuple[dict[str, Any], str]:
     """One LLM JSON call. On failure return ({}, \"failed\") — never retry, never raise."""
     try:
@@ -909,6 +964,7 @@ async def chat_json_soft(
             rfp_id=rfp_id,
             run_id=run_id,
             cache_prefix=cache_prefix,
+            include_corrections=include_corrections,
         )
     except LlmError as exc:
         logger.warning("chat_json_soft: %s", str(exc)[:220])
@@ -926,8 +982,12 @@ async def chat_text(
     rfp_id: str | None = None,
     run_id: str | None = None,
     cache_prefix: str | Sequence[str] | None = None,
+    include_corrections: bool = True,
 ) -> tuple[str, str]:
     """Plain-text chat completion (no JSON response format)."""
+    messages = await apply_standing_corrections(
+        messages, node_name=node_name, include_corrections=include_corrections
+    )
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
     openrouter_model = resolve_llm_model(tier)
