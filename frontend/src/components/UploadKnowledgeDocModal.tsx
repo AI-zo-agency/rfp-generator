@@ -216,7 +216,7 @@ export function UploadKnowledgeDocModal({
             )}
 
             {notice && (
-              <p className="rounded-xl border border-amber-200 bg-amber-50/40 px-4 py-3 text-sm text-amber-800">
+              <p className="rounded-xl border border-zo-warning/30 bg-zo-warning/10 px-4 py-3 text-sm text-zo-warning">
                 {notice}
               </p>
             )}
