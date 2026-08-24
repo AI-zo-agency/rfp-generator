@@ -1441,6 +1441,7 @@ async def export_proposal_google_doc(rfp_id: str) -> ProposalGoogleDocExportResp
         document_url=result["documentUrl"],
         title=result["title"],
         section_count=result["sectionCount"],
+        instruction_leaks=result.get("instructionLeaks") or [],
     )
 
 

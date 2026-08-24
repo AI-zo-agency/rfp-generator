@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import re
 from typing import Any
 
@@ -13,7 +14,9 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 from app.models.proposal import ProposalDraft
-from app.services.proposal_manuscript import build_manuscript_structured
+from app.services.proposal_manuscript import build_manuscript_structured, find_instruction_leaks
+
+logger = logging.getLogger(__name__)
 
 _ORANGE = RGBColor(0xC2, 0x41, 0x0C)
 _BODY = RGBColor(0x4B, 0x55, 0x63)
@@ -284,6 +287,21 @@ def _add_table(doc: Document, headers: list[str], rows: list[list[str]]) -> None
 
 
 def build_proposal_docx_bytes(*, doc_title: str, draft: ProposalDraft) -> bytes:
+    # Export tripwire: scan the PRE-scrub section content for narrated-instruction
+    # prose that convert_instruction_blocks / convert_bare_confirmation_lines
+    # didn't catch. Pattern matching cannot anticipate every phrasing, so this
+    # only warns loudly (server log) — it never blocks the export. build_manuscript_
+    # structured (below) still scrubs internal handoff tags out of the DOCX either way.
+    for section in draft.sections:
+        leaks = find_instruction_leaks(section.content or "")
+        for excerpt in leaks:
+            logger.warning(
+                "Instruction leak in proposal %s section %r (docx export): %s",
+                draft.rfp_id,
+                section.title or section.id,
+                excerpt[:300],
+            )
+
     sections = build_manuscript_structured(draft.sections)
     if not sections:
         raise ProposalDocxExportError(

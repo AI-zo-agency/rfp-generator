@@ -90,3 +90,29 @@ def test_ordinary_prose_is_left_alone() -> None:
 def test_already_tagged_block_is_not_double_wrapped() -> None:
     text = "> ACTION REQUIRED: [MANUAL FILL: Sonja — confirm the reference list]\n"
     assert convert_instruction_blocks(text) == text
+
+
+def test_find_instruction_leaks_reports_untagged_instruction_prose() -> None:
+    from app.services.proposal_manuscript import find_instruction_leaks
+
+    leaks = find_instruction_leaks(
+        "The proposal cannot be submitted until the references are populated.\n"
+    )
+    assert leaks and "cannot be submitted" in leaks[0]
+
+
+def test_find_instruction_leaks_ignores_tagged_content() -> None:
+    from app.services.proposal_manuscript import find_instruction_leaks
+
+    assert (
+        find_instruction_leaks(
+            "[MANUAL FILL: Sonja — the proposal cannot be submitted until refs are populated]\n"
+        )
+        == []
+    )
+
+
+def test_find_instruction_leaks_clean_text() -> None:
+    from app.services.proposal_manuscript import find_instruction_leaks
+
+    assert find_instruction_leaks("We delivered the campaign on schedule.\n") == []

@@ -630,6 +630,49 @@ def strip_internal_handoff_tags(text: str) -> str:
     return cleaned
 
 
+def find_instruction_leaks(text: str) -> list[str]:
+    """Export tripwire: report blocks of narrated-instruction prose that would
+    otherwise ship untagged into a client-facing export.
+
+    `convert_instruction_blocks` (above) is pattern matching and cannot
+    anticipate every phrasing the model might invent. This is the safety net:
+    it reuses the exact same marker list, so it never disagrees with the
+    converter about what counts as a leak, but it does NOT rewrite or block
+    anything. It only reports. Per product decision, an instruction leak must
+    WARN LOUDLY at export time, never hard-fail — a false positive here must
+    never strand a submission against a deadline.
+
+    Text already inside an internal handoff tag ([MANUAL FILL …],
+    [DESIGNER NOTE …], [VERIFY …], [FLAG …]) is ignored: those tags are
+    stripped at export by strip_internal_handoff_tags, so a marker phrase
+    quoted inside one (e.g. a MANUAL FILL body that repeats "cannot be
+    submitted") is not a leak — it never reaches the client.
+
+    Returns the offending excerpts (the matched block, collapsed to a single
+    line), empty when the text is clean.
+    """
+    if not text:
+        return []
+
+    # Blank out already-tagged spans first so a marker phrase quoted inside a
+    # legitimate tag body isn't reported as a leak.
+    masked = INTERNAL_HANDOFF_TAG_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+    leaks: list[str] = []
+    for part in _INSTRUCTION_BLOCK_SPLIT_RE.split(masked):
+        if not part.strip():
+            continue
+        lowered = part.lower()
+        if not _instruction_block_matches(lowered):
+            continue
+        stripped_lines = [_strip_instruction_line_prefix(ln) for ln in part.split("\n")]
+        collapsed = " ".join(ln for ln in stripped_lines if ln)
+        collapsed = re.sub(r"[ \t]{2,}", " ", collapsed).strip()
+        if collapsed:
+            leaks.append(collapsed)
+    return leaks
+
+
 def scrub_text_for_client_export(text: str) -> str:
     """Full export-time scrub: everything scrub_client_facing_section_artifacts
     strips from saved draft content, plus the internal handoff tags that are
