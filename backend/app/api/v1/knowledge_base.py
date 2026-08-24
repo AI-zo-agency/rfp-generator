@@ -17,6 +17,7 @@ from app.services.knowledge_base_document_types import (
     is_valid_category,
 )
 from app.services import google_drive, supermemory
+from app.services import kb_corrections
 from app.services import knowledge_base_service
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,88 @@ def _require_supermemory() -> None:
             status_code=503,
             detail="SUPERMEMORY_API_KEY is required. Documents are stored in Supermemory only.",
         )
+
+
+class CorrectionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    title: str = Field(default="", max_length=200)
+    note: str = Field(..., max_length=2000)
+
+
+async def _create_upload_note(
+    *,
+    notes: str,
+    title: str,
+    linked_document_id: str | None,
+) -> str | None:
+    """Create the correction filed with an upload. Returns an error string, never raises."""
+    if not notes.strip():
+        return None
+    try:
+        await kb_corrections.create_correction(
+            title=f"Note on {title}",
+            note=notes,
+            linked_document_id=linked_document_id,
+        )
+    except (supermemory.SupermemoryError, ValueError) as exc:
+        logger.warning("upload note failed for %s: %s", title, exc)
+        return str(exc)
+    return None
+
+
+@router.get("/corrections")
+async def list_knowledge_base_corrections() -> dict[str, object]:
+    _require_supermemory()
+    try:
+        corrections = await kb_corrections.list_corrections()
+    except supermemory.SupermemoryError as exc:
+        raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+    return {"corrections": corrections}
+
+
+@router.post("/corrections", status_code=201)
+async def create_knowledge_base_correction(payload: CorrectionRequest) -> dict[str, object]:
+    _require_supermemory()
+    try:
+        return await kb_corrections.create_correction(
+            title=payload.title, note=payload.note
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except supermemory.SupermemoryError as exc:
+        raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+
+
+@router.patch("/corrections/{custom_id:path}")
+async def update_knowledge_base_correction(
+    custom_id: str, payload: CorrectionRequest
+) -> dict[str, object]:
+    _require_supermemory()
+    try:
+        return await kb_corrections.update_correction(
+            custom_id=custom_id, title=payload.title, note=payload.note
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except supermemory.SupermemoryError as exc:
+        raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+
+
+@router.delete("/corrections/{custom_id:path}")
+async def delete_knowledge_base_correction(
+    custom_id: str, document_id: str = ""
+) -> dict[str, object]:
+    _require_supermemory()
+    try:
+        await kb_corrections.delete_correction(
+            custom_id=custom_id, document_id=document_id
+        )
+    except supermemory.SupermemoryError as exc:
+        raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+    return {"deleted": custom_id}
 
 
 @router.get("/status", response_model=KnowledgeBaseStatus)
@@ -114,12 +197,13 @@ async def get_knowledge_base_documents() -> KnowledgeBaseDocumentsResponse:
     )
 
 
-@router.post("/documents", response_model=KnowledgeBaseDocument, status_code=201)
+@router.post("/documents", status_code=201)
 async def upload_knowledge_base_document(
     title: str = Form(...),
     category: str = Form(...),
+    notes: str = Form(""),
     file: UploadFile = File(...),
-) -> KnowledgeBaseDocument:
+) -> dict[str, object]:
     _require_supermemory()
 
     clean_title = title.strip()
@@ -154,7 +238,15 @@ async def upload_knowledge_base_document(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return KnowledgeBaseDocument.model_validate(doc)
+    note_error = await _create_upload_note(
+        notes=notes,
+        title=clean_title,
+        linked_document_id=str(doc.get("supermemoryCustomId") or ""),
+    )
+    payload = KnowledgeBaseDocument.model_validate(doc).model_dump(by_alias=True)
+    if note_error:
+        payload["noteError"] = note_error
+    return payload
 
 
 @router.get("/folders", response_model=KnowledgeBaseFoldersResponse)
