@@ -276,12 +276,12 @@ def test_the_position_strip_is_recomputed_on_read_like_every_other_row():
 
     # Empty state — no brief yet — but the figures still render.
     assert result["status"] == "empty"
-    assert result["position"]["cash_figure"] == "$7,742"
-    assert result["position"]["overdue_ap_figure"] == "$26,973"
-    assert result["position"]["overdue_ar_figure"] == "$14,419"
+    assert result["position"]["cash_on_hand"] == "$7,742"
+    assert result["position"]["bills_you_owe_overdue"] == "$26,973"
+    assert result["position"]["invoices_owed_to_you_overdue"] == "$14,419"
 
 
-def test_the_position_strip_is_null_when_there_is_no_cash_figure():
+def test_the_position_block_is_null_when_there_is_no_cash_figure():
     with patch.object(fin_router, "_load_overview", return_value=_overview()), \
          patch.object(fin_router, "get_latest_insight", return_value=None):
         result = fin_router.quickbooks_ai_insights()

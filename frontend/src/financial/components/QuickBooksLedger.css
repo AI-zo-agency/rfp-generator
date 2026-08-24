@@ -1893,7 +1893,7 @@ a.tw-task-card__name:hover {
 
 .qb-insights {
   border: 1px solid var(--zo-border);
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 16px 18px;
   margin-bottom: 14px;
   background: var(--zo-surface);
@@ -1915,6 +1915,12 @@ a.tw-task-card__name:hover {
   font-weight: 600;
   letter-spacing: 0.02em;
   margin: 0;
+}
+
+.qb-insights-info {
+  display: inline-flex;
+  align-items: center;
+  color: var(--zo-text-muted);
 }
 
 .qb-insights-meta {
@@ -1947,52 +1953,11 @@ a.tw-task-card__name:hover {
   cursor: default;
 }
 
-.qb-insights-position {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 26px;
-  margin: 0 0 14px;
-  padding-bottom: 13px;
-  border-bottom: 1px solid var(--zo-border);
-}
-
-.qb-insights-position div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.qb-insights-position dt {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--zo-text-muted);
-}
-
-.qb-insights-position dd {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-/* The net is the figure the owner acts on, so it carries the emphasis.
-   --zo-teal and --zo-orange, not --zo-success: that one is referenced by
-   .qb-pill[data-tone="good"] but defined nowhere, which is why that pill's
-   color-mix background silently drops. */
-.qb-insights-position [data-net] dd {
-  color: var(--zo-teal);
-}
-
-.qb-insights-position [data-short] dd {
-  color: var(--zo-orange);
-}
-
 .qb-insights-brief {
   font-size: 13.5px;
-  line-height: 1.55;
+  line-height: 1.6;
   margin: 0 0 14px;
+  color: var(--zo-text-secondary);
 }
 
 .qb-insights-empty {
@@ -2005,59 +1970,157 @@ a.tw-task-card__name:hover {
   margin: 0 0 10px;
 }
 
-.qb-insights-list + .qb-insights-list {
-  margin-top: 14px;
-}
+/* ── unified notes cards ───────────────────────────────────────────────── */
+/* Factual rows first, then rule-based signals. Soft wash + badge carry
+   impact; source label says whether the prose is model or threshold. */
 
-.qb-insights-list h4 {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: var(--zo-text-muted);
-  margin: 0 0 6px;
-}
-
-.qb-insights-list ul {
-  list-style: none;
+.qb-insights-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   margin: 0;
   padding: 0;
+  list-style: none;
 }
 
-.qb-insights-list li {
+.qb-note-card {
+  --qb-note-accent: var(--zo-text-muted);
+  --qb-note-badge-fg: var(--zo-text-muted);
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 7px 0;
-  border-top: 1px solid var(--zo-border);
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--qb-note-accent) 18%, var(--zo-border));
+  border-radius: 10px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--qb-note-accent) 6%, var(--zo-card-bg, var(--zo-surface))),
+      var(--zo-card-bg, var(--zo-surface))
+    );
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--zo-text) 4%, transparent);
 }
 
-.qb-insights-row-head {
-  font-size: 13px;
-  font-weight: 500;
-  margin: 0;
+.qb-note-card[data-badge="High impact"] {
+  --qb-note-accent: var(--zo-danger);
+  --qb-note-badge-fg: var(--zo-danger);
 }
 
-.qb-insights-row-sub {
-  font-size: 11.5px;
-  color: var(--zo-text-muted);
-  margin: 2px 0 0;
+.qb-note-card[data-badge="Opportunity"] {
+  --qb-note-accent: var(--zo-teal);
+  --qb-note-badge-fg: var(--zo-teal);
 }
 
-.qb-insights-tag {
-  margin-left: 7px;
-  font-size: 10px;
-  padding: 1px 6px;
+.qb-note-card[data-badge="Risk"] {
+  --qb-note-accent: #7c5cbf;
+  --qb-note-badge-fg: #6b4aa8;
+}
+
+.qb-note-card[data-badge="Action"] {
+  --qb-note-accent: #3b82f6;
+  --qb-note-badge-fg: #2563eb;
+}
+
+.qb-note-card[data-badge="Watch"] {
+  --qb-note-accent: #d4a017;
+  --qb-note-badge-fg: #b8860b;
+}
+
+.qb-note-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+
+.qb-note-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
   border-radius: 999px;
-  border: 1px solid var(--zo-border);
-  color: var(--zo-text-muted);
-  font-weight: 500;
+  border: 1px solid color-mix(in srgb, var(--qb-note-accent) 28%, var(--zo-border));
+  background: color-mix(in srgb, var(--qb-note-accent) 12%, transparent);
+  color: var(--qb-note-badge-fg);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 
-.qb-insights-figure {
-  font-variant-numeric: tabular-nums;
-  font-size: 13px;
+.qb-note-ai {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--zo-teal) 28%, var(--zo-border));
+  background: color-mix(in srgb, var(--zo-teal) 10%, transparent);
+  color: var(--zo-teal);
+  font-size: 10px;
   font-weight: 600;
+  letter-spacing: 0.01em;
   white-space: nowrap;
+}
+
+.qb-note-card-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.qb-note-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.qb-note-headline {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--zo-text);
+}
+
+.qb-note-detail {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--zo-text-secondary);
+}
+
+.qb-note-figure {
+  flex-shrink: 0;
+  font-size: 14px;
+  font-weight: 640;
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--zo-text);
+}
+
+.qb-note-go {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--zo-teal);
+  font-size: 11.5px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.qb-note-go:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 720px) {
+  .qb-note-card-body {
+    flex-wrap: wrap;
+  }
+
+  .qb-note-figure {
+    width: 100%;
+  }
 }

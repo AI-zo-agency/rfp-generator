@@ -58,9 +58,15 @@ def position(data: dict[str, Any]) -> dict[str, Any] | None:
 
     net = cash + overdue_ar - overdue_ap
     return {
-        "cash_figure": usd(cash),
-        "overdue_ap_figure": usd(overdue_ap),
-        "overdue_ar_figure": usd(overdue_ar),
-        "net_figure": usd(net),
-        "net_amount": net,
+        # Spelled out, not abbreviated. `overdue_ap_figure` and
+        # `overdue_ar_figure` differ by one letter and the model duly swapped
+        # them, writing "you're owed $28,498 but $26,973 of it is overdue" —
+        # $26,973 is what you owe. Both figures were real, both were in the
+        # evidence, so the guard passed it: a correct figure on the wrong
+        # subject is precisely what it cannot catch. Naming beats guarding.
+        "cash_on_hand": usd(cash),
+        "bills_you_owe_overdue": usd(overdue_ap),
+        "invoices_owed_to_you_overdue": usd(overdue_ar),
+        "net_due_now": usd(net),
+        "net_due_now_amount": net,
     }
