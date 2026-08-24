@@ -6765,10 +6765,11 @@ async def _try_manual_fill_resolution(
     from app.services.proposal_manuscript import (
         convert_bare_confirmation_lines,
         convert_inline_confirmation_phrases,
+        convert_instruction_blocks,
     )
 
     target_text = convert_inline_confirmation_phrases(
-        convert_bare_confirmation_lines(target_text)
+        convert_bare_confirmation_lines(convert_instruction_blocks(target_text))
     )
 
     if not extract_manual_fill_tags(target_text):

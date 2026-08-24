@@ -58,3 +58,45 @@ def test_memory_for_a_document_with_no_chunk_is_kept() -> None:
     merged = supermemory.merge_chunk_first_hits(memories, chunks)
 
     assert len(merged) == 2
+
+
+import asyncio
+
+from app.services import kb_rag_retrieve
+
+
+def test_retrieve_for_question_keeps_a_memory_behind_many_chunks(monkeypatch) -> None:
+    """A memory fact must reach the context even when chunks fill the rank cut."""
+    chunks = [
+        _chunk(f"proposal-{i}", f"Proposal {i} rate table: Account Manager $150.00 per hour. " * 40)
+        for i in range(12)
+    ]
+    memory = _memory(
+        "pricing-guide", "The billable rate for an Account Manager at zo agency is $275.00"
+    )
+
+    async def fake_chunk_first(query, *, limit, filters, threshold):
+        return supermemory_merge(chunks, memory)
+
+    def supermemory_merge(chunk_hits, memory_hit):
+        from app.services import supermemory
+
+        return supermemory.merge_chunk_first_hits([memory_hit], chunk_hits)
+
+    async def fake_resolve(hit):
+        return ""
+
+    monkeypatch.setattr(kb_rag_retrieve, "_search_hits_chunk_first", fake_chunk_first)
+    # kb_rag_retrieve imports `supermemory` locally inside each function rather than
+    # at module scope, so there is no `kb_rag_retrieve.supermemory` attribute to patch.
+    # Patch the real module instead — the function's local `from app.services import
+    # supermemory` resolves to this same module object.
+    monkeypatch.setattr(
+        supermemory, "resolve_hit_document_content", fake_resolve
+    )
+
+    context, sources, _queries = asyncio.run(
+        kb_rag_retrieve.retrieve_for_question("What is the billable rate for an Account Manager?")
+    )
+
+    assert "$275.00" in context, "memory fact was cut before reaching the context"
