@@ -101,3 +101,108 @@ def test_corrections_prompt_block_survives_supermemory_failure(monkeypatch) -> N
 
     block = asyncio.run(kb_corrections.corrections_prompt_block())
     assert "corrections unavailable" in block
+
+
+def test_create_correction_writes_supermemory_doc_and_clears_cache(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+    cleared: list[bool] = []
+
+    async def fake_add(*, content, custom_id, metadata=None):
+        calls["content"] = content
+        calls["custom_id"] = custom_id
+        calls["metadata"] = metadata
+        return {"id": "sm-1"}
+
+    monkeypatch.setattr(kb_corrections.supermemory, "add_text_document", fake_add)
+    monkeypatch.setattr(
+        kb_corrections.supermemory,
+        "invalidate_document_cache",
+        lambda: cleared.append(True),
+    )
+
+    row = asyncio.run(
+        kb_corrections.create_correction(
+            title="Ron Comer retired", note="Ron Comer has retired."
+        )
+    )
+
+    assert str(calls["custom_id"]).startswith("kbnote:")
+    metadata = calls["metadata"]
+    assert metadata["type"] == "kb_correction"
+    assert metadata["note"] == "Ron Comer has retired."
+    assert metadata["active"] is True
+    assert "STANDING CORRECTION" in str(calls["content"])
+    assert "Ron Comer has retired." in str(calls["content"])
+    assert row["customId"] == calls["custom_id"]
+    assert cleared == [True]
+
+
+def test_update_correction_reuses_custom_id_and_preserves_created_at(monkeypatch) -> None:
+    existing = {
+        "id": "sm-1",
+        "customId": "kbnote:abc",
+        "title": "old",
+        "note": "old note",
+        "createdAt": "2026-08-01T00:00:00Z",
+        "updatedAt": "",
+        "linkedDocumentId": None,
+    }
+    calls: dict[str, object] = {}
+
+    async def fake_list():
+        return [existing]
+
+    async def fake_add(*, content, custom_id, metadata=None):
+        calls["custom_id"] = custom_id
+        calls["metadata"] = metadata
+        return {"id": "sm-1"}
+
+    monkeypatch.setattr(kb_corrections, "list_corrections", fake_list)
+    monkeypatch.setattr(kb_corrections.supermemory, "add_text_document", fake_add)
+    monkeypatch.setattr(kb_corrections.supermemory, "invalidate_document_cache", lambda: None)
+
+    row = asyncio.run(
+        kb_corrections.update_correction(
+            custom_id="kbnote:abc", title="Ron retired", note="Ron Comer has retired."
+        )
+    )
+
+    assert calls["custom_id"] == "kbnote:abc"
+    metadata = calls["metadata"]
+    assert metadata["createdAt"] == "2026-08-01T00:00:00Z"
+    assert metadata["note"] == "Ron Comer has retired."
+    assert metadata["updatedAt"]
+    assert row["note"] == "Ron Comer has retired."
+
+
+def test_delete_correction_soft_deletes_when_hard_delete_unsupported(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_delete(document_id):
+        return False
+
+    async def fake_add(*, content, custom_id, metadata=None):
+        calls["metadata"] = metadata
+        return {"id": "sm-1"}
+
+    async def fake_list():
+        return [
+            {
+                "id": "sm-1",
+                "customId": "kbnote:abc",
+                "title": "t",
+                "note": "n",
+                "createdAt": "2026-08-01T00:00:00Z",
+                "updatedAt": "",
+                "linkedDocumentId": None,
+            }
+        ]
+
+    monkeypatch.setattr(kb_corrections.supermemory, "delete_document", fake_delete)
+    monkeypatch.setattr(kb_corrections.supermemory, "add_text_document", fake_add)
+    monkeypatch.setattr(kb_corrections, "list_corrections", fake_list)
+    monkeypatch.setattr(kb_corrections.supermemory, "invalidate_document_cache", lambda: None)
+
+    asyncio.run(kb_corrections.delete_correction(custom_id="kbnote:abc", document_id="sm-1"))
+
+    assert calls["metadata"]["active"] is False
