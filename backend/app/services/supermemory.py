@@ -194,6 +194,29 @@ async def list_all_container_documents(
     return all_docs
 
 
+def invalidate_document_cache() -> None:
+    """Drop the container document cache so the next list re-fetches."""
+    global _doc_list_cache
+    _doc_list_cache = None
+
+
+async def delete_document(document_id: str) -> bool:
+    """Hard-delete a document. Returns False when the endpoint is unavailable."""
+    try:
+        await _request("DELETE", f"/v3/documents/{document_id}")
+    except SupermemoryError as exc:
+        if exc.status_code in {404, 405, 501}:
+            logger.warning(
+                "Supermemory delete unsupported for %s (%s) — caller should soft-delete",
+                document_id,
+                exc.status_code,
+            )
+            return False
+        raise
+    invalidate_document_cache()
+    return True
+
+
 def is_knowledge_base_document(doc: dict[str, Any]) -> bool:
     metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
     doc_type = metadata.get("type") or doc.get("type")
