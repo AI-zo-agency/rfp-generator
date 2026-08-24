@@ -1,3 +1,4 @@
+import { KnowledgeBaseCorrections } from "@/components/KnowledgeBaseCorrections";
 import { KnowledgeBaseGrid } from "@/components/KnowledgeBaseGrid";
 
 export default function KnowledgeBasePage() {
@@ -15,6 +16,7 @@ export default function KnowledgeBasePage() {
           studies, bios, pricing, and won proposals. Nothing is stored locally.
         </p>
       </header>
+      <KnowledgeBaseCorrections />
       <KnowledgeBaseGrid />
     </div>
   );
