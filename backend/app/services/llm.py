@@ -1178,6 +1178,39 @@ def _strip_code_fence(text: str) -> str:
     return stripped.strip()
 
 
+def _find_balanced_json_end(text: str, start: int) -> int | None:
+    """Index just past the closing brace/bracket matching ``text[start]``.
+
+    None when the opening delimiter never closes within the string (the
+    truncated-mid-generation case — leave that to ``_close_truncated_json``).
+    """
+    in_string = False
+    escape = False
+    stack: list[str] = []
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if not stack:
+                return None
+            stack.pop()
+            if not stack:
+                return i + 1
+    return None
+
+
 def _extract_json_from_text(text: str) -> str:
     """Extract JSON from text that may have explanatory prefixes or markdown formatting."""
     # Strip fences FIRST. If we slice from `{` before stripping, a trailing ``` remains
@@ -1188,9 +1221,20 @@ def _extract_json_from_text(text: str) -> str:
     bracket_start = text.find("[")
 
     if brace_start >= 0 and (bracket_start < 0 or brace_start < bracket_start):
-        text = text[brace_start:]
+        start = brace_start
     elif bracket_start >= 0:
-        text = text[bracket_start:]
+        start = bracket_start
+    else:
+        return _strip_code_fence(text)
+
+    # A complete, well-formed JSON value can be followed by trailing prose —
+    # a model that answers the schema AND then keeps talking (e.g. adding an
+    # unsolicited clarifying question after the JSON). json.loads rejects
+    # "Extra data" after a valid value, so isolate just the balanced span
+    # when one closes; otherwise keep the old to-end-of-string slice so the
+    # truncated-mid-generation repair path still gets a chance.
+    end = _find_balanced_json_end(text, start)
+    text = text[start:end] if end is not None else text[start:]
 
     return _strip_code_fence(text)
 
