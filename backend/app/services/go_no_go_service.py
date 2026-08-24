@@ -1085,13 +1085,6 @@ def _assess_deadline(rfp: RfpRecord, content: RfpContentInfo) -> dict[str, Any]:
     }
 
 
-def _compose_stage_one_prompt(*, corrections_block: str, body: str) -> str:
-    """Corrections outrank retrieved excerpts, so they lead the prompt."""
-    if not corrections_block.strip():
-        return body
-    return f"{corrections_block}\n\n{body}"
-
-
 def _build_deadline_context(deadline: dict[str, Any]) -> str:
     lines = [
         f"- Today's date (UTC): {deadline['today']}",
@@ -2616,9 +2609,6 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
         hits_by_requirement,
     ), opportunity = await asyncio.gather(kb_task, opp_task)
 
-    from app.services.kb_corrections import corrections_prompt_block
-
-    standing_corrections = await corrections_prompt_block()
     # Judge each RFP requirement against retrieved KB evidence BEFORE the
     # narrative analyst runs, so Technical/Win scores follow requirement needs.
     capability_rows: list[GoNoGoCapabilityRow] = []
@@ -2716,11 +2706,6 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
 ## Knowledge base excerpts (verified facts only — do not go beyond this)
 {kb_context}
 """
-
-    user_prompt = _compose_stage_one_prompt(
-        corrections_block=standing_corrections,
-        body=user_prompt,
-    )
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

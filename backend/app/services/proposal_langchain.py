@@ -8,7 +8,6 @@ from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
 from app.services import proposal_knowledge_base_tools
-from app.services.kb_corrections import corrections_prompt_block
 from app.services.llm import LlmError, LlmTier, _fireworks_key, _openrouter_key, chat_json, resolve_llm_model
 from app.services.llm_routing import is_quality_critical_node
 
@@ -268,13 +267,6 @@ def _provider_name(*, force_fireworks: bool = False) -> str:
     return "openrouter" if _openrouter_key() else "fireworks"
 
 
-def lead_with_corrections(text: str, block: str) -> str:
-    """Standing corrections outrank retrieved KB text, so they come first."""
-    if not block.strip():
-        return text
-    return f"{block}\n\n{text}"
-
-
 def build_proposal_tools(
     rfp_id: str,
     title: str,
@@ -297,8 +289,7 @@ def build_proposal_tools(
             rfp_sector=sector,
             rfp_title=title,
         )
-        block = await corrections_prompt_block()
-        return lead_with_corrections(text, block)
+        return text
 
     async def search_master_template(section: str) -> str:
         """Search master template content (02_ prefix) for a proposal section."""

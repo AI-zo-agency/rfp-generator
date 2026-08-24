@@ -381,7 +381,6 @@ class SectionsGraphState(TypedDict, total=False):
     brand_voice: dict[str, Any]
     kb_zo_voice: str
     kb_zo_voice_sources: list[str]
-    kb_corrections: str
     kb_company: str
     kb_company_sources: list[str]
     kb_master_roster: str
@@ -1641,11 +1640,7 @@ def replace_bio_work_history_verify_from_kb(
 def _narrative_section_preamble(state: SectionsGraphState) -> str:
     from app.services.proposal_section_dedup import format_anti_duplication_rules
 
-    corrections = (state.get("kb_corrections") or "").strip()
-    corrections_prefix = f"{corrections}\n\n" if corrections else ""
-
     return (
-        f"{corrections_prefix}"
         "You write zö agency NARRATIVE proposal content.\n"
         f"{format_register_block('narrative')}\n\n"
         "Facts (clients, certs, team, case studies) must come ONLY from knowledge-base excerpts.\n"
@@ -1676,12 +1671,10 @@ async def _fetch_knowledge_base(state: SectionsGraphState) -> dict[str, Any]:
     company_text, company_sources = bundles["company"]
     bios_text, bio_sources = bundles["bios"]
     cases_text, case_sources = bundles["case_studies"]
-    corrections_text, _corrections_sources = bundles.get("corrections", ("", []))
 
     return {
         "kb_zo_voice": _sanitize_content(zo_voice_text),
         "kb_zo_voice_sources": zo_voice_sources,
-        "kb_corrections": corrections_text,
         "kb_company": _sanitize_content(company_text),
         "kb_company_sources": company_sources,
         "kb_master_roster": _sanitize_content(roster_text),
