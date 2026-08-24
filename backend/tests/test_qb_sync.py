@@ -281,7 +281,7 @@ def test_ingest_current_year_fetches_as_of_but_hashes_year_end(monkeypatch):
 def _stub_backfill_ingest(monkeypatch) -> None:
     monkeypatch.setattr(qb_sync, "_ingest_reports", lambda *args, **kwargs: 0)
     monkeypatch.setattr(qb_sync, "_ingest_company_info", lambda *args, **kwargs: None)
-    monkeypatch.setattr(qb_sync, "_write_panel_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(qb_sync, "_write_panel_cache", lambda *args, **kwargs: {})
     monkeypatch.setattr(qb_sync, "try_acquire_lease", lambda *args, **kwargs: True)
     monkeypatch.setattr(qb_sync, "upsert_entities", lambda *args, **kwargs: 0)
     monkeypatch.setattr(qb_sync, "upsert_backfill_progress", lambda *args: None)
@@ -415,7 +415,7 @@ def test_nightly_lease_failure_before_cdc_skips_cdc(monkeypatch):
     monkeypatch.setattr(qb_sync, "upsert_sync_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(qb_sync, "_ingest_reports", lambda *args, **kwargs: 0)
     monkeypatch.setattr(qb_sync, "_ingest_company_info", lambda *args, **kwargs: None)
-    monkeypatch.setattr(qb_sync, "_write_panel_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(qb_sync, "_write_panel_cache", lambda *args, **kwargs: {})
     monkeypatch.setattr(qb_sync.settings, "quickbooks_realm_id", "realm-1")
 
     try:
@@ -453,7 +453,7 @@ def test_nightly_lease_failure_before_reports_skips_ingest(monkeypatch):
         lambda *args, **kwargs: ingested.append(True) or 0,
     )
     monkeypatch.setattr(qb_sync, "_ingest_company_info", lambda *args, **kwargs: None)
-    monkeypatch.setattr(qb_sync, "_write_panel_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(qb_sync, "_write_panel_cache", lambda *args, **kwargs: {})
     monkeypatch.setattr(qb_sync, "insert_sync_run", lambda row: "run-1")
     monkeypatch.setattr(qb_sync, "finish_sync_run", lambda *args, **kwargs: None)
     monkeypatch.setattr(qb_sync, "upsert_sync_state", lambda *args, **kwargs: None)
@@ -466,6 +466,53 @@ def test_nightly_lease_failure_before_reports_skips_ingest(monkeypatch):
         pass
 
     assert ingested == []
+
+
+def test_nightly_reuses_panel_payload_for_insight_and_survives_a_failed_brief(monkeypatch):
+    """The panel_cache step's return value must reach generate_and_store with
+    sync_status merged in, and a failed brief must not stop the cursor from
+    advancing — the sync's success does not depend on the model."""
+    fake_overview = {"errors": {}, "ar": {"total": 14_419}}
+    calls = []
+    state_updates = []
+
+    monkeypatch.setattr(qb_sync, "CDC_ENTITIES", [])
+    monkeypatch.setattr(qb_sync, "try_acquire_lease", lambda *args, **kwargs: True)
+    monkeypatch.setattr(qb_sync, "cdc_records", lambda *args, **kwargs: {})
+    monkeypatch.setattr(qb_sync, "_ingest_reports", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(qb_sync, "_ingest_company_info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        qb_sync,
+        "_write_panel_cache",
+        lambda realm_id, years, as_of, activity_since, computed_at: {years[0]: fake_overview},
+    )
+    monkeypatch.setattr(
+        qb_sync,
+        "upsert_sync_state",
+        lambda realm_id, fields: state_updates.append(fields),
+    )
+    monkeypatch.setattr(
+        qb_sync,
+        "generate_and_store",
+        lambda realm_id, overview, as_of, prior=None: calls.append((realm_id, overview, as_of)) or "failed",
+    )
+
+    started = datetime(2026, 8, 13, tzinfo=timezone.utc)
+    qb_sync._run_nightly(
+        realm_id="realm-1",
+        started=started,
+        state={"cdc_cursor": "2026-08-01T00:00:00+00:00"},
+        run_id="run-1",
+        owner="owner-1",
+    )
+
+    assert len(calls) == 1
+    realm_id, overview, as_of = calls[0]
+    assert realm_id == "realm-1"
+    assert as_of == started.date().isoformat()
+    assert overview == {**fake_overview, "sync_status": "ok"}
+
+    assert any(fields.get("cdc_cursor") == started.isoformat() for fields in state_updates)
 
 
 def test_ingest_skips_permission_denied_reports(monkeypatch):
