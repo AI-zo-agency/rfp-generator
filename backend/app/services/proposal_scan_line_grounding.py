@@ -299,9 +299,6 @@ async def run_scan_line_grounding_pass(
     from app.services.proposal_consistency_enforcement import (
         polish_schedule_tabs_for_designer,
     )
-    from app.services.proposal_scan_rfp_contradictions import (
-        STATIC_COMPANY_FACT_SECTION_IDS,
-    )
 
     report = LineGroundReport()
     polished, polish_logs = polish_schedule_tabs_for_designer(
@@ -315,8 +312,12 @@ async def run_scan_line_grounding_pass(
     company_excerpt = _canonical_company_excerpt(sections)
     work: list[tuple[int, ProposalSection]] = []
     for idx, section in enumerate(sections):
-        if section.id in STATIC_COMPANY_FACT_SECTION_IDS:
-            continue
+        # Not excluded from grounding even though it's a static company-fact
+        # section (org-structure, business-info, certifications, insurance):
+        # this pass verifies claims against current KB evidence, which is
+        # exactly what catches a roster title gone stale against a standing
+        # correction (e.g. a title change) — skipping it here would silently
+        # leave that kind of error uncorrected.
         body = section.content or ""
         if is_dead_section(body):
             continue

@@ -132,7 +132,10 @@ async def _write_one_subsection(
                         "Return ONE complete JSON object — no markdown fences. Finish every string/brace.\n"
                         + (
                             "CRITICAL for Org Structure: list EVERY person from the Master Team Roster "
-                            "with their exact title. Incomplete org charts are failures.\n"
+                            "with their exact title — EXCEPT when a STANDING CORRECTIONS entry below "
+                            "names that same person; a correction is newer than the roster document "
+                            "and always wins for that person's title/status (e.g. a title change or "
+                            "retirement). Incomplete org charts are failures.\n"
                             if sec_id == "section-1-org-structure"
                             else ""
                         )

@@ -14,10 +14,7 @@ from typing import Any
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.models.rfp import RfpRecord
 from app.services import llm
-from app.services.proposal_scan_rfp_contradictions import (
-    STATIC_COMPANY_FACT_SECTION_IDS,
-    _manuscript_digest,
-)
+from app.services.proposal_scan_rfp_contradictions import _manuscript_digest
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +31,12 @@ CANONICAL SOURCE (always wins):
   website, etc.
 
 IS a contradiction (flag these):
+- STANDING CORRECTION CONFLICT: a named person's title, role, or employment
+  status anywhere in the manuscript (org chart, bios, staffing tables) does not
+  match a "## STANDING CORRECTIONS" entry for that same person (e.g. a title
+  change, a retirement/departure). A correction is newer than every KB document
+  and the roster — it always wins. Severity=critical. rewrite → update to the
+  correction's wording (or remove the person if the correction says they left).
 - Contact email / phone / website in Business Information (or repeated agency-wide)
   that conflicts with companyfacts (e.g. companyfacts Email: connect@zo.agency but
   draft says info@zo.agency or hello@zo.agency)
@@ -359,12 +362,12 @@ async def run_manuscript_fact_contradiction_pass(
         idx = by_id.get(finding.section_id)
         if idx is None:
             continue
-        if finding.section_id in STATIC_COMPANY_FACT_SECTION_IDS:
-            result.logs.append(
-                f"{finding.section_id}: skipped fact-contradiction rewrite — "
-                "protected static company-fact section (likely false positive)"
-            )
-            continue
+        # Unlike the RFP-contradiction and budget-contradiction passes, this
+        # pass exists specifically to catch stale facts on these sections
+        # (team roster titles, certifications, etc.) — including conflicts
+        # with a standing correction, which this pass's own LLM call also
+        # receives. Excluding it here would remove a real repair path
+        # (e.g. a roster title that standing corrections have since changed).
         section = sections[idx]
         if (
             (section.id or "").startswith("section-2-bio-")

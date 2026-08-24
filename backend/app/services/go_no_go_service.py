@@ -2687,6 +2687,9 @@ Do NOT output a capability matrix. Capability is computed separately.
 Use [FLAG FOR ROLE: ...] and [FLAG: ...] for every item needing human confirmation before submission.
 
 EVIDENCE DISCIPLINE FOR THIS RUN:
+- A "## STANDING CORRECTIONS" block, if present in this conversation, is newer
+  than every KB document and always wins for that person's title/role/status —
+  use the correction's wording, not kb_context's, for anyone it names.
 - Offeror office ≠ automatic subcontractor fix.
 - Google/Meta Ads on one person ≠ agency Verified.
 - 07_FIN ≠ won experience; flag Resonance/competitor text if present.
