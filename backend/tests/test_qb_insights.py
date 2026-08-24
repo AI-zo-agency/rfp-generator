@@ -20,7 +20,7 @@ def _overview():
 
 def test_build_evidence_carries_signals_and_both_row_lists():
     evidence = qb_insights.build_evidence(_overview())
-    assert {"signals", "derived", "chase", "hygiene"} == set(evidence)
+    assert {"position", "signals", "derived", "chase", "hygiene"} == set(evidence)
     assert evidence["chase"][0]["id"] == "chase:cityofumatilla"
     assert any(s["id"] == "ar-late" for s in evidence["signals"])
 
@@ -241,8 +241,21 @@ def test_evidence_hides_the_internal_ranking_keys_from_the_model():
     for row in evidence["chase"] + evidence["hygiene"]:
         assert "dollar_days" not in row
         assert "amount" not in row
+        assert "overdue_amount" not in row
     # The rows themselves keep the keys; only the model's copy is projected.
     assert "dollar_days" in qb_insights.chase_rows(_overview())[0]
+
+
+def test_the_model_gets_the_average_age_and_never_the_oldest():
+    """Handed `overdue_days` beside an amount, the model wrote "OCF is $11,966
+    overdue at 73 days" — the implicature the per-invoice split exists to kill,
+    reintroduced in prose. Only the age that pairs truthfully is sent."""
+    evidence = qb_insights.build_evidence(_overview())
+    row = evidence["chase"][0]
+    assert "overdue_days" not in row
+    assert "avg_overdue_days" in row
+    # The UI still needs the oldest, so the row itself keeps it.
+    assert "overdue_days" in qb_insights.chase_rows(_overview())[0]
 
 
 def test_the_verbal_tolerance_cannot_be_widened_by_a_derived_internal_number():

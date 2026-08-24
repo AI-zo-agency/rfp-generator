@@ -30,6 +30,7 @@ from app.financial.figure_guard import (
     evidence_numbers,
 )
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows, row_ids
+from app.financial.qb_position import position
 from app.financial.qb_signals import derive_signals, derived_figures
 from app.services.llm import chat_json_soft
 
@@ -56,17 +57,28 @@ _SYSTEM = (
     '"the majority of" — unless the data states that share. Quote the stated '
     "share instead.\n\n"
     "Client names come from the data as well; never name one that is not in it. "
-    "If nothing is wrong, say so plainly rather than manufacturing concern."
+    "If nothing is wrong, say so plainly rather than manufacturing concern.\n\n"
+    "The cash figures in `position` are printed on screen directly above your "
+    "brief, where the reader can already see them. Lead with what they mean for "
+    "the week ahead rather than reading them back."
 )
 
 
 # Keys the rows carry for ranking and for the frontend, which the model has no
-# use for. Sending them is not neutral: `dollar_days` is amount x days, a number
-# in the hundreds of thousands that resembles nothing the reader should ever see,
-# and every number in the evidence is a number the guard will accept. OCF's
-# 861,552 sat close enough to 750,000 to license "nearly three-quarters of a
-# million" as a description of $288,199.
-_INTERNAL_ROW_KEYS = {"amount", "overdue_amount", "dollar_days"}
+# use for. Sending them is not neutral: every number in the evidence is a number
+# the guard will accept, and a number the model may pair with the wrong subject.
+#
+# `dollar_days` is amount x days, a figure in the hundreds of thousands that
+# resembles nothing the reader should see. OCF's 861,552 sat close enough to
+# 750,000 to license "nearly three-quarters of a million" as a description of
+# $288,199.
+#
+# `overdue_days` is the age of the single oldest invoice. Handed that beside an
+# amount, the model writes "OCF is $11,966 overdue at 73 days" — the exact
+# implicature the per-invoice split was built to remove, reintroduced in prose.
+# `avg_overdue_days` is the one that pairs truthfully with the amount, so it is
+# the only age the model gets. The UI still shows both.
+_INTERNAL_ROW_KEYS = {"amount", "overdue_amount", "dollar_days", "overdue_days"}
 
 
 def _model_facing(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -83,6 +95,7 @@ def build_evidence(overview: dict[str, Any]) -> dict[str, Any]:
     nothing to the prose and cost the guard its precision.
     """
     return {
+        "position": position(overview),
         "signals": derive_signals(overview),
         "derived": derived_figures(overview),
         "chase": _model_facing(chase_rows(overview)),

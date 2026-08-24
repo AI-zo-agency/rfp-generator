@@ -28,10 +28,20 @@ interface HygieneRow {
   kind: string;
 }
 
+interface PositionData {
+  cash_figure: string;
+  overdue_ap_figure: string;
+  overdue_ar_figure: string;
+  net_figure: string;
+  net_amount: number;
+}
+
 interface InsightsData {
   status: "ok" | "empty";
   brief: string;
   notes: Record<string, string>;
+  /** Null when there is no cash figure to anchor the strip. */
+  position: PositionData | null;
   chase: ChaseRow[];
   hygiene: HygieneRow[];
   as_of: string | null;
@@ -109,6 +119,27 @@ export function QuickBooksInsights({ year }: { year: number }) {
       </header>
 
       {error ? <p className="qb-insights-error">{error}</p> : null}
+
+      {data.position ? (
+        <dl className="qb-insights-position">
+          <div>
+            <dt>Cash</dt>
+            <dd>{data.position.cash_figure}</dd>
+          </div>
+          <div>
+            <dt>Bills overdue</dt>
+            <dd>{data.position.overdue_ap_figure}</dd>
+          </div>
+          <div>
+            <dt>Invoices overdue</dt>
+            <dd>{data.position.overdue_ar_figure}</dd>
+          </div>
+          <div data-net data-short={data.position.net_amount < 0 || undefined}>
+            <dt>Net</dt>
+            <dd>{data.position.net_figure}</dd>
+          </div>
+        </dl>
+      ) : null}
 
       {data.brief ? (
         <p className="qb-insights-brief">{data.brief}</p>

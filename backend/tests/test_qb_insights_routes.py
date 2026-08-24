@@ -247,3 +247,33 @@ def test_http_get_ai_insights_defaults_year_when_omitted(monkeypatch):
     )
     response = client.get("/api/v1/financials/quickbooks/ai-insights")
     assert response.status_code == 200
+
+
+def _overview_with_cash():
+    return _overview() | {
+        "liquidity": {"cash": 7_742.33},
+        "ap": {"total": 38_643.22, "buckets": [
+            {"label": "Not yet due", "amount": 11_670.58},
+            {"label": "1-30 days", "amount": 16_020.40},
+            {"label": "31-60 days", "amount": 10_952.24},
+        ]},
+    }
+
+
+def test_the_position_strip_is_recomputed_on_read_like_every_other_row():
+    with patch.object(fin_router, "_load_overview", return_value=_overview_with_cash()), \
+         patch.object(fin_router, "get_latest_insight", return_value=None):
+        result = fin_router.quickbooks_ai_insights()
+
+    # Empty state — no brief yet — but the figures still render.
+    assert result["status"] == "empty"
+    assert result["position"]["cash_figure"] == "$7,742"
+    assert result["position"]["overdue_ap_figure"] == "$26,973"
+    assert result["position"]["overdue_ar_figure"] == "$14,419"
+
+
+def test_the_position_strip_is_null_when_there_is_no_cash_figure():
+    with patch.object(fin_router, "_load_overview", return_value=_overview()), \
+         patch.object(fin_router, "get_latest_insight", return_value=None):
+        result = fin_router.quickbooks_ai_insights()
+    assert result["position"] is None

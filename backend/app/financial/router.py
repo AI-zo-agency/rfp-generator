@@ -11,6 +11,7 @@ import logging
 from app.financial import google_sheets, ai_classifier
 from app.financial.ai_insights_repository import get_latest_insight
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows
+from app.financial.qb_position import position
 from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
 from app.financial.qb_insights import generate_and_store
 from app.financial.qb_repository import get_panel_cache, get_sync_state
@@ -1006,6 +1007,7 @@ def _insight_response(overview: dict[str, Any], row: dict[str, Any] | None) -> d
         "status": "ok" if row else "empty",
         "brief": payload.get("brief", ""),
         "notes": payload.get("notes", {}),
+        "position": position(overview),
         "chase": chase_rows(overview),
         "hygiene": hygiene_rows(overview),
         "as_of": (row or {}).get("as_of"),
