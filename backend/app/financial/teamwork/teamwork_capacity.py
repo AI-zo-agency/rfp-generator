@@ -128,9 +128,18 @@ def _latest_weekly_rows(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def is_sustained(rows: list[dict[str, Any]]) -> bool:
     ordered = sorted(rows, key=lambda row: row["week_start"], reverse=True)
-    return len(ordered) >= CONSECUTIVE_WEEKS_REQUIRED and all(
+    recent = ordered[:CONSECUTIVE_WEEKS_REQUIRED]
+    if len(recent) < CONSECUTIVE_WEEKS_REQUIRED:
+        return False
+    if not all(
         float(row.get("utilization_pct") or 0) >= CAPACITY_THRESHOLD_PCT
-        for row in ordered[:CONSECUTIVE_WEEKS_REQUIRED]
+        for row in recent
+    ):
+        return False
+    return all(
+        (_as_date(recent[index]["week_start"]) - _as_date(recent[index + 1]["week_start"])).days
+        == 7
+        for index in range(CONSECUTIVE_WEEKS_REQUIRED - 1)
     )
 
 

@@ -101,3 +101,33 @@ def test_capacity_signals_uses_latest_daily_snapshot_in_each_calendar_week():
     ]
 
     assert capacity.capacity_signals(history) == []
+
+
+def test_is_sustained_rejects_high_utilization_when_a_week_is_missing():
+    rows = [
+        {"week_start": "2026-08-03", "utilization_pct": 90.0},
+        {"week_start": "2026-08-10", "utilization_pct": 90.0},
+        {"week_start": "2026-08-24", "utilization_pct": 90.0},
+    ]
+
+    assert capacity.is_sustained(rows) is False
+
+
+def test_capacity_signals_does_not_emit_team_or_hiring_for_gapped_weeks():
+    def gapped_rows(person_id: str, name: str) -> list[dict]:
+        return [
+            {
+                "person_id": person_id,
+                "person_name": name,
+                "as_of": as_of,
+                "utilization_pct": 90.0,
+            }
+            for as_of in ("2026-08-03", "2026-08-10", "2026-08-24")
+        ]
+
+    signals = capacity.capacity_signals(
+        gapped_rows("42", "Alex") + gapped_rows("43", "Sam")
+    )
+
+    assert not any(signal["id"].startswith("capacity:sustained:") for signal in signals)
+    assert not any(signal["id"] in {"capacity:team", "capacity:hiring"} for signal in signals)
