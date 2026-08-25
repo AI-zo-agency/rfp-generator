@@ -84,6 +84,101 @@ def _meaningful_body(content: str, title: str) -> str:
     return "\n".join(keep)
 
 
+def restore_sections_emptied_by_scan(
+    draft: ProposalDraft,
+    prior_sections: "list[ProposalSection] | None",
+    *,
+    min_prior_words: int = 30,
+) -> tuple[ProposalDraft, list[str]]:
+    """Hard invariant: Complete & Clean must NEVER reduce a section that held real
+    drafted content to a bare RFP-outline stub / empty body.
+
+    Any internal step (structure reframe, dedup, ledger, compact) that leaves a
+    previously-substantial section hollow is undone here by restoring the exact
+    pre-scan body from the Before-Scan snapshot. Matching is by section id first;
+    when the id no longer exists (a step replaced the tab with a fresh stub id)
+    it falls back to the normalized title, but only when the prior tab is not
+    still present under its own id — so a legitimately kept tab is never cloned.
+
+    Only fires when the current tab is genuinely hollow AND the prior tab was
+    substantial and not itself a stub, so real restructures are left untouched.
+    """
+    if not prior_sections:
+        return draft, []
+
+    def _substantial(section: ProposalSection) -> bool:
+        return (
+            word_count(section.content or "") >= min_prior_words
+            and not section_is_rfp_draft_stub(section)
+        )
+
+    prior_by_id: dict[str, ProposalSection] = {}
+    prior_by_title: dict[str, ProposalSection] = {}
+    for prior in prior_sections:
+        if not _substantial(prior):
+            continue
+        if prior.id:
+            prior_by_id[prior.id] = prior
+        norm = _normalize_title_echo(prior.title or "")
+        if norm and norm not in prior_by_title:
+            prior_by_title[norm] = prior
+
+    from app.services.proposal_bio_stub import (
+        is_section2_bio_id,
+        looks_like_bio_stub_body,
+    )
+
+    def _degraded(section: ProposalSection, prior: ProposalSection) -> bool:
+        """The scan turned a good section into a stub / bio-stub / empty body."""
+        body = section.content or ""
+        if not body.strip():
+            return True
+        if section_is_rfp_draft_stub(section):
+            return True
+        # A non-bio tab whose body was replaced with a team-bio stub — the exact
+        # corruption the UI note describes ("wrongly replaced this body with a
+        # team bio stub"). Never applies to the real Section 2 bio tabs.
+        if (
+            not is_section2_bio_id(section.id or "")
+            and looks_like_bio_stub_body(body)
+            and not looks_like_bio_stub_body(prior.content or "")
+        ):
+            return True
+        return False
+
+    current_ids = {s.id for s in draft.sections if s.id}
+    logs: list[str] = []
+    changed = False
+    new_sections: list[ProposalSection] = []
+    for section in draft.sections:
+        # Find this tab's substantial pre-scan version (by id, then by title when
+        # a step renamed the id — but only if the prior isn't still present under
+        # its own id, else we'd duplicate a kept section's content).
+        prior = prior_by_id.get(section.id)
+        if prior is None:
+            cand = prior_by_title.get(_normalize_title_echo(section.title or ""))
+            if cand is not None and cand.id not in current_ids:
+                prior = cand
+        if prior is not None and _degraded(section, prior):
+            section = section.model_copy(
+                update={
+                    "content": prior.content or "",
+                    "status": prior.status or section.status or "generated",
+                }
+            )
+            logs.append(
+                f"Restored “{section.title or section.id}” — Complete & Clean had "
+                "reduced a good section to a stub / bio-stub / empty body; pre-scan "
+                "content kept."
+            )
+            changed = True
+        new_sections.append(section)
+
+    if not changed:
+        return draft, []
+    return draft.model_copy(update={"sections": new_sections}), logs
+
+
 def _is_thin_unfilled_shell(section: ProposalSection) -> bool:
     if not (section.content or "").strip():
         return True

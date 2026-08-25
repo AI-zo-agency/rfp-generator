@@ -1,8 +1,9 @@
 """RFP-aware removal of optional claim types and handoff-tag noise.
 
-Option B (2026-07-31): strip designer notes, auditor-echo MANUAL FILL tags, and
-(when the RFP is silent) invented percent-time / named-subcontractor lines.
-Never invent replacement facts.
+Option B (2026-07-31): strip auditor-echo MANUAL FILL tags and (when the RFP is
+silent) invented percent-time / named-subcontractor lines. Never invent
+replacement facts. Designer notes are DELIBERATELY preserved through the scan
+(they are legitimate handoffs, removed only at export) — see strip_designer_notes.
 """
 
 from __future__ import annotations
@@ -24,11 +25,6 @@ from app.services.proposal_manuscript import (
 )
 
 logger = logging.getLogger(__name__)
-
-_DESIGNER_NOTE_RE = re.compile(
-    r"\[DESIGNER\s+NOTE:[^\]]*\]",
-    re.IGNORECASE,
-)
 
 _MANUAL_FILL_TAG_RE = re.compile(
     r"\[MANUAL\s+FILL:[^\]]*\]",
@@ -82,33 +78,21 @@ def strip_handoff_tags_for_scan(content: str) -> str:
 
 
 def strip_designer_notes(content: str) -> tuple[str, int]:
-    """Remove [DESIGNER NOTE: …] except bio-PDF and case-study insert handoffs
-    (Option B stubs)."""
-    from app.services.proposal_case_study_stub import is_case_study_designer_note
+    """Preserve every [DESIGNER NOTE: …] tag — the scan must never vanish them.
 
-    body = content or ""
-    removed = 0
+    Designer notes are legitimate in-progress handoffs (insert an approved bio
+    PDF, render a section as a swimlane, drop in a case-study asset, layout /
+    imagery instructions the designer must action). They belong in the working
+    manuscript through the whole authoring/scan round-trip, exactly like
+    [MANUAL FILL] and [VERIFY], which ``scrub_client_facing_section_artifacts``
+    already preserves. They are removed only at the moment a document leaves the
+    agency, by ``strip_internal_handoff_tags`` in the export-time scrub — so no
+    designer note ever reaches a client even though Complete & Clean keeps it.
 
-    def _repl(match: re.Match[str]) -> str:
-        nonlocal removed
-        tag = match.group(0)
-        # Keep intentional bio PDF / case-study asset insert notes — scrub must
-        # not undo Section 2/3 stubs (this used to only recognize the bio
-        # wording, silently stripping the case-study asset-linking note added
-        # when case studies moved to the same stub-template convention).
-        if re.search(r"Insert approved bio PDF|04_Bio_", tag, re.IGNORECASE):
-            return tag
-        if is_case_study_designer_note(tag):
-            return tag
-        removed += 1
-        return ""
-
-    out = _DESIGNER_NOTE_RE.sub(_repl, body)
-    if removed:
-        out = re.sub(r"\n{3,}", "\n\n", out).strip()
-        if body.endswith("\n") and out:
-            out += "\n"
-    return out, removed
+    Kept as a no-op (rather than deleted) so the ``scrub_section_optional_claims``
+    pipeline and its callers/tests keep their shape; it always reports 0 removed.
+    """
+    return content or "", 0
 
 
 def strip_auditor_echo_manual_fills(content: str) -> tuple[str, int]:

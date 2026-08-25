@@ -101,7 +101,10 @@ def test_bio_filename_matches_spaced_and_underscored_uploads() -> None:
     assert not bio_filename_matches_member("03_CS_LetitiaHopper.pdf", "Letitia Hopper")
 
 
-def test_scrub_preserves_bio_pdf_designer_note() -> None:
+def test_scrub_preserves_all_designer_notes() -> None:
+    # The scan preserves every designer note now — the bio-PDF insert AND any
+    # other handoff (e.g. a layout/swimlane note). Export-time scrub is what
+    # removes them from the client-facing document, never Complete & Clean.
     body = (
         "### Sonja\n\n"
         "[DESIGNER NOTE: Insert approved bio PDF — 04_Bio_SonjaAnderson.pdf. "
@@ -109,9 +112,9 @@ def test_scrub_preserves_bio_pdf_designer_note() -> None:
         "[DESIGNER NOTE: render as swimlane diagram]\n"
     )
     out, n = strip_designer_notes(body)
-    assert n == 1
+    assert n == 0
     assert "Insert approved bio PDF" in out
-    assert "swimlane" not in out.casefold()
+    assert "swimlane" in out.casefold()
 
 
 def test_is_bio_stub_section() -> None:

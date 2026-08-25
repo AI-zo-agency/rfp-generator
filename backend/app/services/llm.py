@@ -721,6 +721,18 @@ CORRECTIONS_EXEMPT_NODES: frozenset[str] = frozenset({
 
 _CORRECTIONS_MARKER = "## STANDING CORRECTIONS"
 
+# Appended on a JSON-parse/refusal retry. Turns a refusal ("I cannot invent…")
+# into a valid object with placeholders, so no phase gets stuck on non-JSON.
+_JSON_REINFORCE_MSG = (
+    "CRITICAL: your previous reply was not valid JSON — it may have refused, "
+    "explained a concern, or wrapped the object in prose. Reply again with ONLY "
+    "a single valid JSON object for the requested schema. Do NOT refuse, do NOT "
+    "add any commentary or markdown, do NOT wrap it in a code fence. If a value "
+    "is unknown or you would object to inventing it, put the string "
+    '"[MANUAL FILL: what is needed]" in that field (or null for a number) instead '
+    "of refusing. Your entire response must start with { and end with }."
+)
+
 
 async def apply_standing_corrections(
     messages: list[dict[str, str]],
@@ -966,6 +978,60 @@ async def chat_json(
             "No LLM API key configured. Set OPENROUTER_API_KEY (primary) or FIREWORKS_API_KEY (fallback).",
             status_code=503,
         )
+
+    # General self-heal for the "model returned prose / refused instead of JSON"
+    # failure: retry ONCE with a hard JSON-only instruction so ANY caller's phase
+    # recovers a parseable object (with MANUAL FILL placeholders) instead of
+    # failing. Only when the failures were JSON-parse failures (not network/quota)
+    # and an OpenRouter key is available — never loops (single attempt).
+    json_parse_failure = any(
+        "invalid JSON" in e or "unexpected response shape" in e or "empty content" in e
+        for e in errors
+    )
+    if (
+        json_parse_failure
+        and openrouter_key
+        and not _is_placeholder_key(openrouter_key)
+    ):
+        try:
+            started = time.perf_counter()
+            reinforced = [
+                *messages,
+                {"role": "user", "content": _JSON_REINFORCE_MSG},
+            ]
+            raw, usage = await _post_chat(
+                base_url=settings.openrouter_base_url,
+                api_key=openrouter_key,
+                model=openrouter_model,
+                messages=reinforced,
+                cache_prefix=cache_prefix,
+                provider="OpenRouter",
+                extra_headers={
+                    "HTTP-Referer": settings.app_url,
+                    "X-Title": settings.app_name,
+                },
+                max_tokens=max_tokens,
+                temperature=0.0,
+            )
+            parsed = _parse_json_response(raw)
+            _record_successful_call(
+                model=openrouter_model,
+                tier=tier,
+                provider="openrouter",
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                node_name=node_name,
+                rfp_id=rfp_id,
+                run_id=run_id,
+            )
+            logger.info(
+                "Recovered a non-JSON/refused LLM response via reinforcement "
+                "retry (node=%s)",
+                node_name,
+            )
+            return parsed, "openrouter"
+        except Exception as exc:  # noqa: BLE001 — fall through to the raise below
+            errors.append(f"reinforcement retry failed: {str(exc)[:200]}")
 
     raise LlmError(
         "All configured LLM providers failed: " + "; ".join(errors),
@@ -1220,6 +1286,39 @@ def _strip_code_fence(text: str) -> str:
     return stripped.strip()
 
 
+def _find_balanced_json_end(text: str, start: int) -> int | None:
+    """Index just past the closing brace/bracket matching ``text[start]``.
+
+    None when the opening delimiter never closes within the string (the
+    truncated-mid-generation case — leave that to ``_close_truncated_json``).
+    """
+    in_string = False
+    escape = False
+    stack: list[str] = []
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if not stack:
+                return None
+            stack.pop()
+            if not stack:
+                return i + 1
+    return None
+
+
 def _extract_json_from_text(text: str) -> str:
     """Extract JSON from text that may have explanatory prefixes or markdown formatting."""
     # Strip fences FIRST. If we slice from `{` before stripping, a trailing ``` remains
@@ -1230,9 +1329,20 @@ def _extract_json_from_text(text: str) -> str:
     bracket_start = text.find("[")
 
     if brace_start >= 0 and (bracket_start < 0 or brace_start < bracket_start):
-        text = text[brace_start:]
+        start = brace_start
     elif bracket_start >= 0:
-        text = text[bracket_start:]
+        start = bracket_start
+    else:
+        return _strip_code_fence(text)
+
+    # A complete, well-formed JSON value can be followed by trailing prose —
+    # a model that answers the schema AND then keeps talking (e.g. adding an
+    # unsolicited clarifying question after the JSON). json.loads rejects
+    # "Extra data" after a valid value, so isolate just the balanced span
+    # when one closes; otherwise keep the old to-end-of-string slice so the
+    # truncated-mid-generation repair path still gets a chance.
+    end = _find_balanced_json_end(text, start)
+    text = text[start:end] if end is not None else text[start:]
 
     return _strip_code_fence(text)
 

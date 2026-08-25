@@ -126,5 +126,150 @@ class StructureStubDraftTests(unittest.TestCase):
         self.assertFalse(section_needs_presubmit_fill(sec))
 
 
+class RestoreEmptiedSectionsTests(unittest.TestCase):
+    """Complete & Clean must never leave a drafted section as an empty stub."""
+
+    FULL = (
+        "Kitsap County needs a differentiated tourism brand. Our plan: A. Vision "
+        "positions the county as the Pacific gateway; B. Market Analysis shows 40% "
+        "of visitors originate in the Seattle metro; C. KPI Targets grow lodging "
+        "tax revenue 12% year over year. We run phased campaigns across paid, "
+        "owned, and earned channels with measurable outcomes reported each quarter "
+        "and a countywide events calendar with direct referral linking."
+    )
+    STUB = (
+        "## Brand Marketing Plan\n\n"
+        "[MANUAL FILL: Draft this RFP-required section — Brand Marketing Plan]\n\n"
+        "RFP-required outline:\n- A. Vision\n- B. Market Analysis\n"
+    )
+
+    def _draft(self, sections):
+        from app.models.proposal import ProposalDraft
+
+        return ProposalDraft(rfpId="r", updatedAt="t", sections=sections)
+
+    def _prior(self):
+        return [
+            ProposalSection(
+                id="s4", title="Brand Marketing Plan", content=self.FULL, status="generated"
+            )
+        ]
+
+    def test_restores_by_id(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            restore_sections_emptied_by_scan,
+        )
+
+        draft = self._draft(
+            [ProposalSection(id="s4", title="Brand Marketing Plan", content=self.STUB, status="generated")]
+        )
+        out, logs = restore_sections_emptied_by_scan(draft, self._prior())
+        self.assertEqual(out.sections[0].content, self.FULL)
+        self.assertEqual(len(logs), 1)
+
+    def test_restores_by_title_when_id_renamed(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            restore_sections_emptied_by_scan,
+        )
+
+        draft = self._draft(
+            [
+                ProposalSection(
+                    id="rfp-structure-brand-marketing-plan",
+                    title="Brand Marketing Plan",
+                    content=self.STUB,
+                    status="generated",
+                )
+            ]
+        )
+        out, logs = restore_sections_emptied_by_scan(draft, self._prior())
+        self.assertEqual(out.sections[0].content, self.FULL)
+
+    def test_does_not_duplicate_when_prior_still_present(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            restore_sections_emptied_by_scan,
+        )
+
+        draft = self._draft(
+            [
+                ProposalSection(id="s4", title="Brand Marketing Plan", content=self.FULL, status="generated"),
+                ProposalSection(
+                    id="rfp-structure-brand-marketing-plan",
+                    title="Brand Marketing Plan",
+                    content=self.STUB,
+                    status="generated",
+                ),
+            ]
+        )
+        out, logs = restore_sections_emptied_by_scan(draft, self._prior())
+        # The kept full tab must not be cloned into the twin stub.
+        self.assertEqual(out.sections[1].content, self.STUB)
+        self.assertEqual(logs, [])
+
+    def test_leaves_substantial_result_untouched(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            restore_sections_emptied_by_scan,
+        )
+
+        restructured = self.FULL + " Additional differentiation detail for Kitsap."
+        draft = self._draft(
+            [ProposalSection(id="s4", title="Brand Marketing Plan", content=restructured, status="generated")]
+        )
+        out, logs = restore_sections_emptied_by_scan(draft, self._prior())
+        self.assertEqual(out.sections[0].content, restructured)
+        self.assertEqual(logs, [])
+
+    def test_restores_good_section_overwritten_by_bio_stub(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            restore_sections_emptied_by_scan,
+        )
+
+        bio_stub = (
+            "## Brand Marketing Plan\n\n"
+            "**Role on this engagement:** Marketing Lead\n\n"
+            "[DESIGNER NOTE: Insert approved bio PDF — 04_Bio_Someone.pdf]"
+        )
+        draft = self._draft(
+            [ProposalSection(id="s4", title="Brand Marketing Plan", content=bio_stub, status="generated")]
+        )
+        out, logs = restore_sections_emptied_by_scan(draft, self._prior())
+        self.assertEqual(out.sections[0].content, self.FULL)
+        self.assertEqual(len(logs), 1)
+
+    def test_real_section2_bio_tab_is_never_reverted(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            restore_sections_emptied_by_scan,
+        )
+
+        bio_stub = (
+            "## 2.1 — Jane Doe\n\n**Role on this engagement:** Designer\n\n"
+            "[DESIGNER NOTE: Insert approved bio PDF — 04_Bio_JaneDoe.pdf]"
+        )
+        prior = [
+            ProposalSection(id="section-2-bio-jane-doe", title="2.1 — Jane Doe", content=self.FULL, status="generated")
+        ]
+        draft = self._draft(
+            [ProposalSection(id="section-2-bio-jane-doe", title="2.1 — Jane Doe", content=bio_stub, status="generated")]
+        )
+        out, logs = restore_sections_emptied_by_scan(draft, prior)
+        # A bio stub is legitimate content for a real Section 2 bio tab.
+        self.assertEqual(out.sections[0].content, bio_stub)
+        self.assertEqual(logs, [])
+
+    def test_does_not_restore_a_prior_stub(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            restore_sections_emptied_by_scan,
+        )
+
+        prior_stub = [
+            ProposalSection(id="s4", title="Brand Marketing Plan", content=self.STUB, status="generated")
+        ]
+        draft = self._draft(
+            [ProposalSection(id="s4", title="Brand Marketing Plan", content=self.STUB, status="generated")]
+        )
+        out, logs = restore_sections_emptied_by_scan(draft, prior_stub)
+        self.assertEqual(logs, [])
+
+
 if __name__ == "__main__":
     unittest.main()

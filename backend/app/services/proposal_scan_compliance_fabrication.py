@@ -245,6 +245,30 @@ async def _rebuild_bio_stub(
     ]
 
 
+def _member_in_org_roster(member: str, org_roles: dict[str, str]) -> bool:
+    """True when this candidate name is an actual team member in the org chart.
+
+    Dynamic roster membership — the org chart is parsed from THIS draft, so it
+    adapts per agency with zero hardcoded name/keyword lists. A tab whose title
+    merely *looks* like "First Last" (e.g. "Proposal Certification",
+    "Descriptive Literature", "Debarment Certification") is never a person
+    unless the roster actually lists them, which is what stops a bio stub from
+    being written into a non-bio closing section.
+    """
+    key = (member or "").casefold().strip()
+    if not key:
+        return False
+    if key in org_roles:
+        return True
+    parts = key.split()
+    if len(parts) >= 2:
+        first, last = parts[0], parts[-1]
+        for name in org_roles:
+            if first in name and last in name:
+                return True
+    return False
+
+
 async def run_compliance_fabrication_repairs(
     draft: ProposalDraft,
     *,
@@ -255,6 +279,7 @@ async def run_compliance_fabrication_repairs(
     from app.services.evidence_trust.legal_attestation_gate import (
         apply_legal_attestation_gates,
     )
+    from app.services.proposal_bio_stub import is_plausible_person_name
     from app.services.proposal_kb_fact_checker import _member_name_from_bio_section
     from app.services.proposal_scan_fact_repairs import parse_org_chart_roles
     from app.services.proposal_sections_graph import _fetch_member_bio_kb
@@ -294,9 +319,30 @@ async def run_compliance_fabrication_repairs(
         section_logs: list[str] = []
 
         if sid.startswith("section-2-bio-") and sid != "section-2-bio-placeholder":
-            member = _member_name_from_bio_section(section.title or "")
+            # A section-2-bio-* id does not guarantee the title actually names a
+            # person — an id can be minted from whatever text a prior step used
+            # (e.g. an RFP forms/acknowledgement tab). Gate the same way the
+            # else-branch already does, or a non-person title like "RFP
+            # Amendments Acknowledgement" gets treated as a bio (and produces a
+            # bogus 04_Bio_RfpAcknowledgement.pdf KB lookup).
+            candidate = _member_name_from_bio_section(section.title or "")
+            member = candidate if is_plausible_person_name(candidate) else ""
         else:
             member = person_name_from_tab_title(section.title or "")
+        # `is_plausible_person_name` accepts any two/three Title-Case words —
+        # including document/section labels like "Proposal Certification" or
+        # "Descriptive Literature" — so it alone would let a bio stub be written
+        # into a non-bio closing section (which the misplaced-bio repair then
+        # blanks to [MANUAL FILL], the "empty section" the user sees). Confirm
+        # the candidate is an ACTUAL team member from the org chart before
+        # treating the tab as a bio. Only gate when we have a roster, so a
+        # missing/unparsed org chart never silently drops real bios.
+        if member and org_roles and not _member_in_org_roster(member, org_roles):
+            section_logs.append(
+                f"{section.title or sid}: title parses as a name but is not an "
+                "org-chart team member — not treated as a bio (no stub written)"
+            )
+            member = ""
         if member:
             org_role = org_roles.get(member.casefold(), "")
             if not org_role:

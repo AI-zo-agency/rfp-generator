@@ -701,8 +701,15 @@ async def _llm_rewrite(
         return section, False, str(raw.get("notes") or "")
     if len(content.split()) < 25 and len((section.content or "").split()) > 60:
         return section, False, "refused thin rewrite"
+    # Patch-not-rewrite guard: never accept a wholesale rewrite of a good section.
+    from app.services.proposal_section_patch import enforce_localized_edit
+
+    body, accepted, reason = enforce_localized_edit(section.content or "", content)
+    if not accepted:
+        logger.info("%s: %s (%s)", node_name, reason, section.id)
+        return section, False, reason
     return (
-        section.model_copy(update={"content": content, "status": "generated"}),
+        section.model_copy(update={"content": body, "status": "generated"}),
         True,
         str(raw.get("notes") or "grounded rewrite"),
     )

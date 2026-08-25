@@ -105,6 +105,56 @@ class ContradictionParseTests(unittest.TestCase):
 
 
 class ContradictionPassTests(unittest.IsolatedAsyncioTestCase):
+    async def test_precomputed_raw_skips_the_detection_llm_call(self) -> None:
+        """With precomputed findings (from the combined detector), the pass must
+        NOT make its own detection call — only per-finding rewrites hit the LLM."""
+        draft = ProposalDraft(
+            rfpId="rfp-x",
+            sections=[
+                ProposalSection(
+                    id="sched",
+                    title="Project Schedule",
+                    content="We deliver a full 10-week sequential plan ending Week 10. " * 20,
+                    status="generated",
+                )
+            ],
+            updatedAt="2026-08-07T00:00:00Z",
+        )
+        precomputed = {
+            "contradictions": [
+                {
+                    "sectionId": "sched",
+                    "sectionTitle": "Project Schedule",
+                    "rfpRequirement": "Launch within 4 weeks of award",
+                    "manuscriptContradiction": "10-week plan overruns window",
+                    "severity": "major",
+                    "fixAction": "verify",
+                    "rewriteInstruction": "Compress calendar",
+                }
+            ],
+            "summary": "Schedule overruns RFP window",
+        }
+        # Only ONE llm call is allowed — the rewrite. If the pass tried its own
+        # detection call, the side_effect list would be exhausted → StopIteration.
+        rewrite_fail = {"content": "short", "changed": True, "notes": "thin"}
+        mock = AsyncMock(side_effect=[(rewrite_fail, "test")])
+        with patch(
+            "app.services.proposal_scan_rfp_contradictions.llm.chat_json",
+            new=mock,
+        ), patch(
+            "app.services.proposal_scan_rfp_contradictions.llm.is_configured",
+            return_value=True,
+        ):
+            result = await run_scan_rfp_contradiction_pass(
+                draft,
+                rfp=_rfp(),
+                rfp_text="Award then launch within 4 weeks. " * 20,
+                use_llm=True,
+                precomputed_raw=precomputed,
+            )
+        self.assertEqual(mock.await_count, 1, "detection call was not skipped")
+        self.assertEqual(result.verify_tags_added, 1)
+
     async def test_prefers_rewrite_then_falls_back_to_verify(self) -> None:
         draft = ProposalDraft(
             rfpId="rfp-x",
@@ -183,17 +233,19 @@ class ContradictionPassTests(unittest.IsolatedAsyncioTestCase):
             ],
             "summary": "ok",
         }
-        fixed_body = (
-            "## Project Schedule\n\n"
-            "Delivery calendar within RFP award→launch window.\n\n"
-            "| Phase | Timing | Milestone |\n"
-            "| --- | --- | --- |\n"
-            "| Discovery | Week 1 | Kickoff |\n"
-            "| Launch | Week 3-4 | Live |\n\n"
-            "Parallel workstreams keep launch inside the RFP window."
-        )
-        rewrite_ok = {"content": fixed_body, "changed": True, "notes": "compressed"}
-        mock = AsyncMock(side_effect=[(audit, "t"), (rewrite_ok, "t")])
+        # Patch model: the fix returns a verbatim-span replacement, not a whole
+        # new section. Only the flagged span changes; the rest stays intact.
+        patch_ok = {
+            "edits": [
+                {
+                    "find": "a full 10-week sequential plan ending Week 10",
+                    "replace": "delivery within the RFP award→launch window (weeks 1–4)",
+                }
+            ],
+            "changed": True,
+            "notes": "compressed",
+        }
+        mock = AsyncMock(side_effect=[(audit, "t"), (patch_ok, "t")])
         with patch(
             "app.services.proposal_scan_rfp_contradictions.llm.chat_json",
             new=mock,

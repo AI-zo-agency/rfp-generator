@@ -12,12 +12,22 @@ from app.services.proposal_rfp_optional_claim_scrub import (
 )
 
 
-def test_strip_designer_notes() -> None:
+def test_strip_designer_notes_preserves_all_notes() -> None:
+    # The scan must NEVER vanish designer notes — they are legitimate handoffs
+    # and are removed only at export. strip_designer_notes is a preserving no-op.
     body = "Intro.\n\n[DESIGNER NOTE: render as swimlane]\n\nOutro."
     out, n = strip_designer_notes(body)
-    assert n == 1
-    assert "DESIGNER NOTE" not in out
-    assert "Intro." in out and "Outro." in out
+    assert n == 0
+    assert out == body
+    assert "[DESIGNER NOTE: render as swimlane]" in out
+
+
+def test_scrub_section_optional_claims_keeps_designer_note() -> None:
+    # Full section scrub (as Complete & Clean runs it) leaves designer notes intact.
+    body = "We deliver brand work.\n\n[DESIGNER NOTE: place hero image full-bleed]"
+    out, logs = scrub_section_optional_claims(body, rfp_text="Design services RFP.")
+    assert "[DESIGNER NOTE: place hero image full-bleed]" in out
+    assert not any("DESIGNER NOTE" in log for log in logs)
 
 
 def test_strip_auditor_echo_removes_deferred_upon_request_code() -> None:
@@ -88,6 +98,10 @@ def test_named_sub_kept_when_rfp_requires() -> None:
 
 
 def test_apply_to_draft_skips_budget_id() -> None:
+    # Uses an auditor-echo MANUAL FILL (which the scrub DOES remove) to prove the
+    # budget id is skipped. Designer notes are asserted preserved in BOTH sections
+    # — the scan must never vanish them.
+    echo = "[MANUAL FILL: Sonja — Section ends mid-sentence without terminal punctuation]"
     draft = ProposalDraft(
         rfpId="r1",
         updatedAt="t",
@@ -95,13 +109,13 @@ def test_apply_to_draft_skips_budget_id() -> None:
             ProposalSection(
                 id="s1",
                 title="Approach",
-                content="Hi.\n[DESIGNER NOTE: chart]\n",
+                content=f"Hi.\n[DESIGNER NOTE: chart]\n{echo}\n",
                 status="generated",
             ),
             ProposalSection(
                 id="budget",
                 title="Pricing",
-                content="[DESIGNER NOTE: keep table]\n$1",
+                content=f"[DESIGNER NOTE: keep table]\n{echo}\n$1",
                 status="generated",
             ),
         ],
@@ -109,9 +123,14 @@ def test_apply_to_draft_skips_budget_id() -> None:
     updated, logs = apply_optional_claim_scrub_to_draft(
         draft, rfp_text="", skip_section_ids={"budget"}
     )
-    assert any("DESIGNER NOTE" in line for line in logs)
-    assert "DESIGNER NOTE" not in (updated.sections[0].content or "")
-    assert "DESIGNER NOTE" in (updated.sections[1].content or "")
+    # Non-budget section: auditor-echo removed, but its designer note survives.
+    assert echo not in (updated.sections[0].content or "")
+    assert "[DESIGNER NOTE: chart]" in (updated.sections[0].content or "")
+    # Budget section skipped entirely: both tags untouched.
+    assert echo in (updated.sections[1].content or "")
+    assert "[DESIGNER NOTE: keep table]" in (updated.sections[1].content or "")
+    # No designer-note removal is ever logged.
+    assert not any("DESIGNER NOTE" in line for line in logs)
 
 
 def test_scrub_section_optional_claims_strips_unsupported_claim_flags() -> None:

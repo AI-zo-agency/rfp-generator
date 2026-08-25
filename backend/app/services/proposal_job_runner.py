@@ -37,6 +37,23 @@ _IN_FLIGHT: frozenset[str] = frozenset({"queued", "running"})
 
 _REDIS_KEY_PREFIX = "zo:job:"
 _REDIS_LOCK_TTL_SEC = 3600  # matches celery_app.py's task_time_limit
+# A Celery task killed WITH its worker (SIGKILL / restart) stays in state
+# "STARTED" forever — the dying worker never marks it SUCCESS/FAILURE. Past the
+# hard task_time_limit (+ margin) it cannot still be running, so a "STARTED"
+# task older than this is a zombie whose lock must be freed, not a live job.
+_ZOMBIE_STARTED_SEC = 3600 + 300
+
+
+def _iso_age_sec(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -94,7 +111,18 @@ async def _redis_get_job(rfp_id: str, lock_key: str) -> ProposalJobRecord | None
         # celery_app.py means a picked-up task moves to STARTED, not PENDING).
         record.status = "queued"
     elif state in ("STARTED", "RETRY"):
-        record.status = "running"
+        age = _iso_age_sec(record.started_at)
+        if state == "STARTED" and age is not None and age > _ZOMBIE_STARTED_SEC:
+            # Zombie: STARTED but older than the hard time limit — the worker was
+            # killed mid-run and never finished it. Report failed so the caller
+            # frees the lock and a new run for this RFP is not blocked forever.
+            record.status = "failed"
+            record.error = (
+                "Worker stopped before the job finished — stale lock cleared. "
+                "Start it again to resume."
+            )
+        else:
+            record.status = "running"
     elif state == "SUCCESS":
         record.status = "completed"
     elif state == "REVOKED":

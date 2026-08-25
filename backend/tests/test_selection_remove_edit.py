@@ -16,8 +16,54 @@ from app.services.proposal_section_editor import (
     _span_for_named_target,
     _splice_selection,
     _strip_named_mentions,
+    _trim_replacement_boundary_overlap,
     _understand_local_edit,
 )
+
+
+class TrimReplacementBoundaryOverlapTests(unittest.TestCase):
+    """A model that over-runs the selected span must not duplicate surrounding prose."""
+
+    def test_over_generated_replacement_is_trimmed_to_span(self) -> None:
+        sentence = (
+            "We will select and configure a purpose-built DMO platform, "
+            "[VERIFY: confirm preferred platform], that supports listings."
+        )
+        content = f"| **Tourism management software** | {sentence} |"
+        sel = "We will select and configure a"
+        start = content.index(sel)
+        end = start + len(sel)
+        # Model returned the WHOLE sentence for a few-word selection.
+        trimmed = _trim_replacement_boundary_overlap(
+            sentence, prefix=content[:start], suffix=content[end:]
+        )
+        spliced = _splice_selection(content, start=start, end=end, replacement=trimmed)
+        self.assertEqual(spliced, content)
+        self.assertEqual(spliced.count("purpose-built DMO platform"), 1)
+
+    def test_prefix_overlap_is_trimmed(self) -> None:
+        content = "The countywide destination plan covers the region."
+        sel = "covers the region"
+        start = content.index(sel)
+        end = start + len(sel)
+        # Model repeated the whole clause before the selection (≥ 20-char overlap).
+        replacement = "The countywide destination plan spans every community"
+        trimmed = _trim_replacement_boundary_overlap(
+            replacement, prefix=content[:start], suffix=content[end:]
+        )
+        self.assertFalse(trimmed.startswith("The countywide destination plan"))
+        self.assertEqual(trimmed, "spans every community")
+
+    def test_clean_replacement_is_left_alone(self) -> None:
+        content = "Our team of 20 people serves the county."
+        sel = "20 people"
+        start = content.index(sel)
+        end = start + len(sel)
+        replacement = "35 professionals"
+        trimmed = _trim_replacement_boundary_overlap(
+            replacement, prefix=content[:start], suffix=content[end:]
+        )
+        self.assertEqual(trimmed, replacement)
 
 
 class SelectionRemoveTests(unittest.TestCase):

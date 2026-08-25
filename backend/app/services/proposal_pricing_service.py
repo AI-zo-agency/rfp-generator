@@ -1257,14 +1257,31 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             "commission dollars — use MANUAL FILL placeholders instead."
         )
         with pipeline_step("budget_llm_json_compact_retry"):
-            raw, provider = await llm.chat_json(
-                [
-                    {"role": "system", "content": STAGE3_BUDGET_PROMPT},
-                    {"role": "user", "content": compact_user},
-                ],
-                max_tokens=6144,
-                temperature=0.2,
-            )
+            try:
+                raw, provider = await llm.chat_json(
+                    [
+                        {"role": "system", "content": STAGE3_BUDGET_PROMPT},
+                        {"role": "user", "content": compact_user},
+                    ],
+                    max_tokens=6144,
+                    temperature=0.2,
+                )
+            except LlmError as retry_exc:
+                # Model refused or returned prose ("I cannot invent dollar
+                # amounts…"). NEVER crash the budget phase on that — fall through
+                # with empty output so the rate-card skeleton below produces
+                # MANUAL FILL line items and generation continues.
+                logger.warning(
+                    "Stage 3 budget compact retry failed (%s) — using skeleton",
+                    str(retry_exc)[:200],
+                )
+                step_trace(
+                    "pricing_llm_compact_retry_refused",
+                    rfp_id=rfp_id,
+                    error_message=str(retry_exc)[:300],
+                )
+                raw = {}
+                provider = provider or "skeleton"
 
     now = datetime.now(timezone.utc).isoformat()
     flags = [
@@ -1298,15 +1315,31 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
             keys=sorted(raw.keys()) if isinstance(raw, dict) else [],
         )
         with pipeline_step("budget_llm_json_line_items_retry"):
-            raw, provider = await llm.chat_json(
-                [
-                    *messages,
-                    {"role": "assistant", "content": json.dumps(raw)},
-                    {"role": "user", "content": _LINE_ITEMS_RETRY_USER},
-                ],
-                max_tokens=8192,
-                temperature=0.2,
-            )
+            try:
+                raw, provider = await llm.chat_json(
+                    [
+                        *messages,
+                        {"role": "assistant", "content": json.dumps(raw)},
+                        {"role": "user", "content": _LINE_ITEMS_RETRY_USER},
+                    ],
+                    max_tokens=8192,
+                    temperature=0.2,
+                )
+            except LlmError as retry_exc:
+                # Model refused / returned prose instead of JSON. Do NOT crash —
+                # keep the prior raw (for confidence/extras) and let the empty
+                # line-items fall through to the rate-card skeleton below.
+                logger.warning(
+                    "Stage 3 budget line-items retry refused/failed (%s) — "
+                    "using skeleton",
+                    str(retry_exc)[:200],
+                )
+                step_trace(
+                    "pricing_llm_line_items_retry_refused",
+                    rfp_id=rfp_id,
+                    error_message=str(retry_exc)[:300],
+                )
+                raw = raw if isinstance(raw, dict) else {}
         line_items = _parse_line_items_from_raw(raw)
         used_skeleton = False
         if not line_items:

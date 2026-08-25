@@ -14,9 +14,11 @@ from typing import Any
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.models.rfp import RfpRecord
 from app.services import llm
-from app.services.proposal_scan_rfp_contradictions import (
-    STATIC_COMPANY_FACT_SECTION_IDS,
-    _manuscript_digest,
+from app.services.proposal_scan_rfp_contradictions import _manuscript_digest
+from app.services.proposal_section_patch import (
+    TARGETED_EDIT_CONTRACT as _PATCH_CONTRACT,
+    apply_targeted_edits as _apply_targeted_edits,
+    parse_targeted_edits as _parse_targeted_edits,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,12 @@ CANONICAL SOURCE (always wins):
   website, etc.
 
 IS a contradiction (flag these):
+- STANDING CORRECTION CONFLICT: a named person's title, role, or employment
+  status anywhere in the manuscript (org chart, bios, staffing tables) does not
+  match a "## STANDING CORRECTIONS" entry for that same person (e.g. a title
+  change, a retirement/departure). A correction is newer than every KB document
+  and the roster — it always wins. Severity=critical. rewrite → update to the
+  correction's wording (or remove the person if the correction says they left).
 - Contact email / phone / website in Business Information (or repeated agency-wide)
   that conflicts with companyfacts (e.g. companyfacts Email: connect@zo.agency but
   draft says info@zo.agency or hello@zo.agency)
@@ -229,18 +237,18 @@ async def _rewrite_section_for_fact_contradiction(
         "explicitly supported in the verified corpus below.\n"
         "Prefer removing fabricated claims and stating verified facts simply, or one "
         "precise [VERIFY]/[MANUAL FILL] if the corpus is silent.\n"
-        "Keep brand voice for narrative sections. Return JSON: "
-        '{"content": "full markdown", "changed": true/false, "notes": "one line"}'
+        "Keep brand voice for narrative sections.\n"
+        + _PATCH_CONTRACT
     )
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\n"
         f"Section: {section.title} (id={section.id})\n\n"
         f"Verified fact (authoritative):\n{finding.verified_fact}\n\n"
         f"Contradiction in draft:\n{finding.manuscript_contradiction}\n\n"
-        f"Rewrite instruction:\n"
+        f"Fix instruction:\n"
         f"{finding.rewrite_instruction or 'Align with verified company facts only.'}\n\n"
         f"Verified company facts corpus:\n{verified_corpus[:18_000]}\n\n"
-        f"Current draft:\n{(section.content or '')[:10_000]}"
+        f"Current section (copy `find` text verbatim from here):\n{(section.content or '')[:10_000]}"
     )
     try:
         raw, _ = await llm.chat_json(
@@ -251,20 +259,20 @@ async def _rewrite_section_for_fact_contradiction(
             rfp_id=rfp.id,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Fact contradiction rewrite failed for %s: %s", section.id, exc)
+        logger.warning("Fact contradiction patch failed for %s: %s", section.id, exc)
         return section, False, ""
     if not isinstance(raw, dict):
         return section, False, ""
-    content = str(raw.get("content") or "").strip()
-    changed = bool(raw.get("changed")) and bool(content)
-    if not changed or content == (section.content or "").strip():
-        return section, False, str(raw.get("notes") or "")
-    if len(content.split()) < 40 and len((section.content or "").split()) > 80:
-        return section, False, "refused thin rewrite"
+    new_body, applied, changed, reason = _apply_targeted_edits(
+        section.content or "", _parse_targeted_edits(raw)
+    )
+    if not changed:
+        # Never fall back to a whole-section rewrite — leave the good body intact.
+        return section, False, str(raw.get("notes") or reason)
     return (
-        section.model_copy(update={"content": content, "status": "generated"}),
+        section.model_copy(update={"content": new_body, "status": "generated"}),
         True,
-        str(raw.get("notes") or "rewrote to align with verified company facts"),
+        str(raw.get("notes") or f"patched {applied} span(s) to align with verified facts"),
     )
 
 
@@ -286,8 +294,15 @@ async def run_manuscript_fact_contradiction_pass(
     rfp: RfpRecord,
     use_llm: bool = True,
     only_rewrite_section_ids: frozenset[str] | None = None,
+    precomputed_raw: dict[str, Any] | None = None,
 ) -> ManuscriptFactContradictionResult:
-    """LLM scan for internal + KB verified-fact contradictions across all sections."""
+    """LLM scan for internal + KB verified-fact contradictions across all sections.
+
+    ``precomputed_raw`` (from the combined contradiction detector): the parsed
+    audit JSON for THIS dimension, so this pass skips its own detection LLM call
+    and goes straight to parse + apply. The verified-facts corpus is still
+    fetched — the per-finding rewrites need it.
+    """
     result = ManuscriptFactContradictionResult(draft=draft)
     if not use_llm or not llm.is_configured():
         result.logs.append("Manuscript fact-contradiction scan skipped (LLM unavailable).")
@@ -303,25 +318,28 @@ async def run_manuscript_fact_contradiction_pass(
         f"Sources: {', '.join(sources[:6])}" if sources else "No companyfacts corpus retrieved."
     )
 
-    user = (
-        f"Client: {rfp.client}\nRFP title: {rfp.title}\n\n"
-        f"VERIFIED COMPANY FACTS (01_companyfacts_verified — authoritative):\n"
-        f"{verified_corpus or '(corpus unavailable — still flag cross-section conflicts)'}\n\n"
-        f"{source_note}\n\n"
-        f"FULL MANUSCRIPT (all sections — check EVERY tab for conflicts):\n{digest}"
-    )
-    try:
-        raw, _ = await llm.chat_json(
-            [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
-            max_tokens=4096,
-            temperature=0.0,
-            node_name="manuscript_fact_contradiction_audit",
-            rfp_id=rfp.id,
+    if precomputed_raw is not None:
+        raw: Any = precomputed_raw
+    else:
+        user = (
+            f"Client: {rfp.client}\nRFP title: {rfp.title}\n\n"
+            f"VERIFIED COMPANY FACTS (01_companyfacts_verified — authoritative):\n"
+            f"{verified_corpus or '(corpus unavailable — still flag cross-section conflicts)'}\n\n"
+            f"{source_note}\n\n"
+            f"FULL MANUSCRIPT (all sections — check EVERY tab for conflicts):\n{digest}"
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Manuscript fact-contradiction audit failed: %s", exc)
-        result.logs.append(f"Manuscript fact-contradiction audit failed: {exc}")
-        return result
+        try:
+            raw, _ = await llm.chat_json(
+                [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+                max_tokens=4096,
+                temperature=0.0,
+                node_name="manuscript_fact_contradiction_audit",
+                rfp_id=rfp.id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Manuscript fact-contradiction audit failed: %s", exc)
+            result.logs.append(f"Manuscript fact-contradiction audit failed: {exc}")
+            return result
 
     if not isinstance(raw, dict):
         result.logs.append("Manuscript fact-contradiction audit returned non-object JSON.")
@@ -359,12 +377,12 @@ async def run_manuscript_fact_contradiction_pass(
         idx = by_id.get(finding.section_id)
         if idx is None:
             continue
-        if finding.section_id in STATIC_COMPANY_FACT_SECTION_IDS:
-            result.logs.append(
-                f"{finding.section_id}: skipped fact-contradiction rewrite — "
-                "protected static company-fact section (likely false positive)"
-            )
-            continue
+        # Unlike the RFP-contradiction and budget-contradiction passes, this
+        # pass exists specifically to catch stale facts on these sections
+        # (team roster titles, certifications, etc.) — including conflicts
+        # with a standing correction, which this pass's own LLM call also
+        # receives. Excluding it here would remove a real repair path
+        # (e.g. a roster title that standing corrections have since changed).
         section = sections[idx]
         if (
             (section.id or "").startswith("section-2-bio-")
