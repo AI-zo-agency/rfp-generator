@@ -27,12 +27,18 @@ from app.financial.teamwork.teamwork_repository import (
 from app.financial.teamwork.teamwork_repository import (
     get_sync_state as get_teamwork_sync_state,
 )
+from app.financial.teamwork.teamwork_repository import list_capacity_snapshots
 from app.financial.teamwork.teamwork_map import site_id_from_base_url
+from app.financial.teamwork.teamwork_insights import SOURCE as TEAMWORK_INSIGHT_SOURCE
+from app.financial.teamwork.teamwork_insights import build_evidence as build_teamwork_evidence
+from app.financial.teamwork.teamwork_insights import generate_and_store as generate_teamwork_insight
+from app.financial.teamwork import teamwork_chat
 from app.financial.teamwork.client import origin as teamwork_origin
 from app.financial.teamwork.teamwork_sync import (
     LeaseHeld as TeamworkLeaseHeld,
 )
 from app.financial.teamwork.teamwork_sync import run_sync as run_teamwork_sync
+from app.financial.teamwork.teamwork_sync import overview_from_cache
 from app.services import quickbooks_oauth
 from app.services.llm import chat_json
 from app.core.config import settings
@@ -801,6 +807,88 @@ def get_teamwork_overview():
         sorted((payload.get("errors") or {}).keys()),
     )
     return payload
+
+
+def _teamwork_insight_response(
+    overview: dict[str, Any], history: list[dict[str, Any]], row: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Join stored narrative to fresh deterministic Teamwork delivery evidence."""
+    payload = (row or {}).get("payload") or {}
+    evidence = build_teamwork_evidence(overview, history)
+    current_as_of = str(overview.get("as_of") or "")
+    return {
+        "status": "ok" if row else "empty",
+        "brief": payload.get("brief", ""),
+        "notes": payload.get("notes", {}),
+        "signals": evidence["signals"],
+        "history": evidence["history"],
+        "as_of": (row or {}).get("as_of"),
+        "generated_at": (row or {}).get("generated_at"),
+        "provider": (row or {}).get("provider"),
+        "stale": bool(row) and bool(current_as_of) and (row or {}).get("as_of") != current_as_of,
+    }
+
+
+def _teamwork_insight_inputs() -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    site_id = site_id_from_base_url(settings.teamwork_base_url)
+    overview = overview_from_cache()
+    try:
+        history = list_capacity_snapshots(site_id)
+    except Exception as exc:  # noqa: BLE001 -- history is useful, not required for current cards
+        logger.warning("operation=teamwork_ai_insights status=history_lookup_failed site_id=%s error=%s", site_id, str(exc)[:200])
+        history = []
+    return site_id, overview, history
+
+
+def _safe_get_teamwork_insight(site_id: str) -> dict[str, Any] | None:
+    try:
+        return get_latest_insight(TEAMWORK_INSIGHT_SOURCE, site_id)
+    except Exception as exc:  # noqa: BLE001 -- an unapplied AI table migration must not hide delivery cards
+        logger.warning("operation=teamwork_ai_insights status=insight_lookup_failed site_id=%s error=%s", site_id, str(exc)[:200])
+        return None
+
+
+@router.get("/teamwork/ai-insights")
+def teamwork_ai_insights():
+    site_id, overview, history = _teamwork_insight_inputs()
+    return _teamwork_insight_response(overview, history, _safe_get_teamwork_insight(site_id))
+
+
+@router.post("/teamwork/ai-insights/regenerate")
+def teamwork_ai_insights_regenerate():
+    site_id, overview, history = _teamwork_insight_inputs()
+    row = _safe_get_teamwork_insight(site_id)
+    if overview.get("sync_status") != "ok" or overview.get("errors"):
+        logger.info("operation=teamwork_ai_insights_regenerate status=skipped sync_status=%s", overview.get("sync_status"))
+        return _teamwork_insight_response(overview, history, row)
+    status = generate_teamwork_insight(site_id, overview, history, str(overview.get("as_of") or _today_iso()))
+    result = _teamwork_insight_response(overview, history, _safe_get_teamwork_insight(site_id))
+    result["generated"] = status
+    return result
+
+
+class TeamworkChatRequest(BaseModel):
+    message: str
+    thread_id: Optional[str] = None
+    focus_id: Optional[str] = None
+    messages: List[Dict[str, str]] = []
+
+
+@router.post("/teamwork/ai-insights/chat")
+async def teamwork_ai_insights_chat(payload: TeamworkChatRequest):
+    site_id, overview, history = _teamwork_insight_inputs()
+    del site_id
+    thread_id = (payload.thread_id or "").strip() or uuid.uuid4().hex
+    result = await teamwork_chat.answer(
+        thread_id=thread_id,
+        question=payload.message,
+        overview=overview,
+        capacity_history=history,
+        history=payload.messages,
+        focus_id=payload.focus_id,
+    )
+    logger.info("operation=teamwork_ai_insights_chat thread=%s guarded=%s capped=%s", thread_id, result["guarded"], result["capped"])
+    return result
 
 
 class TeamworkSyncBody(BaseModel):
