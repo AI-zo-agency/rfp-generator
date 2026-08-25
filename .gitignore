@@ -55,3 +55,6 @@ docs/superpowers/specs/2026-08-13-quickbooks-nightly-sync-design.md
 PRODUCT.md
 DESIGN.md
 .impeccable/
+
+# Claude Code worktrees (isolated workspaces)
+.claude/worktrees/

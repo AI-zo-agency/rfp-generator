@@ -675,6 +675,68 @@ def _record_successful_call(
         logger.warning("LLM cost record failed (non-fatal): %s", str(exc)[:200])
 
 
+#: Utility calls that emit queries or JSON structure, never prose about the
+#: agency — corrections have nothing to correct there, so they are skipped.
+CORRECTIONS_EXEMPT_NODES: frozenset[str] = frozenset({
+    "go_no_go_opportunity_classifier",
+    "go_no_go_evidence_query_plan",
+    "chat_manuscript_intent",
+    "manual_fill_triage",
+    "query_planner",
+    "ledger_add_query_planner",
+    "retrieval_query_planner_batch",
+})
+
+_CORRECTIONS_MARKER = "## STANDING CORRECTIONS"
+
+# Appended on a JSON-parse/refusal retry. Turns a refusal ("I cannot invent…")
+# into a valid object with placeholders, so no phase gets stuck on non-JSON.
+_JSON_REINFORCE_MSG = (
+    "CRITICAL: your previous reply was not valid JSON — it may have refused, "
+    "explained a concern, or wrapped the object in prose. Reply again with ONLY "
+    "a single valid JSON object for the requested schema. Do NOT refuse, do NOT "
+    "add any commentary or markdown, do NOT wrap it in a code fence. If a value "
+    "is unknown or you would object to inventing it, put the string "
+    '"[MANUAL FILL: what is needed]" in that field (or null for a number) instead '
+    "of refusing. Your entire response must start with { and end with }."
+)
+
+
+async def apply_standing_corrections(
+    messages: list[dict[str, str]],
+    *,
+    node_name: str | None,
+    include_corrections: bool,
+) -> list[dict[str, str]]:
+    """Append the standing-corrections block to `messages`, without mutating the input.
+
+    This is the single choke point for corrections: every model call in the
+    backend passes through `chat_json`/`chat_text`, which call this first, so
+    no knowledge-base path can answer from a superseded fact.
+    """
+    if not include_corrections:
+        return messages
+    if node_name in CORRECTIONS_EXEMPT_NODES:
+        return messages
+    if any(_CORRECTIONS_MARKER in (m.get("content") or "") for m in messages):
+        return messages
+
+    import app.services.kb_corrections as kb_corrections
+
+    block = await kb_corrections.corrections_prompt_block()
+    if not block:
+        return messages
+
+    new_messages = [dict(m) for m in messages]
+    for m in new_messages:
+        if m.get("role") == "system":
+            m["content"] = f"{m.get('content') or ''}\n\n{block}"
+            return new_messages
+
+    new_messages.insert(0, {"role": "system", "content": block})
+    return new_messages
+
+
 @_langsmith_traceable(name="llm.chat_json", run_type="chain")
 async def chat_json(
     messages: list[dict[str, str]],
@@ -686,7 +748,11 @@ async def chat_json(
     rfp_id: str | None = None,
     run_id: str | None = None,
     cache_prefix: str | Sequence[str] | None = None,
+    include_corrections: bool = True,
 ) -> tuple[dict[str, Any], str]:
+    messages = await apply_standing_corrections(
+        messages, node_name=node_name, include_corrections=include_corrections
+    )
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
     openrouter_model = resolve_llm_model(tier)
@@ -881,6 +947,60 @@ async def chat_json(
             status_code=503,
         )
 
+    # General self-heal for the "model returned prose / refused instead of JSON"
+    # failure: retry ONCE with a hard JSON-only instruction so ANY caller's phase
+    # recovers a parseable object (with MANUAL FILL placeholders) instead of
+    # failing. Only when the failures were JSON-parse failures (not network/quota)
+    # and an OpenRouter key is available — never loops (single attempt).
+    json_parse_failure = any(
+        "invalid JSON" in e or "unexpected response shape" in e or "empty content" in e
+        for e in errors
+    )
+    if (
+        json_parse_failure
+        and openrouter_key
+        and not _is_placeholder_key(openrouter_key)
+    ):
+        try:
+            started = time.perf_counter()
+            reinforced = [
+                *messages,
+                {"role": "user", "content": _JSON_REINFORCE_MSG},
+            ]
+            raw, usage = await _post_chat(
+                base_url=settings.openrouter_base_url,
+                api_key=openrouter_key,
+                model=openrouter_model,
+                messages=reinforced,
+                cache_prefix=cache_prefix,
+                provider="OpenRouter",
+                extra_headers={
+                    "HTTP-Referer": settings.app_url,
+                    "X-Title": settings.app_name,
+                },
+                max_tokens=max_tokens,
+                temperature=0.0,
+            )
+            parsed = _parse_json_response(raw)
+            _record_successful_call(
+                model=openrouter_model,
+                tier=tier,
+                provider="openrouter",
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                node_name=node_name,
+                rfp_id=rfp_id,
+                run_id=run_id,
+            )
+            logger.info(
+                "Recovered a non-JSON/refused LLM response via reinforcement "
+                "retry (node=%s)",
+                node_name,
+            )
+            return parsed, "openrouter"
+        except Exception as exc:  # noqa: BLE001 — fall through to the raise below
+            errors.append(f"reinforcement retry failed: {str(exc)[:200]}")
+
     raise LlmError(
         "All configured LLM providers failed: " + "; ".join(errors),
         status_code=502,
@@ -897,6 +1017,7 @@ async def chat_json_soft(
     rfp_id: str | None = None,
     run_id: str | None = None,
     cache_prefix: str | Sequence[str] | None = None,
+    include_corrections: bool = True,
 ) -> tuple[dict[str, Any], str]:
     """One LLM JSON call. On failure return ({}, \"failed\") — never retry, never raise."""
     try:
@@ -909,6 +1030,7 @@ async def chat_json_soft(
             rfp_id=rfp_id,
             run_id=run_id,
             cache_prefix=cache_prefix,
+            include_corrections=include_corrections,
         )
     except LlmError as exc:
         logger.warning("chat_json_soft: %s", str(exc)[:220])
@@ -926,8 +1048,12 @@ async def chat_text(
     rfp_id: str | None = None,
     run_id: str | None = None,
     cache_prefix: str | Sequence[str] | None = None,
+    include_corrections: bool = True,
 ) -> tuple[str, str]:
     """Plain-text chat completion (no JSON response format)."""
+    messages = await apply_standing_corrections(
+        messages, node_name=node_name, include_corrections=include_corrections
+    )
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
     openrouter_model = resolve_llm_model(tier)
@@ -1118,6 +1244,39 @@ def _strip_code_fence(text: str) -> str:
     return stripped.strip()
 
 
+def _find_balanced_json_end(text: str, start: int) -> int | None:
+    """Index just past the closing brace/bracket matching ``text[start]``.
+
+    None when the opening delimiter never closes within the string (the
+    truncated-mid-generation case — leave that to ``_close_truncated_json``).
+    """
+    in_string = False
+    escape = False
+    stack: list[str] = []
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if not stack:
+                return None
+            stack.pop()
+            if not stack:
+                return i + 1
+    return None
+
+
 def _extract_json_from_text(text: str) -> str:
     """Extract JSON from text that may have explanatory prefixes or markdown formatting."""
     # Strip fences FIRST. If we slice from `{` before stripping, a trailing ``` remains
@@ -1128,9 +1287,20 @@ def _extract_json_from_text(text: str) -> str:
     bracket_start = text.find("[")
 
     if brace_start >= 0 and (bracket_start < 0 or brace_start < bracket_start):
-        text = text[brace_start:]
+        start = brace_start
     elif bracket_start >= 0:
-        text = text[bracket_start:]
+        start = bracket_start
+    else:
+        return _strip_code_fence(text)
+
+    # A complete, well-formed JSON value can be followed by trailing prose —
+    # a model that answers the schema AND then keeps talking (e.g. adding an
+    # unsolicited clarifying question after the JSON). json.loads rejects
+    # "Extra data" after a valid value, so isolate just the balanced span
+    # when one closes; otherwise keep the old to-end-of-string slice so the
+    # truncated-mid-generation repair path still gets a chance.
+    end = _find_balanced_json_end(text, start)
+    text = text[start:end] if end is not None else text[start:]
 
     return _strip_code_fence(text)
 

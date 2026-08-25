@@ -148,12 +148,40 @@ function normalizeTitleEcho(text: string): string {
   while (i < plain.length && "0123456789.".includes(plain[i] ?? "")) {
     i += 1;
   }
+  plain = plain.slice(i).trim();
+  // Drop a leading separator left between the number and the label (em/en dash,
+  // hyphen, comma, colon, mid-dot) so "1.1 — Who We Are" and "# 1.1, Who We Are"
+  // normalize identically — otherwise the redundant title-echo heading is not
+  // recognized and shows as literal "#" markdown in the editor.
+  let j = 0;
+  while (j < plain.length && "—–-,:·  ".includes(plain[j] ?? "")) {
+    j += 1;
+  }
   plain = plain
-    .slice(i)
-    .trim()
+    .slice(j)
     .toLowerCase()
     .replaceAll("&", "and");
   return plain.split(" ").filter(Boolean).join(" ");
+}
+
+/**
+ * True when a SHORT section is nonetheless complete — it carries real data, not
+ * an unfilled heading stub. A contact block ("**Name**", "CEO | agency",
+ * "Phone: …", "Email: …") or a checkbox attestation has few prose words but is
+ * finished. The signal is structural (it never looks at the section title):
+ *  - no unfilled placeholder tag anywhere, AND
+ *  - at least two non-heading lines that carry real (alphanumeric) content.
+ * A genuine stub is a bare heading (0–1 content lines) or holds a placeholder,
+ * so it still reads as thin.
+ */
+function isFilledShortSection(lines: string[], body: string): boolean {
+  if (PLACEHOLDER_TAG_RE.test(body)) return false;
+  let contentLines = 0;
+  for (const line of lines) {
+    if (HEADING_RE.test(line)) continue;
+    if (/[A-Za-z0-9]/.test(line.replace(/[*_`>#|~-]/g, " "))) contentLines += 1;
+  }
+  return contentLines >= 2;
 }
 
 /** Heading-only / outline-stub RFP tabs that look "drafted" because they are non-empty. */
@@ -186,7 +214,32 @@ export function isThinUnfilledShell(
     }
     return false;
   });
-  return words.length < 12;
+  if (words.length >= 12) return false;
+  // Short but COMPLETE: a contact block / checkbox attestation has few prose
+  // words but real data and no unfilled placeholders — count it as drafted,
+  // not an unfilled heading stub.
+  if (isFilledShortSection(keep, body)) return false;
+  return true;
+}
+
+/**
+ * Drop a leading body line that only echoes the section's own title (e.g. body
+ * starting with "## 2. Foo" when the section title is "2. Foo"). Generation
+ * sometimes repeats the heading inside the body, which is redundant next to the
+ * article's own title and, in a raw-markdown editor, shows as literal "##" text.
+ */
+export function stripLeadingTitleEcho(content: string, title: string): string {
+  const titleEcho = normalizeTitleEcho(title);
+  if (!titleEcho) return content;
+  const lines = content.split("\n");
+  let start = 0;
+  while (start < lines.length && (lines[start] ?? "").trim() === "") start += 1;
+  const firstLine = (lines[start] ?? "").trim();
+  if (!firstLine.startsWith("#")) return content;
+  if (normalizeTitleEcho(firstLine) !== titleEcho) return content;
+  let end = start + 1;
+  while (end < lines.length && (lines[end] ?? "").trim() === "") end += 1;
+  return lines.slice(end).join("\n");
 }
 
 /** Sidebar / progress: RFP tabs that are only a title or draft-stub are not drafted. */

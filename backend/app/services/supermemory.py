@@ -194,6 +194,29 @@ async def list_all_container_documents(
     return all_docs
 
 
+def invalidate_document_cache() -> None:
+    """Drop the container document cache so the next list re-fetches."""
+    global _doc_list_cache
+    _doc_list_cache = None
+
+
+async def delete_document(document_id: str) -> bool:
+    """Hard-delete a document. Returns False when the endpoint is unavailable."""
+    try:
+        await _request("DELETE", f"/v3/documents/{document_id}")
+    except SupermemoryError as exc:
+        if exc.status_code in {404, 405, 501}:
+            logger.warning(
+                "Supermemory delete unsupported for %s (%s) — caller should soft-delete",
+                document_id,
+                exc.status_code,
+            )
+            return False
+        raise
+    invalidate_document_cache()
+    return True
+
+
 def is_knowledge_base_document(doc: dict[str, Any]) -> bool:
     metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
     doc_type = metadata.get("type") or doc.get("type")
@@ -523,6 +546,7 @@ def merge_chunk_first_hits(
     """Chunks first for section-level fidelity; memories only fill docs chunks missed."""
     merged: list[dict[str, Any]] = []
     by_doc: dict[str, dict[str, Any]] = {}
+    seen_chunk_texts: set[str] = set()
 
     for hit in chunk_hits:
         tagged = dict(hit)
@@ -536,7 +560,11 @@ def merge_chunk_first_hits(
             continue
         by_doc[key] = tagged
         merged.append(tagged)
+        normalized_chunk_text = " ".join(chunk_body.casefold().split())
+        if normalized_chunk_text:
+            seen_chunk_texts.add(normalized_chunk_text)
 
+    seen_memory_texts: set[str] = set()
     for hit in memory_hits:
         tagged = dict(hit)
         tagged["_retrieval_mode"] = "hybrid"
@@ -552,8 +580,15 @@ def merge_chunk_first_hits(
                             existing[score_key] = mem_val
                     except (TypeError, ValueError):
                         pass
+
+        normalized_text = " ".join(hit_text(tagged).casefold().split())
+        if not normalized_text:
             continue
-        by_doc[key] = tagged
+        if normalized_text in seen_memory_texts:
+            continue
+        if any(normalized_text in chunk_text for chunk_text in seen_chunk_texts):
+            continue
+        seen_memory_texts.add(normalized_text)
         merged.append(tagged)
 
     return merged

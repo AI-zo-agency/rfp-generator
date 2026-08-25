@@ -132,7 +132,10 @@ async def _write_one_subsection(
                         "Return ONE complete JSON object — no markdown fences. Finish every string/brace.\n"
                         + (
                             "CRITICAL for Org Structure: list EVERY person from the Master Team Roster "
-                            "with their exact title. Incomplete org charts are failures.\n"
+                            "with their exact title — EXCEPT when a STANDING CORRECTIONS entry below "
+                            "names that same person; a correction is newer than the roster document "
+                            "and always wins for that person's title/status (e.g. a title change or "
+                            "retirement). Incomplete org charts are failures.\n"
                             if sec_id == "section-1-org-structure"
                             else ""
                         )
@@ -197,6 +200,26 @@ async def _write_one_subsection(
     if sec.id != sec_id:
         sec = sec.model_copy(update={"id": sec_id, "title": title})
     content = sec.content or ""
+    # A response cut off mid-generation can still parse as valid JSON — the
+    # provider truncates the raw text, but the generic truncated-JSON repair
+    # (llm.py) closes the dangling string/braces cleanly, so no exception
+    # reaches the except-block above. The result is silently near-empty (e.g.
+    # just the "## Business Information" heading, nothing after it) instead
+    # of the visible VERIFY stub the actual-exception path already gives.
+    # Same substantiveness floor as that stub — anything shorter is content
+    # that couldn't possibly satisfy this subsection's own spec.
+    if _word_count(content) < 10:
+        logger.warning(
+            "Section 1 Builder %s returned near-empty content (%d word(s)) "
+            "despite a successful parse — likely truncated mid-generation; "
+            "VERIFY stub",
+            sec_id,
+            _word_count(content),
+        )
+        content = (
+            f"[VERIFY: complete {title} from CompanyTruth / Master Team Roster — "
+            f"generation returned incomplete content]"
+        )
     if sec_id in {"section-1-who-we-are", "section-1-business-info"}:
         content = enforce_agency_tenure(content)
     return sec.model_copy(update={"content": content, "wordCount": _word_count(content)}), provider

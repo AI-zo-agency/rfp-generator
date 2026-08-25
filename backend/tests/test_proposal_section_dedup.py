@@ -268,6 +268,33 @@ class SectionDedupTests(unittest.TestCase):
         self.assertIn("rfp-posting", kept_ids)
         self.assertTrue(any("removed" in log for log in logs))
 
+    def test_scan_coverage_gate_keeps_mega_with_unique_content(self) -> None:
+        """Complete Scan (require_full_coverage): a mega-tab that restates
+        siblings but carries its OWN unique content must be KEPT, not deleted —
+        only its duplicated prose is trimmed. Never lose already-made content."""
+        approach = "Our strategic approach anchors enrollment goals with planning and execution. " * 8
+        dash = "Our dashboards track application starts completed applications cost per application. " * 8
+        innov = "Our innovation process runs quarterly audits monthly mining and annual planning. " * 8
+        unique = "Our proprietary neuromarketing biometric sentiment methodology delivers differentiated advantage. " * 20
+        mega = (
+            "Strategic Approach to Portfolio Planning. " + approach
+            + "Sample Reporting Dashboards. " + dash
+            + "Innovation Process and Examples. " + innov
+            + unique
+        )
+        sections = [
+            _sec("mega", "Brand Marketing Plan", mega),
+            _sec("d1", "Strategic Approach to Portfolio Planning", approach),
+            _sec("e1", "Sample Reporting Dashboards", dash),
+            _sec("f1", "Innovation Process and Examples", innov),
+        ]
+        kept, logs = remove_aggregate_restatement_sections(
+            sections, require_full_coverage=True
+        )
+        kept_ids = {s.id for s in kept}
+        self.assertIn("mega", kept_ids, msg="mega with unique content must be kept")
+        self.assertTrue(any("kept" in log and "covered" in log for log in logs), msg=logs)
+
     def test_dedupe_never_drops_budget_pricing_tab(self) -> None:
         budget_body = (
             "## Proposed Investment\n\n**Professional fees: $151,000**\n\n"
@@ -398,6 +425,47 @@ class SectionDedupTests(unittest.TestCase):
         )
         self.assertTrue(any("near-duplicate" in line for line in logs))
         self.assertTrue(any("Addenda" in t for t in titles))
+
+    def test_scan_drop_clone_false_collapses_lettered_submittal_item_twins(self) -> None:
+        """A lettered RFP submittal item ('F. Innovation Process...') drafted a
+        second time without its letter prefix ('Innovation Process...') is the
+        same ask twice — must collapse via the exact-match path, same as a
+        digit-prefixed twin already does, without touching the disabled soft
+        near-dup matcher."""
+        body = (
+            "We evaluate emerging channels, audience strategies, and AI-enabled "
+            "tools on a continuous cycle, bringing proactive recommendations "
+            "with business impact projections before the client asks. "
+        ) * 6
+        sections = [
+            _sec(
+                "rfp-innovation-unlettered",
+                "Innovation Process and Examples of Strategic Recommendations "
+                "Provided to Clients",
+                body,
+            ),
+            _sec(
+                "rfp-innovation-lettered",
+                "F. Innovation Process and Examples of Strategic Recommendations "
+                "Provided to Clients",
+                body + " Extra lettered-pass paragraph.",
+            ),
+            _sec(
+                "rfp-approach",
+                "D. Strategic Approach to Portfolio Paid Media Planning and "
+                "Optimization",
+                "Annual planning cycle, quarterly strategy sessions, and "
+                "campaign-level execution framework. " * 8,
+            ),
+        ]
+        kept, logs = dedupe_manuscript_for_scan(sections, drop_clone_tabs=False)
+        titles = [s.title or "" for s in kept]
+        self.assertEqual(
+            len([t for t in titles if "Innovation Process" in t]), 1, msg=titles
+        )
+        self.assertTrue(any("near-duplicate" in line for line in logs), msg=logs)
+        # The lone lettered section with no unlettered twin must survive untouched.
+        self.assertTrue(any("Strategic Approach" in t for t in titles), msg=titles)
 
     def test_scan_drop_clone_false_keeps_soft_near_dup_toc_siblings(self) -> None:
         """Complete Scan must not merge distinct TOC tabs that merely share words."""

@@ -191,6 +191,12 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     supabase_rfp_bucket: str = "rfp-pdfs"
 
+    # Background job queue. Empty (local dev default) = proposal/Go-No-Go jobs
+    # run in-process via asyncio.create_task, same as before Celery existed.
+    # Set REDIS_URL (Railway managed Redis) to route jobs through Celery
+    # workers instead — see app/celery_app.py and proposal_job_runner.py.
+    redis_url: str = ""
+
     # JustWin Playwright sync (read from backend/.env or Railway env)
     justwin_email: str = ""
     justwin_password: str = ""
@@ -250,6 +256,10 @@ class Settings(BaseSettings):
     @property
     def teamwork_configured(self) -> bool:
         return bool(self.teamwork_base_url.strip() and self.teamwork_api_key.strip())
+
+    @property
+    def celery_enabled(self) -> bool:
+        return bool(self.redis_url.strip())
 
 
 settings = Settings()

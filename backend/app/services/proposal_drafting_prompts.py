@@ -66,6 +66,16 @@ CERTIFICATIONS & INSURANCE:
 - List only verified certifications (WBENC, WOSB)
 - For insurance: state coverage types only, use [VERIFY: amounts] for dollar figures
 - Do not add platform certifications (Google Ads, Meta, etc.) unless they appear in verified KB
+
+APPLY, NEVER NARRATE:
+These rules govern how you write; they are never content. Never write sentences about
+submission requirements, pass/fail status, what cannot be submitted, or what must be
+verified or confirmed with anyone — the proposal is read by the client, not by you and
+the model that wrote it. Apply the rule silently instead of restating it. When something
+is missing or needs a human, emit exactly one tag — [MANUAL FILL: Sonja — <what is
+needed>] or [VERIFY: <field> — <reason>] — and nothing else. Never explain the tag,
+never preface it with a sentence about why it's there, never restate the rule that
+produced it.
 """
 
 DESIGNER_READY_BLOCK = """## DESIGNER-READY FORMAT (every section — mandatory)

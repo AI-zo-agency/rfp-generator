@@ -4,6 +4,7 @@ import {
   isDeadSection,
   isManuscriptSectionDrafted,
   isSectionDrafted,
+  stripLeadingTitleEcho,
 } from "./proposal-section-health";
 // Same fixture the Python suite asserts, so the two implementations cannot drift.
 import fixture from "../../../backend/tests/fixtures/section_health_cases.json";
@@ -71,5 +72,31 @@ describe("isManuscriptSectionDrafted", () => {
           "paid media flights, and a named project manager. Kickoff follows award within ten business days.",
       }),
     ).toBe(true);
+  });
+});
+
+describe("stripLeadingTitleEcho", () => {
+  it("drops a leading heading line that only repeats the section title", () => {
+    const content =
+      "## 2. Technical Collaborative Approach - Succession and Data Portability\n\n" +
+      "We are committed to transparent, collaborative data stewardship.";
+    expect(
+      stripLeadingTitleEcho(content, "2. Technical Collaborative Approach - Succession and Data Portability"),
+    ).toBe("We are committed to transparent, collaborative data stewardship.");
+  });
+
+  it("leaves content untouched when the first line is not a heading", () => {
+    const content = "We are committed to transparent, collaborative data stewardship.";
+    expect(stripLeadingTitleEcho(content, "Data Portability")).toBe(content);
+  });
+
+  it("leaves content untouched when the heading does not match the title", () => {
+    const content = "### Data Export Capability\n\nAll data is exportable.";
+    expect(stripLeadingTitleEcho(content, "2. Technical Collaborative Approach")).toBe(content);
+  });
+
+  it("is case- and punctuation-insensitive when matching the echoed title", () => {
+    const content = "## who we are\n\nWe are zö agency.";
+    expect(stripLeadingTitleEcho(content, "Who We Are")).toBe("We are zö agency.");
   });
 });

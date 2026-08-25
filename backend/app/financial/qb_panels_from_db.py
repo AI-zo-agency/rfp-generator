@@ -223,11 +223,26 @@ def ar_aging(realm_id: str, *, as_of: date) -> dict[str, Any]:
 
         name = invoice.get("customer_name") or "Unknown"
         entry = by_client.setdefault(
-            name, {"client": name, "amount": 0.0, "invoices": 0, "oldest_days": 0},
+            name,
+            {
+                "client": name, "amount": 0.0, "invoices": 0, "oldest_days": 0,
+                "overdue_amount": 0.0, "overdue_days": 0,
+                "overdue_dollar_days": 0.0,
+            },
         )
         entry["amount"] += balance
         entry["invoices"] += 1
         entry["oldest_days"] = max(entry["oldest_days"], days)
+        # `amount` sums every open invoice while `oldest_days` keeps only the
+        # worst age, so the pair can describe invoices with nothing in common.
+        # Splitting off the overdue portion fixes half of that; the other half
+        # is that one 73-day invoice makes a client's whole overdue balance look
+        # 73 days late. Only the exact per-invoice sum settles it, and this loop
+        # is already standing on every invoice with its own age in hand.
+        if days > 0:
+            entry["overdue_amount"] += balance
+            entry["overdue_days"] = max(entry["overdue_days"], days)
+            entry["overdue_dollar_days"] += balance * days
 
     total = sum(b["amount"] for b in buckets.values())
     clients = sorted(by_client.values(), key=lambda c: -c["amount"])
@@ -251,7 +266,15 @@ def ar_aging(realm_id: str, *, as_of: date) -> dict[str, Any]:
             }
             for label, values in buckets.items()
         ],
-        "clients": [{**c, "amount": round(c["amount"], 2)} for c in clients[:12]],
+        "clients": [
+            {
+                **c,
+                "amount": round(c["amount"], 2),
+                "overdue_amount": round(c["overdue_amount"], 2),
+                "overdue_dollar_days": round(c["overdue_dollar_days"], 2),
+            }
+            for c in clients[:12]
+        ],
     }
 
 
@@ -809,11 +832,32 @@ def monthly_trend(realm_id: str, year: int) -> dict[str, Any]:
     )
     columns = _columns(payload)
     income = _find_row(payload, "Total Income") or []
+    # The same Month-summarized snapshot carries these, and pl_summary already
+    # proves both rows resolve. Carrying them per month is what lets a
+    # year-over-year margin comparison use the same months on both sides
+    # instead of eight months against twelve.
+    gross = _find_row(payload, "Gross Profit") or []
+    cost = _find_row(payload, "Total Cost of Goods Sold") or []
+
+    def _cell(row: list[Any], index: int) -> float | None:
+        return round(_money(row[index]), 2) if index < len(row) else None
+
     months = []
-    for column, value in zip(columns[1:], income[1:]):
+    for index, (column, value) in enumerate(zip(columns[1:], income[1:]), start=1):
         if column.strip().upper() == "TOTAL":
             continue
-        months.append({"month": column.strip(), "amount": round(_money(value), 2)})
+        entry: dict[str, Any] = {
+            "month": column.strip(), "amount": round(_money(value), 2),
+        }
+        # Absent rather than zero when the snapshot has no such row, so a
+        # consumer can tell "no margin data" from "margin was nil".
+        gross_profit = _cell(gross, index)
+        if gross_profit is not None:
+            entry["gross_profit"] = gross_profit
+        cost_of_services = _cell(cost, index)
+        if cost_of_services is not None:
+            entry["cost_of_services"] = cost_of_services
+        months.append(entry)
     booked = [m for m in months if m["amount"]]
     logger.info(
         "operation=monthly_trend realm_id=%s year=%s month_count=%s",

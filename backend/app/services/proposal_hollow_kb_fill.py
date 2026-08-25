@@ -6,10 +6,12 @@ fill only the planned sections. Not a bulk rewrite of every tab.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.services import llm
@@ -41,6 +43,20 @@ _MAX_KB_QUERIES = 3
 _EVIDENCE_CHARS = 14_000
 _FILL_MAX_TOKENS = 4096
 
+# Hard ceilings so this stage can never hang indefinitely — an item that blows
+# its budget is skipped (left as a gap for the next pass) rather than stalling
+# the whole "Complete & clean draft" pipeline. See proposal_fulfill_rfp_gaps.py
+# step 17 ("Pre-submit refresh"), the step this used to freeze on.
+_PLAN_CALL_TIMEOUT_SEC = 150.0
+_FILL_CALL_TIMEOUT_SEC = 150.0
+_RETRIEVAL_QUERY_TIMEOUT_SEC = 60.0
+_STEP_TIME_BUDGET_SEC = 480.0
+
+# Section fills are independent of each other (shared evidence pack fixed
+# before the loop starts) — run a few at a time instead of one-at-a-time.
+# Kept modest to stay well inside provider rate limits.
+_MAX_CONCURRENT_FILLS = 3
+
 
 @dataclass
 class MissingAnswerGap:
@@ -59,9 +75,17 @@ def _skip_section(section: ProposalSection) -> bool:
         return True
     if sid.startswith("section-3-"):
         from app.services.proposal_bio_stub import looks_like_bio_stub_body
+        from app.services.proposal_case_study_stub import (
+            looks_like_case_study_stub_body,
+        )
 
+        body = section.content or ""
+        # Our Work designer-note cards are finished, not hollow — the approved
+        # case study asset is the deliverable, so there is nothing to fill.
+        if looks_like_case_study_stub_body(body):
+            return True
         # Only treat as a gap if a bio stub wrongly landed on Our Work.
-        return not looks_like_bio_stub_body(section.content or "")
+        return not looks_like_bio_stub_body(body)
     return False
 
 
@@ -225,16 +249,19 @@ async def _plan_fills(
         f"Gap inventory:\n{inventory}"
     )
     try:
-        raw, _ = await llm.chat_json(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_tokens=2048,
-            temperature=0.1,
-            node_name="missing_answers_plan",
+        raw, _ = await asyncio.wait_for(
+            llm.chat_json(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=2048,
+                temperature=0.1,
+                node_name="missing_answers_plan",
+            ),
+            timeout=_PLAN_CALL_TIMEOUT_SEC,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — includes asyncio.TimeoutError
         logger.warning("Missing-answers planner failed: %s", exc)
         return [
             {
@@ -279,7 +306,7 @@ async def _plan_fills(
 
 
 async def _retrieve_queries(queries: list[str]) -> tuple[str, list[str]]:
-    """Run a small set of unique KB queries; merge into one evidence pack."""
+    """Run a small set of unique KB queries concurrently; merge into one evidence pack."""
     from app.services import supermemory
     from app.services.proposal_knowledge_base_tools import search_knowledge_base
 
@@ -287,25 +314,39 @@ async def _retrieve_queries(queries: list[str]) -> tuple[str, list[str]]:
         return "", []
 
     seen_q: set[str] = set()
-    blocks: list[str] = []
-    sources: list[str] = []
-    seen_src: set[str] = set()
-    total = 0
+    unique_queries: list[str] = []
     for raw_q in queries:
         q = " ".join((raw_q or "").split())
         key = q.casefold()
         if not q or key in seen_q:
             continue
         seen_q.add(key)
-        if len(seen_q) > _MAX_KB_QUERIES:
+        unique_queries.append(q)
+        if len(unique_queries) >= _MAX_KB_QUERIES:
             break
+
+    async def _fetch(q: str) -> tuple[str, str, list[str]]:
         try:
-            text, srcs = await search_knowledge_base(
-                q, limit=4, max_chars=_EVIDENCE_CHARS // _MAX_KB_QUERIES
+            text, srcs = await asyncio.wait_for(
+                search_knowledge_base(
+                    q, limit=4, max_chars=_EVIDENCE_CHARS // _MAX_KB_QUERIES
+                ),
+                timeout=_RETRIEVAL_QUERY_TIMEOUT_SEC,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — includes asyncio.TimeoutError
             logger.debug("Missing-answers KB skip (%s): %s", q[:60], exc)
-            continue
+            return q, "", []
+        return q, text, srcs
+
+    # Independent lookups — fire them together instead of one-at-a-time, then
+    # merge in the original order so truncation/dedup stays deterministic.
+    results = await asyncio.gather(*(_fetch(q) for q in unique_queries))
+
+    blocks: list[str] = []
+    sources: list[str] = []
+    seen_src: set[str] = set()
+    total = 0
+    for q, text, srcs in results:
         if not (text or "").strip():
             continue
         for src in srcs or []:
@@ -343,6 +384,10 @@ async def _llm_fill_section(
         "draft roster. Never invent clients, metrics, degrees, or contacts.\n"
         "- If evidence is thin for a field, use [VERIFY: …] — never fabricate.\n"
         "- No full resume dumps. Evaluator-ready markdown for THIS section only.\n"
+        "- These rules govern how you write; they are never content. Never write "
+        "sentences about verification requirements or your own constraints — apply "
+        "the rule silently. The tag is the only trace of a gap; never explain or "
+        "preface it.\n"
         'Return JSON: {"content": "full markdown"}'
     )
     user = (
@@ -354,16 +399,19 @@ async def _llm_fill_section(
         f"KB evidence (won proposals + bios):\n{evidence[:_EVIDENCE_CHARS]}"
     )
     try:
-        raw, _ = await llm.chat_json(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_tokens=_FILL_MAX_TOKENS,
-            temperature=0.2,
-            node_name="missing_answers_fill",
+        raw, _ = await asyncio.wait_for(
+            llm.chat_json(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=_FILL_MAX_TOKENS,
+                temperature=0.2,
+                node_name="missing_answers_fill",
+            ),
+            timeout=_FILL_CALL_TIMEOUT_SEC,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — includes asyncio.TimeoutError
         logger.warning("Missing-answers fill failed for %s: %s", section.id, exc)
         return None
     content = str((raw or {}).get("content") or "").strip()
@@ -380,6 +428,8 @@ async def fill_missing_answers_from_won_proposals(
     rfp_sector: str = "",
     rfp_text: str = "",
     rfp_id: str = "",
+    on_progress: Callable[[int, int, str], Awaitable[None]] | None = None,
+    on_cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[ProposalDraft, list[str]]:
     """Agentic pass: inventory → plan → retrieve → fill planned sections only."""
     del rfp_text
@@ -411,20 +461,70 @@ async def fill_missing_answers_from_won_proposals(
     by_id = {s.id: s for s in draft.sections}
     gap_by_id = {g.section_id: g for g in gaps}
     changed = False
-    for item in planned:
+
+    # Each item fills a different section from a shared, already-fixed evidence
+    # pack — they don't depend on one another's output, so run them concurrently
+    # (capped) instead of one-at-a-time. Same accuracy, a fraction of the wall
+    # clock time.
+    sem = asyncio.Semaphore(_MAX_CONCURRENT_FILLS)
+
+    async def _fill_one(item: dict[str, Any]) -> tuple[str, str | None]:
         sid = str(item.get("sectionId") or "")
         section = by_id.get(sid)
         if section is None:
-            continue
-        gap = gap_by_id.get(sid)
-        filled = await _llm_fill_section(
-            section=section,
-            gaps=list(item.get("gaps") or (gap.reasons if gap else [])),
-            evidence=evidence or "(Use draft roster / Our Work only.)",
-            draft_context=draft_ctx,
-            rfp_title=rfp_title,
-            rfp_client=rfp_client,
+            return sid, None
+        async with sem:
+            if on_cancel_check:
+                await on_cancel_check()
+            gap = gap_by_id.get(sid)
+            filled = await _llm_fill_section(
+                section=section,
+                gaps=list(item.get("gaps") or (gap.reasons if gap else [])),
+                evidence=evidence or "(Use draft roster / Our Work only.)",
+                draft_context=draft_ctx,
+                rfp_title=rfp_title,
+                rfp_client=rfp_client,
+            )
+            return sid, filled
+
+    tasks = {asyncio.ensure_future(_fill_one(item)): item for item in planned}
+    done, pending = await asyncio.wait(tasks.keys(), timeout=_STEP_TIME_BUDGET_SEC)
+
+    if pending:
+        for task in pending:
+            task.cancel()
+        logs.append(
+            f"Missing-answers: time budget reached — filled {len(done)}/{len(planned)}, "
+            f"{len(pending)} section(s) left for the next pass"
         )
+        logger.warning(
+            "missing_answers_fill rfp_id=%s time budget (%ss) reached — %d/%d done",
+            rfp_id or "?",
+            _STEP_TIME_BUDGET_SEC,
+            len(done),
+            len(planned),
+        )
+
+    completed = 0
+    first_exc: BaseException | None = None
+    for task in done:
+        exc = task.exception()
+        if exc is not None:
+            # A cooperative Stop request (or unexpected error) surfaced inside
+            # a concurrent fill. Remember it and keep draining the other
+            # already-finished tasks below so their fills still land on
+            # `by_id`; raised at the end, same as the old sequential loop
+            # (which also discarded this function's own in-progress work on
+            # cancellation — steps before this one are already persisted).
+            first_exc = first_exc or exc
+            continue
+        sid, filled = task.result()
+        completed += 1
+        section = by_id.get(sid)
+        if on_progress:
+            await on_progress(completed, len(planned), (section.title if section else sid) or sid)
+        if section is None:
+            continue
         if not filled or filled.strip() == (section.content or "").strip():
             logs.append(f"«{section.title}»: fill skipped")
             continue
@@ -439,6 +539,9 @@ async def fill_missing_answers_from_won_proposals(
             sid,
             sources[:4],
         )
+
+    if first_exc is not None:
+        raise first_exc
 
     if sources:
         logs.append(f"Missing-answers KB sources used: {len(sources)}")
@@ -456,6 +559,8 @@ async def fill_hollow_sections_for_pipeline(
     rfp_sector: str = "",
     rfp_text: str = "",
     rfp_id: str = "",
+    on_progress: Callable[[int, int, str], Awaitable[None]] | None = None,
+    on_cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[ProposalDraft, list[str]]:
     """Final-stage entry: free team skeleton heal, then agentic missing-answers."""
     from app.services.proposal_scan_fact_repairs import fill_hollow_project_team_from_bios
@@ -470,6 +575,8 @@ async def fill_hollow_sections_for_pipeline(
         rfp_sector=rfp_sector,
         rfp_text=rfp_text,
         rfp_id=rfp_id,
+        on_progress=on_progress,
+        on_cancel_check=on_cancel_check,
     )
     logs.extend(agent_logs)
     return draft, logs

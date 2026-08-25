@@ -10,10 +10,48 @@ from app.services.evidence_trust.legal_attestation_gate import (
     rfp_documents_likely_incomplete,
 )
 from app.services.proposal_scan_compliance_fabrication import (
+    _member_in_org_roster,
     bio_narrative_ungrounded,
     repair_bio_role_from_org_chart,
     scrub_ungrounded_named_entities,
 )
+
+
+class OrgRosterMembershipTests(unittest.TestCase):
+    """Non-person section titles must never be treated as team members, so no
+    bio stub is written into a closing/certification tab (then blanked)."""
+
+    ROSTER = {
+        "sonja anderson": "Agency Director",
+        "ella lindau": "Operations Director",
+        "rachel rice": "Development Coordinator",
+    }
+
+    def test_document_titles_are_not_team_members(self) -> None:
+        for title in (
+            "Proposal Certification",
+            "Descriptive Literature",
+            "Proposal Deliverables",
+            "Debarment Certification",
+            "Brand Marketing Plan",
+        ):
+            self.assertFalse(
+                _member_in_org_roster(title, self.ROSTER),
+                msg=f"{title!r} wrongly treated as a person",
+            )
+
+    def test_real_team_members_are_recognized(self) -> None:
+        for name in ("Sonja Anderson", "Ella Lindau", "Rachel Rice"):
+            self.assertTrue(_member_in_org_roster(name, self.ROSTER), msg=name)
+
+    def test_first_last_partial_match(self) -> None:
+        # Middle name / suffix variants still match on first + last.
+        self.assertTrue(_member_in_org_roster("Sonja B Anderson", self.ROSTER))
+
+    def test_empty_roster_matches_nothing(self) -> None:
+        # Caller skips the gate entirely when the roster is empty, so real bios
+        # are never dropped when the org chart failed to parse.
+        self.assertFalse(_member_in_org_roster("Sonja Anderson", {}))
 
 
 class ProcurementAttestationTests(unittest.TestCase):

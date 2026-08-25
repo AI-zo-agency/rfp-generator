@@ -1,18 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
   billablePct,
+  budgetPortfolio,
   buildSignals,
   buildWorkload,
   daysUntil,
   describeDue,
+  describeOverdueHeat,
   describeProjectDue,
   filterProjects,
   formatProjectDate,
+  formatUsdFromCents,
   hoursChartRows,
   hoursLabel,
   hoursNumber,
   nameList,
+  overdueByProject,
   projectIsComplete,
+  projectShortLabel,
   projectUrl,
   shortPersonName,
   taskUrl,
@@ -247,6 +252,9 @@ function project(patch: Partial<TeamworkOverview["projects"][number]> = {}) {
     tasks_completed: 1,
     tasks_overdue: 0,
     progress_pct: 20,
+    // Budgeted by default so a healthy project does not trip unbudgeted signals.
+    budget_capacity: 100_000,
+    budget_used: 0,
     ...patch,
   };
 }
@@ -271,6 +279,72 @@ describe("nameList", () => {
 
   it("summarizes the overflow", () => {
     expect(nameList(["A", "B", "C", "D", "E"])).toBe("A, B, C +2 more");
+  });
+});
+
+describe("overdueByProject", () => {
+  it("groups and sorts by overdue count", () => {
+    const ranked = overdueByProject([
+      task({ project_id: "1", project_name: "EKL 26140 Holiday" }),
+      task({ id: "51", project_id: "1", project_name: "EKL 26140 Holiday" }),
+      task({ id: "52", project_id: "2", project_name: "MPR 26148 Toolkit" }),
+    ]);
+    expect(ranked.map((row) => [row.project_name, row.count])).toEqual([
+      ["EKL 26140 Holiday", 2],
+      ["MPR 26148 Toolkit", 1],
+    ]);
+  });
+});
+
+describe("budgetPortfolio", () => {
+  it("counts budgeted, unbudgeted, and near-budget at 75%", () => {
+    const portfolio = budgetPortfolio([
+      project({ budget_capacity: 10_000_00, budget_used: 8_000_00 }),
+      project({ id: "11", name: "Open", budget_capacity: 0, budget_used: 0 }),
+      project({ id: "12", name: "Calm", budget_capacity: 5_000_00, budget_used: 1_000_00 }),
+    ]);
+    expect(portfolio.budgetedCount).toBe(2);
+    expect(portfolio.unbudgetedCount).toBe(1);
+    expect(portfolio.capacity).toBe(15_000_00);
+    expect(portfolio.used).toBe(9_000_00);
+    expect(portfolio.nearBudget.map((p) => p.name)).toEqual(["Oakdale"]);
+  });
+
+  it("does not mark near-budget when usage is low", () => {
+    const portfolio = budgetPortfolio([
+      project({ budget_capacity: 10_000_00, budget_used: 2_000_00 }),
+    ]);
+    expect(portfolio.nearBudget).toEqual([]);
+  });
+});
+
+describe("describeOverdueHeat", () => {
+  it("leads with the hottest project then oldest late", () => {
+    expect(
+      describeOverdueHeat(
+        [
+          task({ project_name: "EKL 26140 Holiday" }),
+          task({ id: "51", project_name: "EKL 26140 Holiday" }),
+        ],
+        14,
+      ),
+    ).toBe("2 on EKL · oldest 14d late");
+  });
+
+  it("returns the empty line when nothing is overdue", () => {
+    expect(describeOverdueHeat([], 0)).toBe("Nothing overdue");
+  });
+});
+
+describe("formatUsdFromCents", () => {
+  it("rounds cents to whole dollars", () => {
+    expect(formatUsdFromCents(1_155_375)).toBe("$11,554");
+  });
+});
+
+describe("projectShortLabel", () => {
+  it("keeps the leading job code", () => {
+    expect(projectShortLabel("EKL 26140 Eklektik Holiday")).toBe("EKL");
   });
 });
 
@@ -310,6 +384,58 @@ describe("buildSignals", () => {
     const oldest = signals.find((s) => s.id === "oldest-overdue");
     expect(oldest?.headline).toBe("Oldest overdue task is 29 days late");
     expect(oldest?.severity).toBe("critical");
+  });
+
+  it("flags overdue concentration on a hot project as critical", () => {
+    const overdue_tasks = Array.from({ length: 11 }, (_, i) =>
+      task({
+        id: String(50 + i),
+        project_id: "99",
+        project_name: "EKL 26140 Holiday",
+        due_date: "2026-08-10",
+      }),
+    );
+    const signals = buildSignals(overview({ overdue_tasks }), TODAY);
+    const heat = signals.find((s) => s.id === "overdue-concentration");
+    expect(heat?.severity).toBe("critical");
+    expect(heat?.headline).toBe("EKL 26140 Holiday holds 11 overdue tasks");
+  });
+
+  it("flags unbudgeted projects", () => {
+    const signals = buildSignals(
+      overview({
+        projects: [
+          project(),
+          project({ id: "11", name: "No Cap", budget_capacity: 0, budget_used: 0 }),
+        ],
+      }),
+      TODAY,
+    );
+    const unbudgeted = signals.find((s) => s.id === "unbudgeted-projects");
+    expect(unbudgeted?.severity).toBe("warn");
+    expect(unbudgeted?.figure).toBe("1");
+    expect(unbudgeted?.detail).toBe("No Cap");
+  });
+
+  it("flags near-budget projects and skips them when usage is low", () => {
+    expect(
+      buildSignals(
+        overview({
+          projects: [project({ budget_capacity: 10_000_00, budget_used: 2_000_00 })],
+        }),
+        TODAY,
+      ).some((s) => s.id === "near-budget"),
+    ).toBe(false);
+
+    const signals = buildSignals(
+      overview({
+        projects: [project({ name: "Hot", budget_capacity: 10_000_00, budget_used: 8_000_00 })],
+      }),
+      TODAY,
+    );
+    const near = signals.find((s) => s.id === "near-budget");
+    expect(near?.headline).toBe("1 project at or over 75% of budget");
+    expect(near?.detail).toBe("Hot");
   });
 
   it("flags projects past their due date that are not complete", () => {

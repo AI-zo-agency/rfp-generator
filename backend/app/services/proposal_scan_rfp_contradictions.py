@@ -17,6 +17,22 @@ from app.services import llm
 
 logger = logging.getLogger(__name__)
 
+# Section 1 Builder assembles these directly from CompanyTruth / the Master
+# Team Roster — "Facts/table only" (see SECTION_SPECS in section_1_builder.py).
+# They carry no RFP-response narrative, so they cannot logically contain the
+# kind of contradiction these audits look for (schedule overruns, budget
+# ceilings, eligibility prose). Burning a rewrite call "fixing" a false
+# positive here is pure waste and risks corrupting already-correct content
+# (the exact "Business Information wiped" failure mode seen before).
+STATIC_COMPANY_FACT_SECTION_IDS = frozenset(
+    {
+        "section-1-org-structure",
+        "section-1-business-info",
+        "section-1-certifications",
+        "section-1-insurance",
+    }
+)
+
 _SYSTEM = """You are a proposal compliance editor for zö agency.
 
 TASK: Compare the proposal MANUSCRIPT against the RFP. Find ONLY real
@@ -179,29 +195,37 @@ async def _rewrite_section_for_contradiction(
 ) -> tuple[ProposalSection, bool, str]:
     if not llm.is_configured():
         return section, False, ""
+    from app.services.proposal_section_patch import (
+        TARGETED_EDIT_CONTRACT,
+        apply_targeted_edits,
+        parse_targeted_edits,
+    )
+
     system = (
-        "You fix ONE proposal section so it no longer contradicts the RFP.\n"
+        "You fix ONE proposal section so it no longer contradicts the RFP — by "
+        "patching only the offending text, never by rewriting the section.\n"
         "Keep brand voice. Do not invent numbers, dates, signature IDs, clients, "
         "or dollars absent from the RFP excerpt or current draft.\n"
-        "If a date/figure is unknown, prefer omitting the invented column/claim "
-        "or one precise [VERIFY: specific field] — never fabricate and never fill "
-        "an Estimated Hours column with [VERIFY] in every row.\n"
-        "For schedule overruns: replace invented multi-week calendars with a short "
-        "dates/milestones table using timing within the RFP award→launch window.\n"
-        "For fee/hours contradictions: use transparent compensation / pass-through "
-        "language and Guide_Pricing labor categories when present; remove fabricated "
-        "hour grids rather than VERIFY-spamming them.\n"
-        "Return JSON: {\"content\": \"full markdown\", \"changed\": true/false, "
-        "\"notes\": \"one line\"}"
+        "If a date/figure is unknown, prefer removing the invented column/claim "
+        "(replace with empty text) or one precise [VERIFY: specific field] — never "
+        "fabricate and never fill an Estimated Hours column with [VERIFY] in every row.\n"
+        "For schedule overruns: replace the invented multi-week calendar span with a "
+        "short dates/milestones line using timing within the RFP award→launch window.\n"
+        "For fee/hours contradictions: replace the fabricated hour grid span with "
+        "transparent compensation / pass-through language and Guide_Pricing labor "
+        "categories when present.\n"
+        "These rules govern how you write; they are never content. The [VERIFY: ...] "
+        "tag is the only trace of a gap; never explain or preface it.\n"
+        + TARGETED_EDIT_CONTRACT
     )
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\n"
         f"Section: {section.title} (id={section.id})\n\n"
         f"RFP requirement:\n{finding.rfp_requirement}\n\n"
         f"Contradiction:\n{finding.manuscript_contradiction}\n\n"
-        f"Rewrite instruction:\n{finding.rewrite_instruction or 'Resolve the contradiction.'}\n\n"
+        f"Fix instruction:\n{finding.rewrite_instruction or 'Resolve the contradiction.'}\n\n"
         f"RFP excerpt:\n{rfp_excerpt[:14_000]}\n\n"
-        f"Current draft:\n{(section.content or '')[:10_000]}"
+        f"Current section (copy `find` text verbatim from here):\n{(section.content or '')[:10_000]}"
     )
     try:
         raw, _ = await llm.chat_json(
@@ -212,21 +236,22 @@ async def _rewrite_section_for_contradiction(
             rfp_id=rfp.id,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Contradiction rewrite failed for %s: %s", section.id, exc)
+        logger.warning("Contradiction patch failed for %s: %s", section.id, exc)
         return section, False, ""
     if not isinstance(raw, dict):
         return section, False, ""
-    content = str(raw.get("content") or "").strip()
-    changed = bool(raw.get("changed")) and bool(content)
-    if not changed or content == (section.content or "").strip():
-        return section, False, str(raw.get("notes") or "")
-    # Refuse empty / near-empty replacements
-    if len(content.split()) < 40 and len((section.content or "").split()) > 80:
-        return section, False, "refused thin rewrite"
+
+    edits = parse_targeted_edits(raw)
+    new_body, applied, changed, reason = apply_targeted_edits(section.content or "", edits)
+    if not changed:
+        # No verbatim span matched (or the patch was refused) — do NOT fall back
+        # to a whole-section rewrite. Leave the body untouched; the caller tags
+        # VERIFY instead, so a good section is never regenerated to fix one span.
+        return section, False, str(raw.get("notes") or reason)
     return (
-        section.model_copy(update={"content": content, "status": "generated"}),
+        section.model_copy(update={"content": new_body, "status": "generated"}),
         True,
-        str(raw.get("notes") or "rewrote to resolve RFP contradiction"),
+        str(raw.get("notes") or f"patched {applied} span(s) to resolve RFP contradiction"),
     )
 
 
@@ -248,8 +273,14 @@ async def run_scan_rfp_contradiction_pass(
     rfp: RfpRecord,
     rfp_text: str,
     use_llm: bool = True,
+    precomputed_raw: dict[str, Any] | None = None,
 ) -> RfpContradictionScanResult:
-    """LLM manuscript-vs-RFP contradiction scan + safe repairs."""
+    """LLM manuscript-vs-RFP contradiction scan + safe repairs.
+
+    ``precomputed_raw`` (from the combined contradiction detector): the parsed
+    audit JSON for THIS dimension, so this pass skips its own detection LLM call
+    and goes straight to parse + apply.
+    """
     result = RfpContradictionScanResult(draft=draft)
     if not use_llm or not llm.is_configured():
         result.logs.append("RFP contradiction scan skipped (LLM unavailable).")
@@ -260,24 +291,27 @@ async def run_scan_rfp_contradiction_pass(
         result.logs.append("RFP contradiction scan skipped (insufficient RFP/manuscript text).")
         return result
 
-    user = (
-        f"Client: {rfp.client}\nRFP title: {rfp.title}\n"
-        f"Due date: {getattr(rfp, 'due_date', None) or 'unknown'}\n\n"
-        f"RFP text (authoritative):\n{(rfp_text or '')[:40_000]}\n\n"
-        f"Manuscript digest:\n{digest}"
-    )
-    try:
-        raw, _ = await llm.chat_json(
-            [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
-            max_tokens=4096,
-            temperature=0.0,
-            node_name="scan_rfp_contradiction_audit",
-            rfp_id=rfp.id,
+    if precomputed_raw is not None:
+        raw: Any = precomputed_raw
+    else:
+        user = (
+            f"Client: {rfp.client}\nRFP title: {rfp.title}\n"
+            f"Due date: {getattr(rfp, 'due_date', None) or 'unknown'}\n\n"
+            f"RFP text (authoritative):\n{(rfp_text or '')[:40_000]}\n\n"
+            f"Manuscript digest:\n{digest}"
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("RFP contradiction audit failed: %s", exc)
-        result.logs.append(f"RFP contradiction audit failed: {exc}")
-        return result
+        try:
+            raw, _ = await llm.chat_json(
+                [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+                max_tokens=4096,
+                temperature=0.0,
+                node_name="scan_rfp_contradiction_audit",
+                rfp_id=rfp.id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("RFP contradiction audit failed: %s", exc)
+            result.logs.append(f"RFP contradiction audit failed: {exc}")
+            return result
 
     if not isinstance(raw, dict):
         result.logs.append("RFP contradiction audit returned non-object JSON.")
@@ -310,6 +344,12 @@ async def run_scan_rfp_contradiction_pass(
     for finding in findings:
         idx = by_id.get(finding.section_id)
         if idx is None:
+            continue
+        if finding.section_id in STATIC_COMPANY_FACT_SECTION_IDS:
+            result.logs.append(
+                f"{finding.section_id}: skipped rewrite — protected static "
+                "company-fact section (likely false positive)"
+            )
             continue
         section = sections[idx]
         # Always attempt a real rewrite for critical/major — tagging VERIFY is

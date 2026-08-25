@@ -309,3 +309,69 @@ def test_pl_summary_missing_net_income_is_none():
     assert result["net_income"] is None
     assert result["income"] == 1000.0
     assert result["gross_profit"] == 600.0
+
+
+def test_ar_aging_splits_the_overdue_portion_from_the_whole_balance():
+    """The OCF case: one small ancient invoice beside several fresh large ones.
+
+    `amount` and `oldest_days` alone imply the whole balance is 72 days late.
+    It is not — only $1,200 of it is.
+    """
+    invoices = [
+        {"due_date": "2026-06-13", "txn_date": "2026-05-13", "balance": 1_200,
+         "customer_name": "OCF", "is_deleted": False},
+        {"due_date": "2026-09-30", "txn_date": "2026-08-01", "balance": 10_766,
+         "customer_name": "OCF", "is_deleted": False},
+    ]
+    with patch.object(panels, "list_open_invoices", return_value=invoices):
+        result = panels.ar_aging("r1", as_of=date(2026, 8, 24))
+    ocf = next(c for c in result["clients"] if c["client"] == "OCF")
+    assert ocf["amount"] == 11_966
+    assert ocf["invoices"] == 2
+    assert ocf["oldest_days"] == 72
+    assert ocf["overdue_amount"] == 1_200
+    assert ocf["overdue_days"] == 72
+
+
+def test_ar_aging_reports_zero_overdue_for_a_client_who_is_current():
+    invoices = [
+        {"due_date": "2026-09-30", "txn_date": "2026-08-01", "balance": 5_000,
+         "customer_name": "Current Co", "is_deleted": False},
+    ]
+    with patch.object(panels, "list_open_invoices", return_value=invoices):
+        result = panels.ar_aging("r1", as_of=date(2026, 8, 24))
+    client = result["clients"][0]
+    assert client["amount"] == 5_000
+    assert client["overdue_amount"] == 0
+    assert client["overdue_days"] == 0
+
+
+def test_ar_aging_overdue_amounts_sum_to_the_panel_overdue_total():
+    invoices = [
+        {"due_date": "2026-06-13", "txn_date": "2026-05-13", "balance": 1_200,
+         "customer_name": "OCF", "is_deleted": False},
+        {"due_date": "2026-09-30", "txn_date": "2026-08-01", "balance": 10_766,
+         "customer_name": "OCF", "is_deleted": False},
+        {"due_date": "2026-08-01", "txn_date": "2026-07-01", "balance": 3_000,
+         "customer_name": "Acme", "is_deleted": False},
+    ]
+    with patch.object(panels, "list_open_invoices", return_value=invoices):
+        result = panels.ar_aging("r1", as_of=date(2026, 8, 24))
+    assert sum(c["overdue_amount"] for c in result["clients"]) == result["overdue_total"]
+
+
+def test_ar_aging_accumulates_exact_overdue_dollar_days():
+    """Two overdue invoices at different ages; the sum is not amount x oldest."""
+    invoices = [
+        {"due_date": "2026-06-12", "txn_date": "2026-05-12", "balance": 1_200,
+         "customer_name": "OCF", "is_deleted": False},
+        {"due_date": "2026-07-31", "txn_date": "2026-07-01", "balance": 1_200,
+         "customer_name": "OCF", "is_deleted": False},
+    ]
+    with patch.object(panels, "list_open_invoices", return_value=invoices):
+        result = panels.ar_aging("r1", as_of=date(2026, 8, 24))
+    ocf = result["clients"][0]
+    assert ocf["overdue_days"] == 73
+    assert ocf["overdue_dollar_days"] == 1_200 * 73 + 1_200 * 24
+    # The rectangle would have claimed 2,400 x 73 = 175,200.
+    assert ocf["overdue_dollar_days"] < 2_400 * 73

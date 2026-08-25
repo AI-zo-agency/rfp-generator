@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from datetime import datetime, timezone
+from typing import Awaitable, Callable
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.models.rfp import RfpRecord
@@ -12,6 +15,15 @@ from app.services.proposal_section_health import classify_section_health
 from app.services.proposal_section_quality import word_count
 
 logger = logging.getLogger(__name__)
+
+# Hard ceilings so this stage can never hang indefinitely — same failure shape
+# as the "Complete & clean draft" freeze (sequential per-item LLM calls with
+# no timeout and no progress reporting between items). One call per item is
+# kept sequential (not concurrent) because each iteration persists and then
+# re-fetches the draft — running them concurrently risks a lost update where
+# two calls save from stale snapshots.
+_STUB_DRAFT_CALL_TIMEOUT_SEC = 150.0
+_STUB_DRAFT_TIME_BUDGET_SEC = 480.0
 
 _SKIP_FILL_ID_PREFIXES = (
     "section-2-bio-",
@@ -72,6 +84,101 @@ def _meaningful_body(content: str, title: str) -> str:
     return "\n".join(keep)
 
 
+def restore_sections_emptied_by_scan(
+    draft: ProposalDraft,
+    prior_sections: "list[ProposalSection] | None",
+    *,
+    min_prior_words: int = 30,
+) -> tuple[ProposalDraft, list[str]]:
+    """Hard invariant: Complete & Clean must NEVER reduce a section that held real
+    drafted content to a bare RFP-outline stub / empty body.
+
+    Any internal step (structure reframe, dedup, ledger, compact) that leaves a
+    previously-substantial section hollow is undone here by restoring the exact
+    pre-scan body from the Before-Scan snapshot. Matching is by section id first;
+    when the id no longer exists (a step replaced the tab with a fresh stub id)
+    it falls back to the normalized title, but only when the prior tab is not
+    still present under its own id — so a legitimately kept tab is never cloned.
+
+    Only fires when the current tab is genuinely hollow AND the prior tab was
+    substantial and not itself a stub, so real restructures are left untouched.
+    """
+    if not prior_sections:
+        return draft, []
+
+    def _substantial(section: ProposalSection) -> bool:
+        return (
+            word_count(section.content or "") >= min_prior_words
+            and not section_is_rfp_draft_stub(section)
+        )
+
+    prior_by_id: dict[str, ProposalSection] = {}
+    prior_by_title: dict[str, ProposalSection] = {}
+    for prior in prior_sections:
+        if not _substantial(prior):
+            continue
+        if prior.id:
+            prior_by_id[prior.id] = prior
+        norm = _normalize_title_echo(prior.title or "")
+        if norm and norm not in prior_by_title:
+            prior_by_title[norm] = prior
+
+    from app.services.proposal_bio_stub import (
+        is_section2_bio_id,
+        looks_like_bio_stub_body,
+    )
+
+    def _degraded(section: ProposalSection, prior: ProposalSection) -> bool:
+        """The scan turned a good section into a stub / bio-stub / empty body."""
+        body = section.content or ""
+        if not body.strip():
+            return True
+        if section_is_rfp_draft_stub(section):
+            return True
+        # A non-bio tab whose body was replaced with a team-bio stub — the exact
+        # corruption the UI note describes ("wrongly replaced this body with a
+        # team bio stub"). Never applies to the real Section 2 bio tabs.
+        if (
+            not is_section2_bio_id(section.id or "")
+            and looks_like_bio_stub_body(body)
+            and not looks_like_bio_stub_body(prior.content or "")
+        ):
+            return True
+        return False
+
+    current_ids = {s.id for s in draft.sections if s.id}
+    logs: list[str] = []
+    changed = False
+    new_sections: list[ProposalSection] = []
+    for section in draft.sections:
+        # Find this tab's substantial pre-scan version (by id, then by title when
+        # a step renamed the id — but only if the prior isn't still present under
+        # its own id, else we'd duplicate a kept section's content).
+        prior = prior_by_id.get(section.id)
+        if prior is None:
+            cand = prior_by_title.get(_normalize_title_echo(section.title or ""))
+            if cand is not None and cand.id not in current_ids:
+                prior = cand
+        if prior is not None and _degraded(section, prior):
+            section = section.model_copy(
+                update={
+                    "content": prior.content or "",
+                    "status": prior.status or section.status or "generated",
+                }
+            )
+            logs.append(
+                f"Restored “{section.title or section.id}” — Complete & Clean had "
+                "reduced a good section to a stub / bio-stub / empty body; pre-scan "
+                "content kept."
+            )
+            changed = True
+        new_sections.append(section)
+
+    if not changed:
+        return draft, []
+    return draft.model_copy(update={"sections": new_sections}), logs
+
+
 def _is_thin_unfilled_shell(section: ProposalSection) -> bool:
     if not (section.content or "").strip():
         return True
@@ -87,7 +194,19 @@ def section_needs_presubmit_fill(section: ProposalSection) -> bool:
     """
     sid = section.id or ""
     if sid.startswith("section-1-"):
-        return False
+        # Section 1 is otherwise fully protected from this pass (real content
+        # here must never get rewritten) — but that same protection used to
+        # mean a genuinely broken Section 1 subsection (e.g. initial
+        # generation truncated to just the heading, no body at all — see
+        # company_qualification/agents/section_1_builder.py's own
+        # near-empty-content guard) could never be repaired here either, no
+        # matter how many times this pass ran. Only let a section-1-* id
+        # through when it's genuinely hollow (the same bar
+        # _is_thin_unfilled_shell already uses), never the broader
+        # classify_section_health check below — that one exists to catch
+        # subtler quality issues in RFP-specific tabs and is too aggressive
+        # to run against protected static content.
+        return _is_thin_unfilled_shell(section)
     if sid.startswith(_SKIP_FILL_ID_PREFIXES):
         return False
     try:
@@ -147,6 +266,7 @@ async def draft_rfp_structure_stubs(
     rfp_id: str,
     rfp: RfpRecord,
     max_sections: int = 8,
+    on_progress: Callable[[int, int, str], Awaitable[None]] | None = None,
 ) -> tuple[ProposalDraft, list[str]]:
     """LLM-draft leftover empty / heading-only RFP tabs. One call each.
 
@@ -159,21 +279,38 @@ async def draft_rfp_structure_stubs(
     logs: list[str] = []
     sections = list(draft.sections)
     drafted = 0
-    for section in sections:
-        if drafted >= max_sections:
+    pending = [s for s in sections if section_needs_presubmit_fill(s)][:max_sections]
+    deadline = time.monotonic() + _STUB_DRAFT_TIME_BUDGET_SEC
+    for idx, section in enumerate(pending, start=1):
+        if time.monotonic() > deadline:
+            remaining = len(pending) - idx + 1
+            logs.append(
+                f"Stub draft: time budget reached — attempted {idx - 1}/{len(pending)}, "
+                f"{remaining} section(s) left for the next pass"
+            )
+            logger.warning(
+                "draft_rfp_structure_stubs rfp_id=%s time budget (%ss) reached at item %d/%d",
+                rfp_id,
+                _STUB_DRAFT_TIME_BUDGET_SEC,
+                idx,
+                len(pending),
+            )
             break
-        if not section_needs_presubmit_fill(section):
-            continue
+        if on_progress:
+            await on_progress(idx, len(pending), section.title or section.id)
         message = _stub_draft_brief(section)
         try:
             _updated, updated_draft, _research, _provider, detail, _ok, _extra = (
-                await improve_proposal_section(
-                    rfp_id,
-                    section.id,
-                    message,
-                    persist=False,
-                    proposal_wide=False,
-                    improve_section_pinned=True,
+                await asyncio.wait_for(
+                    improve_proposal_section(
+                        rfp_id,
+                        section.id,
+                        message,
+                        persist=False,
+                        proposal_wide=False,
+                        improve_section_pinned=True,
+                    ),
+                    timeout=_STUB_DRAFT_CALL_TIMEOUT_SEC,
                 )
             )
             after = next(

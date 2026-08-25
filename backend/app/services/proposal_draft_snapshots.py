@@ -136,6 +136,41 @@ def push_before_structure_change_snapshot(
     )
 
 
+def latest_before_scan_sections(draft: ProposalDraft) -> list | None:
+    """Sections from the most recent 'Before Scan RFP' snapshot (pre-scan state).
+
+    Used to enforce the invariant that Complete & Clean never empties a section
+    that had real content — the guard restores from this pre-scan copy.
+    """
+    for snap in reversed(draft.snapshots or []):
+        if "before scan" in (snap.label or "").casefold() and snap.sections:
+            return list(snap.sections)
+    return None
+
+
+def prior_sections_for_restore(draft: ProposalDraft) -> list:
+    """All snapshot sections, newest-first, for the empty-section restore guard.
+
+    The latest 'Before Scan RFP' snapshot alone is not enough for RECOVERY: if a
+    prior (e.g. zombie) run already emptied a section, the newest pre-scan
+    snapshot itself holds the empty stub. Flattening every snapshot newest-first
+    lets the guard fall back to the most recent snapshot that still carries real
+    content for that section — before-scan snapshots are ordered first so a true
+    pre-scan copy always wins a same-recency tie.
+    """
+    snaps = list(draft.snapshots or [])
+    before_scan = [
+        s for s in reversed(snaps) if "before scan" in (s.label or "").casefold()
+    ]
+    others = [
+        s for s in reversed(snaps) if "before scan" not in (s.label or "").casefold()
+    ]
+    out: list = []
+    for snap in [*before_scan, *others]:
+        out.extend(snap.sections or [])
+    return out
+
+
 def attach_scan_summary_to_latest_before_scan(
     draft: ProposalDraft,
     report: dict[str, Any],

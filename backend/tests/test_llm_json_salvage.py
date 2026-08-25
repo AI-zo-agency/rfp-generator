@@ -59,6 +59,46 @@ and no insurance prose",
         self.assertIn("a | b |", out["replacement"])
         self.assertIn("c | d |", out["replacement"])
 
+    def test_parses_complete_json_followed_by_trailing_chatty_prose(self) -> None:
+        """A model can answer the schema in full AND then keep talking (e.g. an
+        unsolicited clarifying question after the JSON) — the complete, valid
+        JSON object must still parse, ignoring everything after it closes."""
+        raw = '''```json
+{
+  "understoodAsk": "User wants a general improvement with no specifics.",
+  "mode": "patch",
+  "patches": [],
+  "kbQueries": []
+}
+```
+
+---
+
+**I need more detail to help you effectively.**
+
+Please clarify what improvements you would like:
+- Content gaps?
+- Clarity issues?
+'''
+        parsed = _parse_json_response(raw)
+        self.assertEqual(parsed["mode"], "patch")
+        self.assertEqual(parsed["patches"], [])
+        self.assertEqual(parsed["kbQueries"], [])
+
+    def test_still_repairs_genuinely_truncated_json(self) -> None:
+        """Trailing-content isolation must not break the existing mid-generation
+        truncation repair — a response with no closing brace at all still
+        needs the LIFO-close fallback."""
+        raw = '''```json
+{
+  "issues": [
+    {
+      "code": "other",
+      "summary": "cut off mid'''
+        parsed = _parse_json_response(raw)
+        self.assertIn("issues", parsed)
+        self.assertEqual(parsed["issues"][0]["code"], "other")
+
 
 if __name__ == "__main__":
     unittest.main()

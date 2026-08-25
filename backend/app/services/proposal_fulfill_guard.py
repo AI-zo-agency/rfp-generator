@@ -24,8 +24,17 @@ def fulfill_scan_preserves_section(section: ProposalSection) -> bool:
         return False
     if is_team_bio_section(section.id) and len(body) >= _MIN_BIO_CHARS:
         return True
-    if is_case_study_section(section.id) and len(body) >= _MIN_CASE_STUDY_CHARS:
-        return True
+    if is_case_study_section(section.id):
+        from app.services.proposal_case_study_stub import (
+            looks_like_case_study_stub_body,
+        )
+
+        # An Our Work designer-note card is complete at any length — the length
+        # floor exists to catch half-drafted narratives, and a stub is neither.
+        if looks_like_case_study_stub_body(body):
+            return True
+        if len(body) >= _MIN_CASE_STUDY_CHARS:
+            return True
     return False
 
 

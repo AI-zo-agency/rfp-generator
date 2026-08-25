@@ -18,9 +18,11 @@ import { getManuscriptSections, normalizeOutlineSectionOrder, resolveManuscriptJ
 import {
   isManuscriptSectionDrafted,
   isSectionDrafted,
+  stripLeadingTitleEcho,
 } from "@/lib/proposal-section-health";
 import { buildScanRfpSummary, type ScanRfpFulfillReport, type ScanRfpSummary } from "@/lib/proposal-scan-report";
 import { ScanRfpSummaryBanner } from "@/components/ScanRfpSummaryBanner";
+import { QueuedJobBanner } from "@/components/QueuedJobBanner";
 import {
   buildPipelineStatus,
   fetchProposalDraft,
@@ -61,12 +63,14 @@ import { MarkdownReportBody, stripManuscriptDisplayArtifacts } from "./MarkdownR
 import { DraftSectionEditor, type SectionRevisionRecord } from "./DraftSectionEditor";
 import {
   ProposalSectionChatPanel,
+  buildSectionPinReference,
   type SectionChatMessage,
   type SectionChatReference,
 } from "./ProposalSectionChatPanel";
 import { SectionRevisionCompare } from "./SectionRevisionCompare";
 import { ProposalManualFlagsPanel } from "./ProposalManualFlagsPanel";
-import { ProposalPipelineProgressStrip } from "./ProposalPipelineProgressStrip";
+import { ProposalReviewToolbar } from "./ProposalReviewToolbar";
+import { ProposalWorkflowRail } from "./ProposalWorkflowRail";
 import { ProposalVersionCompare } from "./ProposalVersionCompare";
 import { KeyPersonasBox } from "./KeyPersonasBox";
 import { KeyPersonasModal } from "./KeyPersonasModal";
@@ -257,6 +261,10 @@ function ProposalDraftWorkspaceInner({
   const [isRefiningBudget, setIsRefiningBudget] = useState(false);
   const [isFinalizingGaps, setIsFinalizingGaps] = useState(false);
   const [isFulfillingRfpGaps, setIsFulfillingRfpGaps] = useState(false);
+  // True from the moment Stop is clicked until the backend + Celery task have
+  // actually stopped (job no longer in-flight). Keeps a "Stopping…" state up so
+  // the user knows the request is in progress, not instantly done.
+  const [isStopping, setIsStopping] = useState(false);
   const [isRestoringSnapshot, setIsRestoringSnapshot] = useState(false);
   const [restoreSnapshotAt, setRestoreSnapshotAt] = useState("");
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
@@ -272,6 +280,11 @@ function ProposalDraftWorkspaceInner({
   const [presubmitReview, setPresubmitReview] = useState<PreSubmitReview | null>(null);
   const [showManualFlags, setShowManualFlags] = useState(false);
   const [highlightedSectionId, setHighlightedSectionId] = useState<string | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const [reviewSectionQuery, setReviewSectionQuery] = useState("");
+  const [reviewFocusMode, setReviewFocusMode] = useState(false);
+  const activeSectionTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const compareDetailsRef = useRef<HTMLDetailsElement | null>(null);
   const [activeSubmissionFlag, setActiveSubmissionFlag] = useState<ManualFillFlag | null>(null);
   const [budget, setBudget] = useState<ProposalBudget | null>(null);
   const [research, setResearch] = useState<ProposalResearch | null>(null);
@@ -287,6 +300,13 @@ function ProposalDraftWorkspaceInner({
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
   const [scanSummary, setScanSummary] = useState<ScanRfpSummary | null>(null);
   const [scanSummaryExpanded, setScanSummaryExpanded] = useState(false);
+  // True right after a Complete & clean run finishes successfully, so the UI can
+  // confirm completion and disable the button until the draft actually changes
+  // (avoids a needless re-run). Cleared on any edit / new scan / stop.
+  const [fulfillJustCompleted, setFulfillJustCompleted] = useState(false);
+  // Lets the user dismiss the server-derived "finished successfully" banner
+  // (the one that shows after a refresh). Reset when a new scan starts.
+  const [completionBannerDismissed, setCompletionBannerDismissed] = useState(false);
   const [provider, setProvider] = useState<string | null>(null);
   const [pipelineStatus, setPipelineStatus] =
     useState<ProposalPipelineStatus | null>(null);
@@ -648,6 +668,12 @@ function ProposalDraftWorkspaceInner({
     [outline.sections]
   );
 
+  const reviewSections = useMemo(() => {
+    const q = reviewSectionQuery.trim().toLowerCase();
+    if (!q) return outline.sections;
+    return outline.sections.filter((s) => s.title.toLowerCase().includes(q));
+  }, [outline.sections, reviewSectionQuery]);
+
   const manuscriptProgress = useMemo(() => {
     const total = manuscriptSections.length;
     // Count only genuinely drafted sections. A failed section holds a short
@@ -909,7 +935,9 @@ function ProposalDraftWorkspaceInner({
     const generation = saveGenerationRef.current;
     const timer = setTimeout(() => {
       if (generation !== saveGenerationRef.current) return;
-      void saveProposalDraft(rfp.id, outline);
+      void saveProposalDraft(rfp.id, outline).then(() => {
+        if (generation === saveGenerationRef.current) setLastSavedAt(Date.now());
+      });
     }, 800);
     return () => clearTimeout(timer);
   }, [outline, rfp.id, hydrated, research, isFullProposalRunning, isFulfillingRfpGaps, draftLoadState]);
@@ -999,6 +1027,73 @@ function ProposalDraftWorkspaceInner({
     manuscriptSections[0]?.id ??
     outline.sections[0]?.id ??
     "";
+
+  // The toolbar acts on whichever manuscript textarea last had focus/selection —
+  // not just the section highlighted in the SECTIONS list — so formatting works
+  // no matter where in the document the user actually clicked or selected text.
+  const [focusedSectionId, setFocusedSectionId] = useState<string | null>(null);
+  // Raw-markdown editing is now OPT-IN: clicking a section only selects it and
+  // shows the formatted render — the raw `#`/`|` source appears only for the one
+  // section the user explicitly puts into edit mode via the "Edit source" button.
+  const [editingSectionId, setEditingSectionId] = useState<string | null>(null);
+  const sectionTextareaRefs = useRef<Map<string, HTMLTextAreaElement>>(new Map());
+
+  const activeReviewSectionId = focusedSectionId ?? assistantViewSectionId;
+
+  const activeReviewSection = useMemo(
+    () => outline.sections.find((s) => s.id === activeReviewSectionId) ?? null,
+    [outline.sections, activeReviewSectionId]
+  );
+
+  const resizeManuscriptTextarea = useCallback((el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, []);
+
+  const registerManuscriptTextarea = useCallback(
+    (sectionId: string, el: HTMLTextAreaElement | null) => {
+      if (el) {
+        sectionTextareaRefs.current.set(sectionId, el);
+        resizeManuscriptTextarea(el);
+        // Only one manuscript textarea ever exists at a time (whichever section
+        // is active) — keep the toolbar's target in sync as soon as it mounts,
+        // not only once the user explicitly focuses it.
+        activeSectionTextareaRef.current = el;
+      } else {
+        sectionTextareaRefs.current.delete(sectionId);
+      }
+    },
+    [resizeManuscriptTextarea]
+  );
+
+  const handleManuscriptTextareaFocus = (
+    sectionId: string,
+    e: React.FocusEvent<HTMLTextAreaElement>
+  ) => {
+    activeSectionTextareaRef.current = e.currentTarget;
+    setFocusedSectionId(sectionId);
+  };
+
+  const handleReviewComment = useCallback(
+    (selectedText: string | null) => {
+      if (!activeReviewSection) return;
+      selectSection(activeReviewSection.id);
+      openSectionChat(
+        buildSectionPinReference(activeReviewSection, selectedText ?? activeReviewSection.content)
+      );
+    },
+    [activeReviewSection, selectSection, openSectionChat]
+  );
+
+  // Clicking a read-only section switches it into edit mode (focusedSectionId
+  // changes) before its textarea exists yet — focus it once mounted so the
+  // user can start selecting/typing immediately, no second click needed.
+  useEffect(() => {
+    if (!focusedSectionId) return;
+    const el = sectionTextareaRefs.current.get(focusedSectionId);
+    if (el && document.activeElement !== el) el.focus();
+  }, [focusedSectionId]);
 
   const sections1to3Done = useMemo(
     () =>
@@ -1258,6 +1353,22 @@ function ProposalDraftWorkspaceInner({
     [scrollToManuscriptSection]
   );
 
+  const handleOpenLastResults = useCallback(() => {
+    if (!outline.lastFulfillReport) return;
+    setScanSummary(buildScanRfpSummary(outline.lastFulfillReport as ScanRfpFulfillReport));
+    setScanSummaryExpanded(true);
+    window.requestAnimationFrame(() => {
+      document.querySelector(".proposal-scan-v2")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  }, [outline.lastFulfillReport]);
+
+  const handleOpenCompareToSaved = useCallback(() => {
+    const details = compareDetailsRef.current;
+    if (!details) return;
+    details.open = true;
+    details.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, []);
+
   const handleLiveDraftUpdate = useCallback((draft: ProposalOutline) => {
     setHydrated(true);
     applyOutlineFromServer(draft);
@@ -1506,12 +1617,30 @@ function ProposalDraftWorkspaceInner({
   }, [research?.rfpSections, outline.sections]);
 
   const handleStopPipeline = useCallback(async () => {
+    setIsStopping(true);
     fullProposalAbortRef.current?.abort();
     fulfillAbortRef.current?.abort();
     try {
       await stopProposalGeneration(rfp.id);
     } catch {
       // Still stop UI even if stop request fails (e.g. offline).
+    }
+    // Wait for the running task to actually wind down in Celery + backend — the
+    // cancel is cooperative, so the worker finishes its current LLM call, then
+    // records the stop. Poll job-status until it is no longer in-flight so the
+    // "Stopping…" state stays up until it is genuinely stopped.
+    const stopDeadline = Date.now() + 90_000;
+    while (Date.now() < stopDeadline) {
+      let job: Awaited<ReturnType<typeof getProposalJobStatus>> = null;
+      try {
+        job = await getProposalJobStatus(rfp.id);
+      } catch {
+        break; // status unreachable — stop waiting rather than hang forever
+      }
+      if (!job || (job.status !== "running" && job.status !== "queued")) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1200));
     }
     let snapshot: Awaited<ReturnType<typeof fetchProposalDraft>> | null = null;
     try {
@@ -1561,6 +1690,7 @@ function ProposalDraftWorkspaceInner({
         : "Stopped — progress saved in the database. Use Continue proposal to resume."
     );
     setGenerateError(null);
+    setIsStopping(false);
   }, [rfp.id, applyOutlineFromServer]);
 
   const handleDesignerCompactAll = useCallback(async () => {
@@ -1611,9 +1741,42 @@ function ProposalDraftWorkspaceInner({
     }
   }, [rfp.id, isMatchingCaseStudies, anyPipelineRunning]);
 
+  // "Already cleaned" for this draft — true from this session's just-finished run
+  // (fulfillJustCompleted) OR from the server (survives refresh, same for every
+  // user; set false again the moment the draft is edited). Drives the "run
+  // again?" confirm modal and the button's done state.
+  const scanAlreadyDone =
+    fulfillJustCompleted || Boolean(pipelineStatus?.fulfillScanUpToDate);
+
+  // A Complete & clean run has completed for this RFP at some point (even if the
+  // draft was edited since). Distinguishes a genuine FIRST run from a re-run, so
+  // the confirm never wrongly says "first run" after a scan already happened.
+  const hasCompletedScanBefore =
+    fulfillJustCompleted || Boolean(pipelineStatus?.fulfillScanCompletedAt);
+
+  // A Complete & clean run that finished in the last 30 min, from the SERVER —
+  // so the "finished successfully" banner shows even after a page refresh (or
+  // for a different user), not only in the session that launched it.
+  const scanRecentlyCompleted = useMemo(() => {
+    const at = pipelineStatus?.fulfillScanCompletedAt;
+    if (!at) return false;
+    const t = Date.parse(at);
+    return Number.isFinite(t) && Date.now() - t < 30 * 60 * 1000;
+  }, [pipelineStatus?.fulfillScanCompletedAt]);
+
   const handleFulfillRfpGaps = useCallback(async () => {
     const scanOk = await confirm(
-      canResumeFulfillScan
+      scanAlreadyDone && !canResumeFulfillScan
+        ? {
+            title: "Complete & clean already ran for this draft",
+            description:
+              "This draft was just cleaned and nothing has changed since. Running it " +
+              "again will re-check the same content and cost tokens for no new changes.\n\n" +
+              "Are you sure you want to run it again?",
+            confirmLabel: "Run again anyway",
+            tone: "default",
+          }
+        : canResumeFulfillScan
         ? {
             title: "Resume complete & clean?",
             description:
@@ -1622,9 +1785,20 @@ function ProposalDraftWorkspaceInner({
             confirmLabel: "Resume",
             tone: "default",
           }
-        : {
-            title: "Complete & clean this draft?",
+        : hasCompletedScanBefore
+        ? {
+            title: "Run Complete & clean again?",
             description:
+              "Complete & clean already ran for this draft, and the draft has changed since. " +
+              "Running it again re-checks the whole proposal in the background — it does not " +
+              "wipe good sections or regenerate from scratch. A saved version is stored first.",
+            confirmLabel: "Run again",
+            tone: "default",
+          }
+        : {
+            title: "Start Complete & clean draft (first run)",
+            description:
+              "This is the first Complete & clean run for this draft — it runs in the background, so you can keep working while it finishes.\n\n" +
               "Improves this existing proposal in place — it does not wipe good sections or regenerate from scratch.\n\n" +
               "Keeps Sections 1–3 and any drafted tab that already stands up. Frozen when already correct: fee tables that add up, bios, case studies.\n\n" +
               "Then it only adds or orders what the RFP still needs:\n" +
@@ -1648,6 +1822,8 @@ function ProposalDraftWorkspaceInner({
     setGapResolveNotice(null);
     setScanSummary(null);
     setScanSummaryExpanded(false);
+    setFulfillJustCompleted(false);
+    setCompletionBannerDismissed(false);
     fulfillAbortRef.current?.abort();
     const abort = new AbortController();
     fulfillAbortRef.current = abort;
@@ -1674,8 +1850,11 @@ function ProposalDraftWorkspaceInner({
       setScanSummary(summary);
       setScanSummaryExpanded(false);
       setGapResolveNotice("Saved version available (Before complete & clean).");
+      setFulfillJustCompleted(true);
 
-      setGenerateNotice(null);
+      setGenerateNotice(
+        "Complete & clean finished successfully — this draft is up to date. The button stays disabled until you edit the draft again."
+      );
       setGenerateError(null);
       setActiveTab("content");
       window.requestAnimationFrame(() => {
@@ -1709,7 +1888,7 @@ function ProposalDraftWorkspaceInner({
       stopScanPoll();
       setIsFulfillingRfpGaps(false);
     }
-  }, [confirm, rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll, canResumeFulfillScan, fulfillResumeStep, fulfillResumeLabel]);
+  }, [confirm, rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll, canResumeFulfillScan, fulfillResumeStep, fulfillResumeLabel, scanAlreadyDone, hasCompletedScanBefore]);
 
   const handleGenerateFullProposal = useCallback(async (options?: {
     startAfterSections1to3?: boolean;
@@ -2232,6 +2411,9 @@ function ProposalDraftWorkspaceInner({
   ]);
 
   const updateSection = (id: string, patch: Partial<OutlineSection>) => {
+    // A genuine user edit means the draft no longer matches the last completed
+    // Complete & clean run — re-enable the button.
+    setFulfillJustCompleted(false);
     setOutline((prev) => ({
       ...prev,
       sections: prev.sections.map((s) =>
@@ -2242,6 +2424,7 @@ function ProposalDraftWorkspaceInner({
   };
 
   const moveSection = (id: string, direction: -1 | 1) => {
+    setFulfillJustCompleted(false);
     setOutline((prev) => {
       const index = prev.sections.findIndex((s) => s.id === id);
       const target = index + direction;
@@ -2266,6 +2449,7 @@ function ProposalDraftWorkspaceInner({
     });
     if (!ok) return;
 
+    setFulfillJustCompleted(false);
     setOutline((prev) => {
       let bio = 0;
       let work = 0;
@@ -2311,6 +2495,7 @@ function ProposalDraftWorkspaceInner({
   const addCustomSection = () => {
     const title = newSectionTitle.trim();
     if (!title) return;
+    setFulfillJustCompleted(false);
     const section = createCustomSection(title);
     setOutline((prev) => ({
       ...prev,
@@ -2482,8 +2667,42 @@ function ProposalDraftWorkspaceInner({
           </div>
         ) : null}
 
+        {/* Server-derived completion banner — shows even after a page refresh
+            (or for another user), because it comes from the checkpoint the
+            Celery task wrote, not this browser session. Only when a run finished
+            recently, is not currently running, wasn't just shown in-session, and
+            hasn't been dismissed. */}
+        {scanRecentlyCompleted &&
+        !isFulfillingRfpGaps &&
+        !fulfillJustCompleted &&
+        !completionBannerDismissed ? (
+          <div className="flex items-center gap-2 border-t border-emerald-200/80 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 md:px-4">
+            <span aria-hidden>✓</span>
+            <span className="flex-1">
+              Complete &amp; clean finished successfully — this draft is up to date.
+            </span>
+            <button
+              type="button"
+              onClick={() => setCompletionBannerDismissed(true)}
+              className="shrink-0 rounded px-1.5 py-0.5 text-emerald-700 transition-smooth hover:bg-emerald-100"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        ) : null}
+
         {(scanSummary || generateNotice || generateError) && (
           <div>
+            {/* Unmistakable success banner when a Complete & clean run just
+                finished — shown ABOVE the results summary so the user always
+                knows the run completed (vs got stuck). */}
+            {fulfillJustCompleted && generateNotice ? (
+              <div className="flex items-center gap-2 border-t border-emerald-200/80 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 md:px-4">
+                <span aria-hidden>✓</span>
+                <span>{generateNotice}</span>
+              </div>
+            ) : null}
             {scanSummary ? (
               <ScanRfpSummaryBanner
                 summary={scanSummary}
@@ -2494,7 +2713,7 @@ function ProposalDraftWorkspaceInner({
                 }}
               />
             ) : null}
-            {(generateNotice || generateError) && !scanSummary ? (
+            {(generateNotice || generateError) && !scanSummary && !fulfillJustCompleted ? (
               <div
                 className={`border-t px-3 py-1.5 text-xs md:px-4 ${
                   generateNotice
@@ -2545,14 +2764,16 @@ function ProposalDraftWorkspaceInner({
         resolveError={gapResolveError}
       />
 
-      <ProposalPipelineProgressStrip
-        checkpoint={research?.pipelineCheckpoint}
-        fullProposalProgress={effectiveFullProposalProgress}
-        isFulfillScanRunning={isFulfillingRfpGaps}
-        rfpTabProgress={rfpTabProgress}
-      />
+      {(isFullProposalRunning || isFulfillingRfpGaps) && (
+        <QueuedJobBanner rfpId={rfp.id} />
+      )}
 
-      {rfpCost ? (
+      {/* The live scan/generation workflow now lives in the right-hand RFP
+          Workflow rail (status, activity, and every step). The old full-width
+          top strip was a duplicate of it, so it is intentionally not rendered
+          here anymore — reclaiming the vertical space above the editor. */}
+
+      {rfpCost && activeTab !== "content" ? (
         <div className="border-b border-zo-border/70 bg-[#fafbfc] px-3 py-2 md:px-4">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zo-text-muted">
             <span className="font-semibold text-foreground">
@@ -2665,13 +2886,24 @@ function ProposalDraftWorkspaceInner({
                 </svg>
                 {isMatchingCaseStudies ? "Matching…" : "Match studies"}
               </button>
-              {anyPipelineRunning ? (
+              {anyPipelineRunning || isStopping ? (
                 <button
                   type="button"
                   onClick={() => void handleStopPipeline()}
-                  className="proposal-toolbar-btn proposal-toolbar-btn--danger !min-h-[2.125rem] !px-2.5 !py-1.5 !text-xs"
+                  disabled={isStopping}
+                  className="proposal-toolbar-btn proposal-toolbar-btn--danger !min-h-[2.125rem] !px-2.5 !py-1.5 !text-xs disabled:opacity-70"
                 >
-                  Stop
+                  {isStopping ? (
+                    <>
+                      <span
+                        className="mr-1.5 inline-block h-3 w-3 animate-spin rounded-full border-2 border-current/30 border-t-current align-[-1px]"
+                        aria-hidden
+                      />
+                      Stopping…
+                    </>
+                  ) : (
+                    "Stop"
+                  )}
                 </button>
               ) : null}
               <ProposalTabMoreMenu
@@ -2934,32 +3166,47 @@ function ProposalDraftWorkspaceInner({
                     !outline.sections.some((s) => s.content.trim())
                   }
                   className="zo-btn !py-2 !px-3 !text-sm disabled:opacity-40"
-                  title="Improve this draft in place. Does not rewrite Sections 1–3, healthy budgets, bios, or finished tabs."
+                  title={
+                    scanAlreadyDone && !canResumeFulfillScan
+                      ? "Complete & clean already finished for this draft. Clicking asks to confirm a re-run."
+                      : "Improve this draft in place. Does not rewrite Sections 1–3, healthy budgets, bios, or finished tabs."
+                  }
                 >
                   {isFulfillingRfpGaps
                     ? "Completing draft…"
-                    : canResumeFulfillScan
-                      ? "Continue complete & clean"
-                      : "Complete & clean draft"}
+                    : scanAlreadyDone && !canResumeFulfillScan
+                      ? "✓ Complete & clean done"
+                      : canResumeFulfillScan
+                        ? "Continue complete & clean"
+                        : "Complete & clean draft"}
                 </button>
+                {anyPipelineRunning || isStopping ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleStopPipeline()}
+                    disabled={isStopping}
+                    className="proposal-toolbar-btn proposal-toolbar-btn--danger !min-h-[2.125rem] !px-2.5 !py-1.5 !text-sm disabled:opacity-70"
+                    title="Stop the running Complete & clean / generation job"
+                  >
+                    {isStopping ? (
+                      <>
+                        <span
+                          className="mr-1.5 inline-block h-3 w-3 animate-spin rounded-full border-2 border-current/30 border-t-current align-[-1px]"
+                          aria-hidden
+                        />
+                        Stopping…
+                      </>
+                    ) : (
+                      "Stop"
+                    )}
+                  </button>
+                ) : null}
                 {outline.lastFulfillReport ? (
                   <button
                     type="button"
                     className="zo-btn secondary !py-2 !px-3 !text-sm"
                     title="Re-open the last Complete & clean results panel"
-                    onClick={() => {
-                      setScanSummary(
-                        buildScanRfpSummary(
-                          outline.lastFulfillReport as ScanRfpFulfillReport
-                        )
-                      );
-                      setScanSummaryExpanded(true);
-                      window.requestAnimationFrame(() => {
-                        document
-                          .querySelector(".proposal-scan-v2")
-                          ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-                      });
-                    }}
+                    onClick={handleOpenLastResults}
                   >
                     {scanSummary ? "Results" : "Last results"}
                   </button>
@@ -2999,7 +3246,10 @@ function ProposalDraftWorkspaceInner({
               ))}
             </div>
             {(outline.snapshots?.length ?? 0) > 0 && selectedSnapshotForCompare ? (
-              <details className="mx-3 mb-2 shrink-0 rounded-lg border border-zo-border/70 bg-[#fafbfc] px-3 py-2">
+              <details
+                ref={compareDetailsRef}
+                className="mx-3 mb-2 shrink-0 rounded-lg border border-zo-border/70 bg-[#fafbfc] px-3 py-2"
+              >
                 <summary className="cursor-pointer text-xs font-semibold text-foreground">
                   Compare to saved version ({selectedSnapshotForCompare.label})
                 </summary>
@@ -3013,35 +3263,72 @@ function ProposalDraftWorkspaceInner({
                 </div>
               </details>
             ) : null}
-            <div className="proposal-content-layout flex-1 min-h-0">
-            <nav className="proposal-on-page-nav" aria-label="Jump to section">
-              <p className="proposal-on-page-nav-label text-[10px] font-semibold text-zo-text-muted">
-                Jump to
-              </p>
-              <ul className="proposal-on-page-nav-list mt-2 space-y-0.5">
-                {manuscriptSections.map((section, index) => (
-                  <li key={section.id}>
-                    <button
-                      type="button"
-                      className={`proposal-on-page-link w-full text-left ${
-                        highlightedSectionId === section.id ||
-                        selectedSectionId === section.id
-                          ? "is-active"
-                          : ""
-                      }`}
-                      title={section.title}
-                      onClick={() => scrollToManuscriptSection(section.id)}
-                    >
-                      <span className="proposal-on-page-num">{index + 1}</span>
-                      <span className="proposal-on-page-title">
-                        {section.title}
-                        {!isSectionDrafted(section.content) ? " · …" : ""}
-                      </span>
-                    </button>
-                  </li>
-                ))}
+            <div className={`proposal-workflow-layout ${reviewFocusMode ? "is-review-focus" : ""}`}>
+            <aside className="proposal-review-sections proposal-section-list flex min-h-0 min-w-0 flex-col overflow-hidden">
+              <div className="flex shrink-0 items-center justify-between border-b border-zo-border/60 px-3 py-2.5">
+                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
+                  Sections
+                </p>
+              </div>
+              <div className="shrink-0 border-b border-zo-border/60 p-2">
+                <div className="relative w-full">
+                  <svg
+                    className="pointer-events-none absolute left-2.5 top-1/2 z-[1] h-3.5 w-3.5 -translate-y-1/2 text-zo-text-muted"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    aria-hidden
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
+                    />
+                  </svg>
+                  <input
+                    type="search"
+                    value={reviewSectionQuery}
+                    onChange={(e) => setReviewSectionQuery(e.target.value)}
+                    placeholder="Search sections…"
+                    className="zo-input w-full rounded-lg py-1.5 pl-8 pr-2.5 text-xs outline-none transition-smooth focus:border-zo-orange focus:ring-2 focus:ring-zo-orange/10 [&::-webkit-search-cancel-button]:hidden"
+                  />
+                </div>
+              </div>
+              <ul className="custom-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
+                <ProposalSectionTree
+                  sections={reviewSections}
+                  manuscriptIndexById={manuscriptIndexById}
+                  selectedSectionId={selectedSectionId}
+                  highlightedSectionId={highlightedSectionId}
+                  manualFillFlags={actionableFlags}
+                  sectionRevisions={sectionRevisions}
+                  sectionButtonRefs={sectionButtonRefs}
+                  onSelectSection={scrollToManuscriptSection}
+                  onOpenRevision={(sectionId) => {
+                    scrollToManuscriptSection(sectionId);
+                    setRevisionDrawerSectionId(sectionId);
+                  }}
+                />
               </ul>
-            </nav>
+            </aside>
+            <div className="proposal-review-main flex min-h-0 min-w-0 flex-col overflow-hidden">
+            <ProposalReviewToolbar
+              textareaRef={activeSectionTextareaRef}
+              disabled={anyPipelineRunning || !activeReviewSection}
+              lastSavedAt={lastSavedAt}
+              onComment={handleReviewComment}
+              expanded={reviewFocusMode}
+              onToggleExpanded={() => setReviewFocusMode((v) => !v)}
+              onChange={(content) =>
+                activeReviewSection &&
+                updateSection(activeReviewSection.id, {
+                  content,
+                  status: content ? "generated" : "outline",
+                })
+              }
+            />
+            <div className="proposal-content-layout flex-1 min-h-0">
             <div
               ref={contentScrollRef}
               className="proposal-content-scroll proposal-content-manuscript-pane proposal-review-manuscript custom-scrollbar min-h-0"
@@ -3063,6 +3350,67 @@ function ProposalDraftWorkspaceInner({
               ) : null}
               {manuscriptSections.map((section, index) =>
                   isSectionDrafted(section.content) ? (
+                  section.id === activeReviewSectionId ? (
+                  <article
+                    key={section.id}
+                    id={section.id}
+                    className="proposal-content-article proposal-content-article--read proposal-content-article--editing scroll-mt-24"
+                  >
+                    <h3 className="proposal-content-section-title">
+                      <span className="text-zo-text-muted">{index + 1}.</span>{" "}
+                      {section.title}
+                      {sectionManualFillCount(section.id, actionableFlags) > 0 ? (
+                        <span className="ml-2 text-[11px] font-medium text-amber-800">
+                          · needs input
+                        </span>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingSectionId((cur) =>
+                            cur === section.id ? null : section.id
+                          )
+                        }
+                        disabled={anyPipelineRunning}
+                        className="ml-2 align-middle text-[11px] font-semibold text-zo-orange transition-smooth hover:underline disabled:opacity-50"
+                      >
+                        {editingSectionId === section.id ? "Done editing" : "Edit source"}
+                      </button>
+                    </h3>
+                    <div className="proposal-prose proposal-prose--manuscript mt-4">
+                      {editingSectionId === section.id ? (
+                        <textarea
+                          ref={(el) => registerManuscriptTextarea(section.id, el)}
+                          value={stripLeadingTitleEcho(section.content, section.title)}
+                          disabled={anyPipelineRunning}
+                          onFocus={(e) => handleManuscriptTextareaFocus(section.id, e)}
+                          onInput={(e) => resizeManuscriptTextarea(e.currentTarget)}
+                          onChange={(e) =>
+                            updateSection(section.id, {
+                              content: e.target.value,
+                              status: e.target.value ? "generated" : "outline",
+                            })
+                          }
+                          className="proposal-review-inline-textarea"
+                        />
+                      ) : (
+                        // Default when a section is selected: FORMATTED render,
+                        // never raw markdown. Raw source shows only after the
+                        // user clicks "Edit source" above.
+                        <MarkdownReportBody
+                          body={stripLeadingTitleEcho(section.content, section.title)}
+                          variant="document"
+                          highlightTexts={
+                            activeSubmissionFlag?.sectionId === section.id &&
+                            activeFlagHighlight
+                              ? [activeFlagHighlight.text]
+                              : []
+                          }
+                        />
+                      )}
+                    </div>
+                  </article>
+                  ) : (
                   <article
                     key={section.id}
                     id={section.id}
@@ -3079,9 +3427,16 @@ function ProposalDraftWorkspaceInner({
                         </span>
                       ) : null}
                     </h3>
-                    <div className="proposal-prose proposal-prose--manuscript mt-4">
+                    <div
+                      className="proposal-prose proposal-prose--manuscript proposal-prose--editable mt-4"
+                      title="Click to edit this section"
+                      onClick={() => {
+                        setFocusedSectionId(section.id);
+                        setEditingSectionId(null);
+                      }}
+                    >
                       <MarkdownReportBody
-                        body={section.content}
+                        body={stripLeadingTitleEcho(section.content, section.title)}
                         variant="document"
                         highlightTexts={
                           activeSubmissionFlag?.sectionId === section.id && activeFlagHighlight
@@ -3091,6 +3446,7 @@ function ProposalDraftWorkspaceInner({
                       />
                     </div>
                   </article>
+                  )
                   ) : (
                   <article
                     key={section.id}
@@ -3130,6 +3486,26 @@ function ProposalDraftWorkspaceInner({
             </div>
           </div>
             </div>
+
+            <ProposalWorkflowRail
+              checkpoint={research?.pipelineCheckpoint}
+              isRunning={anyPipelineRunning}
+              fullProposalPhase={effectiveFullProposalProgress}
+              isFulfillScanRunning={isFulfillingRfpGaps}
+              hasCompletedFulfillReport={Boolean(outline.lastFulfillReport)}
+              manualFillCount={manualFillCount}
+              rfpCost={rfpCost}
+              costByRunType={costByRunType}
+              fmtUsd={fmtUsd}
+              canCompareToSaved={Boolean((outline.snapshots?.length ?? 0) > 0 && selectedSnapshotForCompare)}
+              onCompareToSaved={handleOpenCompareToSaved}
+              canViewLastResults={Boolean(outline.lastFulfillReport)}
+              onViewLastResults={handleOpenLastResults}
+              goRfpCount={goRfpCount}
+              onOpenGoRfpPicker={onOpenGoRfpPicker}
+            />
+            </div>
+            </div>
         ) : (
           <div className="flex min-h-[360px] flex-col items-center justify-center px-8 py-16 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#ef5018]/15 text-[#ef5018]">
@@ -3163,13 +3539,24 @@ function ProposalDraftWorkspaceInner({
               >
                 Generate Proposal
               </button>
-              {anyPipelineRunning ? (
+              {anyPipelineRunning || isStopping ? (
                 <button
                   type="button"
                   onClick={() => void handleStopPipeline()}
-                  className="rounded-xl border border-red-300 bg-white px-5 py-2.5 text-sm font-semibold text-red-700 transition-smooth hover:bg-red-50"
+                  disabled={isStopping}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-red-300 bg-white px-5 py-2.5 text-sm font-semibold text-red-700 transition-smooth hover:bg-red-50 disabled:opacity-70"
                 >
-                  Stop
+                  {isStopping ? (
+                    <>
+                      <span
+                        className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-red-300 border-t-red-600"
+                        aria-hidden
+                      />
+                      Stopping…
+                    </>
+                  ) : (
+                    "Stop"
+                  )}
                 </button>
               ) : null}
             </div>
@@ -3240,7 +3627,7 @@ function ProposalDraftWorkspaceInner({
                           </h3>
                           <div className="proposal-prose proposal-prose--manuscript mt-4">
                             <MarkdownReportBody
-                              body={section.content}
+                              body={stripLeadingTitleEcho(section.content, section.title)}
                               variant="document"
                             />
                           </div>

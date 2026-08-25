@@ -614,6 +614,27 @@ def _is_protected_scan_section(section: Any) -> bool:
     return False
 
 
+_DRAFT_STUB_MARKER_DEDUP = "draft this rfp-required section"
+
+
+def _is_hollow_stub_section(section: Any) -> bool:
+    """A bare RFP-outline stub or empty body.
+
+    Such a tab must NEVER win a same-title dedup tie against a real drafted
+    section — that is exactly how a finished section came back empty (the
+    tie-breaker preferred the shorter tab, which was the blank stub).
+    """
+    body = _section_content(section)
+    if not body.strip():
+        return True
+    cf = body.casefold()
+    if _DRAFT_STUB_MARKER_DEDUP in cf:
+        return True
+    if "rfp-required outline" in cf and word_count(body) < 80:
+        return True
+    return False
+
+
 def collapse_title_near_duplicate_sections(
     sections: list[Any],
     *,
@@ -663,17 +684,26 @@ def collapse_title_near_duplicate_sections(
             pts_b = _section_eval_points(sec_b)
             wc_a = word_count(_section_content(sec_a))
             wc_b = word_count(_section_content(sec_b))
-            drop_b = _prefer_drop_b(
-                pts_a=pts_a,
-                pts_b=pts_b,
-                idx_a=idx_a,
-                idx_b=idx_b,
-                wc_a=wc_a,
-                wc_b=wc_b,
-            )
-            # Prefer the fuller RFP-phrased title when scores/length tie-break is weak.
-            if wc_a == wc_b and pts_a == pts_b:
-                drop_b = len(normalize_outline_title(title_b)) <= len(norm_a)
+            # Never drop real drafted content in favor of a blank RFP-outline
+            # stub. When exactly one side is hollow, the hollow one loses —
+            # regardless of scores/length. This is what prevented a finished
+            # "Brand Marketing Plan" tab from being replaced by its empty twin.
+            hollow_a = _is_hollow_stub_section(sec_a)
+            hollow_b = _is_hollow_stub_section(sec_b)
+            if hollow_a != hollow_b:
+                drop_b = hollow_b
+            else:
+                drop_b = _prefer_drop_b(
+                    pts_a=pts_a,
+                    pts_b=pts_b,
+                    idx_a=idx_a,
+                    idx_b=idx_b,
+                    wc_a=wc_a,
+                    wc_b=wc_b,
+                )
+                # Prefer the fuller RFP-phrased title when scores/length tie-break is weak.
+                if wc_a == wc_b and pts_a == pts_b:
+                    drop_b = len(normalize_outline_title(title_b)) <= len(norm_a)
             if drop_b:
                 drop_ids.add(sid_b)
                 dropped_labels.append(
@@ -849,15 +879,25 @@ def remove_aggregate_restatement_sections(
     *,
     min_sibling_hits: int = 3,
     min_words: int = 300,
+    require_full_coverage: bool = False,
+    coverage_threshold: float = 0.9,
 ) -> tuple[list[Any], list[str]]:
     """Delete tabs that restate ≥N other live section titles inside one body.
 
     Discovered from the current outline + content — no fixed parent-title list.
     Prefer deleting the mega restate and keeping the dedicated sibling tabs.
+
+    ``require_full_coverage`` (Complete Scan): only delete a section when its
+    own content is essentially FULLY covered by the union of the sibling
+    sections it restates (≥ ``coverage_threshold`` of its tokens appear there),
+    so nothing unique is ever lost. A mega-tab with genuinely unique paragraphs
+    is left in place — its duplicated prose is handled by the in-place trimmer,
+    never a whole-section delete.
     """
     from app.services.proposal_section_quality import word_count
 
     titles = [_section_title(s) for s in sections]
+    body_by_title = {_section_title(s): _section_content(s) for s in sections}
     drop_ids: set[str] = set()
     logs: list[str] = []
 
@@ -880,16 +920,31 @@ def remove_aggregate_restatement_sections(
         if len(hits) < min_sibling_hits:
             continue
 
+        if require_full_coverage:
+            # Combine the bodies of exactly the siblings this section restates,
+            # and confirm they already carry (nearly) all of this section's
+            # content before deleting it — otherwise keep it (unique content).
+            haystack = "\n".join(body_by_title.get(t, "") for t in hits)
+            coverage = _content_coverage(body, haystack)
+            if coverage < coverage_threshold:
+                logs.append(
+                    f"{title} (kept — restates {len(hits)} siblings but only "
+                    f"{coverage:.0%} of its content is covered by them; "
+                    "trimming duplicated prose in place instead of deleting)"
+                )
+                continue
+
         drop_ids.add(sid)
         logs.append(
-            f"{title} (removed — restates {len(hits)} other sections: "
+            f"{title} (removed — restates {len(hits)} other sections and its "
+            "content is already fully covered by them: "
             + ", ".join(hits[:5])
             + ("…" if len(hits) > 5 else "")
             + ")"
         )
 
     if not drop_ids:
-        return sections, []
+        return sections, logs
     kept = [s for s in sections if _section_id(s) not in drop_ids]
     return kept, logs
 
@@ -936,6 +991,19 @@ def dedupe_manuscript_for_scan(
             exact_normalized_only=True,
         )
         logs.extend(title_dups)
+        # Safe even in Scan: removes ONLY a ≥300-word section whose body
+        # literally restates ≥3 OTHER section titles AND whose content is
+        # already fully covered by those siblings (require_full_coverage) — an
+        # invented "Brand Marketing Plan" mega-tab re-covering the RFP's own
+        # lettered D/E/F asks, where nothing unique is lost. A section with any
+        # unique content is kept; only its duplicated prose is trimmed below.
+        # Cannot merge two distinct-but-word-sharing tabs the way the soft
+        # near-dup / jaccard matchers can, so it is safe outside drop_clone_tabs.
+        sections, removed = remove_aggregate_restatement_sections(
+            sections,
+            require_full_coverage=True,
+        )
+        logs.extend(removed)
     # Offeror/Company Information forms that restate 1.3 → cross-ref only (no table copy)
     draft_like = ProposalDraft(
         rfpId="dedupe-scan",

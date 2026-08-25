@@ -18,15 +18,15 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { ArrowRight, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AnimatedNumber } from "./AnimatedNumber";
+import { QuickBooksInsights } from "./QuickBooksInsights";
 import { AgingBar, DataTable, Empty, Figure, Note, Panel, compact, usd } from "./qb-ui";
-import { deriveSignals, type Signal } from "../lib/qb-signals";
 import type { QuickBooksOverview } from "../types/quickbooks";
 import "./QuickBooksLedger.css";
 
@@ -176,50 +176,6 @@ function MoneyLine({
         />
       ) : null}
     </div>
-  );
-}
-
-function Attention({ signals, onGo }: { signals: Signal[]; onGo: (view: string) => void }) {
-  if (!signals.length) {
-    return (
-      <Panel title="Needs attention">
-        <p className="qb-allclear">
-          Nothing is off. Receivables are current, cost is attributed to clients, and
-          collections are keeping pace with billing.
-        </p>
-      </Panel>
-    );
-  }
-
-  return (
-    <Panel
-      title="Needs attention"
-      meta={`${signals.length} ${signals.length === 1 ? "item" : "items"}`}
-    >
-      <ul className="qb-signals">
-        {signals.map((s) => (
-          <li key={s.id} data-severity={s.severity}>
-            <span className="qb-signal-dot" aria-hidden />
-            <div className="qb-signal-body">
-              <p className="qb-signal-head">
-                {s.headline}
-                <span className="qb-sr">, severity {s.severity}</span>
-              </p>
-              {s.detail ? <p className="qb-signal-detail">{s.detail}</p> : null}
-            </div>
-            {s.figure ? <span className="qb-signal-figure">{s.figure}</span> : null}
-            {s.goTo ? (
-              <button type="button" className="qb-signal-go" onClick={() => onGo(s.goTo!)}>
-                <span>{VIEWS.find((v) => v.id === s.goTo)?.label ?? "Detail"}</span>
-                <ArrowRight size={13} strokeWidth={2.25} aria-hidden />
-              </button>
-            ) : (
-              <span />
-            )}
-          </li>
-        ))}
-      </ul>
-    </Panel>
   );
 }
 
@@ -418,7 +374,7 @@ export function QuickBooksPanels() {
   }, [load, year]);
 
   const net = (data?.ar?.total ?? 0) - (data?.ap?.total ?? 0);
-  const signals = useMemo(() => (data ? deriveSignals(data) : []), [data]);
+  const signals = data?.signals ?? [];
   const clientRows = useMemo(() => (data ? buildClientRows(data) : []), [data]);
   const trend = data?.monthly_trend;
   const rc = data?.revenue_by_class;
@@ -490,7 +446,7 @@ export function QuickBooksPanels() {
           {/* ── position ── */}
           <TabsContent value="today" className="qb-view">
             <MoneyLine data={data} net={net} />
-            <Attention signals={signals} onGo={setView} />
+            <QuickBooksInsights signals={signals} onGo={setView} />
             {data.billing_vs_cash ? (
               <CashChart bvc={data.billing_vs_cash} />
             ) : (

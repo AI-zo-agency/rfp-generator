@@ -95,8 +95,14 @@ class BudgetContradictionPassTests(unittest.IsolatedAsyncioTestCase):
             ],
             "summary": "Merged duplicate coordination lines",
         }
+        # Patch model: replace the two duplicate lines with one merged line, verbatim.
         rewrite_response = {
-            "content": "| Project Management (planning + coordination) | $7,500 |",
+            "edits": [
+                {
+                    "find": "| Planning & Account Management | $7,500 |\n| Project Management | $7,500 |",
+                    "replace": "| Project Management (planning + coordination) | $7,500 |",
+                }
+            ],
             "changed": True,
             "notes": "merged",
         }

@@ -16,6 +16,7 @@ from app.services.google_drive import is_configured
 from app.services.proposal_manuscript import (
     build_google_doc_export_blocks,
     build_manuscript_structured,
+    find_instruction_leaks,
 )
 
 logger = logging.getLogger(__name__)
@@ -327,6 +328,24 @@ def _export_sync(
     existing_document_id: str | None = None,
     existing_document_url: str | None = None,
 ) -> dict[str, Any]:
+    # Export tripwire: scan the PRE-scrub section content for narrated-instruction
+    # prose that convert_instruction_blocks / convert_bare_confirmation_lines
+    # didn't catch. Pattern matching cannot anticipate every phrasing, so this
+    # only warns loudly — it never blocks the export. build_manuscript_structured
+    # (below) still scrubs internal handoff tags out of the Google Doc either way.
+    instruction_leaks: list[dict[str, str]] = []
+    for section in draft.sections:
+        for excerpt in find_instruction_leaks(section.content or ""):
+            logger.warning(
+                "Instruction leak in proposal %s section %r (google doc export): %s",
+                draft.rfp_id,
+                section.title or section.id,
+                excerpt[:300],
+            )
+            instruction_leaks.append(
+                {"section": section.title or section.id, "excerpt": excerpt}
+            )
+
     sections = build_manuscript_structured(draft.sections)
     if not sections:
         raise ProposalGoogleDocExportError(
@@ -397,6 +416,7 @@ def _export_sync(
         "documentUrl": web_link,
         "title": doc_title,
         "sectionCount": len(sections),
+        "instructionLeaks": instruction_leaks,
     }
 
 

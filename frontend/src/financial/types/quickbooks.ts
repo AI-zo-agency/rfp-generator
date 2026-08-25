@@ -1,6 +1,21 @@
 export type Bucket = { label: string; amount: number; count?: number; pct?: number };
 export type MonthAmt = { month: string; amount: number };
 
+export type Severity = "critical" | "warn" | "info";
+
+export interface Signal {
+  id: string;
+  severity: Severity;
+  /** Plain-English statement of the problem. No jargon, no metric names. */
+  headline: string;
+  /** The one number that sizes the problem. Pre-formatted by the backend. */
+  figure?: string;
+  /** Why it matters or what to do. One clause. */
+  detail?: string;
+  /** Tab id to jump to for the underlying rows. */
+  go_to?: string;
+}
+
 export interface QuickBooksOverview {
   year: number;
   generated_at: string;
@@ -8,6 +23,7 @@ export interface QuickBooksOverview {
   synced_at?: string;
   sync_status?: "ok" | "failed" | "backfill_pending" | "missing";
   errors: Record<string, string>;
+  signals: Signal[];
   company: {
     company_name: string;
     legal_name: string;

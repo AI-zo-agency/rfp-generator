@@ -564,6 +564,25 @@ class ProposalPipelineCheckpoint(BaseModel):
         alias="resumeFulfillStep",
         description="Complete & clean draft step to resume from after stop.",
     )
+    last_clean_fulfill_scan_hash: str | None = Field(
+        default=None,
+        alias="lastCleanFulfillScanHash",
+        description=(
+            "Hash of the draft + RFP text as of the last fully-completed "
+            "Complete & clean draft run. A fresh (non-resume) run whose "
+            "current hash matches has nothing new to check."
+        ),
+    )
+    last_clean_fulfill_scan_at: str | None = Field(
+        default=None,
+        alias="lastCleanFulfillScanAt",
+        description=(
+            "ISO timestamp of the last fully-completed Complete & clean run. "
+            "The draft is 'already clean' for the UI when it has not been edited "
+            "since (draft.updatedAt <= this). Survives refresh / other users "
+            "because it is written server-side by the Celery task."
+        ),
+    )
     updated_at: str = Field(alias="updatedAt")
 
 
@@ -942,6 +961,18 @@ class ProposalRestoreSnapshotResponse(BaseModel):
     draft: ProposalDraft
 
 
+class ProposalInstructionLeak(BaseModel):
+    """A block of narrated-instruction prose the generator wrote as client-facing
+    copy instead of following. Caught by the export tripwire (find_instruction_leaks)
+    on top of convert_instruction_blocks — this is the safety net for phrasing the
+    pattern-matching converter didn't anticipate. Reported, never blocking."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    section: str
+    excerpt: str
+
+
 class ProposalGoogleDocExportResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
 
@@ -950,3 +981,6 @@ class ProposalGoogleDocExportResponse(BaseModel):
     document_url: str = Field(alias="documentUrl")
     title: str
     section_count: int = Field(alias="sectionCount")
+    instruction_leaks: list[ProposalInstructionLeak] = Field(
+        default_factory=list, alias="instructionLeaks"
+    )

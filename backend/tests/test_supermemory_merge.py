@@ -104,9 +104,14 @@ class MergeChunkFirstHitsTests(unittest.TestCase):
             }
         ]
         merged = merge_chunk_first_hits(memories, chunks)
-        self.assertEqual(len(merged), 1)
+        # Chunk still leads and keeps its own body — the memory is a distinct fact
+        # (not contained in the chunk text) so it must survive as its own entry
+        # rather than being discarded just because the document has a chunk hit.
+        self.assertEqual(len(merged), 2)
         self.assertEqual(merged[0].get("_retrieval_mode"), "documents")
         self.assertIn("newsletter open rates", merged[0].get("content") or "")
+        self.assertEqual(merged[1].get("_retrieval_mode"), "hybrid")
+        self.assertIn("Torrent Laboratory brand work.", merged[1].get("memory") or "")
 
 
 if __name__ == "__main__":

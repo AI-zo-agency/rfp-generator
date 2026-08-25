@@ -26,9 +26,11 @@ export function UploadKnowledgeDocModal({
   const [mounted, setMounted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const resetForm = useCallback(() => {
     setError(null);
+    setNotice(null);
     setSubmitting(false);
   }, []);
 
@@ -70,10 +72,20 @@ export function UploadKnowledgeDocModal({
       const data = (await response.json()) as {
         error?: string;
         detail?: string;
+        noteError?: string;
       };
 
       if (!response.ok) {
         setError(data.detail ?? data.error ?? "Upload failed.");
+        setSubmitting(false);
+        return;
+      }
+
+      if (data.noteError) {
+        setNotice(`Document uploaded, but the note was not saved: ${data.noteError}`);
+        form.reset();
+        onSuccess?.();
+        router.refresh();
         setSubmitting(false);
         return;
       }
@@ -182,9 +194,30 @@ export function UploadKnowledgeDocModal({
               </span>
             </label>
 
+            <label className="block text-sm font-medium text-foreground">
+              Notes / corrections (optional)
+              <textarea
+                name="notes"
+                rows={3}
+                placeholder='e.g. "Ron Comer has retired" - anything in the knowledge base this makes out of date'
+                className={`${fieldClass} resize-y`}
+              />
+              <span className="mt-1.5 block text-xs text-zo-text-muted">
+                Notes are treated as authoritative — agents follow them over any
+                older document that says otherwise. Manage them in Standing
+                corrections.
+              </span>
+            </label>
+
             {error && (
               <p className="rounded-xl border border-zo-error/30 bg-zo-error/10 px-4 py-3 text-sm text-zo-error">
                 {error}
+              </p>
+            )}
+
+            {notice && (
+              <p className="rounded-xl border border-zo-warning/30 bg-zo-warning/10 px-4 py-3 text-sm text-zo-warning">
+                {notice}
               </p>
             )}
           </div>

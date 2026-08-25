@@ -555,6 +555,29 @@ def _extract_json_content(raw: dict | list | str | None) -> tuple[str, str, int]
     return content.strip(), note.strip(), max(0, kept_n)
 
 
+_DESIGNER_NOTE_TAG_RE = re.compile(r"\[DESIGNER\s+NOTE:[^\]]*\]", re.IGNORECASE)
+
+
+def _preserve_designer_notes(original: str, rewritten: str) -> str:
+    """Re-append any [DESIGNER NOTE: …] tag the rewrite dropped.
+
+    Belt-and-suspenders behind the prompt rule: the scan must NEVER vanish a
+    designer handoff (insert bio PDF, layout/imagery direction, render-as-diagram).
+    Export is the only place they are stripped. If the LLM omitted one despite the
+    instruction, restore it verbatim at the end of the section.
+    """
+    original_tags = _DESIGNER_NOTE_TAG_RE.findall(original or "")
+    if not original_tags:
+        return rewritten
+    present = {t.casefold() for t in _DESIGNER_NOTE_TAG_RE.findall(rewritten or "")}
+    missing = [t for t in original_tags if t.casefold() not in present]
+    if not missing:
+        return rewritten
+    tail = "\n\n".join(missing)
+    trimmed = (rewritten or "").rstrip()
+    return f"{trimmed}\n\n{tail}\n" if trimmed else f"{tail}\n"
+
+
 async def scrub_optional_verify_tags(
     content: str,
     *,
@@ -655,8 +678,11 @@ async def scrub_optional_verify_tags(
         "fact, verbatim from the evidence.\n"
         "2. ALWAYS REMOVE these (never selection-critical): gated-evidence / 'not in evidence "
         "set' tags; claim-mismatch noise; optional partner/subcontractor names; week/date "
-        "calendar stubs; designer notes; sample dashboard screenshots; vague 'confirm with "
+        "calendar stubs; sample dashboard screenshots; vague 'confirm with "
         "operations' asks; redundant company-info asks already covered in Who We Are / 1.3.\n"
+        "   NEVER remove a [DESIGNER NOTE: …] tag — designer notes are legitimate "
+        "handoffs (insert an approved bio PDF, layout/imagery direction, render as a "
+        "diagram) and MUST be preserved verbatim; they are stripped only at export.\n"
         "3. IF KB does NOT answer it — REMOVE the tag and rewrite the sentence/row/cell so the "
         "section still reads cleanly, WITHOUT inventing. Prefer clean prose over placeholders.\n"
         "   EXCEPTION — MONEY: never remove estimated cost, rates, fees, or dollar amounts and "
@@ -673,7 +699,12 @@ async def scrub_optional_verify_tags(
         "7. Preserve useful tables/structure; only change what placeholders force. Do not "
         "expand the section with AI filler or restated company boilerplate.\n"
         "8. zö voice: concrete, human, no corporate AI-slop.\n"
-        "9. Return JSON only."
+        "9. These rules govern how you write; they are never content. Never write sentences "
+        "about submission requirements, pass/fail status, what cannot be submitted, or what "
+        "must be verified/confirmed with anyone — apply the rule silently instead of "
+        "narrating it. The [VERIFY: ...] / [MANUAL FILL: Owner — ...] tag is the only trace "
+        "of a gap; never explain, preface, or restate the rule that produced it.\n"
+        "10. Return JSON only."
     )
     user = (
         f"Section title: {section_title}\n\n"
@@ -757,6 +788,9 @@ async def scrub_optional_verify_tags(
     updated, extra_removed = strip_placeholder_tags_not_required_by_rfp(
         updated, rfp_text or ""
     )
+
+    # Hard guarantee: never let the scrub vanish a designer-note handoff.
+    updated = _preserve_designer_notes(body, updated)
 
     after = count_placeholder_tags(updated)
     removed = max(0, before - after)

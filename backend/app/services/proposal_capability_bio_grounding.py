@@ -63,6 +63,9 @@ Rules:
 - Keep RFP requirement rows that are real asks; only fix the zö Experience /
   response side that overclaims past work.
 - Preserve section structure (tables OK). Return full markdown.
+These rules govern how you write; they are never content. Never write sentences about
+verification requirements or your own constraints — apply the rule silently. The
+[VERIFY: ...] tag is the only trace of a gap; never explain or preface it.
 Return JSON: {"content": "...", "changed": true/false, "notes": "one line"}
 """
 
@@ -77,6 +80,9 @@ Rules:
   must match 04_Bio exactly.
 - Keep **Role on this engagement** if present. Do not invent clients, awards, or
   citation markers like [E3].
+These rules govern how you write; they are never content. Never write sentences about
+verification requirements or your own constraints — apply the rule silently. The
+[DESIGNER NOTE: ...] tag is the only trace of a gap; never explain or preface it.
 Return JSON: {"content": "...", "changed": true/false, "notes": "one line"}
 """
 
@@ -93,6 +99,9 @@ Rules:
 - Strip internal citation markers like [E3] or [E3, E4].
 - Remove empty headers with no body (e.g. Team Qualifications Summary with nothing under them).
 - Do not invent facts that are not in the packed 04_Bio KB.
+These rules govern how you write; they are never content. Never write sentences about
+verification requirements or your own constraints — apply the rule silently. The
+[VERIFY: ...] tag is the only trace of a gap; never explain or preface it.
 Return JSON: {"content": "...", "changed": true/false, "notes": "one line"}
 """
 
@@ -692,8 +701,15 @@ async def _llm_rewrite(
         return section, False, str(raw.get("notes") or "")
     if len(content.split()) < 25 and len((section.content or "").split()) > 60:
         return section, False, "refused thin rewrite"
+    # Patch-not-rewrite guard: never accept a wholesale rewrite of a good section.
+    from app.services.proposal_section_patch import enforce_localized_edit
+
+    body, accepted, reason = enforce_localized_edit(section.content or "", content)
+    if not accepted:
+        logger.info("%s: %s (%s)", node_name, reason, section.id)
+        return section, False, reason
     return (
-        section.model_copy(update={"content": content, "status": "generated"}),
+        section.model_copy(update={"content": body, "status": "generated"}),
         True,
         str(raw.get("notes") or "grounded rewrite"),
     )

@@ -55,6 +55,20 @@ npm run dev
 
 Default port is **3001**. Open [http://localhost:3001](http://localhost:3001).
 
+### 3. Celery worker (optional)
+
+Proposal-pipeline and Go/No-Go jobs run in-process by default — no extra setup needed. Set `REDIS_URL` in `backend/.env` to route them through Celery instead (matches production): survives a backend restart instead of orphaning an in-flight job, and is what lets two different RFPs' jobs run fully in parallel with no shared lock.
+
+```bash
+# Redis must be reachable at REDIS_URL first, e.g.:
+docker run -d -p 6379:6379 redis:7-alpine
+
+cd backend
+.venv/bin/celery -A app.celery_app worker --loglevel=info --concurrency=2
+```
+
+Leave `REDIS_URL` unset (or don't run the worker) to fall back to the original in-process behavior — nothing else changes.
+
 ## Environment variables
 
 | Service | File | Required |
@@ -62,6 +76,7 @@ Default port is **3001**. Open [http://localhost:3001](http://localhost:3001).
 | Backend | `backend/.env` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, LLM keys (`FIREWORKS_API_KEY` or `OPENROUTER_API_KEY`), `SUPERMEMORY_API_KEY` |
 | Frontend | `frontend/.env` | `BACKEND_URL` |
 | Teamwork (optional) | `backend/.env` | `TEAMWORK_BASE_URL`, `TEAMWORK_API_KEY` |
+| Celery worker (optional) | `backend/.env` | `REDIS_URL` — unset means proposal/Go-No-Go jobs run in-process instead |
 
 See `.env.example` in each folder for the full list.
 
@@ -82,11 +97,12 @@ python scripts/migrate_pdfs_to_supabase_storage.py
 
 ## Deployment (Railway)
 
-Three services:
+Four services (Celery worker is optional — see below):
 
 1. **Frontend** — root: `frontend/`, env: `BACKEND_URL` only.
-2. **Backend** — root: `backend/`, start: Dockerfile default (uvicorn). Env: Supabase keys, LLM keys, `CORS_ORIGINS`, QuickBooks vars including `QUICKBOOKS_CRON_SECRET`.
+2. **Backend** — root: `backend/`, start: Dockerfile default (uvicorn). Env: Supabase keys, LLM keys, `CORS_ORIGINS`, QuickBooks vars including `QUICKBOOKS_CRON_SECRET`, plus `REDIS_URL` if the Celery worker is in use.
 3. **Scheduler** — root: `backend/`, start command: `python -m app.scheduler`. Env: `SCHEDULER_BACKEND_URL` (API private URL), `QUICKBOOKS_CRON_SECRET` (same as backend), `SCHEDULER_TIMEZONE=America/Los_Angeles`. One replica. Do not enable Railway Cron Schedule on this service.
+4. **Celery worker** (optional but recommended) — same repo/root (`backend/`) and same Dockerfile as Backend, start command: `celery -A app.celery_app worker --loglevel=info --concurrency=4`. Env: same as Backend (it runs the identical pipeline code), plus `REDIS_URL`. Add a Redis plugin to the project first and set `REDIS_URL` on both this service and Backend. Without this service, Backend automatically falls back to running jobs in-process — nothing breaks, you just lose the "job survives a backend restart" guarantee and cross-RFP parallelism becomes best-effort rather than guaranteed.
 
 QuickBooks nightly sync fires at 11pm Pacific via APScheduler. Details: [`docs/QUICKBOOKS_INTEGRATION.md`](docs/QUICKBOOKS_INTEGRATION.md).
 
@@ -97,3 +113,4 @@ QuickBooks nightly sync fires at 11pm Pacific via APScheduler. Details: [`docs/Q
 | **0 RFPs** on dashboard | Backend not running | Start with `python -m app` (port 8001) |
 | `backend unavailable: fetch failed` | Wrong `BACKEND_URL` or backend down | Check `frontend/.env` and backend process |
 | PDF won't open | Storage bucket missing or PDF not uploaded | Run PDF migration script or re-upload |
+| Proposal job never seems to start / no progress | `REDIS_URL` is set but the Celery worker isn't running | Start it: `cd backend && .venv/bin/celery -A app.celery_app worker --loglevel=info` (or unset `REDIS_URL` to go back to in-process) |

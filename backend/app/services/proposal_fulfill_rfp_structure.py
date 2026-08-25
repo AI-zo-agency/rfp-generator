@@ -28,6 +28,34 @@ _EXHIBIT_A_BMP_RE = re.compile(
     re.I | re.S,
 )
 
+# A TOC ask for personnel resumes/CVs/key-staff qualifications is already met by
+# the per-person Section 2 bio tabs (section-2-bio-*) — those ARE the resumes,
+# just filed one per person instead of under one combined heading. Title-string
+# matching against a single bio never catches this (bio titles are people's
+# names), which used to mint a redundant, forever-empty stub section for it.
+_PERSONNEL_RESUME_ASK_PHRASES = (
+    "resumes of key personnel",
+    "resumes of personnel",
+    "resumes of staff",
+    "resumes of the project team",
+    "resumes of project team",
+    "key personnel",
+    "key staff",
+    "staff qualifications",
+    "staff resumes",
+    "team resumes",
+    "personnel resumes",
+    "staff cvs",
+    "personnel cvs",
+    "project team qualifications",
+    "project team bios",
+)
+
+
+def _spec_is_personnel_resume_ask(title: str) -> bool:
+    t = (title or "").casefold()
+    return any(phrase in t for phrase in _PERSONNEL_RESUME_ASK_PHRASES)
+
 _DEFAULT_BMP_HEADINGS = (
     "A. Vision",
     "B. Market Analysis",
@@ -169,6 +197,20 @@ async def extract_rfp_scored_section_specs(
                         "this RFP's TOC / 'proposal shall include' / numbered contents list.\n"
                         "Use only titles this RFP actually names. Do not invent a default stack "
                         "(no canned cover-letter / technical / cost sequence).\n"
+                        "Never invent a generic agency-capability mega-section — 'Brand Marketing "
+                        "Plan', 'Financial Stability', 'Our Approach', or similar — unless the RFP's "
+                        "own TOC or submittal list names that exact label. A canned mega-section is "
+                        "the single most common mistake here: it silently re-covers ground already "
+                        "assigned to this RFP's own separately-lettered/numbered items (e.g. its own "
+                        "'Strategic Approach' and 'Innovation' asks), so the same content ends up "
+                        "drafted twice under two different titles.\n"
+                        "Skip text that describes the BUYER's own internal review/validation process "
+                        "(e.g. 'a campus representative will validate that proposers...') — that is "
+                        "not something the proposer submits, never a tab.\n"
+                        "Every exhibit/appendix/attachment THIS RFP's own exhibit list names gets its "
+                        "own tab, even one a sibling exhibit's instructions also mention in passing "
+                        "(e.g. Exhibit F referencing 'Exhibit G' does not make G optional — G still "
+                        "needs its own tab if the RFP's exhibit list includes it).\n"
                         "If this RFP states an order, the JSON array must match that order.\n"
                         "Do NOT list evaluation-category labels that duplicate a TOC tab.\n"
                         "Do NOT emit two titles that are the same ask (near-duplicate labels for "
@@ -180,6 +222,11 @@ async def extract_rfp_scored_section_specs(
                         "If a TOC item is a scored narrative evaluators read as its own tab, set "
                         "satisfiedByStaticCompanyBlock false — substance is required.\n"
                         "Dynamic tabs are whatever else THIS RFP asks the proposer to submit.\n"
+                        "Mandatory compliance requirements that call for a detailed narrative "
+                        "response and evidence (e.g. an accessibility / VPAT section demanding a "
+                        "'detailed response' and 'verifiable evidence', not just a signed form) are "
+                        "a dynamic tab too — do not skip these as pure administrative boilerplate; "
+                        "they need real content the same as any other scored narrative section.\n"
                         "sameAskAs = existing draft titles that are the SAME ask by meaning — "
                         "not a keyword synonym list.\n"
                         "Return JSON:\n"
@@ -199,15 +246,30 @@ async def extract_rfp_scored_section_specs(
                     ),
                 },
             ],
-            max_tokens=3072,
+            max_tokens=4096,
             temperature=0.1,
             cache_prefix=excerpt[:45000],
         )
+        rfp_text_cf = rfp_text.casefold()
         for row in (raw or {}).get("sections") or []:
             if not isinstance(row, dict):
                 continue
             title = str(row.get("rfpTitle") or "").strip()
             if not title:
+                continue
+            # Deterministic backstop for a canned-mega-section phrase this app's
+            # OTHER clients' RFPs genuinely ask for often enough that the "do
+            # not invent a default stack" instruction alone isn't reliable —
+            # the model still emits it even when told not to. Plain substring
+            # check: if the RFP text itself never says this phrase, it wasn't
+            # this RFP's own ask.
+            title_cf = title.casefold()
+            if "brand marketing plan" in title_cf and "brand marketing plan" not in rfp_text_cf:
+                logger.info(
+                    "extract_rfp_scored_section_specs: dropped invented "
+                    "'%s' — not named anywhere in this RFP's text",
+                    title,
+                )
                 continue
             headings = [
                 str(h).strip()
@@ -622,6 +684,17 @@ def ensure_missing_scored_section_stubs(
             continue
         if _match_section_for_spec(working, spec):
             continue
+        # A TOC ask for personnel resumes/CVs/key-staff qualifications is
+        # already met by the per-person Section 2 bio tabs — those ARE the
+        # resumes, just filed one per person instead of under one combined
+        # heading. Scoped to stub creation only (never the shared
+        # _spec_is_static_company_ask predicate, which a different caller
+        # also uses to decide whether to DELETE an existing thin section —
+        # this check must never be able to cause that).
+        if _spec_is_personnel_resume_ask(spec.rfp_title or "") and any(
+            (s.id or "").startswith("section-2-bio-") for s in sections
+        ):
+            continue
         sid = f"rfp-structure-{_slug_section_id(spec.rfp_title)}"
         # Never mint a -2 twin of an existing stub id — that produced duplicate
         # sidebar tabs with the same RFP title.
@@ -698,17 +771,30 @@ async def _reframe_section_to_rfp_spec(
         "- If evidence is missing, use [VERIFY: …] — never fabricate named engagements.\n"
         "- Fold timeline/phases INTO this section when THIS RFP embeds schedule in this tab.\n"
         "- Do NOT rewrite team bios or static company-identity tabs already in the draft.\n"
-        "- Stay CONCISE: prefer short paragraphs, markdown bullets, and markdown tables over long essays. "
-        "Respect the Word target when provided — never pad.\n"
+        "- HARD LENGTH CEILING = the Word target below. Fully answer THIS tab's ask "
+        "within it and STOP — never exceed it. Shorter is better when the ask is "
+        "covered. Cut any sentence that does not add RFP-specific substance; do not "
+        "add subsections the RFP did not ask for. Prefer tight paragraphs, markdown "
+        "bullets, and markdown tables over long essays. Never pad for length.\n"
         "- When a table/timeline/swimlane would help evaluators, add "
         "[DESIGNER NOTE: concrete layout hint] near that block.\n"
+        "- These rules govern how you write; they are never content. Never write "
+        "sentences about submission requirements, pass/fail status, what cannot be "
+        "submitted, or what must be verified or confirmed with anyone — apply the "
+        "rule silently instead of narrating it. The [VERIFY: ...] / [DESIGNER NOTE: ...] "
+        "tag is the only trace of a gap; never explain or preface it.\n"
         'Return JSON: {"content": "full markdown section", "designerNote": "hint or null"}'
     )
     word_target = getattr(section, "word_target", None) or 550
+    # Cap output near the target so the model physically cannot write a
+    # multi-page essay it later gets crudely truncated to. ~1.6 tokens/word of
+    # prose + headroom for markdown tables/bullets, floored so short targets
+    # still fit a complete answer.
+    max_out = min(8192, max(1400, int(word_target * 2.4)))
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\n"
         f"Section: {section.title}\n"
-        f"Word target: {word_target} (stay at or under)\n"
+        f"Word target: {word_target} (HARD ceiling — answer fully within it, do not exceed)\n"
         f"RFP expects: {spec.rfp_title}\n"
         f"Required headings still missing or weak: {', '.join(missing_headings) or spec.required_headings}\n"
         f"Alignment instructions: {spec.instructions}\n"
@@ -718,7 +804,7 @@ async def _reframe_section_to_rfp_spec(
     try:
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=8192,
+            max_tokens=max_out,
             temperature=0.25,
             cache_prefix=rfp_excerpt[:35000],
         )

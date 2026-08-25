@@ -5,10 +5,11 @@ Generic for every RFP. Never hardcode a client (HCCC/Umatilla/etc.).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from app.models.proposal import (
     ProposalDraft,
@@ -183,7 +184,8 @@ async def _draft_closing_section(
             )
         user_excerpt = "\n\n".join(excerpt_parts)
 
-        raw, _ = await llm.chat_json(
+        raw, _ = await asyncio.wait_for(
+            llm.chat_json(
             [
                 {
                     "role": "system",
@@ -227,9 +229,11 @@ async def _draft_closing_section(
                     ),
                 },
             ],
-            max_tokens=2048,
-            temperature=0.2,
-            node_name="fulfill_scan_closing_section",
+                max_tokens=2048,
+                temperature=0.2,
+                node_name="fulfill_scan_closing_section",
+            ),
+            timeout=150.0,
         )
         content = str((raw or {}).get("content") or "").strip()
         return content or stub
@@ -240,12 +244,17 @@ async def _draft_closing_section(
         return stub
 
 
+_CLOSING_SECTIONS_TIME_BUDGET_SEC = 480.0
+_CLOSING_SECTIONS_MAX_CONCURRENT = 3
+
+
 async def ensure_closing_sections(
     *,
     draft: ProposalDraft,
     rfp: RfpRecord,
     rfp_text: str,
     research: ProposalResearchCache | None = None,
+    on_progress: Callable[[int, int, str], Awaitable[None]] | None = None,
 ) -> tuple[ProposalDraft, list[ClosingComponent], list[str], ProposalResearchCache | None]:
     """Add missing closing sections from the closing-requirement ledger.
 
@@ -267,36 +276,84 @@ async def ensure_closing_sections(
     logs: list[str] = []
     sections = list(draft.sections)
 
-    for component in components:
-        if draft_already_covers_component(
+    to_draft = [
+        component
+        for component in components
+        if not draft_already_covers_component(
             draft_section_ids=ids,
             draft_titles=titles,
             component=component,
             draft=draft,
-        ):
+        )
+    ]
+    for component in components:
+        if component not in to_draft:
             logs.append(f"Closing already covered: {component.id}")
-            continue
-        content = await _draft_closing_section(
-            component=component,
-            rfp=rfp,
-            rfp_excerpt=rfp_text,
-        )
-        content, _ = apply_contractor_kpi_text_fixes(content)
-        sections.append(
-            ProposalSection(
-                id=component.section_id,
-                title=component.title,
-                content=content,
-                status="generated",
-                source="rfp",
-                mode="write",
-                required=True,
+
+    # Each component is an independent closing/submission form — no
+    # dependency between them — so draft a few concurrently instead of
+    # one-at-a-time, with a hard per-item timeout (see _draft_closing_section)
+    # and an overall time budget so this can never hang the pipeline the way
+    # it used to (silent, unbounded, sequential LLM calls with zero progress
+    # reporting — the same failure shape the "Complete & clean draft" freeze
+    # in the Pre-submit refresh step had).
+    sem = asyncio.Semaphore(_CLOSING_SECTIONS_MAX_CONCURRENT)
+
+    async def _draft_one(component: ClosingComponent) -> tuple[ClosingComponent, str]:
+        async with sem:
+            content = await _draft_closing_section(
+                component=component,
+                rfp=rfp,
+                rfp_excerpt=rfp_text,
             )
+            content, _ = apply_contractor_kpi_text_fixes(content)
+            return component, content
+
+    tasks = {asyncio.ensure_future(_draft_one(c)): c for c in to_draft}
+    if tasks:
+        done, pending = await asyncio.wait(
+            tasks.keys(), timeout=_CLOSING_SECTIONS_TIME_BUDGET_SEC
         )
-        ids.add(component.section_id)
-        titles.append(component.title)
-        added.append(component)
-        logs.append(f"Added closing section: {component.title}")
+        if pending:
+            for task in pending:
+                task.cancel()
+            logs.append(
+                f"Closing sections: time budget reached — drafted {len(done)}/{len(tasks)}, "
+                f"{len(pending)} left for the next pass"
+            )
+            logger.warning(
+                "ensure_closing_sections time budget (%ss) reached — %d/%d done",
+                _CLOSING_SECTIONS_TIME_BUDGET_SEC,
+                len(done),
+                len(tasks),
+            )
+
+        # Stable order (RFP ledger order), not completion order.
+        done_components = {tasks[t]: t for t in done}
+        completed = 0
+        for component in to_draft:
+            task = done_components.get(component)
+            if task is None:
+                continue
+            _component, content = task.result()
+            completed += 1
+            if on_progress:
+                await on_progress(completed, len(to_draft), component.title)
+            sections.append(
+                ProposalSection(
+                    id=component.section_id,
+                    title=component.title,
+                    content=content,
+                    status="generated",
+                    source="rfp",
+                    mode="write",
+                    required=True,
+                )
+            )
+            ids.add(component.section_id)
+            titles.append(component.title)
+            added.append(component)
+            logs.append(f"Added closing section: {component.title}")
 
     logs.append(f"__closing_ledger_count__={len(ledger.requirements)}")
 
@@ -446,13 +503,37 @@ async def _run_fulfill_rfp_gaps_body(
             updatedAt=datetime.now(timezone.utc).isoformat(),
         )
 
+    # HARD BASELINE: capture every section exactly as it enters this scan run,
+    # in memory, before ANY step can mutate it. This is the authoritative "good"
+    # copy used at the end to refuse saving a section the scan degraded — it does
+    # not depend on snapshots (which, on resume, can already be post-damage).
+    pre_scan_sections = list(draft.sections)
+
     from app.services.proposal_pipeline_checkpoint import (
         complete_fulfill_scan,
+        compute_fulfill_scan_hash,
         fulfill_resume_step,
+        fulfill_scan_is_already_clean,
         record_pipeline_activity,
     )
 
     resume_at = fulfill_resume_step(research)
+    scan_hash = compute_fulfill_scan_hash(draft, rfp_text)
+    if (
+        fulfill_scan_is_already_clean(
+            research=research, resume_at=resume_at, current_hash=scan_hash
+        )
+        and research is not None
+        and research.presubmit_review is not None
+        and draft.last_fulfill_report
+    ):
+        logger.info(
+            "Scan RFP %s: draft + RFP text unchanged since last completed scan — "
+            "skipping the 18-step pass (nothing new to check).",
+            rfp_id,
+        )
+        return research.presubmit_review, research, draft, dict(draft.last_fulfill_report)
+
     if resume_at <= 1:
         draft = push_proposal_snapshot(draft, label="Before Scan RFP")
         await asave_proposal_draft(draft)
@@ -516,6 +597,24 @@ async def _run_fulfill_rfp_gaps_body(
             f"(verify missing answers from past won proposals; designer-ready report)."
         )
         logger.info("Scan RFP resume %s from step %s", rfp_id, resume_at)
+        # One checkpoint write, up front, with the TRUE resume target —
+        # not one write per skipped step. That per-step version (removed)
+        # took several sequential DB round-trips to walk from step 1 up to
+        # resume_at before any real work began; if anything interrupted the
+        # process mid-walk (a worker restart, a stop landing at the wrong
+        # instant), the checkpoint was left holding whatever low number it
+        # last wrote — not the real position — so the *next* resume started
+        # from that stale low step instead of where the run actually was.
+        # A single write of the real target is immune to that: even an
+        # interruption a moment later still leaves the correct step behind.
+        await record_pipeline_activity(
+            rfp_id,
+            label=f"Resuming from step {resume_at} (already-done steps saved)",
+            detail=None,
+            step_index=min(resume_at, len(FULFILL_STEPS)),
+            step_total=len(FULFILL_STEPS),
+            in_progress_phase="fulfill-scan",
+        )
 
     def _log_resume_skip(step: int) -> None:
         label = (
@@ -531,6 +630,14 @@ async def _run_fulfill_rfp_gaps_body(
         # Never skip the final stages — they produce the ending report and
         # designer-ready verification (hollow fill from past won proposals).
         if step < resume_at and step < _FINAL_ALWAYS_RUN_FROM:
+            # No checkpoint write here on purpose — the single upfront
+            # "Resuming from step {resume_at}" write (above, at function
+            # start) already reflects the true target. Writing per skipped
+            # step used to require several sequential DB round-trips just to
+            # walk from step 1 up to resume_at, and an interruption mid-walk
+            # left the checkpoint on a stale, too-low step instead of the
+            # real position. This local log call is enough for visibility —
+            # _log_resume_skip only touches in-memory `report["logs"]`.
             raise FulfillStepSkip(step)
         await record_pipeline_activity(
             rfp_id,
@@ -588,11 +695,22 @@ async def _run_fulfill_rfp_gaps_body(
         )
         await _ensure_not_stopped()
 
+        async def _closing_section_progress(done: int, total: int, title: str) -> None:
+            await record_pipeline_activity(
+                rfp_id,
+                label="Scan RFP: closing & submission",
+                detail=f"Drafting closing sections — {done}/{total}: {title}",
+                step_index=2,
+                step_total=len(FULFILL_STEPS),
+                in_progress_phase="fulfill-scan",
+            )
+
         draft, added, close_logs, research = await ensure_closing_sections(
             draft=draft,
             rfp=rfp,
             rfp_text=rfp_text,
             research=research,
+            on_progress=_closing_section_progress,
         )
         report["logs"].extend(close_logs)
         from app.services.proposal_closing_ledger import get_or_extract_closing_ledger
@@ -676,8 +794,19 @@ async def _run_fulfill_rfp_gaps_body(
                 "Write Team Qualifications and other RFP-required stubs left as Action needed.",
             )
             await _ensure_not_stopped()
+
+            async def _stub_draft_progress(done: int, total: int, title: str) -> None:
+                await record_pipeline_activity(
+                    rfp_id,
+                    label="Scan RFP: draft scored stubs",
+                    detail=f"Drafting required tabs — {done}/{total}: {title}",
+                    step_index=2,
+                    step_total=len(FULFILL_STEPS),
+                    in_progress_phase="fulfill-scan",
+                )
+
             draft, stub_draft_logs = await draft_rfp_structure_stubs(
-                draft, rfp_id=rfp_id, rfp=rfp
+                draft, rfp_id=rfp_id, rfp=rfp, on_progress=_stub_draft_progress
             )
             report["logs"].extend(stub_draft_logs)
             if stub_draft_logs:
@@ -1314,6 +1443,11 @@ async def _run_fulfill_rfp_gaps_body(
             "acknowledge openly rather than implying local history."
         )
 
+    # Did KB fact-check (step 11) actually change the manuscript? Step 2 already
+    # ran the full fact-repair pass; the post-fact-check re-run below only has
+    # something new to do when fact-check itself rewrote/repaired a section.
+    # Default True so any error path stays conservative (still runs repairs).
+    fact_check_changed_manuscript = True
     try:
         await _scan_progress(
             11,
@@ -1335,6 +1469,13 @@ async def _run_fulfill_rfp_gaps_body(
             rfp=rfp,
             rfp_context=rfp_text,
             research=research,
+        )
+        fact_check_changed_manuscript = bool(
+            fc_report.requirement_repairs
+            or fc_report.verify_tags_filled
+            or fc_report.stubs_repaired
+            or fc_report.eval_repairs
+            or fc_report.duplicates_removed
         )
         if fc_report.logs:
             report["kbFactCheck"] = {
@@ -1360,33 +1501,46 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("KB fact-check during Scan RFP skipped: %s", exc)
         report["logs"].append(f"KB fact-check skipped: {exc}")
 
-    try:
-        from app.services.proposal_scan_fact_repairs import run_scan_fact_repairs
-
-        draft, post_fc_logs = await run_scan_fact_repairs(
-            draft,
-            research=research,
-            rfp_text=rfp_text,
-            rfp_title=rfp.title or "",
-            rfp_client=rfp.client or "",
-            rfp_sector=getattr(rfp, "sector", None) or "",
-            rfp_id=rfp_id,
+    if not fact_check_changed_manuscript:
+        # Step 2 already ran the full fact-repair pass and KB fact-check changed
+        # nothing since — re-running the heavy pass (per-bio KB searches, hollow
+        # fill, compliance-fabrication) would repeat identical work. Skip it.
+        logger.info(
+            "Scan RFP %s: KB fact-check made no manuscript changes — "
+            "skipping the redundant post-fact-check repair pass.",
+            rfp_id,
         )
-        for line in post_fc_logs:
-            if line.startswith("HUMAN_GAP:"):
-                gap = line.split("HUMAN_GAP:", 1)[1].strip()
-                if gap and gap not in report["humanDecisionGaps"]:
-                    report["humanDecisionGaps"].append(gap)
-        if post_fc_logs:
-            report["logs"].extend(f"post-fact-check: {line}" for line in post_fc_logs[:16])
-            await asave_proposal_draft(draft)
-    except ProposalGenerationCancelled:
-        raise
-    except FulfillStepSkip as skip:
-        _log_resume_skip(skip.step)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Post fact-check repairs skipped: %s", exc)
-        report["logs"].append(f"Post fact-check repairs skipped: {exc}")
+        report["logs"].append(
+            "post-fact-check: skipped (KB fact-check changed nothing to repair)"
+        )
+    else:
+        try:
+            from app.services.proposal_scan_fact_repairs import run_scan_fact_repairs
+
+            draft, post_fc_logs = await run_scan_fact_repairs(
+                draft,
+                research=research,
+                rfp_text=rfp_text,
+                rfp_title=rfp.title or "",
+                rfp_client=rfp.client or "",
+                rfp_sector=getattr(rfp, "sector", None) or "",
+                rfp_id=rfp_id,
+            )
+            for line in post_fc_logs:
+                if line.startswith("HUMAN_GAP:"):
+                    gap = line.split("HUMAN_GAP:", 1)[1].strip()
+                    if gap and gap not in report["humanDecisionGaps"]:
+                        report["humanDecisionGaps"].append(gap)
+            if post_fc_logs:
+                report["logs"].extend(f"post-fact-check: {line}" for line in post_fc_logs[:16])
+                await asave_proposal_draft(draft)
+        except ProposalGenerationCancelled:
+            raise
+        except FulfillStepSkip as skip:
+            _log_resume_skip(skip.step)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Post fact-check repairs skipped: %s", exc)
+            report["logs"].append(f"Post fact-check repairs skipped: {exc}")
 
     # Fact-check can rewrite Approach/Schedule — run the SAME blocker suite
     # Generate-from-scratch uses (titles, consistency, certs, signed PDF note,
@@ -1773,6 +1927,18 @@ async def _run_fulfill_rfp_gaps_body(
         )
         from app.services.proposal_hollow_kb_fill import fill_hollow_sections_for_pipeline
 
+        async def _hollow_fill_progress(done: int, total: int, title: str) -> None:
+            # Sub-step ticks so the UI doesn't look frozen during the sequential
+            # per-section LLM fill loop — this used to sit silent for the whole step.
+            await record_pipeline_activity(
+                rfp_id,
+                label="Scan RFP: pre-submit refresh",
+                detail=f"Filling missing answers — {done}/{total}: {title}",
+                step_index=17,
+                step_total=len(FULFILL_STEPS),
+                in_progress_phase="fulfill-scan",
+            )
+
         draft, misplaced = repair_misplaced_bio_stub_sections(draft)
         draft, hollow = await fill_hollow_sections_for_pipeline(
             draft,
@@ -1781,6 +1947,8 @@ async def _run_fulfill_rfp_gaps_body(
             rfp_sector=getattr(rfp, "sector", None) or "",
             rfp_text=rfp_text,
             rfp_id=rfp_id,
+            on_progress=_hollow_fill_progress,
+            on_cancel_check=_ensure_not_stopped,
         )
         final_fill = misplaced + hollow
         if final_fill:
@@ -1945,12 +2113,31 @@ async def _run_fulfill_rfp_gaps_body(
             "updated_at": now,
         }
     )
-    from app.services.proposal_draft_snapshots import attach_scan_summary_to_latest_before_scan
+    from app.services.proposal_draft_snapshots import (
+        attach_scan_summary_to_latest_before_scan,
+        prior_sections_for_restore,
+    )
+    from app.services.proposal_draft_structure_stubs import (
+        restore_sections_emptied_by_scan,
+    )
+
+    # HARD INVARIANT: Complete & Clean must never save a section it degraded —
+    # emptied, reduced to an RFP-outline stub, or overwritten with a team-bio
+    # stub. Restore from the in-memory pre-scan baseline first (the truest "good"
+    # copy for this run); fall back to snapshot content for anything the baseline
+    # cannot cover (e.g. a section that only exists post-damage on resume).
+    restore_candidates = [*pre_scan_sections, *prior_sections_for_restore(draft)]
+    draft, restore_logs = restore_sections_emptied_by_scan(draft, restore_candidates)
+    if restore_logs:
+        for line in restore_logs:
+            logger.warning("Scan RFP %s: %s", rfp_id, line)
+        report.setdefault("logs", []).extend(restore_logs)
 
     draft = attach_scan_summary_to_latest_before_scan(draft, report)
     await asave_proposal_draft(draft)
     await asave_research_cache(updated_research)
-    await complete_fulfill_scan(rfp_id)
+    final_scan_hash = compute_fulfill_scan_hash(draft, rfp_text)
+    await complete_fulfill_scan(rfp_id, scan_hash=final_scan_hash)
 
     logger.info(
         "Fulfill RFP gaps for %s: closing+%s, issues=%d, ready=%s",

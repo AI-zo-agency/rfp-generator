@@ -32,7 +32,6 @@ from app.services.proposal_intelligence.log import log_intel_event
 from app.services.company_qualification.agents.capability_prioritization import (
     run_capability_prioritization_agent,
 )
-from app.services.company_qualification.agents.case_study_builder import run_case_study_builder_agent
 from app.services.company_qualification.agents.company_truth import run_company_truth_agent
 from app.services.company_qualification.agents.editorial_validation import (
     editorial_reviewed_at,
@@ -2297,6 +2296,26 @@ async def _select_evidence(state: SectionsGraphState) -> dict[str, Any]:
     }
 
 
+def _case_study_relevance_map(fit_report: Any) -> dict[str, str]:
+    """title -> the capability that made it a match, from the fit report.
+
+    Read, never written: the resolver already decided why each study was picked,
+    and a freshly generated "why this fits" line would be exactly the invented
+    claim the stub exists to avoid.
+    """
+    out: dict[str, str] = {}
+    results = getattr(fit_report, "results", None) or []
+    for result in results:
+        capability = str(getattr(result, "capability", "") or "").strip()
+        if not capability:
+            continue
+        for candidate in getattr(result, "candidates", None) or []:
+            source = str(getattr(candidate, "source", "") or "").strip()
+            if source:
+                out.setdefault(source.casefold(), capability)
+    return out
+
+
 def _case_study_display_title(index: int, study: str) -> str:
     """Human title for Section 3 cards — never raw PDF filenames in the UI chip."""
     from app.services.proposal_blocker_prevention import clean_case_study_label
@@ -2340,14 +2359,18 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
     merged_state = await _ensure_brand_voice(state)
     existing = merged_state.get("sections") or []
     new_sections: list[dict[str, Any]] = []
-    rfp_client = merged_state.get("rfp_client", "")
-    context_raw = merged_state.get("proposal_context")
-    proposal_context = (
-        ProposalContext.model_validate(context_raw) if context_raw else ProposalContext()
+    from app.services.proposal_case_study_fit import case_study_display_name
+    from app.services.proposal_case_study_stub import (
+        case_study_asset_filename,
+        format_case_study_stub_content,
     )
-    from app.services.proposal_section_dedup import format_prior_sections_block
 
-    prior_digest = format_prior_sections_block(existing, max_sections=14)
+    # Why each study was picked — produced by evidence selection, not written here.
+    relevance_by_title = {
+        (score.title or "").casefold(): (score.rationale or "").strip()
+        for score in evidence.scores
+        if (score.rationale or "").strip()
+    }
 
     for i, study in enumerate(selected_studies, 1):
         safe_id = study.lower()[:40].replace(" ", "-").replace("/", "-")
@@ -2355,28 +2378,23 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
         sec_title = _case_study_display_title(i, study)
         _log_section_generate_next(merged_state, section_id=sec_id, title=sec_title)
 
-        case_text, case_sources = await proposal_knowledge_base_tools.fetch_single_case_study(study)
-        raw, _provider = await run_case_study_builder_agent(
-            study_title=study,
-            case_study_text=case_text,
-            proposal_context=proposal_context,
-            rfp_client=rfp_client,
-            brand_voice_block=_proposal_voice_block(merged_state),
-            kb_sources=case_sources,
-            prior_sections_digest=prior_digest,
+        # Option B: hand the approved asset to design instead of redrafting it.
+        # The selection above is the work; re-narrating the PDF is not.
+        content = format_case_study_stub_content(
+            display_name=case_study_display_name(study),
+            asset_filename=case_study_asset_filename(study),
+            relevance=relevance_by_title.get(study.casefold(), ""),
         )
-
-        content = _sanitize_content(str(raw.get("content") or "").strip())
         section = _section_payload(
             section_id=sec_id,
             title=sec_title,
             mode="select",
-            word_target=120,
+            word_target=40,
             page_limit=merged_state.get("page_limit"),
             page_ratio=0.03,
             designer_note_default=f"Our Work example: {study}.",
-            raw={"content": content, "kbRefs": raw.get("kbRefs") or []},
-            kb_sources=case_sources,
+            raw={"content": content, "kbRefs": [study]},
+            kb_sources=[study],
             extra_refs=[study],
         )
         if isinstance(section, dict) and "id" in section and "title" in section:
@@ -2890,7 +2908,6 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
         logger.info("Section 3 already complete — skipping regeneration")
         return {}
 
-    voice = _proposal_voice_block(state)
     existing = state.get("sections") or []
     rfp_client = state.get("rfp_client", "")
 
@@ -2899,7 +2916,6 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
 
     # Use prefetched case studies from Go/No-Go when available
     prefetched = state.get("prefetched_case_studies") or {}
-    prefetched_studies: dict[str, str] = prefetched.get("studies", {}) if isinstance(prefetched, dict) else {}
 
     if not case_corpus.strip() and prefetched.get("corpus"):
         case_corpus = prefetched["corpus"]
@@ -2933,6 +2949,7 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
     study_cap = max(5, required_studies)
 
     selected_studies: list[str] = []
+    fit_report = None
     if prefetched.get("titles"):
         selected_studies = list(prefetched["titles"])
         logger.info(
@@ -2951,11 +2968,11 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                 services_requested=services_requested,
                 min_count=required_studies,
                 max_count=study_cap,
-                fetch_full_text=True,
+                # Stubs cite the asset; nothing here reads the full narrative.
+                fetch_full_text=False,
             )
             selected_studies = resolved.titles
-            if resolved.study_texts:
-                prefetched_studies = {**prefetched_studies, **resolved.study_texts}
+            fit_report = resolved.fit_report
             if selected_studies:
                 logger.info(
                     "Section 3 resolver: %d studies (%s) — %s",
@@ -2987,91 +3004,40 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
     new_sections: list[dict[str, Any]] = []
     kb_sources = case_sources
 
+    from app.services.proposal_case_study_fit import case_study_display_name
+    from app.services.proposal_case_study_stub import (
+        case_study_asset_filename,
+        format_case_study_stub_content,
+    )
+
+    # Why each study fits — read off the fit report the resolver already built.
+    relevance_by_title = _case_study_relevance_map(fit_report)
+
     for i, study in enumerate(selected_studies, 1):
         safe_id = study.lower()[:40].replace(" ", "-").replace("/", "-")
         sec_id = f"section-3-work-{i:02d}-{safe_id}"
         sec_title = _case_study_display_title(i, study)
 
-        try:
-            raw, _ = await llm.chat_json(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            f"{_section_system_preamble(state)}\n"
-                            f"Write a SHORT 'Our Work' case study card for: '{study}'.\n\n"
-                            "CRITICAL RULES:\n"
-                            f"- Do NOT write about '{rfp_client}' — that is the CURRENT client this proposal is for, NOT a past case study.\n"
-                            "- ONLY pull verified facts, client names, and outcomes directly from the case studies knowledge base.\n"
-                            "- If facts are not in the KB, do NOT invent them. Use only what is explicitly stated.\n"
-                            "- Do NOT include Source:, filename, .pdf, .docx, or knowledge-base citations in the prose.\n"
-                            "- NEVER append 'Creative Examples:' catalogs or word-count labels.\n"
-                            "- Return ONE complete JSON object — no markdown fences.\n\n"
-                            "HARD LENGTH CAPS:\n"
-                            "- Challenge: MAX 40 words. Solution / Our Approach: MAX 50 words.\n"
-                            "- No economic-impact essays, hotel-tax digressions, or marketing filler.\n"
-                            "- Prefer 2 short sentences per section.\n\n"
-                            "Format and Content:\n"
-                            "- Write from zö's perspective (we/our/us).\n"
-                            "- Structure as exactly these three sections, nothing else: "
-                            "Challenge → Solution / Our Approach → Client Voice.\n"
-                            "- Client Voice: a short client quote copied VERBATIM from the case "
-                            "study KB, in quotation marks, with the speaker's name/title if given. "
-                            "Never paraphrase, embellish, or invent a quote. If the KB contains no "
-                            "client quote for this study, write exactly: [VERIFY: no client quote "
-                            "found in source material]\n"
-                            "- Do NOT include a company/client overview, a Results or KPI/metrics "
-                            "list, 'Key Tactics', or 'Measurable Outcomes' section.\n"
-                            "- Use ASCII characters only in all text — no special Unicode or non-English characters.\n"
-                            'Return JSON: {"content": "full case study content", "kbRefs": ["..."]}'
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Voice:\n{voice}\n\n"
-                            f"Case studies knowledge base:\n"
-                            f"{prefetched_studies.get(study, '')[:12000] or case_corpus[:8000]}"
-                        ),
-                    },
-                ],
-                max_tokens=900,
-                temperature=0.0,  # Zero temp for strict factual extraction
-            )
-        except LlmError as exc:
-            logger.warning(
-                "Legacy case study %s failed (%s); VERIFY stub (no retry)",
-                study,
-                str(exc)[:160],
-            )
-            raw = {
-                "content": f"[VERIFY: complete case study '{study}' from KB — generation interrupted]",
-                "kbRefs": kb_sources,
-            }
-        content = _sanitize_content(raw.get("content", "").strip())
-        from app.services.proposal_integrity_guards import (
-            scrub_case_study_overbuild,
-            scrub_ungrounded_case_study_percent_metrics,
-        )
-
-        source_blob = prefetched_studies.get(study, "")[:12000] or case_corpus[:8000]
-        content, _cs_logs = scrub_case_study_overbuild(content)
-        content, _metric_logs = scrub_ungrounded_case_study_percent_metrics(
-            content, source_text=source_blob
+        # Option B: designer note, not a redrafted narrative. No LLM call, so no
+        # invented metrics or client quotes to scrub back out afterwards.
+        content = format_case_study_stub_content(
+            display_name=case_study_display_name(study),
+            asset_filename=case_study_asset_filename(study),
+            relevance=relevance_by_title.get(study.casefold(), ""),
         )
         section = _section_payload(
             section_id=sec_id,
             title=sec_title,
             mode="select",
-            word_target=120,
+            word_target=40,
             page_limit=state.get("page_limit"),
             page_ratio=0.03,
             designer_note_default=f"Our Work example: {study}.",
-            raw={"content": content, "kbRefs": raw.get("kbRefs") or []},
+            raw={"content": content, "kbRefs": [study]},
             kb_sources=kb_sources,
             extra_refs=[study],
         )
-        
+
         # Validate section before appending
         if not isinstance(section, dict):
             logger.error(f"❌ Work example {study} section is not a dict: {type(section)}")

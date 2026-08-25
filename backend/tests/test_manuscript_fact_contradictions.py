@@ -97,16 +97,18 @@ class FactContradictionPassTests(unittest.IsolatedAsyncioTestCase):
             ],
             "summary": "Invented team size split.",
         }
+        # Patch model: replace only the fabricated team-size span, verbatim.
         rewrite_json = {
-            "content": (
-                "We are zö agency — a team of 35 professionals based in Bend, Oregon. "
-                "We bring thirteen years of lived experience serving public-sector "
-                "and mission-driven clients with warmth, transparency, and proof-led work.\n\n"
-                "## Our Promise\n"
-                "Excellence is our guarantee, not our goal. We meet deadlines, "
-                "stay within budget, and give clients direct access to the people "
-                "doing the work — no surprise bills, no black boxes."
-            ),
+            "edits": [
+                {
+                    "find": (
+                        "Our core team of 20 full-time professionals is supported by "
+                        "a network of specialized contractors, giving us access to "
+                        "35+ specialists across disciplines."
+                    ),
+                    "replace": "Our core team of 35 full-time professionals works across disciplines.",
+                }
+            ],
             "changed": True,
             "notes": "Aligned team size with companyfacts.",
         }

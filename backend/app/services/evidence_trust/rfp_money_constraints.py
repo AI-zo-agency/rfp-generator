@@ -5,6 +5,7 @@ RFP-agnostic: linguistic patterns only — never hardcode client names or fixed 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -254,6 +255,110 @@ def extract_rfp_money_constraints(text: str) -> list[RfpMoneyConstraint]:
         sorted({c.kind for c in found}),
     )
     return found
+
+
+_NTE_FALLBACK_PROMPT = (
+    "You extract ONE fact from an RFP: the maximum dollar figure the buyer "
+    "states a bidder's fee/compensation must not exceed (a hard NTE / price "
+    "ceiling / maximum contract value for the base or Year 1 term). This is "
+    "a last-resort fallback after a deterministic regex pass found nothing — "
+    "the RFP likely phrases its ceiling in wording the regex patterns don't "
+    "anticipate, so read for MEANING, not just the keywords below.\n"
+    "Rules:\n"
+    "- Only report a figure the RFP text ACTUALLY STATES. Never estimate, "
+    "infer from scope, or invent a number.\n"
+    "- 'excerpt' MUST be copied VERBATIM from the RFP text (same characters, "
+    "not paraphrased) — a short window containing the dollar figure and its "
+    "context. This is checked programmatically; a paraphrase is rejected.\n"
+    "- If the RFP states no such ceiling, return null — do not guess.\n"
+    "- A Year-2/3 option-year figure or a total multi-year contract ceiling "
+    "is not the Year 1 / base-term NTE — only report the base-term figure.\n"
+    'Return JSON: {"amount": <number or null>, "excerpt": "<verbatim quote or null>"}'
+)
+
+
+async def llm_extract_hard_fee_nte(rfp_text: str) -> RfpMoneyConstraint | None:
+    """LLM fallback for a hard fee NTE when the deterministic regex pass
+    (extract_rfp_money_constraints) finds nothing — that pass is intentionally
+    RFP-agnostic pattern matching, so it misses ceilings phrased in wording
+    the patterns don't anticipate. Grounded: the returned excerpt must appear
+    verbatim in the RFP text, or the result is rejected outright — this
+    cannot invent a number, only fail to find one that is genuinely there.
+    """
+    body = (rfp_text or "").strip()
+    if not body:
+        return None
+
+    from app.services import llm
+
+    if not llm.is_configured():
+        return None
+
+    try:
+        raw, _ = await asyncio.wait_for(
+            llm.chat_json(
+                [
+                    {"role": "system", "content": _NTE_FALLBACK_PROMPT},
+                    {"role": "user", "content": f"RFP text:\n{body[:60_000]}"},
+                ],
+                max_tokens=512,
+                temperature=0.0,
+                tier="light",
+                node_name="rfp_money_nte_fallback",
+            ),
+            timeout=90.0,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback, never blocks budget generation
+        logger.warning("LLM hard-fee-NTE fallback failed: %s", exc)
+        return None
+
+    amount_raw = raw.get("amount") if isinstance(raw, dict) else None
+    excerpt = str((raw or {}).get("excerpt") or "").strip()
+    if amount_raw is None or not excerpt:
+        return None
+    try:
+        amount = float(amount_raw)
+    except (TypeError, ValueError):
+        return None
+    if amount <= 0:
+        return None
+
+    # Grounding check: reject anything not actually present in the RFP text
+    # (normalize whitespace only — never accept a paraphrase or invented quote).
+    normalized_body = re.sub(r"\s+", " ", body).casefold()
+    normalized_excerpt = re.sub(r"\s+", " ", excerpt).casefold()
+    if normalized_excerpt not in normalized_body:
+        logger.warning(
+            "LLM hard-fee-NTE fallback rejected — excerpt not found verbatim in RFP: %r",
+            excerpt[:120],
+        )
+        return None
+
+    return RfpMoneyConstraint(
+        amount=round(amount, 2),
+        kind=CONSTRAINT_HARD_FEE_NTE,
+        excerpt=excerpt[:200],
+        confidence="medium",
+    )
+
+
+async def extract_rfp_money_constraints_with_llm_fallback(
+    text: str,
+) -> list[RfpMoneyConstraint]:
+    """extract_rfp_money_constraints, plus a grounded LLM fallback for the
+    hard fee NTE specifically when the deterministic pass finds none — the
+    common case that leaves rfp_budget_cap unset and the over-cap check
+    unable to run at all (see collect_over_authority_flags)."""
+    constraints = extract_rfp_money_constraints(text)
+    if any(c.kind == CONSTRAINT_HARD_FEE_NTE for c in constraints):
+        return constraints
+    fallback = await llm_extract_hard_fee_nte(text)
+    if fallback is not None:
+        constraints = [*constraints, fallback]
+        logger.info(
+            "rfp_money_constraints LLM fallback recovered hard_fee_nte=%s", fallback.amount
+        )
+    return constraints
 
 
 def primary_hard_fee_nte(

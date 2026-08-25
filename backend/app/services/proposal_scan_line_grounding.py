@@ -247,6 +247,14 @@ async def _ground_section_body(
     ):
         return body, "rejected — invented contact/money facts."
 
+    # Patch-not-rewrite guard: grounding must correct specific lines, not swap the
+    # whole good section for a same-length rewrite.
+    from app.services.proposal_section_patch import enforce_localized_edit
+
+    guarded, accepted, reason = enforce_localized_edit(body, updated)
+    if not accepted:
+        return body, reason
+
     updated, _ = strip_placeholder_tags_not_required_by_rfp(updated, rfp_text)
     updated = enforce_narrative_voice(
         updated,
@@ -312,6 +320,12 @@ async def run_scan_line_grounding_pass(
     company_excerpt = _canonical_company_excerpt(sections)
     work: list[tuple[int, ProposalSection]] = []
     for idx, section in enumerate(sections):
+        # Not excluded from grounding even though it's a static company-fact
+        # section (org-structure, business-info, certifications, insurance):
+        # this pass verifies claims against current KB evidence, which is
+        # exactly what catches a roster title gone stale against a standing
+        # correction (e.g. a title change) — skipping it here would silently
+        # leave that kind of error uncorrected.
         body = section.content or ""
         if is_dead_section(body):
             continue

@@ -217,26 +217,50 @@ async def run_budget_integrity_pass_b(
         }
         for s in sections[:6]
     ]
+    messages = [
+        {"role": "system", "content": _PASS_B_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"=== CANONICAL ===\n{_canonical_budget_facts(budget)}\n\n"
+                f"=== SECTIONS ===\n{payload}"
+            ),
+        },
+    ]
     try:
         raw, _provider = await llm.chat_json(
-            [
-                {"role": "system", "content": _PASS_B_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"=== CANONICAL ===\n{_canonical_budget_facts(budget)}\n\n"
-                        f"=== SECTIONS ===\n{payload}"
-                    ),
-                },
-            ],
+            messages,
             max_tokens=4096,
             temperature=0.0,
             tier="light",
             node_name="money_intelligence_pass_b",
         )
     except (LlmError, TypeError, Exception) as exc:
-        logger.warning("money_intelligence Pass B failed: %s", exc)
-        return []
+        msg = str(exc).casefold()
+        if "invalid json" not in msg and "truncated" not in msg:
+            logger.warning("money_intelligence Pass B failed: %s", exc)
+            return []
+        # _PASS_B_PROMPT's findings array has no length cap — a proposal with
+        # several pricing sections can produce more findings than 4096 tokens
+        # holds, cutting the JSON off mid-object. One retry at double the
+        # budget recovers those instead of silently dropping every Pass B
+        # finding for the run (this is the failure the "Conflicting fee
+        # totals..." cutoff in the logs was).
+        logger.warning(
+            "money_intelligence Pass B truncated at 4096 tokens — retrying at 8192: %s",
+            exc,
+        )
+        try:
+            raw, _provider = await llm.chat_json(
+                messages,
+                max_tokens=8192,
+                temperature=0.0,
+                tier="light",
+                node_name="money_intelligence_pass_b",
+            )
+        except (LlmError, TypeError, Exception) as retry_exc:
+            logger.warning("money_intelligence Pass B retry failed: %s", retry_exc)
+            return []
 
     issues: list[PreSubmitIssue] = []
     for row in raw.get("findings") or []:
