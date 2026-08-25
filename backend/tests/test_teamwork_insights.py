@@ -108,6 +108,37 @@ def test_validate_response_drops_prohibited_notes_but_keeps_evidence_backed_hiri
     }
 
 
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "The team has estimated effort.",
+        "The team has forecasted hours.",
+        "The team has hours that are unobserved.",
+        "Salaries are at risk.",
+        "Wages are at risk.",
+    ],
+)
+def test_validate_response_rejects_prohibited_claim_concepts_in_natural_word_order(claim):
+    evidence = {"signals": [{"id": "overdue-unassigned", "figure": "1"}], "history": {}}
+
+    with pytest.raises(ValueError, match="prohibited claim"):
+        insights.validate_response({"brief": claim, "notes": {}}, evidence)
+
+
+def test_validate_response_drops_natural_word_order_prohibited_note_claims():
+    evidence = {"signals": [{"id": "overdue-unassigned", "figure": "1"}], "history": {}}
+
+    out = insights.validate_response(
+        {
+            "brief": "One task needs an owner.",
+            "notes": {"overdue-unassigned": "The team has hours that are unobserved."},
+        },
+        evidence,
+    )
+
+    assert out["notes"] == {}
+
+
 def test_build_messages_says_history_is_still_building_when_not_ready():
     evidence = insights.build_evidence(_overview_with_unassigned_overdue(), [])
 

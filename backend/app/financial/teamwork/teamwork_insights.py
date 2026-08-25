@@ -21,16 +21,17 @@ _MAX_TOKENS = 1400
 _TEMPERATURE = 0.3
 _SEVERITY_RANK = {"critical": 0, "warn": 1, "info": 2}
 _PROHIBITED_CLAIMS = (
-    re.compile(r"\b(?:cash|payroll)\b", re.IGNORECASE),
+    re.compile(r"\b(?:cash|payroll|salar(?:y|ies)|wages?)\b", re.IGNORECASE),
     re.compile(
-        r"\b(?:planned|unobserved)\s+(?:work|effort|hours?|capacity)\b",
+        r"\b(?:planned|unobserved|estimated|forecast(?:ed|ing)?)\b"
+        r"(?:\W+\w+){0,4}\W+\b(?:work|effort|hours?|capacity)\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:work|effort|hours?|capacity)\s+(?:is\s+)?(?:planned|unobserved)\b",
+        r"\b(?:work|effort|hours?|capacity)\b(?:\W+\w+){0,4}\W+"
+        r"\b(?:planned|unobserved|estimated|forecast(?:ed|ing)?)\b",
         re.IGNORECASE,
     ),
-    re.compile(r"\b(?:effort|hours?)\s+(?:forecast|estimate)\b", re.IGNORECASE),
 )
 _HIRING_CLAIM = re.compile(r"\b(?:hire|hiring|recruit|recruiting)\b", re.IGNORECASE)
 
