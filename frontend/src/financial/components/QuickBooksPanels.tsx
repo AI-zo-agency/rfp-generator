@@ -412,33 +412,35 @@ export function QuickBooksPanels() {
               <span className="qb-sync-meta">{data.activity.total} ledger changes</span>
             ) : null}
           </p>
-          <button
-            type="button"
-            className="qb-ai-trigger"
-            onClick={() => setAiOpen(true)}
-            aria-haspopup="dialog"
-            aria-expanded={aiOpen}
-          >
-            <Sparkles size={14} strokeWidth={2.25} aria-hidden />
-            AI Intelligence
-            {insights.highImpact ? (
-              <span className="qb-ai-trigger-count">{insights.highImpact}</span>
-            ) : null}
-          </button>
-          <ToggleGroup
-            type="single"
-            value={String(year)}
-            onValueChange={(v) => v && setYear(Number(v))}
-            className="qb-years"
-            aria-label="Fiscal year"
-            aria-busy={loading || undefined}
-          >
-            {years.map((y) => (
-              <ToggleGroupItem key={y} value={String(y)} aria-label={String(y)}>
-                {y}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
+          <div className="qb-toolbar-actions">
+            <button
+              type="button"
+              className="qb-ai-trigger"
+              onClick={() => setAiOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={aiOpen}
+            >
+              <Sparkles size={14} strokeWidth={2.25} aria-hidden />
+              AI Intelligence
+              {insights.highImpact ? (
+                <span className="qb-ai-trigger-count">{insights.highImpact}</span>
+              ) : null}
+            </button>
+            <ToggleGroup
+              type="single"
+              value={String(year)}
+              onValueChange={(v) => v && setYear(Number(v))}
+              className="qb-years"
+              aria-label="Fiscal year"
+              aria-busy={loading || undefined}
+            >
+              {years.map((y) => (
+                <ToggleGroupItem key={y} value={String(y)} aria-label={String(y)}>
+                  {y}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+          </div>
         </div>
 
         <Tabs value={view} onValueChange={setView} className="qb-tabs">

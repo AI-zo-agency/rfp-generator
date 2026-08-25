@@ -41,6 +41,15 @@ html.fin-lock body {
   padding-bottom: 10px;
 }
 
+.qb-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .qb-sync {
   display: flex;
   flex-wrap: wrap;

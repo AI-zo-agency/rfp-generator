@@ -13,25 +13,44 @@
 .qb-ai-trigger {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 11px 5px 9px;
-  border: 1px solid color-mix(in srgb, var(--zo-teal) 32%, var(--zo-border));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--zo-teal) 8%, var(--zo-surface));
-  color: var(--zo-text);
-  font-size: 12.5px;
-  font-weight: 550;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 6px 4px 5px;
+  border: 1px solid color-mix(in srgb, var(--zo-teal-dark) 72%, #000);
+  border-radius: 9px;
+  background: linear-gradient(135deg, var(--zo-teal), var(--zo-teal-dark));
+  box-shadow: 0 2px 5px color-mix(in srgb, var(--zo-teal-dark) 24%, transparent);
+  color: var(--zo-white);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
   cursor: pointer;
-  transition: background 160ms var(--qb-ease, ease), border-color 160ms var(--qb-ease, ease);
+  transition: transform 160ms var(--qb-ease, ease), box-shadow 160ms var(--qb-ease, ease),
+    filter 160ms var(--qb-ease, ease);
 }
 
 .qb-ai-trigger:hover {
-  background: color-mix(in srgb, var(--zo-teal) 14%, var(--zo-surface));
-  border-color: color-mix(in srgb, var(--zo-teal) 48%, var(--zo-border));
+  box-shadow: 0 5px 12px color-mix(in srgb, var(--zo-teal-dark) 28%, transparent);
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.qb-ai-trigger:active {
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--zo-teal-dark) 24%, transparent);
+  transform: translateY(0);
+}
+
+.qb-ai-trigger:focus-visible {
+  outline: 2px solid var(--zo-teal);
+  outline-offset: 3px;
 }
 
 .qb-ai-trigger svg {
-  color: var(--zo-teal);
+  box-sizing: content-box;
+  padding: 5px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--zo-white) 16%, transparent);
+  color: var(--zo-white);
 }
 
 /* The count only appears when something is actually urgent, so its presence
@@ -40,14 +59,16 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 17px;
-  height: 17px;
-  padding: 0 5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  margin-left: 1px;
+  border: 1px solid color-mix(in srgb, var(--zo-white) 45%, transparent);
   border-radius: 999px;
-  background: var(--zo-danger);
-  color: #fff;
-  font-size: 10.5px;
-  font-weight: 650;
+  background: var(--zo-white);
+  color: var(--zo-danger);
+  font-size: 10px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
