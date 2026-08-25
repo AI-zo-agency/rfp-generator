@@ -58,14 +58,17 @@ async def _dispatch_phase(rfp_id: str, phase: str, kwargs: dict) -> None:
     import uuid
 
     from app.services.llm_call_context import llm_call_context
-    from app.services.proposal_generation_cancel import clear_generation_cancel
+    from app.services.proposal_generation_cancel import aclear_generation_cancel
     from app.services.proposal_pipeline_checkpoint import pipeline_phase
 
     module_path, func_name = _PHASE_DISPATCH[phase]
     module = __import__(module_path, fromlist=[func_name])
     func = getattr(module, func_name)
 
-    clear_generation_cancel(rfp_id)
+    # AWAIT the clear so a stale cross-process cancel flag (from an earlier Stop
+    # or a killed worker) is gone before pipeline_phase's first cancel check —
+    # otherwise the fresh run aborts on start with no real logs.
+    await aclear_generation_cancel(rfp_id)
     run_id = str(uuid.uuid4())
     async with pipeline_phase(rfp_id, phase):
         with llm_call_context(rfp_id=rfp_id, run_id=run_id, node_name=phase):

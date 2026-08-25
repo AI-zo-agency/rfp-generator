@@ -573,6 +573,16 @@ class ProposalPipelineCheckpoint(BaseModel):
             "current hash matches has nothing new to check."
         ),
     )
+    last_clean_fulfill_scan_at: str | None = Field(
+        default=None,
+        alias="lastCleanFulfillScanAt",
+        description=(
+            "ISO timestamp of the last fully-completed Complete & clean run. "
+            "The draft is 'already clean' for the UI when it has not been edited "
+            "since (draft.updatedAt <= this). Survives refresh / other users "
+            "because it is written server-side by the Celery task."
+        ),
+    )
     updated_at: str = Field(alias="updatedAt")
 
 

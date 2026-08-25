@@ -47,12 +47,15 @@ class ComputeFulfillScanHashTests(unittest.TestCase):
         after = compute_fulfill_scan_hash(_draft(("s1", "hello world")), "rfp text")
         self.assertNotEqual(before, after)
 
-    def test_changes_when_rfp_text_changes(self):
+    def test_content_hash_ignores_rfp_text(self):
+        # The hash is DRAFT-CONTENT based so an incidental save / RFP-text change
+        # never flips the "already clean" signal — only real draft edits do.
         d = _draft(("s1", "hello"))
-        self.assertNotEqual(
+        self.assertEqual(
             compute_fulfill_scan_hash(d, "rfp text v1"),
             compute_fulfill_scan_hash(d, "rfp text v2"),
         )
+        self.assertEqual(compute_fulfill_scan_hash(d), compute_fulfill_scan_hash(d, "x"))
 
     def test_changes_when_a_section_is_added(self):
         before = compute_fulfill_scan_hash(_draft(("s1", "hello")), "rfp text")

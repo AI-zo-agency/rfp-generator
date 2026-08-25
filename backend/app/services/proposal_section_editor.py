@@ -4925,6 +4925,47 @@ def _selection_bounds_valid(
     return True
 
 
+def _trim_replacement_boundary_overlap(
+    replacement: str,
+    *,
+    prefix: str,
+    suffix: str,
+    min_overlap: int = 20,
+) -> str:
+    """Trim text the model re-emitted beyond the selected span, so a splice cannot
+    duplicate the surrounding sentence.
+
+    Observed defect: a user selects a few words of a table cell and asks to "fill
+    this gap"; the model returns the WHOLE completed sentence as the replacement.
+    Spliced as ``prefix + replacement + suffix`` that repeats the part of the
+    sentence that already lives in ``suffix`` (and/or ``prefix``), producing
+    ``…environment.e will select…environment.`` back-to-back.
+
+    Deterministic fix: if the replacement's tail equals the head of ``suffix``
+    (or its head equals the tail of ``prefix``) for at least ``min_overlap``
+    chars, drop that overlap from the replacement. Case-insensitive; the length
+    floor keeps ordinary coincidental word matches from being trimmed.
+    """
+    r = replacement or ""
+    if not r:
+        return r
+    suf = suffix or ""
+    if suf:
+        max_k = min(len(r), len(suf))
+        for k in range(max_k, min_overlap - 1, -1):
+            if r[-k:].casefold() == suf[:k].casefold():
+                r = r[:-k]
+                break
+    pre = prefix or ""
+    if r and pre:
+        max_k = min(len(r), len(pre))
+        for k in range(max_k, min_overlap - 1, -1):
+            if r[:k].casefold() == pre[-k:].casefold():
+                r = r[k:]
+                break
+    return r
+
+
 def _splice_selection(
     content: str,
     *,
@@ -5378,6 +5419,14 @@ async def _improve_section_selection(
     from app.services.proposal_manuscript import strip_evidence_citation_markers
 
     replacement = strip_evidence_citation_markers(replacement)
+    # Guard: if the model over-ran the selected span and re-emitted surrounding
+    # text, trim the overlap so the splice cannot duplicate the sentence.
+    if replacement.strip():
+        replacement = _trim_replacement_boundary_overlap(
+            replacement,
+            prefix=content[:selection_start],
+            suffix=content[selection_end:],
+        )
     # Pure splice — do not run strip/voice on the full section (that mutates prefix/suffix
     # and falsely trips the before/after guards).
     new_content = _splice_selection(
@@ -9690,14 +9739,27 @@ async def improve_proposal_section(
 
         before_words = word_count(before_section.content or "")
         after_words = word_count(updated_section.content or "")
+        # Report the change at the SELECTION level, not the whole section — a
+        # section-level "692 → 725 words" reads as if the whole tab was rewritten
+        # when only the highlighted span changed. Compute the excerpt delta from
+        # the section length change (the splice preserves everything else).
+        before_excerpt = (before_section.content or "")[selection_start:selection_end]
+        len_delta = len(updated_section.content or "") - len(before_section.content or "")
+        after_excerpt = (updated_section.content or "")[
+            selection_start : selection_end + len_delta
+        ]
+        excerpt_before_words = word_count(before_excerpt)
+        excerpt_after_words = word_count(after_excerpt)
         assistant_message = (
-            f"Updated the selected excerpt in **{section.title}** "
-            f"({before_words} → {after_words} words). Surrounding text unchanged."
+            f"Revised only your selected excerpt in **{section.title}** "
+            f"({excerpt_before_words} → {excerpt_after_words} words in that span). "
+            f"The rest of the section is unchanged."
         )
         if kb_fills > 0:
             assistant_message = (
-                f"Filled **{kb_fills}** verified fact(s) and updated the selected excerpt in "
-                f"**{section.title}** ({before_words} → {after_words} words)."
+                f"Filled **{kb_fills}** verified fact(s) in your selected excerpt in "
+                f"**{section.title}** ({excerpt_before_words} → {excerpt_after_words} "
+                f"words in that span). The rest of the section is unchanged."
             )
         logger.info(
             "Section selection edit complete for %s / %s (%d → %d words)",

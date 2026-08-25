@@ -97,6 +97,28 @@ def clear_generation_cancel(rfp_id: str) -> None:
     _sync_redis_flag(rfp_id, cancelled=False)
 
 
+async def aclear_generation_cancel(rfp_id: str) -> None:
+    """Clear the cancel flag and AWAIT the Redis delete before returning.
+
+    The fire-and-forget clear in ``clear_generation_cancel`` can race the very
+    first cross-process cancel check when a fresh run starts — the Celery worker
+    reads a stale ``zo:cancel:{rfp_id}`` = 1 (left by an earlier Stop or a
+    killed worker) before the delete lands, and aborts the new run on the spot
+    (the "no logs when I start Complete Scan" symptom). Awaiting the delete at
+    task start removes that race deterministically.
+    """
+    _cancel_requested.discard(rfp_id)
+    _redis_cancel_cache[rfp_id] = (time.monotonic(), False)
+    if not settings.celery_enabled:
+        return
+    try:
+        from app.services.redis_client import get_redis
+
+        await get_redis().delete(f"{_REDIS_CANCEL_PREFIX}{rfp_id}")
+    except Exception:  # noqa: BLE001 — best-effort; never block a run on Redis
+        logger.warning("Redis cancel-flag clear failed for %s", rfp_id, exc_info=True)
+
+
 def is_generation_cancelled(rfp_id: str | None = None) -> bool:
     """In-process check only — see check_generation_cancelled for the
     Redis-aware async version the actual poll loop uses."""

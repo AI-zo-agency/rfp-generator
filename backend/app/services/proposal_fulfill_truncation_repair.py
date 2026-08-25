@@ -136,11 +136,20 @@ async def repair_truncated_manuscript_sections(
         if use_llm:
             completed = await _llm_complete_truncated_section(section=section, rfp=rfp)
             if completed and completed != body:
-                sections[idx] = section.model_copy(
-                    update={"content": completed, "status": "generated"}
-                )
-                logs.append(f"Truncation repair: completed cut-off section “{section.title}”.")
-                changed = True
+                # Append-only guard: a truncation repair must KEEP the existing
+                # (good, if cut-off) content and only finish it — never swap it
+                # for a from-scratch rewrite.
+                from app.services.proposal_section_patch import enforce_localized_edit
+
+                guarded, accepted, reason = enforce_localized_edit(body, completed)
+                if accepted:
+                    sections[idx] = section.model_copy(
+                        update={"content": completed, "status": "generated"}
+                    )
+                    logs.append(f"Truncation repair: completed cut-off section “{section.title}”.")
+                    changed = True
+                else:
+                    logs.append(f"Truncation repair: {reason} for “{section.title}”.")
 
     if not changed:
         return draft, logs

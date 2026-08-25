@@ -163,6 +163,36 @@ def closing_package_excerpt(rfp_text: str, *, max_chars: int = 32_000) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+# Keywords the regex pattern tuple above has no entry for (e.g. mandatory
+# accessibility/VPAT requirements) — kept as a separate plain-string list so
+# a domain-keyword addition never has to touch the existing regex patterns.
+# Case-insensitive substring search, no regex.
+_PLAIN_SUBMISSION_KEYWORDS: tuple[str, ...] = (
+    "accessibility",
+    "vpat",
+    "voluntary product accessibility template",
+    "disability standards",
+)
+
+
+def _find_plain_keyword_windows(
+    body: str, keywords: tuple[str, ...], *, span: int
+) -> list[tuple[int, int]]:
+    """Case-insensitive substring window search via ``str.find`` — no regex."""
+    folded = body.casefold()
+    windows: list[tuple[int, int]] = []
+    for keyword in keywords:
+        needle = keyword.casefold()
+        search_from = 0
+        while True:
+            idx = folded.find(needle, search_from)
+            if idx == -1:
+                break
+            windows.append((max(0, idx - span), min(len(body), idx + len(needle) + span)))
+            search_from = idx + len(needle)
+    return windows
+
+
 def submission_documents_excerpt(rfp_text: str, *, max_chars: int = 46_000) -> str:
     """Documents to be submitted, forms to return, vendor qualifications.
 
@@ -211,6 +241,7 @@ def submission_documents_excerpt(rfp_text: str, *, max_chars: int = 46_000) -> s
     for pat in patterns:
         for m in re.finditer(pat, body, flags=re.I | re.S):
             windows.append((max(0, m.start() - span), min(len(body), m.end() + span)))
+    windows.extend(_find_plain_keyword_windows(body, _PLAIN_SUBMISSION_KEYWORDS, span=span))
     merged = _merge_windows(windows)
     if not merged:
         return build_priority_rfp_excerpt(body, max_chars=max_chars)

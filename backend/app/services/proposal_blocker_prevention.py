@@ -186,6 +186,30 @@ async def apply_feedback_blocker_suite(
     budget_contradiction_unresolved = 0
     budget_contradiction_unresolved_titles: list[str] = []
 
+    # ONE combined detection call for all three dimensions (fact / RFP / budget),
+    # instead of three separate full-manuscript audits. Each pass below then
+    # APPLIES its own findings via precomputed_raw — the per-finding rewrite
+    # logic (and its tests) are unchanged; only the detection is consolidated.
+    # If the combined call fails, precomputed stays None and each pass runs its
+    # own detection exactly as before (safe fallback, no behavior change).
+    fact_precomputed: dict | None = None
+    rfp_precomputed: dict | None = None
+    budget_precomputed: dict | None = None
+    if use_llm_contradiction and rfp is not None:
+        try:
+            from app.services.proposal_combined_contradiction_audit import (
+                detect_all_contradictions,
+            )
+
+            combined = await detect_all_contradictions(
+                draft, rfp=rfp, rfp_text=rfp_text, research=research
+            )
+            if combined is not None:
+                fact_precomputed, rfp_precomputed, budget_precomputed = combined
+                logs.append("Contradiction detection: one combined LLM pass (fact + RFP + budget).")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Combined contradiction detection skipped: %s", exc)
+
     if use_llm_contradiction and rfp is not None:
         try:
             from app.services.proposal_manuscript_fact_contradictions import (
@@ -196,6 +220,7 @@ async def apply_feedback_blocker_suite(
                 draft,
                 rfp=rfp,
                 use_llm=True,
+                precomputed_raw=fact_precomputed,
             )
             draft = fact.draft
             logs.extend(fact.logs)
@@ -220,6 +245,7 @@ async def apply_feedback_blocker_suite(
                 rfp=rfp,
                 rfp_text=rfp_text,
                 use_llm=True,
+                precomputed_raw=rfp_precomputed,
             )
             draft = contra.draft
             logs.extend(contra.logs)
@@ -244,6 +270,7 @@ async def apply_feedback_blocker_suite(
                 rfp=rfp,
                 research=research,
                 use_llm=True,
+                precomputed_raw=budget_precomputed,
             )
             draft = budget_audit.draft
             logs.extend(budget_audit.logs)

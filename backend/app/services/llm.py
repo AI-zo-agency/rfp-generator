@@ -689,6 +689,18 @@ CORRECTIONS_EXEMPT_NODES: frozenset[str] = frozenset({
 
 _CORRECTIONS_MARKER = "## STANDING CORRECTIONS"
 
+# Appended on a JSON-parse/refusal retry. Turns a refusal ("I cannot invent…")
+# into a valid object with placeholders, so no phase gets stuck on non-JSON.
+_JSON_REINFORCE_MSG = (
+    "CRITICAL: your previous reply was not valid JSON — it may have refused, "
+    "explained a concern, or wrapped the object in prose. Reply again with ONLY "
+    "a single valid JSON object for the requested schema. Do NOT refuse, do NOT "
+    "add any commentary or markdown, do NOT wrap it in a code fence. If a value "
+    "is unknown or you would object to inventing it, put the string "
+    '"[MANUAL FILL: what is needed]" in that field (or null for a number) instead '
+    "of refusing. Your entire response must start with { and end with }."
+)
+
 
 async def apply_standing_corrections(
     messages: list[dict[str, str]],
@@ -934,6 +946,60 @@ async def chat_json(
             "No LLM API key configured. Set OPENROUTER_API_KEY (primary) or FIREWORKS_API_KEY (fallback).",
             status_code=503,
         )
+
+    # General self-heal for the "model returned prose / refused instead of JSON"
+    # failure: retry ONCE with a hard JSON-only instruction so ANY caller's phase
+    # recovers a parseable object (with MANUAL FILL placeholders) instead of
+    # failing. Only when the failures were JSON-parse failures (not network/quota)
+    # and an OpenRouter key is available — never loops (single attempt).
+    json_parse_failure = any(
+        "invalid JSON" in e or "unexpected response shape" in e or "empty content" in e
+        for e in errors
+    )
+    if (
+        json_parse_failure
+        and openrouter_key
+        and not _is_placeholder_key(openrouter_key)
+    ):
+        try:
+            started = time.perf_counter()
+            reinforced = [
+                *messages,
+                {"role": "user", "content": _JSON_REINFORCE_MSG},
+            ]
+            raw, usage = await _post_chat(
+                base_url=settings.openrouter_base_url,
+                api_key=openrouter_key,
+                model=openrouter_model,
+                messages=reinforced,
+                cache_prefix=cache_prefix,
+                provider="OpenRouter",
+                extra_headers={
+                    "HTTP-Referer": settings.app_url,
+                    "X-Title": settings.app_name,
+                },
+                max_tokens=max_tokens,
+                temperature=0.0,
+            )
+            parsed = _parse_json_response(raw)
+            _record_successful_call(
+                model=openrouter_model,
+                tier=tier,
+                provider="openrouter",
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                node_name=node_name,
+                rfp_id=rfp_id,
+                run_id=run_id,
+            )
+            logger.info(
+                "Recovered a non-JSON/refused LLM response via reinforcement "
+                "retry (node=%s)",
+                node_name,
+            )
+            return parsed, "openrouter"
+        except Exception as exc:  # noqa: BLE001 — fall through to the raise below
+            errors.append(f"reinforcement retry failed: {str(exc)[:200]}")
 
     raise LlmError(
         "All configured LLM providers failed: " + "; ".join(errors),

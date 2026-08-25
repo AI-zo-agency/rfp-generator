@@ -53,8 +53,27 @@ _STOPWORDS = {
 }
 
 
+def _strip_leading_letter_marker(text: str) -> str:
+    """Strip a leading single-letter list marker ('f. ', 'a) ', 'd: ') so
+    'F. Innovation Process...' normalizes the same as 'Innovation Process...'
+    — the RFP's own lettered submittal items (A, B, C...) get drafted both
+    with and without that prefix depending on which pass wrote the tab.
+
+    Plain string methods only — not a regex, and not a hardcoded letter set;
+    any single letter followed by one of these three list-marker punctuation
+    marks qualifies, same as the numeric-prefix strip already does for digits.
+    """
+    if len(text) < 2 or not text[0].isalpha():
+        return text
+    if text[1] not in ").:":
+        return text
+    rest = text[2:].lstrip(" -–—")
+    return rest if rest else text
+
+
 def normalize_outline_title(title: str) -> str:
     text = (title or "").strip().casefold()
+    text = _strip_leading_letter_marker(text)
     text = re.sub(r"^\s*(?:rfp[-\s]?sec(?:tion)?[-\s]?\d+\s*[—\-–:]?\s*)", "", text)
     text = re.sub(r"^\s*\d+(?:\.\d+)*\s*[—\-–:.]?\s*", "", text)
     text = re.sub(r"[^a-z0-9\s]+", " ", text)

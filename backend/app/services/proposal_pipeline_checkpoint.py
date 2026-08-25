@@ -356,20 +356,26 @@ async def complete_fulfill_scan(rfp_id: str, *, scan_hash: str | None = None) ->
     }
     if scan_hash:
         updates["last_clean_fulfill_scan_hash"] = scan_hash
+        # UI "already clean" signal — survives refresh / reaches other users
+        # because it is persisted here by the Celery task, not in a browser.
+        updates["last_clean_fulfill_scan_at"] = _now_iso()
     await _save_checkpoint(rfp_id, cp.model_copy(update=updates))
 
 
-def compute_fulfill_scan_hash(draft: ProposalDraft, rfp_text: str) -> str:
-    """Fingerprint of everything a Complete & clean draft run inspects.
+def compute_fulfill_scan_hash(draft: ProposalDraft, rfp_text: str = "") -> str:
+    """Fingerprint of the DRAFT CONTENT a Complete & clean run inspects.
 
-    Deliberately conservative: any section content/id change or RFP text
-    change produces a different hash. When in doubt this must change, not
-    stay stable — a stale-but-matching hash would wrongly skip a real check.
+    Content-based, not timestamp-based: a section id/content change flips it,
+    but a bare re-save that does not change any content leaves it identical —
+    so the "already clean" signal survives incidental saves/interactions. The
+    ``rfp_text`` arg is accepted for backwards compatibility but intentionally
+    NOT hashed: RFP text is stable after generation, and including it made
+    the hash impossible to recompute in the status endpoint (no rfp_text there).
     """
     import hashlib
 
+    del rfp_text
     parts = [f"{s.id}\x00{s.content or ''}" for s in draft.sections]
-    parts.append(f"RFP\x00{rfp_text or ''}")
     blob = "\x01".join(parts).encode("utf-8", errors="ignore")
     return hashlib.sha256(blob).hexdigest()
 
@@ -814,8 +820,19 @@ async def build_pipeline_status(
     ]
     cp = research.pipeline_checkpoint if research else None
     has_progress = _has_resumable_pipeline_progress(draft, research)
+    # "Already clean" = a Complete & clean run finished AND the draft CONTENT is
+    # unchanged since (content hash match, not a fragile updated_at timestamp —
+    # incidental re-saves must not flip this). Server-derived, so it survives
+    # refresh and is the same for every user.
+    fulfill_up_to_date = False
+    if cp is not None and cp.last_clean_fulfill_scan_hash and draft is not None:
+        fulfill_up_to_date = (
+            cp.last_clean_fulfill_scan_hash == compute_fulfill_scan_hash(draft)
+        )
     return {
         "resumeFromPhase": resume_from,
+        "fulfillScanUpToDate": fulfill_up_to_date,
+        "fulfillScanCompletedAt": cp.last_clean_fulfill_scan_at if cp else None,
         "completedPhases": completed,
         "isComplete": resume_from == "complete",
         # Empty default outline after Reset is NOT resumable — that is a fresh Generate.

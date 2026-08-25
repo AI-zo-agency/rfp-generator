@@ -503,6 +503,12 @@ async def _run_fulfill_rfp_gaps_body(
             updatedAt=datetime.now(timezone.utc).isoformat(),
         )
 
+    # HARD BASELINE: capture every section exactly as it enters this scan run,
+    # in memory, before ANY step can mutate it. This is the authoritative "good"
+    # copy used at the end to refuse saving a section the scan degraded — it does
+    # not depend on snapshots (which, on resume, can already be post-damage).
+    pre_scan_sections = list(draft.sections)
+
     from app.services.proposal_pipeline_checkpoint import (
         complete_fulfill_scan,
         compute_fulfill_scan_hash,
@@ -1437,6 +1443,11 @@ async def _run_fulfill_rfp_gaps_body(
             "acknowledge openly rather than implying local history."
         )
 
+    # Did KB fact-check (step 11) actually change the manuscript? Step 2 already
+    # ran the full fact-repair pass; the post-fact-check re-run below only has
+    # something new to do when fact-check itself rewrote/repaired a section.
+    # Default True so any error path stays conservative (still runs repairs).
+    fact_check_changed_manuscript = True
     try:
         await _scan_progress(
             11,
@@ -1458,6 +1469,13 @@ async def _run_fulfill_rfp_gaps_body(
             rfp=rfp,
             rfp_context=rfp_text,
             research=research,
+        )
+        fact_check_changed_manuscript = bool(
+            fc_report.requirement_repairs
+            or fc_report.verify_tags_filled
+            or fc_report.stubs_repaired
+            or fc_report.eval_repairs
+            or fc_report.duplicates_removed
         )
         if fc_report.logs:
             report["kbFactCheck"] = {
@@ -1483,33 +1501,46 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("KB fact-check during Scan RFP skipped: %s", exc)
         report["logs"].append(f"KB fact-check skipped: {exc}")
 
-    try:
-        from app.services.proposal_scan_fact_repairs import run_scan_fact_repairs
-
-        draft, post_fc_logs = await run_scan_fact_repairs(
-            draft,
-            research=research,
-            rfp_text=rfp_text,
-            rfp_title=rfp.title or "",
-            rfp_client=rfp.client or "",
-            rfp_sector=getattr(rfp, "sector", None) or "",
-            rfp_id=rfp_id,
+    if not fact_check_changed_manuscript:
+        # Step 2 already ran the full fact-repair pass and KB fact-check changed
+        # nothing since — re-running the heavy pass (per-bio KB searches, hollow
+        # fill, compliance-fabrication) would repeat identical work. Skip it.
+        logger.info(
+            "Scan RFP %s: KB fact-check made no manuscript changes — "
+            "skipping the redundant post-fact-check repair pass.",
+            rfp_id,
         )
-        for line in post_fc_logs:
-            if line.startswith("HUMAN_GAP:"):
-                gap = line.split("HUMAN_GAP:", 1)[1].strip()
-                if gap and gap not in report["humanDecisionGaps"]:
-                    report["humanDecisionGaps"].append(gap)
-        if post_fc_logs:
-            report["logs"].extend(f"post-fact-check: {line}" for line in post_fc_logs[:16])
-            await asave_proposal_draft(draft)
-    except ProposalGenerationCancelled:
-        raise
-    except FulfillStepSkip as skip:
-        _log_resume_skip(skip.step)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Post fact-check repairs skipped: %s", exc)
-        report["logs"].append(f"Post fact-check repairs skipped: {exc}")
+        report["logs"].append(
+            "post-fact-check: skipped (KB fact-check changed nothing to repair)"
+        )
+    else:
+        try:
+            from app.services.proposal_scan_fact_repairs import run_scan_fact_repairs
+
+            draft, post_fc_logs = await run_scan_fact_repairs(
+                draft,
+                research=research,
+                rfp_text=rfp_text,
+                rfp_title=rfp.title or "",
+                rfp_client=rfp.client or "",
+                rfp_sector=getattr(rfp, "sector", None) or "",
+                rfp_id=rfp_id,
+            )
+            for line in post_fc_logs:
+                if line.startswith("HUMAN_GAP:"):
+                    gap = line.split("HUMAN_GAP:", 1)[1].strip()
+                    if gap and gap not in report["humanDecisionGaps"]:
+                        report["humanDecisionGaps"].append(gap)
+            if post_fc_logs:
+                report["logs"].extend(f"post-fact-check: {line}" for line in post_fc_logs[:16])
+                await asave_proposal_draft(draft)
+        except ProposalGenerationCancelled:
+            raise
+        except FulfillStepSkip as skip:
+            _log_resume_skip(skip.step)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Post fact-check repairs skipped: %s", exc)
+            report["logs"].append(f"Post fact-check repairs skipped: {exc}")
 
     # Fact-check can rewrite Approach/Schedule — run the SAME blocker suite
     # Generate-from-scratch uses (titles, consistency, certs, signed PDF note,
@@ -2082,7 +2113,25 @@ async def _run_fulfill_rfp_gaps_body(
             "updated_at": now,
         }
     )
-    from app.services.proposal_draft_snapshots import attach_scan_summary_to_latest_before_scan
+    from app.services.proposal_draft_snapshots import (
+        attach_scan_summary_to_latest_before_scan,
+        prior_sections_for_restore,
+    )
+    from app.services.proposal_draft_structure_stubs import (
+        restore_sections_emptied_by_scan,
+    )
+
+    # HARD INVARIANT: Complete & Clean must never save a section it degraded —
+    # emptied, reduced to an RFP-outline stub, or overwritten with a team-bio
+    # stub. Restore from the in-memory pre-scan baseline first (the truest "good"
+    # copy for this run); fall back to snapshot content for anything the baseline
+    # cannot cover (e.g. a section that only exists post-damage on resume).
+    restore_candidates = [*pre_scan_sections, *prior_sections_for_restore(draft)]
+    draft, restore_logs = restore_sections_emptied_by_scan(draft, restore_candidates)
+    if restore_logs:
+        for line in restore_logs:
+            logger.warning("Scan RFP %s: %s", rfp_id, line)
+        report.setdefault("logs", []).extend(restore_logs)
 
     draft = attach_scan_summary_to_latest_before_scan(draft, report)
     await asave_proposal_draft(draft)

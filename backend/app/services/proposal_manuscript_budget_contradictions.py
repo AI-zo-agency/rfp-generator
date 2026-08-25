@@ -15,6 +15,11 @@ from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSe
 from app.models.rfp import RfpRecord
 from app.services import llm
 from app.services.proposal_budget_content import find_budget_section_index
+from app.services.proposal_section_patch import (
+    TARGETED_EDIT_CONTRACT as _PATCH_CONTRACT,
+    apply_targeted_edits as _apply_targeted_edits,
+    parse_targeted_edits as _parse_targeted_edits,
+)
 from app.services.proposal_scan_rfp_contradictions import (
     STATIC_COMPANY_FACT_SECTION_IDS,
     _manuscript_digest,
@@ -222,8 +227,7 @@ async def _rewrite_section_for_budget_contradiction(
         "For Budget/Pricing: keep phase tables intact; merge duplicate PM/planning "
         "lines into ONE scoped line OR differentiate scopes clearly — never double-count.\n"
         "Do NOT invent dollar amounts. Use figures already in the draft or pricing guide.\n"
-        "Return JSON: "
-        '{"content": "full markdown", "changed": true/false, "notes": "one line"}'
+        + _PATCH_CONTRACT
     )
     related = ""
     if finding.related_section_id:
@@ -241,7 +245,7 @@ async def _rewrite_section_for_budget_contradiction(
         f"Fix instruction:\n"
         f"{finding.rewrite_instruction or 'Resolve cross-section budget contradiction.'}\n"
         f"{related}\n"
-        f"Current section:\n{(section.content or '')[:14_000]}"
+        f"Current section (copy `find` text verbatim from here):\n{(section.content or '')[:14_000]}"
     )
     try:
         raw, _ = await llm.chat_json(
@@ -252,18 +256,20 @@ async def _rewrite_section_for_budget_contradiction(
             rfp_id=rfp.id,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Budget contradiction rewrite failed for %s: %s", section.id, exc)
+        logger.warning("Budget contradiction patch failed for %s: %s", section.id, exc)
         return section, False, ""
     if not isinstance(raw, dict):
         return section, False, ""
-    content = str(raw.get("content") or "").strip()
-    changed = bool(raw.get("changed")) and bool(content)
-    if not changed or content == (section.content or "").strip():
-        return section, False, str(raw.get("notes") or "")
+    new_body, applied, changed, reason = _apply_targeted_edits(
+        section.content or "", _parse_targeted_edits(raw)
+    )
+    if not changed:
+        # Never fall back to a whole-section rewrite — leave the good body intact.
+        return section, False, str(raw.get("notes") or reason)
     return (
-        section.model_copy(update={"content": content, "status": "generated"}),
+        section.model_copy(update={"content": new_body, "status": "generated"}),
         True,
-        str(raw.get("notes") or "rewrote for budget cross-section consistency"),
+        str(raw.get("notes") or f"patched {applied} span(s) for budget consistency"),
     )
 
 
@@ -273,8 +279,15 @@ async def run_manuscript_budget_contradiction_pass(
     rfp: RfpRecord,
     research: ProposalResearchCache | None = None,
     use_llm: bool = True,
+    precomputed_raw: dict[str, Any] | None = None,
 ) -> ManuscriptBudgetContradictionResult:
-    """LLM scan for budget/hours/fee cross-section contradictions."""
+    """LLM scan for budget/hours/fee cross-section contradictions.
+
+    ``precomputed_raw`` (from the combined contradiction detector): the parsed
+    audit JSON for THIS dimension, so this pass skips its own detection LLM call
+    and goes straight to parse + apply. Pricing guide / canonical budget are
+    still fetched — the per-finding rewrites need them.
+    """
     result = ManuscriptBudgetContradictionResult(draft=draft)
     if not use_llm or not llm.is_configured():
         result.logs.append("Budget cross-section scan skipped (LLM unavailable).")
@@ -301,26 +314,29 @@ async def run_manuscript_budget_contradiction_pass(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Pricing guide fetch for budget audit failed: %s", exc)
 
-    user = (
-        f"Client: {rfp.client}\nRFP title: {rfp.title}\n\n"
-        f"CANONICAL BUDGET OBJECT (Stage 3 — authoritative line items if present):\n"
-        f"{canonical_budget or '(not loaded — use manuscript fee tables)'}\n\n"
-        f"PRICING GUIDE (00_Guide_Pricing — PM floors, tier rates):\n"
-        f"{pricing_guide[:16_000] or '(unavailable)'}\n\n"
-        f"FULL MANUSCRIPT (check Budget vs Capacity/Hours tabs together):\n{digest}"
-    )
-    try:
-        raw, _ = await llm.chat_json(
-            [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
-            max_tokens=4096,
-            temperature=0.0,
-            node_name="manuscript_budget_contradiction_audit",
-            rfp_id=rfp.id,
+    if precomputed_raw is not None:
+        raw: Any = precomputed_raw
+    else:
+        user = (
+            f"Client: {rfp.client}\nRFP title: {rfp.title}\n\n"
+            f"CANONICAL BUDGET OBJECT (Stage 3 — authoritative line items if present):\n"
+            f"{canonical_budget or '(not loaded — use manuscript fee tables)'}\n\n"
+            f"PRICING GUIDE (00_Guide_Pricing — PM floors, tier rates):\n"
+            f"{pricing_guide[:16_000] or '(unavailable)'}\n\n"
+            f"FULL MANUSCRIPT (check Budget vs Capacity/Hours tabs together):\n{digest}"
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Budget cross-section audit failed: %s", exc)
-        result.logs.append(f"Budget cross-section audit failed: {exc}")
-        return result
+        try:
+            raw, _ = await llm.chat_json(
+                [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+                max_tokens=4096,
+                temperature=0.0,
+                node_name="manuscript_budget_contradiction_audit",
+                rfp_id=rfp.id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Budget cross-section audit failed: %s", exc)
+            result.logs.append(f"Budget cross-section audit failed: {exc}")
+            return result
 
     if not isinstance(raw, dict):
         result.logs.append("Budget cross-section audit returned non-object JSON.")
