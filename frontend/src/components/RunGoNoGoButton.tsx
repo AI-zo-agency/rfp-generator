@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface RunGoNoGoButtonProps {
   rfpId: string;
@@ -31,7 +31,11 @@ export function RunGoNoGoButton({
 }: RunGoNoGoButtonProps) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Read inside the async poll loop to break it immediately when Stop is clicked
+  // (a ref avoids the stale-closure a state value would have inside the loop).
+  const stopRef = useRef(false);
 
   const canAnalyze = hasPdf || hasDescription;
 
@@ -54,7 +58,9 @@ export function RunGoNoGoButton({
   async function pollUntilDone(): Promise<AnalyzeStatus> {
     const started = Date.now();
     while (Date.now() - started < MAX_WAIT_MS) {
+      if (stopRef.current) return { status: "idle" };
       await sleep(POLL_MS);
+      if (stopRef.current) return { status: "idle" };
       const data = await checkStatusOnce();
       if (data.status === "completed") return data;
       if (data.status === "failed") {
@@ -63,6 +69,20 @@ export function RunGoNoGoButton({
       // running | idle (briefly after start) — keep polling
     }
     throw new Error("Go/No-Go timed out after 15 minutes");
+  }
+
+  async function handleStop() {
+    stopRef.current = true;
+    setStopping(true);
+    try {
+      await fetch(`/api/rfps/${rfpId}/analyze/stop`, { method: "POST" });
+    } catch {
+      // Still unstick the UI even if the stop request fails.
+    }
+    setAnalyzing(false);
+    setStopping(false);
+    setError(null);
+    router.refresh();
   }
 
   // Reconnect on mount — an analysis started before a refresh (or from
@@ -98,6 +118,7 @@ export function RunGoNoGoButton({
   }, [rfpId]);
 
   async function handleAnalyze() {
+    stopRef.current = false;
     setAnalyzing(true);
     setError(null);
     try {
@@ -123,19 +144,32 @@ export function RunGoNoGoButton({
 
   return (
     <div className="space-y-2">
-      <button
-        type="button"
-        onClick={handleAnalyze}
-        disabled={loading || !canAnalyze}
-        className="zo-btn secondary disabled:opacity-60"
-        title={
-          canAnalyze
-            ? "Run AI Go/No-Go analysis against the knowledge base"
-            : "Upload an RFP PDF or add a description first"
-        }
-      >
-        {loading ? "Analyzing… (this can take a few minutes)" : "Run Go/No-Go Analysis"}
-      </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={handleAnalyze}
+          disabled={loading || !canAnalyze}
+          className="zo-btn secondary disabled:opacity-60"
+          title={
+            canAnalyze
+              ? "Run AI Go/No-Go analysis against the knowledge base"
+              : "Upload an RFP PDF or add a description first"
+          }
+        >
+          {loading ? "Analyzing… (this can take a few minutes)" : "Run Go/No-Go Analysis"}
+        </button>
+        {loading && (
+          <button
+            type="button"
+            onClick={handleStop}
+            disabled={stopping}
+            className="zo-btn danger disabled:opacity-60"
+            title="Stop the running Go/No-Go analysis"
+          >
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
+        )}
+      </div>
       {!canAnalyze && (
         <p className="text-xs text-zo-text-muted">
           Add a PDF or description to run analysis.

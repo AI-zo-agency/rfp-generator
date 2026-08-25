@@ -473,6 +473,33 @@ async def analyze_go_no_go_status(rfp_id: str) -> dict[str, object]:
     return {"status": "idle", "rfpId": rfp_id}
 
 
+@router.post("/{rfp_id}/analyze/stop")
+async def stop_go_no_go_analysis(rfp_id: str) -> dict[str, object]:
+    """Stop a running Go/No-Go analysis: cancel the job and clear the running
+    signal so the UI unsticks immediately (no wait for the stale-window guard)."""
+    from app.services.proposal_generation_cancel import request_generation_cancel
+    from app.services.proposal_job_runner import cancel_proposal_job
+
+    rfp = get_rfp(rfp_id)
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    request_generation_cancel(rfp_id)
+    try:
+        await cancel_proposal_job(rfp_id, lock_key=_go_no_go_lock_key(rfp_id))
+    except Exception:  # noqa: BLE001 — still clear the persisted running signal
+        logger.warning("cancel_proposal_job failed for Go/No-Go %s", rfp_id)
+    # Overwrite the persisted "in progress" note so GET /analyze/status reports
+    # idle on the next poll (the message avoids the "failed" keyword on purpose).
+    _mark_analyze_failed(rfp_id, "Go/No-Go analysis stopped by user.")
+    return {
+        "ok": True,
+        "status": "idle",
+        "rfpId": rfp_id,
+        "message": "Go/No-Go analysis stopped.",
+    }
+
+
 def _mark_analyze_failed(rfp_id: str, error: str) -> None:
     """Persist a failure note so GET /analyze/status has a durable fallback
     signal even if job-tracker state itself is unavailable (matches the
