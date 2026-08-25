@@ -157,32 +157,23 @@ def test_nightly_snapshot_does_not_require_an_incremental_cursor(monkeypatch):
 def test_nightly_sync_writes_capacity_snapshot_before_generating_insight(monkeypatch):
     calls = []
     started = datetime(2026, 8, 25, 2, tzinfo=timezone.utc)
-    monkeypatch.setattr(
-        sync,
-        "build_overview",
-        lambda *args, **kwargs: {"people": [{"id": "42", "name": "Alex"}]},
-    )
     monkeypatch.setattr(sync, "build_daily_capacity_rows", lambda *args: [{"person_id": "42"}])
     monkeypatch.setattr(sync, "upsert_capacity_snapshots", lambda *args: calls.append("snapshot") or 1)
     monkeypatch.setattr(sync, "list_capacity_snapshots", lambda *args: [])
     monkeypatch.setattr(sync, "generate_and_store", lambda *args: calls.append("insight") or "ok")
 
-    sync._write_teamwork_intelligence("zo", started)
+    sync._write_teamwork_intelligence("zo", started, {"people": [{"id": "42", "name": "Alex"}]})
 
     assert calls == ["snapshot", "insight"]
 
 
 def test_partial_or_failed_overview_does_not_generate_an_insight(monkeypatch):
     generate = Mock()
-    monkeypatch.setattr(
-        sync,
-        "build_overview",
-        lambda *args, **kwargs: {"sync_status": "failed", "errors": {"overview": "down"}},
-    )
     monkeypatch.setattr(sync, "generate_and_store", generate)
 
     sync._write_teamwork_intelligence(
-        "zo", datetime(2026, 8, 25, 2, tzinfo=timezone.utc)
+        "zo", datetime(2026, 8, 25, 2, tzinfo=timezone.utc),
+        {"sync_status": "failed", "errors": {"overview": "down"}},
     )
 
     generate.assert_not_called()

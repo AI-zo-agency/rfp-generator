@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     llm_cache_ttl_1h: bool = True
 
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.0-flash-exp"
+    gemini_model: str = "gemini-3.7-flash"
     
     fireworks_api_key: str = ""
     fireworks_model: str = "accounts/fireworks/models/llama-v3p3-70b-instruct"

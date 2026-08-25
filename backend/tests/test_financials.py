@@ -9,9 +9,14 @@ from app.financial.router import (
 )
 from app.main import app
 
+def test_iworker_timesheets_defaults_are_plain_none():
+    """Direct Python callers (ai-insights, audit queue) must not receive Query objects."""
+    assert get_iworker_timesheets.__defaults__ == (None, None)
+
+
 def test_iworker_timesheets_data():
     res = get_iworker_timesheets()
-    assert res["contractor"] == "iWorker Contractor"
+    assert res["contractor"] == "All Contractors"
     assert "Connected" in res["status"]
     assert len(res["timesheets"]) > 0
     assert res["summary"]["total_logged_hours"] > 0

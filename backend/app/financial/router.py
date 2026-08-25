@@ -533,8 +533,8 @@ class AuditResolveRequest(BaseModel):
 
 @router.get("/iworker-timesheets")
 def get_iworker_timesheets(
-    sheet_url: Optional[str] = Query(None),
-    contractor: Optional[str] = Query(None),
+    sheet_url: Optional[str] = None,
+    contractor: Optional[str] = None,
 ):
     """Returns iWorker timesheets across all contractor tabs with rate extraction and AI classification."""
     cache_key = f"{sheet_url or 'default'}:{contractor or 'all'}"

@@ -2,6 +2,8 @@
 
 import { useCallback, useRef, useState } from "react";
 
+import type { NoteSource } from "./qb-note-badges";
+
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 
 export interface ChatTurn {
@@ -42,7 +44,7 @@ const nextId = () => `t${++seq}`;
  * `qb_chat_threads` table, and this hook is where the source of `turns` swaps
  * from local state to the server's stored history.
  */
-export function useQbChat(): QbChat {
+export function useQbChat(source: NoteSource = "quickbooks"): QbChat {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [busy, setBusy] = useState(false);
   const [costUsd, setCostUsd] = useState(0);
@@ -60,7 +62,7 @@ export function useQbChat(): QbChat {
 
     try {
       const res = await fetch(
-        `${API_BASE}/api/v1/financials/quickbooks/ai-insights/chat`,
+        `${API_BASE}/api/v1/financials/${source}/ai-insights/chat`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -99,7 +101,7 @@ export function useQbChat(): QbChat {
     } finally {
       setBusy(false);
     }
-  }, [busy, turns]);
+  }, [busy, turns, source]);
 
   const reset = useCallback(() => {
     threadId.current = null;

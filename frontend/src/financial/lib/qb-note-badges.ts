@@ -14,8 +14,22 @@ export type NoteBadge =
 
 export type NoteRowKind = "collect" | "margin" | "fix";
 
-/** Rule-based signals from derive_signals. */
-export function badgeForSignal(id: string, severity: Severity): NoteBadge {
+export type NoteSource = "quickbooks" | "teamwork";
+
+/** Rule-based signals from derive_signals (QuickBooks) or build_signals (Teamwork). */
+export function badgeForSignal(
+  id: string,
+  severity: Severity,
+  source: NoteSource = "quickbooks",
+): NoteBadge {
+  // Teamwork ids are partly dynamic (capacity:sustained:<person_id>), so there
+  // is no id table to switch on — severity is the only stable input. `warn`
+  // there is a live delivery risk, not something to merely watch.
+  if (source === "teamwork") {
+    if (severity === "critical") return "High impact";
+    return severity === "warn" ? "Risk" : "Watch";
+  }
+
   switch (id) {
     case "ap-over-cash":
     case "ar-late":

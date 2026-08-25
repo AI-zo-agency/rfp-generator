@@ -125,3 +125,116 @@ describe("countByBadge", () => {
     expect(countByBadge([])).toEqual([]);
   });
 });
+
+/**
+ * Teamwork reuses these cards, but its evidence arrives differently: the
+ * signals ride on the insight response rather than the overview, and the
+ * model's notes key to signal ids because that is all Teamwork lets it
+ * annotate. QuickBooks keys notes to row ids, so the two must not collide.
+ */
+describe("teamwork source", () => {
+  const twSignal = (over: Partial<Signal> = {}): Signal =>
+    ({
+      id: "late-milestones",
+      severity: "critical",
+      headline: "Milestones are late",
+      figure: "10 milestones",
+      detail: "Confirm the recovery plan.",
+      go_to: "projects",
+      ...over,
+    }) as Signal;
+
+  it("reads signals off the response, not the passed list", () => {
+    const cards = buildNoteCards(
+      data({ chase: undefined, signals: [twSignal()] }),
+      [],
+      "teamwork",
+    );
+    expect(cards.map((c) => c.id)).toEqual(["late-milestones"]);
+    expect(cards[0].goTo).toBe("projects");
+  });
+
+  it("attaches the model note to its signal and flags it as AI", () => {
+    const [card] = buildNoteCards(
+      data({
+        signals: [twSignal()],
+        notes: { "late-milestones": "Delivery dates slip next." },
+      }),
+      [],
+      "teamwork",
+    );
+    expect(card.aiEnhanced).toBe(true);
+    expect(card.detail).toBe("Confirm the recovery plan. — Delivery dates slip next.");
+  });
+
+  it("treats a warn as a Risk, not a Watch", () => {
+    const [card] = buildNoteCards(
+      data({ signals: [twSignal({ id: "deadline-pressure", severity: "warn" })] }),
+      [],
+      "teamwork",
+    );
+    expect(card.badge).toBe("Risk");
+  });
+
+  it("leaves an unannotated signal plain", () => {
+    const [card] = buildNoteCards(data({ signals: [twSignal()] }), [], "teamwork");
+    expect(card.aiEnhanced).toBe(false);
+    expect(card.detail).toBe("Confirm the recovery plan.");
+  });
+});
+
+/**
+ * Teamwork derives some cards in the browser and receives others on the
+ * insight response. Both used to render — the drawer's list beside an inline
+ * "Needs attention" panel — disagreeing on how many items existed and, for
+ * late-milestones, on severity. They are merged into one list now.
+ */
+describe("teamwork signal merge", () => {
+  const server: Signal = {
+    id: "late-milestones",
+    severity: "critical",
+    headline: "Milestones are late",
+    figure: "10 milestones",
+    go_to: "projects",
+  } as Signal;
+  const local: Signal = {
+    id: "late-milestones",
+    severity: "warn",
+    headline: "10 late milestones",
+    figure: "10",
+    go_to: "work",
+  } as Signal;
+  const localOnly: Signal = {
+    id: "unbudgeted-projects",
+    severity: "warn",
+    headline: "8 projects have no financial budget",
+    figure: "8",
+    go_to: "projects",
+  } as Signal;
+
+  it("shows a shared id once, not twice", () => {
+    const cards = buildNoteCards(data({ signals: [server] }), [local], "teamwork");
+    expect(cards.filter((c) => c.id === "late-milestones")).toHaveLength(1);
+  });
+
+  it("lets the server win the shared id — it is what the model annotated", () => {
+    const [card] = buildNoteCards(
+      data({ signals: [server], notes: { "late-milestones": "Dates slip." } }),
+      [local],
+      "teamwork",
+    );
+    expect(card.headline).toBe("Milestones are late");
+    expect(card.badge).toBe("High impact");
+    expect(card.aiEnhanced).toBe(true);
+  });
+
+  it("keeps cards only the browser derived", () => {
+    const cards = buildNoteCards(data({ signals: [server] }), [local, localOnly], "teamwork");
+    expect(cards.map((c) => c.id)).toEqual(["late-milestones", "unbudgeted-projects"]);
+  });
+
+  it("leaves quickbooks on the overview list alone", () => {
+    const cards = buildNoteCards(data({ signals: undefined }), [localOnly]);
+    expect(cards.map((c) => c.id)).toEqual(["unbudgeted-projects"]);
+  });
+});

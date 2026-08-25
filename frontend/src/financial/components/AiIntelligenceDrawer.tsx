@@ -15,19 +15,42 @@ import type { QbChat } from "../lib/use-qb-chat";
 import type { NoteCard, QbInsights } from "../lib/use-qb-insights";
 import "./AiIntelligenceDrawer.css";
 
-const VIEW_LABEL: Record<string, string> = {
-  today: "Position",
-  open: "Open",
-  revenue: "Revenue",
-  clients: "Clients",
-  costs: "Costs",
-};
+/**
+ * The per-source wording. Everything else in this drawer — filters, cards,
+ * pinning, the composer — is identical for QuickBooks and Teamwork, so the
+ * component is shared and only these strings differ.
+ */
+export interface DrawerChrome {
+  /** Shown under the title: which system the evidence came from. */
+  source: string;
+  /** Starter questions, offered until the reader asks their own. */
+  seeds: string[];
+  /** goTo id -> the label on the card's jump link. */
+  viewLabel: Record<string, string>;
+  placeholder: string;
+  /** Copy for "nothing is wrong", which reads differently per source. */
+  empty: string;
+  /** Standing caveat above the cards, e.g. Teamwork capacity still building. */
+  notice?: string | null;
+}
 
-const SEEDS = [
-  "What should I chase first?",
-  "Why is margin unmeasurable?",
-  "Summarize this for a partner call",
-];
+export const QUICKBOOKS_CHROME: DrawerChrome = {
+  source: "QuickBooks",
+  seeds: [
+    "What should I chase first?",
+    "Why is margin unmeasurable?",
+    "Summarize this for a partner call",
+  ],
+  viewLabel: {
+    today: "Position",
+    open: "Open",
+    revenue: "Revenue",
+    clients: "Clients",
+    costs: "Costs",
+  },
+  placeholder: "Ask about the position…",
+  empty: "Nothing flagged. Receivables are current and the books look clean.",
+};
 
 interface Props {
   open: boolean;
@@ -36,9 +59,17 @@ interface Props {
   chat: QbChat;
   /** Navigate the ledger underneath, then close. */
   onGo: (view: string) => void;
+  chrome?: DrawerChrome;
 }
 
-export function AiIntelligenceDrawer({ open, onClose, insights, chat, onGo }: Props) {
+export function AiIntelligenceDrawer({
+  open,
+  onClose,
+  insights,
+  chat,
+  onGo,
+  chrome = QUICKBOOKS_CHROME,
+}: Props) {
   const { data, cards, counts, loaded, busy, error, regenerate } = insights;
   const [filter, setFilter] = useState<NoteBadge | null>(null);
   const [pinned, setPinned] = useState<NoteCard | null>(null);
@@ -102,7 +133,7 @@ export function AiIntelligenceDrawer({ open, onClose, insights, chat, onGo }: Pr
           <div className="qb-ai-title">
             <h2>AI Intelligence</h2>
             <p className="qb-ai-sub">
-              <span>QuickBooks</span>
+              <span>{chrome.source}</span>
               {data?.as_of ? (
                 <span data-stale={data.stale || undefined}>
                   {data.stale ? `As of ${data.as_of}` : `Today, ${data.as_of}`}
@@ -168,6 +199,8 @@ export function AiIntelligenceDrawer({ open, onClose, insights, chat, onGo }: Pr
             </p>
           ) : null}
 
+          {chrome.notice ? <p className="qb-ai-empty">{chrome.notice}</p> : null}
+
           {shown.length ? (
             <ol className="qb-ai-list">
               {shown.map((card) => (
@@ -213,7 +246,7 @@ export function AiIntelligenceDrawer({ open, onClose, insights, chat, onGo }: Pr
                           onClose();
                         }}
                       >
-                        {VIEW_LABEL[card.goTo] ?? "Detail"}
+                        {chrome.viewLabel[card.goTo] ?? "Detail"}
                         <ArrowRight size={12} strokeWidth={2.25} aria-hidden />
                       </span>
                     ) : null}
@@ -225,7 +258,7 @@ export function AiIntelligenceDrawer({ open, onClose, insights, chat, onGo }: Pr
             <p className="qb-ai-empty">
               {filter
                 ? `Nothing tagged ${filter}.`
-                : "Nothing flagged. Receivables are current and the books look clean."}
+                : chrome.empty}
             </p>
           ) : null}
 
@@ -254,7 +287,7 @@ export function AiIntelligenceDrawer({ open, onClose, insights, chat, onGo }: Pr
         <div className="qb-ai-composer">
           {!chat.turns.length && !chat.busy ? (
             <div className="qb-ai-seeds">
-              {SEEDS.map((seed) => (
+              {chrome.seeds.map((seed) => (
                 <button
                   key={seed}
                   type="button"
@@ -281,7 +314,7 @@ export function AiIntelligenceDrawer({ open, onClose, insights, chat, onGo }: Pr
               ref={composer}
               rows={1}
               value={draft}
-              placeholder="Ask about the position…"
+              placeholder={chrome.placeholder}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {

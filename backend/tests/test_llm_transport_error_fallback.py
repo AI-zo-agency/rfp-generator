@@ -101,6 +101,65 @@ class TransportErrorBecomesLlmErrorTests(unittest.IsolatedAsyncioTestCase):
                     await self._post_chat()
 
 
+class GeminiTransportErrorTests(unittest.IsolatedAsyncioTestCase):
+    """_post_gemini_chat had the same hole, and it broke the nightly briefs.
+
+    A slow Gemini response raised httpx.ReadTimeout straight through
+    chat_json's `except LlmError` Gemini block and through chat_json_soft,
+    which promises never to raise. No fallback provider was ever tried.
+    """
+
+    async def _post_gemini(self):
+        return await llm._post_gemini_chat(
+            api_key="k",
+            model="gemini-3.7-flash",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1400,
+        )
+
+    async def test_read_timeout_is_raised_as_llm_error(self) -> None:
+        with mock.patch.object(
+            llm.httpx.AsyncClient,
+            "post",
+            new=mock.AsyncMock(side_effect=httpx.ReadTimeout("timed out")),
+        ):
+            with self.assertRaises(LlmError) as ctx:
+                await self._post_gemini()
+
+        self.assertIn("ReadTimeout", str(ctx.exception))
+
+    async def test_slow_gemini_falls_back_instead_of_escaping(self) -> None:
+        """The behaviour the Teamwork brief actually needs: a usable answer."""
+        ok = httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"brief":"ok"}'}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 5},
+            },
+            request=httpx.Request("POST", "https://openrouter.invalid"),
+        )
+
+        async def _post(self_client, url, *args, **kwargs):
+            if "generativelanguage" in str(url):
+                raise httpx.ReadTimeout("timed out")
+            return ok
+
+        with mock.patch.object(llm.settings, "gemini_api_key", "gk"), mock.patch.object(
+            llm.settings, "openrouter_api_key", "ok-key"
+        ), mock.patch.object(llm.httpx.AsyncClient, "post", new=_post):
+            payload, provider = await llm.chat_json_soft(
+                [{"role": "user", "content": "hi"}],
+                max_tokens=1400,
+                tier="light",
+                include_corrections=False,
+            )
+
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(payload, {"brief": "ok"})
+
+
 class ScaledTimeoutTests(unittest.TestCase):
     """Long-output calls were timing out because generation had not finished.
 

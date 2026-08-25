@@ -2,7 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { badgeForRow, badgeForSignal, type NoteBadge, type NoteRowKind } from "./qb-note-badges";
+import {
+  badgeForRow,
+  badgeForSignal,
+  type NoteBadge,
+  type NoteRowKind,
+  type NoteSource,
+} from "./qb-note-badges";
 import type { Signal } from "../types/quickbooks";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
@@ -42,9 +48,14 @@ export interface InsightsData {
   status: "ok" | "empty";
   brief: string;
   notes: Record<string, string>;
-  chase: ChaseRow[];
-  margin: MarginRow[];
-  hygiene: HygieneRow[];
+  /** QuickBooks row lists. Absent on the Teamwork response. */
+  chase?: ChaseRow[];
+  margin?: MarginRow[];
+  hygiene?: HygieneRow[];
+  /** Teamwork ships its signals on the insight response; QuickBooks does not. */
+  signals?: Signal[];
+  /** Teamwork capacity history readiness. */
+  history?: { weeks_available?: number; ready?: boolean };
   as_of: string | null;
   generated_at: string | null;
   provider: string | null;
@@ -78,7 +89,11 @@ export const BADGE_ORDER: NoteBadge[] = [
  * measurable. Rule-based signals follow — they size the same problems without
  * duplicating a factual row id (chase:… vs ar-late).
  */
-export function buildNoteCards(data: InsightsData | null, signals: Signal[]): NoteCard[] {
+export function buildNoteCards(
+  data: InsightsData | null,
+  signals: Signal[],
+  source: NoteSource = "quickbooks",
+): NoteCard[] {
   const cards: NoteCard[] = [];
   const notes = data?.notes ?? {};
 
@@ -129,16 +144,26 @@ export function buildNoteCards(data: InsightsData | null, signals: Signal[]): No
     });
   }
 
+  // Both signal sources, server first. Teamwork derives some cards in the
+  // browser and gets others off the insight response; ids collide on purpose
+  // where both describe the same fact, and the server's copy wins because it
+  // is the one the model was allowed to annotate. QuickBooks passes only the
+  // overview list, so this is a plain concat there.
   const rowIds = new Set(cards.map((c) => c.id));
-  for (const s of signals) {
+  for (const s of [...(data?.signals ?? []), ...signals]) {
     if (rowIds.has(s.id)) continue;
+    // Track ids as they land, not just the row ids seeded above: the two
+    // signal lists overlap by design, so the first copy of an id has to block
+    // the second.
+    rowIds.add(s.id);
+    const note = notes[s.id];
     cards.push({
       id: s.id,
       headline: s.headline,
-      detail: s.detail ?? "",
+      detail: [s.detail, note].filter(Boolean).join(" — "),
       figure: s.figure,
-      badge: badgeForSignal(s.id, s.severity),
-      aiEnhanced: false,
+      badge: badgeForSignal(s.id, s.severity, source),
+      aiEnhanced: Boolean(note),
       goTo: s.go_to,
     });
   }
@@ -173,7 +198,11 @@ export interface QbInsights {
  * cards now: the drawer that shows them, and the button that has to say how
  * many are urgent before the drawer is ever opened.
  */
-export function useQbInsights(signals: Signal[]): QbInsights {
+export function useQbInsights(
+  signals: Signal[],
+  source: NoteSource = "quickbooks",
+): QbInsights {
+  const base = `${API_BASE}/api/v1/financials/${source}/ai-insights`;
   const [data, setData] = useState<InsightsData | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -181,7 +210,7 @@ export function useQbInsights(signals: Signal[]): QbInsights {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/v1/financials/quickbooks/ai-insights`);
+      const res = await fetch(base);
       if (!res.ok) throw new Error(`${res.status}`);
       setData(await res.json());
       setError(null);
@@ -190,7 +219,7 @@ export function useQbInsights(signals: Signal[]): QbInsights {
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [base]);
 
   useEffect(() => {
     void load();
@@ -200,10 +229,7 @@ export function useQbInsights(signals: Signal[]): QbInsights {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(
-        `${API_BASE}/api/v1/financials/quickbooks/ai-insights/regenerate`,
-        { method: "POST" },
-      );
+      const res = await fetch(`${base}/regenerate`, { method: "POST" });
       if (!res.ok) throw new Error(`${res.status}`);
       const next: InsightsData = await res.json();
       setData(next);
@@ -215,9 +241,9 @@ export function useQbInsights(signals: Signal[]): QbInsights {
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [base]);
 
-  const cards = useMemo(() => buildNoteCards(data, signals), [data, signals]);
+  const cards = useMemo(() => buildNoteCards(data, signals, source), [data, signals, source]);
   const counts = useMemo(() => countByBadge(cards), [cards]);
   const highImpact = counts.find((c) => c.badge === "High impact")?.count ?? 0;
 

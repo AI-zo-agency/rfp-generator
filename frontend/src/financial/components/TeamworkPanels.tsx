@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Sparkles } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Empty, Figure, Note, Panel } from "./qb-ui";
@@ -23,14 +23,16 @@ import {
   formatUsdFromCents,
   hoursChartRows,
   hoursLabel,
-  type SectionId,
 } from "../lib/teamwork-derive";
 import { parseTeamworkView, type TeamworkViewId } from "../lib/financial-tab";
-import { TeamworkAttention } from "./teamwork/TeamworkAttention";
 import { TeamworkProjects } from "./teamwork/TeamworkProjects";
 import { TeamworkWork } from "./teamwork/TeamworkWork";
 import { TeamworkTime } from "./teamwork/TeamworkTime";
+import { AiIntelligenceDrawer, type DrawerChrome } from "./AiIntelligenceDrawer";
 import { Count, HoursValue } from "./teamwork/kpis";
+import { useQbChat } from "../lib/use-qb-chat";
+import { useQbInsights } from "../lib/use-qb-insights";
+import type { Signal } from "../types/quickbooks";
 import type { TeamworkOverview } from "../types/teamwork";
 import "./QuickBooksLedger.css";
 
@@ -42,6 +44,27 @@ const VIEWS = [
   { id: "work", label: "Tasks" },
   { id: "time", label: "Time" },
 ] as const;
+
+const TEAMWORK_CHROME: Omit<DrawerChrome, "notice"> = {
+  source: "Teamwork",
+  seeds: [
+    "What should I unblock first?",
+    "Which projects are at risk?",
+    "Summarize this for a standup",
+  ],
+  // The backend emits go_to "tasks"; buildSignals emits SectionIds.
+  viewLabel: { tasks: "Tasks", work: "Tasks", projects: "Projects", time: "Time" },
+  placeholder: "Ask about delivery…",
+  empty: "No delivery items need attention right now.",
+};
+
+/** go_to ids from the backend -> this panel's tab ids. */
+const GO_TO_VIEW: Record<string, TeamworkViewId> = {
+  tasks: "work",
+  work: "work",
+  projects: "projects",
+  time: "time",
+};
 
 function isAbortError(err: unknown) {
   return (
@@ -276,6 +299,7 @@ export function TeamworkPanels({
   const [data, setData] = useState<TeamworkOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [aiOpen, setAiOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
@@ -334,12 +358,32 @@ export function TeamworkPanels({
     [data, todayISO],
   );
 
-  const goToSection = useCallback(
-    (id: SectionId) => {
-      onViewChange(id);
-    },
-    [onViewChange],
+  const drawerSignals = useMemo<Signal[]>(
+    () =>
+      signals.map((s) => ({
+        id: s.id,
+        severity: s.severity,
+        headline: s.headline,
+        figure: s.figure,
+        detail: s.detail,
+        go_to: s.goTo,
+      })),
+    [signals],
   );
+
+  // Locally derived cards and the server's are merged inside the drawer, so
+  // there is one list rather than two that disagreed on count and severity.
+  const insights = useQbInsights(drawerSignals, "teamwork");
+  const chat = useQbChat("teamwork");
+
+  // Staffing signals stay suppressed until three weekly snapshots exist, so say
+  // so rather than letting their absence read as "nothing to report".
+  const history = insights.data?.history;
+  const capacityNotice =
+    history && !history.ready
+      ? `Capacity history is building (${history.weeks_available ?? 0} of 3 weeks). ` +
+        "Staffing recommendations stay unavailable until enough history exists."
+      : null;
 
   const showBody = Boolean(data) && !notConfigured;
   const showError = !loading && !data && !notConfigured;
@@ -363,10 +407,19 @@ export function TeamworkPanels({
               </span>
             ) : null}
           </p>
-          <button type="button" className="qb-retry" onClick={() => void load()} disabled={loading}>
-            <RefreshCw size={13} strokeWidth={2.25} aria-hidden />
-            Refresh
-          </button>
+          <div className="qb-toolbar-actions">
+            <button type="button" className="qb-ai-trigger" onClick={() => setAiOpen(true)} aria-haspopup="dialog" aria-expanded={aiOpen}>
+              <Sparkles size={14} strokeWidth={2.25} aria-hidden />
+              AI Intelligence
+              {insights.highImpact ? (
+                <span className="qb-ai-trigger-count">{insights.highImpact}</span>
+              ) : null}
+            </button>
+            <button type="button" className="qb-retry" onClick={() => void load()} disabled={loading}>
+              <RefreshCw size={13} strokeWidth={2.25} aria-hidden />
+              Refresh
+            </button>
+          </div>
         </div>
 
         {!loading && data && notConfigured ? (
@@ -410,11 +463,6 @@ export function TeamworkPanels({
               <>
                 <TabsContent value="position" className="qb-view">
                   <DeliveryLine data={data} atRiskCount={atRiskCount} oldestLate={oldestLate} />
-                  <TeamworkAttention
-                    signals={signals}
-                    onGo={goToSection}
-                    hasSnapshot={hasSnapshot}
-                  />
                   {errorEntries.length ? (
                     <Note>
                       Teamwork sync has issues ({errorEntries.map(([key]) => key).join(", ")}).{" "}
@@ -441,6 +489,20 @@ export function TeamworkPanels({
             ) : null}
           </Tabs>
         )}
+        <AiIntelligenceDrawer
+          open={aiOpen}
+          onClose={() => setAiOpen(false)}
+          insights={insights}
+          chat={chat}
+          onGo={(id) => onViewChange(GO_TO_VIEW[id] ?? "position")}
+          chrome={{
+            ...TEAMWORK_CHROME,
+            notice: capacityNotice,
+            empty: hasSnapshot
+              ? TEAMWORK_CHROME.empty
+              : "No snapshot yet, so there is nothing to assess. This fills in after the first successful Teamwork sync.",
+          }}
+        />
       </div>
     </TooltipProvider>
   );

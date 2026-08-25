@@ -260,10 +260,21 @@ async def _post_gemini_chat(
     from app.services.proposal_generation_cancel import run_with_generation_cancel
 
     async def _post() -> httpx.Response:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=_http_timeout_for(max_tokens)) as client:
             return await client.post(url, json=body)
 
-    response = await run_with_generation_cancel(_post)
+    try:
+        response = await run_with_generation_cancel(_post)
+    except httpx.HTTPError as exc:
+        # Same reason as the httpx handler in _post_chat, which this function
+        # never got: every layer of resilience here catches LlmError only, so a
+        # raw ReadTimeout out of Gemini skips the OpenRouter/Fireworks fallback
+        # chain AND chat_json_soft's "never raises" contract in one go. The
+        # nightly Teamwork brief died exactly that way -- recorded as failed,
+        # without a single fallback provider being tried.
+        raise LlmError(
+            f"Gemini request failed: {exc.__class__.__name__}: {str(exc)[:200]}"
+        ) from exc
     
     if response.status_code >= 400:
         detail = response.text.strip() or response.reason_phrase

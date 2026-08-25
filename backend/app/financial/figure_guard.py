@@ -183,6 +183,8 @@ def evidence_numbers(evidence: Any) -> set[float]:
         elif isinstance(node, str):
             for _, value, _ in _digit_quantities(node):
                 allowed.add(value)
+            for _, value, _ in _verbal_quantities(node):
+                allowed.add(value)
         elif isinstance(node, dict):
             for value in node.values():
                 walk(value)
