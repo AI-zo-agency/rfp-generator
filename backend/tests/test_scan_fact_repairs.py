@@ -6,12 +6,115 @@ import unittest
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.services.proposal_scan_fact_repairs import (
+    fill_role_verify_tags_from_org_chart,
+    parse_org_chart_roles,
     repair_cover_letter_facts,
     repair_sole_proprietor_language,
     repair_timeline_week_totals,
     scrub_leaked_system_fragments,
     scrub_unverified_banking_claims,
 )
+
+
+class OrgChartRoleTests(unittest.TestCase):
+    ORG = (
+        "## Direction, Operations & Development\n\n"
+        "**Ella Lindau** Operations Director\n"
+        "**Timi Oyewunmi** Executive Assistant\n"
+        "**Oyetola Oyewunmi** Operations Coordinator\n\n"
+        "## Creative\n\n"
+        "**Curt Schultz** Creative Director\n"
+    )
+
+    def _draft(self) -> ProposalDraft:
+        return ProposalDraft(
+            rfpId="r",
+            updatedAt="t",
+            sections=[
+                ProposalSection(
+                    id="section-1-org-structure",
+                    title="1.2 — Organizational Structure",
+                    content=self.ORG,
+                    status="generated",
+                )
+            ],
+        )
+
+    def test_parses_bold_name_lines_from_org_structure_section(self) -> None:
+        roles = parse_org_chart_roles(self._draft())
+        self.assertEqual(roles.get("curt schultz"), "Creative Director")
+        self.assertEqual(roles.get("timi oyewunmi"), "Executive Assistant")
+        self.assertEqual(roles.get("oyetola oyewunmi"), "Operations Coordinator")
+
+    def test_fills_role_verify_tags_and_leaves_unknown_people(self) -> None:
+        roles = parse_org_chart_roles(self._draft())
+        body = (
+            "| Curt Schultz | [VERIFY: confirm Curt Schultz's role/title from HR records] | Support |\n"
+            "| Harsh Mohite | [VERIFY: confirm Harsh Mohite's role/title] | Support |\n"
+        )
+        out, n = fill_role_verify_tags_from_org_chart(body, roles)
+        self.assertEqual(n, 1)
+        self.assertIn("| Curt Schultz | Creative Director |", out)
+        # Not on the org chart → stays a VERIFY (never fabricated).
+        self.assertIn("[VERIFY: confirm Harsh Mohite's role/title]", out)
+
+    def test_no_roles_leaves_content_untouched(self) -> None:
+        body = "| X Y | [VERIFY: confirm X Y's role/title] | Support |"
+        out, n = fill_role_verify_tags_from_org_chart(body, {})
+        self.assertEqual(n, 0)
+        self.assertEqual(out, body)
+
+
+class FinalistWorkClientTests(unittest.TestCase):
+    KEYS = {"cityofnorthglenn", "northglenn", "cityofsanleandro", "sanleandro"}
+
+    def test_removes_finalist_from_delivered_work_list(self) -> None:
+        from app.services.proposal_scan_fact_repairs import strip_finalist_work_clients
+
+        text = (
+            "as demonstrated in our work with municipalities including the "
+            "City of Northglenn, City of Medford, City of Bend, and Deschutes County."
+        )
+        out, logs = strip_finalist_work_clients(text, self.KEYS)
+        self.assertNotIn("Northglenn", out)
+        self.assertIn("City of Medford", out)
+        self.assertIn("City of Bend", out)
+        self.assertIn("Deschutes County", out)
+        self.assertTrue(logs)
+
+    def test_removes_finalist_joined_by_and(self) -> None:
+        from app.services.proposal_scan_fact_repairs import strip_finalist_work_clients
+
+        text = "We delivered campaigns for City of Northglenn and City of Medford."
+        out, _ = strip_finalist_work_clients(text, self.KEYS)
+        self.assertNotIn("Northglenn", out)
+        self.assertIn("City of Medford", out)
+
+    def test_leaves_real_clients_untouched(self) -> None:
+        from app.services.proposal_scan_fact_repairs import strip_finalist_work_clients
+
+        text = "Our work with City of Medford, City of Bend, and Deschutes County."
+        out, logs = strip_finalist_work_clients(text, self.KEYS)
+        self.assertEqual(out, text)
+        self.assertEqual(logs, [])
+
+    def test_no_keys_is_noop(self) -> None:
+        from app.services.proposal_scan_fact_repairs import strip_finalist_work_clients
+
+        text = "Our work with the City of Northglenn."
+        out, logs = strip_finalist_work_clients(text, set())
+        self.assertEqual(out, text)
+        self.assertEqual(logs, [])
+
+    def test_finalist_keys_from_provenance_filenames(self) -> None:
+        from app.services.proposal_scan_fact_repairs import (
+            _client_token_from_finalist_filename,
+        )
+
+        self.assertEqual(
+            _client_token_from_finalist_filename("07_FIN_CityofNorthGlenn_Proposal_2026.pdf"),
+            "cityofnorthglenn",
+        )
 
 
 class ScanFactRepairTests(unittest.TestCase):
