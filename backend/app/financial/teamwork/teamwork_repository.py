@@ -102,6 +102,13 @@ def upsert_milestones(rows: list[dict[str, Any]]) -> int:
     return _upsert_batches("teamwork_milestones", rows, on_conflict="site_id,milestone_id")
 
 
+def upsert_capacity_snapshots(site_id: str, as_of: str, rows: list[dict[str, Any]]) -> int:
+    payload = [{**row, "site_id": site_id, "as_of": as_of} for row in rows]
+    return _upsert_batches(
+        "teamwork_capacity_snapshots", payload, on_conflict="site_id,as_of,person_id"
+    )
+
+
 def prune_snapshot_rows(site_id: str, synced_at: str) -> None:
     """Remove mirror rows absent from a completed full Teamwork snapshot."""
     client = _get_client()
@@ -128,6 +135,11 @@ def list_timelogs(site_id: str, **filters: Any) -> list[dict[str, Any]]:
 
 def list_milestones(site_id: str, **filters: Any) -> list[dict[str, Any]]:
     return _list_rows("teamwork_milestones", site_id, filters)
+
+
+def list_capacity_snapshots(site_id: str, since: str | None = None) -> list[dict[str, Any]]:
+    filters = {"as_of__gte": since} if since else {}
+    return _list_rows("teamwork_capacity_snapshots", site_id, filters)
 
 
 def get_panel_cache(site_id: str) -> dict[str, Any] | None:
