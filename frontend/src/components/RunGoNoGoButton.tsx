@@ -163,7 +163,12 @@ export function RunGoNoGoButton({
             type="button"
             onClick={handleStop}
             disabled={stopping}
-            className="zo-btn danger disabled:opacity-60"
+            className="zo-btn disabled:opacity-60"
+            style={{
+              backgroundColor: "var(--zo-error)",
+              borderColor: "var(--zo-error)",
+              color: "#fff",
+            }}
             title="Stop the running Go/No-Go analysis"
           >
             {stopping ? "Stopping…" : "Stop"}
