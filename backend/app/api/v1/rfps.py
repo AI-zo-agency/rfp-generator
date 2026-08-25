@@ -313,6 +313,11 @@ def mark_go(rfp_id: str) -> dict[str, str]:
     return {"ok": "true", "goNoGo": "go"}
 
 
+# Go/No-Go "can take a few minutes"; past this, a still-"running" signal is a
+# zombie (dead run's persisted note or an orphaned job lock), not a live job.
+_GO_NO_GO_STALE_RUNNING_SEC = 20 * 60
+
+
 def _go_no_go_lock_key(rfp_id: str) -> str:
     # Independent of the proposal-pipeline lock (proposal_job_runner.py
     # defaults to lock_key=rfp_id for those 7 phases) — Go/No-Go and proposal
@@ -412,11 +417,24 @@ async def analyze_go_no_go_status(rfp_id: str) -> dict[str, object]:
 
     job = await get_proposal_job(rfp_id, lock_key=_go_no_go_lock_key(rfp_id))
     if job and job.status == "running":
-        return {
-            "status": "running",
-            "rfpId": rfp_id,
-            "startedAt": job.started_at,
-        }
+        # Guard against an orphaned job lock (e.g. a Redis lock that outlived its
+        # dead worker across a redeploy) reporting "running" indefinitely.
+        from app.services.proposal_job_runner import _iso_age_sec
+
+        age = _iso_age_sec(job.started_at)
+        if age is None or age < _GO_NO_GO_STALE_RUNNING_SEC:
+            return {
+                "status": "running",
+                "rfpId": rfp_id,
+                "startedAt": job.started_at,
+            }
+        # Stale lock — free it so the UI unsticks and a re-run is possible.
+        try:
+            from app.services.proposal_job_runner import cancel_proposal_job
+
+            await cancel_proposal_job(rfp_id, lock_key=_go_no_go_lock_key(rfp_id))
+        except Exception:  # noqa: BLE001 — best-effort; status below still unsticks
+            logger.warning("Could not clear stale Go/No-Go job lock for %s", rfp_id)
     if job and job.status == "failed":
         return {
             "status": "failed",
@@ -440,7 +458,17 @@ async def analyze_go_no_go_status(rfp_id: str) -> dict[str, object]:
             "error": rfp.last_activity_note,
         }
     if "re-run in progress" in note or "analysis in progress" in note:
-        return {"status": "running", "rfpId": rfp_id}
+        # Only trust this persisted note while it is RECENT. It survives backend
+        # restarts/redeploys, so a run that died without marking itself failed
+        # (crash, OOM, worker killed, redeploy mid-run) would otherwise report
+        # "running" forever. Past the stale window with no live job, the run is
+        # gone — report idle so the UI unsticks and the user can re-run.
+        from app.services.proposal_job_runner import _iso_age_sec
+
+        age = _iso_age_sec(rfp.last_activity)
+        if age is None or age < _GO_NO_GO_STALE_RUNNING_SEC:
+            return {"status": "running", "rfpId": rfp_id}
+        return {"status": "idle", "rfpId": rfp_id, "stale": True}
 
     return {"status": "idle", "rfpId": rfp_id}
 
