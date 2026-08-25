@@ -70,6 +70,44 @@ def test_validate_response_rejects_unsupported_quantities():
         insights.validate_response({"brief": "42 tasks need owners.", "notes": {}}, evidence)
 
 
+def test_validate_response_rejects_prohibited_ungrounded_brief_claims():
+    evidence = {"signals": [{"id": "overdue-unassigned", "figure": "1"}], "history": {}}
+
+    with pytest.raises(ValueError, match="prohibited claim"):
+        insights.validate_response(
+            {
+                "brief": "Cash will be tight, payroll is at risk, and hire another person.",
+                "notes": {},
+            },
+            evidence,
+        )
+
+
+def test_validate_response_drops_prohibited_notes_but_keeps_evidence_backed_hiring():
+    evidence = {
+        "signals": [
+            {"id": "capacity:hiring", "figure": "2 people"},
+            {"id": "overdue-unassigned", "figure": "1"},
+        ],
+        "history": {"ready": True},
+    }
+
+    out = insights.validate_response(
+        {
+            "brief": "Capacity pressure supports a staffing response.",
+            "notes": {
+                "capacity:hiring": "Consider hiring or contracting to relieve sustained pressure.",
+                "overdue-unassigned": "Payroll is at risk.",
+            },
+        },
+        evidence,
+    )
+
+    assert out["notes"] == {
+        "capacity:hiring": "Consider hiring or contracting to relieve sustained pressure."
+    }
+
+
 def test_build_messages_says_history_is_still_building_when_not_ready():
     evidence = insights.build_evidence(_overview_with_unassigned_overdue(), [])
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import date
 from typing import Any
 
@@ -19,6 +20,19 @@ SOURCE = "teamwork"
 _MAX_TOKENS = 1400
 _TEMPERATURE = 0.3
 _SEVERITY_RANK = {"critical": 0, "warn": 1, "info": 2}
+_PROHIBITED_CLAIMS = (
+    re.compile(r"\b(?:cash|payroll)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:planned|unobserved)\s+(?:work|effort|hours?|capacity)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:work|effort|hours?|capacity)\s+(?:is\s+)?(?:planned|unobserved)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:effort|hours?)\s+(?:forecast|estimate)\b", re.IGNORECASE),
+)
+_HIRING_CLAIM = re.compile(r"\b(?:hire|hiring|recruit|recruiting)\b", re.IGNORECASE)
 
 _SYSTEM = (
     "You write a concise delivery brief for a creative agency owner from Teamwork "
@@ -172,23 +186,36 @@ def _unsupported_figure(text: str, allowed: set[float]) -> str | None:
     return check_quantities(text, allowed) or check_magnitude_claims(text)
 
 
+def _prohibited_claim(text: str, known_ids: set[str]) -> str | None:
+    for pattern in _PROHIBITED_CLAIMS:
+        if match := pattern.search(text):
+            return match.group(0)
+    if _HIRING_CLAIM.search(text) and "capacity:hiring" not in known_ids:
+        return "hiring without a capacity:hiring signal"
+    return None
+
+
 def validate_response(raw: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
     brief = raw.get("brief")
     if not isinstance(brief, str) or not brief.strip():
         raise ValueError("response has no usable brief")
     brief = brief.strip()
     allowed = evidence_numbers(evidence)
+    known = _known_ids(evidence)
+    if claim := _prohibited_claim(brief, known):
+        raise ValueError(f"brief makes a prohibited claim: {claim!r}")
     if offender := _unsupported_figure(brief, allowed):
         raise ValueError(f"brief states an unsupported quantity: {offender!r}")
 
     notes: dict[str, str] = {}
-    known = _known_ids(evidence)
     raw_notes = raw.get("notes")
     if isinstance(raw_notes, dict):
         for signal_id, note in raw_notes.items():
             if signal_id not in known or not isinstance(note, str) or not note.strip():
                 continue
             note = note.strip()
+            if _prohibited_claim(note, known):
+                continue
             if _unsupported_figure(note, allowed):
                 continue
             notes[signal_id] = note
