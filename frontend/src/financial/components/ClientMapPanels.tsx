@@ -30,6 +30,8 @@ function tone(confidence: ClientMapRow["link_confidence"]) {
 function ClientRow({
   row,
   busy,
+  selected,
+  onSelect,
   onUpdate,
   onAccept,
   onReject,
@@ -37,6 +39,8 @@ function ClientRow({
 }: {
   row: ClientMapRow;
   busy: boolean;
+  selected: boolean;
+  onSelect: (id: string) => void;
   onUpdate: (id: string, patch: ClientMapCorePatch) => Promise<unknown>;
   onAccept: (id: string) => Promise<unknown>;
   onReject: (id: string) => Promise<unknown>;
@@ -59,6 +63,7 @@ function ClientRow({
   if (editing) {
     return (
       <tr>
+        <td><input type="radio" aria-label={`Select ${row.client_name}`} checked={selected} onChange={() => onSelect(row.id)} /></td>
         <td><input aria-label="Tag code" className={INPUT} value={draft.tag_code} onChange={(event) => setDraft({ ...draft, tag_code: event.target.value })} /></td>
         <td><input aria-label="Client name" className={INPUT} value={draft.client_name} onChange={(event) => setDraft({ ...draft, client_name: event.target.value })} /></td>
         <td><input aria-label="Account manager" className={INPUT} value={draft.current_am ?? ""} onChange={(event) => setDraft({ ...draft, current_am: event.target.value })} /></td>
@@ -81,6 +86,7 @@ function ClientRow({
 
   return (
     <tr>
+      <td><input type="radio" aria-label={`Select ${row.client_name}`} checked={selected} onChange={() => onSelect(row.id)} /></td>
       <td><span className="qb-tag !ml-0">{row.tag_code}</span></td>
       <td><span className="qb-name">{row.client_name}</span>{row.is_internal ? <span className="qb-tag">internal</span> : null}</td>
       <td>{row.current_am || "—"}</td>
@@ -142,6 +148,8 @@ function MappingView() {
   const [siteId, setSiteId] = useState("");
   const [projectId, setProjectId] = useState("");
   const [clientMapId, setClientMapId] = useState("");
+  const [selectedRowId, setSelectedRowId] = useState("");
+  const selectedRow = map.rows.find((row) => row.id === selectedRowId);
 
   const addOverride = async (event: FormEvent) => {
     event.preventDefault();
@@ -179,10 +187,10 @@ function MappingView() {
         {map.rows.length ? (
           <div className="qb-tablewrap">
             <table className="qb-table">
-              <thead><tr><th>Tag</th><th>Client</th><th>AM</th><th>Status</th><th>QuickBooks</th><th>Teamwork</th><th>Confidence</th><th>Actions</th></tr></thead>
+              <thead><tr><th><span className="sr-only">Select</span></th><th>Tag</th><th>Client</th><th>AM</th><th>Status</th><th>QuickBooks</th><th>Teamwork</th><th>Confidence</th><th>Actions</th></tr></thead>
               <tbody>
                 {map.rows.map((row) => (
-                  <ClientRow key={row.id} row={row} busy={map.busy} onUpdate={map.update} onAccept={map.accept} onReject={map.reject} onDelete={map.remove} />
+                  <ClientRow key={row.id} row={row} busy={map.busy} selected={row.id === selectedRowId} onSelect={setSelectedRowId} onUpdate={map.update} onAccept={map.accept} onReject={map.reject} onDelete={map.remove} />
                 ))}
               </tbody>
             </table>
@@ -192,10 +200,10 @@ function MappingView() {
 
       <div className="qb-two">
         <Panel title="Unmatched Teamwork" meta={`${map.unmatched.teamwork.length}`}>
-          {map.unmatched.teamwork.length ? <ul className="qb-bars">{map.unmatched.teamwork.map((item) => <li key={`${item.id}-${item.name}`}><span className="qb-name">{item.name || `Company ${item.id}`}</span></li>)}</ul> : <Empty>All Teamwork companies are linked.</Empty>}
+          {map.unmatched.teamwork.length ? <ul className="qb-bars">{map.unmatched.teamwork.map((item) => <li key={`${item.id}-${item.name}`}><button type="button" className="qb-more !mt-0" disabled={map.busy || !selectedRow} onClick={() => selectedRow && void map.attachTeamwork(selectedRow, item)}>Attach {item.name || `Company ${item.id}`}</button></li>)}</ul> : <Empty>All Teamwork companies are linked.</Empty>}
         </Panel>
         <Panel title="Unmatched QuickBooks" meta={`${map.unmatched.quickbooks.length}`}>
-          {map.unmatched.quickbooks.length ? <ul className="qb-bars">{map.unmatched.quickbooks.map((item) => <li key={item.qbo_id}><span className="qb-name">{item.display_name}</span></li>)}</ul> : <Empty>All QuickBooks customers are linked.</Empty>}
+          {map.unmatched.quickbooks.length ? <ul className="qb-bars">{map.unmatched.quickbooks.map((item) => <li key={item.qbo_id}><button type="button" className="qb-more !mt-0" disabled={map.busy || !selectedRow} onClick={() => selectedRow && void map.attachQuickBooks(selectedRow, item)}>Attach {item.display_name}</button></li>)}</ul> : <Empty>All QuickBooks customers are linked.</Empty>}
         </Panel>
       </div>
 

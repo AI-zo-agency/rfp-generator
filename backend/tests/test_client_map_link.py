@@ -73,6 +73,19 @@ def test_exact_confirm_replaces_prior_suggestions_with_exact_entities():
     assert updates[0]["teamwork_company_names"] == ["Torrent Laboratories"]
 
 
+def test_exact_does_not_confirm_from_suggested_teamwork_name():
+    clients = [
+        _client(
+            client_name="Mountain View Heating",
+            teamwork_company_names=["Mt. View Heating"],
+            link_confidence="suggested",
+        )
+    ]
+    qb = [{"qbo_id": "77", "display_name": "Mt. View Heating"}]
+
+    assert apply_exact_links(clients, qb, []) == []
+
+
 def test_exact_does_not_reuse_qb_owned_by_confirmed_client():
     clients = [
         _client(),

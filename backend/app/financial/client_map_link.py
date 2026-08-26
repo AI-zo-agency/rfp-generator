@@ -41,14 +41,7 @@ def apply_exact_links(
         and not client.get("is_internal")
     ]
     normalized_by_client = {
-        str(client["id"]): {
-            normalize_name(str(name))
-            for name in [
-                client.get("client_name"),
-                *(client.get("teamwork_company_names") or []),
-            ]
-            if name and normalize_name(str(name))
-        }
+        str(client["id"]): normalize_name(str(client.get("client_name") or ""))
         for client in eligible
     }
     confirmed_qb_ids = {
@@ -68,8 +61,8 @@ def apply_exact_links(
         qb_by_id.setdefault(qbo_id, customer)
         matching_clients_by_qb.setdefault(qbo_id, set()).update(
             client_id
-            for client_id, names in normalized_by_client.items()
-            if normalized_name in names
+            for client_id, client_name in normalized_by_client.items()
+            if normalized_name == client_name
         )
 
     exact_qb_by_client: dict[str, dict[str, dict[str, Any]]] = {}
@@ -91,7 +84,7 @@ def apply_exact_links(
         tw_matches = [
             company
             for company in tw
-            if normalize_name(str(company.get("name") or "")) in normalized
+            if normalize_name(str(company.get("name") or "")) == normalized
         ]
         exact_qb = list(qb_matches.values()) if len(qb_matches) == 1 else []
         if not exact_qb and not tw_matches:

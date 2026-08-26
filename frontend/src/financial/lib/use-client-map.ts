@@ -108,6 +108,29 @@ export function useClientMap() {
       }),
     update: (id: string, body: ClientMapCorePatch) => patch(id, body),
     accept: (id: string) => patch(id, { link_confidence: "confirmed" }),
+    attachQuickBooks: (
+      row: ClientMapRow,
+      customer: UnmatchedResponse["quickbooks"][number],
+    ) =>
+      patch(row.id, {
+        qb_customer_ids: [...new Set([...row.qb_customer_ids, customer.qbo_id])],
+        qb_customer_names: [...new Set([...row.qb_customer_names, customer.display_name])],
+        link_confidence: "confirmed",
+        link_reason: "manual",
+      }),
+    attachTeamwork: (
+      row: ClientMapRow,
+      company: UnmatchedResponse["teamwork"][number],
+    ) =>
+      patch(row.id, {
+        teamwork_company_ids:
+          company.id === null
+            ? row.teamwork_company_ids
+            : [...new Set([...row.teamwork_company_ids, company.id])],
+        teamwork_company_names: [...new Set([...row.teamwork_company_names, company.name])],
+        link_confidence: "confirmed",
+        link_reason: "manual",
+      }),
     reject: (id: string) =>
       patch(id, {
         qb_customer_ids: [],
