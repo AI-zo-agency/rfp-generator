@@ -46,6 +46,30 @@ def test_patch_client_map_promotes_suggestion(monkeypatch):
     assert response.json()["link_confidence"] == "confirmed"
 
 
+def test_patch_client_map_reject_clears_qb(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        fin_router,
+        "update_client_map",
+        lambda row_id, patch: calls.append((row_id, patch))
+        or {"id": row_id, **patch},
+    )
+    clears = {
+        "qb_customer_ids": [],
+        "qb_customer_names": [],
+        "link_confidence": "unmatched",
+        "link_reason": None,
+    }
+
+    response = client.patch(
+        "/api/v1/financials/client-map/cm-1",
+        json=clears,
+    )
+
+    assert response.status_code == 200
+    assert calls == [("cm-1", clears)]
+
+
 def test_post_client_map_link_runs_requested_passes(monkeypatch):
     run_link = AsyncMock(return_value={"confirmed": 2, "suggested": 1})
     monkeypatch.setattr(fin_router, "run_client_map_link", run_link)
