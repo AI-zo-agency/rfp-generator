@@ -7,19 +7,22 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import logging
 from app.financial import google_sheets, ai_classifier
 from app.financial.ai_insights_repository import get_latest_insight
 from app.financial.client_map_import import import_tags_sheet
 from app.financial.client_map_link import run_link as run_client_map_link
+from app.financial.agency_overview import build_agency_overview
 from app.financial.client_map_repository import (
     delete_client_map,
     delete_job_override,
+    get_client_map as get_client_map_row,
     insert_client_map,
     list_client_map,
     list_job_overrides,
     update_client_map,
+    upsert_invoice_resolution,
     upsert_job_override,
 )
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows
@@ -985,11 +988,28 @@ class ClientMapLinkBody(BaseModel):
 class JobOverrideUpsert(BaseModel):
     site_id: str
     project_id: int
-    client_map_id: str | None = None
+    client_map_id: uuid.UUID | None = None
     qb_customer_ids: list[str] = Field(default_factory=list)
     qb_customer_names: list[str] = Field(default_factory=list)
     link_confidence: LinkConfidence = "confirmed"
     notes: str | None = None
+
+
+class InvoiceResolutionUpsert(BaseModel):
+    invoice_id: str
+    resolution: Literal["linked", "internal"]
+    project_id: str | None = None
+    client_map_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_resolution(self):
+        if self.resolution == "linked" and not self.project_id:
+            raise ValueError("A linked invoice resolution requires project_id")
+        if self.resolution == "internal" and self.project_id is not None:
+            raise ValueError("An internal invoice resolution cannot include project_id")
+        if self.resolution == "internal" and self.client_map_id is not None:
+            raise ValueError("An internal invoice resolution cannot include client_map_id")
+        return self
 
 
 @router.get("/client-map")
@@ -1084,6 +1104,43 @@ async def link_client_map(payload: ClientMapLinkBody):
     return result
 
 
+@router.get("/agency/overview")
+def get_agency_overview(year: int | None = Query(None, ge=2000, le=2100)):
+    payload = build_agency_overview(year=year)
+    logger.info(
+        "operation=agency_overview_route year=%s jobs=%s",
+        payload.get("year"),
+        len(payload.get("jobs") or []),
+    )
+    return payload
+
+
+@router.post("/agency/invoice-resolutions")
+def create_invoice_resolution(payload: InvoiceResolutionUpsert):
+    if payload.resolution == "linked":
+        project_ids = {
+            str(project.get("id"))
+            for project in overview_from_cache().get("projects") or []
+            if isinstance(project, dict) and project.get("id") is not None
+        }
+        if payload.project_id not in project_ids:
+            raise HTTPException(status_code=404, detail="Project not found")
+    if payload.client_map_id is not None and get_client_map_row(str(payload.client_map_id)) is None:
+        raise HTTPException(status_code=404, detail="Client map not found")
+    row = upsert_invoice_resolution(
+        {
+            **payload.model_dump(mode="json"),
+            "realm_id": settings.quickbooks_realm_id,
+        }
+    )
+    logger.info(
+        "operation=invoice_resolution_upsert invoice_id=%s resolution=%s",
+        payload.invoice_id,
+        payload.resolution,
+    )
+    return row
+
+
 @router.get("/client-map/job-overrides")
 def get_client_map_job_overrides(site_id: str | None = Query(None)):
     rows = list_job_overrides(site_id=site_id)
@@ -1093,7 +1150,9 @@ def get_client_map_job_overrides(site_id: str | None = Query(None)):
 
 @router.post("/client-map/job-overrides")
 def create_client_map_job_override(payload: JobOverrideUpsert):
-    row = upsert_job_override(payload.model_dump())
+    if payload.client_map_id is not None and get_client_map_row(str(payload.client_map_id)) is None:
+        raise HTTPException(status_code=404, detail="Client map not found")
+    row = upsert_job_override(payload.model_dump(mode="json"))
     logger.info("operation=client_map_job_override_upsert row_id=%s", row.get("id"))
     return row
 

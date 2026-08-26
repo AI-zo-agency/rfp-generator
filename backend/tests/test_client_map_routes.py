@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -117,3 +118,153 @@ def test_post_client_map_link_runs_requested_passes(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {"confirmed": 2, "suggested": 1}
     run_link.assert_awaited_once_with(include_ai=False)
+
+
+def test_get_agency_overview_returns_builder_payload(monkeypatch):
+    payload = {
+        "year": 2026,
+        "position": {"booked_ytd": 1000, "open_ar": 50, "live_jobs": 1, "overdue_tasks": 0, "join_mapped": 1, "join_total": 1},
+        "jobs": [{"project_id": "1", "join": "confirmed", "billed_ytd": 900, "open_ar": 40}],
+        "needs_mapping": [],
+        "billed_without_project": [],
+    }
+    monkeypatch.setattr(fin_router, "build_agency_overview", lambda year=None: payload)
+
+    response = client.get("/api/v1/financials/agency/overview?year=2026")
+
+    assert response.status_code == 200
+    assert response.json()["jobs"][0]["open_ar"] == 40
+
+
+def test_get_agency_overview_rejects_year_outside_sensible_range():
+    assert client.get("/api/v1/financials/agency/overview?year=1999").status_code == 422
+    assert client.get("/api/v1/financials/agency/overview?year=2101").status_code == 422
+
+
+def test_invoice_resolution_requires_linked_project_and_rejects_internal_project():
+    linked_response = client.post(
+        "/api/v1/financials/agency/invoice-resolutions",
+        json={"invoice_id": "17", "resolution": "linked"},
+    )
+    internal_response = client.post(
+        "/api/v1/financials/agency/invoice-resolutions",
+        json={"invoice_id": "17", "resolution": "internal", "project_id": "44"},
+    )
+
+    assert linked_response.status_code == 422
+    assert internal_response.status_code == 422
+
+
+def test_invoice_resolution_rejects_unknown_project_and_saves_known_project(monkeypatch):
+    monkeypatch.setattr(
+        fin_router,
+        "overview_from_cache",
+        lambda: {"projects": [{"id": "44"}]},
+    )
+    saved_payloads = []
+    monkeypatch.setattr(
+        fin_router,
+        "upsert_invoice_resolution",
+        lambda payload: saved_payloads.append(payload) or {"id": "resolution-1", **payload},
+    )
+    client_map_id = "6aaec310-4b9f-4a61-8e66-b81387bf2097"
+    monkeypatch.setattr(
+        fin_router,
+        "get_client_map_row",
+        lambda row_id: {"id": row_id} if row_id == client_map_id else None,
+    )
+
+    unknown = client.post(
+        "/api/v1/financials/agency/invoice-resolutions",
+        json={"invoice_id": "17", "resolution": "linked", "project_id": "not-a-project"},
+    )
+    known = client.post(
+        "/api/v1/financials/agency/invoice-resolutions",
+        json={"invoice_id": "17", "resolution": "linked", "project_id": "44", "client_map_id": client_map_id},
+    )
+
+    assert unknown.status_code == 404
+    assert known.status_code == 200
+    assert saved_payloads == [{
+        "invoice_id": "17",
+        "resolution": "linked",
+        "project_id": "44",
+        "client_map_id": client_map_id,
+        "realm_id": fin_router.settings.quickbooks_realm_id,
+    }]
+
+
+def test_invoice_resolution_validates_client_map_and_requires_existing_map(monkeypatch):
+    client_map_id = "6aaec310-4b9f-4a61-8e66-b81387bf2097"
+    monkeypatch.setattr(fin_router, "overview_from_cache", lambda: {"projects": [{"id": "44"}]})
+    monkeypatch.setattr(fin_router, "get_client_map_row", lambda _row_id: None)
+
+    malformed = client.post(
+        "/api/v1/financials/agency/invoice-resolutions",
+        json={"invoice_id": "17", "resolution": "linked", "project_id": "44", "client_map_id": "not-a-uuid"},
+    )
+    unknown = client.post(
+        "/api/v1/financials/agency/invoice-resolutions",
+        json={"invoice_id": "17", "resolution": "linked", "project_id": "44", "client_map_id": client_map_id},
+    )
+    internal = client.post(
+        "/api/v1/financials/agency/invoice-resolutions",
+        json={"invoice_id": "17", "resolution": "internal", "client_map_id": client_map_id},
+    )
+
+    assert malformed.status_code == 422
+    assert unknown.status_code == 404
+    assert internal.status_code == 422
+
+
+def test_job_override_validates_and_checks_client_map_before_upsert(monkeypatch):
+    client_map_id = "6aaec310-4b9f-4a61-8e66-b81387bf2097"
+    saved = []
+    monkeypatch.setattr(fin_router, "get_client_map_row", lambda row_id: {"id": row_id} if row_id == client_map_id else None)
+    monkeypatch.setattr(fin_router, "upsert_job_override", lambda payload: saved.append(payload) or payload)
+
+    malformed = client.post(
+        "/api/v1/financials/client-map/job-overrides",
+        json={"site_id": "site-1", "project_id": 44, "client_map_id": "not-a-uuid"},
+    )
+    unknown = client.post(
+        "/api/v1/financials/client-map/job-overrides",
+        json={"site_id": "site-1", "project_id": 44, "client_map_id": "d3c9ed82-df68-433d-a75c-df6aabb74ae0"},
+    )
+    known = client.post(
+        "/api/v1/financials/client-map/job-overrides",
+        json={"site_id": "site-1", "project_id": 44, "client_map_id": client_map_id},
+    )
+
+    assert malformed.status_code == 422
+    assert unknown.status_code == 404
+    assert known.status_code == 200
+    assert saved[0]["client_map_id"] == client_map_id
+
+
+def test_internal_invoice_resolution_uses_settings_realm_and_null_link_fields(monkeypatch):
+    monkeypatch.setattr(
+        fin_router,
+        "settings",
+        SimpleNamespace(quickbooks_realm_id="realm-from-settings"),
+    )
+    saved_payloads = []
+    monkeypatch.setattr(
+        fin_router,
+        "upsert_invoice_resolution",
+        lambda payload: saved_payloads.append(payload) or payload,
+    )
+
+    response = client.post(
+        "/api/v1/financials/agency/invoice-resolutions",
+        json={"invoice_id": "internal-17", "resolution": "internal"},
+    )
+
+    assert response.status_code == 200
+    assert saved_payloads == [{
+        "invoice_id": "internal-17",
+        "resolution": "internal",
+        "project_id": None,
+        "client_map_id": None,
+        "realm_id": "realm-from-settings",
+    }]

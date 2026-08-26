@@ -1118,6 +1118,99 @@ table.qb-table {
   background: #e8ebe8;
 }
 
+/* Agency resolution drawer — one focused decision at a time. */
+.agency-drawer-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  border: 0;
+  background: color-mix(in srgb, var(--zo-text) 28%, transparent);
+  animation: agency-drawer-fade 180ms var(--qb-ease, ease);
+}
+
+.agency-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  width: min(440px, 100vw);
+  height: 100dvh;
+  background: var(--zo-card-bg, var(--zo-surface));
+  border-left: 1px solid var(--zo-border);
+  box-shadow: -18px 0 48px -24px color-mix(in srgb, var(--zo-text) 48%, transparent);
+  animation: agency-drawer-slide 240ms var(--qb-ease, ease);
+}
+
+@keyframes agency-drawer-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes agency-drawer-slide { from { transform: translateX(100%); } to { transform: translateX(0); } }
+
+.agency-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 17px 16px 14px;
+  border-bottom: 1px solid var(--zo-border);
+}
+
+.agency-drawer-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--zo-teal) 14%, transparent);
+  color: var(--zo-teal);
+}
+
+.agency-drawer-head > div { min-width: 0; flex: 1; }
+.agency-drawer-head h2 { margin: 0; font-size: 15px; font-weight: 650; color: var(--zo-text); }
+.agency-drawer-head p { margin: 3px 0 0; font-size: 12px; line-height: 1.4; color: var(--zo-text-muted); }
+
+.agency-drawer-close {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--zo-text-muted);
+  cursor: pointer;
+}
+.agency-drawer-close:hover:not(:disabled) { border-color: var(--zo-border); background: var(--zo-surface); color: var(--zo-text); }
+
+.agency-drawer-body { flex: 1; overflow: auto; padding: 18px 16px; }
+.agency-drawer-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.agency-drawer-details div { min-width: 0; }
+.agency-drawer-details dt, .agency-drawer-eyebrow { margin: 0 0 3px; font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--zo-text-muted); }
+.agency-drawer-details dd { overflow-wrap: anywhere; margin: 0; font-size: 13px; font-weight: 550; color: var(--zo-text); }
+.agency-drawer-field { display: grid; gap: 6px; margin-top: 22px; font-size: 12px; font-weight: 600; color: var(--zo-text); }
+.agency-drawer-field select, .agency-drawer-field textarea { width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid var(--zo-border); border-radius: 8px; background: var(--zo-surface); color: var(--zo-text); font: inherit; }
+.agency-drawer-field textarea { min-height: 88px; resize: vertical; }
+.agency-drawer-field select:focus-visible, .agency-drawer-field textarea:focus-visible, .agency-drawer:focus-visible, .agency-drawer-actions button:focus-visible, .agency-drawer-close:focus-visible { outline: 2px solid var(--zo-teal); outline-offset: 2px; }
+.agency-drawer-hint { margin: 9px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--zo-text-muted); }
+.agency-drawer-evidence h3 { margin: 0 0 16px; font-size: 16px; color: var(--zo-text); }
+.agency-drawer-error { margin: 16px 0 0; padding: 10px 11px; border-radius: 8px; background: color-mix(in srgb, var(--zo-danger) 10%, transparent); color: var(--zo-danger); font-size: 12px; line-height: 1.4; }
+
+.agency-drawer-actions { display: flex; gap: 8px; padding: 12px 16px calc(16px + env(safe-area-inset-bottom)); border-top: 1px solid var(--zo-border); }
+.agency-drawer-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 38px; padding: 8px 11px; border-radius: 8px; font-size: 12.5px; font-weight: 650; cursor: pointer; }
+.agency-drawer-primary { flex: 1; border: 1px solid var(--zo-teal-dark); background: var(--zo-teal); color: var(--zo-white); }
+.agency-drawer-secondary { border: 1px solid var(--zo-border); background: var(--zo-surface); color: var(--zo-text); }
+.agency-drawer-actions button:disabled, .agency-drawer-scrim:disabled, .agency-drawer-close:disabled { opacity: .55; cursor: default; }
+
+@media (max-width: 720px) {
+  .agency-drawer { top: auto; bottom: 0; width: 100%; height: min(82dvh, 640px); border-top: 1px solid var(--zo-border); border-left: 0; border-radius: 16px 16px 0 0; animation-name: agency-drawer-rise; }
+  @keyframes agency-drawer-rise { from { transform: translateY(100%); } to { transform: translateY(0); } }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agency-drawer, .agency-drawer-scrim { animation: none; }
+}
+
 .fin-rail-toggle {
   color: #2f3f3e;
 }
@@ -1404,8 +1497,42 @@ table.qb-table {
   transition: transform 0.15s ease;
 }
 
-.qb-table tbody tr[data-open="true"] .tw-row-chevron__icon {
+.agency-control-room .qb-table tbody tr[data-open="true"] .tw-row-chevron__icon {
   transform: rotate(90deg);
+}
+
+/* Agency: job children stay on the parent column grid (no nested table). */
+.agency-control-room .qb-table tbody tr[data-open="true"] > td {
+  border-bottom-color: transparent;
+}
+
+.qb-table tbody tr.agency-job-child > td {
+  background: var(--zo-surface);
+  color: var(--zo-text-secondary);
+  font-weight: 400;
+}
+
+.qb-table tbody tr.agency-job-child:has(+ tr:not(.agency-job-child)) > td {
+  border-bottom-color: var(--zo-border);
+}
+
+.agency-job-child__name {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding-left: 1.75rem;
+  min-width: 0;
+}
+
+.agency-job-child__title {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--zo-text-muted);
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tw-time-name {
@@ -1898,4 +2025,33 @@ a.tw-task-card__name:hover {
   font-size: 0.7rem;
   color: var(--qb-text-muted, #888);
   white-space: nowrap;
+}
+
+/* Agency owner control room */
+.agency-control-room { min-width: 0; }
+.agency-snapshot { display: flex; align-items: end; justify-content: space-between; gap: 16px; padding: 14px 16px; border: 1px solid var(--zo-border); border-radius: 10px; background: var(--zo-card-bg); }
+.agency-snapshot__eyebrow { margin: 0; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--zo-text-muted); }
+.agency-snapshot__freshness { margin: 4px 0 0; font-size: 12px; color: var(--zo-text-secondary); }
+.agency-snapshot__error { max-width: 34rem; margin: 6px 0 0; font-size: 12px; color: var(--zo-danger); }
+.agency-snapshot__tools { align-self: flex-start; }
+.agency-snapshot__kpis { flex: 1; }
+.agency-action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.agency-action { display: flex; min-width: 0; min-height: 126px; flex-direction: column; justify-content: space-between; gap: 12px; padding: 13px; border: 1px solid var(--zo-border); border-left: 3px solid var(--zo-orange); border-radius: 8px; background: var(--zo-surface); }
+.agency-action[data-kind="delivery"] { border-left-color: var(--zo-danger); }
+.agency-action[data-kind="mapping"] { border-left-color: var(--zo-teal); }
+.agency-action h4 { margin: 3px 0; font-size: 13px; line-height: 1.35; color: var(--zo-text); }
+.agency-action p { margin: 0; color: var(--zo-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.agency-action__status { font-size: 10px !important; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--zo-text-muted) !important; }
+.agency-action__foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--zo-text-muted); }
+.agency-control-room .qb-chips { margin: 0 0 12px; }
+.agency-control-room .qb-panel:has(.agency-action-grid) { overflow: visible; }
+
+@media (max-width: 720px) {
+  .agency-snapshot { align-items: stretch; flex-direction: column; padding: 12px; }
+  .agency-snapshot__kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .agency-snapshot__kpis .qb-figure { min-width: 0; }
+  .agency-action-grid { grid-template-columns: 1fr; }
+  .agency-action { min-height: 0; }
+  .agency-action__foot { align-items: flex-start; flex-direction: column; }
+  .agency-control-room .qb-chips { overflow-x: auto; padding-bottom: 2px; }
 }

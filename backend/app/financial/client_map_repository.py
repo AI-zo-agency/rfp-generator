@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 _CLIENT_MAP_TABLE = "client_map"
 _JOB_OVERRIDE_TABLE = "client_map_job_override"
+_INVOICE_RESOLUTION_TABLE = "agency_invoice_resolution"
 
 
 def _rows(data: Any) -> list[dict[str, Any]]:
@@ -173,6 +174,42 @@ def upsert_job_override(payload: dict[str, Any]) -> dict[str, Any]:
 def delete_job_override(row_id: str) -> None:
     _get_client().table(_JOB_OVERRIDE_TABLE).delete().eq("id", row_id).execute()
     logger.info("operation=delete_job_override row_id=%s", row_id)
+
+
+def list_invoice_resolutions(realm_id: str) -> list[dict[str, Any]]:
+    result = (
+        _get_client()
+        .table(_INVOICE_RESOLUTION_TABLE)
+        .select("*")
+        .eq("realm_id", realm_id)
+        .order("invoice_id")
+        .execute()
+    )
+    rows = _rows(result.data)
+    logger.info(
+        "operation=list_invoice_resolutions realm_id=%s row_count=%s",
+        realm_id,
+        len(rows),
+    )
+    return rows
+
+
+def upsert_invoice_resolution(payload: dict[str, Any]) -> dict[str, Any]:
+    row = {**payload, "updated_at": _now_iso()}
+    result = (
+        _get_client()
+        .table(_INVOICE_RESOLUTION_TABLE)
+        .upsert(row, on_conflict="realm_id,invoice_id")
+        .execute()
+    )
+    upserted = _first(result.data)
+    logger.info(
+        "operation=upsert_invoice_resolution realm_id=%s invoice_id=%s resolution=%s",
+        row.get("realm_id"),
+        row.get("invoice_id"),
+        row.get("resolution"),
+    )
+    return upserted or row
 
 
 def existing_tag_codes() -> list[str]:

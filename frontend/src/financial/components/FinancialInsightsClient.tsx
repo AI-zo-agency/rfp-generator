@@ -37,7 +37,7 @@ function persistFinancialNav(patch: {
 
 export function FinancialInsightsClient({
   initialTab = "quickbooks",
-  initialAgencyView = "mapping",
+  initialAgencyView = "jobs",
   initialView = "position",
 }: {
   initialTab?: FinancialTabId;

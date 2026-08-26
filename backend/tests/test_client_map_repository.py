@@ -24,8 +24,8 @@ class FakeQuery:
         self.calls.append(("or_", expr))
         return self
 
-    def order(self, *_a, **_k):
-        self.calls.append(("order",))
+    def order(self, *args, **_k):
+        self.calls.append(("order", *args))
         return self
 
     def limit(self, n):
@@ -57,7 +57,11 @@ class FakeClient:
         self._query = query
 
     def table(self, name):
-        assert name in ("client_map", "client_map_job_override")
+        assert name in (
+            "client_map",
+            "client_map_job_override",
+            "agency_invoice_resolution",
+        )
         self._query.calls.append(("table", name))
         return self._query
 
@@ -100,3 +104,33 @@ def test_upsert_job_override_uses_site_project_conflict(monkeypatch):
         call[0] == "upsert" and call[2] == "site_id,project_id"
         for call in q.calls
     )
+
+
+def test_list_invoice_resolutions_filters_realm(monkeypatch):
+    q = FakeQuery(data=[{"realm_id": "realm-1", "invoice_id": "invoice-1"}])
+    monkeypatch.setattr(repo, "_get_client", lambda: FakeClient(q))
+    rows = repo.list_invoice_resolutions("realm-1")
+    assert rows[0]["invoice_id"] == "invoice-1"
+    assert ("table", "agency_invoice_resolution") in q.calls
+    assert ("eq", "realm_id", "realm-1") in q.calls
+    assert ("order", "invoice_id") in q.calls
+
+
+def test_upsert_invoice_resolution_uses_realm_invoice_conflict(monkeypatch):
+    q = FakeQuery(data=[{"realm_id": "realm-1", "invoice_id": "invoice-1"}])
+    monkeypatch.setattr(repo, "_get_client", lambda: FakeClient(q))
+    payload = {
+        "realm_id": "realm-1",
+        "invoice_id": "invoice-1",
+        "resolution": "linked",
+        "project_id": 42,
+    }
+    row = repo.upsert_invoice_resolution(payload)
+    assert row["invoice_id"] == "invoice-1"
+    upsert_call = next(call for call in q.calls if call[0] == "upsert")
+    assert upsert_call[1]["realm_id"] == "realm-1"
+    assert upsert_call[1]["invoice_id"] == "invoice-1"
+    assert upsert_call[1]["resolution"] == "linked"
+    assert upsert_call[1]["project_id"] == 42
+    assert upsert_call[1]["updated_at"]
+    assert upsert_call[2] == "realm_id,invoice_id"

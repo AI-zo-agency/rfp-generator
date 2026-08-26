@@ -19,10 +19,10 @@ describe("parseFinancialTab", () => {
 });
 
 describe("parseAgencyView", () => {
-  it("keeps Jobs and defaults unknown values to Mapping", () => {
-    expect(parseAgencyView("jobs")).toBe("jobs");
-    expect(parseAgencyView(null)).toBe("mapping");
-    expect(parseAgencyView("nope")).toBe("mapping");
+  it("keeps Mapping and defaults unknown values to Jobs", () => {
+    expect(parseAgencyView("mapping")).toBe("mapping");
+    expect(parseAgencyView(null)).toBe("jobs");
+    expect(parseAgencyView("nope")).toBe("jobs");
   });
 });
 
@@ -55,16 +55,16 @@ describe("applyFinancialNavSearch", () => {
     ).toBe("");
   });
 
-  it("writes Agency views, omits Mapping, and clears incompatible views", () => {
+  it("writes Agency views, omits Jobs default, and clears incompatible views", () => {
     expect(applyFinancialNavSearch("", { tab: "agency" })).toBe("?tab=agency");
-    expect(applyFinancialNavSearch("tab=agency", { view: "jobs" })).toBe(
-      "?tab=agency&view=jobs",
+    expect(applyFinancialNavSearch("tab=agency", { view: "mapping" })).toBe(
+      "?tab=agency&view=mapping",
     );
-    expect(applyFinancialNavSearch("tab=agency&view=jobs", { view: "mapping" })).toBe(
+    expect(applyFinancialNavSearch("tab=agency&view=mapping", { view: "jobs" })).toBe(
       "?tab=agency",
     );
     expect(
-      applyFinancialNavSearch("tab=agency&view=jobs", { tab: "teamwork" }),
+      applyFinancialNavSearch("tab=agency&view=mapping", { tab: "teamwork" }),
     ).toBe("?tab=teamwork");
     expect(
       applyFinancialNavSearch("tab=teamwork&view=projects", { tab: "agency" }),

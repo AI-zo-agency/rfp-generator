@@ -9,7 +9,7 @@ export const FINANCIAL_TAB_IDS = [
 
 export type FinancialTabId = (typeof FINANCIAL_TAB_IDS)[number];
 
-export const AGENCY_VIEW_IDS = ["mapping", "jobs"] as const;
+export const AGENCY_VIEW_IDS = ["jobs", "mapping"] as const;
 
 export type AgencyViewId = (typeof AGENCY_VIEW_IDS)[number];
 
@@ -22,7 +22,7 @@ export function parseFinancialTab(raw: string | null | undefined): FinancialTabI
 }
 
 export function parseAgencyView(raw: string | null | undefined): AgencyViewId {
-  return AGENCY_VIEW_IDS.includes(raw as AgencyViewId) ? (raw as AgencyViewId) : "mapping";
+  return AGENCY_VIEW_IDS.includes(raw as AgencyViewId) ? (raw as AgencyViewId) : "jobs";
 }
 
 export function parseTeamworkView(raw: string | null | undefined): TeamworkViewId {
@@ -47,7 +47,7 @@ export function applyFinancialNavSearch(
     }
   }
   if (patch.view !== undefined) {
-    if (patch.view === "mapping" || patch.view === "position") params.delete("view");
+    if (patch.view === "jobs" || patch.view === "position") params.delete("view");
     else params.set("view", patch.view);
   }
   const qs = params.toString();

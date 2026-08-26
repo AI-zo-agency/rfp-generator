@@ -5,6 +5,7 @@ import { RefreshCw } from "lucide-react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Empty, Panel, Pill } from "./qb-ui";
+import { AgencyJobsDemo } from "./AgencyJobsDemo";
 import { useClientMap } from "../lib/use-client-map";
 import { parseAgencyView, type AgencyViewId } from "../lib/financial-tab";
 import type { ClientMapCorePatch, ClientMapRow } from "../types/client-map";
@@ -143,10 +144,10 @@ function CreateClientForm({
   );
 }
 
-function MappingView() {
+function MappingView({ prefilledProjectId }: { prefilledProjectId: string | null }) {
   const map = useClientMap();
   const [siteId, setSiteId] = useState("");
-  const [projectId, setProjectId] = useState("");
+  const [projectId, setProjectId] = useState(prefilledProjectId ?? "");
   const [clientMapId, setClientMapId] = useState("");
   const [selectedRowId, setSelectedRowId] = useState("");
   const selectedRow = map.rows.find((row) => row.id === selectedRowId);
@@ -243,17 +244,22 @@ export function ClientMapPanels({
   view: AgencyViewId;
   onViewChange: (view: AgencyViewId) => void;
 }) {
+  const [prefilledProjectId, setPrefilledProjectId] = useState<string | null>(null);
+  const openMappingForProject = (projectId: string) => {
+    setPrefilledProjectId(projectId);
+    onViewChange("mapping");
+  };
   return (
     <div className="qb-ledger">
       <Tabs value={view} onValueChange={(id) => onViewChange(parseAgencyView(id))} className="qb-tabs">
         <TabsList className="qb-tablist">
-          <TabsTrigger value="mapping">Mapping</TabsTrigger>
           <TabsTrigger value="jobs">Jobs</TabsTrigger>
+          <TabsTrigger value="mapping">Mapping</TabsTrigger>
         </TabsList>
-        {view === "mapping" ? <MappingView /> : null}
         <TabsContent value="jobs" className="qb-view">
-          <Panel title="Agency Jobs"><Empty>Agency Jobs ships in Phase B — use Mapping to confirm links.</Empty></Panel>
+          <AgencyJobsDemo onOpenMapping={openMappingForProject} />
         </TabsContent>
+        {view === "mapping" ? <MappingView prefilledProjectId={prefilledProjectId} /> : null}
       </Tabs>
     </div>
   );
