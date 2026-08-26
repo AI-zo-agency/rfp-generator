@@ -1,0 +1,60 @@
+from unittest.mock import AsyncMock
+
+from fastapi.testclient import TestClient
+
+from app.financial import router as fin_router
+from app.main import app
+
+client = TestClient(app)
+
+
+def test_get_client_map_returns_repository_rows(monkeypatch):
+    rows = [{"id": "cm-1", "tag_code": "MVH", "link_confidence": "suggested"}]
+    calls = []
+    monkeypatch.setattr(
+        fin_router,
+        "list_client_map",
+        lambda **filters: calls.append(filters) or rows,
+    )
+
+    response = client.get(
+        "/api/v1/financials/client-map",
+        params={"confidence": "suggested", "status": "Active", "q": "MVH"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == rows
+    assert calls == [{"confidence": "suggested", "status": "Active", "q": "MVH"}]
+
+
+def test_patch_client_map_promotes_suggestion(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        fin_router,
+        "update_client_map",
+        lambda row_id, patch: calls.append((row_id, patch))
+        or {"id": row_id, **patch},
+    )
+
+    response = client.patch(
+        "/api/v1/financials/client-map/cm-1",
+        json={"link_confidence": "confirmed"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [("cm-1", {"link_confidence": "confirmed"})]
+    assert response.json()["link_confidence"] == "confirmed"
+
+
+def test_post_client_map_link_runs_requested_passes(monkeypatch):
+    run_link = AsyncMock(return_value={"confirmed": 2, "suggested": 1})
+    monkeypatch.setattr(fin_router, "run_client_map_link", run_link)
+
+    response = client.post(
+        "/api/v1/financials/client-map/link",
+        json={"include_ai": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"confirmed": 2, "suggested": 1}
+    run_link.assert_awaited_once_with(include_ai=False)

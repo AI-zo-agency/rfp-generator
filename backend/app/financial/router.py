@@ -5,14 +5,26 @@ import re
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import logging
 from app.financial import google_sheets, ai_classifier
 from app.financial.ai_insights_repository import get_latest_insight
+from app.financial.client_map_import import import_tags_sheet
+from app.financial.client_map_link import run_link as run_client_map_link
+from app.financial.client_map_repository import (
+    delete_client_map,
+    delete_job_override,
+    insert_client_map,
+    list_client_map,
+    list_job_overrides,
+    update_client_map,
+    upsert_job_override,
+)
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows
 from app.financial.qb_position import position
+from app.financial.qb_repository import list_customers
 from app.financial.qb_trend import margin_rows
 from app.financial import financial_llm_cost, qb_chat
 from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
@@ -921,6 +933,180 @@ def teamwork_sync(
         result.get("run_id"),
     )
     return result
+
+
+# ── Client map ────────────────────────────────────────────────────────────────
+
+LinkConfidence = Literal["confirmed", "suggested", "unmatched"]
+
+
+class ClientMapCreate(BaseModel):
+    tag_code: str
+    client_name: str
+    qb_customer_ids: list[str] = Field(default_factory=list)
+    qb_customer_names: list[str] = Field(default_factory=list)
+    teamwork_company_ids: list[int] = Field(default_factory=list)
+    teamwork_company_names: list[str] = Field(default_factory=list)
+    city: str | None = None
+    state: str | None = None
+    current_am: str | None = None
+    status: str | None = None
+    source: str | None = None
+    highest_value: str | None = None
+    is_internal: bool = False
+    link_confidence: LinkConfidence = "unmatched"
+    link_reason: str | None = None
+    notes: str | None = None
+
+
+class ClientMapPatch(BaseModel):
+    tag_code: str | None = None
+    client_name: str | None = None
+    qb_customer_ids: list[str] | None = None
+    qb_customer_names: list[str] | None = None
+    teamwork_company_ids: list[int] | None = None
+    teamwork_company_names: list[str] | None = None
+    city: str | None = None
+    state: str | None = None
+    current_am: str | None = None
+    status: str | None = None
+    source: str | None = None
+    highest_value: str | None = None
+    is_internal: bool | None = None
+    link_confidence: LinkConfidence | None = None
+    link_reason: str | None = None
+    notes: str | None = None
+
+
+class ClientMapLinkBody(BaseModel):
+    include_ai: bool = True
+
+
+class JobOverrideUpsert(BaseModel):
+    site_id: str
+    project_id: int
+    client_map_id: str | None = None
+    qb_customer_ids: list[str] = Field(default_factory=list)
+    qb_customer_names: list[str] = Field(default_factory=list)
+    link_confidence: LinkConfidence = "confirmed"
+    notes: str | None = None
+
+
+@router.get("/client-map")
+def get_client_map(
+    confidence: LinkConfidence | None = Query(None),
+    status: str | None = Query(None),
+    q: str | None = Query(None),
+):
+    rows = list_client_map(confidence=confidence, status=status, q=q)
+    logger.info("operation=client_map_list row_count=%s", len(rows))
+    return rows
+
+
+@router.post("/client-map")
+def create_client_map(payload: ClientMapCreate):
+    row = insert_client_map(payload.model_dump())
+    logger.info("operation=client_map_create row_id=%s", row.get("id"))
+    return row
+
+
+@router.get("/client-map/unmatched")
+def get_unmatched_client_map_entities():
+    confirmed = list_client_map(confidence="confirmed")
+    used_qb_ids = {
+        str(customer_id)
+        for row in confirmed
+        for customer_id in (row.get("qb_customer_ids") or [])
+    }
+    used_teamwork_ids = {
+        str(company_id)
+        for row in confirmed
+        for company_id in (row.get("teamwork_company_ids") or [])
+    }
+
+    teamwork = []
+    seen_teamwork: set[tuple[str, str]] = set()
+    for project in overview_from_cache().get("projects") or []:
+        company_id = project.get("company_id")
+        company_name = str(project.get("company_name") or "").strip()
+        key = (str(company_id) if company_id is not None else "", company_name)
+        if (company_id is None and not company_name) or key in seen_teamwork:
+            continue
+        seen_teamwork.add(key)
+        if company_id is None or str(company_id) not in used_teamwork_ids:
+            teamwork.append({"id": company_id, "name": company_name})
+
+    quickbooks = [
+        customer
+        for customer in list_customers(settings.quickbooks_realm_id)
+        if str(customer.get("qbo_id")) not in used_qb_ids
+    ]
+    logger.info(
+        "operation=client_map_unmatched teamwork_count=%s quickbooks_count=%s",
+        len(teamwork),
+        len(quickbooks),
+    )
+    return {"teamwork": teamwork, "quickbooks": quickbooks}
+
+
+@router.post("/client-map/import-sheet")
+def import_client_map_sheet():
+    result = import_tags_sheet()
+    logger.info(
+        "operation=client_map_import_sheet inserted=%s skipped=%s",
+        result.get("inserted"),
+        result.get("skipped"),
+    )
+    return result
+
+
+@router.post("/client-map/link")
+async def link_client_map(payload: ClientMapLinkBody):
+    result = await run_client_map_link(include_ai=payload.include_ai)
+    logger.info(
+        "operation=client_map_link_route include_ai=%s confirmed=%s suggested=%s",
+        payload.include_ai,
+        result.get("confirmed"),
+        result.get("suggested"),
+    )
+    return result
+
+
+@router.get("/client-map/job-overrides")
+def get_client_map_job_overrides(site_id: str | None = Query(None)):
+    rows = list_job_overrides(site_id=site_id)
+    logger.info("operation=client_map_job_overrides_list row_count=%s", len(rows))
+    return rows
+
+
+@router.post("/client-map/job-overrides")
+def create_client_map_job_override(payload: JobOverrideUpsert):
+    row = upsert_job_override(payload.model_dump())
+    logger.info("operation=client_map_job_override_upsert row_id=%s", row.get("id"))
+    return row
+
+
+@router.delete("/client-map/job-overrides/{row_id}")
+def remove_client_map_job_override(row_id: str):
+    delete_job_override(row_id)
+    logger.info("operation=client_map_job_override_delete row_id=%s", row_id)
+    return {"deleted": True, "id": row_id}
+
+
+@router.patch("/client-map/{row_id}")
+def patch_client_map(row_id: str, payload: ClientMapPatch):
+    row = update_client_map(row_id, payload.model_dump(exclude_unset=True))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Client map row not found")
+    logger.info("operation=client_map_patch row_id=%s", row_id)
+    return row
+
+
+@router.delete("/client-map/{row_id}")
+def remove_client_map(row_id: str):
+    delete_client_map(row_id)
+    logger.info("operation=client_map_delete row_id=%s", row_id)
+    return {"deleted": True, "id": row_id}
 
 
 # ── QuickBooks ────────────────────────────────────────────────────────────────
