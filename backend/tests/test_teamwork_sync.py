@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 import pytest
 
@@ -151,6 +152,31 @@ def test_nightly_snapshot_does_not_require_an_incremental_cursor(monkeypatch):
     )
 
     assert state_updates[-1]["last_mode"] == "nightly"
+
+
+def test_nightly_sync_writes_capacity_snapshot_before_generating_insight(monkeypatch):
+    calls = []
+    started = datetime(2026, 8, 25, 2, tzinfo=timezone.utc)
+    monkeypatch.setattr(sync, "build_daily_capacity_rows", lambda *args: [{"person_id": "42"}])
+    monkeypatch.setattr(sync, "upsert_capacity_snapshots", lambda *args: calls.append("snapshot") or 1)
+    monkeypatch.setattr(sync, "list_capacity_snapshots", lambda *args: [])
+    monkeypatch.setattr(sync, "generate_and_store", lambda *args: calls.append("insight") or "ok")
+
+    sync._write_teamwork_intelligence("zo", started, {"people": [{"id": "42", "name": "Alex"}]})
+
+    assert calls == ["snapshot", "insight"]
+
+
+def test_partial_or_failed_overview_does_not_generate_an_insight(monkeypatch):
+    generate = Mock()
+    monkeypatch.setattr(sync, "generate_and_store", generate)
+
+    sync._write_teamwork_intelligence(
+        "zo", datetime(2026, 8, 25, 2, tzinfo=timezone.utc),
+        {"sync_status": "failed", "errors": {"overview": "down"}},
+    )
+
+    generate.assert_not_called()
 
 
 def test_failed_nightly_does_not_advance_cursor(monkeypatch):

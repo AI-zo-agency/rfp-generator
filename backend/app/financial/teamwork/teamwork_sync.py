@@ -11,6 +11,8 @@ from uuid import uuid4
 from app.core.config import settings
 from app.financial.teamwork import client
 from app.financial.teamwork.errors import TeamworkError
+from app.financial.teamwork.teamwork_capacity import build_daily_capacity_rows
+from app.financial.teamwork.teamwork_insights import generate_and_store
 from app.financial.teamwork.teamwork_map import (
     map_milestone,
     map_person,
@@ -25,10 +27,12 @@ from app.financial.teamwork.teamwork_repository import (
     get_panel_cache,
     get_sync_state,
     insert_sync_run,
+    list_capacity_snapshots,
     prune_snapshot_rows,
     release_lease,
     try_acquire_lease,
     upsert_milestones,
+    upsert_capacity_snapshots,
     upsert_panel_cache,
     upsert_people,
     upsert_projects,
@@ -147,9 +151,22 @@ def _fetch_snapshot(*, site_id: str, started: datetime, synced_at: str) -> dict[
     return counts
 
 
-def _write_panel_cache(site_id: str, *, started: datetime, computed_at: str) -> None:
+def _write_panel_cache(site_id: str, *, started: datetime, computed_at: str) -> dict[str, Any]:
     payload = build_overview(site_id, as_of=started.date().isoformat(), computed_at=computed_at)
     upsert_panel_cache(site_id, payload, started.date().isoformat(), computed_at)
+    return payload
+
+
+def _write_teamwork_intelligence(
+    site_id: str, started: datetime, overview: dict[str, Any]
+) -> str:
+    as_of = started.date().isoformat()
+    if overview.get("errors"):
+        return "skipped"
+    rows = build_daily_capacity_rows(overview, as_of)
+    upsert_capacity_snapshots(site_id, as_of, rows)
+    history = list_capacity_snapshots(site_id)
+    return generate_and_store(site_id, {**overview, "sync_status": "ok"}, history, as_of)
 
 
 def _run_backfill(*, site_id: str, started: datetime, run_id: str) -> dict[str, int]:
@@ -179,7 +196,19 @@ def _run_nightly(*, site_id: str, started: datetime, run_id: str) -> dict[str, i
     upsert_sync_state(site_id, {"last_started_at": synced_at, "last_mode": "nightly"})
     counts = _fetch_snapshot(site_id=site_id, started=started, synced_at=synced_at)
     computed_at = datetime.now(timezone.utc).isoformat()
-    _write_panel_cache(site_id, started=started, computed_at=computed_at)
+    overview = _write_panel_cache(site_id, started=started, computed_at=computed_at)
+    try:
+        insight_status = _write_teamwork_intelligence(site_id, started, overview)
+        logger.info(
+            "operation=teamwork_run_nightly step=ai_insights run_id=%s status=%s",
+            run_id,
+            insight_status,
+        )
+    except Exception:
+        logger.exception(
+            "operation=teamwork_write_intelligence site_id=%s status=failed",
+            site_id,
+        )
     now = datetime.now(timezone.utc).isoformat()
     upsert_sync_state(
         site_id,

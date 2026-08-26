@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_model: str = "anthropic/claude-sonnet-4"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # Financial workspace (QuickBooks + Teamwork insights/chat). Empty key
+    # falls back to openrouter_api_key; empty model falls back to openrouter_model.
+    openrouter_api_key_financial: str = ""
+    openrouter_model_financial: str = "google/gemini-3.6-flash"
 
     # Monid — server-side company enrichment only. Never expose this to the frontend.
     monid_api_key: str = ""
@@ -85,7 +89,7 @@ class Settings(BaseSettings):
     llm_cache_ttl_1h: bool = True
 
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.0-flash-exp"
+    gemini_model: str = "gemini-3.7-flash"
     
     fireworks_api_key: str = ""
     fireworks_model: str = "accounts/fireworks/models/llama-v3p3-70b-instruct"
@@ -180,6 +184,12 @@ class Settings(BaseSettings):
     # Hard LLM run budgets (USD). 0 disables guard.
     generate_proposal_max_cost_usd: float = 3.0
     complete_scan_max_cost_usd: float = 3.0
+
+    # Financial workspace chat budgets (USD). Enforced in qb_chat against
+    # financial_llm_calls, not against the proposal run budget above — the two
+    # domains share no ledger. 0 disables.
+    financial_chat_max_cost_usd: float = 0.50
+    financial_chat_turn_max_cost_usd: float = 0.15
 
     # LangSmith — process env is synced at startup (see langsmith_tracing.py).
     langsmith_tracing: bool = False

@@ -1,25 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { ArrowRight, Info, RotateCcw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   badgeForRow,
   badgeForSignal,
   type NoteBadge,
   type NoteRowKind,
-} from "../lib/qb-note-badges";
+  type NoteSource,
+} from "./qb-note-badges";
 import type { Signal } from "../types/quickbooks";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
-
-const VIEW_LABEL: Record<string, string> = {
-  today: "Position",
-  open: "Open",
-  revenue: "Revenue",
-  clients: "Clients",
-  costs: "Costs",
-};
 
 interface ChaseRow {
   id: string;
@@ -52,22 +44,28 @@ interface HygieneRow {
   kind: string;
 }
 
-interface InsightsData {
+export interface InsightsData {
   status: "ok" | "empty";
   brief: string;
   notes: Record<string, string>;
-  chase: ChaseRow[];
-  margin: MarginRow[];
-  hygiene: HygieneRow[];
+  /** QuickBooks row lists. Absent on the Teamwork response. */
+  chase?: ChaseRow[];
+  margin?: MarginRow[];
+  hygiene?: HygieneRow[];
+  /** Teamwork ships its signals on the insight response; QuickBooks does not. */
+  signals?: Signal[];
+  /** Teamwork capacity history readiness. */
+  history?: { weeks_available?: number; ready?: boolean };
   as_of: string | null;
   generated_at: string | null;
   provider: string | null;
+  model?: string | null;
   stale: boolean;
   /** Only present on the regenerate response: "ok" | "failed". */
   generated?: string;
 }
 
-interface NoteCard {
+export interface NoteCard {
   id: string;
   headline: string;
   detail: string;
@@ -78,12 +76,25 @@ interface NoteCard {
   goTo?: string;
 }
 
+/** Badge order for the filter rail — urgency first, bookkeeping last. */
+export const BADGE_ORDER: NoteBadge[] = [
+  "High impact",
+  "Risk",
+  "Watch",
+  "Opportunity",
+  "Action",
+];
+
 /**
  * Cash first, then what shapes profit, then the bookkeeping that makes both
  * measurable. Rule-based signals follow — they size the same problems without
  * duplicating a factual row id (chase:… vs ar-late).
  */
-function buildNoteCards(data: InsightsData | null, signals: Signal[]): NoteCard[] {
+export function buildNoteCards(
+  data: InsightsData | null,
+  signals: Signal[],
+  source: NoteSource = "quickbooks",
+): NoteCard[] {
   const cards: NoteCard[] = [];
   const notes = data?.notes ?? {};
 
@@ -134,16 +145,26 @@ function buildNoteCards(data: InsightsData | null, signals: Signal[]): NoteCard[
     });
   }
 
+  // Both signal sources, server first. Teamwork derives some cards in the
+  // browser and gets others off the insight response; ids collide on purpose
+  // where both describe the same fact, and the server's copy wins because it
+  // is the one the model was allowed to annotate. QuickBooks passes only the
+  // overview list, so this is a plain concat there.
   const rowIds = new Set(cards.map((c) => c.id));
-  for (const s of signals) {
+  for (const s of [...(data?.signals ?? []), ...signals]) {
     if (rowIds.has(s.id)) continue;
+    // Track ids as they land, not just the row ids seeded above: the two
+    // signal lists overlap by design, so the first copy of an id has to block
+    // the second.
+    rowIds.add(s.id);
+    const note = notes[s.id];
     cards.push({
       id: s.id,
       headline: s.headline,
-      detail: s.detail ?? "",
+      detail: [s.detail, note].filter(Boolean).join(" — "),
       figure: s.figure,
-      badge: badgeForSignal(s.id, s.severity),
-      aiEnhanced: false,
+      badge: badgeForSignal(s.id, s.severity, source),
+      aiEnhanced: Boolean(note),
       goTo: s.go_to,
     });
   }
@@ -151,13 +172,38 @@ function buildNoteCards(data: InsightsData | null, signals: Signal[]): NoteCard[
   return cards;
 }
 
-export function QuickBooksInsights({
-  signals,
-  onGo,
-}: Readonly<{
-  signals: Signal[];
-  onGo: (view: string) => void;
-}>) {
+/** Cards per badge, in BADGE_ORDER, skipping badges nothing landed on. */
+export function countByBadge(cards: NoteCard[]): { badge: NoteBadge; count: number }[] {
+  return BADGE_ORDER.map((badge) => ({
+    badge,
+    count: cards.filter((c) => c.badge === badge).length,
+  })).filter((b) => b.count > 0);
+}
+
+export interface QbInsights {
+  data: InsightsData | null;
+  cards: NoteCard[];
+  counts: { badge: NoteBadge; count: number }[];
+  /** Drives the trigger button's badge. Absent means nothing urgent. */
+  highImpact: number;
+  loaded: boolean;
+  busy: boolean;
+  error: string | null;
+  regenerate: () => Promise<void>;
+}
+
+/**
+ * Owns the insights fetch for the whole ledger.
+ *
+ * Lifted out of the panel that used to render them because two things need the
+ * cards now: the drawer that shows them, and the button that has to say how
+ * many are urgent before the drawer is ever opened.
+ */
+export function useQbInsights(
+  signals: Signal[],
+  source: NoteSource = "quickbooks",
+): QbInsights {
+  const base = `${API_BASE}/api/v1/financials/${source}/ai-insights`;
   const [data, setData] = useState<InsightsData | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -165,7 +211,7 @@ export function QuickBooksInsights({
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/v1/financials/quickbooks/ai-insights`);
+      const res = await fetch(base);
       if (!res.ok) throw new Error(`${res.status}`);
       setData(await res.json());
       setError(null);
@@ -174,20 +220,17 @@ export function QuickBooksInsights({
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [base]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const regenerate = async () => {
+  const regenerate = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(
-        `${API_BASE}/api/v1/financials/quickbooks/ai-insights/regenerate`,
-        { method: "POST" },
-      );
+      const res = await fetch(`${base}/regenerate`, { method: "POST" });
       if (!res.ok) throw new Error(`${res.status}`);
       const next: InsightsData = await res.json();
       setData(next);
@@ -199,91 +242,11 @@ export function QuickBooksInsights({
     } finally {
       setBusy(false);
     }
-  };
+  }, [base]);
 
-  const cards = buildNoteCards(data, signals);
+  const cards = useMemo(() => buildNoteCards(data, signals, source), [data, signals, source]);
+  const counts = useMemo(() => countByBadge(cards), [cards]);
+  const highImpact = counts.find((c) => c.badge === "High impact")?.count ?? 0;
 
-  // Wait for the AI fetch unless rule cards already give us something to show.
-  if (!loaded && !signals.length) {
-    return error ? <p className="qb-insights-error" role="status">{error}</p> : null;
-  }
-
-  return (
-    <section className="qb-insights" aria-busy={busy || undefined} aria-live="polite">
-      <header className="qb-insights-head">
-        <h3>
-          Notes
-          <span
-            className="qb-insights-info"
-            title="Notes combine threshold alerts and ledger rows. Cards tagged Enhanced by AI include a model-written take."
-          >
-            <Info size={13} strokeWidth={2.25} aria-hidden />
-            <span className="qb-sr">About notes</span>
-          </span>
-        </h3>
-        <div className="qb-insights-meta">
-          {data?.as_of ? (
-            <span data-stale={data.stale || undefined}>
-              {data.stale ? `As of ${data.as_of}` : `Today, ${data.as_of}`}
-            </span>
-          ) : null}
-          <button type="button" onClick={regenerate} disabled={busy}>
-            <RotateCcw size={13} strokeWidth={2.25} aria-hidden />
-            {busy ? "Working…" : "Regenerate"}
-          </button>
-        </div>
-      </header>
-
-      {error ? <p className="qb-insights-error">{error}</p> : null}
-
-      {data?.brief ? (
-        <p className="qb-insights-brief">{data.brief}</p>
-      ) : loaded ? (
-        <p className="qb-insights-brief qb-insights-empty">
-          No brief yet. The nightly sync writes one, or generate it now.
-        </p>
-      ) : null}
-
-      {cards.length ? (
-        <ol className="qb-insights-list">
-          {cards.map((card) => (
-            <li
-              key={card.id}
-              className="qb-note-card"
-              data-badge={card.badge}
-              data-ai={card.aiEnhanced || undefined}
-            >
-              <div className="qb-note-card-top">
-                <span className="qb-note-badge">{card.badge}</span>
-                {card.aiEnhanced ? (
-                  <span className="qb-note-ai">Enhanced by AI</span>
-                ) : null}
-              </div>
-              <div className="qb-note-card-body">
-                <div className="qb-note-copy">
-                  <p className="qb-note-headline">{card.headline}</p>
-                  {card.detail ? <p className="qb-note-detail">{card.detail}</p> : null}
-                </div>
-                {card.figure ? <span className="qb-note-figure">{card.figure}</span> : null}
-              </div>
-              {card.goTo ? (
-                <button
-                  type="button"
-                  className="qb-note-go"
-                  onClick={() => onGo(card.goTo!)}
-                >
-                  <span>{VIEW_LABEL[card.goTo] ?? "Detail"}</span>
-                  <ArrowRight size={13} strokeWidth={2.25} aria-hidden />
-                </button>
-              ) : null}
-            </li>
-          ))}
-        </ol>
-      ) : loaded && !error ? (
-        <p className="qb-insights-brief qb-insights-empty">
-          Nothing flagged. Receivables are current and the books look clean.
-        </p>
-      ) : null}
-    </section>
-  );
+  return { data, cards, counts, highImpact, loaded, busy, error, regenerate };
 }

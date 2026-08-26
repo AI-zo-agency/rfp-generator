@@ -3,6 +3,7 @@ from hmac import compare_digest
 import json
 import re
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -13,6 +14,7 @@ from app.financial.ai_insights_repository import get_latest_insight
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows
 from app.financial.qb_position import position
 from app.financial.qb_trend import margin_rows
+from app.financial import financial_llm_cost, qb_chat
 from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
 from app.financial.qb_insights import generate_and_store
 from app.financial.qb_repository import get_panel_cache, get_sync_state
@@ -25,14 +27,20 @@ from app.financial.teamwork.teamwork_repository import (
 from app.financial.teamwork.teamwork_repository import (
     get_sync_state as get_teamwork_sync_state,
 )
+from app.financial.teamwork.teamwork_repository import list_capacity_snapshots
 from app.financial.teamwork.teamwork_map import site_id_from_base_url
+from app.financial.teamwork.teamwork_insights import SOURCE as TEAMWORK_INSIGHT_SOURCE
+from app.financial.teamwork.teamwork_insights import build_evidence as build_teamwork_evidence
+from app.financial.teamwork.teamwork_insights import generate_and_store as generate_teamwork_insight
+from app.financial.teamwork import teamwork_chat
 from app.financial.teamwork.client import origin as teamwork_origin
 from app.financial.teamwork.teamwork_sync import (
     LeaseHeld as TeamworkLeaseHeld,
 )
 from app.financial.teamwork.teamwork_sync import run_sync as run_teamwork_sync
+from app.financial.teamwork.teamwork_sync import overview_from_cache
 from app.services import quickbooks_oauth
-from app.services.llm import chat_json
+from app.services.llm import chat_json, resolve_llm_model
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -525,8 +533,8 @@ class AuditResolveRequest(BaseModel):
 
 @router.get("/iworker-timesheets")
 def get_iworker_timesheets(
-    sheet_url: Optional[str] = Query(None),
-    contractor: Optional[str] = Query(None),
+    sheet_url: Optional[str] = None,
+    contractor: Optional[str] = None,
 ):
     """Returns iWorker timesheets across all contractor tabs with rate extraction and AI classification."""
     cache_key = f"{sheet_url or 'default'}:{contractor or 'all'}"
@@ -801,6 +809,89 @@ def get_teamwork_overview():
     return payload
 
 
+def _teamwork_insight_response(
+    overview: dict[str, Any], history: list[dict[str, Any]], row: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Join stored narrative to fresh deterministic Teamwork delivery evidence."""
+    payload = (row or {}).get("payload") or {}
+    evidence = build_teamwork_evidence(overview, history)
+    current_as_of = str(overview.get("as_of") or "")
+    return {
+        "status": "ok" if row else "empty",
+        "brief": payload.get("brief", ""),
+        "notes": payload.get("notes", {}),
+        "signals": evidence["signals"],
+        "history": evidence["history"],
+        "as_of": (row or {}).get("as_of"),
+        "generated_at": (row or {}).get("generated_at"),
+        "provider": (row or {}).get("provider"),
+        "model": (row or {}).get("model") or resolve_llm_model("light", node_name="teamwork_insights"),
+        "stale": bool(row) and bool(current_as_of) and (row or {}).get("as_of") != current_as_of,
+    }
+
+
+def _teamwork_insight_inputs() -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    site_id = site_id_from_base_url(settings.teamwork_base_url)
+    overview = overview_from_cache()
+    try:
+        history = list_capacity_snapshots(site_id)
+    except Exception as exc:  # noqa: BLE001 -- history is useful, not required for current cards
+        logger.warning("operation=teamwork_ai_insights status=history_lookup_failed site_id=%s error=%s", site_id, str(exc)[:200])
+        history = []
+    return site_id, overview, history
+
+
+def _safe_get_teamwork_insight(site_id: str) -> dict[str, Any] | None:
+    try:
+        return get_latest_insight(TEAMWORK_INSIGHT_SOURCE, site_id)
+    except Exception as exc:  # noqa: BLE001 -- an unapplied AI table migration must not hide delivery cards
+        logger.warning("operation=teamwork_ai_insights status=insight_lookup_failed site_id=%s error=%s", site_id, str(exc)[:200])
+        return None
+
+
+@router.get("/teamwork/ai-insights")
+def teamwork_ai_insights():
+    site_id, overview, history = _teamwork_insight_inputs()
+    return _teamwork_insight_response(overview, history, _safe_get_teamwork_insight(site_id))
+
+
+@router.post("/teamwork/ai-insights/regenerate")
+def teamwork_ai_insights_regenerate():
+    site_id, overview, history = _teamwork_insight_inputs()
+    row = _safe_get_teamwork_insight(site_id)
+    if overview.get("sync_status") != "ok" or overview.get("errors"):
+        logger.info("operation=teamwork_ai_insights_regenerate status=skipped sync_status=%s", overview.get("sync_status"))
+        return _teamwork_insight_response(overview, history, row)
+    status = generate_teamwork_insight(site_id, overview, history, str(overview.get("as_of") or _today_iso()))
+    result = _teamwork_insight_response(overview, history, _safe_get_teamwork_insight(site_id))
+    result["generated"] = status
+    return result
+
+
+class TeamworkChatRequest(BaseModel):
+    message: str
+    thread_id: Optional[str] = None
+    focus_id: Optional[str] = None
+    messages: List[Dict[str, str]] = []
+
+
+@router.post("/teamwork/ai-insights/chat")
+async def teamwork_ai_insights_chat(payload: TeamworkChatRequest):
+    site_id, overview, history = _teamwork_insight_inputs()
+    del site_id
+    thread_id = (payload.thread_id or "").strip() or uuid.uuid4().hex
+    result = await teamwork_chat.answer(
+        thread_id=thread_id,
+        question=payload.message,
+        overview=overview,
+        capacity_history=history,
+        history=payload.messages,
+        focus_id=payload.focus_id,
+    )
+    logger.info("operation=teamwork_ai_insights_chat thread=%s guarded=%s capped=%s", thread_id, result["guarded"], result["capped"])
+    return result
+
+
 class TeamworkSyncBody(BaseModel):
     mode: str = "auto"
 
@@ -1019,6 +1110,7 @@ def _insight_response(
         "as_of": (row or {}).get("as_of"),
         "generated_at": (row or {}).get("generated_at"),
         "provider": (row or {}).get("provider"),
+        "model": (row or {}).get("model") or resolve_llm_model("light", node_name="qb_insights"),
         "stale": bool(row) and (row or {}).get("as_of") != _today_iso(),
     }
 
@@ -1115,6 +1207,53 @@ def quickbooks_ai_insights_regenerate():
     return result
 
 
+
+class QbChatRequest(BaseModel):
+    message: str
+    # Absent on the first question of a conversation; the server mints one.
+    thread_id: Optional[str] = None
+    # The note card the reader pinned, if any.
+    focus_id: Optional[str] = None
+    # Phase 1 only: the drawer holds the thread in React state. Once threads are
+    # persisted this is ignored in favor of the stored history.
+    messages: List[Dict[str, str]] = []
+
+
+@router.post("/quickbooks/ai-insights/chat")
+async def quickbooks_ai_insights_chat(payload: QbChatRequest):
+    """Answer one question against the same evidence the brief was written from.
+
+    Current year only, for the same reason the brief is: chat that could be
+    asked about 2024 would be answering from evidence no card on screen shows.
+    """
+    year = datetime.now().year
+    overview = _load_overview(year)
+    prior = _safe_prior_payload(settings.quickbooks_realm_id, year)
+    thread_id = (payload.thread_id or "").strip() or uuid.uuid4().hex
+
+    result = await qb_chat.answer(
+        thread_id=thread_id,
+        question=payload.message,
+        overview=overview,
+        prior=prior,
+        history=payload.messages,
+        focus_id=payload.focus_id,
+    )
+    logger.info(
+        "operation=quickbooks_ai_insights_chat thread=%s guarded=%s capped=%s",
+        thread_id,
+        result["guarded"],
+        result["capped"],
+    )
+    return result
+
+
+@router.get("/quickbooks/ai-insights/chat/cost")
+def quickbooks_ai_insights_chat_cost(thread_id: str = Query(...)):
+    """This thread's LLM spend. Reads financial_llm_calls, never llm_call_log."""
+    return financial_llm_cost.thread_breakdown(thread_id)
+
+
 @router.get("/audit-queue")
 def get_audit_queue():
     """Dynamically builds audit flags from live timesheet data."""
@@ -1131,15 +1270,12 @@ def resolve_audit_item(payload: AuditResolveRequest):
 async def generate_ai_financial_insights():
     """Generates real AI leadership brief from live iWorker Google Sheets data.
     
-    Uses the same provider routing as the rest of the app:
-    - LLM_PREFER_FIREWORKS=true  → Fireworks (MiniMax M3)
-    - LLM_PREFER_OPENROUTER=true → OpenRouter (Gemini 2.5 Flash)
-    - fallback                   → Gemini direct API
+    Uses the financial OpenRouter key/model when configured
+    (OPENROUTER_API_KEY_FINANCIAL / OPENROUTER_MODEL_FINANCIAL).
     """
-    provider_used = "Fireworks" if settings.llm_prefer_fireworks else ("OpenRouter" if settings.llm_prefer_openrouter else "Gemini")
-    model_used = settings.fireworks_model if settings.llm_prefer_fireworks else (settings.openrouter_model if settings.llm_prefer_openrouter else settings.gemini_model)
+    model_used = resolve_llm_model("light", node_name="financial.ai_insights")
     
-    logger.info(f"[AI-INSIGHTS] Starting real AI call | Provider: {provider_used} | Model: {model_used}")
+    logger.info("operation=financial_ai_insights status=start model=%s", model_used)
 
     # ── Fetch live timesheet data ─────────────────────────────────────────────
     data = get_iworker_timesheets()
@@ -1231,15 +1367,16 @@ IMPORTANT: Be specific about dollar amounts and hour counts. Reference actual ta
         {"role": "user", "content": user_prompt},
     ]
 
-    logger.info(f"[AI-INSIGHTS] Sending prompt to {provider_used} (model: {model_used})...")
+    logger.info("operation=financial_ai_insights status=calling model=%s", model_used)
 
     # ── Real AI call via existing provider router ─────────────────────────────
     try:
         result, actual_provider = await chat_json(
             messages,
-            max_tokens=1500,
+            max_tokens=8192,
             temperature=0.3,
             tier="light",
+            node_name="financial.ai_insights",
         )
         logger.info(f"[AI-INSIGHTS] AI response received from {actual_provider} | keys: {list(result.keys())}")
     except Exception as exc:

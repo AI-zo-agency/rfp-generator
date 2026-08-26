@@ -33,15 +33,15 @@ from app.financial.qb_insight_rows import chase_rows, hygiene_rows, row_ids
 from app.financial.qb_position import position
 from app.financial.qb_signals import derive_signals, derived_figures
 from app.financial.qb_trend import margin_rows
-from app.services.llm import chat_json_soft
+from app.services.llm import chat_json_soft, resolve_llm_model
 
 logger = logging.getLogger(__name__)
 
 SOURCE = "quickbooks"
 # Fourteen rows now, and notes that give a consequence rather than a
-# description run two sentences. At 900 the reply was truncated mid-note and
-# the salvage path served half a sentence to the reader. One call a night.
-_MAX_TOKENS = 2200
+# description run two sentences. 3.6 Flash spends ~3k tokens thinking first,
+# so 8192 is the brief plus that reasoning headroom. One call a night.
+_MAX_TOKENS = 8192
 _TEMPERATURE = 0.3
 
 _SYSTEM = (
@@ -289,7 +289,7 @@ def _store_quietly(
             payload=payload,
             evidence=evidence,
             provider=provider,
-            model=None,
+            model=resolve_llm_model("light", node_name="qb_insights"),
             status=status,
             error=error,
         )

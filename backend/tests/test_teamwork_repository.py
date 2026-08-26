@@ -216,6 +216,41 @@ def test_upsert_timelogs_and_milestones_round_trip(client):
     assert repo.list_milestones("zoagency.teamwork.com")[0]["milestone_id"] == 3
 
 
+def test_upsert_capacity_snapshots_uses_site_day_person_as_the_conflict_key(client):
+    count = repo.upsert_capacity_snapshots(
+        "zo",
+        "2026-08-25",
+        [{"person_id": "42", "logged_minutes": 2_040, "capacity_minutes": 2_400}],
+    )
+
+    assert count == 1
+    op, table, payload, conflict = client.calls[-1]
+    assert op == "upsert"
+    assert table == "teamwork_capacity_snapshots"
+    assert conflict == "site_id,as_of,person_id"
+    assert payload == [
+        {
+            "site_id": "zo",
+            "as_of": "2026-08-25",
+            "person_id": "42",
+            "logged_minutes": 2_040,
+            "capacity_minutes": 2_400,
+        }
+    ]
+
+
+def test_list_capacity_snapshots_filters_by_site_and_optional_start_date(client):
+    client.store["teamwork_capacity_snapshots"] = [
+        {"site_id": "zo", "as_of": "2026-08-25", "person_id": "42"},
+        {"site_id": "zo", "as_of": "2026-07-31", "person_id": "41"},
+        {"site_id": "other", "as_of": "2026-08-25", "person_id": "43"},
+    ]
+
+    rows = repo.list_capacity_snapshots("zo", since="2026-08-01")
+
+    assert rows == [{"site_id": "zo", "as_of": "2026-08-25", "person_id": "42"}]
+
+
 def test_panel_cache_round_trip(client):
     repo.upsert_panel_cache(
         "zoagency.teamwork.com",
@@ -270,4 +305,3 @@ def test_release_lease_only_clears_matching_owner(monkeypatch):
     monkeypatch.setattr(repo, "get_sync_state", lambda _site: {"lease_owner": "me"})
     repo.release_lease("zoagency.teamwork.com", "me")
     assert writes == [{"lease_owner": None, "lease_expires_at": None}]
-

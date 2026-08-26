@@ -6,7 +6,7 @@ import re
 import time
 from email.utils import parsedate_to_datetime
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -41,6 +41,27 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 LlmTier = Literal["heavy", "light"]
+
+
+class CostSink(Protocol):
+    """Records one successful call for a domain that keeps its own cost ledger.
+
+    Passing one to `chat_text` diverts accounting away from `llm_call_log` and
+    away from the proposal run-budget guard. It exists because `llm_call_log`
+    is proposal-shaped — every reader on it assumes a row belongs to an RFP —
+    and the financial workspace has no RFP to name.
+    """
+
+    def __call__(
+        self,
+        *,
+        model: str,
+        tier: LlmTier,
+        provider: str,
+        usage: dict[str, Any],
+        latency_ms: int,
+    ) -> None: ...
+
 
 # content, usage dict (prompt_tokens / completion_tokens / estimated)
 _LlmPostResult = tuple[str, dict[str, Any]]
@@ -114,6 +135,22 @@ def _redact_langsmith_llm_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
+# Insights, chat, and the iWorker brief. Proposal nodes stay on the shared key.
+_FINANCIAL_LLM_NODES = frozenset(
+    {
+        "teamwork_insights",
+        "qb_insights",
+        "qb_chat.answer",
+        "teamwork_chat.answer",
+        "financial.ai_insights",
+    }
+)
+
+
+def _is_financial_node(node_name: str | None) -> bool:
+    return (node_name or "") in _FINANCIAL_LLM_NODES
+
+
 def _provider_routing(
     *,
     max_tokens: int | None,
@@ -124,7 +161,8 @@ def _provider_routing(
     Raises LlmError when the request exceeds Fireworks' cap and no alternative exists.
     """
     resolved_node = node_name if node_name is not None else get_llm_node_name()
-    openrouter_available = bool(_openrouter_key())
+    financial_openrouter = _is_financial_node(resolved_node) and bool(_financial_openrouter_key())
+    openrouter_available = bool(_openrouter_key() or financial_openrouter)
     gemini_key = settings.gemini_api_key.strip()
     gemini_available = bool(gemini_key and not _is_placeholder_key(gemini_key))
     decision = resolve_fireworks_eligibility(
@@ -149,13 +187,23 @@ def _provider_routing(
 
     # Prefer-Fireworks only when eligibility does not force skip (quality-critical / over-cap).
     prefer_fw = settings.llm_prefer_fireworks and not decision.skip_prefer_fireworks
-    skip_gemini = settings.llm_prefer_openrouter or prefer_fw
-    skip_openrouter = prefer_fw
+    skip_gemini = settings.llm_prefer_openrouter or prefer_fw or financial_openrouter
+    skip_openrouter = prefer_fw and not financial_openrouter
     return resolved_node, skip_gemini, skip_openrouter, decision.allow_fireworks
 
 
-def resolve_llm_model(tier: LlmTier = "heavy") -> str:
-    """OpenRouter model id for heavy (Sonnet) vs light (Haiku) tiers."""
+def resolve_llm_model(tier: LlmTier = "heavy", *, node_name: str | None = None) -> str:
+    """OpenRouter model id for heavy (Sonnet) vs light (Haiku) tiers.
+
+    Financial workspace nodes use OPENROUTER_MODEL_FINANCIAL when set.
+    """
+    if _is_financial_node(node_name):
+        financial = getattr(settings, "openrouter_model_financial", "")
+        if isinstance(financial, str) and financial.strip():
+            return financial.strip()
+        shared = getattr(settings, "openrouter_model", "")
+        if isinstance(shared, str) and shared.strip():
+            return shared.strip()
     heavy = (settings.llm_heavy_model or settings.openrouter_model or "").strip()
     light = (settings.llm_light_model or "").strip()
     if tier == "light" and light:
@@ -189,6 +237,28 @@ def _openrouter_key() -> str:
     if not key or _is_placeholder_key(key):
         return ""
     return key
+
+
+def _financial_openrouter_key() -> str:
+    key = getattr(settings, "openrouter_api_key_financial", "")
+    if not isinstance(key, str) or not key.strip() or _is_placeholder_key(key):
+        return ""
+    return key.strip()
+
+
+def _openrouter_route(tier: LlmTier, node_name: str | None) -> tuple[str, str]:
+    """(api_key, model) for this call. Financial nodes prefer their own pair."""
+    model = resolve_llm_model(tier, node_name=node_name)
+    if not _is_financial_node(node_name):
+        return _openrouter_key(), model
+    key = _financial_openrouter_key() or _openrouter_key()
+    logger.info(
+        "operation=financial_llm_route node=%s model=%s key_source=%s",
+        node_name,
+        model,
+        "financial" if _financial_openrouter_key() else "shared",
+    )
+    return key, model
 
 
 def _fireworks_key() -> str:
@@ -239,10 +309,21 @@ async def _post_gemini_chat(
     from app.services.proposal_generation_cancel import run_with_generation_cancel
 
     async def _post() -> httpx.Response:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=_http_timeout_for(max_tokens)) as client:
             return await client.post(url, json=body)
 
-    response = await run_with_generation_cancel(_post)
+    try:
+        response = await run_with_generation_cancel(_post)
+    except httpx.HTTPError as exc:
+        # Same reason as the httpx handler in _post_chat, which this function
+        # never got: every layer of resilience here catches LlmError only, so a
+        # raw ReadTimeout out of Gemini skips the OpenRouter/Fireworks fallback
+        # chain AND chat_json_soft's "never raises" contract in one go. The
+        # nightly Teamwork brief died exactly that way -- recorded as failed,
+        # without a single fallback provider being tried.
+        raise LlmError(
+            f"Gemini request failed: {exc.__class__.__name__}: {str(exc)[:200]}"
+        ) from exc
     
     if response.status_code >= 400:
         detail = response.text.strip() or response.reason_phrase
@@ -755,7 +836,6 @@ async def chat_json(
     )
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
-    openrouter_model = resolve_llm_model(tier)
     skip_fireworks_fallback = False
     started = time.perf_counter()
 
@@ -765,6 +845,7 @@ async def chat_json(
     )
     if node_name is None:
         node_name = _resolved_node or None
+    openrouter_key, openrouter_model = _openrouter_route(tier, node_name)
     _enforce_run_cost_cap(node_name, run_id)
 
     # Try Gemini first if API key is configured and not skipped by preferences
@@ -794,7 +875,6 @@ async def chat_json(
             logger.info("Gemini failed: %s", str(exc)[:200])
             started = time.perf_counter()
 
-    openrouter_key = _openrouter_key()
     if openrouter_key and not skip_openrouter:
         try:
             raw, usage = await _post_chat(
@@ -1048,6 +1128,7 @@ async def chat_text(
     rfp_id: str | None = None,
     run_id: str | None = None,
     cache_prefix: str | Sequence[str] | None = None,
+    cost_sink: CostSink | None = None,
     include_corrections: bool = True,
 ) -> tuple[str, str]:
     """Plain-text chat completion (no JSON response format)."""
@@ -1056,7 +1137,6 @@ async def chat_text(
     )
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
-    openrouter_model = resolve_llm_model(tier)
     started = time.perf_counter()
 
     _resolved_node, skip_gemini, skip_openrouter, allow_fireworks = _provider_routing(
@@ -1065,7 +1145,37 @@ async def chat_text(
     )
     if node_name is None:
         node_name = _resolved_node or None
-    _enforce_run_cost_cap(node_name, run_id)
+    openrouter_key, openrouter_model = _openrouter_route(tier, node_name)
+    # A caller that accounts for itself is not part of the proposal run budget
+    # and must not inherit one. _resolve_run_cost_cap_usd reads the pipeline
+    # phase off a contextvar, so without this guard a financial call made while
+    # a proposal is in flight could pick up that proposal's cap.
+    if cost_sink is None:
+        _enforce_run_cost_cap(node_name, run_id)
+
+    def _record(
+        *, model: str, provider: str, usage: dict[str, Any], latency_ms: int
+    ) -> None:
+        """Route one call's usage to whoever owns this domain's cost ledger."""
+        if cost_sink is not None:
+            cost_sink(
+                model=model,
+                tier=tier,
+                provider=provider,
+                usage=usage,
+                latency_ms=latency_ms,
+            )
+            return
+        _record_successful_call(
+            model=model,
+            tier=tier,
+            provider=provider,
+            usage=usage,
+            latency_ms=latency_ms,
+            node_name=node_name,
+            rfp_id=rfp_id,
+            run_id=run_id,
+        )
 
     gemini_key = settings.gemini_api_key.strip()
     if gemini_key and not _is_placeholder_key(gemini_key) and not skip_gemini:
@@ -1078,22 +1188,17 @@ async def chat_text(
                 temperature=temperature,
                 json_mode=False,
             )
-            _record_successful_call(
+            _record(
                 model=settings.gemini_model,
-                tier=tier,
                 provider="gemini",
                 usage=usage,
                 latency_ms=int((time.perf_counter() - started) * 1000),
-                node_name=node_name,
-                rfp_id=rfp_id,
-                run_id=run_id,
             )
             return raw, "gemini"
         except LlmError as exc:
             errors.append(str(exc))
             started = time.perf_counter()
 
-    openrouter_key = _openrouter_key()
     if openrouter_key and not skip_openrouter:
         try:
             raw, usage = await _post_chat(
@@ -1111,15 +1216,11 @@ async def chat_text(
                 temperature=temperature,
                 json_mode=False,
             )
-            _record_successful_call(
+            _record(
                 model=openrouter_model,
-                tier=tier,
                 provider="openrouter",
                 usage=usage,
                 latency_ms=int((time.perf_counter() - started) * 1000),
-                node_name=node_name,
-                rfp_id=rfp_id,
-                run_id=run_id,
             )
             return raw, "openrouter"
         except LlmError as exc:
@@ -1143,15 +1244,11 @@ async def chat_text(
                 temperature=temperature,
                 json_mode=False,
             )
-            _record_successful_call(
+            _record(
                 model=settings.fireworks_model,
-                tier=tier,
                 provider="fireworks",
                 usage=usage,
                 latency_ms=int((time.perf_counter() - started) * 1000),
-                node_name=node_name,
-                rfp_id=rfp_id,
-                run_id=run_id,
             )
             return raw, "fireworks"
         except LlmError as exc:
@@ -1184,15 +1281,11 @@ async def chat_text(
                     temperature=temperature,
                     json_mode=False,
                 )
-                _record_successful_call(
+                _record(
                     model=openrouter_model,
-                    tier=tier,
                     provider="openrouter",
                     usage=usage,
                     latency_ms=int((time.perf_counter() - started) * 1000),
-                    node_name=node_name,
-                    rfp_id=rfp_id,
-                    run_id=run_id,
                 )
                 return raw, "openrouter"
             except LlmError as exc:
@@ -1209,15 +1302,11 @@ async def chat_text(
                     temperature=temperature,
                     json_mode=False,
                 )
-                _record_successful_call(
+                _record(
                     model=settings.gemini_model,
-                    tier=tier,
                     provider="gemini",
                     usage=usage,
                     latency_ms=int((time.perf_counter() - started) * 1000),
-                    node_name=node_name,
-                    rfp_id=rfp_id,
-                    run_id=run_id,
                 )
                 return raw, "gemini"
             except LlmError as exc:
