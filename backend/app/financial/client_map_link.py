@@ -34,30 +34,60 @@ def apply_exact_links(
     tw: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Return exact normalized-name updates without mutating source rows."""
-    updates: list[dict[str, Any]] = []
-    for client in clients:
-        if client.get("link_confidence") == "confirmed" or client.get("is_internal"):
-            continue
-
-        source_names = [
-            client.get("client_name"),
-            *(client.get("teamwork_company_names") or []),
-        ]
-        normalized = {
+    eligible = [
+        client
+        for client in clients
+        if client.get("link_confidence") != "confirmed"
+        and not client.get("is_internal")
+    ]
+    normalized_by_client = {
+        str(client["id"]): {
             normalize_name(str(name))
-            for name in source_names
+            for name in [
+                client.get("client_name"),
+                *(client.get("teamwork_company_names") or []),
+            ]
             if name and normalize_name(str(name))
         }
+        for client in eligible
+    }
+    confirmed_qb_ids = {
+        str(qbo_id)
+        for client in clients
+        if client.get("link_confidence") == "confirmed"
+        for qbo_id in (client.get("qb_customer_ids") or [])
+    }
+    qb_by_id: dict[str, dict[str, Any]] = {}
+    matching_clients_by_qb: dict[str, set[str]] = {}
+    for customer in qb:
+        qbo_id = customer.get("qbo_id")
+        normalized_name = normalize_name(str(customer.get("display_name") or ""))
+        if qbo_id is None or str(qbo_id) in confirmed_qb_ids or not normalized_name:
+            continue
+        qbo_id = str(qbo_id)
+        qb_by_id.setdefault(qbo_id, customer)
+        matching_clients_by_qb.setdefault(qbo_id, set()).update(
+            client_id
+            for client_id, names in normalized_by_client.items()
+            if normalized_name in names
+        )
 
-        qb_matches: dict[str, dict[str, Any]] = {}
-        for customer in qb:
-            qbo_id = customer.get("qbo_id")
-            if (
-                qbo_id is not None
-                and normalize_name(str(customer.get("display_name") or "")) in normalized
-            ):
-                qb_matches[str(qbo_id)] = customer
+    exact_qb_by_client: dict[str, dict[str, dict[str, Any]]] = {}
+    ambiguous_client_ids: set[str] = set()
+    for qbo_id, matching_clients in matching_clients_by_qb.items():
+        if len(matching_clients) == 1:
+            client_id = next(iter(matching_clients))
+            exact_qb_by_client.setdefault(client_id, {})[qbo_id] = qb_by_id[qbo_id]
+        elif len(matching_clients) > 1:
+            ambiguous_client_ids.update(matching_clients)
 
+    updates: list[dict[str, Any]] = []
+    for client in eligible:
+        client_id = str(client["id"])
+        if client_id in ambiguous_client_ids:
+            continue
+        normalized = normalized_by_client[client_id]
+        qb_matches = exact_qb_by_client.get(client_id, {})
         tw_matches = [
             company
             for company in tw
@@ -70,19 +100,19 @@ def apply_exact_links(
         update = {
             "id": client["id"],
             "qb_customer_ids": _merge(
-                client.get("qb_customer_ids") or [],
+                [],
                 [str(row["qbo_id"]) for row in exact_qb],
             ),
             "qb_customer_names": _merge(
-                client.get("qb_customer_names") or [],
+                [],
                 [row.get("display_name") for row in exact_qb],
             ),
             "teamwork_company_ids": _merge(
-                client.get("teamwork_company_ids") or [],
+                [],
                 [row.get("id") for row in tw_matches],
             ),
             "teamwork_company_names": _merge(
-                client.get("teamwork_company_names") or [],
+                [],
                 [row.get("name") for row in tw_matches],
             ),
             "link_confidence": "confirmed",

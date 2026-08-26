@@ -52,6 +52,60 @@ def test_exact_does_not_overwrite_confirmed():
     ) == []
 
 
+def test_exact_confirm_replaces_prior_suggestions_with_exact_entities():
+    clients = [
+        _client(
+            qb_customer_ids=["77"],
+            qb_customer_names=["Suggested Torrent"],
+            teamwork_company_ids=[8],
+            teamwork_company_names=["Suggested Torrent"],
+            link_confidence="suggested",
+        )
+    ]
+    qb = [{"qbo_id": "55", "display_name": "Torrent Laboratories LLC"}]
+    tw = [{"id": 9, "name": "Torrent Laboratories"}]
+
+    updates = apply_exact_links(clients, qb, tw)
+
+    assert updates[0]["qb_customer_ids"] == ["55"]
+    assert updates[0]["qb_customer_names"] == ["Torrent Laboratories LLC"]
+    assert updates[0]["teamwork_company_ids"] == [9]
+    assert updates[0]["teamwork_company_names"] == ["Torrent Laboratories"]
+
+
+def test_exact_does_not_reuse_qb_owned_by_confirmed_client():
+    clients = [
+        _client(),
+        _client(
+            id="2",
+            qb_customer_ids=["55"],
+            qb_customer_names=["Torrent Laboratories LLC"],
+            link_confidence="confirmed",
+        ),
+    ]
+    qb = [{"qbo_id": "55", "display_name": "Torrent Laboratories LLC"}]
+
+    assert apply_exact_links(clients, qb, []) == []
+
+
+def test_exact_leaves_duplicate_client_name_batch_unmatched():
+    clients = [_client(), _client(id="2")]
+    qb = [{"qbo_id": "55", "display_name": "Torrent Laboratories LLC"}]
+    tw = [{"id": 9, "name": "Torrent Laboratories"}]
+
+    assert apply_exact_links(clients, qb, tw) == []
+
+
+def test_exact_never_assigns_duplicate_qb_catalog_id_to_two_clients():
+    clients = [_client(), _client(id="2", client_name="Acme")]
+    qb = [
+        {"qbo_id": "55", "display_name": "Torrent Laboratories LLC"},
+        {"qbo_id": "55", "display_name": "Acme LLC"},
+    ]
+
+    assert apply_exact_links(clients, qb, []) == []
+
+
 def test_llm_suggestions_land_suggested_only():
     proposal = {
         "matches": [
