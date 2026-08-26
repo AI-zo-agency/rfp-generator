@@ -359,19 +359,18 @@ _AUDIT_RESOLUTIONS: dict[str, str] = {}
 def _build_audit_items_from_timesheets() -> list[dict]:
     """Dynamically generate audit queue items from live timesheet data.
     Reads from the cache if available so we don't re-classify.
+
+    Empty cache returns [] — never triggers get_iworker_timesheets(). That pull
+    is reserved for the iWorker tab (and explicit AI-insights generate).
     """
-    # Try to pull from the live cache first
     cached = None
     for _key, (_ts, _resp) in _TIMESHEET_CACHE.items():
         cached = _resp
         break  # Use the first available cached response
 
     if not cached:
-        # Cache is empty (e.g., server just restarted) — trigger a fresh fetch
-        try:
-            cached = get_iworker_timesheets()
-        except Exception:
-            return []
+        logger.info("operation=audit_queue status=skipped reason=timesheet_cache_empty")
+        return []
 
     timesheets = cached.get("timesheets", [])
     active = [t for t in timesheets if t.get("hours", 0) > 0]
@@ -701,10 +700,14 @@ def get_sources_status():
             {
                 "name": "QuickBooks API",
                 "type": "ERP / Invoicing",
-                "status": "Pending Integration (Phase 2)",
-                "active_data": False,
-                "details": "Not connected yet. Dummy data disabled.",
-                "last_sync": "N/A"
+                "status": "Connected" if settings.quickbooks_configured else "Pending Integration (Phase 2)",
+                "active_data": bool(settings.quickbooks_configured),
+                "details": (
+                    "Invoices, bills, P&L, and AR/AP via QuickBooks Online API."
+                    if settings.quickbooks_configured
+                    else "Not connected yet. Dummy data disabled."
+                ),
+                "last_sync": "Nightly Supabase mirror" if settings.quickbooks_configured else "N/A",
             },
             {
                 "name": "Google Ads",

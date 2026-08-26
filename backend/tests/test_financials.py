@@ -14,6 +14,19 @@ def test_iworker_timesheets_defaults_are_plain_none():
     assert get_iworker_timesheets.__defaults__ == (None, None)
 
 
+def test_audit_queue_skips_iworker_when_cache_empty(monkeypatch):
+    """audit-queue must not trigger sheet + classifier when timesheets were never loaded."""
+    from app.financial import router
+
+    monkeypatch.setattr(router, "_TIMESHEET_CACHE", {})
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("audit-queue must not call get_iworker_timesheets")
+
+    monkeypatch.setattr(router, "get_iworker_timesheets", boom)
+    assert get_audit_queue() == {"audit_items": []}
+
+
 def test_iworker_timesheets_data():
     res = get_iworker_timesheets()
     assert res["contractor"] == "All Contractors"
@@ -27,14 +40,22 @@ def test_checklist_data():
     assert len(res["checklist"]) == 19
     assert len(res["phases"]) == 5
 
-def test_sources_status():
+def test_sources_status(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "quickbooks_client_id", "id")
+    monkeypatch.setattr(settings, "quickbooks_client_secret", "secret")
+    monkeypatch.setattr(settings, "quickbooks_refresh_token", "rt")
+    monkeypatch.setattr(settings, "quickbooks_realm_id", "realm")
+
     res = get_sources_status()
     sources = res["sources"]
     assert len(sources) == 5
     iworker = next(s for s in sources if s["name"] == "iWorker Timesheets")
     assert iworker["active_data"] is True
     qb = next(s for s in sources if s["name"] == "QuickBooks API")
-    assert qb["active_data"] is False
+    assert qb["active_data"] is True
+    assert qb["status"] == "Connected"
 
 def test_ai_insights():
     res = generate_ai_financial_insights()

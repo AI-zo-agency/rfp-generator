@@ -96,22 +96,29 @@ export function FinancialInsightsClient({
     }
   }, []);
 
+  const fetchAuditQueue = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/financials/audit-queue`);
+      if (res.ok) {
+        const aJson = await res.json();
+        setAuditItems(aJson.audit_items || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch audit queue:", err);
+    }
+  }, []);
+
   useEffect(() => {
     async function loadInitialData() {
       setLoading(true);
       try {
-        const [srcRes, audRes] = await Promise.all([
-          fetch(`${API_BASE}/api/v1/financials/sources`),
-          fetch(`${API_BASE}/api/v1/financials/audit-queue`),
-        ]);
-
+        // Sources only on mount. audit-queue derives from iWorker timesheets and
+        // must not run until that cache is warm (iWorker tab open), or it would
+        // re-trigger the expensive sheet + classifier pull on every reload.
+        const srcRes = await fetch(`${API_BASE}/api/v1/financials/sources`);
         if (srcRes.ok) {
           const sJson = await srcRes.json();
           setSourcesData(sJson.sources || []);
-        }
-        if (audRes.ok) {
-          const aJson = await audRes.json();
-          setAuditItems(aJson.audit_items || []);
         }
       } catch (err: any) {
         console.error("Failed to load financials data:", err);
@@ -128,6 +135,18 @@ export function FinancialInsightsClient({
     if (activeTab !== "iworker" || iworkerData) return;
     void fetchIworkerData(selectedContractor);
   }, [activeTab, fetchIworkerData, iworkerData, selectedContractor]);
+
+  // Audit flags come from the timesheet cache filled by the iWorker tab.
+  useEffect(() => {
+    if (activeTab !== "ai") return;
+    void fetchAuditQueue();
+  }, [activeTab, fetchAuditQueue]);
+
+  // After iWorker loads, refresh audit so the AI tab has flags without a second pull.
+  useEffect(() => {
+    if (!iworkerData) return;
+    void fetchAuditQueue();
+  }, [iworkerData, fetchAuditQueue]);
 
   const selectTab = (id: FinancialTabId) => {
     setActiveTab(id);

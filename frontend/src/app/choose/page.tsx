@@ -115,7 +115,7 @@ export default function ChooseWorkspacePage() {
             capabilities={["Timesheets", "Task Classification", "Audit Queues"]}
             delay={0.18}
           />
-          {false && (<WorkspaceCard
+          <WorkspaceCard
             href="/lead-finder"
             tone="leads"
             icon={<IconPipeline className="h-7 w-7" />}
@@ -123,7 +123,7 @@ export default function ChooseWorkspacePage() {
             description="Prioritize contacts by sector fit and engagement, then open a prep brief before you reach out."
             capabilities={["Lead Scoring", "AI Enrichment", "Prep Briefs"]}
             delay={0.28}
-          />)}
+          />
         </div>
       </main>
     </div>

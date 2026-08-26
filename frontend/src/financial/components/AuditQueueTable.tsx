@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   AlertCircle,
   Info,
@@ -76,6 +76,10 @@ export function AuditQueueTable({
   const [items, setItems] = useState<AuditItem[]>(initialAuditItems);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setItems(initialAuditItems);
+  }, [initialAuditItems]);
 
   const handleAction = async (id: string, action: string) => {
     setResolvingId(id);
