@@ -59,6 +59,7 @@ export interface InsightsData {
   as_of: string | null;
   generated_at: string | null;
   provider: string | null;
+  model?: string | null;
   stale: boolean;
   /** Only present on the regenerate response: "ok" | "failed". */
   generated?: string;

@@ -29,9 +29,9 @@ from app.services.llm import LlmError, chat_text
 
 logger = logging.getLogger(__name__)
 
-# Answers run two to four sentences; 700 leaves room for a long one without
-# paying for a model that decides to write an essay.
-_MAX_TOKENS = 700
+# Answers run two to four sentences. 3.6 Flash spends most of a small budget
+# on reasoning, so 4096 is the reply plus that headroom.
+_MAX_TOKENS = 4096
 _TEMPERATURE = 0.2
 
 # Turns kept from the thread. Long enough to follow a line of questioning,

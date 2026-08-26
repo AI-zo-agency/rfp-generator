@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_model: str = "anthropic/claude-sonnet-4"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # Financial workspace (QuickBooks + Teamwork insights/chat). Empty key
+    # falls back to openrouter_api_key; empty model falls back to openrouter_model.
+    openrouter_api_key_financial: str = ""
+    openrouter_model_financial: str = "google/gemini-3.6-flash"
 
     # Monid — server-side company enrichment only. Never expose this to the frontend.
     monid_api_key: str = ""

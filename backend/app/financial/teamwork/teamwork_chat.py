@@ -16,7 +16,7 @@ from app.services.llm import LlmError, chat_text
 
 logger = logging.getLogger(__name__)
 
-_MAX_TOKENS = 700
+_MAX_TOKENS = 4096
 _TEMPERATURE = 0.2
 MAX_HISTORY_TURNS = 8
 MAX_QUESTION_CHARS = 2000
@@ -39,7 +39,8 @@ _FORECAST_QUESTION = re.compile(
 )
 _CHAT_RULES = (
     "\n\nYou answer an owner's question about current delivery work, not a daily brief. "
-    "Use two to four sentences with no heading or list. The supplied evidence is "
+    "Use two to four sentences with no heading or list. Name the project, task, and "
+    "owner from the evidence when you recommend an action. The supplied evidence is "
     "everything you know. Reuse supplied figures exactly or omit them; never calculate, "
     "round, approximate, or invent quantities. Do not claim cash, revenue, payroll, "
     "profit, planned work, effort estimates, or unobserved capacity. If information is "

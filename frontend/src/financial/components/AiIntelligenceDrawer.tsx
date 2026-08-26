@@ -134,6 +134,7 @@ export function AiIntelligenceDrawer({
             <h2>AI Intelligence</h2>
             <p className="qb-ai-sub">
               <span>{chrome.source}</span>
+              {data?.model ? <span>{data.model}</span> : null}
               {data?.as_of ? (
                 <span data-stale={data.stale || undefined}>
                   {data.stale ? `As of ${data.as_of}` : `Today, ${data.as_of}`}

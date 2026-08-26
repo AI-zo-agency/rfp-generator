@@ -61,6 +61,20 @@ class ResolveLlmModelTests(unittest.TestCase):
             settings.openrouter_model = "anthropic/claude-sonnet-4"
             self.assertEqual(resolve_llm_model("light"), "anthropic/claude-sonnet-4")
 
+    def test_financial_node_uses_financial_model(self) -> None:
+        from app.services.llm import resolve_llm_model
+
+        with patch("app.services.llm.settings") as settings:
+            settings.llm_heavy_model = "anthropic/claude-sonnet-4"
+            settings.llm_light_model = "google/gemini-3.6-flash"
+            settings.openrouter_model = "anthropic/claude-sonnet-4"
+            settings.openrouter_model_financial = "anthropic/claude-sonnet-4"
+            self.assertEqual(
+                resolve_llm_model("light", node_name="teamwork_insights"),
+                "anthropic/claude-sonnet-4",
+            )
+            self.assertEqual(resolve_llm_model("light"), "google/gemini-3.6-flash")
+
 
 class SectionIsolationTests(unittest.TestCase):
     def test_replace_only_target(self) -> None:

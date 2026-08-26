@@ -12,13 +12,16 @@ from typing import Any
 from app.financial.ai_insights_repository import upsert_insight
 from app.financial.figure_guard import check_magnitude_claims, check_quantities, evidence_numbers
 from app.financial.teamwork.teamwork_capacity import capacity_history_state, capacity_signals
-from app.services.llm import chat_json_soft
+from app.services.llm import chat_json_soft, resolve_llm_model
 
 logger = logging.getLogger(__name__)
 
 SOURCE = "teamwork"
-_MAX_TOKENS = 1400
+# 3.6 Flash spends ~3k tokens thinking before it writes. 8192 leaves room for
+# the JSON brief after that; 3000 truncated live (finish_reason=length).
+_MAX_TOKENS = 8192
 _TEMPERATURE = 0.3
+_NAMED_CAP = 8
 _SEVERITY_RANK = {"critical": 0, "warn": 1, "info": 2}
 _PROHIBITED_CLAIMS = (
     re.compile(r"\b(?:cash|payroll|salar(?:y|ies)|wages?)\b", re.IGNORECASE),
@@ -36,12 +39,16 @@ _PROHIBITED_CLAIMS = (
 _HIRING_CLAIM = re.compile(r"\b(?:hire|hiring|recruit|recruiting)\b", re.IGNORECASE)
 
 _SYSTEM = (
-    "You write a concise delivery brief for a creative agency owner from Teamwork "
-    "operational evidence. Explain delivery consequences and practical next actions. "
-    "Teamwork is not a financial system: never claim cash, revenue, payroll, profit, "
-    "or any conclusion about them. Never claim planned work, effort estimates, or "
-    "unobserved capacity. Reuse supplied figures exactly or omit them; never calculate, "
-    "round, approximate, or invent quantities. Only annotate the supplied signal ids."
+    "You write a delivery brief for a creative agency owner from Teamwork "
+    "operational evidence. Every sentence names a project, task, person, or "
+    "milestone from the evidence and says what to do with it. Generic advice "
+    "such as confirm a plan or review ownership is not useful unless it names "
+    "where. Teamwork is not a financial system: never claim cash, revenue, "
+    "payroll, profit, or any conclusion about them. Never claim planned work, "
+    "effort estimates, or unobserved capacity. Reuse supplied figures exactly "
+    "or omit them; never calculate, round, approximate, or invent quantities. "
+    "Only annotate the supplied signal ids. Names come from the evidence; never "
+    "invent a person, project, or task that is not in it."
 )
 
 
@@ -65,20 +72,82 @@ def _signal(
     }
 
 
+def _assignee_names(task: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    for assignee in task.get("assignees") or []:
+        if isinstance(assignee, dict):
+            name = str(assignee.get("name") or "").strip()
+        else:
+            name = str(assignee or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _name_list(names: list[str], max_n: int = 3) -> str:
+    shown = [name for name in names if name][:max_n]
+    rest = max(0, len([name for name in names if name]) - len(shown))
+    if rest:
+        return f"{', '.join(shown)} +{rest} more"
+    return ", ".join(shown)
+
+
+def _days_late(due: Any, today: str) -> int | None:
+    due_day = _as_date(due)
+    today_day = _as_date(today)
+    if due_day is None or today_day is None:
+        return None
+    delta = (today_day - due_day).days
+    return delta if delta > 0 else None
+
+
+def _task_ref(task: dict[str, Any], today: str) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "task": str(task.get("name") or ""),
+        "project": str(task.get("project_name") or ""),
+        "owners": _assignee_names(task),
+    }
+    days = _days_late(task.get("due_date"), today)
+    if days is not None:
+        row["days_late"] = days
+    due = task.get("due_date")
+    if due:
+        row["due"] = str(due)[:10]
+    return row
+
+
+def _overdue_by_project(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        project = str(task.get("project_name") or "No project")
+        key = str(task.get("project_id") or project)
+        bucket = buckets.setdefault(key, {"project": project, "count": 0})
+        bucket["count"] += 1
+    return sorted(buckets.values(), key=lambda row: (-int(row["count"]), str(row["project"]).casefold()))
+
+
+def _plural(count: int, word: str) -> str:
+    return word if count == 1 else f"{word}s"
+
+
 def build_signals(overview: dict[str, Any], today: str) -> list[dict[str, str]]:
     """Derive deterministic delivery cards from the current Teamwork overview."""
     signals: list[dict[str, str]] = []
     overdue = overview.get("overdue_tasks") or []
-    unassigned = [task for task in overdue if not (task.get("assignees") or [])]
+    unassigned = [task for task in overdue if not _assignee_names(task)]
     if unassigned:
         count = len(unassigned)
+        labels = [
+            f"{task.get('name') or 'Untitled task'} ({task.get('project_name') or 'No project'})"
+            for task in unassigned
+        ]
         signals.append(
             _signal(
                 "overdue-unassigned",
                 "critical",
                 "Overdue work has no owner",
-                f"{count} task{'s' if count != 1 else ''}",
-                "Assign an owner before overdue delivery work can be recovered.",
+                f"{count} {_plural(count, 'task')}",
+                f"{_name_list(labels)}. Assign an owner on each task today.",
                 "tasks",
             )
         )
@@ -93,13 +162,15 @@ def build_signals(overview: dict[str, Any], today: str) -> list[dict[str, str]]:
     ]
     if deadline_tasks:
         count = len(deadline_tasks)
+        ranked = _overdue_by_project(deadline_tasks)
+        labels = [f"{row['project']} ({row['count']})" for row in ranked]
         signals.append(
             _signal(
                 "deadline-pressure",
                 "warn",
                 "Delivery deadlines are close",
-                f"{count} task{'s' if count != 1 else ''}",
-                "Review owners and sequencing for work due in the next seven days.",
+                f"{count} {_plural(count, 'task')}",
+                f"{_name_list(labels)}. Confirm each owner can finish this week.",
                 "tasks",
             )
         )
@@ -111,14 +182,76 @@ def build_signals(overview: dict[str, Any], today: str) -> list[dict[str, str]]:
     ]
     if late_milestones:
         count = len(late_milestones)
+        labels = [
+            f"{milestone.get('name') or 'Untitled milestone'} "
+            f"({milestone.get('project_name') or 'No project'})"
+            for milestone in late_milestones
+        ]
         signals.append(
             _signal(
                 "late-milestones",
                 "critical",
                 "Milestones are late",
-                f"{count} milestone{'s' if count != 1 else ''}",
-                "Confirm the recovery plan and communicate any delivery impact.",
+                f"{count} {_plural(count, 'milestone')}",
+                f"{_name_list(labels)}. Reset the date with each project's owner.",
                 "projects",
+            )
+        )
+
+    ranked_overdue = _overdue_by_project(overdue)
+    if ranked_overdue:
+        top = ranked_overdue[0]
+        top_count = int(top["count"])
+        rest_labels = [f"{row['project']} ({row['count']})" for row in ranked_overdue[1:]]
+        if len(ranked_overdue) == 1 or top_count >= 10:
+            signals.append(
+                _signal(
+                    "overdue-concentration",
+                    "critical" if top_count >= 10 else "warn",
+                    f"{top['project']} holds {top_count} overdue {_plural(top_count, 'task')}",
+                    f"{top_count} {_plural(top_count, 'task')}",
+                    (
+                        f"{_name_list(rest_labels)}. Recover this project first."
+                        if rest_labels
+                        else "Concentrate recovery on this project today."
+                    ),
+                    "tasks",
+                )
+            )
+        else:
+            lead = min(3, len(ranked_overdue))
+            lead_labels = [f"{row['project']} ({row['count']})" for row in ranked_overdue[:lead]]
+            signals.append(
+                _signal(
+                    "overdue-concentration",
+                    "warn",
+                    f"{lead} {_plural(lead, 'project')} hold most overdue",
+                    f"{lead} {_plural(lead, 'project')}",
+                    f"{_name_list(lead_labels)}. Start with the hottest project.",
+                    "tasks",
+                )
+            )
+
+    oldest: dict[str, Any] | None = None
+    oldest_days = 0
+    for task in overdue:
+        days = _days_late(task.get("due_date"), today)
+        if days is not None and days > oldest_days:
+            oldest = task
+            oldest_days = days
+    if oldest and oldest_days:
+        signals.append(
+            _signal(
+                "oldest-overdue",
+                "critical" if oldest_days >= 14 else "warn",
+                f"Oldest overdue task is {oldest_days} days late",
+                f"{oldest_days}d",
+                (
+                    f"{oldest.get('name') or 'Untitled task'} · "
+                    f"{oldest.get('project_name') or 'No project'}. "
+                    "Get a completion date from the owner today."
+                ),
+                "tasks",
             )
         )
 
@@ -136,8 +269,11 @@ def build_signals(overview: dict[str, Any], today: str) -> list[dict[str, str]]:
                 "budget-exposure",
                 "warn",
                 "Project budgets need delivery review",
-                f"{count} project{'s' if count != 1 else ''}",
-                "Check scope, remaining work, and delivery priorities in Teamwork.",
+                f"{count} {_plural(count, 'project')}",
+                (
+                    f"{_name_list([str(project.get('name') or '') for project in budget_exposed])}. "
+                    "Check remaining scope in Teamwork before more time is logged."
+                ),
                 "projects",
             )
         )
@@ -145,10 +281,67 @@ def build_signals(overview: dict[str, Any], today: str) -> list[dict[str, str]]:
     return sorted(signals, key=lambda row: (_SEVERITY_RANK[row["severity"]], row["id"]))
 
 
+def _named_evidence(overview: dict[str, Any], today: str) -> dict[str, Any]:
+    """Hottest named rows the model may quote. Capped samples, not exhaustive lists."""
+    overdue = overview.get("overdue_tasks") or []
+    unassigned = [task for task in overdue if not _assignee_names(task)]
+    current_day = _as_date(today)
+    deadline_tasks = [
+        task
+        for task in overview.get("upcoming_tasks") or []
+        if current_day is not None
+        and (due_date := _as_date(task.get("due_date"))) is not None
+        and 0 <= (due_date - current_day).days <= 7
+    ]
+    late_milestones = [
+        milestone
+        for milestone in overview.get("milestones") or []
+        if str(milestone.get("status") or "").lower() == "late"
+    ]
+    budget_exposed = [
+        project
+        for project in overview.get("projects") or []
+        if int(project.get("budget_capacity") or 0) > 0
+        and int(project.get("budget_used") or 0) * 100
+        >= int(project.get("budget_capacity") or 0) * 85
+    ]
+    oldest: dict[str, Any] | None = None
+    oldest_days = 0
+    for task in overdue:
+        days = _days_late(task.get("due_date"), today)
+        if days is not None and days > oldest_days:
+            oldest = task
+            oldest_days = days
+    named: dict[str, Any] = {}
+    if unassigned:
+        named["unassigned_overdue"] = [_task_ref(task, today) for task in unassigned[:_NAMED_CAP]]
+    if ranked := _overdue_by_project(overdue):
+        named["overdue_by_project"] = ranked[:_NAMED_CAP]
+    if oldest:
+        named["oldest_overdue"] = _task_ref(oldest, today)
+    if late_milestones:
+        named["late_milestones"] = [
+            {
+                "milestone": str(row.get("name") or ""),
+                "project": str(row.get("project_name") or ""),
+                "due": str(row.get("due_date") or "")[:10],
+            }
+            for row in late_milestones[:_NAMED_CAP]
+        ]
+    if deadline_tasks:
+        named["due_this_week_by_project"] = _overdue_by_project(deadline_tasks)[:_NAMED_CAP]
+        named["due_this_week"] = [_task_ref(task, today) for task in deadline_tasks[:_NAMED_CAP]]
+    if budget_exposed:
+        named["budget_exposed"] = [
+            {"project": str(row.get("name") or "")} for row in budget_exposed[:_NAMED_CAP]
+        ]
+    return named
+
+
 def build_evidence(overview: dict[str, Any], history: list[dict[str, Any]]) -> dict[str, Any]:
     today = str(overview.get("as_of") or "")
     signals = build_signals(overview, today) + capacity_signals(history)
-    return {
+    evidence: dict[str, Any] = {
         "signals": sorted(
             signals, key=lambda row: (_SEVERITY_RANK[row["severity"]], row["id"])
         ),
@@ -158,6 +351,10 @@ def build_evidence(overview: dict[str, Any], history: list[dict[str, Any]]) -> d
             "error_count": len(overview.get("errors") or {}),
         },
     }
+    named = _named_evidence(overview, today)
+    if named:
+        evidence["named"] = named
+    return evidence
 
 
 def _known_ids(evidence: dict[str, Any]) -> set[str]:
@@ -176,9 +373,14 @@ def build_messages(evidence: dict[str, Any]) -> list[dict[str, str]]:
     )
     user = (
         f"Here is today's Teamwork delivery evidence:\n\n{json.dumps(evidence, indent=2)}\n\n"
-        "Write JSON exactly shaped as {\"brief\": \"...\", \"notes\": {\"<id>\": \"...\"}}. "
-        "The brief is three or four sentences. Notes are one or two sentences and may use only "
-        f"these signal ids: {sorted(_known_ids(evidence))}. {history_instruction}"
+        "Write JSON exactly shaped as {\"notes\": {\"<id>\": \"...\"}, \"brief\": \"...\"}. "
+        "Write notes first. Each note is two or three sentences: where (project and task "
+        "or milestone names copied from the evidence), who if an owner is listed, and what "
+        "to do next. The brief is three or four sentences naming the hottest projects and "
+        "the first actions. Lists under named are samples of the hottest items, not "
+        "exhaustive — do not imply they are the complete set. "
+        f"Notes may use only these signal ids: {sorted(_known_ids(evidence))}. "
+        f"{history_instruction}"
     )
     return [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}]
 
@@ -238,7 +440,13 @@ async def _generate(evidence: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
 def _store_quietly(site_id: str, as_of: str, **fields: Any) -> bool:
     try:
-        upsert_insight(source=SOURCE, scope_key=site_id, as_of=as_of, model=None, **fields)
+        upsert_insight(
+            source=SOURCE,
+            scope_key=site_id,
+            as_of=as_of,
+            model=resolve_llm_model("light", node_name="teamwork_insights"),
+            **fields,
+        )
         return True
     except Exception:  # noqa: BLE001 -- insight storage cannot fail a sync
         logger.warning(

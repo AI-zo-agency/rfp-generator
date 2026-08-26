@@ -40,7 +40,7 @@ from app.financial.teamwork.teamwork_sync import (
 from app.financial.teamwork.teamwork_sync import run_sync as run_teamwork_sync
 from app.financial.teamwork.teamwork_sync import overview_from_cache
 from app.services import quickbooks_oauth
-from app.services.llm import chat_json
+from app.services.llm import chat_json, resolve_llm_model
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -825,6 +825,7 @@ def _teamwork_insight_response(
         "as_of": (row or {}).get("as_of"),
         "generated_at": (row or {}).get("generated_at"),
         "provider": (row or {}).get("provider"),
+        "model": (row or {}).get("model") or resolve_llm_model("light", node_name="teamwork_insights"),
         "stale": bool(row) and bool(current_as_of) and (row or {}).get("as_of") != current_as_of,
     }
 
@@ -1109,6 +1110,7 @@ def _insight_response(
         "as_of": (row or {}).get("as_of"),
         "generated_at": (row or {}).get("generated_at"),
         "provider": (row or {}).get("provider"),
+        "model": (row or {}).get("model") or resolve_llm_model("light", node_name="qb_insights"),
         "stale": bool(row) and (row or {}).get("as_of") != _today_iso(),
     }
 
@@ -1268,15 +1270,12 @@ def resolve_audit_item(payload: AuditResolveRequest):
 async def generate_ai_financial_insights():
     """Generates real AI leadership brief from live iWorker Google Sheets data.
     
-    Uses the same provider routing as the rest of the app:
-    - LLM_PREFER_FIREWORKS=true  → Fireworks (MiniMax M3)
-    - LLM_PREFER_OPENROUTER=true → OpenRouter (Gemini 2.5 Flash)
-    - fallback                   → Gemini direct API
+    Uses the financial OpenRouter key/model when configured
+    (OPENROUTER_API_KEY_FINANCIAL / OPENROUTER_MODEL_FINANCIAL).
     """
-    provider_used = "Fireworks" if settings.llm_prefer_fireworks else ("OpenRouter" if settings.llm_prefer_openrouter else "Gemini")
-    model_used = settings.fireworks_model if settings.llm_prefer_fireworks else (settings.openrouter_model if settings.llm_prefer_openrouter else settings.gemini_model)
+    model_used = resolve_llm_model("light", node_name="financial.ai_insights")
     
-    logger.info(f"[AI-INSIGHTS] Starting real AI call | Provider: {provider_used} | Model: {model_used}")
+    logger.info("operation=financial_ai_insights status=start model=%s", model_used)
 
     # ── Fetch live timesheet data ─────────────────────────────────────────────
     data = get_iworker_timesheets()
@@ -1368,15 +1367,16 @@ IMPORTANT: Be specific about dollar amounts and hour counts. Reference actual ta
         {"role": "user", "content": user_prompt},
     ]
 
-    logger.info(f"[AI-INSIGHTS] Sending prompt to {provider_used} (model: {model_used})...")
+    logger.info("operation=financial_ai_insights status=calling model=%s", model_used)
 
     # ── Real AI call via existing provider router ─────────────────────────────
     try:
         result, actual_provider = await chat_json(
             messages,
-            max_tokens=1500,
+            max_tokens=8192,
             temperature=0.3,
             tier="light",
+            node_name="financial.ai_insights",
         )
         logger.info(f"[AI-INSIGHTS] AI response received from {actual_provider} | keys: {list(result.keys())}")
     except Exception as exc:

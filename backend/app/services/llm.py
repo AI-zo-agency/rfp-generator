@@ -135,6 +135,22 @@ def _redact_langsmith_llm_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
+# Insights, chat, and the iWorker brief. Proposal nodes stay on the shared key.
+_FINANCIAL_LLM_NODES = frozenset(
+    {
+        "teamwork_insights",
+        "qb_insights",
+        "qb_chat.answer",
+        "teamwork_chat.answer",
+        "financial.ai_insights",
+    }
+)
+
+
+def _is_financial_node(node_name: str | None) -> bool:
+    return (node_name or "") in _FINANCIAL_LLM_NODES
+
+
 def _provider_routing(
     *,
     max_tokens: int | None,
@@ -145,7 +161,8 @@ def _provider_routing(
     Raises LlmError when the request exceeds Fireworks' cap and no alternative exists.
     """
     resolved_node = node_name if node_name is not None else get_llm_node_name()
-    openrouter_available = bool(_openrouter_key())
+    financial_openrouter = _is_financial_node(resolved_node) and bool(_financial_openrouter_key())
+    openrouter_available = bool(_openrouter_key() or financial_openrouter)
     gemini_key = settings.gemini_api_key.strip()
     gemini_available = bool(gemini_key and not _is_placeholder_key(gemini_key))
     decision = resolve_fireworks_eligibility(
@@ -170,13 +187,23 @@ def _provider_routing(
 
     # Prefer-Fireworks only when eligibility does not force skip (quality-critical / over-cap).
     prefer_fw = settings.llm_prefer_fireworks and not decision.skip_prefer_fireworks
-    skip_gemini = settings.llm_prefer_openrouter or prefer_fw
-    skip_openrouter = prefer_fw
+    skip_gemini = settings.llm_prefer_openrouter or prefer_fw or financial_openrouter
+    skip_openrouter = prefer_fw and not financial_openrouter
     return resolved_node, skip_gemini, skip_openrouter, decision.allow_fireworks
 
 
-def resolve_llm_model(tier: LlmTier = "heavy") -> str:
-    """OpenRouter model id for heavy (Sonnet) vs light (Haiku) tiers."""
+def resolve_llm_model(tier: LlmTier = "heavy", *, node_name: str | None = None) -> str:
+    """OpenRouter model id for heavy (Sonnet) vs light (Haiku) tiers.
+
+    Financial workspace nodes use OPENROUTER_MODEL_FINANCIAL when set.
+    """
+    if _is_financial_node(node_name):
+        financial = getattr(settings, "openrouter_model_financial", "")
+        if isinstance(financial, str) and financial.strip():
+            return financial.strip()
+        shared = getattr(settings, "openrouter_model", "")
+        if isinstance(shared, str) and shared.strip():
+            return shared.strip()
     heavy = (settings.llm_heavy_model or settings.openrouter_model or "").strip()
     light = (settings.llm_light_model or "").strip()
     if tier == "light" and light:
@@ -210,6 +237,28 @@ def _openrouter_key() -> str:
     if not key or _is_placeholder_key(key):
         return ""
     return key
+
+
+def _financial_openrouter_key() -> str:
+    key = getattr(settings, "openrouter_api_key_financial", "")
+    if not isinstance(key, str) or not key.strip() or _is_placeholder_key(key):
+        return ""
+    return key.strip()
+
+
+def _openrouter_route(tier: LlmTier, node_name: str | None) -> tuple[str, str]:
+    """(api_key, model) for this call. Financial nodes prefer their own pair."""
+    model = resolve_llm_model(tier, node_name=node_name)
+    if not _is_financial_node(node_name):
+        return _openrouter_key(), model
+    key = _financial_openrouter_key() or _openrouter_key()
+    logger.info(
+        "operation=financial_llm_route node=%s model=%s key_source=%s",
+        node_name,
+        model,
+        "financial" if _financial_openrouter_key() else "shared",
+    )
+    return key, model
 
 
 def _fireworks_key() -> str:
@@ -787,7 +836,6 @@ async def chat_json(
     )
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
-    openrouter_model = resolve_llm_model(tier)
     skip_fireworks_fallback = False
     started = time.perf_counter()
 
@@ -797,6 +845,7 @@ async def chat_json(
     )
     if node_name is None:
         node_name = _resolved_node or None
+    openrouter_key, openrouter_model = _openrouter_route(tier, node_name)
     _enforce_run_cost_cap(node_name, run_id)
 
     # Try Gemini first if API key is configured and not skipped by preferences
@@ -826,7 +875,6 @@ async def chat_json(
             logger.info("Gemini failed: %s", str(exc)[:200])
             started = time.perf_counter()
 
-    openrouter_key = _openrouter_key()
     if openrouter_key and not skip_openrouter:
         try:
             raw, usage = await _post_chat(
@@ -1089,7 +1137,6 @@ async def chat_text(
     )
     global _FIREWORKS_SUSPENDED
     errors: list[str] = []
-    openrouter_model = resolve_llm_model(tier)
     started = time.perf_counter()
 
     _resolved_node, skip_gemini, skip_openrouter, allow_fireworks = _provider_routing(
@@ -1098,6 +1145,7 @@ async def chat_text(
     )
     if node_name is None:
         node_name = _resolved_node or None
+    openrouter_key, openrouter_model = _openrouter_route(tier, node_name)
     # A caller that accounts for itself is not part of the proposal run budget
     # and must not inherit one. _resolve_run_cost_cap_usd reads the pipeline
     # phase off a contextvar, so without this guard a financial call made while
@@ -1151,7 +1199,6 @@ async def chat_text(
             errors.append(str(exc))
             started = time.perf_counter()
 
-    openrouter_key = _openrouter_key()
     if openrouter_key and not skip_openrouter:
         try:
             raw, usage = await _post_chat(

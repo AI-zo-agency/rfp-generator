@@ -65,7 +65,7 @@ def test_teamwork_get_ai_insights_has_the_dashboard_shape(monkeypatch):
 
     assert response.status_code == 200
     body = response.json()
-    for key in ("status", "brief", "notes", "signals", "history", "as_of", "generated_at", "provider", "stale"):
+    for key in ("status", "brief", "notes", "signals", "history", "as_of", "generated_at", "provider", "model", "stale"):
         assert key in body
 
 

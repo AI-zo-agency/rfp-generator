@@ -11,7 +11,13 @@ def _overview_with_unassigned_overdue() -> dict:
         "sync_status": "ok",
         "errors": {},
         "overdue_tasks": [
-            {"id": "task-1", "name": "Approve homepage", "assignees": []},
+            {
+                "id": "task-1",
+                "name": "Approve homepage",
+                "project_name": "MPR Fundraising Toolkit",
+                "assignees": [],
+                "due_date": "2026-08-06",
+            },
         ],
         "upcoming_tasks": [],
         "milestones": [],
@@ -41,6 +47,32 @@ def test_build_evidence_includes_current_and_capacity_signals():
 
     assert any(row["id"] == "overdue-unassigned" for row in evidence["signals"])
     assert any(row["id"] == "capacity:sustained:42" for row in evidence["signals"])
+
+
+def test_unassigned_signal_names_the_task_and_project():
+    evidence = insights.build_evidence(_overview_with_unassigned_overdue(), [])
+    card = next(row for row in evidence["signals"] if row["id"] == "overdue-unassigned")
+
+    assert "Approve homepage" in card["detail"]
+    assert "MPR Fundraising Toolkit" in card["detail"]
+    assert evidence["named"]["unassigned_overdue"][0]["task"] == "Approve homepage"
+
+
+def test_oldest_overdue_signal_names_the_late_task():
+    evidence = insights.build_evidence(_overview_with_unassigned_overdue(), [])
+    card = next(row for row in evidence["signals"] if row["id"] == "oldest-overdue")
+
+    assert card["figure"] == "19d"
+    assert "Approve homepage" in card["detail"]
+
+
+def test_build_messages_asks_for_named_next_actions():
+    evidence = insights.build_evidence(_overview_with_unassigned_overdue(), [])
+    user = insights.build_messages(evidence)[1]["content"]
+
+    assert "where" in user
+    assert "what to do next" in user
+    assert "named" in user
 
 
 def test_validate_response_keeps_only_notes_for_evidence_signal_ids():

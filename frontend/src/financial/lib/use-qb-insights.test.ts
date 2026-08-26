@@ -14,6 +14,7 @@ function data(over: Partial<InsightsData> = {}): InsightsData {
     as_of: "2026-08-24",
     generated_at: null,
     provider: null,
+    model: null,
     stale: false,
     ...over,
   };
