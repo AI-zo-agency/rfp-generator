@@ -2421,6 +2421,62 @@ async def run_phase3_6_self_edit(rfp_id: str):
     """Phase 3.6: senior-editor self-edit loop (section-wise KB repair)."""
     with pipeline_phase("phase-3-6-self-edit", rfp_id=rfp_id):
         await _collapse_bio_stubs(rfp_id, log_label="Phase 3.6 start bio stub")
+
+        # Cross-reference open tags against the manuscript itself BEFORE the
+        # self-edit loop's KB repair pass — a fact already stated three
+        # sections away is free and more authoritative than a KB query, and
+        # the self-edit loop below still handles anything left unresolved.
+        # Same fix as Complete & Clean's step 11 — the "Generate proposal"
+        # pipeline is a SEPARATE path through this codebase and does not
+        # otherwise share that step, so it needs its own call here.
+        try:
+            from app.services.proposal_cross_reference_resolver import (
+                resolve_tags_from_manuscript,
+            )
+
+            pre_draft = await aget_proposal_draft(rfp_id)
+            if pre_draft:
+                updated, xref_applied = await resolve_tags_from_manuscript(pre_draft)
+                if xref_applied:
+                    await asave_proposal_draft(updated)
+                    step_trace(
+                        "phase3_6_cross_reference_resolved",
+                        rfp_id=rfp_id,
+                        resolved_count=len(xref_applied),
+                        resolved=xref_applied[:12],
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Cross-reference tag resolution during Phase 3.6 skipped for %s: %s",
+                rfp_id,
+                exc,
+            )
+
+        # Form-slot parity with Complete Scan / section chat: copy Active Client
+        # List into missing I.2 from a sibling tab before senior self-edit.
+        try:
+            from app.services.proposal_chat_improve_pin import (
+                fill_all_active_client_lists_from_siblings,
+            )
+
+            form_draft = await aget_proposal_draft(rfp_id)
+            if form_draft:
+                filled, form_logs = fill_all_active_client_lists_from_siblings(form_draft)
+                if form_logs:
+                    await asave_proposal_draft(filled)
+                    step_trace(
+                        "phase3_6_active_client_list_form_slots",
+                        rfp_id=rfp_id,
+                        filled=len(form_logs),
+                        samples=form_logs[:6],
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Active Client List form-slot fill during Phase 3.6 skipped for %s: %s",
+                rfp_id,
+                exc,
+            )
+
         draft, research, report = await run_self_edit_loop(
             rfp_id,
             lean=True,
@@ -3642,9 +3698,36 @@ async def generate_full_proposal(
 
         # Final zero-fabrication pass — canonical budget, reference phones, flags.
         try:
+            from app.services.proposal_chat_improve_pin import (
+                fill_all_active_client_lists_from_siblings,
+            )
+            from app.services.proposal_pointer_page_integrity import (
+                apply_pointer_page_integrity_to_draft,
+            )
             from app.services.proposal_zero_fabrication import (
                 apply_zero_fabrication_guards_before_persist,
             )
+
+            # Safety re-run before ZF (parity with Complete Scan scan-final).
+            draft, form_logs = fill_all_active_client_lists_from_siblings(draft)
+            if form_logs:
+                step_trace(
+                    "post_self_edit_active_client_list_form_slots",
+                    rfp_id=rfp_id,
+                    filled=len(form_logs),
+                    samples=form_logs[:6],
+                )
+
+            draft, ptr_logs = apply_pointer_page_integrity_to_draft(draft)
+            if ptr_logs:
+                step_trace(
+                    "post_self_edit_pointer_page_integrity",
+                    rfp_id=rfp_id,
+                    actions=len(ptr_logs),
+                    samples=ptr_logs[:8],
+                )
+                for line in ptr_logs[:8]:
+                    logger.info("Full proposal pointer-page integrity: %s — %s", rfp_id, line)
 
             rfp_final = get_rfp(rfp_id)
             final_rfp_text = load_rfp_for_proposal(rfp_id)[2] if rfp_final else ""

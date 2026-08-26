@@ -277,9 +277,11 @@ async def _rewrite_section_for_fact_contradiction(
 
 
 def _append_verify_note(section: ProposalSection, finding: FactContradictionFinding) -> ProposalSection:
-    note = (
-        f"[VERIFY: resolve fact contradiction — {finding.manuscript_contradiction[:180]} "
-        f"| Verified source says: {finding.verified_fact[:140]}]"
+    from app.services.proposal_manual_flags import format_verify_tag
+
+    note = format_verify_tag(
+        f"resolve fact contradiction — {finding.manuscript_contradiction[:180]} "
+        f"| Verified source says: {finding.verified_fact[:140]}"
     )
     body = section.content or ""
     if note[:60].casefold() in body.casefold():

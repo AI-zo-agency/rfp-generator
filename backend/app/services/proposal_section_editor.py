@@ -179,6 +179,11 @@ Rules:
    Multi-item recommendation lists still count as one single-section hasFix —
    put the full scrub checklist into applyInstruction. Never invent KB contacts
    in applyInstruction (say remove or [VERIFY: Sonja…]).
+   When the only safe edit is inserting a [VERIFY: …] flag (e.g. buyer board
+   roster zö cannot independently confirm) — still set hasFix=true with
+   applyInstruction that inserts that exact VERIFY tag once and leaves verified
+   contact fields / disclosure answers unchanged. "No structural rewrite" does
+   NOT mean hasFix=false when a VERIFY flag should be planted.
 9a. Highlighted excerpt + verify/confirm/check — OR the user says the excerpt is
     wrong/incorrect: they want a VERDICT on that text, not a rewrite. You MUST use
     the Verified KB facts block when present — never answer from memory alone.
@@ -2687,6 +2692,11 @@ whole section regenerated or the change cannot be localized.
 NEVER choose full_rewrite when the user asks to ADD / CREATE a new sidebar section or tab
 (alongside existing content). Those are structural adds handled elsewhere — not rewrites
 of the open tab.
+
+When the user reports MISSING subsections (e.g. I.2 Active Client List entirely
+missing, jumps I.1 → I.3), empty headers, empty table cells, or a numbered list of
+structural defects: mode MUST be full_rewrite. A surgical patch cannot insert a
+heading that is not in the current content.
 
 When the user asks to REPLACE this section with a DIFFERENT / OTHER RFP need (scan RFP,
 another requirement, not the same topic): mode=full_rewrite. The instruction MUST change
@@ -5964,9 +5974,37 @@ async def _persist_section_improve_draft(
     section_title: str,
 ) -> ProposalDraft:
     """Save improved manuscript + an After snapshot so versions keep chat content."""
+    from app.services.proposal_cross_reference_resolver import (
+        resolve_tags_from_manuscript,
+    )
+    from app.services.proposal_pointer_page_integrity import (
+        apply_pointer_page_integrity_to_draft,
+    )
     from app.services.proposal_zero_fabrication import (
         apply_zero_fabrication_guards_before_persist,
     )
+
+    # Resolve VERIFY/MANUAL FILL answered elsewhere in THIS manuscript first.
+    try:
+        updated_draft, xref_logs = await resolve_tags_from_manuscript(updated_draft)
+        if xref_logs:
+            logger.info(
+                "cross-reference resolve (chat-persist): %s",
+                "; ".join(xref_logs[:8]),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cross-reference resolve skipped on chat-persist: %s", exc)
+
+    # Remap wrong Section-N cross-refs + execute/strip EDITOR NOTES before ZF.
+    try:
+        updated_draft, ptr_logs = apply_pointer_page_integrity_to_draft(updated_draft)
+        if ptr_logs:
+            logger.info(
+                "pointer-page integrity (chat-persist): %s",
+                "; ".join(ptr_logs[:8]),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pointer-page integrity skipped on chat-persist: %s", exc)
 
     guarded, _report = await apply_zero_fabrication_guards_before_persist(
         updated_draft,
@@ -7767,8 +7805,9 @@ async def improve_proposal_section(
             chat_intent, scope_reason = coerce_chat_intent_for_scope(
                 chat_intent, raw_user_message
             )
-            # Improve pin binds THIS tab. Questions stay advisory; change
-            # requests rewrite this tab. Only a clear add-tab ask leaves the pin.
+            # Improve pin binds THIS tab only. Mentions of §21/§22 as move
+            # destinations must never become multi_patch / remaps. Only a clear
+            # add-tab ask leaves the pin.
             if chat_intent == "structure" or is_add_section_intent(raw_user_message):
                 if chat_intent != "structure":
                     chat_intent = "structure"
@@ -7776,7 +7815,13 @@ async def improve_proposal_section(
                 scope_reason = "add_section_overrides_improve_pin"
             else:
                 intent_degraded = bool(intent_info.get("degraded"))
-                scope_reason = "improve_section_pinned"
+                if chat_intent == "multi_patch":
+                    chat_intent = "single_edit"
+                    scope_reason = "improve_pin_blocks_multi_patch"
+                else:
+                    scope_reason = "improve_section_pinned"
+                intent_info["primarySectionId"] = section_id
+                intent_info["intent"] = chat_intent
         else:
             intent_info = await classify_chat_edit_intent(
                 user_message=raw_user_message,
@@ -9140,6 +9185,33 @@ async def improve_proposal_section(
                 section_id,
             )
 
+    # Required form slot: copy Active Client List from a sibling tab into missing I.2
+    # before edit-scope planning (selection patches cannot insert a missing heading).
+    # Draft-wide — same helper Complete Scan / Generate use — so every incomplete
+    # eval form gets the slot, not only the open tab.
+    if not selection_mode and (
+        improve_section_pinned
+        or re.search(r"(?i)active\s+client\s+list|jumps?\s+i\.?\s*1", latest_user_ask)
+    ):
+        from app.services.proposal_chat_improve_pin import (
+            fill_all_active_client_lists_from_siblings,
+            improve_pin_needs_full_rewrite,
+        )
+
+        draft, form_logs = fill_all_active_client_lists_from_siblings(draft)
+        if form_logs:
+            section = _find_draft_section(draft, section_id) or section
+            logger.info(
+                "Form-slot Active Client List fill for %s: %s",
+                rfp_id,
+                "; ".join(form_logs[:4]),
+            )
+            # Keep going through full rewrite so the rest of the issue list is fixed.
+            if improve_section_pinned and improve_pin_needs_full_rewrite(
+                latest_user_ask, section.content or ""
+            ):
+                pass  # fall through to full rewrite with I.2 already present
+
     if (
         not selection_mode
         and not is_add_section_intent(latest_user_ask)
@@ -9164,13 +9236,54 @@ async def improve_proposal_section(
                         section_id,
                         (scope_plan.understood_ask or latest_user_ask)[:80],
                     )
-                    if len(planned_spans) == 1:
+                    from app.services.proposal_chat_improve_pin import (
+                        improve_pin_needs_full_rewrite,
+                        should_collapse_edit_scope_to_selection,
+                    )
+
+                    if improve_section_pinned and improve_pin_needs_full_rewrite(
+                        latest_user_ask, section.content or ""
+                    ):
+                        # Missing I.2 / multi-issue lists cannot be selection-spliced.
+                        planned_spans = None
+                        scope_plan = EditScopePlan(
+                            understood_ask=scope_plan.understood_ask
+                            or latest_user_ask.strip(),
+                            mode="full_rewrite",
+                            patches=[],
+                            kb_queries=list(scope_plan.kb_queries or []),
+                        )
+                        logger.info(
+                            "Improve pin forced full_rewrite (structural/multi-issue) "
+                            "for %s / %s",
+                            rfp_id,
+                            section_id,
+                        )
+                    elif (
+                        len(planned_spans) == 1
+                        and should_collapse_edit_scope_to_selection(
+                            improve_section_pinned=improve_section_pinned,
+                            user_message=latest_user_ask,
+                            section_content=section.content or "",
+                            planned_span_count=1,
+                        )
+                    ):
                         selection_start, selection_end, only = planned_spans[0]
                         selection_text = (section.content or "")[
                             selection_start:selection_end
                         ]
                         selection_mode = True
                         user_message = only.editor_instruction
+                    elif len(planned_spans) == 1:
+                        # Improve pin + non-collapsible single patch → full rewrite.
+                        planned_spans = None
+                        scope_plan = EditScopePlan(
+                            understood_ask=scope_plan.understood_ask
+                            or latest_user_ask.strip(),
+                            mode="full_rewrite",
+                            patches=[],
+                            kb_queries=list(scope_plan.kb_queries or []),
+                        )
                 else:
                     logger.info(
                         "Edit-scope plan asked patch but no anchors found in %s — "

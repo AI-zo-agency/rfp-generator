@@ -317,6 +317,10 @@ function ProposalDraftWorkspaceInner({
   const saveGenerationRef = useRef(0);
   const fullProposalAbortRef = useRef<AbortController | null>(null);
   const fulfillAbortRef = useRef<AbortController | null>(null);
+  /** Prevents double green-banner when request race + poll both see completion. */
+  const fulfillCompletionShownRef = useRef(false);
+  /** True once this run's live poll saw inProgressPhase === fulfill-scan. */
+  const fulfillSawRunningRef = useRef(false);
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const sectionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const contentScrollRef = useRef<HTMLDivElement | null>(null);
@@ -1436,23 +1440,100 @@ function ProposalDraftWorkspaceInner({
   const handleResearchPoll = useCallback((updated: ProposalResearch | null) => {
     if (!updated) return;
     setResearch(updated);
-    // Polling updates live checkpoint activity only — do not recompute resume/skip locally.
-    setPipelineStatus((prev) => {
-      const cp = updated.pipelineCheckpoint;
-      if (prev && cp) {
-        return {
-          ...prev,
-          checkpoint: cp,
-          inProgressPhase: cp.inProgressPhase ?? null,
-          lastFailedPhase: cp.lastFailedPhase ?? prev.lastFailedPhase ?? null,
-          lastError: cp.lastError ?? prev.lastError ?? null,
-          lastCompletedPhase:
-            cp.lastCompletedPhase ?? prev.lastCompletedPhase ?? null,
-        };
-      }
-      return buildPipelineStatus(outlineRef.current, updated, prev);
-    });
+    if (updated.pipelineCheckpoint?.inProgressPhase === FULFILL_SCAN_PHASE) {
+      fulfillSawRunningRef.current = true;
+    }
+    // Keep checkpoint + Complete & clean completion stamps live so the green
+    // banner can appear as soon as Celery finishes — no manual refresh.
+    setPipelineStatus((prev) =>
+      buildPipelineStatus(outlineRef.current, updated, prev)
+    );
   }, []);
+
+  /**
+   * Flip the UI to the green "finished successfully" state and pull the final
+   * draft — used by the launch handler, reconnect poll, and live checkpoint
+   * watcher so the user never needs a manual refresh.
+   */
+  const applyFulfillScanSuccessUi = useCallback(
+    async (options?: {
+      draft?: ProposalOutline | null;
+      research?: ProposalResearch | null;
+      fulfillReport?: Record<string, unknown> | null;
+      skipFetch?: boolean;
+    }) => {
+      if (fulfillCompletionShownRef.current) {
+        setIsFulfillingRfpGaps(false);
+        return;
+      }
+      fulfillCompletionShownRef.current = true;
+
+      let draft = options?.draft ?? null;
+      let updatedResearch = options?.research ?? null;
+      let report =
+        options?.fulfillReport ??
+        (draft?.lastFulfillReport as Record<string, unknown> | undefined) ??
+        null;
+
+      if (!options?.skipFetch) {
+        try {
+          const snapshot = await fetchProposalDraft(rfp.id);
+          if (snapshot.draft) draft = snapshot.draft;
+          if (snapshot.research) updatedResearch = snapshot.research;
+          if (snapshot.draft?.lastFulfillReport) {
+            report = snapshot.draft.lastFulfillReport as Record<string, unknown>;
+          }
+          if (snapshot.research) {
+            setPipelineStatus(
+              buildPipelineStatus(
+                snapshot.draft,
+                snapshot.research,
+                snapshot.pipelineStatus
+              )
+            );
+          }
+        } catch {
+          // Non-fatal — still show success from whatever we already have.
+        }
+      }
+
+      if (draft) {
+        applyOutlineFromServer({
+          ...draft,
+          lastFulfillReport: report ?? draft.lastFulfillReport,
+        });
+      }
+      if (updatedResearch) {
+        setResearch(updatedResearch);
+        setPipelineStatus((prev) =>
+          buildPipelineStatus(draft ?? outlineRef.current, updatedResearch, prev)
+        );
+        if (updatedResearch.budget) setBudget(updatedResearch.budget);
+        if (updatedResearch.presubmitReview) {
+          setPresubmitReview(updatedResearch.presubmitReview);
+        }
+      }
+      if (report) {
+        setScanSummary(buildScanRfpSummary(report as ScanRfpFulfillReport));
+        setScanSummaryExpanded(false);
+      }
+      setGapResolveNotice("Saved version available (Before complete & clean).");
+      setFulfillJustCompleted(true);
+      setCompletionBannerDismissed(false);
+      setGenerateNotice(
+        "Complete & clean finished successfully — this draft is up to date. The button stays disabled until you edit the draft again."
+      );
+      setGenerateError(null);
+      setIsFulfillingRfpGaps(false);
+      setActiveTab("content");
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector(".proposal-scan-v2")
+          ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    },
+    [rfp.id, applyOutlineFromServer]
+  );
 
   const handleLiveDraftUpdateRef = useRef(handleLiveDraftUpdate);
   const handleResearchPollRef = useRef(handleResearchPoll);
@@ -1500,26 +1581,20 @@ function ProposalDraftWorkspaceInner({
       if (activePhase === FULFILL_SCAN_PHASE) {
         if (!jobRunning) return;
         setIsFulfillingRfpGaps(true);
+        fulfillCompletionShownRef.current = false;
+        fulfillSawRunningRef.current = true;
         abort = new AbortController();
         fulfillAbortRef.current = abort;
         try {
           const waited = await pollFulfillScanCompletion(rfp.id, abort.signal);
-          if (cancelled || !waited.draft || !waited.research) return;
-          const fulfillReport = (waited.draft.lastFulfillReport ?? {}) as Record<
-            string,
-            unknown
-          >;
-          setPresubmitReview(waited.research.presubmitReview ?? null);
-          setResearch(waited.research);
-          applyOutlineFromServer({
-            ...waited.draft,
-            lastFulfillReport: fulfillReport,
+          if (cancelled) return;
+          await applyFulfillScanSuccessUi({
+            draft: waited.draft,
+            research: waited.research,
+            fulfillReport:
+              (waited.draft?.lastFulfillReport as Record<string, unknown>) ??
+              null,
           });
-          setScanSummary(buildScanRfpSummary(fulfillReport as ScanRfpFulfillReport));
-          setScanSummaryExpanded(false);
-          setGapResolveNotice("Saved version available (Before complete & clean).");
-          setGenerateNotice(null);
-          setGenerateError(null);
         } catch (error) {
           if (cancelled) return;
           if (
@@ -1573,6 +1648,35 @@ function ProposalDraftWorkspaceInner({
     research?.pipelineCheckpoint?.inProgressPhase,
     rfp.id,
     applyOutlineFromServer,
+    applyFulfillScanSuccessUi,
+  ]);
+
+  /**
+   * Safety net: if Celery finishes while the long POST/race is still hanging,
+   * the live research poll already cleared inProgressPhase and stamped
+   * lastCleanFulfillScanAt — flip the green banner + draft without waiting
+   * for the HTTP request (and without requiring a page refresh).
+   */
+  useEffect(() => {
+    if (!hydrated || !isFulfillingRfpGaps || fulfillJustCompleted) return;
+    if (fulfillCompletionShownRef.current) return;
+    if (!fulfillSawRunningRef.current) return;
+    const cp = research?.pipelineCheckpoint;
+    if (!cp || cp.inProgressPhase === FULFILL_SCAN_PHASE) return;
+    const at = cp.lastCleanFulfillScanAt;
+    if (!at) return;
+    const finishedAt = Date.parse(at);
+    if (!Number.isFinite(finishedAt) || Date.now() - finishedAt > 15 * 60 * 1000) {
+      return;
+    }
+    void applyFulfillScanSuccessUi();
+  }, [
+    hydrated,
+    isFulfillingRfpGaps,
+    fulfillJustCompleted,
+    research?.pipelineCheckpoint?.inProgressPhase,
+    research?.pipelineCheckpoint?.lastCleanFulfillScanAt,
+    applyFulfillScanSuccessUi,
   ]);
 
   /** Don't keep a stale "Stopped" banner while the server job is still running. */
@@ -1765,6 +1869,14 @@ function ProposalDraftWorkspaceInner({
   }, [pipelineStatus?.fulfillScanCompletedAt]);
 
   const handleFulfillRfpGaps = useCallback(async () => {
+    // A duplicate invocation while one is already in flight (double-click,
+    // a second call sharing this same handler) used to silently abort the
+    // running request via fulfillAbortRef below — the run would look
+    // "stopped" client-side even though the backend kept executing
+    // independently to completion. No-op instead of restarting.
+    if (isFulfillingRfpGaps) {
+      return;
+    }
     const scanOk = await confirm(
       scanAlreadyDone && !canResumeFulfillScan
         ? {
@@ -1824,6 +1936,8 @@ function ProposalDraftWorkspaceInner({
     setScanSummaryExpanded(false);
     setFulfillJustCompleted(false);
     setCompletionBannerDismissed(false);
+    fulfillCompletionShownRef.current = false;
+    fulfillSawRunningRef.current = false;
     fulfillAbortRef.current?.abort();
     const abort = new AbortController();
     fulfillAbortRef.current = abort;
@@ -1832,19 +1946,6 @@ function ProposalDraftWorkspaceInner({
       handleLiveDraftUpdate,
       handleResearchPoll
     );
-    const showCompleted = () => {
-      setFulfillJustCompleted(true);
-      setGenerateNotice(
-        "Complete & clean finished successfully — this draft is up to date. The button stays disabled until you edit the draft again."
-      );
-      setGenerateError(null);
-      setActiveTab("content");
-      window.requestAnimationFrame(() => {
-        document
-          .querySelector(".proposal-scan-v2")
-          ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      });
-    };
     try {
       // The scan is a multi-minute background job. Awaiting the single request
       // for its whole duration means a dropped/timed-out connection (proxy or
@@ -1897,65 +1998,33 @@ function ProposalDraftWorkspaceInner({
       if (outcome.via === "request") {
         const { review, research: updatedResearch, draft, fulfillReport } =
           outcome.r;
-        setPresubmitReview(review);
-        setResearch(updatedResearch);
-        applyOutlineFromServer({
-          ...draft,
-          lastFulfillReport:
+        await applyFulfillScanSuccessUi({
+          draft,
+          research: updatedResearch,
+          fulfillReport:
             (fulfillReport as Record<string, unknown>) ??
-            draft.lastFulfillReport,
+            (draft.lastFulfillReport as Record<string, unknown>) ??
+            null,
+          skipFetch: true,
         });
-        const summary = buildScanRfpSummary(fulfillReport);
-        setScanSummary(summary);
-        setScanSummaryExpanded(false);
-        setGapResolveNotice(
-          "Saved version available (Before complete & clean)."
-        );
-        showCompleted();
+        if (review) setPresubmitReview(review);
       } else if (outcome.w === "failed") {
         throw new Error("Complete & clean failed on the server.");
       } else {
-        // The backend job finished (or the connection stalled). Stop waiting on
-        // the long request and pull the final saved state so the UI resolves
-        // without a manual refresh.
+        // Backend finished (or connection stalled) — pull final saved state.
         abort.abort();
-        try {
-          const snapshot = await fetchProposalDraft(rfp.id);
-          if (snapshot.draft) {
-            applyOutlineFromServer(snapshot.draft);
-          }
-          if (snapshot.research) {
-            setResearch(snapshot.research);
-            setPipelineStatus(
-              buildPipelineStatus(
-                snapshot.draft,
-                snapshot.research,
-                snapshot.pipelineStatus
-              )
-            );
-            if (snapshot.research.budget) setBudget(snapshot.research.budget);
-            if (snapshot.research.presubmitReview) {
-              setPresubmitReview(snapshot.research.presubmitReview);
-            }
-          }
-          const report = snapshot.draft?.lastFulfillReport;
-          if (report) {
-            setScanSummary(buildScanRfpSummary(report));
-            setScanSummaryExpanded(false);
-          }
-        } catch {
-          // Non-fatal — the scan is saved server-side; a reload will show it.
-        }
-        setGapResolveNotice(
-          "Saved version available (Before complete & clean)."
-        );
-        showCompleted();
+        await applyFulfillScanSuccessUi();
       }
     } catch (error) {
       if (
         abort.signal.aborted ||
         (error instanceof DOMException && error.name === "AbortError")
       ) {
+        // If the safety-net effect already showed success, don't overwrite it
+        // with a "stopped" banner.
+        if (fulfillCompletionShownRef.current || fulfillJustCompleted) {
+          return;
+        }
         setScanSummary(null);
         setScanSummaryExpanded(false);
         setGenerateNotice(
@@ -1977,12 +2046,22 @@ function ProposalDraftWorkspaceInner({
       stopScanPoll();
       setIsFulfillingRfpGaps(false);
     }
-  }, [confirm, rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll, canResumeFulfillScan, fulfillResumeStep, fulfillResumeLabel, scanAlreadyDone, hasCompletedScanBefore]);
+  }, [confirm, rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll, applyFulfillScanSuccessUi, canResumeFulfillScan, fulfillResumeStep, fulfillResumeLabel, scanAlreadyDone, hasCompletedScanBefore, fulfillJustCompleted]);
 
   const handleGenerateFullProposal = useCallback(async (options?: {
     startAfterSections1to3?: boolean;
     startFromCaseStudies?: boolean;
   }) => {
+    // A duplicate invocation while one is already in flight (double-click, a
+    // second call sharing this same handler) used to silently abort the
+    // running request via fullProposalAbortRef below — the run would look
+    // "stopped" client-side even though the backend kept executing
+    // independently to completion (confirmed live: a Celery task logged
+    // succeeded well after the UI showed "Stopped"). No-op instead of
+    // restarting; the running progress UI already reflects this state.
+    if (isFullProposalRunning) {
+      return;
+    }
     // Continue = resume from checkpoint (e.g. budget failure).
     // Fresh / regenerate-from-done = forceRestart from Sections 1–3.
     // startAfterSections1to3 = Start from Intelligence (keep 1–3, re-run Phase 2+).
@@ -3159,6 +3238,7 @@ function ProposalDraftWorkspaceInner({
                 <div className="proposal-editor-split">
                   <div ref={editorScrollRef} className="proposal-editor-body">
                     <DraftSectionEditor
+                      key={selectedSection.id}
                       section={selectedSection}
                       wordCount={countWords(selectedSection.content)}
                       disabled={anyPipelineRunning}
@@ -3829,7 +3909,8 @@ function ProposalDraftWorkspaceInner({
                 onClick={() => setRevisionDrawerSectionId(null)}
               />
               <div
-                className="proposal-revision-drawer"
+                className="proposal-revision-drawer overflow-hidden"
+                style={{ maxHeight: "100dvh" }}
                 role="dialog"
                 aria-labelledby="proposal-revision-drawer-title"
               >

@@ -13,7 +13,7 @@ import {
 import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/proposal";
 import type { SectionRevisionRecord } from "./DraftSectionEditor";
 import { MarkdownReportBody } from "./MarkdownReportBody";
-import { composeApplyFixInstruction } from "./compose-apply-fix-instruction";
+import { composeApplyFixInstruction, resolveApplyFixTarget } from "./compose-apply-fix-instruction";
 import "./ProposalSectionChatPanel.css";
 
 export interface SectionChatSuggestedFix {
@@ -240,33 +240,45 @@ export function ProposalSectionChatPanel({
         return;
       }
 
-      // Revise-excerpt pin always wins the API target — "fill this" must not follow
-      // chat history to a different tab while the table/paragraph is still pinned.
+      // Revise-excerpt / Improve-full-section pins always win the API target.
+      // Mentions of §21 / Experience / "move into Qualifications" must NOT steal
+      // the edit — Improve means this tab only.
       const selectionPin =
         activeReference?.mode === "selection" && activeReference.selection
           ? activeReference
           : null;
+      const improvePin =
+        activeReference?.mode === "section" && activeReference.sectionId
+          ? activeReference
+          : null;
       let targetSection = resolution.section;
       if (selectionPin) {
-        const pinnedSection = sections.find((s) => s.id === selectionPin.sectionId);
-        if (pinnedSection) targetSection = pinnedSection;
+        const pinnedSec = sections.find((s) => s.id === selectionPin.sectionId);
+        if (pinnedSec) targetSection = pinnedSec;
+      } else if (improvePin && resolution.reason !== "outline-structure") {
+        const pinnedSec = sections.find((s) => s.id === improvePin.sectionId);
+        if (pinnedSec) targetSection = pinnedSec;
       }
 
       // Stale Improve pin on another tab must not keep redirecting status/API.
+      // Clarify-reply / outline-structure may leave the pin intentionally.
       if (
         activeReference &&
         activeReference.mode !== "selection" &&
         activeReference.sectionId !== targetSection.id &&
-        resolution.reason !== "pinned"
+        resolution.reason !== "pinned" &&
+        resolution.reason !== "clarify-reply" &&
+        resolution.reason !== "outline-structure"
       ) {
         activeReference = null;
         onSetReference(null);
       }
 
       const proposalWideAsk =
-        resolution.reason === "proposal-wide" ||
-        resolution.reason === "outline-structure" ||
-        messageLooksProposalWide(trimmed);
+        !improvePin &&
+        (resolution.reason === "proposal-wide" ||
+          resolution.reason === "outline-structure" ||
+          messageLooksProposalWide(trimmed));
 
       setIsRunning(true);
       setError(null);
@@ -299,12 +311,26 @@ export function ProposalSectionChatPanel({
             activeReference.sectionId === targetSection.id,
         });
 
+        // The resolver can legitimately land on a section other than the one
+        // open in the editor (a named mention, a proposal-wide ask, a stale
+        // pin). When that happens, say so up front — a reader who has a
+        // different tab open should never have to infer which section a
+        // response is actually about from its content.
+        const viewingSection = viewingSectionId
+          ? sections.find((s) => s.id === viewingSectionId) ?? null
+          : null;
+        const targetDiffersFromOpenTab =
+          viewingSection !== null && viewingSection.id !== targetSection.id;
+        const responseContent = targetDiffersFromOpenTab
+          ? `_Acted on "${targetSection.title}" — not "${viewingSection.title}", which is open in the editor._\n\n${result.assistantMessage}`
+          : result.assistantMessage;
+
         onMessagesChange([
           ...nextMessages,
           {
             id: `a-${Date.now()}`,
             role: "assistant",
-            content: result.assistantMessage,
+            content: responseContent,
             draftUnchanged: !result.draftChanged,
             suggestedFix:
               !result.draftChanged && result.suggestedFix ? result.suggestedFix : null,
@@ -386,18 +412,9 @@ export function ProposalSectionChatPanel({
   const applySuggestedFix = useCallback(
     async (messageId: string, fix: SectionChatSuggestedFix, extras: string) => {
       if (isRunning || disabled) return;
-      const viewing =
-        viewingSectionId != null
-          ? sections.find((s) => s.id === viewingSectionId) ?? null
-          : null;
-      // Apply always runs on the tab the user had open when they got the audit.
-      const target =
-        viewing ??
-        sections.find((s) => s.id === fix.sectionId) ??
-        sections.find((s) => {
-          const wanted = fix.sectionTitle?.trim().toLowerCase();
-          return Boolean(wanted) && s.title.trim().toLowerCase() === wanted;
-        });
+      // Always the audited tab from suggestedFix — never the currently open
+      // sidebar tab (that rewrote Exhibit 2 when Exhibit 5's Apply was clicked).
+      const target = resolveApplyFixTarget(sections, fix, viewingSectionId);
       if (!target) {
         setError("That section is no longer in the draft.");
         return;
@@ -439,6 +456,7 @@ export function ProposalSectionChatPanel({
           {
             conversationHistory: history,
             applyFix: true,
+            improveSectionPinned: true,
           }
         );
 
@@ -515,6 +533,7 @@ export function ProposalSectionChatPanel({
       onSectionUpdated,
       rfpId,
       sections,
+      viewingSectionId,
     ]
   );
 

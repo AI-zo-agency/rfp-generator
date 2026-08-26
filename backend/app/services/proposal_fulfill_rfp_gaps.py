@@ -1120,6 +1120,23 @@ async def _run_fulfill_rfp_gaps_body(
                 f"Dedupe: {len(dedupe_logs)} compact action(s): "
                 + "; ".join(dedupe_logs[:10])
             )
+        # Required form slots: copy Active Client List into missing I.2 from a
+        # sibling tab (same as section chat). Run after dedupe so clones are gone.
+        try:
+            from app.services.proposal_chat_improve_pin import (
+                fill_all_active_client_lists_from_siblings,
+            )
+
+            draft, form_logs = fill_all_active_client_lists_from_siblings(draft)
+            if form_logs:
+                draft = draft.model_copy(
+                    update={"updated_at": datetime.now(timezone.utc).isoformat()}
+                )
+                await asave_proposal_draft(draft)
+                report["logs"].extend(form_logs[:8])
+        except Exception as form_exc:  # noqa: BLE001
+            logger.warning("Active Client List form-slot fill after dedupe skipped: %s", form_exc)
+            report["logs"].append(f"Form-slot Active Client List fill skipped: {form_exc}")
     except ProposalGenerationCancelled:
         raise
     except FulfillStepSkip as skip:
@@ -1442,6 +1459,37 @@ async def _run_fulfill_rfp_gaps_body(
             "RFP emphasizes prior work in the buyer's state/region — if the portfolio has none, "
             "acknowledge openly rather than implying local history."
         )
+
+    # Cross-reference open tags against the manuscript itself BEFORE spending
+    # an external KB query — a fact three sections away is free, faster, and
+    # more authoritative than Supermemory: it is what THIS proposal already
+    # told the evaluator. Observed live: "1.4 — Certifications" states WBENC/
+    # WOSB are current through a specific date; a different section re-asked
+    # the same question as an open [VERIFY: ...] tag anyway. Same step number
+    # as KB fact-check below — this is a cheaper first pass over the same
+    # gap, not a new pipeline stage, so no checkpoint/resume renumbering risk.
+    try:
+        await _ensure_not_stopped()
+        from app.services.proposal_cross_reference_resolver import (
+            resolve_tags_from_manuscript,
+        )
+
+        draft, xref_applied = await resolve_tags_from_manuscript(draft)
+        if xref_applied:
+            report["logs"].append(
+                f"Cross-reference: resolved {len(xref_applied)} tag(s) from "
+                "facts already stated elsewhere in this manuscript"
+            )
+            for line in xref_applied[:20]:
+                report["logs"].append(f"Cross-reference: {line}")
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Cross-reference tag resolution during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"Cross-reference resolution skipped: {exc}")
 
     # Did KB fact-check (step 11) actually change the manuscript? Step 2 already
     # ran the full fact-repair pass; the post-fact-check re-run below only has
@@ -1790,6 +1838,43 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Optional placeholder scrub during Scan RFP skipped: %s", exc)
         report["logs"].append(f"Placeholder scrub skipped: {exc}")
 
+    # Orphan VERIFY tails (no opening [VERIFY) are invisible to placeholder scrub
+    # — always clear them, and stub hollow shells so gibberish never ships.
+    try:
+        from app.services.proposal_manual_flags import (
+            repair_orphan_verify_leftovers_in_draft,
+        )
+
+        draft, orphan_logs = repair_orphan_verify_leftovers_in_draft(draft)
+        if orphan_logs:
+            draft = draft.model_copy(
+                update={"updated_at": datetime.now(timezone.utc).isoformat()}
+            )
+            await asave_proposal_draft(draft)
+            report["logs"].extend(orphan_logs[:12])
+    except Exception as orphan_exc:  # noqa: BLE001
+        logger.warning("Orphan VERIFY leftover repair skipped: %s", orphan_exc)
+        report["logs"].append(f"Orphan VERIFY leftover repair skipped: {orphan_exc}")
+
+    # After optional scrub: plant required board-roster VERIFY on campaign /
+    # contribution disclosure tabs (buyer board ≠ zö KB — Ella/Rachel confirm).
+    # Must run AFTER scrub so the new flag is not stripped in the same pass.
+    try:
+        from app.services.proposal_chat_improve_pin import (
+            insert_all_board_roster_verify_flags,
+        )
+
+        draft, board_logs = insert_all_board_roster_verify_flags(draft)
+        if board_logs:
+            draft = draft.model_copy(
+                update={"updated_at": datetime.now(timezone.utc).isoformat()}
+            )
+            await asave_proposal_draft(draft)
+            report["logs"].extend(board_logs[:8])
+    except Exception as board_exc:  # noqa: BLE001
+        logger.warning("Board-roster VERIFY insert during Scan skipped: %s", board_exc)
+        report["logs"].append(f"Board-roster VERIFY insert skipped: {board_exc}")
+
     try:
         from app.services.proposal_section_dedup import dedupe_manuscript_for_scan
 
@@ -1962,6 +2047,51 @@ async def _run_fulfill_rfp_gaps_body(
 
     # Final zero-fabrication pass — keep claims grounded before ending report.
     try:
+        from app.services.proposal_chat_improve_pin import (
+            fill_all_active_client_lists_from_siblings,
+            insert_all_board_roster_verify_flags,
+        )
+        from app.services.proposal_cross_reference_resolver import (
+            resolve_tags_from_manuscript,
+        )
+        from app.services.proposal_manual_flags import (
+            repair_orphan_verify_leftovers_in_draft,
+        )
+        from app.services.proposal_manuscript import (
+            apply_designer_ready_markup_polish_to_draft,
+        )
+        from app.services.proposal_pointer_page_integrity import (
+            apply_pointer_page_integrity_to_draft,
+        )
+
+        # Safety re-run: compact / Ralph / optional scrub must not leave I.2 missing
+        # or strip board-roster VERIFY from contribution disclosure forms.
+        draft, form_logs = fill_all_active_client_lists_from_siblings(draft)
+        if form_logs:
+            report["logs"].extend(form_logs[:8])
+        # Second cross-ref pass — hollow fill / scrub may leave tags answered elsewhere.
+        draft, xref_logs = await resolve_tags_from_manuscript(draft)
+        if xref_logs:
+            report["logs"].extend(xref_logs[:8])
+            report["logs"].append(
+                f"Scan-final cross-reference resolve: {len(xref_logs)} tag(s)"
+            )
+        draft, orphan_logs = repair_orphan_verify_leftovers_in_draft(draft)
+        if orphan_logs:
+            report["logs"].extend(orphan_logs[:8])
+        draft, ptr_logs = apply_pointer_page_integrity_to_draft(draft)
+        if ptr_logs:
+            report["logs"].extend(ptr_logs[:12])
+        draft, board_logs = insert_all_board_roster_verify_flags(draft)
+        if board_logs:
+            report["logs"].extend(board_logs[:8])
+        draft, polish_logs = apply_designer_ready_markup_polish_to_draft(draft)
+        if polish_logs:
+            report["logs"].extend(polish_logs[:8])
+    except Exception as form_exc:  # noqa: BLE001
+        logger.warning("Pre-final form-slot fill skipped: %s", form_exc)
+
+    try:
         from app.services.proposal_zero_fabrication import (
             apply_zero_fabrication_guards_before_persist,
         )
@@ -1981,6 +2111,25 @@ async def _run_fulfill_rfp_gaps_body(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scan final zero-fabrication pass skipped: %s", exc)
         report["logs"].append(f"Final zero-fabrication pass skipped: {exc}")
+
+    # Post-ZF polish — forms integrity / scrub must not leave orphan VERIFY tails
+    # or prose designer-note labels.
+    try:
+        from app.services.proposal_manual_flags import (
+            repair_orphan_verify_leftovers_in_draft,
+        )
+        from app.services.proposal_manuscript import (
+            apply_designer_ready_markup_polish_to_draft,
+        )
+
+        draft, orphan_logs = repair_orphan_verify_leftovers_in_draft(draft)
+        if orphan_logs:
+            report["logs"].extend(orphan_logs[:6])
+        draft, polish_logs = apply_designer_ready_markup_polish_to_draft(draft)
+        if polish_logs:
+            report["logs"].extend(polish_logs[:6])
+    except Exception as polish_exc:  # noqa: BLE001
+        logger.warning("Post-ZF designer polish skipped: %s", polish_exc)
 
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp, draft=draft, research=research, finalized=False
@@ -2132,6 +2281,38 @@ async def _run_fulfill_rfp_gaps_body(
         for line in restore_logs:
             logger.warning("Scan RFP %s: %s", rfp_id, line)
         report.setdefault("logs", []).extend(restore_logs)
+
+    # HARD INVARIANT: restore must not reintroduce wrong § pointers, EDITOR NOTES
+    # work tickets, or orphan VERIFY leftovers — re-run integrity after restore.
+    try:
+        from app.services.proposal_manual_flags import (
+            repair_orphan_verify_leftovers_in_draft,
+        )
+        from app.services.proposal_manuscript import (
+            apply_designer_ready_markup_polish_to_draft,
+        )
+        from app.services.proposal_pointer_page_integrity import (
+            apply_pointer_page_integrity_to_draft,
+        )
+
+        draft, orphan_logs = repair_orphan_verify_leftovers_in_draft(draft)
+        if orphan_logs:
+            report.setdefault("logs", []).extend(orphan_logs[:6])
+        draft, ptr_logs = apply_pointer_page_integrity_to_draft(draft)
+        if ptr_logs:
+            report.setdefault("logs", []).extend(ptr_logs[:10])
+            report["logs"].append(
+                f"Post-restore pointer integrity: {len(ptr_logs)} action(s)"
+            )
+        draft, polish_logs = apply_designer_ready_markup_polish_to_draft(draft)
+        if polish_logs:
+            report.setdefault("logs", []).extend(polish_logs[:6])
+    except Exception as restore_fix_exc:  # noqa: BLE001
+        logger.warning(
+            "Post-restore integrity polish skipped for %s: %s",
+            rfp_id,
+            restore_fix_exc,
+        )
 
     draft = attach_scan_summary_to_latest_before_scan(draft, report)
     await asave_proposal_draft(draft)

@@ -530,6 +530,90 @@ def specs_from_intelligence_outline(
     return specs
 
 
+def specs_from_scored_criteria(
+    research: ProposalResearchCache | None,
+) -> list[RfpSectionSpec]:
+    """Section specs for every scored criterion the RFP publishes — no LLM call.
+
+    Complete & clean already recovers missing scored tabs, but it learned the
+    section list from one LLM read of the TOC. An RFP whose scoring lives in an
+    evaluation-criteria response form rather than its TOC therefore lost whole
+    scored sections, and the only fix on offer was regenerating the proposal
+    from scratch.
+
+    The scoreboard is already persisted on the requirement ledger from the
+    intelligence phase, so reading it here is free: an existing draft gains the
+    scored sections it is missing without re-running Phase 2, and sections that
+    already cover a criterion are matched and left untouched by
+    ``ensure_missing_scored_section_stubs``.
+    """
+    ledger = getattr(research, "requirement_ledger", None) if research else None
+    requirements = list(getattr(ledger, "requirements", []) or []) if ledger else []
+    specs: list[RfpSectionSpec] = []
+    seen: set[str] = set()
+    for req in requirements:
+        if getattr(req, "source", "") != "scored_criterion":
+            continue
+        title = str(getattr(req, "text", "") or "").strip()
+        if not title:
+            continue
+        key = title.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        points = getattr(req, "points", None)
+        specs.append(
+            RfpSectionSpec(
+                rfp_title=title,
+                instructions=(
+                    "Scored evaluation criterion — this RFP awards points for it, so it "
+                    "needs its own section answering the buyer's ask directly."
+                ),
+                evaluation_weight=f"{points:g} pts" if points else "scored",
+            )
+        )
+    return specs
+
+
+async def specs_from_missing_submittals(
+    rfp_text: str,
+    *,
+    existing_section_titles: list[str] | None = None,
+) -> list[RfpSectionSpec]:
+    """Section specs for whatever the completeness-check agent reports missing.
+
+    Closing-component detection (the LLM pass that normally finds exhibits to
+    return) is one call juggling ~20 instructions at once and was observed to
+    vary run-to-run on the SAME RFP — 9 sections one Phase 2 run, 8 the next,
+    never landing on all of them. This reuses the SAME focused, single-purpose
+    completeness agent the live Intelligence path now runs (see
+    proposal_evaluation_coverage.find_missing_submittals_via_llm) — one small
+    targeted call, not a keyword parser and not a full re-derivation — so
+    Complete & clean can add whatever an earlier run missed to an ALREADY
+    drafted proposal, without re-running Phase 2 or touching a single
+    already-drafted section. Proposals generated before this fix existed
+    don't retroactively benefit from the live-path check, which is what this
+    Complete & clean recovery is for.
+    """
+    from app.services.proposal_evaluation_coverage import find_missing_submittals_via_llm
+
+    titles = [t for t in (existing_section_titles or []) if (t or "").strip()]
+    reported = await find_missing_submittals_via_llm(rfp_text, titles)
+    return [
+        RfpSectionSpec(
+            rfp_title=item["title"],
+            instructions=(
+                (item["reason"] or "Required submittal flagged by completeness check.")
+                + " Emit a short checklist plus [DESIGNER NOTE: Attach …] / "
+                "[MANUAL FILL: …] for any signed form the buyer supplies — do "
+                "not invent form content."
+            ),
+        )
+        for item in reported
+        if item["mandatory"]
+    ]
+
+
 def apply_rfp_toc_layout(
     draft: ProposalDraft,
     specs: list[RfpSectionSpec],
@@ -664,7 +748,6 @@ def order_draft_to_rfp_sequence(
     working = draft.model_copy(update={"sections": dynamic})
     used: set[str] = set()
     ordered: list[ProposalSection] = []
-    renamed = False
     for spec in specs:
         if _spec_is_rfp_title_noise(spec):
             continue
@@ -673,16 +756,27 @@ def order_draft_to_rfp_sequence(
         section = _match_section_for_spec(working, spec)
         if section is None or section.id in used:
             continue
-        if not outline_titles_near_duplicate(spec.rfp_title, section.title or ""):
-            section = section.model_copy(update={"title": spec.rfp_title})
-            renamed = True
+        # No relabeling here — deliberately. _match_section_for_spec matches
+        # via direct title similarity OR an LLM sameAskAs alias, and only the
+        # alias path can find a section whose title differs from spec.rfp_title
+        # (a direct match, by definition, already IS a near-duplicate title).
+        # An alias match means "this section covers a different, related ask
+        # already — don't add a duplicate tab for it", a coverage signal, not
+        # an identity signal. Relabeling on it previously took a correctly
+        # drafted "SECTION I — Background and Qualifications" tab and
+        # overwrote its title with "EXHIBIT 1: Evaluation Criteria Response
+        # Form" (the alias for a DIFFERENT spec) — and did so again on every
+        # subsequent Complete & clean run, since the same alias re-matches
+        # the same way each time. This function orders tabs; it never retitles
+        # one, because it cannot tell "same ask, buyer's fuller wording" apart
+        # from "different ask, already covered" from title similarity alone.
         ordered.append(section)
         used.add(section.id)
     rest_dynamic = [s for s in dynamic if s.id not in used]
     new_sections = static + ordered + rest_dynamic
     before_ids = [s.id for s in draft.sections]
     after_ids = [s.id for s in new_sections]
-    if before_ids == after_ids and not renamed:
+    if before_ids == after_ids:
         return draft, logs
     if ordered:
         logs.append(
@@ -903,6 +997,8 @@ async def run_rfp_structure_alignment_pass(
     use_llm: bool,
 ) -> tuple[ProposalDraft, list[str], list[str]]:
     """Walk scored RFP sections — reframe outline, redraft VERIFY stubs (any RFP)."""
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
     logs: list[str] = []
     human: list[str] = []
     excerpt = submission_documents_excerpt(rfp_text) or rfp_text[:100_000]
@@ -916,6 +1012,50 @@ async def run_rfp_structure_alignment_pass(
         logs.append("RFP structure: no scored section outline detected in excerpt.")
     else:
         logs.append(f"RFP structure: {len(specs)} scored section spec(s) from RFP.")
+
+    # Union in the persisted scoreboard. Free (no LLM call) and it catches the
+    # case the TOC read misses: an RFP that scores against a criteria response
+    # form rather than its table of contents.
+    criterion_specs = specs_from_scored_criteria(research)
+    if criterion_specs:
+        known = [s.rfp_title for s in specs]
+        added = [
+            spec
+            for spec in criterion_specs
+            if not any(
+                outline_titles_near_duplicate(spec.rfp_title, title) for title in known
+            )
+        ]
+        if added:
+            specs = list(specs) + added
+            logs.append(
+                f"RFP structure: +{len(added)} scored criterion spec(s) from the "
+                f"requirement ledger: {[s.rfp_title for s in added][:8]}"
+            )
+
+    # Union in whatever a focused completeness-check pass finds the current
+    # draft still missing — one small targeted LLM call, not a keyword parser,
+    # catching exactly the failure closing-component detection has: one call
+    # juggling many instructions at once, observed to miss a different subset
+    # of submittals on consecutive runs of the same RFP.
+    exhibit_specs = await specs_from_missing_submittals(
+        rfp_text, existing_section_titles=[s.title for s in draft.sections if s.title]
+    )
+    if exhibit_specs:
+        known = [s.rfp_title for s in specs]
+        added_exhibits = [
+            spec
+            for spec in exhibit_specs
+            if not any(
+                outline_titles_near_duplicate(spec.rfp_title, title) for title in known
+            )
+        ]
+        if added_exhibits:
+            specs = list(specs) + added_exhibits
+            logs.append(
+                f"RFP structure: +{len(added_exhibits)} required-exhibit spec(s) parsed "
+                f"directly from the RFP text: {[s.rfp_title for s in added_exhibits][:8]}"
+            )
 
     # Recover tabs the outline lean-filter / Phase 3 skip dropped entirely.
     draft, stub_logs = ensure_missing_scored_section_stubs(

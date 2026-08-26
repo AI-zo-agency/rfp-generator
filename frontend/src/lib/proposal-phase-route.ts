@@ -47,7 +47,7 @@ export async function proxyProposalPhasePost(
         {
           detail:
             res.status >= 500
-              ? `${errorLabel} failed on the server (HTTP ${res.status}). Try again in a moment.`
+              ? `${errorLabel} failed on the server (HTTP ${res.status}). Often a brief Supabase disconnect or server reload — wait a few seconds and try again. ${snippet ? `Detail: ${snippet}` : ""}`.trim()
               : `Invalid JSON from backend (HTTP ${res.status}): ${snippet}`,
         },
         { status: 502 }

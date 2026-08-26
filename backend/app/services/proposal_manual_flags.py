@@ -38,9 +38,114 @@ def is_section_draft_stub_manual_fill(tag: str) -> bool:
 def strip_section_draft_stub_manual_fills(text: str) -> str:
     """Remove draft-this-section stubs so Improve can write real prose."""
     return _SECTION_DRAFT_STUB_MFILL_RE.sub("", text or "")
+
+
 VERIFY_TAG_RE = re.compile(r"\[VERIFY:\s*([^\]]+)\]", re.I)
 PLACEHOLDER_TAG_RE = re.compile(r"\[(?:PLACEHOLDER|INSERT|TBD)[^\]]+\]", re.I)
 GENERIC_VERIFY_RE = re.compile(r"\[VERIFY\]", re.I)
+
+# VERIFY_TAG_RE stops at the first ]. If contradiction text embeds a ], append
+# produces a note the optional-scrub regex only partially deletes — leaving a
+# gibberish tail like: `with no actual content… | RFP requires: … (pricing gui]`.
+_ORPHAN_VERIFY_LEFTOVER_RE = re.compile(
+    r"(?is)"
+    r"(?:^|(?<=\n))"
+    r"[^\n\[]{0,160}?"
+    r"(?:"
+    r"with\s+no\s+actual\s+content|"
+    r"required\s+submiss\w*|"
+    r"resolve\s+(?:RFP|fact)\s+contradiction"
+    r")?"
+    r"[^\n\[]{0,240}?"
+    r"(?:\|\s*|[—–-]\s*)?"
+    r"(?:RFP\s+requires:|Verified\s+source\s+says:)"
+    r"[^\n\[]*?\]"
+)
+
+
+def sanitize_verify_tag_interior(text: str) -> str:
+    """Keep VERIFY bodies free of [ / ] so VERIFY_TAG_RE matches the whole tag."""
+    cleaned = (text or "").replace("[", "(").replace("]", ")")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def format_verify_tag(ask: str) -> str:
+    """Build a single well-formed ``[VERIFY: …]`` chip."""
+    interior = sanitize_verify_tag_interior(ask)
+    if not interior:
+        return "[VERIFY: needs review]"
+    return f"[VERIFY: {interior}]"
+
+
+def repair_orphan_verify_leftovers(content: str) -> tuple[str, int]:
+    """Strip contradiction VERIFY tails left after a premature ``]`` closed the tag."""
+    body = content or ""
+    if not body.strip():
+        return body, 0
+    # Only operate on text *outside* well-formed VERIFY chips — otherwise a
+    # legitimate ``[VERIFY: … | RFP requires: …]`` would be eaten by the orphan
+    # pattern matching the interior through the closing bracket.
+    parts: list[str] = []
+    last = 0
+    removed = 0
+    for match in VERIFY_TAG_RE.finditer(body):
+        chunk, n = _ORPHAN_VERIFY_LEFTOVER_RE.subn("", body[last : match.start()])
+        removed += n
+        parts.append(chunk)
+        parts.append(match.group(0))
+        last = match.end()
+    chunk, n = _ORPHAN_VERIFY_LEFTOVER_RE.subn("", body[last:])
+    removed += n
+    parts.append(chunk)
+    if not removed:
+        return body, 0
+    out = "".join(parts)
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    out = re.sub(r"  +", " ", out)
+    return out.strip(), removed
+
+
+def repair_orphan_verify_leftovers_in_draft(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """Draft-wide orphan VERIFY cleanup; hollow shells get a MANUAL FILL stub."""
+    from app.services.proposal_section_health import SectionHealth, classify_section_health
+
+    logs: list[str] = []
+    sections: list = []
+    changed = False
+    for section in draft.sections:
+        body = section.content or ""
+        cleaned, n = repair_orphan_verify_leftovers(body)
+        if not n:
+            sections.append(section)
+            continue
+        changed = True
+        title = (section.title or section.id or "section").strip()
+        health = classify_section_health(cleaned)
+        if health in {
+            SectionHealth.EMPTY,
+            SectionHealth.PLACEHOLDER_ONLY,
+            SectionHealth.DRAFT_FAILED,
+            SectionHealth.NO_EVIDENCE,
+        } or len(cleaned.strip()) < 40:
+            cleaned = (
+                f"## {title}\n\n"
+                f"[MANUAL FILL: Draft this RFP-required section — {title}]\n"
+            )
+            logs.append(
+                f"orphan VERIFY leftover cleared on “{title}” → MANUAL FILL stub"
+            )
+        else:
+            logs.append(f"orphan VERIFY leftover cleared on “{title}”")
+        sections.append(
+            section.model_copy(update={"content": cleaned, "status": "generated"})
+        )
+    if not changed:
+        return draft, logs
+    return draft.model_copy(update={"sections": sections}), logs
 
 _MANUAL_FILL_REQUEST_RE = re.compile(
     r"(?is)"

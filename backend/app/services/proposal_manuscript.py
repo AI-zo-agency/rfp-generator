@@ -6,7 +6,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from app.models.proposal import ProposalSection
+    from app.models.proposal import ProposalDraft, ProposalSection
 
 SECTION_1_ID_ORDER: tuple[str, ...] = (
     "section-1-who-we-are",
@@ -588,6 +588,36 @@ def normalize_designer_note_markup(text: str) -> str:
         return f"[DESIGNER NOTE: {body}]"
 
     return _DESIGNER_NOTE_PROSE_RE.sub(_repl, text)
+
+
+def apply_designer_ready_markup_polish_to_draft(
+    draft: ProposalDraft,
+) -> tuple[ProposalDraft, list[str]]:
+    """Normalize designer-note tags + collapse empty H2/H3 shells — no new facts.
+
+    Complete Scan / Generate final polish so the manuscript is handoff-shaped
+    for layout (bracket callouts, no empty heading shells).
+    """
+    logs: list[str] = []
+    sections = []
+    changed_any = False
+    for section in draft.sections:
+        body = section.content or ""
+        if not body.strip():
+            sections.append(section)
+            continue
+        polished = normalize_designer_note_markup(body)
+        polished = collapse_empty_subheadings(polished)
+        if polished != body:
+            changed_any = True
+            title = (section.title or section.id or "section").strip()
+            logs.append(f"{title}: designer-ready markup polish")
+            sections.append(section.model_copy(update={"content": polished}))
+        else:
+            sections.append(section)
+    if not changed_any:
+        return draft, []
+    return draft.model_copy(update={"sections": sections}), logs
 
 
 # --- Internal handoff tags: THE single definition ---------------------------------

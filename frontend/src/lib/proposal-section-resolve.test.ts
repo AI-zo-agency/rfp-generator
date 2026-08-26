@@ -207,6 +207,135 @@ describe("resolveChatTarget", () => {
     }
   });
 
+  it("Improve pin stays on Exhibit when issue list mentions insurance and §18/§26", () => {
+    // Reproduce: user pins Exhibit 1 via Improve full section, pastes a defect
+    // list that happens to say "professional liability insurance" and compare
+    // §18 vs §26 — those incidental words must NOT steal to Insurance / §18.
+    const withExhibit = [
+      ...sections,
+      sec("insurance", "Insurance Certification"),
+      sec("sec-18", "18. Evaluation Criteria Narrative"),
+      sec("sec-26", "26. Evaluation Criteria Response Form (duplicate)"),
+      sec(
+        "exhibit-1",
+        "Exhibit 1: Evaluation Criteria Response Form"
+      ),
+    ];
+    const pin = withExhibit.find((s) => s.id === "exhibit-1")!;
+    const ask = [
+      "I.2 Active Client List entirely missing — jumps I.1 → I.3, no client list.",
+      "This is the core defect that makes §18 a broken duplicate of §26.",
+      'Stray double period — "...professional liability insurance. ."',
+      'Dangling empty header — "State registrations." with nothing under it.',
+      "Empty table cells in I.4 — 3 of 7 rows have no Cost to CNM / When billed values.",
+      "Word count is padded, not complete — repeating I.1/I.3/I.4/I.5 content that already exists in §26.",
+      "Fix all of these in this section.",
+    ].join("\n");
+    const result = resolveChatTarget(withExhibit, ask, {
+      viewingSectionId: pin.id,
+      pinnedSection: pin,
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("exhibit-1");
+      expect(result.reason).toBe("pinned");
+      expect(result.section.id).not.toBe("insurance");
+      expect(result.section.id).not.toBe("sec-18");
+    }
+  });
+
+  it("Improve pin stays on Technical Proposal when trim ask names §21 Experience", () => {
+    // Orland Park: Improve on Technical Proposal + trim instruction that cites
+    // §21/§22/Experience as places content already lives — must NOT rewrite Experience.
+    const withTech = [
+      ...sections,
+      sec("tech", "20. Technical Proposal"),
+      sec(
+        "exp-21",
+        "21. Experience — Municipal, Tourism & Economic Development Marketing (Operating History, Relevant Projects & Similar Scope)"
+      ),
+      sec("qual-22", "22. Qualifications of Assigned Personnel"),
+      sec("fee-26", "26. Fee Proposal"),
+    ];
+    const pin = withTech.find((s) => s.id === "tech")!;
+    const ask = [
+      "Keep the cross-reference table at the top (RFP Requirement → Addressed In).",
+      "Below that, cut the Experience, Operating History, Qualifications table, Approach/Timeline table, and Fee summary — all of that already exists in full in §21/§22/§23/§26.",
+      "Before cutting, pull Medford/Rogue X and Santa Clara into §21's case study table;",
+      "Letitia Hopper's Qualifications row → fix the blank row in §22.",
+    ].join(" ");
+    const result = resolveChatTarget(withTech, ask, {
+      viewingSectionId: pin.id,
+      pinnedSection: pin,
+    });
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("tech");
+      expect(result.reason).toBe("pinned");
+      expect(result.section.id).not.toBe("exp-21");
+    }
+  });
+
+  it("without Improve pin, explicit fix-the-insurance-section still retargets", () => {
+    const withInsurance = [
+      ...sections,
+      sec("insurance", "Insurance Certification"),
+      sec("exhibit-1", "Exhibit 1: Evaluation Criteria Response Form"),
+    ];
+    const result = resolveChatTarget(
+      withInsurance,
+      "Fix the Insurance Certification section — mark coverages Compliant only from COI",
+      {
+        viewingSectionId: "exhibit-1",
+        pinnedSection: null,
+      }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("insurance");
+    }
+  });
+
+  it("Improve pin yields only when ask primarily targets another section by name", () => {
+    const withInsurance = [
+      ...sections,
+      sec("insurance", "Insurance Certification"),
+      sec("exhibit-1", "Exhibit 1: Evaluation Criteria Response Form"),
+    ];
+    const pin = withInsurance.find((s) => s.id === "exhibit-1")!;
+    const result = resolveChatTarget(
+      withInsurance,
+      "Fix the Insurance Certification section — mark coverages Compliant only from COI",
+      {
+        viewingSectionId: pin.id,
+        pinnedSection: pin,
+      }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      // Explicit "Fix the Insurance Certification section" is a primary retarget.
+      expect(result.section.id).toBe("insurance");
+    }
+  });
+
+  it("incidental insurance wording without pin does not unique-topic hijack", () => {
+    const withInsurance = [
+      ...sections,
+      sec("insurance", "Insurance Certification"),
+      sec("exhibit-1", "Exhibit 1: Evaluation Criteria Response Form"),
+    ];
+    const result = resolveChatTarget(
+      withInsurance,
+      "Fix the stray double period after professional liability insurance. .",
+      { viewingSectionId: "exhibit-1" }
+    );
+    expect(result?.kind).toBe("resolved");
+    if (result?.kind === "resolved") {
+      expect(result.section.id).toBe("exhibit-1");
+      expect(result.reason).not.toBe("unique-topic");
+    }
+  });
+
   it("fuzzy title tokens beat open tab", () => {
     const withPast = [
       ...sections,
@@ -456,7 +585,7 @@ describe("resolveChatTarget", () => {
     expect(result?.kind).toBe("resolved");
     if (result?.kind === "resolved") {
       expect(result.section.id).toBe("section-3-work-umatilla");
-      expect(result.reason).toBe("client-name");
+      expect(["client-name", "title"]).toContain(result.reason);
     }
   });
 

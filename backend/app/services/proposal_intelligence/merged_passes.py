@@ -18,6 +18,11 @@ from app.services.proposal_intelligence.agents.rfp_understanding import (
     AGENT as UNDERSTANDING_AGENT,
     UNDERSTANDING_FORBIDDEN_KEYS,
 )
+from app.services.proposal_evaluation_coverage import (
+    backfill_evaluation_response_limits,
+    sanitize_evaluation_criteria_names,
+    evaluation_extraction_looks_degenerate,
+)
 from app.services.proposal_intelligence.agents.section_strategy_planner import (
     apply_section_strategy_from_raw,
 )
@@ -123,10 +128,24 @@ Return JSON ONLY:
     "confidence": 0.0
   },
   "evaluation": {
-    "criteria": [{"name": "string", "weight": 25, "priorityRank": 1}],
+    "scoredResponseForm": true,
+    "totalPoints": 1000,
+    "responseCharLimit": 4000,
     "emphasis": ["Methodology", "Experience"],
     "writingStyle": "executive|technical|mixed",
-    "confidence": 0.0
+    "confidence": 0.0,
+    "criteria": [
+      {
+        "name": "Strategic Planning",
+        "itemCode": "SECTION III",
+        "weight": 160,
+        "priorityRank": 1,
+        "responseCharLimit": 4000,
+        "items": [
+          {"itemCode": "III.1", "ask": "verbatim scored ask", "weight": 40, "responseCharLimit": 4000}
+        ]
+      }
+    ]
   },
   "successCriteria": {
     "items": [{"criterion": "string", "why": "string", "recurringTheme": true}],
@@ -137,7 +156,23 @@ Return JSON ONLY:
 Compliance: include the FULL submission checklist — documents to submit, forms to return,
 vendor qualification narratives, addenda acknowledgement, financial stability, awards,
 references, pricing attachment format.
-Evaluation: include weighting when the RFP states it.
+Evaluation — THE SCOREBOARD. This drives the proposal outline, so extract it completely:
+- Transcribe the RFP's scoring table / evaluation-criteria response form EXACTLY as published.
+  One "criteria" entry per SCORED PARENT SECTION (the buyer's own heading — "SECTION III
+  Strategic Planning", "Tab 4 — Technical Approach"), carrying that section's TOTAL points.
+- Put the buyer's section label in itemCode ("SECTION III", "Tab 4", "B.2"); leave "" when
+  the RFP does not number its criteria.
+- Every numbered sub-ask under a parent goes in "items" with its own itemCode ("III.1"),
+  its points, and "ask" = the RFP's OWN wording of what to describe (verbatim, not a
+  paraphrase). These are what the writer must answer one by one — losing them loses points.
+- Set scoredResponseForm true when the RFP publishes a criteria response form whose sections
+  ARE the required proposal sections. Set totalPoints to the stated maximum.
+- responseCharLimit: the per-response field cap the RFP states ("each form field allows a
+  maximum of 4,000 characters"). Put it at the level the RFP states it — package-wide,
+  per criterion, or per item. Omit when the RFP states no character cap.
+- List EVERY scored section, including pricing/economy sections. Never merge two scored
+  sections into one entry and never drop a section because it looks administrative.
+- weight: use stated points when given, else the stated percentage. Never invent weights.
 Success: mark recurringTheme true for themes that should echo across the proposal.
 Scope: separate mandatory vs optional vs out-of-scope. No proposal prose.
 """
@@ -348,7 +383,10 @@ async def run_opportunity_extract(
                     ),
                 },
             ],
-            max_tokens=8192,
+            # Understanding + compliance + scope + evaluation + success in one
+            # response. The evaluation block alone can now run to 25+ verbatim
+            # scored asks, so the old 8192 truncated the JSON mid-array.
+            max_tokens=16384,
             temperature=0.1,
             node_name="opportunity_extract",
         )
@@ -412,6 +450,42 @@ async def run_opportunity_extract(
     )
 
     plan = _apply_opportunity_slices(plan, raw, provider)
+
+    # This one call carries understanding + compliance + scope + evaluation +
+    # success. When it runs long the evaluation block is what degrades, and it
+    # degrades silently: a 1,000-point seven-section criteria form came back as
+    # a single criterion named "Evaluation Criteria Response Form" with no
+    # points, so every downstream guarantee correctly found nothing to protect
+    # and the scored sections vanished. Re-extract with the focused agent —
+    # one extra call, and only on a detected collapse.
+    if evaluation_extraction_looks_degenerate(plan.opportunity.evaluation, rfp_context):
+        logger.warning(
+            "Evaluation extraction looks degenerate for %s (criteria=%d) — "
+            "re-running the focused evaluation agent",
+            rfp_meta.get("title", ""),
+            len(plan.opportunity.evaluation.criteria),
+        )
+        from app.services.proposal_intelligence.agents.evaluation_criteria import (
+            run_evaluation_criteria,
+        )
+
+        try:
+            plan = await run_evaluation_criteria(
+                plan=plan, rfp_context=rfp_context, rfp_meta=rfp_meta
+            )
+            logger.info(
+                "Evaluation re-extraction recovered %d criterion/criteria",
+                len(plan.opportunity.evaluation.criteria),
+            )
+        except Exception as exc:  # noqa: BLE001
+            # A failed retry must not sink the whole opportunity pass — the
+            # degraded evaluation is still better than no plan at all.
+            logger.warning("Evaluation re-extraction failed: %s", exc)
+
+    # The extractor reads the whole RFP but reports one blob; a per-field
+    # character cap stated in the submission instructions is routinely dropped.
+    backfill_evaluation_response_limits(plan.opportunity.evaluation, rfp_context)
+    sanitize_evaluation_criteria_names(plan.opportunity.evaluation)
     return plan
 
 

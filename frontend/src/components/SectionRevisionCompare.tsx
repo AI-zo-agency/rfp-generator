@@ -58,6 +58,7 @@ export function SectionRevisionCompare({
   return (
     <section
       className={`proposal-revision-drawer-panel proposal-revision-compare--${theme}`}
+      style={{ flex: "1 1 0%", minHeight: 0, height: "auto", overflow: "hidden" }}
       aria-label="Section revision summary"
     >
       <header className="proposal-revision-drawer-header">
@@ -115,80 +116,98 @@ export function SectionRevisionCompare({
         </div>
       </header>
 
-      {summary ? (
-        <div className="proposal-revision-meta-row">
-          <div className="proposal-revision-summary-md">
-            <MarkdownReportBody body={summary} variant="report" />
+      <div
+        className="proposal-revision-drawer-body flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain"
+        style={{ WebkitOverflowScrolling: "touch" }}
+      >
+        {summary ? (
+          <div className="proposal-revision-meta-row">
+            <div className="proposal-revision-summary-md">
+              <MarkdownReportBody body={summary} variant="report" />
+            </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
 
-      {identical ? (
-        <div className="proposal-revision-compare-stage">
-          <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
-            <p className="proposal-revision-stage-label">Current section</p>
-            <div className="proposal-revision-stage-body whitespace-pre-wrap">
-              {(after || before || "").trim() || "(empty)"}
-            </div>
-            <p className="mt-3 text-xs text-zo-text-muted">
-              This apply did not change this section&apos;s text (patch skipped or
-              only other sections were updated). Open a section that actually
-              changed, or ask again to apply the fix here.
-            </p>
-          </div>
-        </div>
-      ) : hunks.length === 0 ? (
-        <div className="proposal-revision-compare-stage">
-          <div className="proposal-revision-stage-col proposal-revision-stage-col--before">
-            <p className="proposal-revision-stage-label">Before</p>
-            <div className="proposal-revision-stage-body whitespace-pre-wrap">
-              {(before || "").trim() || "(empty)"}
+        {identical ? (
+          <div
+            className="proposal-revision-compare-stage"
+            style={{ minHeight: "min(28rem, 55dvh)" }}
+          >
+            <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
+              <p className="proposal-revision-stage-label">Current section</p>
+              <div className="proposal-revision-stage-body whitespace-pre-wrap">
+                {(after || before || "").trim() || "(empty)"}
+              </div>
+              <p className="mt-3 text-xs text-zo-text-muted">
+                This apply did not change this section&apos;s text (patch skipped or
+                only other sections were updated). Open a section that actually
+                changed, or ask again to apply the fix here.
+              </p>
             </div>
           </div>
-          <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
-            <p className="proposal-revision-stage-label">After</p>
-            <div className="proposal-revision-stage-body whitespace-pre-wrap">
-              {(after || "").trim() || "(empty)"}
+        ) : hunks.length === 0 ? (
+          <div
+            className="proposal-revision-compare-stage"
+            style={{ minHeight: "min(28rem, 55dvh)" }}
+          >
+            <div className="proposal-revision-stage-col proposal-revision-stage-col--before">
+              <p className="proposal-revision-stage-label">Before</p>
+              <div className="proposal-revision-stage-body whitespace-pre-wrap">
+                {(before || "").trim() || "(empty)"}
+              </div>
+            </div>
+            <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
+              <p className="proposal-revision-stage-label">After</p>
+              <div className="proposal-revision-stage-body whitespace-pre-wrap">
+                {(after || "").trim() || "(empty)"}
+              </div>
             </div>
           </div>
-        </div>
-      ) : (
-        <>
-          {hunks.length > 1 ? (
-            <div className="proposal-revision-hunk-tabs" role="tablist" aria-label="Changed blocks">
-              {hunks.map((hunk, index) => (
-                <button
-                  key={`${hunk.type}-${index}`}
-                  type="button"
-                  role="tab"
-                  aria-selected={selectedHunk === index}
-                  className={`proposal-revision-hunk-tab proposal-revision-hunk--${hunk.type} ${
-                    selectedHunk === index ? "is-selected" : ""
-                  }`}
-                  onClick={() => setSelectedHunk(index)}
-                >
-                  {hunkLabel(hunk.type)} {index + 1}
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="proposal-revision-compare-stage">
-            {active?.before ? (
-              <div className="proposal-revision-stage-col proposal-revision-stage-col--before">
-                <p className="proposal-revision-stage-label">Before</p>
-                <div className="proposal-revision-stage-body">{active.before}</div>
+        ) : (
+          <>
+            {hunks.length > 1 ? (
+              <div
+                className="proposal-revision-hunk-tabs sticky top-0 z-[1]"
+                role="tablist"
+                aria-label="Changed blocks"
+              >
+                {hunks.map((hunk, index) => (
+                  <button
+                    key={`${hunk.type}-${index}`}
+                    type="button"
+                    role="tab"
+                    aria-selected={selectedHunk === index}
+                    className={`proposal-revision-hunk-tab proposal-revision-hunk--${hunk.type} ${
+                      selectedHunk === index ? "is-selected" : ""
+                    }`}
+                    onClick={() => setSelectedHunk(index)}
+                  >
+                    {hunkLabel(hunk.type)} {index + 1}
+                  </button>
+                ))}
               </div>
             ) : null}
-            {active?.after ? (
-              <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
-                <p className="proposal-revision-stage-label">After</p>
-                <div className="proposal-revision-stage-body">{active.after}</div>
-              </div>
-            ) : null}
-          </div>
-        </>
-      )}
+
+            <div
+              className="proposal-revision-compare-stage"
+              style={{ minHeight: "min(28rem, 55dvh)" }}
+            >
+              {active?.before ? (
+                <div className="proposal-revision-stage-col proposal-revision-stage-col--before">
+                  <p className="proposal-revision-stage-label">Before</p>
+                  <div className="proposal-revision-stage-body">{active.before}</div>
+                </div>
+              ) : null}
+              {active?.after ? (
+                <div className="proposal-revision-stage-col proposal-revision-stage-col--after">
+                  <p className="proposal-revision-stage-label">After</p>
+                  <div className="proposal-revision-stage-body">{active.after}</div>
+                </div>
+              ) : null}
+            </div>
+          </>
+        )}
+      </div>
     </section>
   );
 }

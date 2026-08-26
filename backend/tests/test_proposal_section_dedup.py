@@ -8,6 +8,7 @@ from app.models.proposal import ProposalSection
 from app.services.proposal_section_dedup import (
     ANTI_DUPLICATION_RULES,
     collapse_title_near_duplicate_sections,
+    compress_sibling_restatement_blocks,
     dedupe_manuscript_for_scan,
     format_prior_sections_block,
     prune_near_duplicate_sections,
@@ -190,6 +191,79 @@ class SectionDedupTests(unittest.TestCase):
         self.assertIn("See **", approach.content or "")
         self.assertNotIn("founded in 2013", approach.content or "")
         self.assertTrue(any("trimmed" in line for line in logs))
+
+    def test_complete_scan_compresses_technical_proposal_sibling_blocks(self) -> None:
+        """Technical Proposal must not re-paste Experience / Qualifications wholes.
+
+        Keep the useful cross-ref table; replace heading blocks that match a
+        dedicated sibling tab with a one-line pointer (Complete Scan path).
+        """
+        exp_body = (
+            "## Experience\n\n"
+            "We have worked with municipalities and tourism boards for thirteen years, "
+            "including City of Medford Rogue X downtown activation and City of Santa Clara "
+            "destination brand campaigns with measurable overnight visitation lift.\n\n"
+            "| Project | Outcome |\n| --- | --- |\n| Medford | Downtown activation |\n"
+        )
+        qual_body = (
+            "## Qualifications\n\n"
+            "| Name | Role | Years |\n| --- | --- | --- |\n"
+            "| Letitia Hopper | Brand Lead | 12 |\n| Ella Lindau | Strategy | 10 |\n"
+        )
+        fee_body = (
+            "## Fee Proposal\n\n"
+            "Total proposed investment is ninety-eight thousand dollars for Year 1 "
+            "creative, media planning, and destination brand delivery milestones.\n"
+        )
+        tech = (
+            "## Technical Proposal\n\n"
+            "| RFP Requirement | Addressed In |\n| --- | --- |\n"
+            "| Experience | §21 |\n| Qualifications | §22 |\n| Fees | §26 |\n\n"
+            "### Experience — Municipal, Tourism & Economic Development Marketing\n\n"
+            "We have worked with municipalities and tourism boards for thirteen years, "
+            "including City of Medford Rogue X downtown activation and City of Santa Clara "
+            "destination brand campaigns with measurable overnight visitation lift.\n\n"
+            "| Project | Outcome |\n| --- | --- |\n| Medford | Downtown activation |\n\n"
+            "### Qualifications of Assigned Personnel\n\n"
+            "| Name | Role | Years |\n| --- | --- | --- |\n"
+            "| Letitia Hopper | Brand Lead | 12 |\n| Ella Lindau | Strategy | 10 |\n\n"
+            "### Fee Proposal\n\n"
+            "Total proposed investment is ninety-eight thousand dollars for Year 1 "
+            "creative, media planning, and destination brand delivery milestones.\n"
+        )
+        sections = [
+            _sec(
+                "tech",
+                "20. Technical Proposal",
+                tech,
+            ),
+            _sec(
+                "exp-21",
+                "21. Experience — Municipal, Tourism & Economic Development Marketing",
+                exp_body,
+            ),
+            _sec(
+                "qual-22",
+                "22. Qualifications of Assigned Personnel",
+                qual_body,
+            ),
+            _sec("fee-26", "26. Fee Proposal", fee_body),
+        ]
+        kept, logs = dedupe_manuscript_for_scan(sections, drop_clone_tabs=False)
+        tech_out = next(s for s in kept if s.id == "tech")
+        body = tech_out.content or ""
+        self.assertIn("RFP Requirement", body)
+        self.assertIn("Addressed In", body)
+        # Sibling wholes replaced with pointers — not deleted tab, not full restate.
+        self.assertTrue(any("sibling block" in line or "restatement block" in line for line in logs)
+                        or "See **" in body)
+        self.assertIn("See **", body)
+        # Dedicated tabs untouched.
+        exp = next(s for s in kept if s.id == "exp-21")
+        self.assertIn("Medford", exp.content or "")
+        # Technical Proposal should not still carry the long fee sentence once compressed.
+        fee_sentence = "ninety-eight thousand dollars for Year 1"
+        self.assertLessEqual(body.lower().count(fee_sentence.lower()), 0)
 
     def test_prune_deletes_overlapping_collab_tabs(self) -> None:
         body = (

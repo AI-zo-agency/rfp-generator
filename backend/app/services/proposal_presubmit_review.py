@@ -40,6 +40,7 @@ from app.services.proposal_manuscript_cleanup import (
     budget_mentions_subcontractors,
     deny_subcontractors_claimed,
 )
+from app.services.proposal_evaluation_coverage import find_response_char_limit
 from app.services.proposal_voice_enforcement import contains_vendor_language
 from app.services.proposal_hallucination_detector import (
     detect_hallucinations,
@@ -824,6 +825,78 @@ def _compliance_checklist(
     return items
 
 
+def _response_blocks(content: str) -> list[tuple[str, str]]:
+    """Split a section into the separately-submitted responses it holds.
+
+    An RFP that caps responses by character does so per FIELD. A tab answering
+    five numbered asks fills five fields, so measuring the whole tab against one
+    field's cap would report a false failure. Markdown sub-headings are how the
+    writer marks those per-item answers, so each heading starts a new block.
+    """
+    blocks: list[tuple[str, str]] = []
+    label = ""
+    buffer: list[str] = []
+    for line in (content or "").splitlines():
+        if line.lstrip().startswith("#"):
+            if buffer:
+                blocks.append((label, "\n".join(buffer)))
+                buffer = []
+            label = line.lstrip("# ").strip()
+            continue
+        buffer.append(line)
+    if buffer:
+        blocks.append((label, "\n".join(buffer)))
+    return [(lbl, text) for lbl, text in blocks if text.strip()]
+
+
+def _scan_response_char_limits(
+    *,
+    draft: ProposalDraft,
+    rfp_text: str | None,
+) -> list[PreSubmitIssue]:
+    """Flag responses longer than the per-field character cap the RFP states.
+
+    Portals enforce these caps by rejecting the submission, so an over-limit
+    response is a hard blocker rather than a style note. Under-limit is fine —
+    the cap is a ceiling, not a target.
+    """
+    limit = find_response_char_limit(rfp_text or "")
+    if not limit:
+        return []
+    issues: list[PreSubmitIssue] = []
+    for section in draft.sections:
+        content = section.content or ""
+        if not content.strip():
+            continue
+        reg = classify_section_register(
+            section_id=section.id,
+            title=section.title,
+            zo_mode=section.mode,
+        )
+        if reg != "narrative":
+            continue
+        for label, block in _response_blocks(content):
+            length = len(block.strip())
+            if length <= limit:
+                continue
+            where = f" ({label})" if label else ""
+            issues.append(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="compliance",
+                    message=(
+                        f"Response{where} is {length:,} characters — the RFP caps each "
+                        f"response field at {limit:,}. Cut {length - limit:,} characters "
+                        "or the portal will reject the submission."
+                    ),
+                    sectionId=section.id,
+                    sectionTitle=section.title,
+                    excerpt=block.strip()[:300],
+                )
+            )
+    return issues
+
+
 def _scan_hallucinations(draft: ProposalDraft) -> list[PreSubmitIssue]:
     """Detect fabricated facts, unverified claims, and hallucinated content."""
     issues: list[PreSubmitIssue] = []
@@ -982,6 +1055,7 @@ def run_presubmit_review(
         _scan_submission_document_gaps(draft=draft, rfp=rfp, rfp_text=rfp_text or None)
     )
     issues.extend(_scan_voice(draft=draft))
+    issues.extend(_scan_response_char_limits(draft=draft, rfp_text=rfp_text or None))
     issues.extend(_scan_grammar(draft=draft))
     issues.extend(_scan_subcontractor_narrative(draft=draft, research=research))
     issues.extend(scan_manuscript_consistency(draft=draft, research=research, rfp=rfp))
