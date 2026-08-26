@@ -131,9 +131,12 @@ class CertClaimScrubTests(unittest.TestCase):
 
         self.assertTrue(
             user_asks_cert_claim_scrub(
-                "Remove three false certifications (MBE, WBE, DBE); "
-                "retain only WBENC/WOSB."
+                "Remove three false certifications (MBE, WBE, DBE)."
             )
+        )
+        # No retain-only synonym regex — intent must say remove/false cert.
+        self.assertFalse(
+            user_asks_cert_claim_scrub("retain only WBENC/WOSB and B Corp.")
         )
         self.assertFalse(user_asks_cert_claim_scrub("What certifications do we have?"))
 

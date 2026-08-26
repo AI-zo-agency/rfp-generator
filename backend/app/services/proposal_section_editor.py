@@ -6620,9 +6620,7 @@ async def _try_section_cert_claim_scrub(
             provider,
             (
                 f"**{section.title}** — reviewed certification claims against the verified "
-                "agency list (WBENC, WOSB only — never B Corp / MBE / DBE / platform "
-                "badges). No MBE/DBE/standalone "
-                "WBE or unverified badges remain to remove."
+                "agency list (WBENC and WOSB only). No fabricated or unverified badges remain."
             ),
             False,
         )
@@ -6644,7 +6642,6 @@ async def _try_section_cert_claim_scrub(
     reply = (
         f"**{section.title}** — removed fabricated / unverified certification claims "
         f"({len(logs)} change(s)). Kept only verified agency credentials: WBENC/WOSB. "
-        "Never B Corp, MBE/DBE, 1% for the Planet, or LinkedIn Gold. "
         + "; ".join(logs[:4])
         + ("…" if len(logs) > 4 else "")
     )
