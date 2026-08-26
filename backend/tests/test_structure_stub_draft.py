@@ -126,6 +126,71 @@ class StructureStubDraftTests(unittest.TestCase):
         self.assertFalse(section_needs_presubmit_fill(sec))
 
 
+class SpecCoveredByFilledSectionTests(unittest.TestCase):
+    """The stub step must not duplicate a section the writer already drafted."""
+
+    def _spec(self, title: str):
+        class _S:
+            def __init__(s):
+                s.rfp_title = title
+                s.same_ask_as = []
+
+        return _S()
+
+    def _filled(self, sid: str, title: str) -> ProposalSection:
+        body = " ".join(
+            ["We coordinate stakeholders and drive economic development through tourism."] * 7
+        )
+        return ProposalSection(id=sid, title=title, content=body, status="generated")
+
+    def test_long_rfp_title_covered_by_shorter_filled_section(self) -> None:
+        from app.services.proposal_fulfill_rfp_structure import (
+            _spec_covered_by_filled_section,
+        )
+
+        secs = [
+            self._filled("7", "7. Strategic Approach and Measurement"),
+            self._filled("8", "8. Stakeholder Coordination and Community Partnership"),
+        ]
+        self.assertTrue(
+            _spec_covered_by_filled_section(
+                secs, self._spec("Stakeholder Coordination and Economic Development Through Tourism")
+            )
+        )
+        self.assertTrue(
+            _spec_covered_by_filled_section(
+                secs, self._spec("Strategic Approach to Tourism Promotion and Place Branding")
+            )
+        )
+
+    def test_genuinely_missing_spec_is_not_suppressed(self) -> None:
+        from app.services.proposal_fulfill_rfp_structure import (
+            _spec_covered_by_filled_section,
+        )
+
+        secs = [self._filled("8", "8. Stakeholder Coordination and Community Partnership")]
+        self.assertFalse(
+            _spec_covered_by_filled_section(secs, self._spec("Cost Proposal and Fee Schedule"))
+        )
+
+    def test_thin_stub_does_not_count_as_coverage(self) -> None:
+        from app.services.proposal_fulfill_rfp_structure import (
+            _spec_covered_by_filled_section,
+        )
+
+        stub = ProposalSection(
+            id="x",
+            title="Stakeholder Coordination",
+            content="[MANUAL FILL: Draft this RFP-required section — Stakeholder Coordination]",
+            status="generated",
+        )
+        self.assertFalse(
+            _spec_covered_by_filled_section(
+                [stub], self._spec("Stakeholder Coordination and Economic Development")
+            )
+        )
+
+
 class RestoreEmptiedSectionsTests(unittest.TestCase):
     """Complete & Clean must never leave a drafted section as an empty stub."""
 

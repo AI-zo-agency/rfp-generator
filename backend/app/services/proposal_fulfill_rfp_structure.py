@@ -395,6 +395,49 @@ def _match_section_for_spec(
     return None
 
 
+def _leading_concept_tokens(title: str, n: int = 2) -> list[str]:
+    """First ``n`` significant tokens of a title (marker/number/stopwords stripped)."""
+    from app.services.proposal_outline_dedup import _STOPWORDS, normalize_outline_title
+
+    toks = [
+        w
+        for w in normalize_outline_title(title).split()
+        if len(w) >= 3 and w not in _STOPWORDS
+    ]
+    return toks[:n]
+
+
+def _spec_covered_by_filled_section(
+    sections: list[ProposalSection],
+    spec: RfpSectionSpec,
+) -> bool:
+    """True when an already-DRAFTED section opens with the same concept as this
+    scored spec, so the stub step must not mint a duplicate.
+
+    ``_match_section_for_spec`` only catches near-duplicate titles (jaccard ≥
+    0.72); long RFP titles like "Stakeholder Coordination and Economic
+    Development Through Tourism" fall under that against an existing
+    "Stakeholder Coordination and Community Partnership", so a redundant empty
+    stub was being added next to the writer's filled section. This is the
+    coverage backstop: same leading concept ("stakeholder coordination",
+    "strategic approach") + an existing section that is actually drafted. It only
+    ever SUPPRESSES a stub — it never deletes or edits a section.
+    """
+    spec_head = _leading_concept_tokens(spec.rfp_title or "")
+    if len(spec_head) < 2:
+        return False
+    from app.services.proposal_draft_structure_stubs import section_is_rfp_draft_stub
+    from app.services.proposal_section_quality import word_count
+
+    for section in sections:
+        body = section.content or ""
+        if word_count(body) < 40 or section_is_rfp_draft_stub(section):
+            continue
+        if _leading_concept_tokens(section.title or "") == spec_head:
+            return True
+    return False
+
+
 def _spec_is_static_company_ask(draft: ProposalDraft, spec: RfpSectionSpec) -> bool:
     """TOC item already satisfied by Sections 1.1–1.5 / 2 / 3 — header wrap only."""
     if spec.satisfied_by_static_company_block:
@@ -683,6 +726,14 @@ def ensure_missing_scored_section_stubs(
         if _spec_is_static_company_ask(working, spec):
             continue
         if _match_section_for_spec(working, spec):
+            continue
+        # Coverage backstop: don't mint a duplicate stub next to a section the
+        # writer already drafted under a slightly different (sub-threshold) title.
+        if _spec_covered_by_filled_section(sections, spec):
+            logs.append(
+                f"RFP structure: “{spec.rfp_title}” already covered by a drafted "
+                "section — no stub added"
+            )
             continue
         # A TOC ask for personnel resumes/CVs/key-staff qualifications is
         # already met by the per-person Section 2 bio tabs — those ARE the

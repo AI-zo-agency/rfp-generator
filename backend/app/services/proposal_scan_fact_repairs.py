@@ -230,24 +230,250 @@ def flag_financial_stability_without_companyfacts(
 
 
 def parse_org_chart_roles(draft: ProposalDraft) -> dict[str, str]:
-    """Name (lower) → canonical role title from Section 1.2 org chart."""
+    """Name (lower) → canonical role title from the Section 1.2 org chart.
+
+    Matches the org-structure tab by id OR title (it ships as
+    ``section-1-org-structure`` / "Organizational Structure", not only the older
+    ``section-1-2`` / "org chart" wording), and parses BOTH layouts it appears
+    in: pipe tables (``| Name | … | Role |``) and bold-name lines
+    (``**Ella Lindau** Operations Director`` under ``## Category`` headings).
+    Without both, every teammate's role/title stayed an unresolved [VERIFY] tag
+    even though the org chart listed it.
+    """
     roles: dict[str, str] = {}
+
+    def _record(name: str, role: str) -> None:
+        name = name.strip()
+        role = role.strip().lstrip("—–-:").strip()
+        # Two-word (or more) person name, a real role, and not a whole sentence.
+        if len(name.split()) >= 2 and 3 < len(role) < 80 and "." not in role:
+            roles[name.casefold()] = role
+
     for section in draft.sections:
         sid = section.id or ""
         title_cf = (section.title or "").casefold()
-        if sid != "section-1-2" and "org chart" not in title_cf and "team roster" not in title_cf:
+        is_org_section = (
+            sid in ("section-1-2", "section-1-org-structure")
+            or "org chart" in title_cf
+            or "team roster" in title_cf
+            or "organizational structure" in title_cf
+            or "org structure" in title_cf
+        )
+        if not is_org_section:
             continue
-        for line in (section.content or "").splitlines():
-            if "|" not in line or "---" in line:
+        for raw in (section.content or "").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
                 continue
-            cells = [c.strip() for c in line.split("|") if c.strip()]
-            if len(cells) < 2:
+            # Pipe-table row: | Name | … | Role |
+            if "|" in line and "---" not in line:
+                cells = [c.strip() for c in line.split("|") if c.strip()]
+                if len(cells) >= 2:
+                    _record(cells[0].replace("*", ""), cells[-1].replace("*", ""))
                 continue
-            name = re.sub(r"\*+", "", cells[0]).strip()
-            role = re.sub(r"\*+", "", cells[-1]).strip()
-            if re.search(r"[A-Za-z]+\s+[A-Za-z]+", name) and len(role) > 3:
-                roles[name.casefold()] = role
+            # Bold-name line: **Name** Role
+            if line.startswith("**") and "**" in line[2:]:
+                close = line.index("**", 2)
+                _record(line[2:close], line[close + 2 :])
     return roles
+
+
+def _org_role_for_person(name: str, org_roles: dict[str, str]) -> str:
+    """Look a person up in the org roster — exact key, else first+last token."""
+    key = (name or "").strip().casefold()
+    if not key:
+        return ""
+    if key in org_roles:
+        return org_roles[key]
+    parts = key.split()
+    if len(parts) >= 2:
+        for roster_name, role in org_roles.items():
+            if parts[0] in roster_name and parts[-1] in roster_name:
+                return role
+    return ""
+
+
+def _role_from_verify_inner(inner: str, org_roles: dict[str, str]) -> str:
+    """If a [VERIFY: …] body asks to confirm a named person's role/title, return
+    the org-chart role for that person (else "")."""
+    low = inner.casefold()
+    if "role" not in low and "title" not in low:
+        return ""
+    apos = inner.find("'s")
+    if apos == -1:
+        apos = inner.find("’s")  # curly apostrophe
+    if apos == -1:
+        return ""
+    name_part = inner[:apos].strip()
+    for lead in ("confirm ", "verify ", "check ", "supply "):
+        if name_part.casefold().startswith(lead):
+            name_part = name_part[len(lead):].strip()
+    name_part = name_part.strip("* ").strip()
+    return _org_role_for_person(name_part, org_roles)
+
+
+def fill_role_verify_tags_from_org_chart(
+    content: str, org_roles: dict[str, str]
+) -> tuple[str, int]:
+    """Resolve ``[VERIFY: confirm <Name>'s role/title …]`` tags from the org
+    chart — the roles are already listed there, so these must not ship as
+    unresolved handoffs. Plain-string scan (no regex). Leaves a tag untouched
+    when the person is not on the org chart (a real gap the writer must confirm).
+    """
+    text = content or ""
+    if not org_roles or "[VERIFY:" not in text:
+        return text, 0
+    out: list[str] = []
+    filled = 0
+    i = 0
+    marker = "[VERIFY:"
+    while True:
+        start = text.find(marker, i)
+        if start == -1:
+            out.append(text[i:])
+            break
+        end = text.find("]", start)
+        if end == -1:
+            out.append(text[i:])
+            break
+        out.append(text[i:start])
+        inner = text[start + len(marker):end]
+        role = _role_from_verify_inner(inner, org_roles)
+        if role:
+            out.append(role)
+            filled += 1
+        else:
+            out.append(text[start:end + 1])
+        i = end + 1
+    return "".join(out), filled
+
+
+_LOCATION_OF_PREFIXES = ("cityof", "townof", "countyof", "villageof", "boroughof")
+
+
+def _norm_map(text: str) -> tuple[str, list[int]]:
+    """Alphanumeric-only lowercased view of text + index back to original chars."""
+    norm: list[str] = []
+    idx: list[int] = []
+    for i, ch in enumerate(text or ""):
+        if ch.isalnum():
+            norm.append(ch.lower())
+            idx.append(i)
+    return "".join(norm), idx
+
+
+def _client_token_from_finalist_filename(src: str) -> str:
+    """`07_FIN_CityofNorthGlenn_Proposal_2026.pdf` → `cityofnorthglenn` (norm key)."""
+    base = (src or "").replace("\\", "/").split("/")[-1]
+    if "." in base:
+        base = base[: base.rfind(".")]
+    parts = base.split("_")
+    for i, part in enumerate(parts):
+        if part.casefold() == "fin" and i + 1 < len(parts):
+            return "".join(c for c in parts[i + 1].lower() if c.isalnum())
+    return ""
+
+
+def finalist_client_keys_from_research(
+    research: ProposalResearchCache | None,
+) -> set[str]:
+    """Normalized client keys for every finalist (07_FIN) source in the corpus.
+
+    Includes the full key (``cityofnorthglenn``) and the bare core after a
+    location prefix (``northglenn``) so both "City of Northglenn" and a bare
+    "Northglenn" can be matched.
+    """
+    keys: set[str] = set()
+    if not research or not getattr(research, "evidence_corpus", None):
+        return keys
+    from app.services.evidence_trust.provenance import (
+        ProvenanceKind,
+        classify_provenance,
+    )
+
+    for item in research.evidence_corpus or []:
+        candidates: list[str] = []
+        primary = getattr(item, "source", "") or ""
+        if primary:
+            candidates.append(primary)
+        for sub in getattr(item, "sources", None) or []:
+            candidates.append(sub)
+        for src in candidates:
+            if classify_provenance(src) != ProvenanceKind.FINALIST:
+                continue
+            token = _client_token_from_finalist_filename(src)
+            if len(token) < 5:
+                continue
+            keys.add(token)
+            for prefix in _LOCATION_OF_PREFIXES:
+                if token.startswith(prefix) and len(token) - len(prefix) >= 5:
+                    keys.add(token[len(prefix):])
+                    break
+    return keys
+
+
+def _excise_client(text: str, s: int, e: int) -> str:
+    """Remove text[s:e] plus one adjacent list separator, keeping the list clean."""
+    if text[e : e + 6].casefold() == ", and ":
+        return text[:s] + text[e + 2 :]  # drop ", " keep "and Y"
+    if text[e : e + 2] == ", ":
+        return text[:s] + text[e + 2 :]
+    if text[e : e + 5].casefold() == " and ":
+        return text[:s] + text[e + 5 :]
+    if text[max(0, s - 6) : s].casefold() == ", and ":
+        return text[: s - 6] + text[e:]
+    if text[max(0, s - 2) : s] == ", ":
+        return text[: s - 2] + text[e:]
+    if text[max(0, s - 5) : s].casefold() == " and ":
+        return text[: s - 5] + text[e:]
+    return text[:s] + text[e:]
+
+
+def strip_finalist_work_clients(
+    content: str, finalist_keys: set[str]
+) -> tuple[str, list[str]]:
+    """Remove finalist (07_FIN, lost-bid) clients from delivered-work claims.
+
+    A finalist proposal is NOT a won engagement; naming that client anywhere in
+    our own proposal reads as delivered work it never was — a materially false
+    client-facing claim. Removes the finalist client name (and one adjacent list
+    separator, so the surrounding list stays clean) wherever it appears in our
+    drafted section. Which clients are finalists is decided dynamically from KB
+    filename provenance (07_FIN); no topic keyword lists. Plain-string, no regex.
+    """
+    text = content or ""
+    if not finalist_keys or not text.strip():
+        return text, []
+
+    removed: list[str] = []
+    guard = 0
+    while guard < 25:
+        guard += 1
+        norm, idx = _norm_map(text)
+        hit: tuple[int, int] | None = None
+        # Prefer the longest (full "cityof…") key so the whole "City of X" span
+        # is excised, not just the bare core leaving a dangling "City of".
+        for key in sorted(finalist_keys, key=len, reverse=True):
+            pos = norm.find(key)
+            if pos == -1:
+                continue
+            s = idx[pos]
+            e = idx[pos + len(key) - 1] + 1
+            hit = (s, e)
+            break
+        if hit is None:
+            break
+        s, e = hit
+        removed.append(text[s:e])
+        text = _excise_client(text, s, e)
+
+    logs: list[str] = []
+    if removed:
+        logs.append(
+            "Removed finalist (07_FIN, not a won engagement) client(s): "
+            + ", ".join(dict.fromkeys(removed))
+        )
+    return text, logs
 
 
 def _person_years_from_bio(content: str) -> str | None:
@@ -537,6 +763,7 @@ async def run_scan_fact_repairs(
 
     org_roles = parse_org_chart_roles(draft)
     bio_by_name = _bio_index_by_name(draft)
+    finalist_keys = finalist_client_keys_from_research(research)
 
     sections: list[ProposalSection] = []
     changed = False
@@ -586,6 +813,21 @@ async def run_scan_fact_repairs(
             if fixed_fin != new_body:
                 new_body = fixed_fin
                 section_logs.extend(fin_logs)
+
+        # Resolve "[VERIFY: confirm <Name>'s role/title]" tags from the org chart
+        # (applies to any section — team tables, staffing narratives, etc.).
+        role_filled, n_roles = fill_role_verify_tags_from_org_chart(new_body, org_roles)
+        if role_filled != new_body:
+            new_body = role_filled
+            section_logs.append(
+                f"filled {n_roles} role/title [VERIFY] tag(s) from org chart"
+            )
+
+        # Drop finalist (07_FIN, lost-bid) clients wrongly cited as delivered work.
+        fin_stripped, fin_logs = strip_finalist_work_clients(new_body, finalist_keys)
+        if fin_stripped != new_body:
+            new_body = fin_stripped
+            section_logs.extend(fin_logs)
 
         if new_body != body:
             changed = True

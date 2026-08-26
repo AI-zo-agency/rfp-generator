@@ -1832,26 +1832,8 @@ function ProposalDraftWorkspaceInner({
       handleLiveDraftUpdate,
       handleResearchPoll
     );
-    try {
-      const { review, research: updatedResearch, draft, fulfillReport } =
-        await runFulfillRfpGaps(rfp.id, {
-          signal: abort.signal,
-          mode: "full",
-        });
-      setPresubmitReview(review);
-      setResearch(updatedResearch);
-      applyOutlineFromServer({
-        ...draft,
-        lastFulfillReport:
-          (fulfillReport as Record<string, unknown>) ??
-          draft.lastFulfillReport,
-      });
-      const summary = buildScanRfpSummary(fulfillReport);
-      setScanSummary(summary);
-      setScanSummaryExpanded(false);
-      setGapResolveNotice("Saved version available (Before complete & clean).");
+    const showCompleted = () => {
       setFulfillJustCompleted(true);
-
       setGenerateNotice(
         "Complete & clean finished successfully — this draft is up to date. The button stays disabled until you edit the draft again."
       );
@@ -1862,6 +1844,113 @@ function ProposalDraftWorkspaceInner({
           .querySelector(".proposal-scan-v2")
           ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
+    };
+    try {
+      // The scan is a multi-minute background job. Awaiting the single request
+      // for its whole duration means a dropped/timed-out connection (proxy or
+      // browser closing a long-held request WITHOUT an error) never resolves —
+      // the button then shows "running" forever until a manual refresh, even
+      // though the backend finished and saved. Guard: race the request against a
+      // job-status watcher so completion is detected either way.
+      const requestOutcome = runFulfillRfpGaps(rfp.id, {
+        signal: abort.signal,
+        mode: "full",
+      })
+        .then((r) => ({ via: "request" as const, r }))
+        .catch((e) => ({ via: "error" as const, e }));
+
+      const watchCompletion = async (): Promise<
+        "done" | "failed" | "stalled"
+      > => {
+        const deadline = Date.now() + 45 * 60_000;
+        let sawRunning = false;
+        while (Date.now() < deadline) {
+          if (abort.signal.aborted) return "stalled";
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+          let job: Awaited<ReturnType<typeof getProposalJobStatus>> = null;
+          try {
+            job = await getProposalJobStatus(rfp.id);
+          } catch {
+            continue; // status unreachable — keep waiting on the request
+          }
+          if (job && (job.status === "running" || job.status === "queued")) {
+            sawRunning = true;
+            continue;
+          }
+          if (job && job.status === "failed") return "failed";
+          // Not in-flight. Only conclude "done" once we've actually seen the job
+          // running — avoids a premature verdict in the gap before it registers.
+          if (sawRunning) return "done";
+        }
+        return "stalled";
+      };
+
+      const outcome = await Promise.race([
+        requestOutcome,
+        watchCompletion().then((w) => ({ via: "watch" as const, w })),
+      ]);
+
+      if (outcome.via === "error") {
+        throw outcome.e;
+      }
+
+      if (outcome.via === "request") {
+        const { review, research: updatedResearch, draft, fulfillReport } =
+          outcome.r;
+        setPresubmitReview(review);
+        setResearch(updatedResearch);
+        applyOutlineFromServer({
+          ...draft,
+          lastFulfillReport:
+            (fulfillReport as Record<string, unknown>) ??
+            draft.lastFulfillReport,
+        });
+        const summary = buildScanRfpSummary(fulfillReport);
+        setScanSummary(summary);
+        setScanSummaryExpanded(false);
+        setGapResolveNotice(
+          "Saved version available (Before complete & clean)."
+        );
+        showCompleted();
+      } else if (outcome.w === "failed") {
+        throw new Error("Complete & clean failed on the server.");
+      } else {
+        // The backend job finished (or the connection stalled). Stop waiting on
+        // the long request and pull the final saved state so the UI resolves
+        // without a manual refresh.
+        abort.abort();
+        try {
+          const snapshot = await fetchProposalDraft(rfp.id);
+          if (snapshot.draft) {
+            applyOutlineFromServer(snapshot.draft);
+          }
+          if (snapshot.research) {
+            setResearch(snapshot.research);
+            setPipelineStatus(
+              buildPipelineStatus(
+                snapshot.draft,
+                snapshot.research,
+                snapshot.pipelineStatus
+              )
+            );
+            if (snapshot.research.budget) setBudget(snapshot.research.budget);
+            if (snapshot.research.presubmitReview) {
+              setPresubmitReview(snapshot.research.presubmitReview);
+            }
+          }
+          const report = snapshot.draft?.lastFulfillReport;
+          if (report) {
+            setScanSummary(buildScanRfpSummary(report));
+            setScanSummaryExpanded(false);
+          }
+        } catch {
+          // Non-fatal — the scan is saved server-side; a reload will show it.
+        }
+        setGapResolveNotice(
+          "Saved version available (Before complete & clean)."
+        );
+        showCompleted();
+      }
     } catch (error) {
       if (
         abort.signal.aborted ||
