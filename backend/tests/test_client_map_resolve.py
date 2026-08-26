@@ -29,3 +29,54 @@ def test_ambiguous_tag_returns_ambiguous():
     ]
     m = resolve_project("zo", 2, "ATC 25001 x", None, None, client_rows=rows, overrides_loaded=True)
     assert m.kind == "ambiguous"
+
+
+def test_resolve_single_tag_match():
+    rows = [
+        {"id": "cm-mvh", "tag_code": "MVH", "client_name": "Mountain View Heating",
+         "qb_customer_ids": ["10"], "link_confidence": "confirmed", "is_internal": False},
+    ]
+    m = resolve_project(
+        "zo", 3, "MVH 26139 Comfort Suite Print", None, None,
+        client_rows=rows, overrides_loaded=True, override=None,
+    )
+    assert m.via == "tag"
+    assert m.client_map_id == "cm-mvh"
+    assert m.qb_customer_ids == ["10"]
+
+
+def test_resolve_company_id_match():
+    rows = [
+        {"id": "cm-co", "tag_code": "TOR", "client_name": "Torrent Laboratories",
+         "qb_customer_ids": ["55"], "teamwork_company_ids": [42],
+         "teamwork_company_names": [], "link_confidence": "confirmed", "is_internal": False},
+    ]
+    m = resolve_project(
+        "zo", 4, "Contra Costa RFP Deck", 42, None,
+        client_rows=rows, overrides_loaded=True, override=None,
+    )
+    assert m.via == "company"
+    assert m.client_map_id == "cm-co"
+
+
+def test_resolve_company_name_normalized_match():
+    rows = [
+        {"id": "cm-tor", "tag_code": "TOR", "client_name": "Torrent Laboratories",
+         "qb_customer_ids": ["55"], "teamwork_company_ids": [],
+         "teamwork_company_names": ["Torrent Laboratories"],
+         "link_confidence": "confirmed", "is_internal": False},
+    ]
+    m = resolve_project(
+        "zo", 5, "Some Project", None, "Torrent Laboratories LLC",
+        client_rows=rows, overrides_loaded=True, override=None,
+    )
+    assert m.via == "company"
+    assert m.client_map_id == "cm-tor"
+
+
+def test_resolve_no_match_returns_none():
+    m = resolve_project(
+        "zo", 6, "Contra Costa RFP Deck", None, "Unknown Client LLC",
+        client_rows=[], overrides_loaded=True, override=None,
+    )
+    assert m is None

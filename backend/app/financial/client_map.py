@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.financial import client_map_repository as repo
+from app.financial.client_map_normalize import normalize_name
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +96,15 @@ def resolve_project(
                 is_internal=bool(r.get("is_internal")),
             )
     cid = str(company_id) if company_id is not None else None
-    cname = (company_name or "").strip()
+    cname_norm = normalize_name(company_name) if (company_name or "").strip() else ""
     for r in rows:
         ids = {str(x) for x in (r.get("teamwork_company_ids") or [])}
-        names = {str(n).casefold() for n in (r.get("teamwork_company_names") or [])}
-        if (cid and cid in ids) or (cname and cname.casefold() in names):
+        names = {
+            normalize_name(str(n))
+            for n in (r.get("teamwork_company_names") or [])
+            if str(n).strip()
+        }
+        if (cid and cid in ids) or (cname_norm and cname_norm in names):
             logger.info(
                 "operation=resolve_project site_id=%s project_id=%s via=company client_map_id=%s",
                 site_id,
