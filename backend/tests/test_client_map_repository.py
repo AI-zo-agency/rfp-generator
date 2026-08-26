@@ -76,6 +76,8 @@ def test_insert_client_map_sets_unmatched_default(monkeypatch):
     row = repo.insert_client_map({"tag_code": "MVH", "client_name": "Mountain View Heating"})
     assert row["link_confidence"] == "unmatched"
     assert q.calls[0] == ("table", "client_map")
+    insert_call = next(c for c in q.calls if c[0] == "insert")
+    assert insert_call[1]["link_confidence"] == "unmatched"
 
 
 def test_get_job_override_filters_site_and_project(monkeypatch):
