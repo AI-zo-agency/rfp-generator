@@ -1012,6 +1012,8 @@ def create_client_map(payload: ClientMapCreate):
 
 @router.get("/client-map/unmatched")
 def get_unmatched_client_map_entities():
+    from app.financial.client_map_normalize import normalize_name
+
     confirmed = list_client_map(confidence="confirmed")
     used_qb_ids = {
         str(customer_id)
@@ -1023,6 +1025,12 @@ def get_unmatched_client_map_entities():
         for row in confirmed
         for company_id in (row.get("teamwork_company_ids") or [])
     }
+    used_teamwork_names = {
+        normalize_name(str(name))
+        for row in confirmed
+        for name in (row.get("teamwork_company_names") or [])
+        if normalize_name(str(name))
+    }
 
     teamwork = []
     seen_teamwork: set[tuple[str, str]] = set()
@@ -1033,8 +1041,12 @@ def get_unmatched_client_map_entities():
         if (company_id is None and not company_name) or key in seen_teamwork:
             continue
         seen_teamwork.add(key)
-        if company_id is None or str(company_id) not in used_teamwork_ids:
-            teamwork.append({"id": company_id, "name": company_name})
+        name_key = normalize_name(company_name)
+        id_matched = company_id is not None and str(company_id) in used_teamwork_ids
+        name_matched = bool(name_key) and name_key in used_teamwork_names
+        if id_matched or name_matched:
+            continue
+        teamwork.append({"id": company_id, "name": company_name})
 
     quickbooks = [
         customer

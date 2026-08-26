@@ -172,7 +172,16 @@ function MappingView() {
         <p className="qb-sync">
           <span className="qb-sync-dot" data-busy={map.busy ? "true" : undefined} aria-hidden />
           {map.rows.length} client mappings
-          {map.lastLinkResult ? <span className="qb-sync-meta">{map.lastLinkResult.confirmed} confirmed · {map.lastLinkResult.suggested} suggested</span> : null}
+          {map.lastLinkResult ? (
+            <span className="qb-sync-meta">
+              {map.lastLinkResult.confirmed} confirmed
+              {typeof map.lastLinkResult.teamwork_tag === "number"
+                ? ` · ${map.lastLinkResult.teamwork_tag} tag`
+                : ""}
+              {" · "}
+              {map.lastLinkResult.suggested} suggested
+            </span>
+          ) : null}
         </p>
         <div className="qb-toolbar-actions">
           <button type="button" className="qb-retry" disabled={map.busy} onClick={() => void map.importSheet()}>Import from Tags</button>

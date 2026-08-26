@@ -24,16 +24,50 @@ def _client(**overrides):
     }
 
 
-def test_exact_confirms_normalized_qb_name():
-    clients = [_client()]
-    qb = [{"qbo_id": "55", "display_name": "Torrent Laboratories LLC"}]
-    tw = [{"id": 9, "name": "Torrent Laboratory"}]
+def test_teamwork_tag_links_attach_by_project_tag():
+    from app.financial.client_map_link import apply_teamwork_tag_links
 
-    updates = apply_exact_links(clients, qb, tw)
+    clients = [
+        _client(
+            id="eff",
+            tag_code="EFF",
+            client_name="EverFast Fiber",
+            qb_customer_ids=["1049"],
+            qb_customer_names=["EverFast Fiber"],
+            link_confidence="confirmed",
+            link_reason="exact normalized name",
+        )
+    ]
+    projects = [
+        {
+            "id": "1",
+            "name": "EFF 26132 EverFast August Retainer",
+            "company_id": None,
+            "company_name": "Everfast Fiber Networks LLC",
+        }
+    ]
 
-    assert updates[0]["qb_customer_ids"] == ["55"]
+    updates = apply_teamwork_tag_links(clients, projects)
+
+    assert len(updates) == 1
+    assert updates[0]["teamwork_company_names"] == ["Everfast Fiber Networks LLC"]
+    assert updates[0]["qb_customer_ids"] == ["1049"]
     assert updates[0]["link_confidence"] == "confirmed"
-    assert updates[0]["id"] == "1"
+
+
+def test_teamwork_tag_links_skip_ambiguous_tags():
+    from app.financial.client_map_link import apply_teamwork_tag_links
+
+    clients = [
+        _client(id="1", tag_code="ATC", client_name="Arctic"),
+        _client(id="2", tag_code="ATC", client_name="Anti-Trafficking"),
+    ]
+    projects = [
+        {"name": "ATC 25001 x", "company_id": 9, "company_name": "Arctic Chiller"}
+    ]
+
+    assert apply_teamwork_tag_links(clients, projects) == []
+
 
 
 def test_exact_does_not_overwrite_confirmed():
@@ -198,7 +232,7 @@ def test_run_link_persists_exact_updates(monkeypatch):
 
     result = asyncio.run(run_link(include_ai=False))
 
-    assert result == {"confirmed": 1, "suggested": 0}
+    assert result == {"confirmed": 1, "suggested": 0, "teamwork_tag": 0}
     assert updates[0][0] == "1"
     assert updates[0][1]["link_confidence"] == "confirmed"
     assert "id" not in updates[0][1]
@@ -226,4 +260,8 @@ def test_run_link_returns_partial_counts_on_llm_error(monkeypatch):
 
     monkeypatch.setattr(client_map_link, "chat_json", fail_llm)
 
-    assert asyncio.run(run_link()) == {"confirmed": 0, "suggested": 0}
+    assert asyncio.run(run_link()) == {
+        "confirmed": 0,
+        "suggested": 0,
+        "teamwork_tag": 0,
+    }

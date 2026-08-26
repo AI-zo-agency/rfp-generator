@@ -10,6 +10,7 @@ from typing import Any
 from app.core.config import settings
 from app.financial import client_map_repository as repo
 from app.financial import qb_repository
+from app.financial.client_map import parse_job_key
 from app.financial.client_map_normalize import normalize_name
 from app.financial.teamwork.teamwork_sync import overview_from_cache
 from app.services.llm import LlmError, chat_json
@@ -26,6 +27,10 @@ def _merge(existing: Iterable[Any], additions: Iterable[Any]) -> list[Any]:
         merged.append(value)
         seen.add(str(value))
     return merged
+
+
+def _tw_name_key(name: str | None) -> str:
+    return normalize_name(name or "")
 
 
 def apply_exact_links(
@@ -198,20 +203,94 @@ def apply_llm_suggestions(
     return list(pending.values())
 
 
-def _teamwork_companies() -> list[dict[str, Any]]:
+def _teamwork_companies(projects: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     companies: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    for project in overview_from_cache().get("projects") or []:
+    for project in projects if projects is not None else overview_from_cache().get("projects") or []:
         company_id = project.get("company_id")
         company_name = str(project.get("company_name") or "").strip()
         if company_id is None and not company_name:
             continue
-        key = (str(company_id) if company_id is not None else "", normalize_name(company_name))
+        key = (str(company_id) if company_id is not None else "", _tw_name_key(company_name))
         if key in seen:
             continue
         seen.add(key)
         companies.append({"id": company_id, "name": company_name})
     return companies
+
+
+def apply_teamwork_tag_links(
+    clients: list[dict[str, Any]],
+    projects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach Teamwork companies using the TAG in live project titles.
+
+    Project names look like `HML 24016 …`. That tag is a stronger join than
+    company-name equality (`EverFast Fiber` vs `Everfast Fiber Networks LLC`).
+    Enriches existing rows; never clears QB links or demotes confidence.
+    """
+    by_tag: dict[str, list[dict[str, Any]]] = {}
+    for row in clients:
+        if row.get("is_internal"):
+            continue
+        tag = str(row.get("tag_code") or "").strip().upper()
+        if not tag:
+            continue
+        by_tag.setdefault(tag, []).append(row)
+
+    pending: dict[str, dict[str, Any]] = {}
+    for project in projects:
+        key = parse_job_key(str(project.get("name") or ""))
+        if not key:
+            continue
+        hits = by_tag.get(key["tag"]) or []
+        if len(hits) != 1:
+            continue
+        client = hits[0]
+        company_name = str(project.get("company_name") or "").strip()
+        company_id = project.get("company_id")
+        if company_id is None and not company_name:
+            continue
+
+        client_id = str(client["id"])
+        update = pending.get(client_id)
+        if update is None:
+            update = {
+                "id": client["id"],
+                "qb_customer_ids": list(client.get("qb_customer_ids") or []),
+                "qb_customer_names": list(client.get("qb_customer_names") or []),
+                "teamwork_company_ids": list(client.get("teamwork_company_ids") or []),
+                "teamwork_company_names": list(client.get("teamwork_company_names") or []),
+                "link_confidence": client.get("link_confidence") or "unmatched",
+                "link_reason": client.get("link_reason") or "",
+                "_changed": False,
+            }
+            pending[client_id] = update
+
+        before_ids = list(update["teamwork_company_ids"])
+        before_names = list(update["teamwork_company_names"])
+        update["teamwork_company_ids"] = _merge(
+            update["teamwork_company_ids"], [company_id]
+        )
+        update["teamwork_company_names"] = _merge(
+            update["teamwork_company_names"], [company_name]
+        )
+        if (
+            update["teamwork_company_ids"] == before_ids
+            and update["teamwork_company_names"] == before_names
+        ):
+            continue
+        update["_changed"] = True
+        if update["link_confidence"] != "confirmed":
+            update["link_confidence"] = "confirmed"
+            update["link_reason"] = "teamwork project tag"
+
+    out: list[dict[str, Any]] = []
+    for update in pending.values():
+        if not update.pop("_changed", False):
+            continue
+        out.append(update)
+    return out
 
 
 def _persist(updates: list[dict[str, Any]]) -> None:
@@ -222,21 +301,43 @@ def _persist(updates: list[dict[str, Any]]) -> None:
         )
 
 
+def _used_teamwork_names(clients: list[dict[str, Any]]) -> set[str]:
+    return {
+        _tw_name_key(name)
+        for row in clients
+        if row.get("link_confidence") == "confirmed"
+        for name in (row.get("teamwork_company_names") or [])
+        if _tw_name_key(name)
+    }
+
+
 async def run_link(*, include_ai: bool = True) -> dict[str, int]:
-    """Run exact linking, followed by validated light-model suggestions."""
+    """Run exact linking, tag-based Teamwork attach, then light-model suggestions."""
     clients = repo.list_client_map()
     qb = qb_repository.list_customers(settings.quickbooks_realm_id)
-    tw = _teamwork_companies()
+    projects = list(overview_from_cache().get("projects") or [])
+    tw = _teamwork_companies(projects)
 
     exact_updates = apply_exact_links(clients, qb, tw)
     _persist(exact_updates)
-    counts = {"confirmed": len(exact_updates), "suggested": 0}
+    clients = repo.list_client_map()
+    tag_updates = apply_teamwork_tag_links(clients, projects)
+    _persist(tag_updates)
+    newly_confirmed_via_tag = sum(
+        1 for u in tag_updates if u.get("link_reason") == "teamwork project tag"
+    )
+    counts = {
+        "confirmed": len(exact_updates) + newly_confirmed_via_tag,
+        "suggested": 0,
+        "teamwork_tag": len(tag_updates),
+    }
     logger.info(
-        "operation=client_map_link_exact clients=%s qb=%s teamwork=%s confirmed=%s",
+        "operation=client_map_link_exact clients=%s qb=%s teamwork=%s confirmed=%s tag_links=%s",
         len(clients),
         len(qb),
         len(tw),
-        counts["confirmed"],
+        len(exact_updates),
+        len(tag_updates),
     )
     if not include_ai:
         return counts
@@ -258,13 +359,17 @@ async def run_link(*, include_ai: bool = True) -> dict[str, int]:
         for row in clients
         for company_id in (row.get("teamwork_company_ids") or [])
     }
+    used_tw_names = _used_teamwork_names(clients)
     unmatched_qb = [
         row for row in qb if str(row.get("qbo_id")) not in used_qb_ids
     ]
     unmatched_tw = [
         row
         for row in tw
-        if row.get("id") is None or str(row.get("id")) not in used_tw_ids
+        if (
+            (row.get("id") is None or str(row.get("id")) not in used_tw_ids)
+            and _tw_name_key(row.get("name")) not in used_tw_names
+        )
     ]
     if not leftovers or not unmatched_qb:
         return counts

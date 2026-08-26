@@ -8,6 +8,41 @@ from app.main import app
 client = TestClient(app)
 
 
+def test_unmatched_teamwork_respects_confirmed_company_names(monkeypatch):
+    monkeypatch.setattr(
+        fin_router,
+        "list_client_map",
+        lambda **filters: [
+            {
+                "id": "hml",
+                "link_confidence": "confirmed",
+                "qb_customer_ids": ["919"],
+                "teamwork_company_ids": [],
+                "teamwork_company_names": ["Hampton Lumber"],
+            }
+        ]
+        if filters.get("confidence") == "confirmed"
+        else [],
+    )
+    monkeypatch.setattr(
+        fin_router,
+        "overview_from_cache",
+        lambda: {
+            "projects": [
+                {"company_id": None, "company_name": "Hampton Lumber"},
+                {"company_id": None, "company_name": "Back Office Connection"},
+            ]
+        },
+    )
+    monkeypatch.setattr(fin_router, "list_customers", lambda *_a, **_k: [])
+
+    response = client.get("/api/v1/financials/client-map/unmatched")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["teamwork"] == [{"id": None, "name": "Back Office Connection"}]
+
+
 def test_get_client_map_returns_repository_rows(monkeypatch):
     rows = [{"id": "cm-1", "tag_code": "MVH", "link_confidence": "suggested"}]
     calls = []

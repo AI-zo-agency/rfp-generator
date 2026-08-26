@@ -46,11 +46,15 @@ def _project_is_complete(row: dict[str, Any]) -> bool:
 
 
 def _project_payload(row: dict[str, Any]) -> dict[str, Any]:
+    company_id = row.get("company_id")
     return {
         "id": str(row.get("project_id") or ""),
         "name": row.get("name") or "Untitled project",
         "status": row.get("status") or "",
         "health": row.get("health") or "unset",
+        # company_id is required for client_map joins; older payloads omitted it
+        # and left every Teamwork company looking unmatched.
+        "company_id": int(company_id) if company_id is not None else None,
         "company_name": row.get("company_name") or "",
         "start_date": row.get("start_date"),
         "due_date": row.get("due_date"),

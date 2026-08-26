@@ -30,6 +30,7 @@ export interface UnmatchedResponse {
 export interface LinkResult {
   confirmed: number;
   suggested: number;
+  teamwork_tag?: number;
 }
 
 export interface JobOverride {
