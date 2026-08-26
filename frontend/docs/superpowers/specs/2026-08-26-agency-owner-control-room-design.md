@@ -30,6 +30,7 @@ The first major region is an impact-ordered queue of actionable exceptions:
 - Late projects and overdue tasks
 - Unmapped or ambiguous Teamwork-to-QuickBooks relationships
 - Open AR that needs a follow-up
+- QuickBooks invoices with no linked Teamwork project or job
 - Billed QuickBooks customers without a live Teamwork project
 
 Each item explains its trigger, identifies the client/project, shows the relevant financial or delivery impact, and has one primary in-place action. Severity and workload indicators make the queue scannable without turning it into a color-heavy alert wall.
@@ -38,15 +39,17 @@ Each item explains its trigger, identifies the client/project, shows the relevan
 
 The full project portfolio remains on the page after the queue. Rows are client-led rather than raw job-led, and show health, live job count, hours this month, billed YTD, open AR, and mapping status. Filters allow the owner to focus on action state, delivery health, or financial exposure. Expanding a client reveals its individual Teamwork jobs and their supporting data, while client-level QuickBooks figures remain clearly non-additive.
 
-### 4. Revenue watchlist
+### 4. Unlinked invoice watchlist
 
-The less urgent "billed, no live Teamwork project" set becomes a compact revenue watchlist. It remains visible in the same control room but does not visually outrank current delivery or direct mapping work.
+QuickBooks invoices with no linked Teamwork project or job appear as a compact reconciliation watchlist. Each row identifies the invoice/customer, amount, invoice status, and the missing relationship. The owner can investigate the context and assign or confirm the relevant project/job without leaving the page. A secondary, aggregated customer-level view covers billed customers with no live Teamwork project. Both stay visible in the control room but do not visually outrank current delivery or direct mapping work.
 
 ## In-place resolution
 
 Selecting an actionable mapping issue opens a focused side panel over the control room. It shows the Teamwork project/company, the current relationship evidence, suggested QuickBooks customer matches, and a searchable customer picker. The owner can confirm a match, set an override, or mark internal work, then save. On success, the queue, snapshot coverage, and relevant portfolio row update without a navigation change.
 
 Selecting an AR issue opens an in-place detail panel with the client’s open amount and relevant context. This surface will support recording/reviewing follow-up within the tab; it must not imply that an invoice was collected unless the underlying system provides that capability.
+
+Selecting an unlinked invoice opens the same resolution panel in invoice mode, prefilled with its QuickBooks context. The owner can link it to an existing client/project/job, or explicitly classify it as internal/non-project revenue when appropriate. Every exception remains auditable through its displayed source evidence and resolution state.
 
 ## Interaction and states
 
@@ -56,6 +59,7 @@ Selecting an AR issue opens an in-place detail panel with the client’s open am
 - Empty states affirm the resolved condition (for example, all live work mapped) and retain access to the portfolio.
 - Failed retrieval shows a clear retry state without masking cached data.
 - Mapping saves show progress, success feedback, and actionable error copy; no silent state changes.
+- Invoice-link saves update the watchlist and its customer/project rollups in place.
 - Desktop uses a right-side resolution panel. On smaller screens, the same panel becomes a full-width stacked sheet.
 
 ## Visual direction
@@ -72,4 +76,4 @@ Preserve the established zö operational palette and restrained editorial tone. 
 
 ## Verification
 
-Implement unit coverage for any new prioritization/grouping helpers, exercise loading/error/empty states, and verify the page at desktop and mobile viewport sizes. Confirm that a client’s billed and AR totals are never summed across repeated jobs. Run the project’s relevant lint/test/build commands and the UI detector against the changed Agency surface.
+Implement unit coverage for any new prioritization/grouping helpers, exercise loading/error/empty states, and verify the page at desktop and mobile viewport sizes. Confirm that a client’s billed and AR totals are never summed across repeated jobs, and that invoices without a project/job relationship remain visible until explicitly resolved. Run the project’s relevant lint/test/build commands and the UI detector against the changed Agency surface.
