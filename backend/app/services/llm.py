@@ -143,6 +143,7 @@ _FINANCIAL_LLM_NODES = frozenset(
         "qb_chat.answer",
         "teamwork_chat.answer",
         "financial.ai_insights",
+        "client_map.link",
     }
 )
 
