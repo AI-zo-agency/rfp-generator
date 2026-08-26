@@ -2131,6 +2131,28 @@ async def _run_fulfill_rfp_gaps_body(
     except Exception as polish_exc:  # noqa: BLE001
         logger.warning("Post-ZF designer polish skipped: %s", polish_exc)
 
+    # Hollow fill / pointer inserts / MANUAL FILL stamps can push past the RFP
+    # page limit after step-16 Ralph — reassert before readiness scoring.
+    try:
+        from app.services.proposal_ralph import reassert_rfp_page_limit_after_content_passes
+
+        draft, ralph_final = reassert_rfp_page_limit_after_content_passes(
+            draft,
+            page_limit=rfp.page_limit,
+            rfp_text=rfp_text,
+            label="scan-pre-readiness",
+        )
+        if ralph_final:
+            report["logs"].extend(ralph_final[:12])
+            hard_fit = [
+                x for x in ralph_final if "page-hard-fit" in x or "page-limit:" in x
+            ]
+            if hard_fit:
+                report["pageLimitEnforced"] = True
+                report["pageLimitNotes"] = hard_fit[:6]
+    except Exception as ralph_exc:  # noqa: BLE001
+        logger.warning("Scan pre-readiness page-limit reassert skipped: %s", ralph_exc)
+
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp, draft=draft, research=research, finalized=False
     )
@@ -2312,6 +2334,32 @@ async def _run_fulfill_rfp_gaps_body(
             "Post-restore integrity polish skipped for %s: %s",
             rfp_id,
             restore_fix_exc,
+        )
+
+    # Last content touch before save: restore can reintroduce long pre-scan
+    # bodies — never let that overshadow an explicit RFP page limit.
+    try:
+        from app.services.proposal_ralph import reassert_rfp_page_limit_after_content_passes
+
+        draft, ralph_save = reassert_rfp_page_limit_after_content_passes(
+            draft,
+            page_limit=rfp.page_limit,
+            rfp_text=rfp_text,
+            label="scan-post-restore",
+        )
+        if ralph_save:
+            report.setdefault("logs", []).extend(ralph_save[:12])
+            hard_fit = [
+                x for x in ralph_save if "page-hard-fit" in x or "page-limit:" in x
+            ]
+            if hard_fit:
+                report["pageLimitEnforced"] = True
+                report["pageLimitNotes"] = hard_fit[:6]
+    except Exception as ralph_save_exc:  # noqa: BLE001
+        logger.warning(
+            "Post-restore page-limit reassert skipped for %s: %s",
+            rfp_id,
+            ralph_save_exc,
         )
 
     draft = attach_scan_summary_to_latest_before_scan(draft, report)

@@ -3750,6 +3750,28 @@ async def generate_full_proposal(
                     budget_mismatches=zf_report.budget_mismatch_count,
                     samples=zf_report.logs[:10],
                 )
+
+            # Pointer inserts / form fills must not overshadow an explicit page limit.
+            from app.services.proposal_ralph import (
+                reassert_rfp_page_limit_after_content_passes,
+            )
+
+            draft, ralph_re = reassert_rfp_page_limit_after_content_passes(
+                draft,
+                page_limit=(rfp_final or rfp).page_limit if (rfp_final or rfp) else None,
+                rfp_text=final_rfp_text,
+                label="post-self-edit",
+            )
+            if ralph_re:
+                await asave_proposal_draft(draft)
+                for line in ralph_re[:10]:
+                    logger.info("Full proposal page-limit reassert: %s — %s", rfp_id, line)
+                step_trace(
+                    "post_self_edit_page_limit_reassert",
+                    rfp_id=rfp_id,
+                    actions=len(ralph_re),
+                    samples=ralph_re[:8],
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Full proposal zero-fabrication pass skipped for %s: %s", rfp_id, exc
@@ -3867,6 +3889,47 @@ async def generate_full_proposal(
                     "adversarial_repair_skipped",
                     rfp_id=rfp_id,
                     reason="adversarial_repair_loop=false",
+                )
+
+            # Stub fill / adversarial repair can add words after post-self-edit
+            # Ralph — reassert explicit RFP page limit before pre-submit.
+            try:
+                from app.services.proposal_ralph import (
+                    reassert_rfp_page_limit_after_content_passes,
+                )
+                from app.services.rfp_content import combine_rfp_text, load_local_rfp_text
+
+                _d, pdf_t, *_rest = load_local_rfp_text(rfp, max_chars=250_000)
+                limit_text = combine_rfp_text(
+                    _d or (rfp.description or ""), pdf_t, max_chars=250_000
+                )
+                if len(limit_text.strip()) < 200:
+                    limit_text = load_rfp_for_proposal(rfp_id)[2]
+                draft, ralph_pre4 = reassert_rfp_page_limit_after_content_passes(
+                    draft,
+                    page_limit=rfp.page_limit,
+                    rfp_text=limit_text,
+                    label="pre-phase-4",
+                )
+                if ralph_pre4:
+                    await asave_proposal_draft(draft)
+                    for line in ralph_pre4[:10]:
+                        logger.info(
+                            "Full proposal pre-phase-4 page-limit reassert: %s — %s",
+                            rfp_id,
+                            line,
+                        )
+                    step_trace(
+                        "pre_phase4_page_limit_reassert",
+                        rfp_id=rfp_id,
+                        actions=len(ralph_pre4),
+                        samples=ralph_pre4[:8],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Full proposal pre-phase-4 page-limit reassert skipped for %s: %s",
+                    rfp_id,
+                    exc,
                 )
 
             with pipeline_phase("phase-4-presubmit", rfp_id=rfp_id):

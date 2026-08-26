@@ -170,6 +170,26 @@ def apply_zero_fabrication_guards(
         logger.warning("%s cert claim scrub skipped: %s", label, exc)
 
     try:
+        from app.services.proposal_edge_case_guards import apply_edge_case_guards_to_draft
+
+        draft, edge_logs = apply_edge_case_guards_to_draft(draft)
+        for line in edge_logs:
+            report.logs.append(f"{label}: edge-case — {line}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s edge-case guards skipped: %s", label, exc)
+
+    try:
+        from app.services.proposal_scan_fact_repairs import (
+            apply_leaked_fragment_scrub_to_draft,
+        )
+
+        draft, leak_logs = apply_leaked_fragment_scrub_to_draft(draft)
+        for line in leak_logs:
+            report.logs.append(f"{label}: leak scrub — {line}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s leak fragment scrub skipped: %s", label, exc)
+
+    try:
         from app.services.proposal_state_registration_guard import (
             scrub_unverified_state_registration_claims,
         )

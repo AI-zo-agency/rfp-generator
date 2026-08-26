@@ -143,6 +143,21 @@ def scrub_leaked_system_fragments(content: str) -> tuple[str, list[str]]:
     text, stripped = _strip_leaked_bracket_spans(text)
     if stripped:
         logs.append("Removed leaked internal/system fragment")
+    # Trailing unclosed / half-bracket instruction: ".... Confirm whether …]"
+    before = text
+    text = re.sub(
+        r"(?is)(?:\.{2,}|\u2026)\s*Confirm\s+whether\b[^\]\n]{0,200}\]?",
+        "",
+        text,
+    )
+    # Orphan trailing instruction without leading ellipsis but with stray ]
+    text = re.sub(
+        r"(?im)^[ \t]*Confirm\s+whether\b[^\]\n]{0,200}\]\s*$",
+        "",
+        text,
+    )
+    if text != before:
+        logs.append("Removed leaked Confirm-whether instruction fragment")
     text = _collapse_blank_lines(text)
     if not logs:
         return content or "", []

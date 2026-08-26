@@ -15,9 +15,11 @@ from app.services.proposal_hallucination_detector import VERIFIED_CERTIFICATIONS
 
 logger = logging.getLogger(__name__)
 
-# Agency-level certs we may state when publicly verifiable (companyfacts / B Lab registry).
+# Agency-level certs we may state — companyfacts only (WBENC / WOSB).
+# B Corp / B Corporation is a REPEAT fabrication pattern across RFPs and must
+# never ship (same denylist as go_no_go_evidence_scrub).
 PUBLICLY_VERIFIABLE_AGENCY_CERTS = frozenset(
-    {*(c.upper() for c in VERIFIED_CERTIFICATIONS), "B CORPORATION", "B CORP"}
+    {*(c.upper() for c in VERIFIED_CERTIFICATIONS)}
 )
 
 # Diversity program designations zö does not hold as separate certs (WBENC/WOSB are verified).
@@ -63,6 +65,8 @@ _STANDALONE_WBE_RE = re.compile(
 )
 
 # Marketing / platform badges not on the verified agency cert list.
+# Do NOT add B Corp here — use go_no_go_evidence_scrub.scrub_evidence_text
+# (single shared denylist) so we never fork another cert synonym regex table.
 _UNVERIFIED_MARKETING_CERT_RES: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"1\s*%\s*for\s*the\s*Planet(?:\s+membership)?", re.I),
@@ -171,7 +175,7 @@ def user_asks_cert_claim_scrub(text: str) -> bool:
     ):
         return True
     if re.search(
-        r"(?is)\bretain\s+only\b.{0,80}\b(?:WBENC|WOSB|B\s+Corp)",
+        r"(?is)\bretain\s+only\b.{0,80}\b(?:WBENC|WOSB)",
         raw,
     ):
         return True

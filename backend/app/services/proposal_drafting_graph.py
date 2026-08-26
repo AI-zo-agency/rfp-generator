@@ -137,7 +137,7 @@ YOU MUST NEVER:
 
 VERIFIED FACTS ONLY (from evidence corpus):
 - Agency: founded August 21, 2013; years in operation = current year − 2013 (13 in 2026). Never say a different year count than Business Information.
-- Certifications: WBENC, WOSB ONLY (no platform certs unless in verified evidence)
+- Certifications: WBENC, WOSB ONLY (no B Corp, MBE/DBE, platform certs, or invented badges)
 - Client retention: NEVER cite specific retention rate (not formally tracked per verified facts)
 - Awards: Creative Excellence 2024, Netty 2024, NYX 2024, Vega Digital 2024, Sonja's Enterprising Women 2026
 - Team: ONLY names from 04_Bio_*.pdf files in evidence
