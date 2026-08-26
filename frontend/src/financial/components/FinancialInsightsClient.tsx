@@ -9,6 +9,7 @@ import {
 } from "./FinancialNavSidebar";
 import {
   applyFinancialNavSearch,
+  type AgencyViewId,
   type TeamworkViewId,
 } from "../lib/financial-tab";
 import { TabFade } from "./TabFade";
@@ -18,10 +19,14 @@ import { AuditQueueTable, AuditItem } from "./AuditQueueTable";
 import { DataSourcesGrid, DataSource } from "./DataSourcesGrid";
 import { QuickBooksPanels } from "./QuickBooksPanels";
 import { TeamworkPanels } from "./TeamworkPanels";
+import { ClientMapPanels } from "./ClientMapPanels";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 
-function persistFinancialNav(patch: { tab?: FinancialTabId; view?: TeamworkViewId }) {
+function persistFinancialNav(patch: {
+  tab?: FinancialTabId;
+  view?: AgencyViewId | TeamworkViewId;
+}) {
   const next = applyFinancialNavSearch(window.location.search, patch);
   try {
     window.history.replaceState(null, "", `${window.location.pathname}${next}`);
@@ -32,12 +37,15 @@ function persistFinancialNav(patch: { tab?: FinancialTabId; view?: TeamworkViewI
 
 export function FinancialInsightsClient({
   initialTab = "quickbooks",
+  initialAgencyView = "mapping",
   initialView = "position",
 }: {
   initialTab?: FinancialTabId;
+  initialAgencyView?: AgencyViewId;
   initialView?: TeamworkViewId;
 }) {
   const [activeTab, setActiveTab] = useState<FinancialTabId>(initialTab);
+  const [agencyView, setAgencyView] = useState<AgencyViewId>(initialAgencyView);
   const [teamworkView, setTeamworkView] = useState<TeamworkViewId>(initialView);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [loading, setLoading] = useState<boolean>(true);
@@ -158,6 +166,11 @@ export function FinancialInsightsClient({
     persistFinancialNav({ view: id });
   };
 
+  const selectAgencyView = (id: AgencyViewId) => {
+    setAgencyView(id);
+    persistFinancialNav({ view: id });
+  };
+
   const handleSelectContractor = (contractorName: string) => {
     setSelectedContractor(contractorName);
     void fetchIworkerData(contractorName);
@@ -241,6 +254,16 @@ export function FinancialInsightsClient({
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
+            {activeTab === "agency" ? (
+              <TabFade
+                active
+                className="min-h-0 flex-1 overflow-clip"
+                id="financial-panel-agency"
+              >
+                <ClientMapPanels view={agencyView} onViewChange={selectAgencyView} />
+              </TabFade>
+            ) : null}
+
             {activeTab === "quickbooks" ? (
               <TabFade
                 active

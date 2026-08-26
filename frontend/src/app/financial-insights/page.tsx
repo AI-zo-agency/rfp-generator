@@ -1,5 +1,6 @@
 import { FinancialInsightsClient } from "@/financial/components/FinancialInsightsClient";
 import {
+  parseAgencyView,
   parseFinancialTab,
   parseTeamworkView,
 } from "@/financial/lib/financial-tab";
@@ -23,6 +24,7 @@ export default async function FinancialInsightsPage({
   return (
     <FinancialInsightsClient
       initialTab={parseFinancialTab(firstQuery(query.tab))}
+      initialAgencyView={parseAgencyView(firstQuery(query.view))}
       initialView={parseTeamworkView(firstQuery(query.view))}
     />
   );

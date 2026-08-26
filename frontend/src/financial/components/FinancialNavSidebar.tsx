@@ -6,6 +6,7 @@ import {
   Clock3,
   Database,
   FolderKanban,
+  LayoutDashboard,
   PanelLeft,
   Sparkles,
   X,
@@ -25,6 +26,12 @@ export interface FinancialNavTab {
 }
 
 export const FINANCIAL_TABS: FinancialNavTab[] = [
+  {
+    id: "agency",
+    label: "Agency",
+    hint: "Jobs with delivery and money",
+    Icon: LayoutDashboard,
+  },
   {
     id: "quickbooks",
     label: "QuickBooks Ledger",
