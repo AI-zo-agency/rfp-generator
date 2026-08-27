@@ -112,6 +112,25 @@ async def _enqueue_pipeline_phase(
                         "job": proposal_job_to_dict(existing),
                     },
                 )
+            # Client often POSTs the *next* Generate phase the moment the prior
+            # checkpoint flips to completed, while Celery is still inside that
+            # prior task chaining forward. Returning 409 made the UI abort with
+            # resume stuck at senior-editor (budget → self-edit). Attach instead
+            # when both sides are Generate pipeline phases.
+            from app.services.proposal_pipeline_checkpoint import PIPELINE_PHASES
+
+            if existing.job_type in PIPELINE_PHASES and phase in PIPELINE_PHASES:
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "ok": True,
+                        "started": False,
+                        "alreadyRunning": True,
+                        "phase": existing.job_type,
+                        "requestedPhase": phase,
+                        "job": proposal_job_to_dict(existing),
+                    },
+                )
             raise HTTPException(
                 status_code=409,
                 detail=(

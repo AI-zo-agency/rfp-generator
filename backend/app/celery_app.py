@@ -75,6 +75,8 @@ async def _dispatch_phase(rfp_id: str, phase: str, kwargs: dict) -> None:
             f"Unknown pipeline phase {phase!r}. Restart the Celery worker so it "
             f"loads the latest _PHASE_DISPATCH. Known phases: {known}"
         )
+    # Reserved for the worker orchestrator — never pass through to phase funcs.
+    chain_next = kwargs.pop("chain_next", True)
     module_path, func_name = _PHASE_DISPATCH[phase]
     module = __import__(module_path, fromlist=[func_name])
     func = getattr(module, func_name)
@@ -87,6 +89,84 @@ async def _dispatch_phase(rfp_id: str, phase: str, kwargs: dict) -> None:
     async with pipeline_phase(rfp_id, phase):
         with llm_call_context(rfp_id=rfp_id, run_id=run_id, node_name=phase):
             await func(rfp_id, **kwargs)
+
+    if chain_next:
+        await _enqueue_next_generate_phase(rfp_id, phase)
+
+
+async def _enqueue_next_generate_phase(rfp_id: str, completed_phase: str) -> None:
+    """Keep Generate proposal moving without requiring the browser to POST next.
+
+    The client still polls/continues; if it drops after Phase 2, Celery starts
+    Phase 3 (and so on) so the run does not look mysteriously "Stopped".
+    """
+    from datetime import datetime, timezone
+
+    from app.services.proposal_generation_cancel import (
+        ProposalGenerationCancelled,
+        check_generation_cancelled,
+    )
+    from app.services.proposal_pipeline_checkpoint import (
+        PIPELINE_PHASES,
+        _next_phase_after,
+        record_phase_started,
+    )
+
+    if completed_phase not in PIPELINE_PHASES:
+        return
+    try:
+        await check_generation_cancelled(rfp_id)
+    except ProposalGenerationCancelled:
+        logger.info(
+            "Skip chain after %s for %s — generation cancel flag is set",
+            completed_phase,
+            rfp_id,
+        )
+        return
+
+    next_phase = _next_phase_after(completed_phase)
+    if next_phase == "complete" or next_phase not in _PHASE_DISPATCH:
+        return
+
+    # Free the per-RFP Redis lock held by this still-finishing Celery task so
+    # the next phase can dispatch (otherwise start sees us as still running).
+    if settings.celery_enabled:
+        from app.services.proposal_job_runner import _redis_clear_job
+
+        await _redis_clear_job(rfp_id)
+
+    await record_phase_started(rfp_id, next_phase)
+    async_result = run_pipeline_phase_task.delay(
+        rfp_id, next_phase, {"chain_next": True}
+    )
+    if settings.celery_enabled:
+        import json
+
+        from app.services.proposal_job_runner import (
+            _REDIS_KEY_PREFIX,
+            _REDIS_LOCK_TTL_SEC,
+        )
+        from app.services.redis_client import get_redis
+
+        started_at = datetime.now(timezone.utc).isoformat()
+        await get_redis().set(
+            f"{_REDIS_KEY_PREFIX}{rfp_id}",
+            json.dumps(
+                {
+                    "job_type": next_phase,
+                    "celery_task_id": async_result.id,
+                    "started_at": started_at,
+                }
+            ),
+            ex=_REDIS_LOCK_TTL_SEC,
+        )
+    logger.info(
+        "Chained next generate phase after %s → %s for %s (task=%s)",
+        completed_phase,
+        next_phase,
+        rfp_id,
+        async_result.id,
+    )
 
 
 @celery_app.task(bind=True, name="proposal.run_pipeline_phase")

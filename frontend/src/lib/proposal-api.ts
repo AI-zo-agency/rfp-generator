@@ -129,7 +129,9 @@ import {
   buildPipelineStatus,
   normalizeCheckpointForDisplay,
   phaseCompleteOnServer,
+  phaseIndex,
   phaseIsComplete,
+  PIPELINE_PHASE_ORDER,
   shouldRunPhase,
   shouldSkipCompletedPhase,
   type PipelinePhase,
@@ -181,12 +183,33 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 function throwIfProposalStopped(res: Response, data: { detail?: string }): void {
-  if (res.status === 409) {
-    throw new DOMException(
-      data.detail ?? "Proposal generation stopped",
-      "AbortError"
-    );
+  // Only cooperative Stop / cancel conflicts — never "another job is running"
+  // (that is a Celery chain race; callers attach and wait instead).
+  if (res.status !== 409) return;
+  const detail = data.detail ?? "";
+  if (/already running \(/i.test(detail)) {
+    throw new Error(detail || "Another proposal job is already running");
   }
+  throw new DOMException(
+    detail || "Proposal generation stopped",
+    "AbortError"
+  );
+}
+
+function asGeneratePipelinePhase(
+  value: string | null | undefined
+): PipelinePhase | null {
+  if (!value || value === "complete") return null;
+  return (PIPELINE_PHASE_ORDER as string[]).includes(value)
+    ? (value as PipelinePhase)
+    : null;
+}
+
+/** Parse FastAPI "Another proposal job is already running (phase-3-5-budget)." */
+function parseAlreadyRunningJobType(detail: string): string | null {
+  const match = detail.match(/already running \(([^)]+)\)/i);
+  const jobType = match?.[1]?.trim();
+  return jobType || null;
 }
 
 /** Tell backend to stop LLM/Supermemory and save pipeline checkpoint. */
@@ -505,7 +528,7 @@ export async function getProposalJobStatus(
 async function startProposalPhaseJob(
   path: string,
   signal?: AbortSignal,
-  options?: { body?: string }
+  options?: { body?: string; phase?: PipelinePhase | string }
 ): Promise<
   | { mode: "async"; alreadyRunning: boolean }
   | {
@@ -562,6 +585,21 @@ async function startProposalPhaseJob(
 
   if (res.status === 202 || res.ok) {
     return { mode: "async", alreadyRunning: Boolean(data.alreadyRunning) };
+  }
+
+  // After budget (etc.) completes, Celery still holds that job lock while it
+  // chains senior-editor. A naive POST for the next phase gets 409 — treat it
+  // as alreadyRunning and wait, instead of aborting Generate.
+  if (res.status === 409) {
+    const detail = formatApiDetail(data.detail, "");
+    const runningPhase = asGeneratePipelinePhase(
+      parseAlreadyRunningJobType(detail)
+    );
+    const requestedPhase = asGeneratePipelinePhase(options?.phase ?? null);
+    if (runningPhase && requestedPhase) {
+      return { mode: "async", alreadyRunning: true };
+    }
+    throwIfProposalStopped(res, { detail });
   }
 
   throwIfProposalStopped(res, data);
@@ -621,10 +659,25 @@ async function waitForProposalPhase(
     const cp = snapshot.research?.pipelineCheckpoint;
     const job = await fetchProposalJobStatus(rfpId);
 
+    const inProg = asGeneratePipelinePhase(cp?.inProgressPhase);
+    const lastDone = asGeneratePipelinePhase(cp?.lastCompletedPhase);
+    const jobPhase = asGeneratePipelinePhase(job?.jobType ?? null);
+
     if (cp?.inProgressPhase === phase) {
       observedRunning = true;
     }
     if (job?.jobType === phase && job.status === "running") {
+      observedRunning = true;
+    }
+    // Predecessor still finishing (Celery about to chain to us).
+    if (inProg && phaseIndex(inProg) < phaseIndex(phase)) {
+      observedRunning = true;
+    }
+    if (
+      jobPhase &&
+      job?.status === "running" &&
+      phaseIndex(jobPhase) < phaseIndex(phase)
+    ) {
       observedRunning = true;
     }
 
@@ -640,6 +693,22 @@ async function waitForProposalPhase(
       }
     }
 
+    // Checkpoint already advanced past this phase (server chain or prior run).
+    if (lastDone && phaseIndex(lastDone) >= phaseIndex(phase) && inProg !== phase) {
+      return { draft: snapshot.draft, research: snapshot.research };
+    }
+    // Successor already running — Celery chained past us.
+    if (inProg && phaseIndex(inProg) > phaseIndex(phase)) {
+      return { draft: snapshot.draft, research: snapshot.research };
+    }
+    if (
+      jobPhase &&
+      job?.status === "running" &&
+      phaseIndex(jobPhase) > phaseIndex(phase)
+    ) {
+      return { draft: snapshot.draft, research: snapshot.research };
+    }
+
     if (observedRunning && cp?.inProgressPhase !== phase) {
       if (cp?.lastFailedPhase === phase) {
         const err = cp.lastError ?? `${phase} failed`;
@@ -647,6 +716,19 @@ async function waitForProposalPhase(
           throw new DOMException(err, "AbortError");
         }
         throw new Error(err);
+      }
+      // Still on an earlier generate phase — keep waiting for the chain.
+      if (inProg && phaseIndex(inProg) < phaseIndex(phase)) {
+        await sleep(STAGE_POLL_INTERVAL_MS);
+        continue;
+      }
+      if (
+        jobPhase &&
+        job?.status === "running" &&
+        phaseIndex(jobPhase) < phaseIndex(phase)
+      ) {
+        await sleep(STAGE_POLL_INTERVAL_MS);
+        continue;
       }
       if (
         cp?.lastCompletedPhase === phase ||
@@ -781,7 +863,7 @@ async function runProposalPhaseAsync(
   budget?: ProposalBudget;
   review?: PreSubmitReview;
 }> {
-  const started = await startProposalPhaseJob(path, signal);
+  const started = await startProposalPhaseJob(path, signal, { phase });
   if (started.mode === "sync") {
     return {
       draft: started.draft ? apiDraftToOutline(started.draft) : null,

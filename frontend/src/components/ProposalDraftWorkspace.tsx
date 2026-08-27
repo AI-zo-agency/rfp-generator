@@ -355,6 +355,8 @@ function ProposalDraftWorkspaceInner({
   const skipNextSaveRef = useRef(false);
   const saveGenerationRef = useRef(0);
   const fullProposalAbortRef = useRef<AbortController | null>(null);
+  /** Sync lock — React state lags a tick; prevents a second click aborting the first run. */
+  const fullProposalInFlightRef = useRef(false);
   const fulfillAbortRef = useRef<AbortController | null>(null);
   /** Prevents double green-banner when request race + poll both see completion. */
   const fulfillCompletionShownRef = useRef(false);
@@ -1750,10 +1752,8 @@ function ProposalDraftWorkspaceInner({
           });
         } catch (error) {
           if (cancelled) return;
-          if (
-            abort.signal.aborted ||
-            (error instanceof DOMException && error.name === "AbortError")
-          ) {
+          // User Stop only — not poll/timeout AbortErrors.
+          if (abort.signal.aborted) {
             setGenerateNotice(
               "Complete & clean stopped — progress saved. Use Complete & clean draft to resume from the last step."
             );
@@ -1830,8 +1830,44 @@ function ProposalDraftWorkspaceInner({
       };
       const mapped =
         progressMap[activePhase] ?? fullProposalProgressFromInFlight(activePhase);
-      if (mapped) {
-        setFullProposalProgress(mapped);
+      if (!mapped || !jobRunning) return;
+
+      // Server is still drafting (Celery chained the next phase, or the tab
+      // reconnected mid-run). Re-attach the client orchestrator so the UI does
+      // not sit idle after Phase 2 while Phase 3+ keeps going.
+      setIsFullProposalRunning(true);
+      setFullProposalProgress(mapped);
+      fullProposalInFlightRef.current = true;
+      abort = new AbortController();
+      fullProposalAbortRef.current = abort;
+      try {
+        const { draft, research: updatedResearch } =
+          await generateFullProposalStaged(rfp.id, setFullProposalProgress, {
+            signal: abort.signal,
+            onDraftUpdate: (d) => handleLiveDraftUpdateRef.current(d),
+            onResearchUpdate: (r) => handleResearchPollRef.current(r),
+          });
+        if (cancelled || abort.signal.aborted) return;
+        applyOutlineFromServer(draft);
+        if (updatedResearch) {
+          handleResearchPollRef.current(updatedResearch);
+        }
+        setGenerateNotice(null);
+      } catch (error) {
+        if (cancelled || abort.signal.aborted) return;
+        setGenerateError(
+          error instanceof Error ? error.message : "Proposal generation failed"
+        );
+      } finally {
+        fullProposalInFlightRef.current = false;
+        if (fullProposalAbortRef.current === abort) {
+          fullProposalAbortRef.current = null;
+        }
+        stopPoll?.();
+        if (!cancelled) {
+          setIsFullProposalRunning(false);
+          setFullProposalProgress(null);
+        }
       }
     }
 
@@ -1839,7 +1875,11 @@ function ProposalDraftWorkspaceInner({
     return () => {
       cancelled = true;
       stopPoll?.();
-      abort?.abort();
+      // Never abort the live Generate controller — that made Phase 2→3 look
+      // "Stopped" when this effect re-ran on checkpoint updates.
+      if (abort && abort !== fullProposalAbortRef.current) {
+        abort.abort();
+      }
     };
   }, [
     hydrated,
@@ -2216,15 +2256,14 @@ function ProposalDraftWorkspaceInner({
       } else if (outcome.w === "failed") {
         throw new Error("Complete & clean failed on the server.");
       } else {
-        // Backend finished (or connection stalled) — pull final saved state.
-        abort.abort();
+        // Backend finished (or poll stalled while worker kept going) — pull final
+        // saved state. Do NOT abort() here: that made success look like Stop.
         await applyFulfillScanSuccessUi();
       }
     } catch (error) {
-      if (
-        abort.signal.aborted ||
-        (error instanceof DOMException && error.name === "AbortError")
-      ) {
+      // Only a real user Stop (fulfillAbortRef) is "stopped". Timeout / race
+      // AbortErrors must not clear a finished scan.
+      if (abort.signal.aborted) {
         // If the safety-net effect already showed success, don't overwrite it
         // with a "stopped" banner.
         if (fulfillCompletionShownRef.current || fulfillJustCompleted) {
@@ -2504,9 +2543,10 @@ function ProposalDraftWorkspaceInner({
     // independently to completion (confirmed live: a Celery task logged
     // succeeded well after the UI showed "Stopped"). No-op instead of
     // restarting; the running progress UI already reflects this state.
-    if (isFullProposalRunning) {
+    if (isFullProposalRunning || fullProposalInFlightRef.current) {
       return;
     }
+    fullProposalInFlightRef.current = true;
     // Continue = resume from checkpoint (e.g. budget failure).
     // Fresh / regenerate-from-done = forceRestart from Sections 1–3.
     // startAfterSections1to3 = Start from Intelligence (keep 1–3, re-run Phase 2+).
@@ -2518,6 +2558,7 @@ function ProposalDraftWorkspaceInner({
       !startAfterSections1to3 &&
       !startFromCaseStudies
     ) {
+      fullProposalInFlightRef.current = false;
       await handleFulfillRfpGaps();
       return;
     }
@@ -2540,6 +2581,7 @@ function ProposalDraftWorkspaceInner({
         tone: "danger",
       });
       if (!caseOk) {
+        fullProposalInFlightRef.current = false;
         return;
       }
     } else if (startAfterSections1to3) {
@@ -2552,6 +2594,7 @@ function ProposalDraftWorkspaceInner({
         tone: "danger",
       });
       if (!intelligenceOk) {
+        fullProposalInFlightRef.current = false;
         return;
       }
     } else if (shouldResume) {
@@ -2562,6 +2605,7 @@ function ProposalDraftWorkspaceInner({
         tone: "default",
       });
       if (!resumeOk) {
+        fullProposalInFlightRef.current = false;
         return;
       }
     } else if (fullProposalDone) {
@@ -2573,6 +2617,7 @@ function ProposalDraftWorkspaceInner({
         tone: "danger",
       });
       if (!restartOk) {
+        fullProposalInFlightRef.current = false;
         return;
       }
     }
@@ -2643,6 +2688,7 @@ function ProposalDraftWorkspaceInner({
             ? error.message
             : "Failed to clear case studies before restart."
         );
+        fullProposalInFlightRef.current = false;
         return;
       }
     } else if (startAfterSections1to3) {
@@ -2678,6 +2724,7 @@ function ProposalDraftWorkspaceInner({
             ? error.message
             : "Failed to clear previous Intelligence before restart."
         );
+        fullProposalInFlightRef.current = false;
         return;
       }
     } else {
@@ -2722,7 +2769,10 @@ function ProposalDraftWorkspaceInner({
         draft.sections.find((s) => s.content)?.id ?? draft.sections[0]?.id ?? null
       );
     } catch (error) {
-      if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+      // Only treat *user/explicit* abort as Stop. Timeouts and AbortSignal.any
+      // from PHASE_START_TIMEOUT also raise AbortError — those must resume, not
+      // look like the user hit Stop.
+      if (abort.signal.aborted) {
         setGenerateNotice(
           "Stopped — progress saved in the database. Use Continue proposal to resume."
         );
@@ -2781,6 +2831,7 @@ function ProposalDraftWorkspaceInner({
         setGenerateError(errMsg);
       }
     } finally {
+      fullProposalInFlightRef.current = false;
       if (fullProposalAbortRef.current === abort) {
         fullProposalAbortRef.current = null;
       }

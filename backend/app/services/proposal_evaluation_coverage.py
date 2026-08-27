@@ -134,15 +134,69 @@ def criterion_code(criterion: Any) -> str:
     return str(_get(criterion, "item_code", "itemCode") or "").strip()
 
 
+# Named evaluation factors that score the offeror's approach / SOW response.
+# Used only when the buyer also published a section code — abstract category
+# labels without structure stay advisory (see evaluation_is_published_response_form).
+_OFFEROR_RESPONSE_FACTOR = re.compile(
+    r"\b("
+    r"technical\s+approach|proposed\s+approach|project\s+approach|"
+    r"methodology|work\s+plan|management\s+approach|"
+    r"scope\s+of\s+work|statement\s+of\s+work|"
+    r"understanding\s+of\s+(the\s+)?(project|scope|requirements)"
+    r")\b",
+    re.I,
+)
+
+# Asks that make clear the evaluator is scoring a submitted response, even when
+# points sit on Qualifications / Cost and this factor's weight is null.
+_ASK_NEEDS_OFFEROR_RESPONSE = re.compile(
+    r"offeror.?s?\s+response|proposer.?s?\s+response|"
+    r"based\s+on\s+(the\s+)?(offeror|proposer|vendor).{0,60}response|"
+    r"response\s+to\s+section|"
+    r"proposed\s+(approach|methodology|solution|work\s+plan)",
+    re.I,
+)
+
+
+def criterion_requires_outline_tab(criterion: Any) -> bool:
+    """True when this factor must appear as its own manuscript tab.
+
+    Points > 0 always qualify. A coded factor that names an approach / scope /
+    methodology response — or whose ask scores the offeror's response — also
+    qualifies when weight is null or qualitative. Otherwise Phase 2 drops
+    Technical Approach / Scope tabs while keeping only Qualifications + Cost,
+    even though the evaluator opens that response section.
+    """
+    if not criterion_name(criterion):
+        return False
+    if criterion_points(criterion) > 0:
+        return True
+    code = criterion_code(criterion)
+    if not code:
+        return False
+    name = criterion_name(criterion)
+    if _OFFEROR_RESPONSE_FACTOR.search(name):
+        return True
+    ask_blob = " ".join(
+        str(_get(item, "ask") or "") for item in criterion_items(criterion)
+    )
+    ask_blob = f"{ask_blob} {str(_get(criterion, 'description') or '')}".strip()
+    return bool(_ASK_NEEDS_OFFEROR_RESPONSE.search(ask_blob))
+
+
 def scored_criteria(evaluation: Any) -> list[Any]:
-    """Parent criteria the evaluator scores, in the RFP's own order."""
+    """Parent criteria that must reach the outline as tabs, in RFP order.
+
+    Includes positive-point criteria and coded offeror-response factors whose
+    weight was omitted or qualitative (see ``criterion_requires_outline_tab``).
+    """
     criteria = _get(evaluation, "criteria") or []
     if not isinstance(criteria, list):
         return []
     return [
         crit
         for crit in criteria
-        if criterion_name(crit) and criterion_points(crit) > 0
+        if criterion_requires_outline_tab(crit)
     ]
 
 
@@ -366,10 +420,15 @@ def _make_section(criterion: Any, *, order: int, index: int) -> dict[str, Any]:
     items = criterion_items(criterion)
     codes = [str(_get(item, "item_code", "itemCode") or "").strip() for item in items]
     codes = [c for c in codes if c]
-    reason = (
-        f"Scored evaluation criterion worth {points:g} points"
-        + (f" covering {', '.join(codes)}" if codes else "")
-    )
+    code_tail = f" covering {', '.join(codes)}" if codes else ""
+    if points > 0:
+        reason = f"Scored evaluation criterion worth {points:g} points{code_tail}"
+    else:
+        reason = (
+            "Named evaluation factor requiring an offeror response"
+            f"{code_tail}"
+            " (weight omitted or qualitative in extraction)"
+        )
     return {
         "id": f"rfp-eval-{index}",
         "title": criterion_outline_title(criterion),
@@ -379,7 +438,7 @@ def _make_section(criterion: Any, *, order: int, index: int) -> dict[str, Any]:
         "parentId": None,
         "children": [],
         "dependencies": [],
-        "evaluationWeight": points,
+        "evaluationWeight": points if points > 0 else None,
         "protectFromCap": True,
         "submissionInstrument": "narrative",
     }
@@ -460,7 +519,11 @@ def ensure_scored_criteria_coverage(
         else:
             section = raw
         new_sections.append(section)
-        added.append(f"{raw['title']} ({raw['evaluationWeight']:g} pts)")
+        weight = raw.get("evaluationWeight")
+        if isinstance(weight, (int, float)) and weight > 0:
+            added.append(f"{raw['title']} ({weight:g} pts)")
+        else:
+            added.append(f"{raw['title']} (required evaluation response)")
 
     # Drop the wrapper whenever the scored criteria have real tabs — whether
     # THIS pass injected them or the planner emitted them itself. Gating on
@@ -498,11 +561,17 @@ def ensure_scored_criteria_coverage(
 
 def uncovered_scored_criteria(sections: list[Any], evaluation: Any) -> list[str]:
     """Scored criteria with no outline tab — for reporting and verification."""
-    return [
-        f"{criterion_outline_title(crit)} ({criterion_points(crit):g} pts)"
-        for crit in scored_criteria(evaluation)
-        if not outline_covers_criterion(sections, crit)
-    ]
+    labels: list[str] = []
+    for crit in scored_criteria(evaluation):
+        if outline_covers_criterion(sections, crit):
+            continue
+        points = criterion_points(crit)
+        title = criterion_outline_title(crit)
+        if points > 0:
+            labels.append(f"{title} ({points:g} pts)")
+        else:
+            labels.append(f"{title} (required evaluation response)")
+    return labels
 
 
 def evaluation_priority_brief(evaluation: Any, *, limit: int = 24) -> str:
@@ -523,8 +592,16 @@ def evaluation_priority_brief(evaluation: Any, *, limit: int = 24) -> str:
     ]
     for crit in ranked[:limit]:
         points = criterion_points(crit)
-        share = f"{(points / total * 100):.0f}%" if total > 0 else "?"
-        lines.append(f"- [{points:g} pts / {share}] {criterion_outline_title(crit)}")
+        if points > 0:
+            share = f"{(points / total * 100):.0f}%" if total > 0 else "?"
+            lines.append(
+                f"- [{points:g} pts / {share}] {criterion_outline_title(crit)}"
+            )
+        else:
+            lines.append(
+                "- [required response / no points extracted] "
+                f"{criterion_outline_title(crit)}"
+            )
         for item in criterion_items(crit):
             code = str(_get(item, "item_code", "itemCode") or "").strip()
             ask = str(_get(item, "ask") or "").strip()

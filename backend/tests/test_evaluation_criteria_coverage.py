@@ -773,5 +773,102 @@ class TitlesDropWrappedPointsTextTests(unittest.TestCase):
         self.assertFalse(any("UP TO" in s.title for s in kept))
 
 
+class NullWeightOfferorResponseCoverageTests(unittest.TestCase):
+    """ND HHS-style scoreboard: Quals + Cost carry points; Approach is null.
+
+    Phase 2 extracted Technical Approach (Section 5.05) with weight=null and an
+    ask that scores the offeror's response to Scope of Work. The planner's
+    anti-bloat rules dropped SOW restatements, and scored_criteria used to
+    require points > 0 — so Approach never got a tab. Coverage must inject it.
+    """
+
+    def nd_like_evaluation(self) -> EvaluationAnalysis:
+        return EvaluationAnalysis(
+            scoredResponseForm=False,
+            totalPoints=100,
+            emphasis=["Technical Approach to Scope of Work"],
+            criteria=[
+                EvaluationCriterion(
+                    name="Qualifications",
+                    itemCode="Section 5.06",
+                    weight=80,
+                    items=[
+                        EvaluationCriterionItem(
+                            itemCode="5.06.a", ask="Relevant experience", weight=40
+                        )
+                    ],
+                ),
+                EvaluationCriterion(
+                    name="Technical Approach",
+                    itemCode="Section 5.05",
+                    weight=None,
+                    items=[
+                        EvaluationCriterionItem(
+                            itemCode="5.05",
+                            ask=(
+                                "Evaluate based on the offeror's response to "
+                                "Section 2.03 Scope of Work."
+                            ),
+                            weight=None,
+                        )
+                    ],
+                ),
+                EvaluationCriterion(
+                    name="Cost Proposal",
+                    itemCode="Section 5.07",
+                    weight=20,
+                ),
+            ],
+        )
+
+    def test_null_weight_technical_approach_is_uncovered_then_injected(self) -> None:
+        evaluation = self.nd_like_evaluation()
+        outline = [
+            OutlineSection(
+                id="q", title="Section 5.06 — Qualifications", order=1
+            ),
+            OutlineSection(id="c", title="Section 5.07 — Cost Proposal", order=2),
+            OutlineSection(
+                id="f",
+                title="Required Forms",
+                order=3,
+                submissionInstrument="form",
+            ),
+        ]
+        before = uncovered_scored_criteria(outline, evaluation)
+        self.assertTrue(
+            any("Technical Approach" in label for label in before),
+            before,
+        )
+        kept, added, _dropped = ensure_scored_criteria_coverage(
+            outline, evaluation, section_factory=_build_section
+        )
+        self.assertTrue(
+            any("Technical Approach" in line for line in added),
+            added,
+        )
+        titles = [s.title for s in kept]
+        self.assertTrue(
+            any("Technical Approach" in t for t in titles),
+            titles,
+        )
+        self.assertEqual(uncovered_scored_criteria(kept, evaluation), [])
+
+    def test_abstract_approach_category_without_code_stays_advisory(self) -> None:
+        """Null-weight Approach with no section code must not mint a stub."""
+        categories = EvaluationAnalysis(
+            criteria=[
+                EvaluationCriterion(name="Technical Approach", weight=None),
+                EvaluationCriterion(name="Cost", weight=20),
+            ]
+        )
+        kept, added, dropped = ensure_scored_criteria_coverage(
+            [], categories, section_factory=_build_section
+        )
+        self.assertEqual(added, [])
+        self.assertEqual(kept, [])
+        self.assertEqual(dropped, [])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
