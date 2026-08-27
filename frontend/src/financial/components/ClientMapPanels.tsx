@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo, useState, type FormEvent } from "react";
-import { ChevronLeft, ChevronRight, CircleHelp, RefreshCw, Search } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsUpDown, CircleHelp, RefreshCw, Search } from "lucide-react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Empty, Panel, Pill } from "./qb-ui";
 import { AgencyJobsDemo, AgencyJobsToolbar, useAgencyOverview } from "./AgencyJobsDemo";
@@ -14,10 +15,12 @@ import "./QuickBooksLedger.css";
 
 const INPUT =
   "h-11 min-w-32 rounded-md border border-[var(--zo-border)] bg-[var(--zo-card-bg)] px-3 text-base text-[var(--zo-text)] outline-none focus:border-[var(--zo-teal)]";
-const MAPPINGS_PER_PAGE = 25;
+const MAPPINGS_PER_PAGE = 10;
 const INTERNAL_HINT =
   "Your own agency (e.g. ZO Agency), not a paying client. Skips Teamwork/QuickBooks auto-linking and billed/AR dollars.";
+const BLANK_STATUS = "(blank)";
 type MappingFilter = "all" | ClientMapRow["link_confidence"];
+export type ClientNameSort = "asc" | "desc" | null;
 
 function InternalFlag({
   checked,
@@ -46,15 +49,39 @@ function InternalFlag({
   );
 }
 
-export function filterClientMapRows(rows: ClientMapRow[], query: string, filter: MappingFilter) {
+export function statusKey(status: string | null | undefined) {
+  const trimmed = status?.trim();
+  return trimmed ? trimmed : BLANK_STATUS;
+}
+
+export function collectClientMapStatuses(rows: ClientMapRow[]) {
+  return [...new Set(rows.map((row) => statusKey(row.status)))].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
+export function filterClientMapRows(
+  rows: ClientMapRow[],
+  query: string,
+  filter: MappingFilter,
+  statuses: string[] = [],
+) {
   const normalizedQuery = query.trim().toLowerCase();
+  const statusSet = new Set(statuses);
   return rows.filter((row) => {
     const matchesFilter = filter === "all" || row.link_confidence === filter;
+    const matchesStatus = statusSet.size === 0 || statusSet.has(statusKey(row.status));
     const haystack = [row.tag_code, row.client_name, row.current_am, ...row.qb_customer_names, ...row.teamwork_company_names]
       .filter(Boolean)
       .join(" ")
       .toLowerCase();
-    return matchesFilter && (!normalizedQuery || haystack.includes(normalizedQuery));
+    return matchesFilter && matchesStatus && (!normalizedQuery || haystack.includes(normalizedQuery));
+  });
+}
+
+export function sortClientMapRows(rows: ClientMapRow[], sort: ClientNameSort) {
+  if (!sort) return rows;
+  return [...rows].sort((a, b) => {
+    const cmp = a.client_name.localeCompare(b.client_name, undefined, { sensitivity: "base" });
+    return sort === "asc" ? cmp : -cmp;
   });
 }
 
@@ -64,9 +91,85 @@ export function paginateClientMapRows(rows: ClientMapRow[], page: number, pageSi
   return { page: safePage, pageCount, rows: rows.slice((safePage - 1) * pageSize, safePage * pageSize) };
 }
 
+export function nextClientNameSort(current: ClientNameSort): ClientNameSort {
+  if (current === null) return "asc";
+  if (current === "asc") return "desc";
+  return null;
+}
+
 function MappingPagination({ page, pageCount, onChange }: { page: number; pageCount: number; onChange: (page: number) => void }) {
   if (pageCount <= 1) return null;
   return <nav className="mapping-pagination" aria-label="Client mapping pages"><span>Page {page} of {pageCount}</span><div><button type="button" onClick={() => onChange(page - 1)} disabled={page === 1} aria-label="Previous mapping page"><ChevronLeft size={15} /></button><button type="button" onClick={() => onChange(page + 1)} disabled={page === pageCount} aria-label="Next mapping page"><ChevronRight size={15} /></button></div></nav>;
+}
+
+function ClientNameSortButton({ sort, onChange }: { sort: ClientNameSort; onChange: (next: ClientNameSort) => void }) {
+  return (
+    <button
+      type="button"
+      className="qb-sort"
+      onClick={() => onChange(nextClientNameSort(sort))}
+      aria-label={`Sort clients ${sort === "asc" ? "descending" : sort === "desc" ? "unsorted" : "ascending"}`}
+    >
+      Client
+      {sort === "asc" ? (
+        <ChevronUp size={14} strokeWidth={2.5} aria-hidden />
+      ) : sort === "desc" ? (
+        <ChevronDown size={14} strokeWidth={2.5} aria-hidden />
+      ) : (
+        <ChevronsUpDown size={14} strokeWidth={2} aria-hidden className="qb-sort-idle" />
+      )}
+    </button>
+  );
+}
+
+function StatusMultiselect({
+  options,
+  selected,
+  onChange,
+}: {
+  options: string[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const active = selected.length > 0;
+  const toggle = (value: string) => {
+    onChange(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value]);
+  };
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button type="button" className="mapping-status-filter" data-active={active ? "true" : undefined} aria-label="Filter by status">
+          Status{active ? <span>{selected.length}</span> : null}
+          <ChevronDown size={14} aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="mapping-status-menu w-56 p-2">
+        <div className="mapping-status-menu__head">
+          <span>Status</span>
+          {active ? (
+            <button type="button" className="mapping-status-menu__clear" onClick={() => onChange([])}>
+              Clear
+            </button>
+          ) : null}
+        </div>
+        {options.length ? (
+          <ul className="mapping-status-menu__list">
+            {options.map((option) => (
+              <li key={option}>
+                <label className="mapping-status-menu__option">
+                  <input type="checkbox" checked={selected.includes(option)} onChange={() => toggle(option)} />
+                  <span>{option}</span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mapping-status-menu__empty">No statuses yet.</p>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 const emptyRow = (): ClientMapCorePatch => ({
@@ -240,6 +343,8 @@ function MappingView({
   const [attachTargetId, setAttachTargetId] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MappingFilter>("all");
+  const [clientSort, setClientSort] = useState<ClientNameSort>(null);
+  const [statusFilter, setStatusFilter] = useState<string[]>([]);
   const [page, setPage] = useState(1);
   const [overrideError, setOverrideError] = useState<string | null>(null);
   const [overrideNotice, setOverrideNotice] = useState<string | null>(null);
@@ -251,7 +356,11 @@ function MappingView({
   );
   const resolvedClientMapId = clientMapId || existingOverride?.client_map_id || "";
   const selectedClient = map.rows.find((row) => row.id === resolvedClientMapId);
-  const filteredRows = useMemo(() => filterClientMapRows(map.rows, query, filter), [filter, map.rows, query]);
+  const statusOptions = useMemo(() => collectClientMapStatuses(map.rows), [map.rows]);
+  const filteredRows = useMemo(
+    () => sortClientMapRows(filterClientMapRows(map.rows, query, filter, statusFilter), clientSort),
+    [clientSort, filter, map.rows, query, statusFilter],
+  );
   const pagedRows = paginateClientMapRows(filteredRows, page);
   const filters: { id: MappingFilter; label: string; count: number }[] = [
     { id: "all", label: "All", count: map.rows.length },
@@ -316,7 +425,35 @@ function MappingView({
         {filteredRows.length ? (
           <div className="qb-tablewrap">
             <table className="qb-table mapping-table">
-              <thead><tr><th>Tag</th><th>Client</th><th>AM</th><th>Status</th><th>QuickBooks</th><th>Teamwork</th><th>Confidence</th><th>Actions</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>Tag</th>
+                  <th>
+                    <ClientNameSortButton
+                      sort={clientSort}
+                      onChange={(next) => {
+                        setClientSort(next);
+                        setPage(1);
+                      }}
+                    />
+                  </th>
+                  <th>AM</th>
+                  <th>
+                    <StatusMultiselect
+                      options={statusOptions}
+                      selected={statusFilter}
+                      onChange={(next) => {
+                        setStatusFilter(next);
+                        setPage(1);
+                      }}
+                    />
+                  </th>
+                  <th>QuickBooks</th>
+                  <th>Teamwork</th>
+                  <th>Confidence</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
               <tbody>
                 {pagedRows.rows.map((row) => (
                   <ClientRow key={row.id} row={row} busy={map.busy} onUpdate={map.update} onAccept={map.accept} onReject={map.reject} onDelete={map.remove} />
@@ -345,12 +482,46 @@ function MappingView({
         </label>
       ) : null}
 
-      <div className="qb-two">
+      <div className="qb-two mapping-unmatched">
         <Panel title="Unmatched Teamwork" meta={`${map.unmatched.teamwork.length}`}>
-          {map.unmatched.teamwork.length ? <ul className="qb-bars">{map.unmatched.teamwork.map((item) => <li key={`${item.id}-${item.name}`}><button type="button" className="qb-more !mt-0" disabled={map.busy || !attachTarget} onClick={() => attachTarget && void map.attachTeamwork(attachTarget, item)}>Attach {item.name || `Company ${item.id}`}</button></li>)}</ul> : <Empty>All Teamwork companies are linked.</Empty>}
+          {map.unmatched.teamwork.length ? (
+            <ul className="mapping-attach-list">
+              {map.unmatched.teamwork.map((item) => (
+                <li key={`${item.id}-${item.name}`}>
+                  <button
+                    type="button"
+                    className="mapping-attach-item"
+                    disabled={map.busy || !attachTarget}
+                    onClick={() => attachTarget && void map.attachTeamwork(attachTarget, item)}
+                  >
+                    Attach {item.name || `Company ${item.id}`}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Empty>All Teamwork companies are linked.</Empty>
+          )}
         </Panel>
         <Panel title="Unmatched QuickBooks" meta={`${map.unmatched.quickbooks.length}`}>
-          {map.unmatched.quickbooks.length ? <ul className="qb-bars">{map.unmatched.quickbooks.map((item) => <li key={item.qbo_id}><button type="button" className="qb-more !mt-0" disabled={map.busy || !attachTarget} onClick={() => attachTarget && void map.attachQuickBooks(attachTarget, item)}>Attach {item.display_name}</button></li>)}</ul> : <Empty>All QuickBooks customers are linked.</Empty>}
+          {map.unmatched.quickbooks.length ? (
+            <ul className="mapping-attach-list">
+              {map.unmatched.quickbooks.map((item) => (
+                <li key={item.qbo_id}>
+                  <button
+                    type="button"
+                    className="mapping-attach-item"
+                    disabled={map.busy || !attachTarget}
+                    onClick={() => attachTarget && void map.attachQuickBooks(attachTarget, item)}
+                  >
+                    Attach {item.display_name}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Empty>All QuickBooks customers are linked.</Empty>
+          )}
         </Panel>
       </div>
 

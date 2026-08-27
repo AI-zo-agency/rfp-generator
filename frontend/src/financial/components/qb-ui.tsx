@@ -420,7 +420,7 @@ export function DataTable<T>({
                 const dir = header.column.getIsSorted();
                 const numeric = header.column.columnDef.meta?.numeric;
                 return (
-                  <TableHead key={header.id} data-numeric={numeric ? "true" : undefined}>
+                  <TableHead key={header.id} data-numeric={numeric ? "true" : undefined} className={numeric ? "text-right" : undefined}>
                     {sortable ? (
                       <button
                         type="button"
