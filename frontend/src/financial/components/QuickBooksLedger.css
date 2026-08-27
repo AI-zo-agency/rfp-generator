@@ -1130,14 +1130,14 @@ table.qb-table {
 
 .agency-drawer {
   position: fixed;
-  top: 0;
-  right: 0;
+  top: 16px;
+  right: 16px;
   z-index: 101;
   display: flex;
   flex-direction: column;
   width: min(440px, 100vw);
-  height: 100vh;
-  max-height: 100dvh;
+  height: auto;
+  max-height: calc(100dvh - 32px);
   background: var(--zo-card-bg, var(--zo-surface));
   border-left: 1px solid var(--zo-border);
   box-shadow: -18px 0 48px -24px color-mix(in srgb, var(--zo-text) 48%, transparent);
@@ -1185,7 +1185,7 @@ table.qb-table {
 }
 .agency-drawer-close:hover:not(:disabled) { border-color: var(--zo-border); background: var(--zo-surface); color: var(--zo-text); }
 
-.agency-drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 18px 16px; scrollbar-width: thin; }
+.agency-drawer-body { flex: 0 1 auto; min-height: 0; overflow: auto; padding: 18px 16px; scrollbar-width: thin; }
 .agency-drawer-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
 .agency-drawer-details div { min-width: 0; }
 .agency-drawer-details dt, .agency-drawer-eyebrow { margin: 0 0 3px; font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--zo-text-muted); }
@@ -1205,7 +1205,7 @@ table.qb-table {
 .agency-drawer-actions button:disabled, .agency-drawer-scrim:disabled, .agency-drawer-close:disabled { opacity: .55; cursor: default; }
 
 @media (max-width: 720px) {
-  .agency-drawer { top: auto; bottom: 0; width: 100%; height: min(82dvh, 640px); border-top: 1px solid var(--zo-border); border-left: 0; border-radius: 16px 16px 0 0; animation-name: agency-drawer-rise; }
+  .agency-drawer { top: auto; right: 0; bottom: 0; width: 100%; height: min(82dvh, 640px); max-height: none; border-top: 1px solid var(--zo-border); border-left: 0; border-radius: 16px 16px 0 0; animation-name: agency-drawer-rise; }
   @keyframes agency-drawer-rise { from { transform: translateY(100%); } to { transform: translateY(0); } }
 }
 
