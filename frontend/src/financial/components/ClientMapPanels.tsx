@@ -1,20 +1,50 @@
 "use client";
 
 import { useMemo, useState, type FormEvent } from "react";
-import { ChevronLeft, ChevronRight, RefreshCw, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleHelp, RefreshCw, Search } from "lucide-react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Empty, Panel, Pill } from "./qb-ui";
-import { AgencyJobsDemo } from "./AgencyJobsDemo";
+import { AgencyJobsDemo, AgencyJobsToolbar, useAgencyOverview } from "./AgencyJobsDemo";
 import { useClientMap } from "../lib/use-client-map";
 import { parseAgencyView, type AgencyViewId } from "../lib/financial-tab";
 import type { ClientMapCorePatch, ClientMapRow } from "../types/client-map";
 import "./QuickBooksLedger.css";
 
 const INPUT =
-  "h-8 min-w-24 rounded-md border border-[var(--zo-border)] bg-[var(--zo-card-bg)] px-2 text-xs text-[var(--zo-text)] outline-none focus:border-[var(--zo-teal)]";
+  "h-11 min-w-32 rounded-md border border-[var(--zo-border)] bg-[var(--zo-card-bg)] px-3 text-base text-[var(--zo-text)] outline-none focus:border-[var(--zo-teal)]";
 const MAPPINGS_PER_PAGE = 25;
+const INTERNAL_HINT =
+  "Your own agency (e.g. ZO Agency), not a paying client. Skips Teamwork/QuickBooks auto-linking and billed/AR dollars.";
 type MappingFilter = "all" | ClientMapRow["link_confidence"];
+
+function InternalFlag({
+  checked,
+  onChange,
+  className = "mapping-check",
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  className?: string;
+}) {
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <label className={className}>
+            <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+            Internal
+            <CircleHelp size={15} aria-hidden className="opacity-55" />
+          </label>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-[240px]">
+          {INTERNAL_HINT}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
 
 export function filterClientMapRows(rows: ClientMapRow[], query: string, filter: MappingFilter) {
   const normalizedQuery = query.trim().toLowerCase();
@@ -56,8 +86,6 @@ function tone(confidence: ClientMapRow["link_confidence"]) {
 function ClientRow({
   row,
   busy,
-  selected,
-  onSelect,
   onUpdate,
   onAccept,
   onReject,
@@ -65,8 +93,6 @@ function ClientRow({
 }: {
   row: ClientMapRow;
   busy: boolean;
-  selected: boolean;
-  onSelect: (id: string) => void;
   onUpdate: (id: string, patch: ClientMapCorePatch) => Promise<unknown>;
   onAccept: (id: string) => Promise<unknown>;
   onReject: (id: string) => Promise<unknown>;
@@ -88,22 +114,23 @@ function ClientRow({
 
   if (editing) {
     return (
-      <tr>
-        <td><input type="radio" aria-label={`Select ${row.client_name}`} checked={selected} onChange={() => onSelect(row.id)} /></td>
-        <td><input aria-label="Tag code" className={INPUT} value={draft.tag_code} onChange={(event) => setDraft({ ...draft, tag_code: event.target.value })} /></td>
-        <td><input aria-label="Client name" className={INPUT} value={draft.client_name} onChange={(event) => setDraft({ ...draft, client_name: event.target.value })} /></td>
-        <td><input aria-label="Account manager" className={INPUT} value={draft.current_am ?? ""} onChange={(event) => setDraft({ ...draft, current_am: event.target.value })} /></td>
-        <td><input aria-label="Status" className={INPUT} value={draft.status ?? ""} onChange={(event) => setDraft({ ...draft, status: event.target.value })} /></td>
-        <td colSpan={3}>
-          <label className="inline-flex items-center gap-2 text-xs text-[var(--zo-text-secondary)]">
-            <input type="checkbox" checked={draft.is_internal} onChange={(event) => setDraft({ ...draft, is_internal: event.target.checked })} />
-            Internal
-          </label>
-        </td>
+      <tr data-editing="true">
+        <td><input aria-label="Tag code" className="mapping-field mapping-field--tag" value={draft.tag_code} onChange={(event) => setDraft({ ...draft, tag_code: event.target.value })} /></td>
         <td>
-          <div className="flex gap-2">
-            <button type="button" className="qb-retry" disabled={busy || !draft.tag_code.trim() || !draft.client_name.trim()} onClick={() => void save()}>Save</button>
-            <button type="button" className="qb-more" onClick={() => setEditing(false)}>Cancel</button>
+          <div className="mapping-edit-stack">
+            <input aria-label="Client name" className="mapping-field" value={draft.client_name} onChange={(event) => setDraft({ ...draft, client_name: event.target.value })} />
+            <InternalFlag checked={draft.is_internal} onChange={(is_internal) => setDraft({ ...draft, is_internal })} />
+          </div>
+        </td>
+        <td><input aria-label="Account manager" className="mapping-field mapping-field--am" value={draft.current_am ?? ""} onChange={(event) => setDraft({ ...draft, current_am: event.target.value })} /></td>
+        <td><input aria-label="Status" className="mapping-field mapping-field--status" value={draft.status ?? ""} onChange={(event) => setDraft({ ...draft, status: event.target.value })} /></td>
+        <td>{row.qb_customer_names.join(", ") || "—"}</td>
+        <td>{row.teamwork_company_names.join(", ") || "—"}</td>
+        <td><Pill label={row.link_confidence} tone={tone(row.link_confidence)} /></td>
+        <td>
+          <div className="mapping-actions">
+            <button type="button" className="mapping-action mapping-action--primary" disabled={busy || !draft.tag_code.trim() || !draft.client_name.trim()} onClick={() => void save()}>Save</button>
+            <button type="button" className="mapping-action" onClick={() => setEditing(false)}>Cancel</button>
           </div>
         </td>
       </tr>
@@ -112,22 +139,33 @@ function ClientRow({
 
   return (
     <tr>
-      <td><input type="radio" aria-label={`Select ${row.client_name}`} checked={selected} onChange={() => onSelect(row.id)} /></td>
       <td><span className="qb-tag !ml-0">{row.tag_code}</span></td>
-      <td><span className="qb-name">{row.client_name}</span>{row.is_internal ? <span className="qb-tag">internal</span> : null}</td>
+      <td>
+        <span className="qb-name">{row.client_name}</span>
+        {row.is_internal ? (
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="qb-tag" tabIndex={0}>internal</span>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="max-w-[240px]">{INTERNAL_HINT}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ) : null}
+      </td>
       <td>{row.current_am || "—"}</td>
       <td>{row.status || "—"}</td>
       <td>{row.qb_customer_names.join(", ") || "—"}</td>
       <td>{row.teamwork_company_names.join(", ") || "—"}</td>
       <td><Pill label={row.link_confidence} tone={tone(row.link_confidence)} /></td>
       <td>
-        <div className="flex flex-wrap gap-2">
-          {row.link_confidence === "suggested" ? <button type="button" className="qb-more !mt-0" disabled={busy} onClick={() => void onAccept(row.id)}>Accept</button> : null}
-          {row.link_confidence !== "unmatched" ? <button type="button" className="qb-more !mt-0" disabled={busy} onClick={() => void onReject(row.id)}>Reject</button> : null}
-          <button type="button" className="qb-more !mt-0" disabled={busy} onClick={() => setEditing(true)}>Edit</button>
+        <div className="mapping-actions">
+          {row.link_confidence === "suggested" ? <button type="button" className="mapping-action mapping-action--primary" disabled={busy} onClick={() => void onAccept(row.id)}>Accept</button> : null}
+          {row.link_confidence !== "unmatched" ? <button type="button" className="mapping-action" disabled={busy} onClick={() => void onReject(row.id)}>Reject</button> : null}
+          <button type="button" className="mapping-action" disabled={busy} onClick={() => setEditing(true)}>Edit</button>
           <button
             type="button"
-            className="qb-more !mt-0 text-[var(--zo-danger)]"
+            className="mapping-action mapping-action--danger"
             disabled={busy}
             onClick={() => {
               if (window.confirm(`Delete ${row.client_name}?`)) void onDelete(row.id);
@@ -159,11 +197,15 @@ function CreateClientForm({
 
   return (
     <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void submit(event)}>
-      <label className="grid gap-1 text-[11px] text-[var(--zo-text-muted)]">Tag<input className={INPUT} value={draft.tag_code} onChange={(event) => setDraft({ ...draft, tag_code: event.target.value })} required /></label>
-      <label className="grid gap-1 text-[11px] text-[var(--zo-text-muted)]">Client<input className={INPUT} value={draft.client_name} onChange={(event) => setDraft({ ...draft, client_name: event.target.value })} required /></label>
-      <label className="grid gap-1 text-[11px] text-[var(--zo-text-muted)]">AM<input className={INPUT} value={draft.current_am ?? ""} onChange={(event) => setDraft({ ...draft, current_am: event.target.value })} /></label>
-      <label className="grid gap-1 text-[11px] text-[var(--zo-text-muted)]">Status<input className={INPUT} value={draft.status ?? ""} onChange={(event) => setDraft({ ...draft, status: event.target.value })} /></label>
-      <label className="mb-2 inline-flex items-center gap-2 text-xs text-[var(--zo-text-secondary)]"><input type="checkbox" checked={draft.is_internal} onChange={(event) => setDraft({ ...draft, is_internal: event.target.checked })} />Internal</label>
+      <label className="grid gap-1 text-[15px] text-[var(--zo-text-muted)]">Tag<input className={INPUT} value={draft.tag_code} onChange={(event) => setDraft({ ...draft, tag_code: event.target.value })} required /></label>
+      <label className="grid gap-1 text-[15px] text-[var(--zo-text-muted)]">Client<input className={INPUT} value={draft.client_name} onChange={(event) => setDraft({ ...draft, client_name: event.target.value })} required /></label>
+      <label className="grid gap-1 text-[15px] text-[var(--zo-text-muted)]">AM<input className={INPUT} value={draft.current_am ?? ""} onChange={(event) => setDraft({ ...draft, current_am: event.target.value })} /></label>
+      <label className="grid gap-1 text-[15px] text-[var(--zo-text-muted)]">Status<input className={INPUT} value={draft.status ?? ""} onChange={(event) => setDraft({ ...draft, status: event.target.value })} /></label>
+      <InternalFlag
+        className="mb-2 inline-flex items-center gap-2 text-base text-[var(--zo-text-secondary)]"
+        checked={draft.is_internal}
+        onChange={(is_internal) => setDraft({ ...draft, is_internal })}
+      />
       <button type="submit" className="qb-retry" disabled={busy}>Add client</button>
     </form>
   );
@@ -195,13 +237,13 @@ function MappingView({
   const map = useClientMap();
   const [projectId, setProjectId] = useState(prefilledProjectId ?? "");
   const [clientMapId, setClientMapId] = useState("");
-  const [selectedRowId, setSelectedRowId] = useState("");
+  const [attachTargetId, setAttachTargetId] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MappingFilter>("all");
   const [page, setPage] = useState(1);
   const [overrideError, setOverrideError] = useState<string | null>(null);
   const [overrideNotice, setOverrideNotice] = useState<string | null>(null);
-  const selectedRow = map.rows.find((row) => row.id === selectedRowId);
+  const attachTarget = map.rows.find((row) => row.id === attachTargetId);
   const siteId = prefilledSiteId?.trim() || null;
   const existingOverride = useMemo(
     () => map.jobOverrides.find((override) => override.site_id === siteId && override.project_id === Number(projectId)),
@@ -241,7 +283,7 @@ function MappingView({
   }
 
   return (
-    <TabsContent value="mapping" className="qb-view">
+    <TabsContent value="mapping" className="qb-view mapping-view">
       <div className="qb-toolbar mapping-toolbar">
         <p className="qb-sync">
           <span className="qb-sync-dot" data-busy={map.busy ? "true" : undefined} aria-hidden />
@@ -274,10 +316,10 @@ function MappingView({
         {filteredRows.length ? (
           <div className="qb-tablewrap">
             <table className="qb-table mapping-table">
-              <thead><tr><th><span className="sr-only">Select</span></th><th>Tag</th><th>Client</th><th>AM</th><th>Status</th><th>QuickBooks</th><th>Teamwork</th><th>Confidence</th><th>Actions</th></tr></thead>
+              <thead><tr><th>Tag</th><th>Client</th><th>AM</th><th>Status</th><th>QuickBooks</th><th>Teamwork</th><th>Confidence</th><th>Actions</th></tr></thead>
               <tbody>
                 {pagedRows.rows.map((row) => (
-                  <ClientRow key={row.id} row={row} busy={map.busy} selected={row.id === selectedRowId} onSelect={setSelectedRowId} onUpdate={map.update} onAccept={map.accept} onReject={map.reject} onDelete={map.remove} />
+                  <ClientRow key={row.id} row={row} busy={map.busy} onUpdate={map.update} onAccept={map.accept} onReject={map.reject} onDelete={map.remove} />
                 ))}
               </tbody>
             </table>
@@ -286,28 +328,49 @@ function MappingView({
         <MappingPagination page={pagedRows.page} pageCount={pagedRows.pageCount} onChange={setPage} />
       </Panel>
 
+      {(map.unmatched.teamwork.length || map.unmatched.quickbooks.length) ? (
+        <label className="mapping-attach-target">
+          <span>Attach unmatched to</span>
+          <select
+            aria-label="Client to attach unmatched companies to"
+            className={INPUT}
+            value={attachTargetId}
+            onChange={(event) => setAttachTargetId(event.target.value)}
+          >
+            <option value="">Choose a client</option>
+            {map.rows.map((row) => (
+              <option key={row.id} value={row.id}>{row.tag_code} — {row.client_name}</option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
       <div className="qb-two">
         <Panel title="Unmatched Teamwork" meta={`${map.unmatched.teamwork.length}`}>
-          {map.unmatched.teamwork.length ? <ul className="qb-bars">{map.unmatched.teamwork.map((item) => <li key={`${item.id}-${item.name}`}><button type="button" className="qb-more !mt-0" disabled={map.busy || !selectedRow} onClick={() => selectedRow && void map.attachTeamwork(selectedRow, item)}>Attach {item.name || `Company ${item.id}`}</button></li>)}</ul> : <Empty>All Teamwork companies are linked.</Empty>}
+          {map.unmatched.teamwork.length ? <ul className="qb-bars">{map.unmatched.teamwork.map((item) => <li key={`${item.id}-${item.name}`}><button type="button" className="qb-more !mt-0" disabled={map.busy || !attachTarget} onClick={() => attachTarget && void map.attachTeamwork(attachTarget, item)}>Attach {item.name || `Company ${item.id}`}</button></li>)}</ul> : <Empty>All Teamwork companies are linked.</Empty>}
         </Panel>
         <Panel title="Unmatched QuickBooks" meta={`${map.unmatched.quickbooks.length}`}>
-          {map.unmatched.quickbooks.length ? <ul className="qb-bars">{map.unmatched.quickbooks.map((item) => <li key={item.qbo_id}><button type="button" className="qb-more !mt-0" disabled={map.busy || !selectedRow} onClick={() => selectedRow && void map.attachQuickBooks(selectedRow, item)}>Attach {item.display_name}</button></li>)}</ul> : <Empty>All QuickBooks customers are linked.</Empty>}
+          {map.unmatched.quickbooks.length ? <ul className="qb-bars">{map.unmatched.quickbooks.map((item) => <li key={item.qbo_id}><button type="button" className="qb-more !mt-0" disabled={map.busy || !attachTarget} onClick={() => attachTarget && void map.attachQuickBooks(attachTarget, item)}>Attach {item.display_name}</button></li>)}</ul> : <Empty>All QuickBooks customers are linked.</Empty>}
         </Panel>
       </div>
 
-      <Panel title="Job overrides" meta={`${map.jobOverrides.length}`}>
+      <Panel
+        title="Job overrides"
+        meta={`${map.jobOverrides.length}`}
+        hint="Force one Teamwork project to a mapped client (and its QuickBooks customer) when the usual tag/company match is wrong or missing. Open Mapping from an Agency job action so the workspace is included."
+      >
         <form className="mb-4 flex flex-wrap items-end gap-2" onSubmit={(event) => void addOverride(event)}>
-          <div className="basis-full text-xs text-[var(--zo-text-secondary)]">
+          <div className="basis-full text-base text-[var(--zo-text-secondary)]">
             {siteId
               ? `Teamwork workspace ready · resolve Project ${projectId || "—"} by selecting its mapped client.`
               : "Workspace context is unavailable. Open this from an Agency mapping action so the connected Teamwork workspace is included."}
           </div>
-          <label className="grid gap-1 text-[11px] text-[var(--zo-text-muted)]">Project ID<input className={INPUT} type="number" value={projectId} onChange={(event) => setProjectId(event.target.value)} required /></label>
-          <label className="grid gap-1 text-[11px] text-[var(--zo-text-muted)]">Mapped client<select aria-label="Mapped client" className={INPUT} value={resolvedClientMapId} onChange={(event) => { setClientMapId(event.target.value); setOverrideError(null); }} required><option value="">Choose a client</option>{map.rows.map((row) => <option key={row.id} value={row.id}>{row.tag_code} — {row.client_name}{row.qb_customer_names.length ? ` · ${row.qb_customer_names.join(", ")}` : " · no QuickBooks customer"}</option>)}</select></label>
+          <label className="grid gap-1 text-[15px] text-[var(--zo-text-muted)]">Project ID<input className={INPUT} type="number" value={projectId} onChange={(event) => setProjectId(event.target.value)} required /></label>
+          <label className="grid gap-1 text-[15px] text-[var(--zo-text-muted)]">Mapped client<select aria-label="Mapped client" className={INPUT} value={resolvedClientMapId} onChange={(event) => { setClientMapId(event.target.value); setOverrideError(null); }} required><option value="">Choose a client</option>{map.rows.map((row) => <option key={row.id} value={row.id}>{row.tag_code} — {row.client_name}{row.qb_customer_names.length ? ` · ${row.qb_customer_names.join(", ")}` : " · no QuickBooks customer"}</option>)}</select></label>
           <button type="submit" className="qb-retry" disabled={map.busy || !siteId}>{existingOverride ? "Update override" : "Save override"}</button>
         </form>
         {overrideError ? <p className="qb-error mb-4" role="alert">{overrideError}</p> : null}
-        {overrideNotice ? <p className="mb-4 text-xs text-[var(--zo-success)]" role="status">{overrideNotice}</p> : null}
+        {overrideNotice ? <p className="mb-4 text-base text-[var(--zo-success)]" role="status">{overrideNotice}</p> : null}
         {map.jobOverrides.length ? (
           <div className="qb-tablewrap"><table className="qb-table"><thead><tr><th>Site</th><th>Project</th><th>Client</th><th>QuickBooks</th><th /></tr></thead><tbody>
             {map.jobOverrides.map((override) => {
@@ -329,19 +392,28 @@ export function ClientMapPanels({
   onViewChange: (view: AgencyViewId) => void;
 }) {
   const [mappingHandoff, setMappingHandoff] = useState<{ projectId: string; siteId: string | null } | null>(null);
+  const overview = useAgencyOverview();
   const openMappingForProject = (projectId: string, siteId?: string | null) => {
     setMappingHandoff({ projectId, siteId: siteId ?? null });
     onViewChange("mapping");
   };
   return (
     <div className="qb-ledger">
+      {view === "jobs" ? (
+        <AgencyJobsToolbar
+          data={overview.data}
+          loading={overview.loading}
+          error={overview.error}
+          onRefresh={() => void overview.load()}
+        />
+      ) : null}
       <Tabs value={view} onValueChange={(id) => onViewChange(parseAgencyView(id))} className="qb-tabs">
         <TabsList className="qb-tablist">
           <TabsTrigger value="jobs">Jobs</TabsTrigger>
           <TabsTrigger value="mapping">Mapping</TabsTrigger>
         </TabsList>
         <TabsContent value="jobs" className="qb-view">
-          <AgencyJobsDemo onOpenMapping={openMappingForProject} />
+          <AgencyJobsDemo overview={overview} onOpenMapping={openMappingForProject} />
         </TabsContent>
         {view === "mapping" ? <MappingView prefilledProjectId={mappingHandoff?.projectId ?? null} prefilledSiteId={mappingHandoff?.siteId ?? null} /> : null}
       </Tabs>

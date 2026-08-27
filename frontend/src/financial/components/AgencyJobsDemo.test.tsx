@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  actionSource,
   applyAgencyLoadResult,
   filterAgencyActions,
   filterAgencyGroups,
@@ -69,6 +70,13 @@ describe("AgencyJobsDemo control-room helpers", () => {
 
   it("uses the explicit missing-relationship label in the watchlist", () => {
     expect(invoiceRelationshipLabel()).toBe("No project or job linked");
+  });
+
+  it("labels queue rows by Teamwork vs QuickBooks source", () => {
+    expect(actionSource({ kind: "delivery" })).toBe("Teamwork");
+    expect(actionSource({ kind: "mapping" })).toBe("Teamwork");
+    expect(actionSource({ kind: "receivable" })).toBe("QuickBooks");
+    expect(actionSource({ kind: "invoice" })).toBe("QuickBooks");
   });
 
   it("distinguishes an empty queue from an unavailable overview", () => {

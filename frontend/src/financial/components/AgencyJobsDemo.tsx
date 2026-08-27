@@ -42,7 +42,7 @@ export function paginate<T>(items: T[], page: number, pageSize: number) {
   return { page: safePage, pageCount, items: items.slice((safePage - 1) * pageSize, safePage * pageSize) };
 }
 export function invoiceRelationshipLabel() { return "No project or job linked"; }
-export function getAgencyEmptyMessage(hasOverview: boolean) { return hasOverview ? "No owner actions match this filter." : "No agency overview is available. Retry to load the control room."; }
+export function getAgencyEmptyMessage(hasOverview: boolean) { return hasOverview ? "No owner actions match this filter." : "No agency overview is available. Retry to load jobs."; }
 export function invoiceStatusPresentation(invoice: { status?: string; open_ar: number }) {
   const status = invoice.status?.trim().toLowerCase();
   if (status === "paid") return { label: "paid", tone: "good" as const };
@@ -52,26 +52,22 @@ export function invoiceStatusPresentation(invoice: { status?: string; open_ar: n
 }
 export function getInvoiceResolutionOutcome(refreshed: boolean) { return refreshed ? null : "Invoice resolution was saved, but the overview needs a refresh. Retry to confirm the latest data."; }
 function actionLabel(action: AgencyAction) { return action.kind === "delivery" ? "Review delivery" : action.kind === "mapping" ? "Resolve mapping" : "Review receivable"; }
-function actionStatus(action: AgencyAction) { return action.kind === "delivery" ? "Delivery" : action.kind === "mapping" ? "Mapping" : "Accounts receivable"; }
+function actionStatus(action: AgencyAction) { return action.kind === "delivery" ? "Delivery" : action.kind === "mapping" ? "Mapping" : "Receivable"; }
+/** Where the signal originates — delivery/mapping from Teamwork jobs; AR/invoices from QuickBooks. */
+export function actionSource(action: Pick<AgencyAction, "kind">) {
+  return action.kind === "delivery" || action.kind === "mapping" ? "Teamwork" : "QuickBooks";
+}
 
 function Pagination({ page, pageCount, onChange, label }: { page: number; pageCount: number; onChange: (page: number) => void; label: string }) {
   if (pageCount <= 1) return null;
   return <nav className="agency-pagination" aria-label={label}><span>Page {page} of {pageCount}</span><div><button type="button" onClick={() => onChange(page - 1)} disabled={page === 1} aria-label="Previous page"><ChevronLeft size={15} /></button><button type="button" onClick={() => onChange(page + 1)} disabled={page === pageCount} aria-label="Next page"><ChevronRight size={15} /></button></div></nav>;
 }
 
-export function AgencyJobsDemo({ onOpenMapping }: { onOpenMapping?: (projectId: string, siteId?: string | null) => void }) {
+export function useAgencyOverview() {
   const [data, setData] = useState<AgencyOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const cachedData = useRef<AgencyOverview | null>(null);
-  const [openIds, setOpenIds] = useState<Set<string>>(() => new Set());
-  const [portfolioFilter, setPortfolioFilter] = useState<PortfolioFilter>("all");
-  const [queueFilter, setQueueFilter] = useState<QueueFilter>("all");
-  const [queuePage, setQueuePage] = useState(1);
-  const [invoicePage, setInvoicePage] = useState(1);
-  const [orphanPage, setOrphanPage] = useState(1);
-  const [selectedAction, setSelectedAction] = useState<AgencyAction | null>(null);
-  const [receivableFollowUps, setReceivableFollowUps] = useState<Record<string, ReceivableFollowUp>>({});
   const load = useCallback(async (): Promise<boolean> => {
     setLoading(true); setError(null);
     try {
@@ -87,6 +83,53 @@ export function AgencyJobsDemo({ onOpenMapping }: { onOpenMapping?: (projectId: 
   // The overview is an external data source; this intentionally runs once on mount.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, [load]);
+  return { data, loading, error, setError, load };
+}
+
+export function AgencyJobsToolbar({
+  data,
+  loading,
+  error,
+  onRefresh,
+}: {
+  data: AgencyOverview | null;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="qb-toolbar">
+      <p className="qb-sync" data-tone={error ? "bad" : undefined}>
+        <span className="qb-sync-dot" data-busy={loading ? "true" : undefined} aria-hidden />
+        {formatAgencyFreshness(data?.as_of)}
+        {data?.position ? <span className="qb-sync-meta">{data.position.live_jobs} live jobs</span> : null}
+      </p>
+      <div className="qb-toolbar-actions">
+        <button type="button" className="qb-retry" disabled={loading} onClick={onRefresh}>
+          <RefreshCw className={loading ? "animate-spin" : undefined} size={13} strokeWidth={2.25} aria-hidden />
+          Refresh
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function AgencyJobsDemo({
+  overview,
+  onOpenMapping,
+}: {
+  overview: ReturnType<typeof useAgencyOverview>;
+  onOpenMapping?: (projectId: string, siteId?: string | null) => void;
+}) {
+  const { data, loading, error, setError, load } = overview;
+  const [openIds, setOpenIds] = useState<Set<string>>(() => new Set());
+  const [portfolioFilter, setPortfolioFilter] = useState<PortfolioFilter>("all");
+  const [queueFilter, setQueueFilter] = useState<QueueFilter>("all");
+  const [queuePage, setQueuePage] = useState(1);
+  const [invoicePage, setInvoicePage] = useState(1);
+  const [orphanPage, setOrphanPage] = useState(1);
+  const [selectedAction, setSelectedAction] = useState<AgencyAction | null>(null);
+  const [receivableFollowUps, setReceivableFollowUps] = useState<Record<string, ReceivableFollowUp>>({});
   const groups = useMemo(() => groupJobsByProject(data?.jobs ?? []), [data?.jobs]);
   const filteredGroups = useMemo(() => filterAgencyGroups(groups, portfolioFilter), [groups, portfolioFilter]);
   const actions = useMemo(() => data ? buildAgencyActions(data) : [], [data]);
@@ -107,8 +150,51 @@ export function AgencyJobsDemo({ onOpenMapping }: { onOpenMapping?: (projectId: 
   const portfolioFilters: { id: PortfolioFilter; label: string; count: number }[] = portfolioFilterIds.map((id) => ({ id, label: id === "all" ? "All" : id[0].toUpperCase() + id.slice(1), count: filterAgencyGroups(groups, id).length }));
   const queueFilters: { id: QueueFilter; label: string; count: number }[] = queueFilterIds.map((id) => ({ id, label: id === "ar" ? "Receivables" : id === "all" ? "All priorities" : id[0].toUpperCase() + id.slice(1), count: filterAgencyActions(actions, id).length }));
   return <div className="agency-control-room space-y-5">
-    <section className="agency-snapshot" aria-label="Agency snapshot"><div className="agency-snapshot__intro"><h2>Agency control room</h2><p>{formatAgencyFreshness(data?.as_of)}</p>{error ? <p className="agency-snapshot__error" role="alert">{error}</p> : null}</div><div className="agency-snapshot__kpis qb-moneyline"><Figure label="Booked YTD" size="lg" metric="booked" value={position ? usd(position.booked_ytd) : "—"} sub={`QuickBooks ${data?.year ?? ""}`} /><Figure label="Open AR" size="lg" metric="ar" value={position ? usd(position.open_ar) : "—"} tone={position && position.open_ar > 0 ? "warn" : undefined} sub="All customers" /><Figure label="Live jobs" size="lg" metric="projects" value={<Count value={position?.live_jobs ?? 0} />} sub={`${position?.overdue_tasks ?? 0} overdue tasks`} /><Figure label="Join health" size="lg" metric="flag" value={<span>{position?.join_mapped ?? 0}<span className="qb-figure-rest"> / {position?.join_total ?? 0}</span></span>} tone={position && position.join_mapped < position.join_total ? "warn" : undefined} sub="Confirmed / override / internal" /></div><button type="button" className="qb-retry agency-snapshot__refresh" disabled={loading} onClick={() => void load()}><RefreshCw className={loading ? "animate-spin" : undefined} size={14} aria-hidden />Refresh</button></section>
-    <Panel title="Priority queue" meta={`${filteredActions.length} owner decisions · invoices are handled separately`}><FilterChips options={queueFilters} value={queueFilter} onChange={(next) => { setQueueFilter(next); setQueuePage(1); }} label="Filter priority queue" />{pagedActions.items.length ? <div className="agency-priority-list">{pagedActions.items.map((action) => <article key={action.id} className="agency-priority-row" data-kind={action.kind}><div className="agency-priority-row__type">{actionStatus(action)}</div><div className="agency-priority-row__summary"><strong>{action.title}</strong><span>{action.detail}</span></div><div className="agency-priority-row__impact"><span>Impact</span><strong>{action.amount ? usd(action.amount) : "—"}</strong></div><button type="button" className="agency-resolve-button" onClick={() => setSelectedAction(action)}>{actionLabel(action)}<ArrowRight size={15} aria-hidden /></button></article>)}</div> : <Empty>{getAgencyEmptyMessage(data !== null)}</Empty>}<Pagination page={pagedActions.page} pageCount={pagedActions.pageCount} onChange={setQueuePage} label="Priority queue pages" /></Panel>
+    {error ? <p className="agency-snapshot__error" role="alert">{error}</p> : null}
+    <div className="qb-moneyline" aria-label="Agency snapshot">
+      <Figure label="Booked YTD" size="lg" metric="booked" value={position ? usd(position.booked_ytd) : "—"} sub={`QuickBooks ${data?.year ?? ""}`} />
+      <Figure label="Open AR" size="lg" metric="ar" value={position ? usd(position.open_ar) : "—"} tone={position && position.open_ar > 0 ? "warn" : undefined} sub="All customers" />
+      <Figure label="Live jobs" size="lg" metric="projects" value={<Count value={position?.live_jobs ?? 0} />} sub={`${position?.overdue_tasks ?? 0} overdue tasks`} />
+      <Figure label="Join health" size="lg" metric="flag" value={<span>{position?.join_mapped ?? 0}<span className="qb-figure-rest"> / {position?.join_total ?? 0}</span></span>} tone={position && position.join_mapped < position.join_total ? "warn" : undefined} sub="Confirmed / override / internal" />
+    </div>
+    <Panel
+      className="agency-priority-panel"
+      title="Priority queue"
+      meta={`${filteredActions.length} need attention`}
+      hint="Late or at-risk Teamwork jobs, incomplete client mapping, and QuickBooks open AR. Unlinked invoices stay in the panel below."
+    >
+      <FilterChips options={queueFilters} value={queueFilter} onChange={(next) => { setQueueFilter(next); setQueuePage(1); }} label="Filter priority queue" />
+      {pagedActions.items.length ? (
+        <div className="agency-priority-list">
+          {pagedActions.items.map((action) => {
+            const source = actionSource(action);
+            return (
+              <article key={action.id} className="agency-priority-row" data-kind={action.kind} data-source={source}>
+                <div className="agency-priority-row__meta">
+                  <span className="agency-priority-row__source">{source}</span>
+                  <span className="agency-priority-row__kind">{actionStatus(action)}</span>
+                </div>
+                <div className="agency-priority-row__summary">
+                  <strong>{action.title}</strong>
+                  <span>{action.detail}</span>
+                </div>
+                <div className="agency-priority-row__impact" data-empty={action.amount ? undefined : "true"}>
+                  <span>Open AR</span>
+                  <strong>{action.amount ? usd(action.amount) : "None"}</strong>
+                </div>
+                <button type="button" className="agency-resolve-button" onClick={() => setSelectedAction(action)}>
+                  {actionLabel(action)}
+                  <ArrowRight size={16} aria-hidden />
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <Empty>{getAgencyEmptyMessage(data !== null)}</Empty>
+      )}
+      <Pagination page={pagedActions.page} pageCount={pagedActions.pageCount} onChange={setQueuePage} label="Priority queue pages" />
+    </Panel>
     <Panel title="Invoice reconciliation" meta={`${data?.unlinked_invoices.length ?? 0} invoices need a project or job relationship`}>{pagedInvoices.items.length ? <div className="qb-tablewrap"><table className="qb-table agency-invoice-table"><thead><tr><th>Invoice</th><th>Customer</th><th>Status</th><th>Relationship</th><th>Total</th><th>Open AR</th><th><span className="sr-only">Action</span></th></tr></thead><tbody>{pagedInvoices.items.map((invoice) => { const presentation = invoiceStatusPresentation(invoice); const action = actions.find((candidate) => candidate.kind === "invoice" && candidate.invoiceId === invoice.invoice_id) ?? null; return <tr key={invoice.invoice_id}><td><strong>{invoice.invoice_number || invoice.invoice_id}</strong><span className="agency-table-sub">Due {invoice.due_date || "—"}</span></td><td>{invoice.customer_name || "—"}</td><td><Pill label={presentation.label} tone={presentation.tone} /></td><td>{invoiceRelationshipLabel()}</td><td data-numeric="true">{usd(invoice.total_amt)}</td><td data-numeric="true">{usd(invoice.open_ar)}</td><td><button type="button" className="agency-resolve-button agency-resolve-button--table" disabled={!action} onClick={() => setSelectedAction(action)}>Resolve<ArrowRight size={14} aria-hidden /></button></td></tr>; })}</tbody></table></div> : <Empty>No unlinked invoices.</Empty>}<Pagination page={pagedInvoices.page} pageCount={pagedInvoices.pageCount} onChange={setInvoicePage} label="Invoice reconciliation pages" /></Panel>
     <Panel title="Client portfolio" meta={`${filteredGroups.length} of ${groups.length} projects · client money is never summed across jobs`}><FilterChips options={portfolioFilters} value={portfolioFilter} onChange={setPortfolioFilter} label="Filter client portfolio" />{filteredGroups.length ? <div className="qb-tablewrap"><table className="qb-table"><thead><tr><th>Project</th><th>Status</th><th>Jobs</th><th>Hours MTD</th><th>QB billed YTD</th><th>Open AR</th><th>Join</th></tr></thead><tbody>{filteredGroups.map((group) => { const open = openIds.has(group.id); return <Fragment key={group.id}><tr data-expandable="true" data-open={open ? "true" : undefined} tabIndex={0} aria-expanded={open} onClick={() => toggle(group.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(group.id); } }}><td><span className="inline-flex items-center gap-2"><span className="tw-row-chevron" aria-hidden><ChevronRight size={14} className="tw-row-chevron__icon" /></span><span className="qb-name">{group.clientName}</span></span></td><td>{group.status}</td><td data-numeric="true">{group.jobCount}</td><td data-numeric="true"><HoursValue minutes={group.hoursMtdMinutes} /></td><td data-numeric="true">{moneyCell(group.billedYtd)}</td><td data-numeric="true">{moneyCell(group.openAr)}</td><td><Pill label={group.join} tone={joinTone(group.join)} /></td></tr>{open ? group.jobs.map((row) => <tr key={row.project_id} className="agency-job-child"><td><div className="agency-job-child__name"><span className="qb-tag !ml-0">{row.job_label}</span>{row.project_name !== row.job_label ? <span className="agency-job-child__title">{row.project_name}</span> : null}</div></td><td>{row.status || "—"}</td><td data-numeric="true" /><td data-numeric="true"><HoursValue minutes={row.hours_mtd_minutes} /></td><td data-numeric="true" /><td data-numeric="true" /><td><Pill label={row.join} tone={joinTone(row.join)} /></td></tr>) : null}</Fragment>; })}</tbody></table></div> : <Empty>No projects match this filter.</Empty>}</Panel>
     <Panel title="Billed without a live Teamwork project" meta={`${data?.billed_without_project.length ?? 0} customers`}>{pagedOrphans.items.length ? <div className="qb-tablewrap"><table className="qb-table"><thead><tr><th>Customer</th><th>Billed YTD</th><th>Open AR</th></tr></thead><tbody>{pagedOrphans.items.map((row) => <tr key={row.customer_id}><td>{row.customer_name}</td><td data-numeric="true">{usd(row.billed_ytd)}</td><td data-numeric="true">{usd(row.open_ar)}</td></tr>)}</tbody></table></div> : <Empty>No orphan billed customers.</Empty>}<Pagination page={pagedOrphans.page} pageCount={pagedOrphans.pageCount} onChange={setOrphanPage} label="Billed customers pages" /></Panel>

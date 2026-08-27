@@ -24,6 +24,7 @@ import {
   ChevronUp,
   ChevronsUpDown,
   CircleDollarSign,
+  CircleHelp,
   Clock,
   Flag,
   FolderKanban,
@@ -46,7 +47,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 /* ── money ─────────────────────────────────────────────────────────────── */
@@ -78,12 +79,15 @@ export function Panel({
   title,
   meta,
   action,
+  hint,
   children,
   className,
 }: {
   title?: string;
   meta?: ReactNode;
   action?: ReactNode;
+  /** Hover tip next to the title — use for panels whose purpose isn’t obvious. */
+  hint?: string;
   children: ReactNode;
   className?: string;
 }) {
@@ -91,7 +95,25 @@ export function Panel({
     <section className={cn("qb-panel", className)}>
       {title || meta || action ? (
         <div className="qb-panel-head">
-          {title ? <h3>{title}</h3> : null}
+          {title ? (
+            <h3>
+              {title}
+              {hint ? (
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button type="button" className="qb-panel-hint" aria-label={`About ${title}`}>
+                        <CircleHelp size={13} aria-hidden />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-[280px]">
+                      {hint}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              ) : null}
+            </h3>
+          ) : null}
           {meta ? <span className="qb-panel-meta">{meta}</span> : null}
           {action ? <div className="qb-panel-action">{action}</div> : null}
         </div>
