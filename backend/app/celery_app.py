@@ -51,6 +51,14 @@ _PHASE_DISPATCH: dict[str, tuple[str, str]] = {
     "phase-3-5-budget": ("app.services.proposal_generator", "run_phase3_5_budget"),
     "phase-4-review": ("app.services.proposal_generator", "run_phase4_presubmit_review"),
     "fulfill-scan": ("app.services.proposal_fulfill_rfp_gaps", "run_fulfill_rfp_gaps"),
+    "align-rfp-outline": (
+        "app.services.proposal_align_rfp_outline",
+        "run_align_to_rfp_outline",
+    ),
+    "packet-redistribute": (
+        "app.services.proposal_packet_redistribute",
+        "run_packet_redistribute",
+    ),
 }
 
 
@@ -61,6 +69,12 @@ async def _dispatch_phase(rfp_id: str, phase: str, kwargs: dict) -> None:
     from app.services.proposal_generation_cancel import aclear_generation_cancel
     from app.services.proposal_pipeline_checkpoint import pipeline_phase
 
+    if phase not in _PHASE_DISPATCH:
+        known = ", ".join(sorted(_PHASE_DISPATCH))
+        raise KeyError(
+            f"Unknown pipeline phase {phase!r}. Restart the Celery worker so it "
+            f"loads the latest _PHASE_DISPATCH. Known phases: {known}"
+        )
     module_path, func_name = _PHASE_DISPATCH[phase]
     module = __import__(module_path, fromlist=[func_name])
     func = getattr(module, func_name)

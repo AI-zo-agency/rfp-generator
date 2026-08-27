@@ -7723,6 +7723,28 @@ async def improve_proposal_section(
 
     # Powerful chat ops: duplicate audit / fabrication purge (content → RFP → KB)
     from app.services.proposal_chat_ops import classify_chat_op, run_chat_ops
+    from app.services.proposal_align_rfp_outline import (
+        align_draft_from_chat,
+        message_asks_align_rfp_outline,
+    )
+
+    # Whole-packet RFP order/format → Align (not Improve redraft of the open tab).
+    # Wins over pin/selection: rearrange asks must never rewrite Who We Are.
+    if not apply_fix and message_asks_align_rfp_outline(raw_user_message):
+        early = _find_draft_section(draft, section_id) or (
+            draft.sections[0] if draft.sections else None
+        )
+        if early is None:
+            raise ProposalError("Draft has no sections.", status_code=400)
+        focus, updated, research, reply, changed = await align_draft_from_chat(
+            rfp_id=rfp_id,
+            draft=draft,
+            research=research,
+            section=early,
+        )
+        return _improve_outcome(
+            focus, updated, research, _provider_name(), reply, changed
+        )
 
     chat_op = "none" if apply_fix else classify_chat_op(raw_user_message)
     if chat_op != "none" and not selection_mode:

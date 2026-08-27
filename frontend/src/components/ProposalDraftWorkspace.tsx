@@ -20,6 +20,8 @@ import {
   isSectionDrafted,
   stripLeadingTitleEcho,
 } from "@/lib/proposal-section-health";
+import { createMarkdownSourceMap } from "@/lib/markdown-source-map";
+import { toggleWrapMarkers } from "@/lib/markdown-inline-format";
 import { buildScanRfpSummary, type ScanRfpFulfillReport, type ScanRfpSummary } from "@/lib/proposal-scan-report";
 import { ScanRfpSummaryBanner } from "@/components/ScanRfpSummaryBanner";
 import { QueuedJobBanner } from "@/components/QueuedJobBanner";
@@ -41,6 +43,11 @@ import {
   runPhase4PreSubmitReview,
   runPhase4FinalizeGaps,
   runFulfillRfpGaps,
+  runAlignRfpOutline,
+  previewAlignRfpOutline,
+  runPacketRedistribute,
+  previewPacketRedistribute,
+  pollAlignRfpOutlineCompletion,
   restoreProposalSnapshot,
   stopProposalGeneration,
   downloadProposalDocx,
@@ -57,7 +64,22 @@ import {
 import { getLlmCostForRfp, type LlmCostRfpBreakdown } from "@/lib/llm-cost-service";
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
-import { ProposalSectionTree } from "./ProposalSectionTree";
+import { ProposalSectionTree, reorderSectionsById } from "./ProposalSectionTree";
+import { MatchRfpPacketControl } from "./MatchRfpPacketControl";
+import { CapabilityHoverTip } from "./CapabilityHoverTip";
+import { ManuscriptSelectionBubble } from "./ManuscriptSelectionBubble";
+import {
+  capabilityById,
+  formatDoesDoesntBlock,
+} from "@/lib/proposal-tool-guide";
+import {
+  PacketPlaceReportBanner,
+  type PacketPlaceReport,
+} from "./PacketPlaceReportBanner";
+import { PacketPlacePreviewModal } from "./PacketPlacePreviewModal";
+import { AlignOutlinePreviewModal } from "./AlignOutlinePreviewModal";
+import type { PacketPlacePreview } from "@/lib/proposal-api";
+import type { AlignOutlinePreview } from "@/lib/proposal-api";
 import { SectionStatusPill } from "./SectionStatusPill";
 import { MarkdownReportBody, stripManuscriptDisplayArtifacts } from "./MarkdownReportBody";
 import { DraftSectionEditor, type SectionRevisionRecord } from "./DraftSectionEditor";
@@ -94,6 +116,8 @@ import {
 import {
   FULFILL_SCAN_PHASE,
   FULFILL_SCAN_STEP_LABELS,
+  ALIGN_RFP_OUTLINE_PHASE,
+  PACKET_REDISTRIBUTE_PHASE,
   pipelineServerStillWorkingMessage,
   inProgressPhaseLabel,
   type PipelineInProgressPhase,
@@ -261,6 +285,21 @@ function ProposalDraftWorkspaceInner({
   const [isRefiningBudget, setIsRefiningBudget] = useState(false);
   const [isFinalizingGaps, setIsFinalizingGaps] = useState(false);
   const [isFulfillingRfpGaps, setIsFulfillingRfpGaps] = useState(false);
+  const [isAligningRfpOutline, setIsAligningRfpOutline] = useState(false);
+  const [isPlacingPacketContent, setIsPlacingPacketContent] = useState(false);
+  const [placeReport, setPlaceReport] = useState<PacketPlaceReport | null>(null);
+  const [placePreviewOpen, setPlacePreviewOpen] = useState(false);
+  const [placePreviewLoading, setPlacePreviewLoading] = useState(false);
+  const [placePreviewError, setPlacePreviewError] = useState<string | null>(null);
+  const [placePreview, setPlacePreview] = useState<PacketPlacePreview | null>(
+    null
+  );
+  const [alignPreviewOpen, setAlignPreviewOpen] = useState(false);
+  const [alignPreviewLoading, setAlignPreviewLoading] = useState(false);
+  const [alignPreviewError, setAlignPreviewError] = useState<string | null>(null);
+  const [alignPreview, setAlignPreview] = useState<AlignOutlinePreview | null>(
+    null
+  );
   // True from the moment Stop is clicked until the backend + Celery task have
   // actually stopped (job no longer in-flight). Keeps a "Stopping…" state up so
   // the user knows the request is in progress, not instantly done.
@@ -928,7 +967,14 @@ function ProposalDraftWorkspaceInner({
     // Never autosave the empty default shell while the initial GET is still in flight —
     // that race was wiping full Supabase manuscripts (snapshots survived, live draft did not).
     if (draftLoadState !== "ready") return;
-    if (isFullProposalRunning || isFulfillingRfpGaps) return; // never overwrite backend partials mid-generation / scan
+    if (
+      isFullProposalRunning ||
+      isFulfillingRfpGaps ||
+      isAligningRfpOutline ||
+      isPlacingPacketContent ||
+      isRestoringSnapshot
+    )
+      return; // never overwrite backend partials mid-generation / scan / restore
     if (skipNextSaveRef.current) {
       skipNextSaveRef.current = false;
       return;
@@ -944,7 +990,18 @@ function ProposalDraftWorkspaceInner({
       });
     }, 800);
     return () => clearTimeout(timer);
-  }, [outline, rfp.id, hydrated, research, isFullProposalRunning, isFulfillingRfpGaps, draftLoadState]);
+  }, [
+    outline,
+    rfp.id,
+    hydrated,
+    research,
+    isFullProposalRunning,
+    isFulfillingRfpGaps,
+    isAligningRfpOutline,
+    isPlacingPacketContent,
+    isRestoringSnapshot,
+    draftLoadState,
+  ]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -1040,6 +1097,10 @@ function ProposalDraftWorkspaceInner({
   // shows the formatted render — the raw `#`/`|` source appears only for the one
   // section the user explicitly puts into edit mode via the "Edit source" button.
   const [editingSectionId, setEditingSectionId] = useState<string | null>(null);
+  const [reviewPreviewSelection, setReviewPreviewSelection] = useState<{
+    start: number;
+    end: number;
+  } | null>(null);
   const sectionTextareaRefs = useRef<Map<string, HTMLTextAreaElement>>(new Map());
 
   const activeReviewSectionId = focusedSectionId ?? assistantViewSectionId;
@@ -1048,6 +1109,34 @@ function ProposalDraftWorkspaceInner({
     () => outline.sections.find((s) => s.id === activeReviewSectionId) ?? null,
     [outline.sections, activeReviewSectionId]
   );
+
+  const activeReviewMarkdown = useMemo(() => {
+    if (!activeReviewSection) return "";
+    return stripLeadingTitleEcho(
+      activeReviewSection.content,
+      activeReviewSection.title
+    );
+  }, [activeReviewSection]);
+
+  const ensureReviewEditable = useCallback(() => {
+    if (!activeReviewSectionId) return;
+    setEditingSectionId(activeReviewSectionId);
+  }, [activeReviewSectionId]);
+
+  const captureReviewPreviewSelection = useCallback(() => {
+    if (!activeReviewSection) return;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    const text = sel.toString().replace(/\u00a0/g, " ");
+    if (text.trim().length < 1) return;
+    const source = stripLeadingTitleEcho(
+      activeReviewSection.content,
+      activeReviewSection.title
+    );
+    const range = createMarkdownSourceMap(source).find(text);
+    if (!range) return;
+    setReviewPreviewSelection(range);
+  }, [activeReviewSection]);
 
   const resizeManuscriptTextarea = useCallback((el: HTMLTextAreaElement | null) => {
     if (!el) return;
@@ -1065,7 +1154,11 @@ function ProposalDraftWorkspaceInner({
         // not only once the user explicitly focuses it.
         activeSectionTextareaRef.current = el;
       } else {
+        const prev = sectionTextareaRefs.current.get(sectionId);
         sectionTextareaRefs.current.delete(sectionId);
+        if (prev && activeSectionTextareaRef.current === prev) {
+          activeSectionTextareaRef.current = null;
+        }
       }
     },
     [resizeManuscriptTextarea]
@@ -1090,9 +1183,24 @@ function ProposalDraftWorkspaceInner({
     [activeReviewSection, selectSection, openSectionChat]
   );
 
-  // Clicking a read-only section switches it into edit mode (focusedSectionId
-  // changes) before its textarea exists yet — focus it once mounted so the
-  // user can start selecting/typing immediately, no second click needed.
+  useEffect(() => {
+    setReviewPreviewSelection(null);
+  }, [activeReviewSectionId]);
+
+  // After "Edit source" (or a toolbar format that opens it), focus the textarea.
+  useEffect(() => {
+    if (!editingSectionId) return;
+    const el = sectionTextareaRefs.current.get(editingSectionId);
+    if (el && document.activeElement !== el) {
+      el.focus();
+      if (reviewPreviewSelection) {
+        const s = Math.min(reviewPreviewSelection.start, el.value.length);
+        const e = Math.min(reviewPreviewSelection.end, el.value.length);
+        if (e > s) el.setSelectionRange(s, e);
+      }
+    }
+  }, [editingSectionId, reviewPreviewSelection]);
+
   useEffect(() => {
     if (!focusedSectionId) return;
     const el = sectionTextareaRefs.current.get(focusedSectionId);
@@ -1212,6 +1320,8 @@ function ProposalDraftWorkspaceInner({
     isRefiningBudget ||
     isFinalizingGaps ||
     isFulfillingRfpGaps ||
+    isAligningRfpOutline ||
+    isPlacingPacketContent ||
     serverPipelineActive;
 
   const handleFinalizeGaps = useCallback(
@@ -1257,12 +1367,14 @@ function ProposalDraftWorkspaceInner({
         outline.snapshots?.find((s) => s.savedAt === savedAt)?.label ??
         "saved version";
       const restoreOk = await confirm({
-        title: `Load checkpoint “${label}”?`,
+        title: `Restore “${label}”?`,
         description:
-          "This replaces the FULL live proposal with that saved copy.\n\n" +
-          "Your current live draft is kept as “Live draft (before restore)” in Saved versions.\n\n" +
-          "Example: an earlier Form 2 checkpoint will clear Form 3/References if they were added later.",
-        confirmLabel: "Load checkpoint",
+          "This replaces the FULL live proposal with that saved checkpoint " +
+          "(section order and wording).\n\n" +
+          "Your current live draft is kept as “Live draft (before restore)” " +
+          "in Saved versions so you can undo this restore.\n\n" +
+          "Tip: pick a version in the dropdown first, then click Restore.",
+        confirmLabel: "Restore checkpoint",
         tone: "default",
       });
       if (!restoreOk) {
@@ -1270,34 +1382,44 @@ function ProposalDraftWorkspaceInner({
       }
       setIsRestoringSnapshot(true);
       setGapResolveError(null);
-      const beforeSections = outline.sections;
+      const beforeIds = outline.sections.map((s) => s.id);
       try {
+        // Server already persists the restore — do not PUT a slimmed client
+        // copy afterward (that raced autosave and hollowed checkpoint bodies).
         const restored = await restoreProposalSnapshot(rfp.id, savedAt);
         applyOutlineFromServer(restored);
-        // Persist immediately so a stale autosave cannot resurrect the bad draft.
-        await saveProposalDraft(rfp.id, restored);
         setRestoreSnapshotAt(savedAt);
 
+        const afterIds = restored.sections.map((s) => s.id);
+        const orderChanged =
+          beforeIds.length !== afterIds.length ||
+          beforeIds.some((id, i) => id !== afterIds[i]);
         const beforeById = new Map(
-          beforeSections.map((s) => [s.id, (s.content || "").trim()] as const)
+          outline.sections.map((s) => [s.id, (s.content || "").trim()] as const)
         );
-        const changed =
-          restored.sections.find((s) => {
-            const prev = beforeById.get(s.id) ?? "";
-            const next = (s.content || "").trim();
-            return prev !== next;
-          }) ??
+        const contentChanged = restored.sections.find((s) => {
+          const prev = beforeById.get(s.id) ?? "";
+          return prev !== (s.content || "").trim();
+        });
+        const focus =
+          contentChanged ??
           restored.sections.find((s) => (s.content || "").trim()) ??
           restored.sections[0];
-        if (changed) {
-          setSelectedSectionId(changed.id);
+        if (focus) {
+          setSelectedSectionId(focus.id);
         }
 
         const filled = restored.sections.filter((s) =>
           Boolean(s.content?.trim())
         ).length;
+        const orderNote = orderChanged
+          ? " Section order was restored too — check the Outline tab."
+          : "";
         setGapResolveNotice(
-          `Restored “${label}” (${filled} sections with content). Opened “${changed?.title ?? "proposal"}” so you can see the change.`
+          `Restored “${label}” (${filled} sections with content).${orderNote}`
+        );
+        setGenerateNotice(
+          `Restored “${label}”. Current draft was saved as “Live draft (before restore)”.`
         );
         setActiveTab("outline");
         return true;
@@ -1310,19 +1432,22 @@ function ProposalDraftWorkspaceInner({
         setIsRestoringSnapshot(false);
       }
     },
-    [confirm, restoreSnapshotAt, outline.snapshots, outline.sections, rfp.id, applyOutlineFromServer]
+    [
+      confirm,
+      restoreSnapshotAt,
+      outline.snapshots,
+      outline.sections,
+      rfp.id,
+      applyOutlineFromServer,
+    ]
   );
 
-  const handleSnapshotDropdownChange = useCallback(
-    (savedAt: string) => {
-      // Selecting a version loads it as the live draft (with confirm).
-      // Compare still uses the selected checkpoint after restore.
-      if (!savedAt) return;
-      setRestoreSnapshotAt(savedAt);
-      void handleRestoreSnapshot(savedAt);
-    },
-    [handleRestoreSnapshot]
-  );
+  const handleSnapshotDropdownChange = useCallback((savedAt: string) => {
+    // Selecting only picks the checkpoint for Restore + Compare.
+    // Never auto-load on change — that felt broken and easy to misfire.
+    if (!savedAt) return;
+    setRestoreSnapshotAt(savedAt);
+  }, []);
 
   useEffect(() => {
     const snaps = outline.snapshots ?? [];
@@ -1330,14 +1455,23 @@ function ProposalDraftWorkspaceInner({
       setRestoreSnapshotAt("");
       return;
     }
-    if (!snaps.some((s) => s.savedAt === restoreSnapshotAt)) {
-      const preferred =
-        [...snaps]
-          .reverse()
-          .find((s) => /saved after chat|after improving/i.test(s.label ?? "")) ??
-        snaps[snaps.length - 1]!;
-      setRestoreSnapshotAt(preferred.savedAt);
+    if (snaps.some((s) => s.savedAt === restoreSnapshotAt)) {
+      return;
     }
+    // Prefer undo points from structure jobs, then chat saves, then newest.
+    const preferred =
+      [...snaps]
+        .reverse()
+        .find((s) =>
+          /before align to rfp|before scan rfp|before structure change/i.test(
+            s.label ?? ""
+          )
+        ) ??
+      [...snaps]
+        .reverse()
+        .find((s) => /saved after chat|after improving/i.test(s.label ?? "")) ??
+      snaps[snaps.length - 1]!;
+    setRestoreSnapshotAt(preferred.savedAt);
   }, [outline.snapshots, restoreSnapshotAt]);
 
   const selectedSnapshotForCompare = useMemo(
@@ -1542,7 +1676,13 @@ function ProposalDraftWorkspaceInner({
 
   /** Resume live manuscript updates when user reopens during backend generation. */
   useEffect(() => {
-    if (!hydrated || isFullProposalRunning || isFulfillingRfpGaps) return;
+    if (
+      !hydrated ||
+      isFullProposalRunning ||
+      isFulfillingRfpGaps ||
+      isAligningRfpOutline
+    )
+      return;
 
     let cancelled = false;
     let stopPoll: (() => void) | null = null;
@@ -1571,10 +1711,23 @@ function ProposalDraftWorkspaceInner({
         (draft) => handleLiveDraftUpdateRef.current(draft),
         (updated) => {
           handleResearchPollRef.current(updated);
-          const live = updated?.pipelineCheckpoint?.inProgressPhase;
-          if (live) {
-            setGenerateNotice(pipelineServerStillWorkingMessage(live));
+          const cp = updated?.pipelineCheckpoint;
+          const live = cp?.inProgressPhase;
+          if (!live) return;
+          if (live === ALIGN_RFP_OUTLINE_PHASE) {
+            const detail = cp?.activityDetail?.trim();
+            const step =
+              cp?.stepIndex != null && cp.stepTotal
+                ? `Step ${cp.stepIndex}/${cp.stepTotal}`
+                : null;
+            setGenerateNotice(
+              [step, detail || cp?.activityLabel || "Align to RFP outline…"]
+                .filter(Boolean)
+                .join(" — ")
+            );
+            return;
           }
+          setGenerateNotice(pipelineServerStillWorkingMessage(live));
         }
       );
 
@@ -1620,6 +1773,53 @@ function ProposalDraftWorkspaceInner({
         return;
       }
 
+      // Align is not Generate — show Align rail + live notice, never "RFP tabs".
+      if (activePhase === ALIGN_RFP_OUTLINE_PHASE) {
+        if (!jobRunning) return;
+        setIsAligningRfpOutline(true);
+        abort = new AbortController();
+        try {
+          const waited = await pollAlignRfpOutlineCompletion(
+            rfp.id,
+            abort.signal
+          );
+          if (cancelled) return;
+          if (waited.draft) applyOutlineFromServer(waited.draft);
+          if (waited.research) {
+            handleResearchPollRef.current(waited.research);
+          }
+          const report = (waited.draft?.lastFulfillReport ?? {}) as {
+            changed?: boolean;
+            beforeTitles?: string[];
+            afterTitles?: string[];
+          };
+          const beforeN = report.beforeTitles?.length ?? 0;
+          const afterN = report.afterTitles?.length ?? 0;
+          setGenerateNotice(
+            report.changed
+              ? `Aligned to RFP outline — ${beforeN} → ${afterN} tabs (order/stubs only; prose unchanged).`
+              : "Align finished — outline already matched the RFP order (prose unchanged)."
+          );
+        } catch (error) {
+          if (cancelled) return;
+          if (
+            abort.signal.aborted ||
+            (error instanceof DOMException && error.name === "AbortError")
+          ) {
+            setGenerateNotice("Align to RFP outline stopped.");
+            setGenerateError(null);
+            return;
+          }
+          setGenerateError(
+            error instanceof Error ? error.message : "Align to RFP outline failed"
+          );
+        } finally {
+          stopPoll?.();
+          if (!cancelled) setIsAligningRfpOutline(false);
+        }
+        return;
+      }
+
       const progressMap: Record<string, FullProposalProgress> = {
         "sections-1-3": "sections-1-3",
         "phase-2": "phase-2",
@@ -1628,11 +1828,11 @@ function ProposalDraftWorkspaceInner({
         "phase-3-5-budget": "phase-3-5-budget",
         "phase-4-review": "phase-4-review",
       };
-      setFullProposalProgress(
-        progressMap[activePhase] ??
-          fullProposalProgressFromInFlight(activePhase) ??
-          "phase-3"
-      );
+      const mapped =
+        progressMap[activePhase] ?? fullProposalProgressFromInFlight(activePhase);
+      if (mapped) {
+        setFullProposalProgress(mapped);
+      }
     }
 
     void reconnect();
@@ -1645,6 +1845,7 @@ function ProposalDraftWorkspaceInner({
     hydrated,
     isFullProposalRunning,
     isFulfillingRfpGaps,
+    isAligningRfpOutline,
     research?.pipelineCheckpoint?.inProgressPhase,
     rfp.id,
     applyOutlineFromServer,
@@ -1696,10 +1897,13 @@ function ProposalDraftWorkspaceInner({
         setIsFulfillingRfpGaps(true);
         return;
       }
+      if (job.jobType === ALIGN_RFP_OUTLINE_PHASE) {
+        setIsAligningRfpOutline(true);
+        return;
+      }
       setIsFullProposalRunning(true);
       setFullProposalProgress(
-        fullProposalProgressFromInFlight(job.jobType as PipelineInProgressPhase) ??
-          "phase-3"
+        fullProposalProgressFromInFlight(job.jobType as PipelineInProgressPhase)
       );
     };
 
@@ -1877,6 +2081,7 @@ function ProposalDraftWorkspaceInner({
     if (isFulfillingRfpGaps) {
       return;
     }
+    const completeCleanGuide = formatDoesDoesntBlock("completeClean", "ralph");
     const scanOk = await confirm(
       scanAlreadyDone && !canResumeFulfillScan
         ? {
@@ -1884,6 +2089,7 @@ function ProposalDraftWorkspaceInner({
             description:
               "This draft was just cleaned and nothing has changed since. Running it " +
               "again will re-check the same content and cost tokens for no new changes.\n\n" +
+              `${completeCleanGuide}\n\n` +
               "Are you sure you want to run it again?",
             confirmLabel: "Run again anyway",
             tone: "default",
@@ -1893,7 +2099,8 @@ function ProposalDraftWorkspaceInner({
             title: "Resume complete & clean?",
             description:
               `Continue from step ${fulfillResumeStep} — ${fulfillResumeLabel}.\n\n` +
-              "Earlier steps are already saved on the draft. Pre-submit refresh and submission readiness still run in full — missing answers are filled from past won proposals and the ending report is rebuilt for designer handoff.",
+              "Earlier steps are already saved on the draft. Pre-submit refresh and submission readiness still run in full — missing answers are filled from past won proposals and the ending report is rebuilt for designer handoff.\n\n" +
+              completeCleanGuide,
             confirmLabel: "Resume",
             tone: "default",
           }
@@ -1902,24 +2109,22 @@ function ProposalDraftWorkspaceInner({
             title: "Run Complete & clean again?",
             description:
               "Complete & clean already ran for this draft, and the draft has changed since. " +
-              "Running it again re-checks the whole proposal in the background — it does not " +
-              "wipe good sections or regenerate from scratch. A saved version is stored first.",
+              "Running it again re-checks the whole proposal in the background. A saved version is stored first.\n\n" +
+              completeCleanGuide,
             confirmLabel: "Run again",
             tone: "default",
           }
         : {
             title: "Start Complete & clean draft (first run)",
             description:
-              "This is the first Complete & clean run for this draft — it runs in the background, so you can keep working while it finishes.\n\n" +
-              "Improves this existing proposal in place — it does not wipe good sections or regenerate from scratch.\n\n" +
-              "Keeps Sections 1–3 and any drafted tab that already stands up. Frozen when already correct: fee tables that add up, bios, case studies.\n\n" +
-              "Then it only adds or orders what the RFP still needs:\n" +
-              "• Intelligence tabs in THIS RFP's submission order (whatever the buyer listed — not a fixed Cover Letter/Cost stack)\n" +
-              "• If the RFP names company identity as its own TOC item, add a header around 1.1–1.5 — no second company essay\n" +
+              "Runs in the background — you can keep working while it finishes. A saved version is stored first.\n\n" +
+              `${completeCleanGuide}\n\n` +
+              "Also in this pass:\n" +
+              "• Order / add tabs this RFP still needs (buyer’s list, not a fixed Cover Letter stack)\n" +
               "• Missing closing / submission tabs\n" +
-              "• Budget rewrite only if the table does not add up\n" +
-              "• Fact/KB grounding, DQ gate, pre-submit review\n\n" +
-              "Does not invent facts, figures, or signatures. A saved version is stored first.",
+              "• Budget rewrite only if the fee table does not add up\n" +
+              "• Fact/KB grounding and DQ gate\n\n" +
+              `Keeps Sections 1–3 and solid drafted tabs. ${capabilityById("completeClean").doesnt}`,
             confirmLabel: "Complete & clean",
             tone: "default",
           }
@@ -2047,6 +2252,246 @@ function ProposalDraftWorkspaceInner({
       setIsFulfillingRfpGaps(false);
     }
   }, [confirm, rfp.id, applyOutlineFromServer, handleLiveDraftUpdate, handleResearchPoll, applyFulfillScanSuccessUi, canResumeFulfillScan, fulfillResumeStep, fulfillResumeLabel, scanAlreadyDone, hasCompletedScanBefore, fulfillJustCompleted]);
+
+  const handleAlignRfpOutline = useCallback(async () => {
+    if (
+      isAligningRfpOutline ||
+      anyPipelineRunning ||
+      alignPreviewLoading ||
+      placePreviewLoading
+    ) {
+      return;
+    }
+    setAlignPreview(null);
+    setAlignPreviewError(null);
+    setAlignPreviewOpen(true);
+    setAlignPreviewLoading(true);
+    setGenerateNotice("Checking left list vs RFP order (preview only)…");
+    setGenerateError(null);
+    try {
+      const result = await previewAlignRfpOutline(rfp.id);
+      setAlignPreview(result.preview);
+      setGenerateNotice(
+        result.nothingToChange
+          ? "Preview ready — left list already matches. Nothing to apply."
+          : "Preview ready — compare the lists, then Apply changes if you agree."
+      );
+    } catch (error) {
+      setAlignPreviewError(
+        error instanceof Error ? error.message : "Align preview failed"
+      );
+      setGenerateNotice(null);
+    } finally {
+      setAlignPreviewLoading(false);
+    }
+  }, [
+    rfp.id,
+    isAligningRfpOutline,
+    anyPipelineRunning,
+    alignPreviewLoading,
+    placePreviewLoading,
+  ]);
+
+  const handleApplyAlignPreview = useCallback(async () => {
+    if (isAligningRfpOutline || anyPipelineRunning) return;
+    setAlignPreviewOpen(false);
+    setGenerateNotice(
+      "Applying left-list changes — saving undo checkpoint…"
+    );
+    setGenerateError(null);
+    setIsAligningRfpOutline(true);
+    const abort = new AbortController();
+    const stopPoll = startLiveDraftPolling(
+      rfp.id,
+      handleLiveDraftUpdate,
+      (updated) => {
+        handleResearchPoll(updated);
+        const cp = updated?.pipelineCheckpoint;
+        if (cp?.inProgressPhase === ALIGN_RFP_OUTLINE_PHASE) {
+          const detail = cp.activityDetail?.trim();
+          const step =
+            cp.stepIndex != null && cp.stepTotal
+              ? `Step ${cp.stepIndex}/${cp.stepTotal}`
+              : null;
+          setGenerateNotice(
+            [step, detail || cp.activityLabel || "Align to RFP outline…"]
+              .filter(Boolean)
+              .join(" — ")
+          );
+        }
+      }
+    );
+    try {
+      const result = await runAlignRfpOutline(rfp.id, { signal: abort.signal });
+      applyOutlineFromServer(result.draft);
+      if (result.research) {
+        handleResearchPoll(result.research);
+      }
+      const beforeAlign = [...(result.draft.snapshots ?? [])]
+        .reverse()
+        .find((s) => /before align to rfp/i.test(s.label ?? ""));
+      if (beforeAlign?.savedAt) {
+        setRestoreSnapshotAt(beforeAlign.savedAt);
+      }
+      const beforeN = result.report.beforeTitles?.length ?? 0;
+      const afterN = result.report.afterTitles?.length ?? 0;
+      setGenerateNotice(
+        result.report.changed
+          ? `Left list updated — ${beforeN} → ${afterN} headings (order/empty slots only; writing unchanged). Undo: Restore “Before Align to RFP outline”.`
+          : "Align finished — list already matched (nothing changed)."
+      );
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setGenerateNotice("Align stopped.");
+        setGenerateError(null);
+        return;
+      }
+      setGenerateError(
+        error instanceof Error ? error.message : "Align to RFP outline failed"
+      );
+      setGenerateNotice(null);
+    } finally {
+      stopPoll();
+      setIsAligningRfpOutline(false);
+    }
+  }, [
+    rfp.id,
+    isAligningRfpOutline,
+    anyPipelineRunning,
+    applyOutlineFromServer,
+    handleLiveDraftUpdate,
+    handleResearchPoll,
+  ]);
+
+  const handleCloseAlignPreview = useCallback(() => {
+    if (isAligningRfpOutline) return;
+    setAlignPreviewOpen(false);
+    setAlignPreviewError(null);
+  }, [isAligningRfpOutline]);
+
+  const handlePlacePacketContent = useCallback(async () => {
+    if (isPlacingPacketContent || anyPipelineRunning || placePreviewLoading) {
+      return;
+    }
+    setPlaceReport(null);
+    setPlacePreview(null);
+    setPlacePreviewError(null);
+    setPlacePreviewOpen(true);
+    setPlacePreviewLoading(true);
+    setGenerateNotice("Scanning draft for misplaced blocks (preview only)…");
+    setGenerateError(null);
+    try {
+      const result = await previewPacketRedistribute(rfp.id);
+      setPlacePreview(result.preview);
+      const n = result.plannedMoves ?? result.preview.plannedMoves ?? 0;
+      setGenerateNotice(
+        n > 0
+          ? `Preview ready — ${n} move(s) proposed. Review the modal, then Apply.`
+          : "Preview ready — no automatic moves. Check the modal for notes."
+      );
+    } catch (error) {
+      setPlacePreviewError(
+        error instanceof Error ? error.message : "Place preview failed"
+      );
+      setGenerateNotice(null);
+    } finally {
+      setPlacePreviewLoading(false);
+    }
+  }, [
+    rfp.id,
+    isPlacingPacketContent,
+    anyPipelineRunning,
+    placePreviewLoading,
+  ]);
+
+  const handleApplyPlacePreview = useCallback(async () => {
+    if (isPlacingPacketContent || anyPipelineRunning) return;
+    setPlacePreviewOpen(false);
+    setPlaceReport(null);
+    setGenerateNotice(
+      "Applying approved moves — Step 1/4: saving undo checkpoint…"
+    );
+    setGenerateError(null);
+    setIsPlacingPacketContent(true);
+    const abort = new AbortController();
+    const stopPoll = startLiveDraftPolling(
+      rfp.id,
+      handleLiveDraftUpdate,
+      (updated) => {
+        handleResearchPoll(updated);
+        const cp = updated?.pipelineCheckpoint;
+        if (cp?.inProgressPhase === PACKET_REDISTRIBUTE_PHASE) {
+          const detail = cp.activityDetail?.trim();
+          const step =
+            cp.stepIndex != null && cp.stepTotal
+              ? `Step ${cp.stepIndex}/${cp.stepTotal}`
+              : null;
+          setGenerateNotice(
+            [step, detail || cp.activityLabel || "Place content…"]
+              .filter(Boolean)
+              .join(" — ")
+          );
+        }
+      }
+    );
+    try {
+      const result = await runPacketRedistribute(rfp.id, {
+        signal: abort.signal,
+      });
+      applyOutlineFromServer(result.draft);
+      if (result.research) {
+        handleResearchPoll(result.research);
+      }
+      const beforePlace = [...(result.draft.snapshots ?? [])]
+        .reverse()
+        .find((s) => /before packet redistribute/i.test(s.label ?? ""));
+      if (beforePlace?.savedAt) {
+        setRestoreSnapshotAt(beforePlace.savedAt);
+      }
+      const report = result.report as PacketPlaceReport;
+      setPlaceReport(report);
+      const moved = report.movedCount ?? 0;
+      const planned = report.plannedMoves ?? moved;
+      const flags =
+        (report.humanGaps?.length ?? 0) +
+        (report.stubTitles?.length ?? 0) +
+        (report.skipped?.length ?? 0);
+      setGenerateNotice(
+        moved > 0 || planned > 0
+          ? `Place finished — ${moved}${planned ? ` of ${planned}` : ""} move(s).${
+              flags > 0 ? ` ${flags} flag(s) to review below.` : ""
+            } Undo: Restore “Before packet redistribute”.`
+          : "Place finished — no block moves. Check the summary below for any notes."
+      );
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setGenerateNotice("Place content stopped.");
+        setGenerateError(null);
+        return;
+      }
+      setGenerateError(
+        error instanceof Error ? error.message : "Place content failed"
+      );
+      setGenerateNotice(null);
+      setPlaceReport(null);
+    } finally {
+      stopPoll();
+      setIsPlacingPacketContent(false);
+    }
+  }, [
+    rfp.id,
+    isPlacingPacketContent,
+    anyPipelineRunning,
+    applyOutlineFromServer,
+    handleLiveDraftUpdate,
+    handleResearchPoll,
+  ]);
+
+  const handleClosePlacePreview = useCallback(() => {
+    if (isPlacingPacketContent) return;
+    setPlacePreviewOpen(false);
+    setPlacePreviewError(null);
+  }, [isPlacingPacketContent]);
 
   const handleGenerateFullProposal = useCallback(async (options?: {
     startAfterSections1to3?: boolean;
@@ -2605,6 +3050,23 @@ function ProposalDraftWorkspaceInner({
     });
   };
 
+  const reorderSectionByDrag = useCallback(
+    (fromId: string, toId: string) => {
+      if (anyPipelineRunning) return;
+      setFulfillJustCompleted(false);
+      setOutline((prev) => {
+        const sections = reorderSectionsById(prev.sections, fromId, toId);
+        if (sections === prev.sections) return prev;
+        return {
+          ...prev,
+          sections,
+          updatedAt: new Date().toISOString(),
+        };
+      });
+    },
+    [anyPipelineRunning]
+  );
+
   const removeSection = async (id: string) => {
     const target = outline.sections.find((s) => s.id === id);
     if (!target) return;
@@ -2860,7 +3322,7 @@ function ProposalDraftWorkspaceInner({
           </div>
         ) : null}
 
-        {(scanSummary || generateNotice || generateError) && (
+        {(scanSummary || generateNotice || generateError || placeReport) && (
           <div>
             {/* Unmistakable success banner when a Complete & clean run just
                 finished — shown ABOVE the results summary so the user always
@@ -2870,6 +3332,12 @@ function ProposalDraftWorkspaceInner({
                 <span aria-hidden>✓</span>
                 <span>{generateNotice}</span>
               </div>
+            ) : null}
+            {placeReport ? (
+              <PacketPlaceReportBanner
+                report={placeReport}
+                onDismiss={() => setPlaceReport(null)}
+              />
             ) : null}
             {scanSummary ? (
               <ScanRfpSummaryBanner
@@ -2881,7 +3349,12 @@ function ProposalDraftWorkspaceInner({
                 }}
               />
             ) : null}
-            {(generateNotice || generateError) && !scanSummary && !fulfillJustCompleted ? (
+            {(generateNotice || generateError) &&
+            !fulfillJustCompleted &&
+            (!scanSummary ||
+              isPlacingPacketContent ||
+              isAligningRfpOutline) &&
+            !placeReport ? (
               <div
                 className={`border-t px-3 py-1.5 text-xs md:px-4 ${
                   generateNotice
@@ -2892,7 +3365,7 @@ function ProposalDraftWorkspaceInner({
                 {generateNotice ?? generateError}
               </div>
             ) : null}
-            {generateError && scanSummary ? (
+            {generateError && (scanSummary || placeReport) ? (
               <div className="border-t border-red-200/80 bg-red-50 px-3 py-1.5 text-xs text-zo-error md:px-4">
                 {generateError}
               </div>
@@ -2975,85 +3448,87 @@ function ProposalDraftWorkspaceInner({
             </span>
             <div className="proposal-tab-actions-toolbar">
             <label className="proposal-snapshot-field">
-              <span className="proposal-snapshot-field-label">
-                Saved version
-              </span>
+              <CapabilityHoverTip id="savedVersion" side="bottom">
+                <span className="proposal-snapshot-field-label">
+                  Saved version
+                </span>
+              </CapabilityHoverTip>
               <span className="proposal-snapshot-field-control">
-                <select
-                  value={restoreSnapshotAt}
-                  onChange={(e) =>
-                    handleSnapshotDropdownChange(e.target.value)
-                  }
+                <CapabilityHoverTip id="savedVersion" side="bottom">
+                  <select
+                    value={restoreSnapshotAt}
+                    onChange={(e) =>
+                      handleSnapshotDropdownChange(e.target.value)
+                    }
+                    disabled={
+                      isRestoringSnapshot ||
+                      anyPipelineRunning ||
+                      (outline.snapshots?.length ?? 0) === 0
+                    }
+                    className="proposal-snapshot-select"
+                    aria-label="Choose a saved proposal version"
+                    aria-busy={isRestoringSnapshot}
+                  >
+                    {(outline.snapshots?.length ?? 0) === 0 ? (
+                      <option value="">No versions yet</option>
+                    ) : (
+                      [...(outline.snapshots ?? [])].reverse().map((snap) => (
+                        <option key={snap.savedAt} value={snap.savedAt}>
+                          {snap.label}
+                          {" · "}
+                          {new Date(snap.savedAt).toLocaleString(undefined, {
+                            month: "short",
+                            day: "numeric",
+                            hour: "numeric",
+                            minute: "2-digit",
+                          })}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </CapabilityHoverTip>
+              </span>
+              <CapabilityHoverTip id="restore" side="bottom">
+                <button
+                  type="button"
+                  className="proposal-tab-text-btn"
                   disabled={
+                    !restoreSnapshotAt ||
                     isRestoringSnapshot ||
                     anyPipelineRunning ||
                     (outline.snapshots?.length ?? 0) === 0
                   }
-                  className="proposal-snapshot-select"
-                  aria-label="Choose a saved proposal version to restore"
-                  aria-busy={isRestoringSnapshot}
-                  title={
-                    (outline.snapshots?.length ?? 0) > 0
-                      ? "Select a checkpoint to restore it as the live draft (confirm first). Compare updates after restore."
-                      : "Versions appear after chat improve, Complete & clean, or when a draft checkpoint is saved."
-                  }
+                  onClick={() => void handleRestoreSnapshot()}
                 >
-                  {(outline.snapshots?.length ?? 0) === 0 ? (
-                    <option value="">No versions yet</option>
-                  ) : (
-                    [...(outline.snapshots ?? [])].reverse().map((snap) => (
-                      <option key={snap.savedAt} value={snap.savedAt}>
-                        {snap.label}
-                        {" · "}
-                        {new Date(snap.savedAt).toLocaleString(undefined, {
-                          month: "short",
-                          day: "numeric",
-                          hour: "numeric",
-                          minute: "2-digit",
-                        })}
-                      </option>
-                    ))
-                  )}
-                </select>
-              </span>
-              <button
-                type="button"
-                className="proposal-tab-text-btn"
-                disabled={
-                  !restoreSnapshotAt ||
-                  isRestoringSnapshot ||
-                  anyPipelineRunning ||
-                  (outline.snapshots?.length ?? 0) === 0
-                }
-                onClick={() => void handleRestoreSnapshot()}
-              >
-                {isRestoringSnapshot ? "Restoring…" : "Restore"}
-              </button>
+                  {isRestoringSnapshot ? "Restoring…" : "Restore"}
+                </button>
+              </CapabilityHoverTip>
             </label>
             <div className="flex shrink-0 items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => void handleMatchCaseStudies()}
-                disabled={anyPipelineRunning || isMatchingCaseStudies}
-                className="inline-flex min-h-[2.125rem] items-center gap-1.5 rounded-lg border border-[#ef5018]/30 bg-[#ef5018]/10 px-2.5 py-1.5 text-xs font-semibold text-[#ef5018] hover:bg-[#ef5018]/15 disabled:cursor-not-allowed disabled:opacity-50"
-                title="Rank KB case studies against this RFP"
-              >
-                <svg
-                  className="h-3.5 w-3.5 shrink-0"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  aria-hidden
+              <CapabilityHoverTip id="matchStudies" side="bottom">
+                <button
+                  type="button"
+                  onClick={() => void handleMatchCaseStudies()}
+                  disabled={anyPipelineRunning || isMatchingCaseStudies}
+                  className="inline-flex min-h-[2.125rem] items-center gap-1.5 rounded-lg border border-[#ef5018]/30 bg-[#ef5018]/10 px-2.5 py-1.5 text-xs font-semibold text-[#ef5018] hover:bg-[#ef5018]/15 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
-                  />
-                </svg>
-                {isMatchingCaseStudies ? "Matching…" : "Match studies"}
-              </button>
+                  <svg
+                    className="h-3.5 w-3.5 shrink-0"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    aria-hidden
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
+                    />
+                  </svg>
+                  {isMatchingCaseStudies ? "Matching…" : "Match studies"}
+                </button>
+              </CapabilityHoverTip>
               {anyPipelineRunning || isStopping ? (
                 <button
                   type="button"
@@ -3074,55 +3549,63 @@ function ProposalDraftWorkspaceInner({
                   )}
                 </button>
               ) : null}
-              <ProposalTabMoreMenu
-                disabled={anyPipelineRunning}
-                items={[
-                  {
-                    id: "designer-compact",
-                    label: "Designer-compact all",
-                    title: "Rewrite overlong tabs as designer-ready tables/bullets",
-                    disabled:
-                      anyPipelineRunning ||
-                      isDesignerCompacting ||
-                      manuscriptProgress.complete === 0,
-                    onClick: () => void handleDesignerCompactAll(),
-                  },
-                  {
-                    id: "reset",
-                    label: "Reset draft",
-                    disabled: isResettingDraft,
-                    tone: "danger",
-                    onClick: () => setResetConfirmOpen(true),
-                  },
-                  {
-                    id: "from-case-studies",
-                    label: "Start from Case Studies",
-                    title: "Keeps Company + Team Bios; re-extracts case studies",
-                    disabled: anyPipelineRunning,
-                    onClick: () =>
-                      requireKeyPersonas(() =>
-                        void handleGenerateFullProposal({ startFromCaseStudies: true })
-                      ),
-                  },
-                  {
-                    id: "from-intelligence",
-                    label: "Start from Intelligence",
-                    title: "Keeps Sections 1–3; rebuilds Intelligence onward",
-                    disabled: anyPipelineRunning,
-                    onClick: () =>
-                      requireKeyPersonas(() =>
-                        void handleGenerateFullProposal({ startAfterSections1to3: true })
-                      ),
-                  },
-                ]}
-              />
+              <CapabilityHoverTip id="moreMenu" side="bottom">
+                <span className="inline-flex">
+                  <ProposalTabMoreMenu
+                    disabled={anyPipelineRunning}
+                    items={[
+                      {
+                        id: "designer-compact",
+                        label: "Designer-compact all",
+                        title: "Rewrite overlong tabs as designer-ready tables/bullets",
+                        disabled:
+                          anyPipelineRunning ||
+                          isDesignerCompacting ||
+                          manuscriptProgress.complete === 0,
+                        onClick: () => void handleDesignerCompactAll(),
+                      },
+                      {
+                        id: "reset",
+                        label: "Reset draft",
+                        disabled: isResettingDraft,
+                        tone: "danger",
+                        onClick: () => setResetConfirmOpen(true),
+                      },
+                      {
+                        id: "from-case-studies",
+                        label: "Start from Case Studies",
+                        title: "Keeps Company + Team Bios; re-extracts case studies",
+                        disabled: anyPipelineRunning,
+                        onClick: () =>
+                          requireKeyPersonas(() =>
+                            void handleGenerateFullProposal({ startFromCaseStudies: true })
+                          ),
+                      },
+                      {
+                        id: "from-intelligence",
+                        label: "Start from Intelligence",
+                        title: "Keeps Sections 1–3; rebuilds Intelligence onward",
+                        disabled: anyPipelineRunning,
+                        onClick: () =>
+                          requireKeyPersonas(() =>
+                            void handleGenerateFullProposal({ startAfterSections1to3: true })
+                          ),
+                      },
+                    ]}
+                  />
+                </span>
+              </CapabilityHoverTip>
             </div>
-            <KeyPersonasBox
-              rfpId={rfp.id}
-              initialSelectedIds={outline.selectedKeyPersonas || []}
-              onSelectionChange={handleKeyPersonasChange}
-              onDraftSynced={handlePersonasDraftSynced}
-            />
+            <CapabilityHoverTip id="keyPersonas" side="bottom">
+              <span className="inline-flex">
+                <KeyPersonasBox
+                  rfpId={rfp.id}
+                  initialSelectedIds={outline.selectedKeyPersonas || []}
+                  onSelectionChange={handleKeyPersonasChange}
+                  onDraftSynced={handlePersonasDraftSynced}
+                />
+              </span>
+            </CapabilityHoverTip>
             {/* Gate shown when generation is attempted with no personas chosen.
                 Separate instance from KeyPersonasBox so its open state is
                 driven by the generate action rather than by the toolbar. */}
@@ -3134,21 +3617,23 @@ function ProposalDraftWorkspaceInner({
               onSelectionChange={handleKeyPersonasChange}
               onDraftSynced={handlePersonasDraftSynced}
             />
-            <button
-              type="button"
-              onClick={() => requireKeyPersonas(() => void handlePrimaryPipeline())}
-              disabled={anyPipelineRunning}
-              className="zo-btn proposal-toolbar-btn disabled:opacity-60"
-            >
-              {isFullProposalRunning || isFulfillingRfpGaps ? (
-                <>
-                  <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-zo-white/30 border-t-zo-white" />
-                  {primaryPipelineLabel}
-                </>
-              ) : (
-                primaryPipelineLabel
-              )}
-            </button>
+            <CapabilityHoverTip id="generateProposal" side="bottom">
+              <button
+                type="button"
+                onClick={() => requireKeyPersonas(() => void handlePrimaryPipeline())}
+                disabled={anyPipelineRunning}
+                className="zo-btn proposal-toolbar-btn disabled:opacity-60"
+              >
+                {isFullProposalRunning || isFulfillingRfpGaps ? (
+                  <>
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-zo-white/30 border-t-zo-white" />
+                    {primaryPipelineLabel}
+                  </>
+                ) : (
+                  primaryPipelineLabel
+                )}
+              </button>
+            </CapabilityHoverTip>
             </div>
           </div>
 
@@ -3176,6 +3661,9 @@ function ProposalDraftWorkspaceInner({
                   setRevisionDrawerSectionId(sectionId);
                 }}
                 onDeleteSection={(id) => void removeSection(id)}
+                onReorderSection={
+                  anyPipelineRunning ? undefined : reorderSectionByDrag
+                }
               />
             </ul>
 
@@ -3327,28 +3815,35 @@ function ProposalDraftWorkspaceInner({
             <div className="proposal-tab-actions flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zo-border/60 px-3 py-2.5">
               <p className="text-xs text-zo-text-muted">Full proposal text</p>
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void handleFulfillRfpGaps()}
+                <MatchRfpPacketControl
                   disabled={
-                    anyPipelineRunning ||
-                    !outline.sections.some((s) => s.content.trim())
+                    !outline.sections.some((s) => s.content.trim()) ||
+                    anyPipelineRunning
                   }
-                  className="zo-btn !py-2 !px-3 !text-sm disabled:opacity-40"
-                  title={
-                    scanAlreadyDone && !canResumeFulfillScan
-                      ? "Complete & clean already finished for this draft. Clicking asks to confirm a re-run."
-                      : "Improve this draft in place. Does not rewrite Sections 1–3, healthy budgets, bios, or finished tabs."
-                  }
-                >
-                  {isFulfillingRfpGaps
-                    ? "Completing draft…"
-                    : scanAlreadyDone && !canResumeFulfillScan
-                      ? "✓ Complete & clean done"
-                      : canResumeFulfillScan
-                        ? "Continue complete & clean"
-                        : "Complete & clean draft"}
-                </button>
+                  isOrdering={isAligningRfpOutline || alignPreviewLoading}
+                  isPlacing={isPlacingPacketContent || placePreviewLoading}
+                  onOrderTabs={() => void handleAlignRfpOutline()}
+                  onPlaceContent={() => void handlePlacePacketContent()}
+                />
+                <CapabilityHoverTip id="completeClean" side="bottom">
+                  <button
+                    type="button"
+                    onClick={() => void handleFulfillRfpGaps()}
+                    disabled={
+                      anyPipelineRunning ||
+                      !outline.sections.some((s) => s.content.trim())
+                    }
+                    className="zo-btn !py-2 !px-3 !text-sm disabled:opacity-40"
+                  >
+                    {isFulfillingRfpGaps
+                      ? "Completing draft…"
+                      : scanAlreadyDone && !canResumeFulfillScan
+                        ? "✓ Complete & clean done"
+                        : canResumeFulfillScan
+                          ? "Continue complete & clean"
+                          : "Complete & clean draft"}
+                  </button>
+                </CapabilityHoverTip>
                 {anyPipelineRunning || isStopping ? (
                   <button
                     type="button"
@@ -3478,24 +3973,83 @@ function ProposalDraftWorkspaceInner({
                     scrollToManuscriptSection(sectionId);
                     setRevisionDrawerSectionId(sectionId);
                   }}
+                  onReorderSection={
+                    anyPipelineRunning || reviewSectionQuery.trim()
+                      ? undefined
+                      : reorderSectionByDrag
+                  }
                 />
               </ul>
             </aside>
             <div className="proposal-review-main flex min-h-0 min-w-0 flex-col overflow-hidden">
             <ProposalReviewToolbar
               textareaRef={activeSectionTextareaRef}
+              content={activeReviewMarkdown}
               disabled={anyPipelineRunning || !activeReviewSection}
               lastSavedAt={lastSavedAt}
               onComment={handleReviewComment}
               expanded={reviewFocusMode}
               onToggleExpanded={() => setReviewFocusMode((v) => !v)}
-              onChange={(content) =>
+              ensureEditable={ensureReviewEditable}
+              showFormattedView={() => setEditingSectionId(null)}
+              previewSelection={reviewPreviewSelection}
+              onPreviewSelectionConsumed={() => setReviewPreviewSelection(null)}
+              onChange={(next) =>
                 activeReviewSection &&
                 updateSection(activeReviewSection.id, {
-                  content,
-                  status: content ? "generated" : "outline",
+                  content: next,
+                  status: next ? "generated" : "outline",
                 })
               }
+            />
+            <ManuscriptSelectionBubble
+              active={Boolean(
+                reviewPreviewSelection &&
+                  reviewPreviewSelection.end > reviewPreviewSelection.start &&
+                  activeReviewSection
+              )}
+              disabled={anyPipelineRunning || !activeReviewSection}
+              onBold={() => {
+                if (!activeReviewSection || !reviewPreviewSelection) return;
+                const { next } = toggleWrapMarkers(
+                  activeReviewMarkdown,
+                  reviewPreviewSelection.start,
+                  reviewPreviewSelection.end,
+                  "**"
+                );
+                updateSection(activeReviewSection.id, {
+                  content: next,
+                  status: next ? "generated" : "outline",
+                });
+                setReviewPreviewSelection(null);
+                setEditingSectionId(null);
+              }}
+              onItalic={() => {
+                if (!activeReviewSection || !reviewPreviewSelection) return;
+                const { next } = toggleWrapMarkers(
+                  activeReviewMarkdown,
+                  reviewPreviewSelection.start,
+                  reviewPreviewSelection.end,
+                  "_"
+                );
+                updateSection(activeReviewSection.id, {
+                  content: next,
+                  status: next ? "generated" : "outline",
+                });
+                setReviewPreviewSelection(null);
+                setEditingSectionId(null);
+              }}
+              onAskToChange={() => {
+                if (!activeReviewSection) return;
+                const selected =
+                  reviewPreviewSelection != null
+                    ? activeReviewMarkdown.slice(
+                        reviewPreviewSelection.start,
+                        reviewPreviewSelection.end
+                      )
+                    : null;
+                handleReviewComment(selected);
+              }}
             />
             <div className="proposal-content-layout flex-1 min-h-0">
             <div
@@ -3523,7 +4077,7 @@ function ProposalDraftWorkspaceInner({
                   <article
                     key={section.id}
                     id={section.id}
-                    className="proposal-content-article proposal-content-article--read proposal-content-article--editing scroll-mt-24"
+                    className="proposal-content-article proposal-content-article--read scroll-mt-24 bg-[rgba(17,24,39,0.015)]"
                   >
                     <h3 className="proposal-content-section-title">
                       <span className="text-zo-text-muted">{index + 1}.</span>{" "}
@@ -3546,7 +4100,14 @@ function ProposalDraftWorkspaceInner({
                         {editingSectionId === section.id ? "Done editing" : "Edit source"}
                       </button>
                     </h3>
-                    <div className="proposal-prose proposal-prose--manuscript mt-4">
+                    <div
+                      className="proposal-prose proposal-prose--manuscript mt-4 selection:bg-blue-500/20 selection:text-inherit"
+                      onMouseUp={() => {
+                        if (editingSectionId !== section.id) {
+                          captureReviewPreviewSelection();
+                        }
+                      }}
+                    >
                       {editingSectionId === section.id ? (
                         <textarea
                           ref={(el) => registerManuscriptTextarea(section.id, el)}
@@ -3554,6 +4115,15 @@ function ProposalDraftWorkspaceInner({
                           disabled={anyPipelineRunning}
                           onFocus={(e) => handleManuscriptTextareaFocus(section.id, e)}
                           onInput={(e) => resizeManuscriptTextarea(e.currentTarget)}
+                          onSelect={(e) => {
+                            const el = e.currentTarget;
+                            if (el.selectionStart !== el.selectionEnd) {
+                              setReviewPreviewSelection({
+                                start: el.selectionStart,
+                                end: el.selectionEnd,
+                              });
+                            }
+                          }}
                           onChange={(e) =>
                             updateSection(section.id, {
                               content: e.target.value,
@@ -3661,6 +4231,8 @@ function ProposalDraftWorkspaceInner({
               isRunning={anyPipelineRunning}
               fullProposalPhase={effectiveFullProposalProgress}
               isFulfillScanRunning={isFulfillingRfpGaps}
+              isAlignRunning={isAligningRfpOutline}
+              isPlaceRunning={isPlacingPacketContent}
               hasCompletedFulfillReport={Boolean(outline.lastFulfillReport)}
               manualFillCount={manualFillCount}
               rfpCost={rfpCost}
@@ -3695,19 +4267,16 @@ function ProposalDraftWorkspaceInner({
                 : "Generate the full proposal (Sections 1–3 + RFP-specific sections)."}
             </p>
             <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-              <button
-                type="button"
-                onClick={() => requireKeyPersonas(() => void handleGenerateFullProposal())}
-                disabled={anyPipelineRunning}
-                className="zo-btn disabled:opacity-60"
-                title={
-                  hasKeyPersonas
-                    ? undefined
-                    : "Select key personas first — they are named and staffed throughout the proposal"
-                }
-              >
-                Generate Proposal
-              </button>
+              <CapabilityHoverTip id="generateProposal" side="bottom">
+                <button
+                  type="button"
+                  onClick={() => requireKeyPersonas(() => void handleGenerateFullProposal())}
+                  disabled={anyPipelineRunning}
+                  className="zo-btn disabled:opacity-60"
+                >
+                  Generate Proposal
+                </button>
+              </CapabilityHoverTip>
               {anyPipelineRunning || isStopping ? (
                 <button
                   type="button"
@@ -4021,6 +4590,25 @@ function ProposalDraftWorkspaceInner({
         result={caseStudyMatchResult}
         loading={isMatchingCaseStudies}
         error={caseStudyMatchError}
+      />
+      <AlignOutlinePreviewModal
+        open={alignPreviewOpen}
+        loading={alignPreviewLoading}
+        error={alignPreviewError}
+        preview={alignPreview}
+        applying={isAligningRfpOutline}
+        onClose={handleCloseAlignPreview}
+        onApply={() => void handleApplyAlignPreview()}
+      />
+      <PacketPlacePreviewModal
+        open={placePreviewOpen}
+        loading={placePreviewLoading}
+        error={placePreviewError}
+        preview={placePreview}
+        applying={isPlacingPacketContent}
+        onClose={handleClosePlacePreview}
+        onApply={() => void handleApplyPlacePreview()}
+        onFixSectionOrder={() => void handleAlignRfpOutline()}
       />
     </section>
   );

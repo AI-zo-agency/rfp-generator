@@ -162,6 +162,55 @@ class ProposalDraftSnapshotTests(unittest.TestCase):
         draft = _draft(_section("a", "x"), _section("b", ""))
         self.assertEqual(filled_count(draft), 1)
 
+    def test_before_align_snapshot_survives_slim_client_save(self) -> None:
+        """FE autosave sends hollow snapshot shells — DB bodies must survive merge."""
+        from app.models.proposal import ProposalDraftSnapshot
+        from app.services.proposal_api_slim import merge_snapshots_for_save
+
+        draft = _draft(
+            _section("who", "Who we are body"),
+            _section("price", "Price body"),
+        )
+        draft = push_proposal_snapshot(draft, label="Before Align to RFP outline")
+        self.assertTrue(any(s.label == "Before Align to RFP outline" for s in draft.snapshots or []))
+        saved_at = (draft.snapshots or [])[-1].saved_at
+
+        # Simulate Align rewriting live order.
+        aligned = draft.model_copy(
+            update={
+                "sections": [
+                    _section("price", "Price body"),
+                    _section("who", "Who we are body"),
+                ]
+            }
+        )
+        # Client PUT with slim snapshots (empty bodies).
+        slim_incoming = aligned.model_copy(
+            update={
+                "snapshots": [
+                    ProposalDraftSnapshot(
+                        savedAt=saved_at,
+                        label="Before Align to RFP outline",
+                        sections=[],
+                    )
+                ]
+            }
+        )
+        merged = merge_snapshots_for_save(slim_incoming, draft)
+        snap = next(s for s in merged.snapshots if s.saved_at == saved_at)
+        self.assertIn(
+            "Who we are body",
+            next(s for s in snap.sections if s.id == "who").content,
+        )
+
+        # Restore still works after the hollow client write was merged.
+        restored = restore_proposal_snapshot(merged, saved_at=saved_at)
+        assert restored is not None
+        self.assertEqual(
+            [s.id for s in restored.sections],
+            ["who", "price"],
+        )
+
     def test_before_structure_change_snapshot_is_restorable(self) -> None:
         from app.services.proposal_draft_snapshots import (
             push_before_structure_change_snapshot,

@@ -14,6 +14,7 @@ import type { OutlineSection, ProposalOutline, ProposalResearch } from "@/types/
 import type { SectionRevisionRecord } from "./DraftSectionEditor";
 import { MarkdownReportBody } from "./MarkdownReportBody";
 import { composeApplyFixInstruction, resolveApplyFixTarget } from "./compose-apply-fix-instruction";
+import { CapabilityHoverTip } from "./CapabilityHoverTip";
 import "./ProposalSectionChatPanel.css";
 
 export interface SectionChatSuggestedFix {
@@ -588,7 +589,11 @@ export function ProposalSectionChatPanel({
     <aside className="proposal-section-chat" aria-label="Proposal assistant">
       <header className="proposal-section-chat-header">
         <div className="min-w-0 flex-1">
-          <p className="proposal-section-chat-kicker">Proposal assistant</p>
+          <CapabilityHoverTip id="assistant" side="bottom">
+            <p className="proposal-section-chat-kicker cursor-help">
+              Proposal assistant
+            </p>
+          </CapabilityHoverTip>
         </div>
         {showClose && onClose ? (
           <button

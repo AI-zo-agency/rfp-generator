@@ -1238,6 +1238,73 @@ async def fulfill_rfp_gaps_endpoint(
 
 
 @router.post(
+    "/{rfp_id}/proposal/align-rfp-outline/preview",
+)
+async def align_rfp_outline_preview_endpoint(rfp_id: str) -> dict[str, Any]:
+    """Preview left-list vs RFP order — does not change the draft until Apply."""
+    from app.services.proposal_align_rfp_outline import preview_align_to_rfp_outline
+
+    try:
+        return await preview_align_to_rfp_outline(rfp_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{rfp_id}/proposal/align-rfp-outline",
+)
+async def align_rfp_outline_endpoint(rfp_id: str) -> JSONResponse:
+    """Reorder / stub sidebar tabs to RFP submission order — no prose rewrite.
+
+    Uses pending Align preview when present (no second structure pass).
+    """
+    from app.services.proposal_align_rfp_outline import run_align_to_rfp_outline
+
+    async def work() -> None:
+        await run_align_to_rfp_outline(rfp_id)
+
+    return await _enqueue_pipeline_phase(
+        rfp_id,
+        "align-rfp-outline",
+        work,
+        timeout_sec=10 * 60,
+        job_kwargs={},
+    )
+
+
+@router.post(
+    "/{rfp_id}/proposal/packet-redistribute/preview",
+)
+async def packet_redistribute_preview_endpoint(rfp_id: str) -> dict[str, Any]:
+    """Scan misplaced blocks — returns a preview; does not change the draft body."""
+    from app.services.proposal_packet_redistribute import preview_packet_redistribute
+
+    try:
+        return await preview_packet_redistribute(rfp_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{rfp_id}/proposal/packet-redistribute",
+)
+async def packet_redistribute_endpoint(rfp_id: str) -> JSONResponse:
+    """Apply Place moves (uses pending preview plan when present — no second LLM)."""
+    from app.services.proposal_packet_redistribute import run_packet_redistribute
+
+    async def work() -> None:
+        await run_packet_redistribute(rfp_id)
+
+    return await _enqueue_pipeline_phase(
+        rfp_id,
+        "packet-redistribute",
+        work,
+        timeout_sec=15 * 60,
+        job_kwargs={},
+    )
+
+
+@router.post(
     "/{rfp_id}/proposal/restore-snapshot",
     response_model=ProposalRestoreSnapshotResponse,
 )
@@ -1275,7 +1342,13 @@ async def restore_proposal_snapshot_endpoint(
         )
     restored = prune_clutter_snapshots(restored)
     await asave_proposal_draft(restored)
-    return ProposalRestoreSnapshotResponse(draft=restored)
+    # Slim snapshot bodies in the HTTP response — full copies stay in DB.
+    # Returning every checkpoint body used to blow past proxy limits so Restore
+    # looked broken (timeout / truncated JSON) even though the DB write succeeded.
+    slim = slim_draft_for_api(restored)
+    return ProposalRestoreSnapshotResponse(
+        draft=ProposalDraft.model_validate(slim)
+    )
 
 
 @router.post("/{rfp_id}/proposal/export/docx")

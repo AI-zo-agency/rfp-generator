@@ -136,6 +136,8 @@ import {
   type PipelineInProgressPhase,
   type ProposalPipelineStatus,
   FULFILL_SCAN_PHASE,
+  ALIGN_RFP_OUTLINE_PHASE,
+  PACKET_REDISTRIBUTE_PHASE,
 } from "./proposal-pipeline-checkpoint";
 import { staticSections1to3Complete } from "./proposal-draft";
 import { PROPOSAL_STAGE_TIMEOUT_MS } from "./proposal-stage-timeout";
@@ -267,7 +269,9 @@ export type FullProposalProgress =
 export function fullProposalProgressFromInFlight(
   phase: PipelineInProgressPhase | null | undefined
 ): FullProposalProgress | null {
-  if (!phase || phase === FULFILL_SCAN_PHASE) return null;
+  if (!phase || phase === FULFILL_SCAN_PHASE || phase === ALIGN_RFP_OUTLINE_PHASE || phase === PACKET_REDISTRIBUTE_PHASE) {
+    return null;
+  }
   switch (phase) {
     case "sections-1-3":
     case "phase-2":
@@ -277,7 +281,8 @@ export function fullProposalProgressFromInFlight(
     case "phase-4-review":
       return phase;
     default:
-      return "phase-3";
+      // Never invent "RFP tabs" for standalone jobs (Align, Scan, etc.).
+      return null;
   }
 }
 
@@ -1847,6 +1852,302 @@ export async function runFulfillRfpGaps(
   };
 }
 
+async function waitForNamedPhaseJob(
+  rfpId: string,
+  phase: string,
+  signal: AbortSignal | undefined,
+  options: { label: string; maxMs?: number }
+): Promise<{
+  draft: ProposalOutline | null;
+  research: ProposalResearch | null;
+}> {
+  const label = options.label;
+  const maxMs = options.maxMs ?? 10 * 60 * 1000;
+  const deadline = Date.now() + maxMs;
+  let observedRunning = false;
+  const startedWall = Date.now();
+
+  while (Date.now() < deadline) {
+    throwIfAborted(signal);
+    const snapshot = await fetchProposalDraft(rfpId);
+    const cp = snapshot.research?.pipelineCheckpoint;
+    const job = await fetchProposalJobStatus(rfpId);
+
+    if (cp?.inProgressPhase === phase) observedRunning = true;
+    if (job?.jobType === phase && job.status === "running") observedRunning = true;
+
+    if (job?.jobType === phase) {
+      if (job.status === "cancelled") {
+        throw new DOMException(
+          job.error ?? "Proposal generation stopped",
+          "AbortError"
+        );
+      }
+      if (job.status === "failed") {
+        throw new Error(job.error ?? `${label} failed`);
+      }
+      if (job.status === "completed" && cp?.inProgressPhase !== phase) {
+        return { draft: snapshot.draft, research: snapshot.research };
+      }
+    }
+
+    if (observedRunning && cp?.inProgressPhase !== phase) {
+      if (cp?.lastError && /stopped|cancel/i.test(cp.lastError)) {
+        throw new DOMException(cp.lastError, "AbortError");
+      }
+      if (cp?.lastFailedPhase === phase) {
+        throw new Error(cp.lastError ?? `${label} failed`);
+      }
+      return { draft: snapshot.draft, research: snapshot.research };
+    }
+
+    if (!observedRunning && Date.now() - startedWall > 60_000) {
+      throw new Error(
+        `Timed out waiting for ${label} to start. Check that the backend is running.`
+      );
+    }
+
+    await sleep(STAGE_POLL_INTERVAL_MS);
+  }
+
+  throw new Error(`Timed out waiting for ${label} to finish.`);
+}
+
+/** Reorder / stub sidebar tabs to RFP submission order — no prose rewrite. */
+/** Poll until an in-flight Align to RFP outline job finishes (no POST — reconnect only). */
+export async function pollAlignRfpOutlineCompletion(
+  rfpId: string,
+  signal?: AbortSignal
+): Promise<{
+  draft: ProposalOutline | null;
+  research: ProposalResearch | null;
+}> {
+  return waitForNamedPhaseJob(rfpId, ALIGN_RFP_OUTLINE_PHASE, signal, {
+    label: "Align to RFP outline",
+    maxMs: 10 * 60 * 1000,
+  });
+}
+
+export type AlignOutlinePreview = {
+  currentTitles?: string[];
+  proposedTitles?: string[];
+  rfpNeededTitles?: string[];
+  changes?: string[];
+  addedTitles?: string[];
+  nothingToChange?: boolean;
+  summary?: string;
+  humanDecisionGaps?: string[];
+};
+
+export async function previewAlignRfpOutline(
+  rfpId: string,
+  options?: { signal?: AbortSignal }
+): Promise<{
+  ok: boolean;
+  preview: AlignOutlinePreview;
+  nothingToChange: boolean;
+}> {
+  throwIfAborted(options?.signal);
+  const res = await fetch(
+    `/api/rfps/${rfpId}/proposal/align-rfp-outline/preview`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      signal: options?.signal,
+    }
+  );
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    ok?: boolean;
+    preview?: AlignOutlinePreview;
+    nothingToChange?: boolean;
+  } = {};
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from align preview.");
+  }
+  if (!res.ok) {
+    throw new Error(formatApiDetail(data.detail, "Align preview failed"));
+  }
+  return {
+    ok: Boolean(data.ok ?? true),
+    preview: data.preview ?? {},
+    nothingToChange: Boolean(
+      data.nothingToChange ?? data.preview?.nothingToChange
+    ),
+  };
+}
+
+export async function runAlignRfpOutline(
+  rfpId: string,
+  options?: { signal?: AbortSignal }
+): Promise<{
+  draft: ProposalOutline;
+  research: ProposalResearch | null;
+  report: {
+    mode?: string;
+    beforeTitles?: string[];
+    afterTitles?: string[];
+    logs?: string[];
+    summary?: string;
+    changed?: boolean;
+  };
+}> {
+  throwIfAborted(options?.signal);
+  await clearProposalGenerationStop(rfpId);
+  const started = await startProposalPhaseJob(
+    `/api/rfps/${rfpId}/proposal/align-rfp-outline`,
+    options?.signal
+  );
+  if (started.mode === "sync") {
+    if (!started.draft) {
+      throw new Error("Incomplete Align to RFP outline response");
+    }
+    const outline = apiDraftToOutline(started.draft);
+    return {
+      draft: outline,
+      research: started.research ?? null,
+      report: (outline.lastFulfillReport ?? {}) as {
+        mode?: string;
+        beforeTitles?: string[];
+        afterTitles?: string[];
+        logs?: string[];
+        summary?: string;
+        changed?: boolean;
+      },
+    };
+  }
+  const waited = await waitForNamedPhaseJob(
+    rfpId,
+    ALIGN_RFP_OUTLINE_PHASE,
+    options?.signal,
+    { label: "Align to RFP outline", maxMs: 10 * 60 * 1000 }
+  );
+  if (!waited.draft) {
+    throw new Error("Incomplete Align to RFP outline response");
+  }
+  return {
+    draft: waited.draft,
+    research: waited.research,
+    report: (waited.draft.lastFulfillReport ?? {}) as {
+      mode?: string;
+      beforeTitles?: string[];
+      afterTitles?: string[];
+      logs?: string[];
+      summary?: string;
+      changed?: boolean;
+    },
+  };
+}
+
+export type PacketRedistributeReport = {
+  mode?: string;
+  movedCount?: number;
+  plannedMoves?: number;
+  moveSummaries?: string[];
+  skipped?: string[];
+  humanGaps?: string[];
+  stubFillIds?: string[];
+  stubTitles?: string[];
+  summary?: string;
+  changed?: boolean;
+  logs?: string[];
+};
+
+export type PacketPlacePreview = {
+  issues?: string[];
+  moves?: Array<{
+    kind?: string;
+    heading?: string;
+    fromTitle?: string;
+    toTitle?: string;
+    summary?: string;
+  }>;
+  humanGaps?: string[];
+  stubTitles?: string[];
+  plannedMoves?: number;
+  summary?: string;
+  nothingToMove?: boolean;
+};
+
+export async function previewPacketRedistribute(
+  rfpId: string,
+  options?: { signal?: AbortSignal }
+): Promise<{ ok: boolean; preview: PacketPlacePreview; plannedMoves: number }> {
+  throwIfAborted(options?.signal);
+  const res = await fetch(
+    `/api/rfps/${rfpId}/proposal/packet-redistribute/preview`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      signal: options?.signal,
+    }
+  );
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    ok?: boolean;
+    preview?: PacketPlacePreview;
+    plannedMoves?: number;
+  } = {};
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from place preview.");
+  }
+  if (!res.ok) {
+    throw new Error(formatApiDetail(data.detail, "Place preview failed"));
+  }
+  return {
+    ok: Boolean(data.ok ?? true),
+    preview: data.preview ?? {},
+    plannedMoves: data.plannedMoves ?? data.preview?.plannedMoves ?? 0,
+  };
+}
+
+export async function runPacketRedistribute(
+  rfpId: string,
+  options?: { signal?: AbortSignal }
+): Promise<{
+  draft: ProposalOutline;
+  research: ProposalResearch | null;
+  report: PacketRedistributeReport;
+}> {
+  throwIfAborted(options?.signal);
+  await clearProposalGenerationStop(rfpId);
+  const started = await startProposalPhaseJob(
+    `/api/rfps/${rfpId}/proposal/packet-redistribute`,
+    options?.signal
+  );
+  if (started.mode === "sync") {
+    if (!started.draft) {
+      throw new Error("Incomplete Place content response");
+    }
+    const outline = apiDraftToOutline(started.draft);
+    return {
+      draft: outline,
+      research: started.research ?? null,
+      report: (outline.lastFulfillReport ?? {}) as PacketRedistributeReport,
+    };
+  }
+  const waited = await waitForNamedPhaseJob(
+    rfpId,
+    PACKET_REDISTRIBUTE_PHASE,
+    options?.signal,
+    { label: "Place content", maxMs: 15 * 60 * 1000 }
+  );
+  if (!waited.draft) {
+    throw new Error("Incomplete Place content response");
+  }
+  return {
+    draft: waited.draft,
+    research: waited.research,
+    report: (waited.draft.lastFulfillReport ?? {}) as PacketRedistributeReport,
+  };
+}
+
 export async function restoreProposalSnapshot(
   rfpId: string,
   savedAt: string
@@ -1864,7 +2165,7 @@ export async function restoreProposalSnapshot(
     throw new Error("Invalid response from restore snapshot.");
   }
   if (!res.ok) {
-    throw new Error(data.detail ?? "Could not restore snapshot.");
+    throw new Error(formatApiDetail(data.detail, "Could not restore snapshot."));
   }
   if (!data.draft) {
     throw new Error("Incomplete restore snapshot response.");
