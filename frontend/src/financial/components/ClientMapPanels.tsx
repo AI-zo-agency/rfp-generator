@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, type FormEvent } from "react";
-import { RefreshCw } from "lucide-react";
+import { ChevronLeft, ChevronRight, RefreshCw, Search } from "lucide-react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Empty, Panel, Pill } from "./qb-ui";
@@ -13,6 +13,31 @@ import "./QuickBooksLedger.css";
 
 const INPUT =
   "h-8 min-w-24 rounded-md border border-[var(--zo-border)] bg-[var(--zo-card-bg)] px-2 text-xs text-[var(--zo-text)] outline-none focus:border-[var(--zo-teal)]";
+const MAPPINGS_PER_PAGE = 25;
+type MappingFilter = "all" | ClientMapRow["link_confidence"];
+
+export function filterClientMapRows(rows: ClientMapRow[], query: string, filter: MappingFilter) {
+  const normalizedQuery = query.trim().toLowerCase();
+  return rows.filter((row) => {
+    const matchesFilter = filter === "all" || row.link_confidence === filter;
+    const haystack = [row.tag_code, row.client_name, row.current_am, ...row.qb_customer_names, ...row.teamwork_company_names]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return matchesFilter && (!normalizedQuery || haystack.includes(normalizedQuery));
+  });
+}
+
+export function paginateClientMapRows(rows: ClientMapRow[], page: number, pageSize = MAPPINGS_PER_PAGE) {
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const safePage = Math.min(Math.max(1, page), pageCount);
+  return { page: safePage, pageCount, rows: rows.slice((safePage - 1) * pageSize, safePage * pageSize) };
+}
+
+function MappingPagination({ page, pageCount, onChange }: { page: number; pageCount: number; onChange: (page: number) => void }) {
+  if (pageCount <= 1) return null;
+  return <nav className="mapping-pagination" aria-label="Client mapping pages"><span>Page {page} of {pageCount}</span><div><button type="button" onClick={() => onChange(page - 1)} disabled={page === 1} aria-label="Previous mapping page"><ChevronLeft size={15} /></button><button type="button" onClick={() => onChange(page + 1)} disabled={page === pageCount} aria-label="Next mapping page"><ChevronRight size={15} /></button></div></nav>;
+}
 
 const emptyRow = (): ClientMapCorePatch => ({
   tag_code: "",
@@ -171,6 +196,9 @@ function MappingView({
   const [projectId, setProjectId] = useState(prefilledProjectId ?? "");
   const [clientMapId, setClientMapId] = useState("");
   const [selectedRowId, setSelectedRowId] = useState("");
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<MappingFilter>("all");
+  const [page, setPage] = useState(1);
   const [overrideError, setOverrideError] = useState<string | null>(null);
   const [overrideNotice, setOverrideNotice] = useState<string | null>(null);
   const selectedRow = map.rows.find((row) => row.id === selectedRowId);
@@ -181,6 +209,14 @@ function MappingView({
   );
   const resolvedClientMapId = clientMapId || existingOverride?.client_map_id || "";
   const selectedClient = map.rows.find((row) => row.id === resolvedClientMapId);
+  const filteredRows = useMemo(() => filterClientMapRows(map.rows, query, filter), [filter, map.rows, query]);
+  const pagedRows = paginateClientMapRows(filteredRows, page);
+  const filters: { id: MappingFilter; label: string; count: number }[] = [
+    { id: "all", label: "All", count: map.rows.length },
+    { id: "suggested", label: "Needs review", count: map.rows.filter((row) => row.link_confidence === "suggested").length },
+    { id: "unmatched", label: "Unmatched", count: map.rows.filter((row) => row.link_confidence === "unmatched").length },
+    { id: "confirmed", label: "Confirmed", count: map.rows.filter((row) => row.link_confidence === "confirmed").length },
+  ];
 
   const addOverride = async (event: FormEvent) => {
     event.preventDefault();
@@ -206,10 +242,10 @@ function MappingView({
 
   return (
     <TabsContent value="mapping" className="qb-view">
-      <div className="qb-toolbar">
+      <div className="qb-toolbar mapping-toolbar">
         <p className="qb-sync">
           <span className="qb-sync-dot" data-busy={map.busy ? "true" : undefined} aria-hidden />
-          {map.rows.length} client mappings
+          Review client relationships
           {map.lastLinkResult ? (
             <span className="qb-sync-meta">
               {map.lastLinkResult.confirmed} confirmed
@@ -230,19 +266,24 @@ function MappingView({
 
       {map.error ? <div className="qb-error"><p>{map.error}</p></div> : null}
 
-      <Panel title="Client map" meta={`${map.rows.length} rows`} action={<CreateClientForm busy={map.busy} onCreate={map.create} />}>
-        {map.rows.length ? (
+      <Panel title="Client map" meta={`Showing ${pagedRows.rows.length} of ${filteredRows.length}${filteredRows.length !== map.rows.length ? ` · ${map.rows.length} total` : ""}`} action={<CreateClientForm busy={map.busy} onCreate={map.create} />}>
+        <div className="mapping-controls">
+          <label className="mapping-search"><Search size={15} aria-hidden /><span className="sr-only">Search client mappings</span><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Search client, tag, or linked company" /></label>
+          <div className="mapping-filters" aria-label="Filter client mappings">{filters.map((item) => <button key={item.id} type="button" data-active={filter === item.id ? "true" : undefined} onClick={() => { setFilter(item.id); setPage(1); }}>{item.label}<span>{item.count}</span></button>)}</div>
+        </div>
+        {filteredRows.length ? (
           <div className="qb-tablewrap">
-            <table className="qb-table">
+            <table className="qb-table mapping-table">
               <thead><tr><th><span className="sr-only">Select</span></th><th>Tag</th><th>Client</th><th>AM</th><th>Status</th><th>QuickBooks</th><th>Teamwork</th><th>Confidence</th><th>Actions</th></tr></thead>
               <tbody>
-                {map.rows.map((row) => (
+                {pagedRows.rows.map((row) => (
                   <ClientRow key={row.id} row={row} busy={map.busy} selected={row.id === selectedRowId} onSelect={setSelectedRowId} onUpdate={map.update} onAccept={map.accept} onReject={map.reject} onDelete={map.remove} />
                 ))}
               </tbody>
             </table>
           </div>
-        ) : <Empty>No client mappings yet. Import Tags or add one above.</Empty>}
+        ) : <Empty>{map.rows.length ? "No client mappings match this review." : "No client mappings yet. Import Tags or add one above."}</Empty>}
+        <MappingPagination page={pagedRows.page} pageCount={pagedRows.pageCount} onChange={setPage} />
       </Panel>
 
       <div className="qb-two">

@@ -191,7 +191,7 @@ export function FinancialNavSidebar({
 
       <div
         className={cn(
-          "relative h-full max-md:w-0 max-md:shrink-0",
+          "relative h-full max-md:w-0 max-md:shrink-0 md:sticky md:top-0 md:self-start",
           "md:transition-[width] md:duration-200 md:ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:md:transition-none",
           railCollapsed ? "md:w-[56px]" : "md:w-[264px]",
         )}
