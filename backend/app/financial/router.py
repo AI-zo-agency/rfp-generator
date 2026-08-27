@@ -14,6 +14,7 @@ from app.financial.ai_insights_repository import get_latest_insight
 from app.financial.client_map_import import import_tags_sheet
 from app.financial.client_map_link import run_link as run_client_map_link
 from app.financial.agency_overview import build_agency_overview
+from app.financial.client_map import ClientMatch, resolve_project
 from app.financial.client_map_repository import (
     delete_client_map,
     delete_job_override,
@@ -28,6 +29,7 @@ from app.financial.client_map_repository import (
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows
 from app.financial.qb_position import position
 from app.financial.qb_repository import list_customers
+from app.financial.qb_panels_from_db import list_invoices
 from app.financial.qb_trend import margin_rows
 from app.financial import financial_llm_cost, qb_chat
 from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
@@ -1117,20 +1119,66 @@ def get_agency_overview(year: int | None = Query(None, ge=2000, le=2100)):
 
 @router.post("/agency/invoice-resolutions")
 def create_invoice_resolution(payload: InvoiceResolutionUpsert):
+    realm_id = settings.quickbooks_realm_id
+    invoice = next(
+        (
+            row
+            for row in list_invoices(realm_id)
+            if str(row.get("qbo_id") or "") == payload.invoice_id
+            and not row.get("is_deleted")
+        ),
+        None,
+    )
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    selected_project: dict[str, Any] | None = None
     if payload.resolution == "linked":
-        project_ids = {
-            str(project.get("id"))
-            for project in overview_from_cache().get("projects") or []
-            if isinstance(project, dict) and project.get("id") is not None
-        }
-        if payload.project_id not in project_ids:
+        selected_project = next(
+            (
+                project
+                for project in overview_from_cache().get("projects") or []
+                if isinstance(project, dict) and str(project.get("id")) == payload.project_id
+            ),
+            None,
+        )
+        if selected_project is None:
             raise HTTPException(status_code=404, detail="Project not found")
-    if payload.client_map_id is not None and get_client_map_row(str(payload.client_map_id)) is None:
-        raise HTTPException(status_code=404, detail="Client map not found")
+    if payload.client_map_id is not None:
+        client_map = get_client_map_row(str(payload.client_map_id))
+        if client_map is None:
+            raise HTTPException(status_code=404, detail="Client map not found")
+        if payload.resolution == "linked" and selected_project is not None:
+            matches_invoice_customer = str(invoice.get("customer_id") or "") in {
+                str(customer_id) for customer_id in (client_map.get("qb_customer_ids") or [])
+            }
+            if not matches_invoice_customer:
+                client_rows = list_client_map()
+                site_id = site_id_from_base_url(settings.teamwork_base_url)
+                project_match = resolve_project(
+                    site_id,
+                    selected_project["id"],
+                    str(selected_project.get("name") or ""),
+                    selected_project.get("company_id"),
+                    selected_project.get("company_name"),
+                    client_rows=client_rows,
+                    overrides_loaded=True,
+                )
+                matches_project = (
+                    isinstance(project_match, ClientMatch)
+                    and str(project_match.client_map_id) == str(payload.client_map_id)
+                )
+            else:
+                matches_project = False
+            if not matches_project and not matches_invoice_customer:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Client map does not match the selected project or invoice customer",
+                )
     row = upsert_invoice_resolution(
         {
             **payload.model_dump(mode="json"),
-            "realm_id": settings.quickbooks_realm_id,
+            "realm_id": realm_id,
         }
     )
     logger.info(

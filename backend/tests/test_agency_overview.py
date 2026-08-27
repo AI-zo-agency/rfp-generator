@@ -298,3 +298,53 @@ def test_overview_does_not_count_suggested_override_as_mapped(monkeypatch):
         "company_name": "",
         "join": "suggested",
     }]
+
+
+def test_overview_exposes_linked_invoice_on_project_without_double_counting(monkeypatch):
+    monkeypatch.setattr(agency_overview, "_site_id", lambda: "site-1")
+    monkeypatch.setattr(
+        agency_overview,
+        "overview_from_cache",
+        lambda: {"projects": [{"id": "44", "name": "ACM 26001 Retainer"}]},
+    )
+    monkeypatch.setattr(agency_overview.map_repo, "list_client_map", lambda: [])
+    monkeypatch.setattr(agency_overview.map_repo, "list_job_overrides", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        agency_overview.map_repo,
+        "list_invoice_resolutions",
+        lambda _realm_id: [{"invoice_id": "17", "project_id": "44", "client_map_id": "cm-1", "resolution": "linked"}],
+    )
+    monkeypatch.setattr(
+        agency_overview,
+        "list_invoices",
+        lambda *_args, **_kwargs: [{"qbo_id": "17", "doc_number": "INV-17", "customer_id": "55", "total_amt": 100, "balance": 30}],
+    )
+    monkeypatch.setattr(
+        agency_overview,
+        "money_by_customer_id",
+        lambda *_args, **_kwargs: {"55": {"customer_id": "55", "billed_ytd": 100, "open_ar": 30}},
+    )
+    monkeypatch.setattr(
+        agency_overview, "pl_summary", lambda *_args: {"income": 100})
+    monkeypatch.setattr(
+        agency_overview,
+        "resolve_project",
+        lambda *_args, **_kwargs: ClientMatch(client_map_id="cm-1", qb_customer_ids=["55"], link_confidence="confirmed"),
+    )
+
+    payload = agency_overview.build_agency_overview(year=2026)
+
+    assert payload["site_id"] == "site-1"
+    assert payload["unlinked_invoices"] == []
+    job = payload["jobs"][0]
+    assert job["site_id"] == "site-1"
+    assert job["linked_invoices"] == [{
+        "invoice_id": "17", "invoice_number": "INV-17", "customer_id": "55", "customer_name": None,
+        "txn_date": None, "due_date": None, "total_amt": 100.0, "open_ar": 30.0,
+        "status": "open", "client_map_id": "cm-1",
+    }]
+    assert job["linked_invoice_total"] == 100.0
+    assert job["linked_invoice_open_ar"] == 30.0
+    assert job["billed_ytd"] == 100.0
+    assert job["open_ar"] == 30.0
+    assert payload["position"]["open_ar"] == 30.0

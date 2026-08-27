@@ -7,6 +7,8 @@ export type AgencyJoinStatus =
   | "job override";
 
 export interface AgencyJobRow {
+  /** Safe Teamwork workspace context carried into the job-override handoff. */
+  site_id?: string | null;
   project_id: string;
   job_label: string;
   project_name: string;

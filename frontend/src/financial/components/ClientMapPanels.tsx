@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { RefreshCw } from "lucide-react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -144,23 +144,60 @@ function CreateClientForm({
   );
 }
 
-function MappingView({ prefilledProjectId }: { prefilledProjectId: string | null }) {
+export function mappingHandoffError({
+  projectId,
+  siteId,
+  client,
+}: {
+  projectId: string;
+  siteId: string | null;
+  client: ClientMapRow | undefined;
+}): string | null {
+  if (!projectId.trim()) return "Choose a Teamwork project before saving the override.";
+  if (!siteId?.trim()) return "This mapping needs its Teamwork workspace context. Reopen it from the Agency action and try again.";
+  if (!client) return "Choose a client with a QuickBooks customer mapping.";
+  if (!client.qb_customer_ids.length) return `${client.client_name} has no QuickBooks customer mapping. Select a mapped client or attach a QuickBooks customer first.`;
+  return null;
+}
+
+function MappingView({
+  prefilledProjectId,
+  prefilledSiteId,
+}: {
+  prefilledProjectId: string | null;
+  prefilledSiteId: string | null;
+}) {
   const map = useClientMap();
-  const [siteId, setSiteId] = useState("");
   const [projectId, setProjectId] = useState(prefilledProjectId ?? "");
   const [clientMapId, setClientMapId] = useState("");
   const [selectedRowId, setSelectedRowId] = useState("");
+  const [overrideError, setOverrideError] = useState<string | null>(null);
+  const [overrideNotice, setOverrideNotice] = useState<string | null>(null);
   const selectedRow = map.rows.find((row) => row.id === selectedRowId);
+  const siteId = prefilledSiteId?.trim() || null;
+  const existingOverride = useMemo(
+    () => map.jobOverrides.find((override) => override.site_id === siteId && override.project_id === Number(projectId)),
+    [map.jobOverrides, projectId, siteId],
+  );
+  const resolvedClientMapId = clientMapId || existingOverride?.client_map_id || "";
+  const selectedClient = map.rows.find((row) => row.id === resolvedClientMapId);
 
   const addOverride = async (event: FormEvent) => {
     event.preventDefault();
-    if (!siteId.trim() || !projectId) return;
-    await map.addJobOverride({
-      site_id: siteId.trim(),
+    const validationError = mappingHandoffError({ projectId, siteId, client: selectedClient });
+    if (validationError) {
+      setOverrideError(validationError);
+      setOverrideNotice(null);
+      return;
+    }
+    if (!siteId) return;
+    setOverrideError(null);
+    const saved = await map.addJobOverride({
+      site_id: siteId,
       project_id: Number(projectId),
-      client_map_id: clientMapId || null,
+      client_map_id: resolvedClientMapId,
     });
-    setProjectId("");
+    if (saved) setOverrideNotice(existingOverride ? "Job override updated." : "Job override created.");
   };
 
   if (map.loading && !map.rows.length) {
@@ -219,11 +256,17 @@ function MappingView({ prefilledProjectId }: { prefilledProjectId: string | null
 
       <Panel title="Job overrides" meta={`${map.jobOverrides.length}`}>
         <form className="mb-4 flex flex-wrap items-end gap-2" onSubmit={(event) => void addOverride(event)}>
-          <label className="grid gap-1 text-[11px] text-[var(--zo-text-muted)]">Site ID<input className={INPUT} value={siteId} onChange={(event) => setSiteId(event.target.value)} required /></label>
+          <div className="basis-full text-xs text-[var(--zo-text-secondary)]">
+            {siteId
+              ? `Teamwork workspace ready · resolve Project ${projectId || "—"} by selecting its mapped client.`
+              : "Workspace context is unavailable. Open this from an Agency mapping action so the connected Teamwork workspace is included."}
+          </div>
           <label className="grid gap-1 text-[11px] text-[var(--zo-text-muted)]">Project ID<input className={INPUT} type="number" value={projectId} onChange={(event) => setProjectId(event.target.value)} required /></label>
-          <label className="grid gap-1 text-[11px] text-[var(--zo-text-muted)]">Client<select className={INPUT} value={clientMapId} onChange={(event) => setClientMapId(event.target.value)}><option value="">No client</option>{map.rows.map((row) => <option key={row.id} value={row.id}>{row.tag_code} — {row.client_name}</option>)}</select></label>
-          <button type="submit" className="qb-retry" disabled={map.busy}>Add override</button>
+          <label className="grid gap-1 text-[11px] text-[var(--zo-text-muted)]">Mapped client<select aria-label="Mapped client" className={INPUT} value={resolvedClientMapId} onChange={(event) => { setClientMapId(event.target.value); setOverrideError(null); }} required><option value="">Choose a client</option>{map.rows.map((row) => <option key={row.id} value={row.id}>{row.tag_code} — {row.client_name}{row.qb_customer_names.length ? ` · ${row.qb_customer_names.join(", ")}` : " · no QuickBooks customer"}</option>)}</select></label>
+          <button type="submit" className="qb-retry" disabled={map.busy || !siteId}>{existingOverride ? "Update override" : "Save override"}</button>
         </form>
+        {overrideError ? <p className="qb-error mb-4" role="alert">{overrideError}</p> : null}
+        {overrideNotice ? <p className="mb-4 text-xs text-[var(--zo-success)]" role="status">{overrideNotice}</p> : null}
         {map.jobOverrides.length ? (
           <div className="qb-tablewrap"><table className="qb-table"><thead><tr><th>Site</th><th>Project</th><th>Client</th><th>QuickBooks</th><th /></tr></thead><tbody>
             {map.jobOverrides.map((override) => {
@@ -244,9 +287,9 @@ export function ClientMapPanels({
   view: AgencyViewId;
   onViewChange: (view: AgencyViewId) => void;
 }) {
-  const [prefilledProjectId, setPrefilledProjectId] = useState<string | null>(null);
-  const openMappingForProject = (projectId: string) => {
-    setPrefilledProjectId(projectId);
+  const [mappingHandoff, setMappingHandoff] = useState<{ projectId: string; siteId: string | null } | null>(null);
+  const openMappingForProject = (projectId: string, siteId?: string | null) => {
+    setMappingHandoff({ projectId, siteId: siteId ?? null });
     onViewChange("mapping");
   };
   return (
@@ -259,7 +302,7 @@ export function ClientMapPanels({
         <TabsContent value="jobs" className="qb-view">
           <AgencyJobsDemo onOpenMapping={openMappingForProject} />
         </TabsContent>
-        {view === "mapping" ? <MappingView prefilledProjectId={prefilledProjectId} /> : null}
+        {view === "mapping" ? <MappingView prefilledProjectId={mappingHandoff?.projectId ?? null} prefilledSiteId={mappingHandoff?.siteId ?? null} /> : null}
       </Tabs>
     </div>
   );

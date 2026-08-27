@@ -1,12 +1,27 @@
 from unittest.mock import AsyncMock
 from types import SimpleNamespace
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from app.financial import router as fin_router
 from app.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _known_invoices(monkeypatch):
+    """Resolution requests always operate on a real invoice in the QB realm."""
+    monkeypatch.setattr(
+        fin_router,
+        "list_invoices",
+        lambda _realm_id: [
+            {"qbo_id": "17", "customer_id": "customer-17"},
+            {"qbo_id": "internal-17", "customer_id": "internal-customer"},
+        ],
+    )
 
 
 def test_unmatched_teamwork_respects_confirmed_company_names(monkeypatch):
@@ -171,7 +186,7 @@ def test_invoice_resolution_rejects_unknown_project_and_saves_known_project(monk
     monkeypatch.setattr(
         fin_router,
         "get_client_map_row",
-        lambda row_id: {"id": row_id} if row_id == client_map_id else None,
+        lambda row_id: {"id": row_id, "qb_customer_ids": ["customer-17"]} if row_id == client_map_id else None,
     )
 
     unknown = client.post(
@@ -192,6 +207,33 @@ def test_invoice_resolution_rejects_unknown_project_and_saves_known_project(monk
         "client_map_id": client_map_id,
         "realm_id": fin_router.settings.quickbooks_realm_id,
     }]
+
+
+def test_invoice_resolution_rejects_missing_invoice_and_mismatched_client_map(monkeypatch):
+    client_map_id = "6aaec310-4b9f-4a61-8e66-b81387bf2097"
+    monkeypatch.setattr(
+        fin_router,
+        "overview_from_cache",
+        lambda: {"projects": [{"id": "44", "name": "ACM 26001 Retainer"}]},
+    )
+    monkeypatch.setattr(
+        fin_router,
+        "get_client_map_row",
+        lambda row_id: {"id": row_id, "qb_customer_ids": ["wrong-customer"]} if row_id == client_map_id else None,
+    )
+    monkeypatch.setattr(fin_router, "list_client_map", lambda: [])
+
+    missing = client.post(
+        "/api/v1/financials/agency/invoice-resolutions",
+        json={"invoice_id": "does-not-exist", "resolution": "internal"},
+    )
+    mismatched = client.post(
+        "/api/v1/financials/agency/invoice-resolutions",
+        json={"invoice_id": "17", "resolution": "linked", "project_id": "44", "client_map_id": client_map_id},
+    )
+
+    assert missing.status_code == 404
+    assert mismatched.status_code == 422
 
 
 def test_invoice_resolution_validates_client_map_and_requires_existing_map(monkeypatch):

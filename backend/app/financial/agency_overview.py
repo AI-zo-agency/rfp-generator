@@ -126,6 +126,7 @@ def build_job_row(
     match: ClientMatch | Ambiguous | None,
     hours_mtd_minutes: int,
     money: dict[str, dict[str, Any]],
+    site_id: str | None = None,
 ) -> dict[str, Any]:
     key = parse_job_key(str(project.get("name") or ""))
     job_label = (
@@ -139,6 +140,7 @@ def build_job_row(
     billed, ar = _sum_money(_money_ids(match), money)
     return {
         "project_id": str(project.get("id") or ""),
+        "site_id": site_id,
         "job_label": job_label,
         "project_name": project.get("name") or "",
         "company_name": project.get("company_name") or "",
@@ -154,6 +156,11 @@ def build_job_row(
             match.link_confidence if isinstance(match, ClientMatch) else None
         ),
         "via": match.via if isinstance(match, ClientMatch) else None,
+        # These are relationship details only.  They deliberately do not feed
+        # the client-level money columns above, which remain non-additive.
+        "linked_invoices": [],
+        "linked_invoice_total": 0.0,
+        "linked_invoice_open_ar": 0.0,
     }
 
 
@@ -293,6 +300,7 @@ def build_agency_overview(*, year: int | None = None) -> dict[str, Any]:
             match=match,
             hours_mtd_minutes=minutes_by_project.get(str(pid), 0),
             money=money,
+            site_id=site_id,
         )
         jobs.append(row)
         for cid in _money_ids(match) or []:
@@ -311,6 +319,43 @@ def build_agency_overview(*, year: int | None = None) -> dict[str, Any]:
     ]
     orphan_billed = billed_without_live_project(money, linked_customer_ids=linked_customer_ids)
     invoice_exceptions = unlinked_invoices(invoices, resolutions=invoice_resolutions)
+    invoices_by_id = {
+        str(invoice["qbo_id"]): invoice
+        for invoice in invoices
+        if not invoice.get("is_deleted") and invoice.get("qbo_id") is not None
+    }
+    jobs_by_project = {row["project_id"]: row for row in jobs}
+    for resolution in invoice_resolutions:
+        if resolution.get("resolution") != "linked":
+            continue
+        project_id = str(resolution.get("project_id") or "")
+        invoice = invoices_by_id.get(str(resolution.get("invoice_id") or ""))
+        job = jobs_by_project.get(project_id)
+        if job is None or invoice is None:
+            continue
+        open_ar = _amount(invoice, "balance")
+        job["linked_invoices"].append(
+            {
+                "invoice_id": str(invoice["qbo_id"]),
+                "invoice_number": invoice.get("doc_number"),
+                "customer_id": invoice.get("customer_id"),
+                "customer_name": invoice.get("customer_name"),
+                "txn_date": invoice.get("txn_date"),
+                "due_date": invoice.get("due_date"),
+                "total_amt": _amount(invoice),
+                "open_ar": open_ar,
+                "status": invoice.get("status") or ("open" if open_ar > 0 else "paid"),
+                "client_map_id": resolution.get("client_map_id"),
+            }
+        )
+    for job in jobs:
+        job["linked_invoices"].sort(key=lambda row: str(row["invoice_id"]))
+        job["linked_invoice_total"] = round(
+            sum(float(row["total_amt"]) for row in job["linked_invoices"]), 2
+        )
+        job["linked_invoice_open_ar"] = round(
+            sum(float(row["open_ar"]) for row in job["linked_invoices"]), 2
+        )
 
     booked = 0.0
     try:
@@ -328,6 +373,7 @@ def build_agency_overview(*, year: int | None = None) -> dict[str, Any]:
 
     payload = {
         "year": year,
+        "site_id": site_id,
         "as_of": tw.get("as_of") or tw.get("generated_at"),
         "position": {
             "booked_ytd": round(booked, 2),
