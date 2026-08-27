@@ -168,6 +168,53 @@ class StructureStubRecoveryTests(unittest.TestCase):
         self.assertEqual(updated.sections[0].title, "Who We Are")
         self.assertFalse(any("added missing" in x.casefold() for x in logs))
 
+    def test_does_not_stub_when_closing_tab_already_covers_exhibit(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-closing-dedup",
+            sections=[
+                ProposalSection(
+                    id="rfp-closing-exhibit_k",
+                    title="Exhibit K — Contractor References",
+                    content="[MANUAL FILL: Attach signed reference form]",
+                )
+            ],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
+        specs = [
+            RfpSectionSpec(
+                rfp_title="Exhibit K Contractor References",
+                instructions="Required exhibit",
+                mandated_submission_format=True,
+            )
+        ]
+        updated, logs = ensure_missing_scored_section_stubs(draft, specs)
+        self.assertEqual(len(updated.sections), 1)
+        self.assertEqual(updated.sections[0].id, "rfp-closing-exhibit_k")
+        self.assertTrue(any("closing tab" in x.casefold() for x in logs))
+
+    def test_does_not_stub_when_rfp_title_already_present(self) -> None:
+        draft = ProposalDraft(
+            rfpId="rfp-title-dedup",
+            sections=[
+                ProposalSection(
+                    id="rfp-cover-letter",
+                    title="Cover Letter",
+                    content="Dear evaluators.",
+                )
+            ],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
+        specs = [
+            RfpSectionSpec(
+                rfp_title="Cover Letter",
+                instructions="Signed cover letter required",
+                mandated_submission_format=True,
+            )
+        ]
+        updated, logs = ensure_missing_scored_section_stubs(draft, specs)
+        self.assertEqual(len(updated.sections), 1)
+        self.assertTrue(any("title already in draft" in x.casefold() for x in logs))
+
 
 class IntelligenceTabOrderTests(unittest.TestCase):
     def test_keeps_section_1_3_first_and_orders_dynamic_tabs(self) -> None:

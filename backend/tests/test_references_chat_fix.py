@@ -130,6 +130,56 @@ class TestReferencesChatFix(unittest.TestCase):
         self.assertNotIn("[VERIFY:", working.content)
         self.assertIn("available on request", reply.casefold())
 
+    def test_apply_fix_scrubs_duplicate_sonja_exhibit_k(self) -> None:
+        section = ProposalSection(
+            id="rfp-exhibit-k",
+            title="Exhibit K — References Form",
+            content=(
+                "Sonja Anderson, Agency Director, zö agency, (541) 350-2778, connect@zo.agency\n"
+                "Sonja Anderson, Agency Director, zö agency, (541) 350-2778, connect@zo.agency\n"
+            ),
+            status="generated",
+            source="rfp",
+            mode="write",
+        )
+        ask = (
+            "Apply the fix: llm.inconsistency.exhibit_k_duplicate_reference — "
+            "Exhibit K lists the same reference twice."
+        )
+        result = _try_deterministic_references_fix(
+            section=section,
+            user_message=ask,
+            conversation_history=None,
+            apply_fix=True,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        working, _reply = result
+        self.assertNotIn("Sonja Anderson", working.content)
+        self.assertIn("MANUAL FILL", working.content)
+
+    def test_chat_message_fix_duplicate_references(self) -> None:
+        section = ProposalSection(
+            id="rfp-ref",
+            title="References",
+            content=(
+                "Jordan Lee, Director, Oregon Employment, 503-555-0100, jordan@oregon.gov\n"
+                "Jordan Lee, Director, Oregon Employment, 503-555-0100, jordan@oregon.gov\n"
+            ),
+            status="generated",
+            source="rfp",
+            mode="write",
+        )
+        result = _try_deterministic_references_fix(
+            section=section,
+            user_message="Fix duplicate reference contacts in this section.",
+            conversation_history=None,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        working, _ = result
+        self.assertEqual(working.content.count("Jordan Lee"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

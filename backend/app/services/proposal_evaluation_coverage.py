@@ -714,10 +714,12 @@ certifications, disclosures, signature pages, references.
 
 Rules:
 - Read the outline titles carefully before flagging anything — a tab titled
-  differently from the RFP's own heading can still be the same submittal
-  (e.g. an outline tab titled "Compliance Forms" may already cover what the
-  RFP calls "Exhibit 3" and "Exhibit 4" together). Only report items with NO
-  tab answering them, not items phrased differently than the RFP.
+  differently from the RFP's own heading can still be the same submittal when
+  it covers the same ask by meaning. Only report items with NO tab answering
+  them, not items phrased differently than the RFP.
+- When the RFP includes a mandatory content-format or submission-layout section,
+  verify every row that section requires appears in the outline — use the buyer's
+  own headings from THAT section, not generic labels.
 - Do NOT flag reference-only material the RFP describes but does not ask the
   offeror to submit — sample contracts, NDAs, or attachments the RFP marks
   optional / "send only if requested" / describing what the AWARDED vendor

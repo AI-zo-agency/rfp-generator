@@ -8,6 +8,7 @@ from app.models.proposal import ProposalBudget, ProposalDraft, ProposalSection
 from app.services.evidence_trust.rfp_hard_facts import extract_rfp_hard_facts
 from app.services.proposal_integrity_guards import (
     apply_manuscript_integrity_guards,
+    apply_reference_content_scrubs,
     case_study_fidelity_ok,
     case_study_has_required_structure,
     case_study_looks_like_source_dump,
@@ -15,7 +16,10 @@ from app.services.proposal_integrity_guards import (
     enforce_pricing_tier_for_cost_weight,
     infer_cost_weight_pct,
     prefer_case_study_kb_text,
+    references_section_has_preservable_content,
+    scrub_agency_contact_as_client_reference,
     scrub_case_study_overbuild,
+    scrub_duplicate_reference_contact_lines,
     scrub_reference_withholding,
 )
 
@@ -86,6 +90,50 @@ class TestReferenceIntegrity(unittest.TestCase):
         self.assertIn("MANUAL FILL", out)
         self.assertIn("Reference 1:", out)
         self.assertTrue(any("Dropped" in line for line in logs))
+
+    def test_collapses_duplicate_sonja_exhibit_k_lines(self) -> None:
+        body = (
+            "Sonja Anderson, Agency Director, zö agency, (541) 350-2778, connect@zo.agency\n"
+            "Sonja Anderson, Agency Director, zö agency, (541) 350-2778, connect@zo.agency\n"
+        )
+        out, logs = apply_reference_content_scrubs(body)
+        self.assertEqual(
+            out.casefold().count("sonja anderson"),
+            0,
+            msg="Agency director must not remain as a client reference row",
+        )
+        self.assertIn("MANUAL FILL", out)
+        self.assertTrue(logs)
+
+    def test_duplicate_contact_line_scrub(self) -> None:
+        line = (
+            "Jordan Lee, Communications Director, Oregon Employment Department, "
+            "503-555-0100, jordan.lee@oregon.gov"
+        )
+        body = f"{line}\n{line}\n"
+        out, logs = scrub_duplicate_reference_contact_lines(body)
+        self.assertEqual(out.count("Jordan Lee"), 1)
+        self.assertTrue(logs)
+
+    def test_agency_contact_removed_from_references(self) -> None:
+        body = (
+            "Sonja Anderson, Agency Director, zö agency, (541) 350-2778, connect@zo.agency\n"
+        )
+        out, logs = scrub_agency_contact_as_client_reference(body)
+        self.assertNotIn("Sonja Anderson", out)
+        self.assertIn("MANUAL FILL", out)
+        self.assertTrue(logs)
+
+    def test_preservable_content_detects_kb_reference(self) -> None:
+        body = (
+            "Reference 1: Oregon Employment Department\n"
+            "Contact: Jordan Lee, Communications Director\n"
+            "Organization: Oregon Employment Department\n"
+            "Phone: 503-555-0100\n"
+            "Email: jordan.lee@oregon.gov\n"
+            "Project: Workforce campaign\n"
+        )
+        self.assertTrue(references_section_has_preservable_content(body))
 
 
 class TestPricingTierGuard(unittest.TestCase):

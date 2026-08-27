@@ -29,7 +29,13 @@ AGENT = "dynamic_section_planner"
 _SYSTEM = """Dynamic Section Planner. Decide which proposal sections must be generated
 FOR THIS RFP ONLY — read the RFP TOC / submission instructions in the excerpt.
 
-RULE 0 — THE SCOREBOARD OUTRANKS EVERY RULE BELOW.
+RULE 0 — SUBMISSION FORMAT OUTRANKS SCOREBOARD LABELS WHEN THEY CONFLICT.
+When THIS RFP publishes a section that defines mandatory proposal content format,
+submission layout, or required packet structure, that section's headings and order
+outrank evaluation-criteria numbers or labels from elsewhere in the RFP for tab
+TITLES and ORDER. Copy the buyer's format-section labels verbatim — do not rename
+tabs using evaluation-point numbering when the format section uses different labels.
+
 The user message lists this RFP's SCORED EVALUATION CRITERIA with their points.
 Those criteria are not hints; they are the sections an evaluator opens, scores and totals.
 - EVERY scored parent criterion gets its OWN tab. No exceptions, no merging two scored

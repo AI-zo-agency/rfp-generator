@@ -41,7 +41,9 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "employment",
         "example",
         "examples",
+        "economic",
         "government",
+        "growth",
         "closing",
         "company",
         "cover",
@@ -55,6 +57,7 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "information",
         "insurance",
         "letter",
+        "media",
         "methodology",
         "municipal",
         "municipality",
@@ -63,6 +66,7 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "organizational",
         "our",
         "overview",
+        "paid",
         "past",
         "performance",
         "portfolio",
@@ -74,6 +78,7 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "samples",
         "scope",
         "strategy",
+        "strength",
         "structure",
         "studies",
         "study",
@@ -92,6 +97,7 @@ _PERSON_NAME_STOP_WORDS = frozenset(
         "who",
         "with",
         "work",
+        "your",
     }
 )
 

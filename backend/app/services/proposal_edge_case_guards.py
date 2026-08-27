@@ -198,6 +198,19 @@ def flag_hollow_references_section(
     return f"{_HOLLOW_REF_FILL}\n", logs
 
 
+def _section_is_resume_pointer_tab(section: ProposalSection) -> bool:
+    """Resume tabs legitimately cite manuscript §2 bios — do not VERIFY them away."""
+    title = (section.title or "").casefold()
+    if re.search(
+        r"\b(?:resumes?|curriculum\s+vitae|\bcv\b|key\s+personnel|"
+        r"personnel\s+resumes?|staff\s+resumes?)\b",
+        title,
+    ):
+        return True
+    body = (section.content or "")[:400].casefold()
+    return "resumes of key" in body or "key personnel resumes" in body
+
+
 def apply_edge_case_guards_to_section(
     section: ProposalSection,
     *,
@@ -205,8 +218,12 @@ def apply_edge_case_guards_to_section(
 ) -> tuple[ProposalSection, list[str]]:
     body = section.content or ""
     logs: list[str] = []
-    body, cite_logs = scrub_bio_marks_used_as_rfp_cites(body, bio_names=bio_names)
-    logs.extend(cite_logs)
+    # Resume / key-personnel tabs MUST point at manuscript §2 bios — never
+    # replace those pointers with VERIFY. That destructive scrub left ten
+    # "incorrectly substituted" placeholders as visible content.
+    if not _section_is_resume_pointer_tab(section):
+        body, cite_logs = scrub_bio_marks_used_as_rfp_cites(body, bio_names=bio_names)
+        logs.extend(cite_logs)
     body, blank_logs = scrub_blank_name_before_will(body)
     logs.extend(blank_logs)
     body, county_logs = scrub_county_city_manager_mismatch(body)

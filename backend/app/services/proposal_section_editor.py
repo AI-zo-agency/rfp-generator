@@ -1524,6 +1524,39 @@ def _message_targets_non_references_section(user_message: str) -> bool:
     return False
 
 
+def _user_asks_reference_integrity_fix(
+    user_message: str,
+    *,
+    apply_fix: bool = False,
+) -> bool:
+    """Broader reference scrub triggers — duplicates, Exhibit K, Apply fix from review."""
+    text = user_message or ""
+    if _message_targets_non_references_section(text):
+        return False
+    if re.search(
+        r"(?i)revert|restore|leave\s+(?:as-?is|alone)|do\s+not\s+add\s+a?\s*verify|"
+        r"available\s+on\s+request[\"']?\s*\.?\s*do\s+not",
+        text,
+    ):
+        return False
+    if apply_fix and re.search(
+        r"(?i)\b(?:reference|exhibit\s+[a-k]\b|duplicate|inconsistency)",
+        text,
+    ):
+        return True
+    if re.search(
+        r"(?i)"
+        r"duplicate.{0,60}reference|reference.{0,60}duplicate|"
+        r"same\s+reference\s+twice|listed\s+the\s+same\s+reference|"
+        r"exhibit\s+k|agency\s+director|sonja\s+anderson|connect@zo\.agency|"
+        r"fix.{0,40}reference|reference.{0,40}integrity|"
+        r"remove\s+duplicate|scrub\s+reference|fill\s+in\s+content",
+        text,
+    ):
+        return True
+    return _user_asks_reference_contact_fix(text)
+
+
 def _user_asks_reference_contact_fix(user_message: str) -> bool:
     text = user_message or ""
     if _message_targets_non_references_section(text):
@@ -1695,11 +1728,13 @@ def _try_deterministic_references_fix(
     section: ProposalSection,
     user_message: str,
     conversation_history: list[dict[str, str]] | None,
+    apply_fix: bool = False,
+    research: ProposalResearchCache | None = None,
 ) -> tuple[ProposalSection, str] | None:
-    """Apply §21 References contact fixes without LLM — no fabrications.
+    """Apply References integrity fixes without LLM — no fabrications.
 
-    Only runs when the LATEST user message asks for a references contact fix.
-    Never re-runs from chat history alone (that stole §11 Umatilla edits).
+    Runs on explicit contact-fill asks, Apply-fix from review, or duplicate/
+    agency-contact defects on a references tab.
     """
     del conversation_history  # Intentionally unused — latest message only.
     if _message_targets_non_references_section(user_message):
@@ -1716,15 +1751,50 @@ def _try_deterministic_references_fix(
     if revert is not None:
         return revert
 
-    if not _user_asks_reference_contact_fix(user_message):
-        return None
-
-    contacts = _extract_contacts_from_ask(user_message)
-    scrubbed, scrub_logs = _apply_reference_contacts_to_content(
-        section.content or "", contacts
+    from app.services.proposal_integrity_guards import (
+        apply_reference_content_scrubs,
+        apply_reference_post_fill_scrubs,
+        reference_section_has_scrubbable_defects,
     )
 
-    if scrubbed.strip() == (section.content or "").strip():
+    locks = research.manuscript_locks if research else None
+    primary = (locks.primary_contact_name if locks else "") or ""
+    body = section.content or ""
+    wants_integrity = _user_asks_reference_integrity_fix(
+        user_message, apply_fix=apply_fix
+    )
+    wants_contacts = _user_asks_reference_contact_fix(user_message)
+    has_defects = reference_section_has_scrubbable_defects(body)
+    run_scrub = wants_integrity or (
+        apply_fix and is_ref_section and has_defects
+    )
+
+    if not run_scrub and not wants_contacts:
+        return None
+
+    scrubbed = body
+    scrub_logs: list[str] = []
+
+    if wants_contacts:
+        from app.services.proposal_integrity_guards import scrub_reference_withholding
+
+        contacts = _extract_contacts_from_ask(user_message)
+        withheld, ref_logs = scrub_reference_withholding(scrubbed)
+        scrub_logs.extend(ref_logs)
+        scrubbed, contact_logs = _apply_reference_contacts_to_content(
+            withheld, contacts
+        )
+        scrub_logs.extend(contact_logs)
+        scrubbed, post_logs = apply_reference_post_fill_scrubs(
+            scrubbed, primary_contact_name=primary
+        )
+        scrub_logs.extend(post_logs)
+    elif run_scrub:
+        scrubbed, scrub_logs = apply_reference_content_scrubs(
+            scrubbed, primary_contact_name=primary
+        )
+
+    if scrubbed.strip() == body.strip():
         return None
 
     working = section.model_copy(update={"content": scrubbed, "status": "generated"})
@@ -1734,15 +1804,22 @@ def _try_deterministic_references_fix(
     ]
     for line in scrub_logs:
         parts.append(f"- {line}")
-    if "oregon" in contacts:
-        parts.append(f"- Oregon Employment Department → {contacts['oregon']}")
-    if "carbondale" in contacts:
-        parts.append(f"- City of Carbondale → {contacts['carbondale']}")
-    if "maricopa" in contacts:
-        parts.append(f"- Maricopa County → {contacts['maricopa']}")
-    parts.append(
-        "No fabricated contacts. Pre-cleared / agreed-to-respond claims removed."
-    )
+    if wants_contacts:
+        contacts = _extract_contacts_from_ask(user_message)
+        if "oregon" in contacts:
+            parts.append(f"- Oregon Employment Department → {contacts['oregon']}")
+        if "carbondale" in contacts:
+            parts.append(f"- City of Carbondale → {contacts['carbondale']}")
+        if "maricopa" in contacts:
+            parts.append(f"- Maricopa County → {contacts['maricopa']}")
+        parts.append(
+            "No fabricated contacts. Pre-cleared / agreed-to-respond claims removed."
+        )
+    elif has_defects:
+        parts.append(
+            "Removed duplicate or agency-contact placeholder rows. "
+            "Use verified ClientList contacts only — or leave MANUAL FILL for Sonja."
+        )
     return working, "\n".join(parts)
 
 
@@ -6151,13 +6228,20 @@ async def _try_budget_summary_reconcile(
     str,
     bool,
 ] | None:
-    """Fix duplicated Year-1 / pass-through summary prose from the existing fee table.
+    """Sync Professional fees / travel / total labels from the canonical ledger.
 
-    Never runs Stage 3.5 — line items stay as-is.
+    On budget tabs: always compare labeled figures to the fee table — no
+    user-message keyword gate. When labels already match, return None so the
+    pricing agent can draft. Never Stage 3.5 (line items stay as-is).
     """
     ask = (user_message or "").strip()
-    if not user_asks_budget_summary_reconcile(ask):
+    # Full rebuild owns the tab — don't steal it into label-only sync.
+    if user_asks_budget_rebuild(ask) or user_asks_global_cost_rebuild(ask):
         return None
+    if not section_is_budget_related(section):
+        # Non-budget tabs: keep the existing explicit Year-1 / pass-through path.
+        if not user_asks_budget_summary_reconcile(ask):
+            return None
 
     provider = _provider_name()
     if research is None:
@@ -6168,6 +6252,12 @@ async def _try_budget_summary_reconcile(
         )
     canonical = research.budget if research else None
     if canonical is None or not (canonical.line_items or []):
+        # Budget tab with no ledger yet: fall through to the pricing agent /
+        # canonical refresh unless this is an explicit Year-1 summary ask.
+        if section_is_budget_related(section) and not user_asks_budget_summary_reconcile(
+            ask
+        ):
+            return None
         return (
             section,
             draft,
@@ -6187,22 +6277,8 @@ async def _try_budget_summary_reconcile(
         _find_draft_section(updated_draft, section.id) or section
     )
     if n <= 0:
-        from app.services.proposal_budget_content import canonical_budget_summary_figures
-
-        figs = canonical_budget_summary_figures(canonical)
-        return (
-            focus,
-            draft,
-            research,
-            provider,
-            (
-                "No duplicated Year-1 / pass-through summary blocks needed a rewrite "
-                f"(canonical agency fee ${figs['agency_fee']:,.2f}, pass-through "
-                f"${figs['passthrough']:,.2f}, total invoicing ${figs['total']:,.2f}). "
-                "Line items were left unchanged — this is not a Stage 3.5 rebuild."
-            ),
-            False,
-        )
+        # Labels already match — let the agent handle the ask.
+        return None
 
     if persist:
         updated_draft = await _persist_section_improve_draft(
@@ -6216,11 +6292,11 @@ async def _try_budget_summary_reconcile(
 
     figs = canonical_budget_summary_figures(canonical)
     reply = (
-        f"**Patches applied:** Reconciled investment summary prose from the existing "
-        f"fee table ({n} label fix(es)) — agency fee ${figs['agency_fee']:,.2f}, "
-        f"media pass-through ${figs['passthrough']:,.2f}, direct "
+        f"**Patches applied:** Synced investment summary labels from the fee ledger "
+        f"({n} label fix(es)) — professional/agency fees ${figs['agency_fee']:,.2f}, "
+        f"media pass-through ${figs['passthrough']:,.2f}, direct travel "
         f"${figs['direct']:,.2f}, total client invoicing ${figs['total']:,.2f}. "
-        "Line items were **not** regenerated (no Stage 3.5)."
+        "Phase/line items were left unchanged."
     )
     return focus, updated_draft, research, provider, reply, True
 
@@ -7944,6 +8020,8 @@ async def improve_proposal_section(
                     section=early_section,
                     user_message=raw_user_message,
                     conversation_history=conversation_history,
+                    apply_fix=apply_fix,
+                    research=research,
                 )
                 if ref_fix is not None:
                     provider = _provider_name()

@@ -38,6 +38,48 @@ class StructureStubDraftTests(unittest.TestCase):
         )
         self.assertTrue(section_is_rfp_draft_stub(sec))
 
+    def test_cover_letter_checklist_needs_letter_body_fill(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            cover_letter_lacks_letter_body,
+            is_cover_letter_section_title,
+        )
+
+        self.assertTrue(is_cover_letter_section_title("Section 1 - Cover Letter"))
+        checklist = (
+            "[DESIGNER NOTE: Attach the physically signed cover letter PDF.]\n\n"
+            "## COVER LETTER REQUIREMENTS\n\n"
+            "THE RFP MANDATES A SIGNED COVER LETTER ADDRESSING FIVE ELEMENTS:\n\n"
+            "1. Statement of Intent\n"
+            "2. Authorized Signature\n"
+            "3. Contact Information\n"
+            "4. Addenda Acknowledgement\n"
+        )
+        self.assertTrue(cover_letter_lacks_letter_body(checklist))
+        sec = ProposalSection(
+            id="rfp-cover",
+            title="Section 1 - Cover Letter",
+            content=checklist,
+            status="generated",
+        )
+        self.assertTrue(section_is_rfp_draft_stub(sec))
+        self.assertTrue(section_needs_presubmit_fill(sec))
+        brief = _stub_draft_brief(sec)
+        self.assertIn("real offer letter", brief.casefold())
+
+        real = (
+            "Dear Tseng College Selection Committee,\n\n"
+            "We are pleased to submit this proposal for Paid Media Campaigns.\n\n"
+            "Sincerely,\nSonja Anderson\n"
+            "[MANUAL FILL: authorized signature]\n"
+            "[DESIGNER NOTE: Attach signed PDF]\n"
+        )
+        self.assertFalse(cover_letter_lacks_letter_body(real))
+        self.assertFalse(
+            section_is_rfp_draft_stub(
+                ProposalSection(id="rfp-cover", title="Cover Letter", content=real)
+            )
+        )
+
     def test_performance_stub_needs_presubmit_fill(self) -> None:
         from app.services.proposal_draft_structure_stubs import (
             _stub_draft_brief,

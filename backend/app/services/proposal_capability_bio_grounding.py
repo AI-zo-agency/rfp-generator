@@ -715,6 +715,39 @@ async def _llm_rewrite(
     )
 
 
+def _section_skips_past_proven_scrub(section: ProposalSection) -> bool:
+    """True when scrub cannot improve accuracy (stubs / form handoffs / bios).
+
+    Keeps Sonnet for real narrative past-delivery claims; skips tabs that are
+    MANUAL FILL / designer attach notes so Complete Scan does not burn $ on them.
+    """
+    sid = section.id or ""
+    if sid.startswith("section-2-bio-"):
+        return True
+    from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+    from app.services.proposal_draft_structure_stubs import section_is_rfp_draft_stub
+
+    body = section.content or ""
+    if section_is_rfp_draft_stub(section):
+        return True
+    if is_bio_pdf_designer_note(body) and len(body.split()) < 120:
+        return True
+    # Form / exhibit handoffs: almost all MANUAL FILL / DESIGNER NOTE lines.
+    prose_lines = [
+        ln.strip()
+        for ln in body.splitlines()
+        if ln.strip()
+        and not ln.strip().startswith("#")
+        and not re.match(r"(?i)^\[(?:MANUAL FILL|DESIGNER NOTE|VERIFY)", ln.strip())
+    ]
+    prose = " ".join(prose_lines)
+    if len(prose.split()) < 40 and (
+        "[MANUAL FILL:" in body.upper() or "[DESIGNER NOTE:" in body.upper()
+    ):
+        return True
+    return False
+
+
 async def scrub_ungrounded_past_capability_claims(
     draft: ProposalDraft,
     *,
@@ -739,7 +772,7 @@ async def scrub_ungrounded_past_capability_claims(
     for section in draft.sections:
         body = section.content or ""
         sid = section.id or ""
-        if sid.startswith("section-2-bio-"):
+        if _section_skips_past_proven_scrub(section):
             sections.append(section)
             continue
         if not section_asserts_past_proven_capability(body):

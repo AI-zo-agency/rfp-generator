@@ -2186,6 +2186,12 @@ def reconcile_budget_summary_prose(
             agency,
         ),
         (
+            r"(Professional\s+(?:services\s+)?fees?)"
+            + _connector
+            + r"\$[\d,]+(?:\.\d{2})?",
+            agency,
+        ),
+        (
             r"(Client\s+media\s+pass-?through(?:\s*\([^)]*\))?)"
             + _connector
             + r"\$[\d,]+(?:\.\d{2})?",

@@ -32,6 +32,59 @@ _SKIP_FILL_ID_PREFIXES = (
 
 _DRAFT_STUB_MARKER = "draft this rfp-required section"
 
+_COVER_LETTER_TITLE_TOKENS = (
+    "cover letter",
+    "letter of transmittal",
+    "transmittal letter",
+    "letter of offer",
+)
+
+_COVER_LETTER_BODY_SIGNALS = (
+    "dear ",
+    "we are pleased",
+    "we respectfully submit",
+    "respectfully submit",
+    "sincerely",
+    "respectfully submitted",
+    "this proposal is submitted",
+    "please accept this",
+)
+
+_COVER_LETTER_CHECKLIST_SIGNALS = (
+    "cover letter requirements",
+    "mandates a signed cover letter",
+    "statement of intent",
+    "authorized signature",
+    "addenda acknowledgement",
+    "addenda acknowledgment",
+)
+
+
+def is_cover_letter_section_title(title: str) -> bool:
+    t = (title or "").casefold()
+    return any(tok in t for tok in _COVER_LETTER_TITLE_TOKENS)
+
+
+def cover_letter_lacks_letter_body(content: str) -> bool:
+    """True when a cover-letter tab is a requirements checklist, not a letter.
+
+    Signed-PDF designer notes are correct and stay — but the RFP still needs
+    the offer letter prose (intent, contact, addenda ack). A green check on a
+    checklist-only body is a false complete.
+    """
+    body = (content or "").casefold()
+    if not body.strip():
+        return True
+    if any(sig in body for sig in _COVER_LETTER_BODY_SIGNALS):
+        return False
+    checklist_hits = sum(1 for sig in _COVER_LETTER_CHECKLIST_SIGNALS if sig in body)
+    if checklist_hits >= 2:
+        return True
+    # Designer-note-only / outline chrome without letter salutation.
+    if "[designer note" in body and checklist_hits >= 1:
+        return True
+    return False
+
 
 def section_is_rfp_draft_stub(section: ProposalSection) -> bool:
     body = section.content or ""
@@ -41,6 +94,10 @@ def section_is_rfp_draft_stub(section: ProposalSection) -> bool:
     if "RFP-required outline" in body and word_count(
         strip_section_draft_stub_manual_fills(body)
     ) < 80:
+        return True
+    if is_cover_letter_section_title(section.title or "") and cover_letter_lacks_letter_body(
+        body
+    ):
         return True
     return False
 
@@ -209,6 +266,14 @@ def section_needs_presubmit_fill(section: ProposalSection) -> bool:
         return _is_thin_unfilled_shell(section)
     if sid.startswith(_SKIP_FILL_ID_PREFIXES):
         return False
+    title_cf = (section.title or "").casefold()
+    if "reference" in title_cf:
+        from app.services.proposal_integrity_guards import (
+            references_section_has_preservable_content,
+        )
+
+        if references_section_has_preservable_content(section.content or ""):
+            return False
     try:
         from app.services.proposal_section_dedup import (
             _is_protected_budget_section,
@@ -230,6 +295,10 @@ def section_needs_presubmit_fill(section: ProposalSection) -> bool:
     health = classify_section_health(section.content)
     if health is not None:
         return True
+    if is_cover_letter_section_title(section.title or "") and cover_letter_lacks_letter_body(
+        section.content or ""
+    ):
+        return True
     return _is_thin_unfilled_shell(section)
 
 
@@ -246,7 +315,7 @@ def stub_fill_landed(before: ProposalSection, after: ProposalSection) -> bool:
 
 def _stub_draft_brief(section: ProposalSection) -> str:
     title = (section.title or "this section").strip()
-    return (
+    base = (
         f"This tab is an unfilled RFP-required section (“{title}”). "
         "Write submission-ready prose for THIS tab's unique ask only. "
         "Use KB + THIS RFP. Do not invent clients, contacts, certs, carriers, "
@@ -258,6 +327,19 @@ def _stub_draft_brief(section: ProposalSection) -> str:
         "Section 1.4 / 1.5 with companyfacts proof — this tab may cross-ref them, "
         "never invent Compliant, carriers, or KPI numbers the RFP/KB do not state."
     )
+    if is_cover_letter_section_title(title):
+        return (
+            f"{base}\n\n"
+            "COVER LETTER — write a real offer letter, not a requirements checklist:\n"
+            "- Salutation + short statement of intent to bid on THIS RFP\n"
+            "- Firm contact (from companyfacts / Section 1.3 — no invented phones)\n"
+            "- Address each RFP cover-letter element in letter prose\n"
+            "- Closing + [MANUAL FILL: authorized signature / date]\n"
+            "- Keep [DESIGNER NOTE: Attach physically signed cover letter PDF] "
+            "— do not invent signature dates, notary, or claim the PDF is attached\n"
+            "Do NOT output a meta list titled 'Cover Letter Requirements' alone."
+        )
+    return base
 
 
 async def draft_rfp_structure_stubs(

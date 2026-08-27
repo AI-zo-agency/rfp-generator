@@ -154,18 +154,67 @@ async def _repair_misstated_closing_sections(
     return draft, logs
 
 
+def _closing_form_template_stub(component: ClosingComponent) -> str:
+    """Deterministic stub for forms/attachments/signatures — no LLM.
+
+    Accuracy-safe: signed exhibits must not invent field content; the ledger
+    instructions already tell Sonja/designer what to attach. LLM drafts here
+    burned Sonnet spend and still ended as MANUAL FILL.
+    """
+    instructions = (component.draft_instructions or "").strip()
+    parts = [
+        f"## {component.title}",
+        "",
+        f"This RFP requires a closing package item matched as “{component.match_hint}”.",
+        "",
+    ]
+    if instructions:
+        parts.extend([instructions, ""])
+    parts.append(
+        f"[MANUAL FILL: complete {component.title} per RFP instructions — "
+        f"attach signed forms / fill agency form fields before export.]"
+    )
+    parts.append("")
+    parts.append(
+        "[DESIGNER NOTE: Attach the buyer-supplied signed PDF for this item. "
+        "Do not invent form field values or mark Ready until the file is attached.]"
+    )
+    return "\n".join(parts).strip() + "\n"
+
+
+def _closing_uses_template_stub(component: ClosingComponent) -> bool:
+    """True when LLM drafting cannot improve accuracy over a handoff stub.
+
+    Cover letters / letters of transmittal are NEVER template-only: the RFP
+    still needs a real offer letter body; only the wet signature / signed PDF
+    is a designer attach. Classifying them as form/attachment must not skip
+    the letter prose.
+    """
+    title = f"{component.title} {component.match_hint} {component.id}".casefold()
+    if any(
+        tok in title
+        for tok in (
+            "cover letter",
+            "letter of transmittal",
+            "transmittal letter",
+            "letter of offer",
+        )
+    ):
+        return False
+    kind = (component.kind or "").casefold().strip()
+    return kind in {"form", "attachment", "signature"}
+
+
 async def _draft_closing_section(
     *,
     component: ClosingComponent,
     rfp: RfpRecord,
     rfp_excerpt: str,
 ) -> str:
-    stub = (
-        f"## {component.title}\n\n"
-        f"This RFP requires a closing package item matched as “{component.match_hint}”.\n\n"
-        f"[MANUAL FILL: complete {component.title} per RFP instructions — "
-        f"attach signed forms / fill agency form fields before export.]\n"
-    )
+    stub = _closing_form_template_stub(component)
+    # Forms / attach-PDFs / signatures: template only (accuracy ≥ LLM, $0).
+    if _closing_uses_template_stub(component):
+        return stub
     if not llm.is_configured():
         return stub
     try:
@@ -289,6 +338,19 @@ async def ensure_closing_sections(
     for component in components:
         if component not in to_draft:
             logs.append(f"Closing already covered: {component.id}")
+
+    template_only = [c for c in to_draft if _closing_uses_template_stub(c)]
+    llm_needed = [c for c in to_draft if not _closing_uses_template_stub(c)]
+    if template_only:
+        logs.append(
+            f"Closing cost-save: {len(template_only)} form/attachment/signature "
+            f"stub(s) without LLM — {[c.id for c in template_only][:12]}"
+        )
+    if llm_needed:
+        logs.append(
+            f"Closing narrative LLM draft(s): {len(llm_needed)} — "
+            f"{[c.id for c in llm_needed][:8]}"
+        )
 
     # Each component is an independent closing/submission form — no
     # dependency between them — so draft a few concurrently instead of
@@ -1310,7 +1372,32 @@ async def _run_fulfill_rfp_gaps_body(
         )
         report["logs"].extend(cert_logs)
 
-        if repair_logs or consistency_logs or cert_logs:
+        # Agentic QC — LLM rewrites leftover VERIFY-as-content, signed-vs-unsigned
+        # contradictions, truncated fragments, citation conflation. Not regex patches.
+        try:
+            from app.services.proposal_agentic_qc_repair import (
+                run_agentic_manuscript_qc_repair,
+            )
+
+            await record_pipeline_activity(
+                rfp_id,
+                label="Scan RFP: consistency repairs",
+                detail="Agentic QC — rewriting leftover defects with manuscript context",
+                step_index=8,
+                step_total=len(FULFILL_STEPS),
+                in_progress_phase="fulfill-scan",
+            )
+            draft, qc_logs = await run_agentic_manuscript_qc_repair(
+                draft, rfp_text=rfp_text
+            )
+            report["logs"].extend(qc_logs)
+            if qc_logs:
+                report["agenticQcRepairs"] = qc_logs[:12]
+        except Exception as qc_exc:  # noqa: BLE001
+            logger.warning("Agentic manuscript QC skipped: %s", qc_exc)
+            report["logs"].append(f"Agentic QC skipped: {qc_exc}")
+
+        if repair_logs or consistency_logs or cert_logs or report.get("agenticQcRepairs"):
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise

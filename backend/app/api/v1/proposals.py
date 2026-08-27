@@ -1019,7 +1019,12 @@ async def improve_section_endpoint(
             note = str(exc).strip() or "Could not complete this instruction."
             # Selection-edit no-op is a routing failure, not a fabrication salvage
             # case — do not surface unrelated budget DISQUALIFY flags as the recap.
-            skip_salvage = "Selection edit did not change the excerpt" in note
+            # Pricing playbook refusals are intentional policy replies — never run
+            # manuscript-wide ZF / agentic QC salvage on unrelated tabs.
+            skip_salvage = (
+                "Selection edit did not change the excerpt" in note
+                or "reverse-engineer line items" in note.casefold()
+            )
             if skip_salvage:
                 draft = prior_draft
                 draft_changed = False

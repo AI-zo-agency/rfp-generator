@@ -57,6 +57,32 @@ class EdgeCaseGuardTests(unittest.TestCase):
         self.assertNotIn("provisions (§2.3 (Vivek Patel))", gifts)
         self.assertTrue(logs)
 
+    def test_resume_tab_keeps_bio_pointers(self) -> None:
+        """Resume / key-personnel tabs must keep §2.N bio cross-refs — not VERIFY."""
+        draft = ProposalDraft(
+            rfpId="rfp-resume",
+            sections=[
+                _sec("section-2-bio-sonja", "2.1 — Sonja Anderson", "Bio body."),
+                _sec("section-2-bio-todd", "2.2 — Todd Anderson", "Bio body."),
+                _sec(
+                    "resumes",
+                    "Resumes of Key Personnel",
+                    (
+                        "Resumes for key personnel are provided in Section 2:\n"
+                        "- See §2.1 (Sonja Anderson) for this narrative.\n"
+                        "- See §2.2 (Todd Anderson) for this narrative.\n"
+                    ),
+                ),
+            ],
+            updatedAt="2026-08-26T00:00:00Z",
+        )
+        out, logs = apply_edge_case_guards_to_draft(draft)
+        body = next(s for s in out.sections if s.id == "resumes").content or ""
+        self.assertIn("§2.1 (Sonja Anderson)", body)
+        self.assertIn("§2.2 (Todd Anderson)", body)
+        self.assertNotIn("incorrectly substituted", body)
+        self.assertFalse(any("resumes" in x.casefold() and "bio mark" in x.casefold() for x in logs))
+
     def test_blank_name_before_will(self) -> None:
         body = (
             "Todd Anderson will lead strategy. , will ensure resource allocation "

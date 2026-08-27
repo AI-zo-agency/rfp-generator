@@ -73,7 +73,35 @@ _REAL_PHONE_RE = re.compile(
     r"(?<!\[VERIFY:)(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b"
 )
 _AGENCY_PLACEHOLDER_EMAIL_RE = re.compile(
-    r"(?i)\b(?:sonja|ella|info|hello)@zo\.agency\b"
+    r"(?i)\b(?:sonja|ella|info|hello|connect)@zo\.agency\b"
+)
+
+_AGENCY_AS_CLIENT_LINE_RE = re.compile(
+    r"(?i)"
+    r"(?:"
+    r"sonja\s+anderson|"
+    r"agency\s+director|"
+    r"\bzö\s+agency\b|\bzo\s+agency\b|"
+    r"connect@zo\.agency"
+    r")"
+)
+
+_REFERENCE_CONTACT_LINE_RE = re.compile(
+    r"(?i)"
+    r"(?:"
+    r"\breference\s+\d+\b|"
+    r"@|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b|"
+    r"\bcontact\s*:|"
+    r"agency\s+director|"
+    r"communications\s+director|"
+    r"project\s+manager"
+    r")"
+)
+
+_MANUAL_FILL_REFERENCES = (
+    "[MANUAL FILL: Sonja — supply verified client references from "
+    "ClientList / KB only (name, title, org, phone, email). "
+    "Do not list agency staff as client references.]"
 )
 
 _WE_EXPERTLY_MANAGES_RE = re.compile(
@@ -232,6 +260,220 @@ def drop_incomplete_reference_entries(content: str) -> tuple[str, list[str]]:
     return "\n\n".join(pieces).strip() + "\n", logs
 
 
+def is_reference_section(section: ProposalSection) -> bool:
+    title_cf = (section.title or "").casefold()
+    sid_cf = (section.id or "").casefold()
+    return "reference" in title_cf or "reference" in sid_cf
+
+
+def _normalize_reference_contact_line(line: str) -> str:
+    norm = re.sub(r"\s+", " ", (line or "").strip().casefold())
+    return re.sub(r"[^\w\s@.-]", "", norm)
+
+
+def _line_looks_like_reference_contact(line: str) -> bool:
+    stripped = (line or "").strip()
+    if not stripped or stripped.startswith("#"):
+        return False
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return False
+    return bool(_REFERENCE_CONTACT_LINE_RE.search(stripped))
+
+
+def _line_is_agency_contact_not_client(
+    line: str,
+    *,
+    primary_contact_name: str = "",
+) -> bool:
+    stripped = (line or "").strip()
+    if not stripped:
+        return False
+    if _AGENCY_AS_CLIENT_LINE_RE.search(stripped):
+        return True
+    locked = (primary_contact_name or "").strip()
+    if locked and locked.casefold() in stripped.casefold():
+        if re.search(r"(?i)\b(?:zö\s+agency|zo\s+agency|@zo\.agency)\b", stripped):
+            return True
+    return False
+
+
+def scrub_duplicate_reference_contact_lines(content: str) -> tuple[str, list[str]]:
+    """Remove duplicate full contact rows (e.g. identical Sonja lines × 2)."""
+    text = content or ""
+    logs: list[str] = []
+    if not text.strip():
+        return text, logs
+
+    seen: set[str] = set()
+    out_lines: list[str] = []
+    removed = 0
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            out_lines.append(raw)
+            continue
+        if not _line_looks_like_reference_contact(stripped):
+            out_lines.append(raw)
+            continue
+        norm = _normalize_reference_contact_line(stripped)
+        if norm in seen:
+            removed += 1
+            continue
+        seen.add(norm)
+        out_lines.append(raw)
+
+    if not removed:
+        return text, logs
+    logs.append(
+        f"Removed {removed} duplicate reference contact row"
+        f"{'s' if removed != 1 else ''}"
+    )
+    return "\n".join(out_lines).strip() + ("\n" if text.endswith("\n") else ""), logs
+
+
+def scrub_agency_contact_as_client_reference(
+    content: str,
+    *,
+    primary_contact_name: str = "",
+) -> tuple[str, list[str]]:
+    """Drop agency primary-contact rows masquerading as client references."""
+    text = content or ""
+    logs: list[str] = []
+    if not text.strip():
+        return text, logs
+
+    kept: list[str] = []
+    dropped = 0
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            kept.append(raw)
+            continue
+        if _line_is_agency_contact_not_client(
+            stripped, primary_contact_name=primary_contact_name
+        ) and _line_looks_like_reference_contact(stripped):
+            dropped += 1
+            continue
+        kept.append(raw)
+
+    if not dropped:
+        return text, logs
+
+    body = "\n".join(kept).strip()
+    logs.append(
+        f"Removed {dropped} agency-contact row"
+        f"{'s' if dropped != 1 else ''} from references (not client refs)"
+    )
+    # If nothing substantive remains, replace with a single Sonja handoff.
+    substantive = [
+        ln.strip()
+        for ln in body.splitlines()
+        if ln.strip()
+        and not ln.strip().startswith("[MANUAL FILL:")
+        and not ln.strip().startswith("[VERIFY:")
+    ]
+    has_client_ref = any(
+        _line_looks_like_reference_contact(ln)
+        and not _line_is_agency_contact_not_client(
+            ln, primary_contact_name=primary_contact_name
+        )
+        for ln in substantive
+    )
+    if not has_client_ref and _MANUAL_FILL_REFERENCES.casefold() not in body.casefold():
+        body = f"{body}\n\n{_MANUAL_FILL_REFERENCES}\n".strip() + "\n"
+        logs.append("Inserted MANUAL FILL after agency-contact-only references package")
+    return body, logs
+
+
+def apply_reference_content_scrubs(
+    content: str,
+    *,
+    primary_contact_name: str = "",
+) -> tuple[str, list[str]]:
+    """Run all deterministic reference integrity scrubs on one section body."""
+    logs: list[str] = []
+    text = content or ""
+    text, ref_logs = scrub_reference_withholding(text)
+    logs.extend(ref_logs)
+    text, drop_logs = drop_incomplete_reference_entries(text)
+    logs.extend(drop_logs)
+    text, dup_logs = scrub_duplicate_reference_contact_lines(text)
+    logs.extend(dup_logs)
+    text, agency_logs = scrub_agency_contact_as_client_reference(
+        text, primary_contact_name=primary_contact_name
+    )
+    logs.extend(agency_logs)
+    from app.services.proposal_consistency_enforcement import scrub_duplicate_reference_emails
+
+    text, email_logs = scrub_duplicate_reference_emails(text)
+    logs.extend(email_logs)
+    return text, logs
+
+
+def apply_reference_post_fill_scrubs(
+    content: str,
+    *,
+    primary_contact_name: str = "",
+) -> tuple[str, list[str]]:
+    """Dedupe + agency-contact scrub only — after contact rows are filled."""
+    logs: list[str] = []
+    text = content or ""
+    text, dup_logs = scrub_duplicate_reference_contact_lines(text)
+    logs.extend(dup_logs)
+    text, agency_logs = scrub_agency_contact_as_client_reference(
+        text, primary_contact_name=primary_contact_name
+    )
+    logs.extend(agency_logs)
+    from app.services.proposal_consistency_enforcement import scrub_duplicate_reference_emails
+
+    text, email_logs = scrub_duplicate_reference_emails(text)
+    logs.extend(email_logs)
+    return text, logs
+
+
+def references_section_has_preservable_content(content: str) -> bool:
+    """True when references already have at least one complete KB contact row."""
+    text = (content or "").strip()
+    if not text:
+        return False
+    if _reference_entry_is_kb_complete(text):
+        return True
+    parts = [p for p in _REFERENCE_BLOCK_SPLIT_RE.split(text) if p and p.strip()]
+    complete = sum(1 for part in parts if _reference_entry_is_kb_complete(part))
+    if complete >= 1 and len(text) > 80:
+        return True
+    # Comma-separated contact lines (Exhibit K form style).
+    client_lines = [
+        ln.strip()
+        for ln in text.splitlines()
+        if _line_looks_like_reference_contact(ln)
+        and not _line_is_agency_contact_not_client(ln)
+        and _REAL_EMAIL_RE.search(ln)
+        and not _AGENCY_PLACEHOLDER_EMAIL_RE.search(ln)
+    ]
+    return len(client_lines) >= 1
+
+
+def reference_section_has_scrubbable_defects(content: str) -> bool:
+    """True when duplicate rows or agency staff appear as client references."""
+    text = (content or "").strip()
+    if not text:
+        return False
+    seen: set[str] = set()
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not _line_looks_like_reference_contact(stripped):
+            continue
+        norm = _normalize_reference_contact_line(stripped)
+        if norm and norm in seen:
+            return True
+        if norm:
+            seen.add(norm)
+        if _line_is_agency_contact_not_client(stripped):
+            return True
+    return False
+
+
 def fix_known_bio_typos(content: str) -> tuple[str, list[str]]:
     """Deterministic template typos that recur across proposals."""
     text = content or ""
@@ -255,10 +497,8 @@ def apply_manuscript_integrity_guards(draft: ProposalDraft) -> tuple[ProposalDra
         section_logs: list[str] = []
 
         if "reference" in title_cf or "reference" in sid.casefold():
-            new, ref_logs = scrub_reference_withholding(new)
+            new, ref_logs = apply_reference_content_scrubs(new)
             section_logs.extend(ref_logs)
-            new, drop_logs = drop_incomplete_reference_entries(new)
-            section_logs.extend(drop_logs)
         else:
             # Still strip upon-request deferrals anywhere (RFP often forbids withholding).
             scrubbed, ref_logs = scrub_reference_withholding(new)

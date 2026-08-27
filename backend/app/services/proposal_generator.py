@@ -2220,19 +2220,24 @@ async def _run_phase3_drafting_inner(
 
     from app.services.proposal_fulfill_rfp_structure import (
         apply_rfp_toc_layout,
-        extract_rfp_scored_section_specs,
+        build_rfp_structure_specs,
+        ensure_missing_scored_section_stubs,
         specs_from_intelligence_outline,
     )
 
     specs: list = []
+    existing_titles = [s.title for s in merged_sections if s.title]
     try:
-        specs = await extract_rfp_scored_section_specs(
+        specs, spec_logs = await build_rfp_structure_specs(
             rfp_source_text or "",
             rfp_title=rfp.title,
-            existing_section_titles=[s.title for s in merged_sections if s.title],
+            existing_section_titles=existing_titles,
+            include_missing_submittals=False,
         )
+        for line in spec_logs[:8]:
+            logger.info("Phase 3 RFP structure specs: %s — %s", rfp_id, line)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Phase 3 RFP TOC extract skipped: %s", exc)
+        logger.warning("Phase 3 RFP structure specs skipped: %s", exc)
     if not specs:
         specs = specs_from_intelligence_outline(
             [
@@ -2250,12 +2255,23 @@ async def _run_phase3_drafting_inner(
         provider=provider,
     )
     draft, toc_logs = apply_rfp_toc_layout(draft, specs)
-    for line in toc_logs[:8]:
+    if specs:
+        draft, stub_logs = ensure_missing_scored_section_stubs(draft, specs)
+        if stub_logs:
+            draft, reorder_logs = apply_rfp_toc_layout(draft, specs)
+            toc_logs = [*toc_logs, *stub_logs, *reorder_logs]
+    for line in toc_logs[:12]:
         logger.info("Phase 3 TOC layout: %s — %s", rfp_id, line)
+    from app.services.proposal_consistency_enforcement import apply_consistency_enforcement
     from app.services.proposal_integrity_guards import apply_manuscript_integrity_guards
 
     draft, integrity_logs = apply_manuscript_integrity_guards(draft)
-    for line in integrity_logs[:12]:
+    draft, consistency_logs = apply_consistency_enforcement(
+        draft,
+        research=research,
+        rfp_text=rfp_source_text or "",
+    )
+    for line in [*integrity_logs, *consistency_logs][:12]:
         logger.info("Phase 3 integrity: %s — %s", rfp_id, line)
 
     try:
@@ -3150,6 +3166,28 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
                 )
         except Exception:
             logger.exception("Phase 4 money intelligence failed for %s", rfp_id)
+
+    # Phase 4 steps (stub fill, adversarial repair, VERIFY scrub) can rewrite
+    # reference tabs after Phase 3 — re-run deterministic reference guards last.
+    from app.services.proposal_consistency_enforcement import apply_consistency_enforcement
+    from app.services.proposal_integrity_guards import apply_manuscript_integrity_guards
+
+    content_info_final = _assess_rfp_content(rfp)
+    rfp_text_final = combine_rfp_text(
+        content_info_final.description or "", content_info_final.pdf_text or ""
+    )
+    draft, post_review_integrity = apply_manuscript_integrity_guards(draft)
+    draft, post_review_consistency = apply_consistency_enforcement(
+        draft,
+        research=research,
+        rfp_text=rfp_text_final or "",
+    )
+    if post_review_integrity or post_review_consistency:
+        await asave_proposal_draft(draft)
+        for line in post_review_integrity[:6]:
+            logger.info("Phase 4 final reference integrity %s: %s", rfp_id, line)
+        for line in post_review_consistency[:6]:
+            logger.info("Phase 4 final reference consistency %s: %s", rfp_id, line)
 
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp,

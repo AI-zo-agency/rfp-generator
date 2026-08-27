@@ -309,6 +309,19 @@ async def apply_zero_fabrication_guards_before_persist(
         logger.warning("%s forms attachments integrity skipped: %s", label, exc)
 
     try:
+        from app.services.proposal_agentic_qc_repair import (
+            run_agentic_manuscript_qc_repair,
+        )
+
+        draft, qc_logs = await run_agentic_manuscript_qc_repair(
+            draft, rfp_text=rfp_text, max_sections=8
+        )
+        for line in qc_logs:
+            report.logs.append(f"{label}: agentic QC — {line}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s agentic QC skipped: %s", label, exc)
+
+    try:
         from app.services.proposal_capability_bio_grounding import ground_bios_to_kb
 
         draft, bio_logs = await ground_bios_to_kb(draft, rfp_text=rfp_text, use_llm=False)
@@ -344,5 +357,6 @@ async def apply_structure_coverage_pass(
         research=research,
         skip_section_ids=skip,
         use_llm=use_llm,
+        include_missing_submittals=True,
     )
     return updated, logs

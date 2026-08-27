@@ -362,31 +362,44 @@ async def run_compliance_fabrication_repairs(
                 new_body = fixed_role
                 section_logs.extend(role_logs)
 
+            # Designer-note bio stubs have no narrative year/edu claims — skip
+            # the multi-query Supermemory bio fetch (wall-clock + cost).
+            from app.services.proposal_bio_stub import (
+                is_bio_pdf_designer_note,
+                looks_like_bio_stub_body,
+            )
+
             kb_text = ""
-            try:
-                kb_text, _ = await _fetch_member_bio_kb(member)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Bio KB for grounding %s: %s", member, exc)
+            stub_only = is_bio_pdf_designer_note(new_body) and looks_like_bio_stub_body(
+                new_body
+            )
+            if not stub_only:
+                try:
+                    kb_text, _ = await _fetch_member_bio_kb(member)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Bio KB for grounding %s: %s", member, exc)
 
-            if kb_text:
-                aligned, year_logs = align_bio_years_deterministically(new_body, kb_text)
-                aligned, edu_logs = align_bio_education_deterministically(
-                    aligned, kb_text, member=member
-                )
-                if year_logs or edu_logs:
-                    new_body = aligned
-                    section_logs.extend(year_logs + edu_logs)
+                if kb_text:
+                    aligned, year_logs = align_bio_years_deterministically(
+                        new_body, kb_text
+                    )
+                    aligned, edu_logs = align_bio_education_deterministically(
+                        aligned, kb_text, member=member
+                    )
+                    if year_logs or edu_logs:
+                        new_body = aligned
+                        section_logs.extend(year_logs + edu_logs)
 
-            if bio_narrative_ungrounded(new_body, kb_text):
-                rebuilt = await _rebuild_bio_stub(
-                    section.model_copy(update={"content": new_body}),
-                    member=member,
-                    org_role=org_role,
-                    rfp_text=rfp_text,
-                )
-                if rebuilt:
-                    new_body, rebuild_logs = rebuilt
-                    section_logs.extend(rebuild_logs)
+                if bio_narrative_ungrounded(new_body, kb_text):
+                    rebuilt = await _rebuild_bio_stub(
+                        section.model_copy(update={"content": new_body}),
+                        member=member,
+                        org_role=org_role,
+                        rfp_text=rfp_text,
+                    )
+                    if rebuilt:
+                        new_body, rebuild_logs = rebuilt
+                        section_logs.extend(rebuild_logs)
 
         if any(
             k in title_cf

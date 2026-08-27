@@ -253,9 +253,7 @@ async def run_content_risk_repair(
     user_message: str = "",
 ) -> ContentRiskRepairResult:
     """Apply multi-section content-risk fixes for chat."""
-    from app.services.proposal_consistency_enforcement import (
-        scrub_duplicate_reference_emails,
-    )
+    from app.services.proposal_integrity_guards import apply_reference_content_scrubs
     from app.services.proposal_fulfill_fabrication_guard import (
         repair_fabricated_qualifications,
     )
@@ -265,8 +263,10 @@ async def run_content_risk_repair(
     rfp_excerpt = (rfp_context or "")[:12_000]
     sections = list(draft.sections)
     ask = (user_message or "").casefold()
+    locks = research.manuscript_locks if research else None
+    primary = (locks.primary_contact_name if locks else "") or ""
 
-    # Always run deterministic fabrication + duplicate-email scrub first
+    # Always run deterministic fabrication + reference integrity scrub first
     working = draft.model_copy(update={"sections": sections})
     working, fab_logs, _human = repair_fabricated_qualifications(working, research)
     if fab_logs:
@@ -275,10 +275,13 @@ async def run_content_risk_repair(
     for idx, section in enumerate(sections):
         title_cf = (section.title or "").casefold()
         if "reference" in title_cf or "qualif" in title_cf:
-            body, email_logs = scrub_duplicate_reference_emails(section.content or "")
-            if email_logs:
+            body, ref_logs = apply_reference_content_scrubs(
+                section.content or "",
+                primary_contact_name=primary,
+            )
+            if ref_logs:
                 sections[idx] = section.model_copy(update={"content": body})
-                result.logs.extend(f"{section.id}: {line}" for line in email_logs)
+                result.logs.extend(f"{section.id}: {line}" for line in ref_logs)
                 result.sections_changed.append(section.id)
 
     # Target sections by role

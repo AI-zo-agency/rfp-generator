@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { improveProposalSection } from "@/lib/proposal-api";
 import {
   chatBusyStatusLabel,
@@ -78,6 +78,13 @@ const QUICK_PROMPTS = [
   "Does this meet the RFP?",
 ];
 
+const REFERENCE_QUICK_PROMPTS = [
+  "Fix duplicate reference contacts (KB verified only — no agency staff).",
+  "Remove fabricated contacts; keep ClientList references only.",
+  "Fill [VERIFY] tags from KB only.",
+  "Does this meet the RFP?",
+];
+
 const SECTION_PIN_LABEL = "Improve this section";
 const REVISE_PIN_LABEL = "Revise content";
 
@@ -147,7 +154,14 @@ export function ProposalSectionChatPanel({
     if (reference?.mode === "section") {
       // Always bind the compose box to the newly pinned tab — do not keep a
       // leftover question about Client References after Improve on another tab.
-      setInput("Improve this section for the RFP.");
+      const titleCf = (reference.sectionTitle ?? "").toLowerCase();
+      if (titleCf.includes("reference") || titleCf.includes("exhibit k")) {
+        setInput(
+          "Fix reference contacts — verified ClientList only, no duplicate rows, no agency staff."
+        );
+      } else {
+        setInput("Improve this section for the RFP.");
+      }
     }
   }, [reference?.text, reference?.sectionId, reference?.mode]);
 
@@ -542,6 +556,18 @@ export function ProposalSectionChatPanel({
   const viewingSection =
     sections.find((s) => s.id === viewingSectionId) ?? sections[0] ?? null;
 
+  const quickPrompts = useMemo(() => {
+    const title = (
+      viewingSection?.title ??
+      reference?.sectionTitle ??
+      ""
+    ).toLowerCase();
+    if (title.includes("reference") || title.includes("exhibit k")) {
+      return REFERENCE_QUICK_PROMPTS;
+    }
+    return QUICK_PROMPTS;
+  }, [viewingSection?.title, reference?.sectionTitle]);
+
   const pinViewingSection = () => {
     if (!viewingSection || disabled || isRunning) return;
     onSetReference(
@@ -780,7 +806,7 @@ export function ProposalSectionChatPanel({
               </button>
             </>
           ) : null}
-          {QUICK_PROMPTS.map((prompt) => (
+          {quickPrompts.map((prompt) => (
             <button
               key={prompt}
               type="button"

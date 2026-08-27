@@ -37,6 +37,35 @@ class CapabilityDetectionTests(unittest.TestCase):
         )
         self.assertFalse(section_asserts_past_proven_capability(text))
 
+    def test_form_handoff_skips_past_proven_scrub(self) -> None:
+        from app.models.proposal import ProposalSection
+        from app.services.proposal_capability_bio_grounding import (
+            _section_skips_past_proven_scrub,
+        )
+
+        form = ProposalSection(
+            id="rfp-closing-exhibit_j",
+            title="Exhibit J — Proposal Certification",
+            content=(
+                "## Exhibit J\n\n"
+                "This RFP requires a closing package item matched as “Exhibit J”.\n\n"
+                "[MANUAL FILL: complete Exhibit J — attach signed form before export.]\n\n"
+                "[DESIGNER NOTE: Attach the buyer-supplied signed PDF.]"
+            ),
+        )
+        self.assertTrue(_section_skips_past_proven_scrub(form))
+
+        narrative = ProposalSection(
+            id="rfp-tech",
+            title="Technical Approach",
+            content=(
+                "We have delivered large-scale paid media campaigns for higher "
+                "education clients across multi-channel programs with measurable ROI."
+            ),
+        )
+        self.assertFalse(_section_skips_past_proven_scrub(narrative))
+        self.assertTrue(section_asserts_past_proven_capability(narrative.content or ""))
+
 
 class BioYearGroundingTests(unittest.TestCase):
     def test_inflated_years_detected(self) -> None:
@@ -138,6 +167,8 @@ class BioEducationGroundingTests(unittest.TestCase):
         )
         self.assertFalse(is_plausible_person_name("Municipality Summaries"))
         self.assertFalse(is_plausible_person_name("Municapility Summaries"))
+        self.assertFalse(is_plausible_person_name("Economic Growth"))
+        self.assertFalse(is_plausible_person_name("Your Strength"))
         self.assertTrue(is_plausible_person_name("Sonja Anderson"))
         section = ProposalSection(
             id="section-3-work-01-municipality-summaries",

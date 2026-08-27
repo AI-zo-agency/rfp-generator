@@ -135,6 +135,39 @@ def _deterministic_repair(section: ProposalSection) -> ProposalSection:
     return repaired
 
 
+def _finding_is_reference_integrity_defect(finding: AdversarialAuditFinding) -> bool:
+    blob = f"{finding.code or ''} {finding.message or ''}".casefold()
+    return "reference" in blob and (
+        "duplicate" in blob
+        or "agency" in blob
+        or "inconsistency" in blob
+        or "upon request" in blob
+    )
+
+
+def _apply_deterministic_reference_repair(
+    section: ProposalSection,
+    *,
+    research: ProposalResearchCache | None,
+) -> ProposalSection | None:
+    from app.services.proposal_integrity_guards import (
+        apply_reference_content_scrubs,
+        is_reference_section,
+    )
+
+    if not is_reference_section(section):
+        return None
+    locks = research.manuscript_locks if research else None
+    primary = (locks.primary_contact_name if locks else "") or ""
+    new, _logs = apply_reference_content_scrubs(
+        section.content or "",
+        primary_contact_name=primary,
+    )
+    if new == (section.content or ""):
+        return None
+    return section.model_copy(update={"content": new})
+
+
 def _apply_deterministic_patch(
     working_draft: ProposalDraft, section: ProposalSection | None
 ) -> tuple[ProposalDraft, bool]:
@@ -842,6 +875,70 @@ async def run_adversarial_repair_loop(
                     continue
             except Exception:
                 pass
+
+            if section is not None and _finding_is_reference_integrity_defect(finding):
+                repaired = _apply_deterministic_reference_repair(
+                    section, research=research
+                )
+                if repaired is not None:
+                    working_draft = working_draft.model_copy(
+                        update={
+                            "sections": [
+                                repaired if existing.id == repaired.id else existing
+                                for existing in working_draft.sections
+                            ],
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                    changed = True
+                    report_attempts.append(
+                        _attempt_entry(
+                            finding_code=finding.code,
+                            section_id=finding.section_id,
+                            strategy="reference_integrity_scrub",
+                            outcome="patched",
+                            attempts=attempts_by_finding.get(key, 0),
+                        )
+                    )
+                    step_trace(
+                        "adversarial_repair_attempt",
+                        rfp_id=rfp.id,
+                        finding_code=finding.code,
+                        section_id=finding.section_id,
+                        attempt_number=attempts_by_finding.get(key, 0),
+                        repair_mode="reference_integrity_scrub",
+                        outcome="patched",
+                        resolved=True,
+                        improved=True,
+                    )
+                    continue
+
+            if section is not None:
+                try:
+                    from app.services.proposal_integrity_guards import (
+                        is_reference_section,
+                        references_section_has_preservable_content,
+                    )
+
+                    if (
+                        is_reference_section(section)
+                        and references_section_has_preservable_content(
+                            section.content or ""
+                        )
+                        and "inconsistency" in (finding.code or "").casefold()
+                    ):
+                        report_attempts.append(
+                            _attempt_entry(
+                                finding_code=finding.code,
+                                section_id=finding.section_id,
+                                strategy="reference_preserve_skip",
+                                outcome="reference_kb_preserved",
+                                attempts=attempts_by_finding.get(key, 0),
+                            )
+                        )
+                        continue
+                except Exception:
+                    pass
 
             if _protected_finding(section, finding.message):
                 # Section may already have VERIFY/MANUAL FILL for a sibling defect —

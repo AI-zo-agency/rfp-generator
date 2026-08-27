@@ -86,6 +86,9 @@ _REVERSE_ENGINEER_ASK_RE = re.compile(
     r"(?:hit|reach|make|get(?:\s+it)?\s+to|force|squeeze|pad|inflate)\s+"
     r"(?:(?:the|a)\s+)?(?:total|budget|ceiling|cap|sum)\b.{0,24}\$?\s*\d|"
     r"(?:total|budget|sum|ceiling|cap)\s*(?:of|to|at|=|:)?\s*\$\s*\d|"
+    # Intentional "change/set … to $X" — NOT "sums to $210k" / "equals $X" math prose.
+    r"(?:change|set|adjust|bring|bump|raise|drop)\s+"
+    r"(?:(?:it|them|(?:the\s+)?(?:total|budget|sum|fees?|price))\s+)?"
     r"to\s+\$\s*\d{2,}|"
     r"(?:fit|reduce|lower|cut)\s+(?:(?:the|it|our)\s+)?(?:total|budget|sum)\s+to\s+\$?\s*\d|"
     r"so\s+the\s+total\s+(?:is|equals|hits|reaches|=)\s+\$?\s*\d"
@@ -128,6 +131,8 @@ def user_asks_budget_summary_reconcile(text: str) -> bool:
     """True when the user wants narrative totals fixed from the existing fee table.
 
     This is surgical prose only — never Stage 3.5 / new line items.
+    Prefer section-tab ledger sync over growing keyword lists — chat Improve on
+    budget tabs runs reconcile from the canonical object without this gate.
     """
     raw = text or ""
     # Explicit full rebuild / regenerate always wins against summary-only.
@@ -432,6 +437,10 @@ def user_asked_reverse_engineered_total(user_message: str) -> bool:
         text = (latest.group(1) or "").strip()
         if not text:
             return False
+    # Label sync (Professional fees vs travel, summary vs phase table) is not
+    # reverse-engineering line items.
+    if user_asks_budget_summary_reconcile(text):
+        return False
     # Completing Cost from the guide / canonical object is allowed even if wording
     # includes "match" or "fit" without an explicit dollar/target figure.
     if _SAFE_BUDGET_COMPLETE_RE.search(text) and not re.search(
