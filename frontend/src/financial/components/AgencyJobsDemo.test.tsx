@@ -9,6 +9,7 @@ import {
   getInvoiceResolutionOutcome,
   invoiceStatusPresentation,
   invoiceRelationshipLabel,
+  paginate,
 } from "./AgencyJobsDemo";
 
 const groups = [
@@ -52,8 +53,12 @@ describe("AgencyJobsDemo control-room helpers", () => {
     ] as Parameters<typeof filterAgencyActions>[0];
 
     expect(filterAgencyActions(actions, "ar")).toEqual([actions[2]]);
-    expect(filterAgencyActions(actions, "invoices")).toEqual([actions[3]]);
-    expect(filterAgencyActions(actions, "all")).toHaveLength(4);
+    expect(filterAgencyActions(actions, "all")).toHaveLength(3);
+  });
+
+  it("keeps long queues bounded with stable pages", () => {
+    expect(paginate([1, 2, 3, 4, 5, 6, 7], 1, 3)).toEqual({ page: 1, pageCount: 3, items: [1, 2, 3] });
+    expect(paginate([1, 2, 3, 4, 5, 6, 7], 99, 3)).toEqual({ page: 3, pageCount: 3, items: [7] });
   });
 
   it("keeps overdue invoices out of the green paid presentation", () => {
@@ -63,7 +68,7 @@ describe("AgencyJobsDemo control-room helpers", () => {
   });
 
   it("uses the explicit missing-relationship label in the watchlist", () => {
-    expect(invoiceRelationshipLabel({ status: "paid" } as Parameters<typeof invoiceRelationshipLabel>[0])).toBe("No project or job linked");
+    expect(invoiceRelationshipLabel()).toBe("No project or job linked");
   });
 
   it("distinguishes an empty queue from an unavailable overview", () => {

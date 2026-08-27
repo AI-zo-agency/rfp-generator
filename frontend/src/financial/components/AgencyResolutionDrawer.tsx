@@ -115,6 +115,7 @@ export function AgencyResolutionDrawer({
   onRecordReceivableFollowUp,
 }: Props) {
   const drawer = useRef<HTMLElement>(null);
+  const body = useRef<HTMLDivElement>(null);
   const restoreFocus = useRef<HTMLElement | null>(null);
   const [selectedProject, setSelectedProject] = useState<{ actionId: string; projectId: string } | null>(null);
   const [loading, setLoading] = useState(false);
@@ -130,6 +131,10 @@ export function AgencyResolutionDrawer({
       restoreFocus.current?.focus();
     };
   }, [open]);
+
+  useEffect(() => {
+    if (open) body.current?.scrollTo({ top: 0 });
+  }, [action?.id, open]);
 
   useEffect(() => {
     if (open) return;
@@ -211,7 +216,7 @@ export function AgencyResolutionDrawer({
           </button>
         </header>
 
-        <div className="agency-drawer-body">
+        <div ref={body} className="agency-drawer-body">
           {invoice ? (
             <>
               <dl className="agency-drawer-details">
