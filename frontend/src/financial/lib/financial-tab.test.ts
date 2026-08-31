@@ -19,7 +19,11 @@ describe("parseFinancialTab", () => {
 });
 
 describe("parseAgencyView", () => {
-  it("keeps Mapping and defaults unknown values to Jobs", () => {
+  it("keeps agency job tabs and mapping, defaulting unknown values to Queue", () => {
+    expect(parseAgencyView("jobs")).toBe("jobs");
+    expect(parseAgencyView("portfolio")).toBe("portfolio");
+    expect(parseAgencyView("invoices")).toBe("invoices");
+    expect(parseAgencyView("orphans")).toBe("orphans");
     expect(parseAgencyView("mapping")).toBe("mapping");
     expect(parseAgencyView(null)).toBe("jobs");
     expect(parseAgencyView("nope")).toBe("jobs");
@@ -55,8 +59,11 @@ describe("applyFinancialNavSearch", () => {
     ).toBe("");
   });
 
-  it("writes Agency views, omits Jobs default, and clears incompatible views", () => {
+  it("writes Agency views, omits Queue default, and clears incompatible views", () => {
     expect(applyFinancialNavSearch("", { tab: "agency" })).toBe("?tab=agency");
+    expect(applyFinancialNavSearch("tab=agency", { view: "portfolio" })).toBe(
+      "?tab=agency&view=portfolio",
+    );
     expect(applyFinancialNavSearch("tab=agency", { view: "mapping" })).toBe(
       "?tab=agency&view=mapping",
     );

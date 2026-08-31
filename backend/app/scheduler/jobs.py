@@ -34,6 +34,20 @@ JOBS: tuple[ScheduledJob, ...] = (
         body={"mode": "auto"},
         timeout_seconds=600,
     ),
+    ScheduledJob(
+        id="agency_weekly_snapshot",
+        path="/api/v1/financials/agency/ai-insights/snapshot",
+        cron="30 22 * * 5",
+        timezone="America/Los_Angeles",
+        timeout_seconds=300,
+    ),
+    ScheduledJob(
+        id="agency_weekly_generate",
+        path="/api/v1/financials/agency/ai-insights/generate",
+        cron="0 6 * * 1",
+        timezone="America/Los_Angeles",
+        timeout_seconds=300,
+    ),
 )
 
 

@@ -65,6 +65,62 @@ html.fin-lock main .text-\[10px\] {
   margin-left: auto;
 }
 
+.qb-toolbar-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  min-width: 0;
+}
+
+.qb-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px 8px 8px;
+  border: 1px solid var(--zo-border);
+  border-radius: 9px;
+  background: var(--zo-card-bg);
+  font-size: 15px;
+  font-weight: 550;
+  color: var(--zo-text-secondary);
+  cursor: pointer;
+  transition: background 150ms var(--qb-ease), color 150ms var(--qb-ease);
+}
+
+.qb-back:hover {
+  background: var(--zo-surface);
+  color: var(--zo-text);
+}
+
+.qb-back:focus-visible {
+  outline: 2px solid var(--zo-teal);
+  outline-offset: 2px;
+}
+
+.qb-toolbar-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--zo-text);
+}
+
+.qb-toolbar-meta {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--zo-text-muted);
+}
+
+.qb-toolbar-meta + .qb-toolbar-meta::before {
+  content: "·";
+  margin-right: 10px;
+  color: var(--zo-text-muted);
+}
+
 /* Mapping review queue — search/filter chrome (type scale lives on shared qb-* bases). */
 .mapping-view .qb-name { max-width: 40ch; }
 
@@ -1410,6 +1466,12 @@ table.qb-table {
 
 .qb-retry:hover {
   background: var(--zo-surface);
+}
+
+.qb-toolbar-actions .qb-retry[data-active="true"] {
+  border-color: color-mix(in srgb, var(--zo-teal) 40%, var(--zo-border));
+  background: color-mix(in srgb, var(--zo-teal) 12%, var(--zo-card-bg));
+  color: var(--zo-teal-dark);
 }
 
 .qb-retry:focus-visible {

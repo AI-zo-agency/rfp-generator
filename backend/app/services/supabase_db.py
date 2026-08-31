@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, TypeVar
@@ -17,10 +18,12 @@ from app.services import supabase_storage
 
 logger = logging.getLogger(__name__)
 
-_client = None
+_client_local = threading.local()
 _T = TypeVar("_T")
 _TRANSIENT = (
     httpx.RemoteProtocolError,
+    httpx.LocalProtocolError,
+    httpx.ProtocolError,
     httpx.ReadError,
     httpx.ConnectError,
     httpx.TimeoutException,
@@ -30,9 +33,8 @@ _TRANSIENT = (
 
 
 def reset_supabase_client() -> None:
-    """Drop cached client so the next request opens a fresh HTTP connection."""
-    global _client
-    _client = None
+    """Drop this thread's cached client so the next request opens a fresh connection."""
+    _client_local.client = None
 
 
 def _with_transient_retry(op_name: str, fn: Callable[[], _T], *, attempts: int = 3) -> _T:
@@ -70,13 +72,14 @@ def use_supabase_db() -> bool:
 
 
 def _get_client():
-    global _client
-    if _client is not None:
-        return _client
+    cached = getattr(_client_local, "client", None)
+    if cached is not None:
+        return cached
     if not use_supabase_db():
         raise SupabaseDbError("Supabase is not configured", status_code=503)
     try:
         from supabase import create_client
+        from supabase.lib.client_options import SyncClientOptions
     except ImportError as exc:
         raise SupabaseDbError(
             "supabase package not installed — pip install supabase",
@@ -85,11 +88,16 @@ def _get_client():
 
     from app.core.config import settings
 
-    _client = create_client(
+    # ponytail: one sync httpx.Client per thread; shared clients + HTTP/2 corrupt under
+    # FastAPI's thread pool (LocalProtocolError / httpcore KeyError on stream cleanup).
+    http_client = httpx.Client(http2=False, timeout=120.0)
+    options = SyncClientOptions(httpx_client=http_client, postgrest_client_timeout=120)
+    _client_local.client = create_client(
         settings.supabase_url.strip(),
         settings.supabase_service_role_key.strip(),
+        options=options,
     )
-    return _client
+    return _client_local.client
 
 
 def _iso(value: str | datetime | None) -> str | None:

@@ -10,10 +10,16 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 import logging
 from app.financial import google_sheets, ai_classifier
-from app.financial.ai_insights_repository import get_latest_insight
+from app.financial.ai_insights_repository import get_insight, get_latest_insight
 from app.financial.client_map_import import import_tags_sheet
 from app.financial.client_map_link import run_link as run_client_map_link
 from app.financial.agency_overview import build_agency_overview
+from app.financial.agency_insights import SOURCE as AGENCY_INSIGHT_SOURCE
+from app.financial.agency_insights import build_evidence as build_agency_evidence
+from app.financial.agency_insights import generate_and_store as generate_agency_insight
+from app.financial.agency_insights import store_snapshot as store_agency_snapshot
+from app.financial.agency_week import brief_week_for, iso, prior_week_bounds, today_pt, week_bounds
+from app.financial import agency_chat
 from app.financial.client_map import ClientMatch, resolve_project
 from app.financial.client_map_repository import (
     delete_client_map,
@@ -1115,6 +1121,171 @@ def get_agency_overview(year: int | None = Query(None, ge=2000, le=2100)):
         len(payload.get("jobs") or []),
     )
     return payload
+
+
+def _agency_site_id() -> str:
+    return site_id_from_base_url(settings.teamwork_base_url)
+
+
+def _agency_insight_row() -> dict[str, Any] | None:
+    brief_start, _, _ = brief_week_for()
+    try:
+        return get_insight(AGENCY_INSIGHT_SOURCE, _agency_site_id(), iso(brief_start))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "operation=agency_ai_insights status=insight_lookup_failed site_id=%s error=%s",
+            _agency_site_id(),
+            str(exc)[:200],
+        )
+        return None
+
+
+def _agency_prior_chain_evidence() -> dict[str, Any] | None:
+    prev_monday, _ = prior_week_bounds(today_pt())
+    row = None
+    try:
+        row = get_insight(AGENCY_INSIGHT_SOURCE, _agency_site_id(), iso(prev_monday))
+    except Exception:  # noqa: BLE001
+        return None
+    evidence = (row or {}).get("evidence")
+    return evidence if isinstance(evidence, dict) else None
+
+
+def _agency_carryover_baseline(row: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Friday snapshot or prior stored evidence used for week-over-week diffs."""
+    snapshot_row = row
+    if not snapshot_row:
+        try:
+            monday, _ = week_bounds(today_pt())
+            snapshot_row = get_insight(AGENCY_INSIGHT_SOURCE, _agency_site_id(), iso(monday))
+        except Exception:  # noqa: BLE001
+            snapshot_row = None
+    evidence = (snapshot_row or {}).get("evidence")
+    if isinstance(evidence, dict) and (evidence.get("open_items") or []):
+        return evidence
+    return _agency_prior_chain_evidence()
+
+
+def _agency_insight_response(
+    overview: dict[str, Any],
+    row: dict[str, Any] | None,
+    *,
+    prior_evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    evidence = build_agency_evidence(overview, prior_evidence=prior_evidence, for_snapshot=False)
+    payload = (row or {}).get("payload") or {}
+    brief_start, _, _ = brief_week_for()
+    stored_as_of = (row or {}).get("as_of")
+    has_brief = bool(str(payload.get("brief") or "").strip())
+    return {
+        "status": "ok" if has_brief else "empty",
+        "brief": payload.get("brief", ""),
+        "notes": payload.get("notes", {}),
+        "signals": evidence.get("signals") or [],
+        "cadence": "weekly",
+        "period_label": payload.get("period_label") or evidence.get("period_label"),
+        "current_week_label": evidence.get("current_week_label"),
+        "bootstrap": not evidence.get("has_prior_snapshot"),
+        "as_of": stored_as_of,
+        "generated_at": (row or {}).get("generated_at"),
+        "provider": (row or {}).get("provider"),
+        "model": (row or {}).get("model") or resolve_llm_model("light", node_name="agency_insights"),
+        "stale": not has_brief or stored_as_of != iso(brief_start),
+    }
+
+
+@router.get("/agency/ai-insights")
+def agency_ai_insights():
+    overview = build_agency_overview()
+    row = _agency_insight_row()
+    prior_evidence = _agency_carryover_baseline(row)
+    return _agency_insight_response(overview, row, prior_evidence=prior_evidence)
+
+
+@router.post("/agency/ai-insights/regenerate")
+def agency_ai_insights_regenerate():
+    overview = build_agency_overview()
+    brief_start, _, _ = brief_week_for()
+    prior_evidence = _agency_carryover_baseline(_agency_insight_row())
+    status = generate_agency_insight(_agency_site_id(), overview, prior_evidence)
+    fresh = _agency_insight_row()
+    result = _agency_insight_response(overview, fresh, prior_evidence=prior_evidence)
+    result["generated"] = status
+    logger.info(
+        "operation=agency_ai_insights_regenerate site_id=%s as_of=%s status=%s",
+        _agency_site_id(),
+        iso(brief_start),
+        status,
+    )
+    return result
+
+
+@router.post("/agency/ai-insights/snapshot")
+def agency_ai_insights_snapshot(request: Request):
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+    overview = build_agency_overview()
+    status = store_agency_snapshot(_agency_site_id(), overview, _agency_prior_chain_evidence())
+    monday, _ = week_bounds(today_pt())
+    logger.info(
+        "operation=agency_ai_insights_snapshot site_id=%s as_of=%s status=%s",
+        _agency_site_id(),
+        iso(monday),
+        status,
+    )
+    return {"status": status, "as_of": iso(monday)}
+
+
+@router.post("/agency/ai-insights/generate")
+def agency_ai_insights_generate(request: Request):
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+    overview = build_agency_overview()
+    brief_start, _, _ = brief_week_for()
+    row = None
+    try:
+        row = get_insight(AGENCY_INSIGHT_SOURCE, _agency_site_id(), iso(brief_start))
+    except Exception:  # noqa: BLE001
+        row = None
+    prior_evidence = _agency_carryover_baseline(row)
+    status = generate_agency_insight(_agency_site_id(), overview, prior_evidence)
+    logger.info(
+        "operation=agency_ai_insights_generate site_id=%s as_of=%s status=%s",
+        _agency_site_id(),
+        iso(brief_start),
+        status,
+    )
+    return {"status": status, "as_of": iso(brief_start)}
+
+
+class AgencyChatRequest(BaseModel):
+    message: str
+    thread_id: Optional[str] = None
+    focus_id: Optional[str] = None
+    messages: List[Dict[str, str]] = []
+
+
+@router.post("/agency/ai-insights/chat")
+async def agency_ai_insights_chat(payload: AgencyChatRequest):
+    overview = build_agency_overview()
+    row = _agency_insight_row()
+    prior_evidence = _agency_carryover_baseline(row)
+    thread_id = (payload.thread_id or "").strip() or uuid.uuid4().hex
+    result = await agency_chat.answer(
+        thread_id=thread_id,
+        question=payload.message,
+        overview=overview,
+        prior_evidence=prior_evidence,
+        history=payload.messages,
+        focus_id=payload.focus_id,
+    )
+    logger.info(
+        "operation=agency_ai_insights_chat thread=%s guarded=%s capped=%s",
+        thread_id,
+        result["guarded"],
+        result["capped"],
+    )
+    return result
 
 
 @router.post("/agency/invoice-resolutions")

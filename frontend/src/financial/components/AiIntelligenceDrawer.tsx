@@ -132,12 +132,22 @@ export function AiIntelligenceDrawer({
           </span>
           <div className="qb-ai-title">
             <h2>AI Intelligence</h2>
+            {data?.cadence === "weekly" && data.period_label ? (
+              <p className="qb-ai-week-title">Weekly insights for {data.period_label}</p>
+            ) : null}
             <p className="qb-ai-sub">
               <span>{chrome.source}</span>
               {data?.model ? <span>{data.model}</span> : null}
-              {data?.as_of ? (
+              {data?.cadence === "weekly" && data.current_week_label ? (
+                <span>{data.current_week_label}</span>
+              ) : null}
+              {data?.as_of && (data.cadence !== "weekly" || data.stale) ? (
                 <span data-stale={data.stale || undefined}>
-                  {data.stale ? `As of ${data.as_of}` : `Today, ${data.as_of}`}
+                  {data.cadence === "weekly"
+                    ? `Brief stale · ${data.as_of}`
+                    : data.stale
+                      ? `As of ${data.as_of}`
+                      : `Today, ${data.as_of}`}
                 </span>
               ) : null}
               {chat.costUsd > 0 ? <span>${chat.costUsd.toFixed(3)} this thread</span> : null}
@@ -196,7 +206,9 @@ export function AiIntelligenceDrawer({
             <p className="qb-ai-brief">{data.brief}</p>
           ) : loaded ? (
             <p className="qb-ai-empty">
-              No brief yet. The nightly sync writes one, or generate it now.
+              {data?.cadence === "weekly"
+                ? "No weekly brief yet. Monday's job writes one, or generate it now."
+                : "No brief yet. The nightly sync writes one, or generate it now."}
             </p>
           ) : null}
 

@@ -68,3 +68,28 @@ def get_latest_insight(source: str, scope_key: str) -> dict[str, Any] | None:
         row is not None,
     )
     return row
+
+
+def get_insight(source: str, scope_key: str, as_of: str) -> dict[str, Any] | None:
+    """One successful row for an exact as-of date (e.g. Agency weekly Monday key)."""
+    result = (
+        _get_client()
+        .table("ai_insights")
+        .select("*")
+        .eq("source", source)
+        .eq("scope_key", scope_key)
+        .eq("as_of", as_of)
+        .eq("status", "ok")
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    row = rows[0] if rows else None
+    logger.info(
+        "operation=get_insight source=%s scope_key=%s as_of=%s found=%s",
+        source,
+        scope_key,
+        as_of,
+        row is not None,
+    )
+    return row

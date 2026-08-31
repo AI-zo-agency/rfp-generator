@@ -1,17 +1,37 @@
 "use client";
 
 import { useMemo, useState, type FormEvent } from "react";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsUpDown, CircleHelp, RefreshCw, Search } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsUpDown, CircleHelp, Search, Sparkles } from "lucide-react";
 
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { AiIntelligenceDrawer, type DrawerChrome } from "./AiIntelligenceDrawer";
 import { Empty, Panel, Pill } from "./qb-ui";
 import { AgencyJobsDemo, AgencyJobsToolbar, useAgencyOverview } from "./AgencyJobsDemo";
+import { useAgencyChat } from "../lib/use-agency-chat";
+import { useAgencyInsights } from "../lib/use-agency-insights";
 import { useClientMap } from "../lib/use-client-map";
-import { parseAgencyView, type AgencyViewId } from "../lib/financial-tab";
+import { type AgencyJobsViewId, type AgencyViewId } from "../lib/financial-tab";
 import type { ClientMapCorePatch, ClientMapRow } from "../types/client-map";
 import "./QuickBooksLedger.css";
+
+const AGENCY_CHROME: DrawerChrome = {
+  source: "Agency",
+  seeds: [
+    "What carried over from last week?",
+    "Which mapping gaps matter most?",
+    "Summarize this for Monday standup",
+  ],
+  viewLabel: {
+    jobs: "Queue",
+    portfolio: "Portfolio",
+    invoices: "Invoices",
+    orphans: "Orphans",
+    mapping: "Mapping",
+  },
+  placeholder: "Ask about carryover or the owner queue…",
+  empty: "Nothing flagged in the Agency join layer right now.",
+};
 
 const INPUT =
   "h-11 min-w-32 rounded-md border border-[var(--zo-border)] bg-[var(--zo-card-bg)] px-3 text-base text-[var(--zo-text)] outline-none focus:border-[var(--zo-teal)]";
@@ -331,13 +351,14 @@ export function mappingHandoffError({
 }
 
 function MappingView({
+  map,
   prefilledProjectId,
   prefilledSiteId,
 }: {
+  map: ReturnType<typeof useClientMap>;
   prefilledProjectId: string | null;
   prefilledSiteId: string | null;
 }) {
-  const map = useClientMap();
   const [projectId, setProjectId] = useState(prefilledProjectId ?? "");
   const [clientMapId, setClientMapId] = useState("");
   const [attachTargetId, setAttachTargetId] = useState("");
@@ -392,29 +413,7 @@ function MappingView({
   }
 
   return (
-    <TabsContent value="mapping" className="qb-view mapping-view">
-      <div className="qb-toolbar mapping-toolbar">
-        <p className="qb-sync">
-          <span className="qb-sync-dot" data-busy={map.busy ? "true" : undefined} aria-hidden />
-          Review client relationships
-          {map.lastLinkResult ? (
-            <span className="qb-sync-meta">
-              {map.lastLinkResult.confirmed} confirmed
-              {typeof map.lastLinkResult.teamwork_tag === "number"
-                ? ` · ${map.lastLinkResult.teamwork_tag} tag`
-                : ""}
-              {" · "}
-              {map.lastLinkResult.suggested} suggested
-            </span>
-          ) : null}
-        </p>
-        <div className="qb-toolbar-actions">
-          <button type="button" className="qb-retry" disabled={map.busy} onClick={() => void map.importSheet()}>Import from Tags</button>
-          <button type="button" className="qb-retry" disabled={map.busy} onClick={() => void map.findLinks()}>Find links</button>
-          <button type="button" className="qb-retry" disabled={map.loading || map.busy} onClick={() => void map.reload()}><RefreshCw size={13} aria-hidden />Refresh</button>
-        </div>
-      </div>
-
+    <div className="qb-view mapping-view">
       {map.error ? <div className="qb-error"><p>{map.error}</p></div> : null}
 
       <Panel title="Client map" meta={`Showing ${pagedRows.rows.length} of ${filteredRows.length}${filteredRows.length !== map.rows.length ? ` · ${map.rows.length} total` : ""}`} action={<CreateClientForm busy={map.busy} onCreate={map.create} />}>
@@ -551,7 +550,7 @@ function MappingView({
           </tbody></table></div>
         ) : <Empty>No job-level overrides.</Empty>}
       </Panel>
-    </TabsContent>
+    </div>
   );
 }
 
@@ -563,31 +562,68 @@ export function ClientMapPanels({
   onViewChange: (view: AgencyViewId) => void;
 }) {
   const [mappingHandoff, setMappingHandoff] = useState<{ projectId: string; siteId: string | null } | null>(null);
+  const [aiOpen, setAiOpen] = useState(false);
   const overview = useAgencyOverview();
+  const map = useClientMap();
+  const insights = useAgencyInsights();
+  const chat = useAgencyChat();
   const openMappingForProject = (projectId: string, siteId?: string | null) => {
     setMappingHandoff({ projectId, siteId: siteId ?? null });
     onViewChange("mapping");
   };
   return (
     <div className="qb-ledger">
-      {view === "jobs" ? (
-        <AgencyJobsToolbar
-          data={overview.data}
-          loading={overview.loading}
-          error={overview.error}
-          onRefresh={() => void overview.load()}
+      <AgencyJobsToolbar
+        data={overview.data}
+        loading={overview.loading}
+        error={overview.error}
+        onRefresh={() => void overview.load()}
+        view={view}
+        onViewChange={onViewChange}
+        aiHighImpact={view !== "mapping" ? insights.highImpact : 0}
+        onOpenAi={view !== "mapping" ? () => setAiOpen(true) : undefined}
+        aiOpen={aiOpen}
+        mapping={
+          view === "mapping"
+            ? {
+                busy: map.busy,
+                loading: map.loading,
+                rowCount: map.rows.length,
+                lastLinkResult: map.lastLinkResult,
+                onImport: () => void map.importSheet(),
+                onFindLinks: () => void map.findLinks(),
+                onRefresh: () => void map.reload(),
+              }
+            : undefined
+        }
+      />
+      {view !== "mapping" ? (
+        <AgencyJobsDemo
+          overview={overview}
+          view={view as AgencyJobsViewId}
+          onViewChange={onViewChange}
+          onOpenMapping={openMappingForProject}
         />
-      ) : null}
-      <Tabs value={view} onValueChange={(id) => onViewChange(parseAgencyView(id))} className="qb-tabs">
-        <TabsList className="qb-tablist">
-          <TabsTrigger value="jobs">Jobs</TabsTrigger>
-          <TabsTrigger value="mapping">Mapping</TabsTrigger>
-        </TabsList>
-        <TabsContent value="jobs" className="qb-view">
-          <AgencyJobsDemo overview={overview} onOpenMapping={openMappingForProject} />
-        </TabsContent>
-        {view === "mapping" ? <MappingView prefilledProjectId={mappingHandoff?.projectId ?? null} prefilledSiteId={mappingHandoff?.siteId ?? null} /> : null}
-      </Tabs>
+      ) : (
+        <MappingView
+          map={map}
+          prefilledProjectId={mappingHandoff?.projectId ?? null}
+          prefilledSiteId={mappingHandoff?.siteId ?? null}
+        />
+      )}
+      <AiIntelligenceDrawer
+        open={aiOpen}
+        onClose={() => setAiOpen(false)}
+        insights={insights}
+        chat={chat}
+        onGo={(id) => onViewChange(id as AgencyViewId)}
+        chrome={{
+          ...AGENCY_CHROME,
+          notice: insights.data?.bootstrap
+            ? "First weekly snapshot not recorded yet — carryover and “new this week” counts start after Friday’s job."
+            : null,
+        }}
+      />
     </div>
   );
 }

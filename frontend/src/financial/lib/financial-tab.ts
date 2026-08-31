@@ -9,7 +9,11 @@ export const FINANCIAL_TAB_IDS = [
 
 export type FinancialTabId = (typeof FINANCIAL_TAB_IDS)[number];
 
-export const AGENCY_VIEW_IDS = ["jobs", "mapping"] as const;
+export const AGENCY_JOBS_VIEW_IDS = ["jobs", "portfolio", "invoices", "orphans"] as const;
+
+export type AgencyJobsViewId = (typeof AGENCY_JOBS_VIEW_IDS)[number];
+
+export const AGENCY_VIEW_IDS = [...AGENCY_JOBS_VIEW_IDS, "mapping"] as const;
 
 export type AgencyViewId = (typeof AGENCY_VIEW_IDS)[number];
 

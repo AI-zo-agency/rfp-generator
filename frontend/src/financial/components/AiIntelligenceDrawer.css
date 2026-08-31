@@ -152,6 +152,14 @@
   letter-spacing: 0.01em;
 }
 
+.qb-ai-week-title {
+  margin: 0.15rem 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--zo-text);
+  line-height: 1.35;
+}
+
 .qb-ai-sub {
   display: flex;
   flex-wrap: wrap;
