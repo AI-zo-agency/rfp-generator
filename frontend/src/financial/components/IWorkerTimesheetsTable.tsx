@@ -25,10 +25,15 @@ import {
   Minus,
   FileSpreadsheet,
   Loader2,
+  ChevronLeft,
+  ChevronRight,
+  Users,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { expoOutEase } from "@/lib/motion";
 import { AnimatedNumber } from "./AnimatedNumber";
+import type { PeriodInsights, PeriodHistoryPoint, PeriodGranularity } from "../types/iworker";
+import { entryDateInPeriod } from "../lib/iworker-period";
 
 export interface TimesheetEntry {
   id: string;
@@ -75,15 +80,39 @@ interface IWorkerTimesheetsTableProps {
     total_spend_usd: number;
     active_tasks_count: number;
     hourly_rate_usd: number;
-    unbilled_risk_amount: number;
   };
-  weeklyTotals: Array<{
-    week_ending: string;
-    total_hours: number;
-    total_amount: number;
-    entries_count: number;
-  }>;
+  periodInsights: PeriodInsights;
+  periodHistory: PeriodHistoryPoint[];
+  granularity: PeriodGranularity;
+  onGranularityChange: (g: PeriodGranularity) => void;
+  onPeriodStartChange: (iso: string | null) => void;
+  periodFilterEnabled: boolean;
+  onTogglePeriodFilter: () => void;
   timesheets: TimesheetEntry[];
+}
+
+function formatDeltaPct(pct: number | null): string {
+  if (pct === null) return "—";
+  const sign = pct > 0 ? "+" : "";
+  return `${sign}${Math.round(pct)}%`;
+}
+
+function deltaColorClass(pct: number | null): string {
+  if (pct === null) return "text-zinc-400";
+  if (pct > 0) return "text-emerald-600";
+  if (pct < 0) return "text-red-500";
+  return "text-zinc-400";
+}
+
+function signalSeverityStyles(severity: string): { border: string; bg: string; icon: string } {
+  switch (severity) {
+    case "scope":
+      return { border: "border-orange-200", bg: "bg-orange-50/60", icon: "text-orange-600" };
+    case "capacity":
+      return { border: "border-blue-200", bg: "bg-blue-50/60", icon: "text-blue-600" };
+    default:
+      return { border: "border-red-200", bg: "bg-red-50/60", icon: "text-red-600" };
+  }
 }
 
 function getMonthYearKey(dateStr: string): string {
@@ -151,7 +180,13 @@ export function IWorkerTimesheetsTable({
   onSelectContractor,
   isLoadingContractor = false,
   summary,
-  weeklyTotals,
+  periodInsights,
+  periodHistory,
+  granularity,
+  onGranularityChange,
+  onPeriodStartChange,
+  periodFilterEnabled,
+  onTogglePeriodFilter,
   timesheets,
 }: IWorkerTimesheetsTableProps) {
   const [sheetStatus, setSheetStatus] = useState<"connected" | "disconnected">("connected");
@@ -261,9 +296,33 @@ export function IWorkerTimesheetsTable({
     });
   }, [timesheets]);
 
+  const selectedPeriodIndex = useMemo(() => {
+    const periods = periodInsights.available_periods;
+    const idx = periods.findIndex((p) => p.start === periodInsights.selected.start);
+    return idx >= 0 ? idx : periods.length - 1;
+  }, [periodInsights.available_periods, periodInsights.selected.start]);
+
+  const trendHistory = useMemo(
+    () => periodHistory.filter((p) => p.granularity === granularity),
+    [periodHistory, granularity],
+  );
+
+  const maxTrendHours = useMemo(
+    () => Math.max(...trendHistory.map((p) => p.hours), 1),
+    [trendHistory],
+  );
+
+  const periodEmptyCopy =
+    granularity === "month" ? "No hours logged this month" : "No hours logged this week";
+
   const filteredAndSorted = useMemo(() => {
     if (!isConnected) return [];
     let result = [...enrichedEntries];
+    if (periodFilterEnabled) {
+      result = result.filter((item) =>
+        entryDateInPeriod(item.date, periodInsights.selected.start, periodInsights.selected.end),
+      );
+    }
     if (hideOffDays) result = result.filter((item) => item.hours > 0);
     if (selectedYear !== "ALL") result = result.filter((item) => item.date.includes(selectedYear));
     if (selectedMonth !== "ALL")
@@ -308,7 +367,19 @@ export function IWorkerTimesheetsTable({
       return sortOrder === "DESC" ? dateB - dateA : dateA - dateB;
     });
     return result;
-  }, [enrichedEntries, hideOffDays, selectedYear, selectedMonth, selectedStatusFilter, searchQuery, sortOrder, isConnected]);
+  }, [
+    enrichedEntries,
+    periodFilterEnabled,
+    periodInsights.selected.start,
+    periodInsights.selected.end,
+    hideOffDays,
+    selectedYear,
+    selectedMonth,
+    selectedStatusFilter,
+    searchQuery,
+    sortOrder,
+    isConnected,
+  ]);
 
   const deliverableGroups = useMemo(() => {
     const map: {
@@ -352,11 +423,6 @@ export function IWorkerTimesheetsTable({
     });
     return groups;
   }, [filteredAndSorted]);
-
-  const liveOverScopeSpend = useMemo(
-    () => enrichedEntries.filter((e) => e.isOverScope).reduce((acc, curr) => acc + curr.amount, 0),
-    [enrichedEntries]
-  );
 
   const toggleExpand = (taskName: string) => {
     setExpandedDeliverables((prev) => ({ ...prev, [taskName]: !prev[taskName] }));
@@ -546,9 +612,9 @@ export function IWorkerTimesheetsTable({
         </div>
       </div>
 
-      {/* ─── OVERVIEW STATS — own section, room to breathe ──────────────────── */}
+      {/* ─── PERIOD OPS KPIs ─────────────────────────────────────────────────── */}
       {isConnected ? (
-        <div className="relative">
+        <div className="relative space-y-5">
           {isLoadingContractor && (
             <div className="absolute inset-0 bg-white/70 backdrop-blur-[1px] z-20 rounded-2xl flex items-center justify-center transition-all duration-300">
               <div className="inline-flex items-center gap-2.5 rounded-xl bg-white border border-[#3C5A56]/20 px-4 py-2.5 shadow-lg text-xs font-semibold text-[#3C5A56] animate-pulse">
@@ -557,58 +623,269 @@ export function IWorkerTimesheetsTable({
               </div>
             </div>
           )}
+
+          {/* Period controls */}
+          <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm px-5 py-4 transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="inline-flex items-center rounded-xl bg-zinc-100 p-1 border border-zinc-200 gap-0.5">
+                <button
+                  onClick={() => onGranularityChange("week")}
+                  className={`inline-flex cursor-pointer items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg transition-all ${
+                    granularity === "week"
+                      ? "bg-[#3C5A56] text-white shadow-sm"
+                      : "text-zinc-500 hover:text-zinc-800"
+                  }`}
+                >
+                  Week
+                </button>
+                <button
+                  onClick={() => onGranularityChange("month")}
+                  className={`inline-flex cursor-pointer items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg transition-all ${
+                    granularity === "month"
+                      ? "bg-[#3C5A56] text-white shadow-sm"
+                      : "text-zinc-500 hover:text-zinc-800"
+                  }`}
+                >
+                  Month
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => {
+                    const prev = periodInsights.available_periods[selectedPeriodIndex - 1];
+                    if (prev) onPeriodStartChange(prev.start);
+                  }}
+                  disabled={selectedPeriodIndex <= 0}
+                  className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50 text-zinc-600 hover:border-[#3C5A56]/40 hover:text-[#3C5A56] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                  aria-label="Previous period"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <span className="text-sm font-semibold text-foreground min-w-[10rem] text-center">
+                  {periodInsights.selected.label}
+                </span>
+                <button
+                  onClick={() => {
+                    const next = periodInsights.available_periods[selectedPeriodIndex + 1];
+                    if (next) onPeriodStartChange(next.start);
+                  }}
+                  disabled={selectedPeriodIndex >= periodInsights.available_periods.length - 1}
+                  className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50 text-zinc-600 hover:border-[#3C5A56]/40 hover:text-[#3C5A56] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                  aria-label="Next period"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+                {!periodInsights.selected.is_current && (
+                  <button
+                    onClick={() => onPeriodStartChange(null)}
+                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-[#3C5A56]/30 bg-[#3C5A56]/5 px-3 py-2 text-xs font-semibold text-[#3C5A56] hover:bg-[#3C5A56]/10 transition-all"
+                  >
+                    {granularity === "month" ? "This month" : "This week"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Hero KPI cards */}
           <div className={`grid grid-cols-1 sm:grid-cols-3 gap-5 transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
-            {/* Total Hours */}
             <div className="flex items-center gap-4 rounded-2xl bg-white border border-zinc-200 shadow-sm px-6 py-6">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
                 <Clock className="h-5 w-5" />
               </div>
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
-                  Total Logged Hours
+                  Period Hours
                 </p>
-                <p className="font-heading text-3xl font-bold text-foreground leading-none">
-                  <AnimatedNumber value={summary.total_logged_hours} decimals={2} />
-                  <span className="text-sm font-semibold text-zo-text-muted ml-1.5">hrs</span>
+                <div className="flex items-baseline gap-2">
+                  <p className="font-heading text-3xl font-bold text-foreground leading-none">
+                    <AnimatedNumber value={periodInsights.current.hours} decimals={2} />
+                    <span className="text-sm font-semibold text-zo-text-muted ml-1.5">hrs</span>
+                  </p>
+                  <span className={`text-xs font-bold ${deltaColorClass(periodInsights.delta.hours_pct)}`}>
+                    {formatDeltaPct(periodInsights.delta.hours_pct)}
+                  </span>
+                </div>
+                <p className="text-[11px] text-zo-text-muted mt-1.5">
+                  {periodInsights.current.hours > 0
+                    ? periodInsights.selected.label
+                    : periodEmptyCopy}
                 </p>
-                <p className="text-[11px] text-zo-text-muted mt-1.5">Across active weekly cycles</p>
               </div>
             </div>
 
-            {/* Total Spend */}
             <div className="flex items-center gap-4 rounded-2xl bg-white border border-zinc-200 shadow-sm px-6 py-6">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
                 <DollarSign className="h-5 w-5" />
               </div>
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
-                  Contractor Spend
+                  Period Spend
                 </p>
-                <p className="font-heading text-3xl font-bold text-emerald-600 leading-none">
-                  <AnimatedNumber value={summary.total_spend_usd} decimals={2} prefix="$" />
-                </p>
+                <div className="flex items-baseline gap-2">
+                  <p className="font-heading text-3xl font-bold text-emerald-600 leading-none">
+                    <AnimatedNumber value={periodInsights.current.spend_usd} decimals={2} prefix="$" />
+                  </p>
+                  <span className={`text-xs font-bold ${deltaColorClass(periodInsights.delta.spend_pct)}`}>
+                    {formatDeltaPct(periodInsights.delta.spend_pct)}
+                  </span>
+                </div>
                 <p className="text-[11px] text-zo-text-muted mt-1.5">
-                  ${summary.hourly_rate_usd.toFixed(2)} / hr · Sheet cell H4
+                  {periodInsights.current.hours > 0
+                    ? periodInsights.selected.label
+                    : periodEmptyCopy}
                 </p>
               </div>
             </div>
 
-            {/* AI Flagged Risk */}
             <div className="flex items-center gap-4 rounded-2xl bg-orange-50 border border-orange-200 shadow-sm px-6 py-6">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-orange-100 text-orange-600">
                 <AlertTriangle className="h-5 w-5" />
               </div>
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
-                  AI Flagged Scope Risk
+                  Scope Risk
                 </p>
-                <p className="font-heading text-3xl font-bold text-orange-600 leading-none">
-                  <AnimatedNumber value={liveOverScopeSpend} decimals={2} prefix="$" />
+                <div className="flex items-baseline gap-2">
+                  <p className="font-heading text-3xl font-bold text-orange-600 leading-none">
+                    <AnimatedNumber value={periodInsights.current.scope_risk_usd} decimals={2} prefix="$" />
+                  </p>
+                  <span className={`text-xs font-bold ${deltaColorClass(periodInsights.delta.scope_risk_pct)}`}>
+                    {formatDeltaPct(periodInsights.delta.scope_risk_pct)}
+                  </span>
+                </div>
+                <p className="text-[11px] text-zo-text-muted mt-1.5">
+                  {periodInsights.current.hours > 0
+                    ? periodInsights.selected.label
+                    : periodEmptyCopy}
                 </p>
-                <p className="text-[11px] text-zo-text-muted mt-1.5">Unbilled revision overages (R3+)</p>
               </div>
             </div>
           </div>
+
+          {/* Signals */}
+          {periodInsights.signals.length > 0 && (
+            <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
+              <div className="px-6 py-4 border-b border-zinc-100 bg-zinc-50/60">
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted">
+                  Period Signals
+                </p>
+              </div>
+              <div className="divide-y divide-zinc-100">
+                {periodInsights.signals.map((signal) => {
+                  const styles = signalSeverityStyles(signal.severity);
+                  return (
+                    <div key={signal.id} className={`px-6 py-4 ${styles.bg}`}>
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className={`h-4 w-4 shrink-0 mt-0.5 ${styles.icon}`} />
+                        <div>
+                          <p className="text-sm font-semibold text-foreground">{signal.headline}</p>
+                          <p className="text-xs text-zo-text-muted mt-1 leading-relaxed">{signal.detail}</p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Contractor strip */}
+          {periodInsights.contractors.length > 0 && (
+            <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
+              <div className="px-6 py-4 border-b border-zinc-100 bg-zinc-50/60 flex items-center gap-2">
+                <Users className="h-4 w-4 text-[#3C5A56]" />
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted">
+                  Contractor Breakdown
+                </p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-zinc-50 border-b border-zinc-100">
+                    <tr className="text-zinc-400 font-semibold uppercase tracking-wider">
+                      <th className="px-6 py-3">Contractor</th>
+                      <th className="px-4 py-3 text-right">Hours</th>
+                      <th className="px-4 py-3 text-right">Spend</th>
+                      <th className="px-4 py-3 text-right">Scope</th>
+                      <th className="px-4 py-3 text-right">Utilization</th>
+                      <th className="px-4 py-3 text-right">Δ Hours</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-50">
+                    {periodInsights.contractors.map((c) => (
+                      <tr
+                        key={c.name}
+                        onClick={() => onSelectContractor?.(c.name)}
+                        className="hover:bg-zinc-50/80 cursor-pointer transition-colors"
+                      >
+                        <td className="px-6 py-3.5 font-semibold text-[#3C5A56]">{c.name}</td>
+                        <td className="px-4 py-3.5 text-right font-mono font-semibold text-foreground">
+                          {c.hours.toFixed(1)}
+                        </td>
+                        <td className="px-4 py-3.5 text-right font-mono font-semibold text-emerald-600">
+                          ${c.spend_usd.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-3.5 text-right font-mono font-semibold text-orange-600">
+                          ${c.scope_risk_usd.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-3.5 text-right font-semibold text-zinc-600">
+                          {c.utilization_pct !== null ? `${Math.round(c.utilization_pct)}%` : "—"}
+                        </td>
+                        <td className={`px-4 py-3.5 text-right font-semibold ${deltaColorClass(c.hours_delta_pct)}`}>
+                          {formatDeltaPct(c.hours_delta_pct)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Trend strip */}
+          {trendHistory.length > 0 && (
+            <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm px-6 py-5 transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted">
+                  Hours Trend
+                </p>
+                <span className="text-xs text-zo-text-muted">
+                  {granularity === "month" ? "Monthly" : "Weekly"} history
+                </span>
+              </div>
+              <div className="flex items-end gap-1.5 h-24">
+                {trendHistory.map((point) => {
+                  const isSelected = point.start === periodInsights.selected.start;
+                  const heightPct = Math.max((point.hours / maxTrendHours) * 100, 4);
+                  return (
+                    <button
+                      key={point.start}
+                      onClick={() => onPeriodStartChange(point.start)}
+                      title={`${point.start}: ${point.hours.toFixed(1)} hrs`}
+                      className="group flex flex-1 flex-col items-center gap-1 cursor-pointer min-w-0"
+                    >
+                      <div className="w-full flex items-end justify-center h-20">
+                        <motion.div
+                          initial={{ height: 0 }}
+                          animate={{ height: `${heightPct}%` }}
+                          transition={{ duration: 0.4, ease: expoOutEase }}
+                          className={`w-full max-w-[2rem] rounded-t-md transition-colors ${
+                            isSelected
+                              ? "bg-[#3C5A56]"
+                              : "bg-[#3C5A56]/25 group-hover:bg-[#3C5A56]/45"
+                          }`}
+                        />
+                      </div>
+                      <span className={`text-[9px] font-semibold truncate w-full text-center ${isSelected ? "text-[#3C5A56]" : "text-zinc-400"}`}>
+                        {point.start.slice(5)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-8 py-12 text-center space-y-3">
@@ -756,6 +1033,15 @@ export function IWorkerTimesheetsTable({
 
             {/* Results Count */}
             <div className="text-xs text-zinc-500 font-medium whitespace-nowrap ml-auto flex items-center gap-2">
+              {periodFilterEnabled && (
+                <button
+                  onClick={onTogglePeriodFilter}
+                  className="inline-flex items-center gap-1 rounded-full bg-[#3C5A56]/10 text-[#3C5A56] font-semibold px-2.5 py-0.5 border border-[#3C5A56]/20 text-[11px] hover:bg-[#3C5A56]/15 transition-colors cursor-pointer"
+                >
+                  Filtered to {periodInsights.selected.label}
+                  <X className="h-3 w-3" />
+                </button>
+              )}
               {searchQuery && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-700 font-semibold px-2.5 py-0.5 border border-emerald-200 text-[11px]">
                   Filtered by "{searchQuery}"

@@ -13,8 +13,9 @@ import {
   type TeamworkViewId,
 } from "../lib/financial-tab";
 import { TabFade } from "./TabFade";
-import { IWorkerTimesheetsTable, TimesheetEntry } from "./IWorkerTimesheetsTable";
+import { IWorkerTimesheetsTable } from "./IWorkerTimesheetsTable";
 import { AiInsightsPanel, AiInsightsData } from "./AiInsightsPanel";
+import type { IWorkerTimesheetsResponse, PeriodGranularity } from "../types/iworker";
 import { AuditQueueTable, AuditItem } from "./AuditQueueTable";
 import { DataSourcesGrid, DataSource } from "./DataSourcesGrid";
 import { QuickBooksPanels } from "./QuickBooksPanels";
@@ -50,33 +51,12 @@ export function FinancialInsightsClient({
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [selectedContractor, setSelectedContractor] = useState<string>("all");
+  const [granularity, setGranularity] = useState<PeriodGranularity>("week");
+  const [periodStart, setPeriodStart] = useState<string | null>(null);
+  const [periodFilterEnabled, setPeriodFilterEnabled] = useState(true);
 
   // Data states
-  const [iworkerData, setIworkerData] = useState<{
-    contractor: string;
-    source: string;
-    tabs?: Array<{
-      name: string;
-      rate: number;
-      total_hours: number;
-      total_spend: number;
-      active_entries: number;
-    }>;
-    summary: {
-      total_logged_hours: number;
-      total_spend_usd: number;
-      active_tasks_count: number;
-      hourly_rate_usd: number;
-      unbilled_risk_amount: number;
-    };
-    weekly_totals: Array<{
-      week_ending: string;
-      total_hours: number;
-      total_amount: number;
-      entries_count: number;
-    }>;
-    timesheets: TimesheetEntry[];
-  } | null>(null);
+  const [iworkerData, setIworkerData] = useState<IWorkerTimesheetsResponse | null>(null);
 
   const [sourcesData, setSourcesData] = useState<DataSource[]>([]);
   const [auditItems, setAuditItems] = useState<AuditItem[]>([]);
@@ -84,29 +64,48 @@ export function FinancialInsightsClient({
 
   const [isContractorLoading, setIsContractorLoading] = useState<boolean>(false);
 
-  const fetchIworkerData = useCallback(async (contractorName: string = "all") => {
-    setIsContractorLoading(true);
-    try {
-      const savedUrl = localStorage.getItem("zo_iworker_sheet_url") || "";
-      const queryParams = new URLSearchParams();
-      if (savedUrl) queryParams.set("sheet_url", savedUrl);
-      if (contractorName && contractorName !== "all") queryParams.set("contractor", contractorName);
+  const fetchIworkerData = useCallback(
+    async (
+      contractorName: string = "all",
+      opts?: { granularity?: PeriodGranularity; periodStart?: string | null },
+    ) => {
+      setIsContractorLoading(true);
+      try {
+        const savedUrl = localStorage.getItem("zo_iworker_sheet_url") || "";
+        const queryParams = new URLSearchParams();
+        if (savedUrl) queryParams.set("sheet_url", savedUrl);
+        if (contractorName && contractorName !== "all") {
+          queryParams.set("contractor", contractorName);
+        }
+        const g = opts?.granularity ?? granularity;
+        const ps = opts?.periodStart !== undefined ? opts.periodStart : periodStart;
+        queryParams.set("granularity", g);
+        if (ps) queryParams.set("period_start", ps);
 
-      const res = await fetch(`${API_BASE}/api/v1/financials/iworker-timesheets?${queryParams.toString()}`);
-      if (res.ok) {
-        const data = await res.json();
-        setIworkerData(data);
+        const res = await fetch(
+          `${API_BASE}/api/v1/financials/iworker-timesheets?${queryParams.toString()}`,
+        );
+        if (res.ok) {
+          const data = await res.json();
+          setIworkerData(data);
+        }
+      } catch (err) {
+        console.error("Failed to fetch iWorker data:", err);
+      } finally {
+        setIsContractorLoading(false);
       }
-    } catch (err) {
-      console.error("Failed to fetch iWorker data:", err);
-    } finally {
-      setIsContractorLoading(false);
-    }
-  }, []);
+    },
+    [granularity, periodStart],
+  );
 
   const fetchAuditQueue = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/v1/financials/audit-queue`);
+      const queryParams = new URLSearchParams();
+      queryParams.set("granularity", granularity);
+      if (periodStart) queryParams.set("period_start", periodStart);
+      const res = await fetch(
+        `${API_BASE}/api/v1/financials/audit-queue?${queryParams.toString()}`,
+      );
       if (res.ok) {
         const aJson = await res.json();
         setAuditItems(aJson.audit_items || []);
@@ -114,7 +113,7 @@ export function FinancialInsightsClient({
     } catch (err) {
       console.error("Failed to fetch audit queue:", err);
     }
-  }, []);
+  }, [granularity, periodStart]);
 
   useEffect(() => {
     async function loadInitialData() {
@@ -140,9 +139,9 @@ export function FinancialInsightsClient({
 
   // iWorker classification is expensive; wait until that tab is opened.
   useEffect(() => {
-    if (activeTab !== "iworker" || iworkerData) return;
+    if (activeTab !== "iworker") return;
     void fetchIworkerData(selectedContractor);
-  }, [activeTab, fetchIworkerData, iworkerData, selectedContractor]);
+  }, [activeTab, selectedContractor, granularity, periodStart, fetchIworkerData]);
 
   // Audit flags come from the timesheet cache filled by the iWorker tab.
   useEffect(() => {
@@ -150,11 +149,11 @@ export function FinancialInsightsClient({
     void fetchAuditQueue();
   }, [activeTab, fetchAuditQueue]);
 
-  // After iWorker loads, refresh audit so the AI tab has flags without a second pull.
+  // After iWorker loads or period changes, refresh audit for the AI tab.
   useEffect(() => {
     if (!iworkerData) return;
     void fetchAuditQueue();
-  }, [iworkerData, fetchAuditQueue]);
+  }, [iworkerData, granularity, periodStart, fetchAuditQueue]);
 
   const selectTab = (id: FinancialTabId) => {
     setActiveTab(id);
@@ -173,13 +172,29 @@ export function FinancialInsightsClient({
 
   const handleSelectContractor = (contractorName: string) => {
     setSelectedContractor(contractorName);
-    void fetchIworkerData(contractorName);
+  };
+
+  const handleGranularityChange = (g: PeriodGranularity) => {
+    setGranularity(g);
+    setPeriodStart(null);
+  };
+
+  const handlePeriodStartChange = (iso: string | null) => {
+    setPeriodStart(iso);
+  };
+
+  const handleTogglePeriodFilter = () => {
+    setPeriodFilterEnabled((prev) => !prev);
   };
 
   const handleFetchAiInsights = async (): Promise<AiInsightsData> => {
-    const res = await fetch(`${API_BASE}/api/v1/financials/ai-insights`, {
-      method: "POST",
-    });
+    const queryParams = new URLSearchParams();
+    queryParams.set("granularity", granularity);
+    if (periodStart) queryParams.set("period_start", periodStart);
+    const res = await fetch(
+      `${API_BASE}/api/v1/financials/ai-insights?${queryParams.toString()}`,
+      { method: "POST" },
+    );
     if (!res.ok) {
       throw new Error("Failed to generate AI insights");
     }
@@ -221,8 +236,14 @@ export function FinancialInsightsClient({
         onSelectContractor={handleSelectContractor}
         isLoadingContractor={isContractorLoading}
         summary={iworkerData.summary}
-        weeklyTotals={iworkerData.weekly_totals}
         timesheets={iworkerData.timesheets}
+        periodInsights={iworkerData.period_insights}
+        periodHistory={iworkerData.period_history}
+        granularity={granularity}
+        onGranularityChange={handleGranularityChange}
+        onPeriodStartChange={handlePeriodStartChange}
+        periodFilterEnabled={periodFilterEnabled}
+        onTogglePeriodFilter={handleTogglePeriodFilter}
       />
     );
   }
