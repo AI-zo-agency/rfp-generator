@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from app.financial.iworker_period_insights import (
     build_period_insights,
     build_period_metrics,
+    expected_hours_for_period,
     month_bounds,
     month_label,
     parse_entry_date,
@@ -157,3 +158,64 @@ def test_contractor_rows_include_weekend():
     row = next(c for c in out["contractors"] if c["name"] == "Murilo")
     assert row["hours"] == 3.0
     assert row["hours_delta_pct"] == 50.0
+
+
+def test_expected_hours_prorates_in_progress_week():
+    hours = expected_hours_for_period(
+        "week",
+        date(2026, 5, 11),
+        date(2026, 5, 17),
+        date(2026, 5, 13),
+        20.0,
+        None,
+        {},
+    )
+    assert round(hours, 2) == round(20.0 * 3 / 7, 2)
+
+
+def test_expected_hours_full_closed_week():
+    hours = expected_hours_for_period(
+        "week",
+        date(2026, 5, 4),
+        date(2026, 5, 10),
+        date(2026, 5, 13),
+        20.0,
+        None,
+        {},
+    )
+    assert hours == 20.0
+
+
+def test_underlogged_signal_after_wednesday():
+    entries = [_entry(contractor="Murilo", date="May 13, 2026", hours=1.0, amount=12.5)]
+    out = build_period_insights(
+        entries,
+        granularity="week",
+        now=NOW,
+        expected_hours_by_contractor={"Murilo": 20.0},
+    )
+    ids = [s["id"] for s in out["signals"]]
+    assert "iworker:underlogged:Murilo" in ids
+
+
+def test_overcapacity_signal():
+    entries = [_entry(contractor="Murilo", date="May 13, 2026", hours=20.0, amount=250.0)]
+    out = build_period_insights(
+        entries,
+        granularity="week",
+        now=NOW,
+        expected_hours_by_contractor={"Murilo": 20.0},
+    )
+    ids = [s["id"] for s in out["signals"]]
+    assert "iworker:overcapacity:Murilo" in ids
+
+
+def test_spend_spike_and_scope_risk_signals():
+    entries = [
+        _entry(date="May 13, 2026", hours=10.0, amount=130.0, ai_classification={"is_over_scope": True}),
+        _entry(date="May 6, 2026", hours=10.0, amount=100.0),
+    ]
+    out = build_period_insights(entries, granularity="week", now=NOW)
+    ids = [s["id"] for s in out["signals"]]
+    assert "iworker:spend_spike" in ids
+    assert any(i.startswith("iworker:scope_risk:") for i in ids)

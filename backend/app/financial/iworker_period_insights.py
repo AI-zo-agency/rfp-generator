@@ -206,15 +206,121 @@ def _contractor_rate(entries: list[dict[str, Any]], name: str) -> float:
 
 
 def load_expected_hours_map() -> dict[str, float]:
-    return {}
+    raw = (getattr(settings, "iworker_expected_hours_json", None) or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("operation=iworker_expected_hours status=invalid_json")
+        return {}
+    out: dict[str, float] = {}
+    if isinstance(parsed, dict):
+        for key, value in parsed.items():
+            try:
+                out[str(key).strip()] = float(value)
+            except (TypeError, ValueError):
+                continue
+    return out
 
 
-def expected_hours_for_period(*_a, **_k) -> float:
-    return DEFAULT_WEEKLY_EXPECTED_HOURS
+def expected_hours_for_period(
+    granularity: str,
+    start: date,
+    end: date,
+    today: date,
+    default_weekly: float,
+    contractor: str | None,
+    expected_map: dict[str, float],
+) -> float:
+    weekly = default_weekly
+    if contractor:
+        for key, value in expected_map.items():
+            if key.lower() == contractor.lower():
+                weekly = value
+                break
+    in_progress = start <= today <= end
+    if granularity == "month":
+        days_in_month = (end - start).days + 1
+        elapsed = ((min(today, end) - start).days + 1) if in_progress else days_in_month
+        return weekly * (elapsed / 7.0)
+    elapsed = ((min(today, end) - start).days + 1) if in_progress else 7
+    return weekly * (elapsed / 7.0)
 
 
 def build_period_signals(insights: dict[str, Any], *, now: datetime | None = None) -> list[dict[str, Any]]:
-    return []
+    signals: list[dict[str, Any]] = []
+    selected = insights["selected"]
+    spend_pct = (insights.get("delta") or {}).get("spend_pct")
+    if spend_pct is not None and spend_pct >= SPEND_SPIKE_PCT:
+        signals.append(
+            {
+                "id": "iworker:spend_spike",
+                "severity": "cost",
+                "headline": f"Contractor spend is up {spend_pct}% vs last period",
+                "detail": "Review hours mix before this week's invoice.",
+                "contractor": None,
+            }
+        )
+    current_scope = insights["current"]["scope_risk_usd"]
+    prev_scope = insights["previous_metrics"]["scope_risk_usd"]
+    scope_pct = (insights.get("delta") or {}).get("scope_risk_pct")
+    if current_scope >= SCOPE_RISK_MIN_USD and (
+        prev_scope == 0 or (scope_pct is not None and scope_pct > 0) or current_scope > prev_scope
+    ):
+        signals.append(
+            {
+                "id": "iworker:scope_risk:all",
+                "severity": "scope",
+                "headline": f"${current_scope:.2f} over-scope risk this period",
+                "detail": "Intervene on R3+ work before invoicing.",
+                "contractor": None,
+            }
+        )
+    today = today_in_tz(now, insights.get("timezone"))
+    start = date.fromisoformat(selected["start"])
+    end = date.fromisoformat(selected["end"])
+    elapsed_frac = ((min(today, end) - start).days + 1) / ((end - start).days + 1)
+    late_enough = (
+        (not selected.get("is_current"))
+        or today.weekday() >= UNDERLOGGED_WEEKDAY_MIN
+        or elapsed_frac >= UNDERLOGGED_ELAPSED_FRAC
+    )
+    for row in insights.get("contractors") or []:
+        name = row["name"]
+        util = row.get("utilization_pct")
+        expected = row.get("expected_hours") or 0
+        if util is not None and util >= OVERCAPACITY_UTIL * 100:
+            signals.append(
+                {
+                    "id": f"iworker:overcapacity:{name}",
+                    "severity": "capacity",
+                    "headline": f"{name} is at {util}% of expected hours",
+                    "detail": "Rebalance load before overtime compounds.",
+                    "contractor": name,
+                }
+            )
+        elif (
+            selected.get("is_current")
+            and late_enough
+            and expected > 0
+            and row["hours"] < expected * UNDERLOGGED_HOURS_FRAC
+        ):
+            signals.append(
+                {
+                    "id": f"iworker:underlogged:{name}",
+                    "severity": "capacity",
+                    "headline": f"{name} is under-logged this week",
+                    "detail": f"{row['hours']} hrs vs {expected:.1f} expected so far — chase missing logs or reassign.",
+                    "contractor": name,
+                }
+            )
+    logger.info(
+        "operation=iworker_signals count=%s ids=%s",
+        len(signals),
+        ",".join(s["id"] for s in signals),
+    )
+    return signals
 
 
 def build_period_insights(

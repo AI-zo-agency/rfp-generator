@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     scheduler_backend_url: str = "http://127.0.0.1:8001"
     scheduler_timezone: str = "America/Los_Angeles"
     scheduler_run_on_start: bool = True
+    iworker_tz: str = "America/Los_Angeles"
+    iworker_expected_hours_json: str = ""
 
     # Teamwork.com — read-only V3 API. Basic auth is API_KEY with an empty password.
     # Never expose these to the frontend.
