@@ -1,17 +1,20 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { AiInsightsData } from "../components/AiInsightsPanel";
 import type { AuditItem } from "../components/AuditQueueTable";
-import type { PeriodInsights } from "../types/iworker";
+import type { PeriodGranularity, PeriodInsights } from "../types/iworker";
 import type { Signal } from "../types/quickbooks";
 import {
   buildNoteCards,
   countByBadge,
   type InsightsData,
+  type NoteCard,
   type QbInsights,
 } from "./use-qb-insights";
+
+const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8001";
 
 function periodSignalSeverity(severity: string): Signal["severity"] {
   if (severity === "scope") return "critical";
@@ -68,10 +71,12 @@ function aiToInsightsData(
   ai: AiInsightsData | null,
   periodLabel?: string,
 ): InsightsData | null {
-  if (!ai) return null;
+  if (!ai || ai.status === "empty") return null;
+  const brief = ai.summary?.leadership_brief_text?.trim();
+  if (!brief) return null;
   return {
     status: "ok",
-    brief: ai.summary.leadership_brief_text,
+    brief,
     notes: {},
     as_of: ai.generated_at,
     generated_at: ai.generated_at,
@@ -82,14 +87,92 @@ function aiToInsightsData(
   };
 }
 
+function isAiInsightsPayload(raw: unknown): raw is AiInsightsData {
+  if (!raw || typeof raw !== "object") return false;
+  const row = raw as AiInsightsData;
+  return typeof row.status === "string" && Boolean(row.summary);
+}
+
+function buildSummaryCards(ai: AiInsightsData | null): NoteCard[] {
+  if (!ai?.summary || ai.status === "empty") return [];
+  const cards: NoteCard[] = [];
+
+  ai.summary.top_3_risks?.forEach((detail, index) => {
+    const text = detail?.trim();
+    if (!text) return;
+    cards.push({
+      id: `iworker:ai:risk:${index}`,
+      headline: "Risk",
+      detail: text,
+      badge: "Risk",
+      aiEnhanced: true,
+    });
+  });
+
+  ai.summary.top_3_wins?.forEach((detail, index) => {
+    const text = detail?.trim();
+    if (!text) return;
+    cards.push({
+      id: `iworker:ai:win:${index}`,
+      headline: "Win",
+      detail: text,
+      badge: "Opportunity",
+      aiEnhanced: true,
+    });
+  });
+
+  ai.summary.margin_recommendations?.forEach((detail, index) => {
+    const text = detail?.trim();
+    if (!text) return;
+    cards.push({
+      id: `iworker:ai:rec:${index}`,
+      headline: "Recommendation",
+      detail: text,
+      badge: "Action",
+      aiEnhanced: true,
+    });
+  });
+
+  return cards;
+}
+
 export function useIworkerInsights(
   periodInsights: PeriodInsights | undefined,
   auditItems: AuditItem[],
-  aiInsights: AiInsightsData | null,
-  onGenerate: () => Promise<AiInsightsData>,
+  granularity: PeriodGranularity,
+  periodStart: string | null,
 ): QbInsights {
+  const [aiInsights, setAiInsights] = useState<AiInsightsData | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  const query = useMemo(() => {
+    const params = new URLSearchParams({ granularity });
+    if (periodStart) params.set("period_start", periodStart);
+    return params.toString();
+  }, [granularity, periodStart]);
+
+  const load = useCallback(async () => {
+    if (!periodInsights) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/financials/iworker/ai-insights?${query}`);
+      if (!res.ok) throw new Error(`${res.status}`);
+      const raw = await res.json();
+      setAiInsights(isAiInsightsPayload(raw) ? raw : null);
+      setError(null);
+    } catch {
+      setError("Couldn't load insights.");
+      setAiInsights(null);
+    } finally {
+      setLoaded(true);
+    }
+  }, [periodInsights, query]);
+
+  useEffect(() => {
+    setLoaded(false);
+    void load();
+  }, [load]);
 
   const signals = useMemo(
     () => buildIworkerSignals(periodInsights, auditItems),
@@ -101,7 +184,13 @@ export function useIworkerInsights(
     [aiInsights, periodInsights?.selected.label],
   );
 
-  const cards = useMemo(() => buildNoteCards(data, signals, "iworker"), [data, signals]);
+  const cards = useMemo(() => {
+    const base = buildNoteCards(data, signals, "iworker");
+    const ids = new Set(base.map((card) => card.id));
+    const aiCards = buildSummaryCards(aiInsights).filter((card) => !ids.has(card.id));
+    return [...base, ...aiCards];
+  }, [data, signals, aiInsights]);
+
   const counts = useMemo(() => countByBadge(cards), [cards]);
   const highImpact = counts.find((c) => c.badge === "High impact")?.count ?? 0;
 
@@ -109,20 +198,30 @@ export function useIworkerInsights(
     setBusy(true);
     setError(null);
     try {
-      await onGenerate();
+      const res = await fetch(
+        `${API_BASE}/api/v1/financials/iworker/ai-insights/regenerate?${query}`,
+        { method: "POST" },
+      );
+      if (!res.ok) throw new Error(`${res.status}`);
+      const raw = await res.json();
+      if (!isAiInsightsPayload(raw)) throw new Error("invalid payload");
+      setAiInsights(raw);
+      if (raw.generated === "failed" || raw.stored === false) {
+        setError("Brief generated but could not be saved. It will disappear on refresh.");
+      }
     } catch {
       setError("Couldn't generate a new brief. The flags below are still current.");
     } finally {
       setBusy(false);
     }
-  }, [onGenerate]);
+  }, [query]);
 
   return {
     data,
     cards,
     counts,
     highImpact,
-    loaded: Boolean(periodInsights),
+    loaded: loaded && Boolean(periodInsights),
     busy,
     error,
     regenerate,

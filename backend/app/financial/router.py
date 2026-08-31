@@ -16,6 +16,12 @@ from app.financial.iworker_snapshots import (
     rows_for_current_periods,
     upsert_period_snapshots,
 )
+from app.financial.iworker_insights import (
+    build_evidence as build_iworker_evidence,
+    get_stored_insight,
+    persist_insight,
+    response_from_row,
+)
 from app.financial.ai_insights_repository import get_insight, get_latest_insight
 from app.financial.client_map_import import import_tags_sheet
 from app.financial.client_map_link import run_link as run_client_map_link
@@ -1921,6 +1927,7 @@ def resolve_audit_item(
     logger.info(f"[AUDIT] Resolved item {payload.id!r} with action={payload.action!r}")
     return {"success": True, "id": payload.id, "status": _AUDIT_RESOLUTIONS[payload.id]}
 
+
 @router.post("/ai-insights")
 async def generate_ai_financial_insights(
     granularity: str = "week",
@@ -2141,7 +2148,7 @@ IMPORTANT:
     generated_at = datetime.now().strftime("%b %d, %Y at %I:%M %p")
     logger.info(f"[AI-INSIGHTS] Successfully generated insights via {actual_provider} at {generated_at}")
 
-    return {
+    response = {
         "status": "success",
         "generated_at": generated_at,
         "provider": actual_provider,
@@ -2161,5 +2168,74 @@ IMPORTANT:
             "over_scope_spend": total_over_scope_spend,
             "over_scope_items": len(over_scope_tasks),
             "period_label": period_label,
-        }
+        },
     }
+    response["stored"] = persist_insight(
+        granularity=insights["granularity"],
+        period_start=selected["start"],
+        period_end=selected["end"],
+        result=response,
+        evidence=build_iworker_evidence(insights, response["stats"]),
+        provider=actual_provider,
+        model=model_used,
+    )
+    logger.info(
+        "operation=financial_ai_insights status=completed granularity=%s period_start=%s stored=%s",
+        insights["granularity"],
+        selected["start"],
+        response["stored"],
+    )
+    return response
+
+
+def _safe_get_iworker_insight(
+    granularity: str,
+    period_start: str,
+    period_end: str,
+) -> dict[str, Any] | None:
+    try:
+        return get_stored_insight(granularity, period_start, period_end)
+    except Exception as exc:  # noqa: BLE001 — missing table must not break the drawer
+        logger.warning(
+            "operation=iworker_ai_insights status=insight_lookup_failed granularity=%s period_start=%s error=%s",
+            granularity,
+            period_start,
+            str(exc)[:200],
+        )
+        return None
+
+
+@router.get("/iworker/ai-insights")
+def iworker_ai_insights(
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+):
+    """Latest stored brief for the selected calendar week or month."""
+    data = get_iworker_timesheets(
+        granularity=granularity,
+        period_start=period_start,
+        persist_snapshots=False,
+    )
+    selected = data["period_insights"]["selected"]
+    row = _safe_get_iworker_insight(granularity, selected["start"], selected["end"])
+    logger.info(
+        "operation=iworker_ai_insights granularity=%s period_start=%s found=%s",
+        granularity,
+        selected["start"],
+        row is not None,
+    )
+    return response_from_row(row, period_label=selected.get("label"))
+
+
+@router.post("/iworker/ai-insights/regenerate")
+async def iworker_ai_insights_regenerate(
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+):
+    """Generate a fresh brief for the selected period and upsert to Supabase."""
+    result = await generate_ai_financial_insights(
+        granularity=granularity,
+        period_start=period_start,
+    )
+    result["generated"] = "ok" if result.get("status") == "success" else "failed"
+    return result

@@ -158,6 +158,35 @@ def test_ai_insights(monkeypatch):
     assert len(res["summary"]["top_3_wins"]) == 3
 
 
+def test_ai_insights_persists_to_supabase(monkeypatch):
+    from app.financial import router
+
+    async def fake_chat_json(messages, **_k):
+        return (
+            {
+                "leadership_brief_text": "Brief",
+                "top_3_risks": ["r1", "r2", "r3"],
+                "top_3_wins": ["w1", "w2", "w3"],
+                "margin_recommendations": ["m1", "m2", "m3"],
+            },
+            "test",
+        )
+
+    stored = {"called": False}
+
+    def fake_persist(**kwargs):
+        stored["called"] = True
+        stored["kwargs"] = kwargs
+        return True
+
+    monkeypatch.setattr(router, "chat_json", fake_chat_json)
+    monkeypatch.setattr(router, "persist_insight", fake_persist)
+    res = asyncio.run(generate_ai_financial_insights())
+    assert res["stored"] is True
+    assert stored["called"] is True
+    assert stored["kwargs"]["granularity"] in ("week", "month")
+
+
 def test_ai_insights_prompt_uses_period_metrics(monkeypatch):
     from app.financial import router
 

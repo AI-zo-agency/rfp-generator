@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import type { AiInsightsData } from "./AiInsightsPanel";
 import { AuditQueueTable, type AuditItem } from "./AuditQueueTable";
 import {
   AiIntelligenceDrawer,
@@ -43,9 +42,8 @@ export interface IWorkerPanelsProps {
   onPeriodStartChange: (iso: string | null) => void;
   periodFilterEnabled: boolean;
   onTogglePeriodFilter: () => void;
+  periodStart: string | null;
   auditItems: AuditItem[];
-  aiInsights: AiInsightsData | null;
-  onFetchAiInsights: () => Promise<AiInsightsData>;
   onResolveAuditItem: (id: string, action: string) => Promise<void>;
 }
 
@@ -59,9 +57,8 @@ export function IWorkerPanels({
   onPeriodStartChange,
   periodFilterEnabled,
   onTogglePeriodFilter,
+  periodStart,
   auditItems,
-  aiInsights,
-  onFetchAiInsights,
   onResolveAuditItem,
 }: IWorkerPanelsProps) {
   const [aiOpen, setAiOpen] = useState(false);
@@ -69,8 +66,8 @@ export function IWorkerPanels({
   const insights = useIworkerInsights(
     iworkerData?.period_insights,
     auditItems,
-    aiInsights,
-    onFetchAiInsights,
+    granularity,
+    periodStart,
   );
 
   if (isLoading && !iworkerData) {

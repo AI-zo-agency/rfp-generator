@@ -14,7 +14,6 @@ import {
 } from "../lib/financial-tab";
 import { TabFade } from "./TabFade";
 import { IWorkerPanels } from "./IWorkerPanels";
-import type { AiInsightsData } from "./AiInsightsPanel";
 import type { IWorkerTimesheetsResponse, PeriodGranularity } from "../types/iworker";
 import { AuditItem } from "./AuditQueueTable";
 import { DataSourcesGrid, DataSource } from "./DataSourcesGrid";
@@ -60,7 +59,6 @@ export function FinancialInsightsClient({
 
   const [sourcesData, setSourcesData] = useState<DataSource[]>([]);
   const [auditItems, setAuditItems] = useState<AuditItem[]>([]);
-  const [aiInsights, setAiInsights] = useState<AiInsightsData | null>(null);
 
   const [isContractorLoading, setIsContractorLoading] = useState<boolean>(false);
 
@@ -182,22 +180,6 @@ export function FinancialInsightsClient({
     setPeriodFilterEnabled((prev) => !prev);
   };
 
-  const handleFetchAiInsights = async (): Promise<AiInsightsData> => {
-    const queryParams = new URLSearchParams();
-    queryParams.set("granularity", granularity);
-    if (periodStart) queryParams.set("period_start", periodStart);
-    const res = await fetch(
-      `${API_BASE}/api/v1/financials/ai-insights?${queryParams.toString()}`,
-      { method: "POST" },
-    );
-    if (!res.ok) {
-      throw new Error("Failed to generate AI insights");
-    }
-    const data = await res.json();
-    setAiInsights(data);
-    return data;
-  };
-
   const handleResolveAuditItem = async (id: string, action: string) => {
     try {
       await fetch(`${API_BASE}/api/v1/financials/audit-queue/resolve`, {
@@ -223,9 +205,8 @@ export function FinancialInsightsClient({
         onPeriodStartChange={handlePeriodStartChange}
         periodFilterEnabled={periodFilterEnabled}
         onTogglePeriodFilter={handleTogglePeriodFilter}
+        periodStart={periodStart}
         auditItems={auditItems}
-        aiInsights={aiInsights}
-        onFetchAiInsights={handleFetchAiInsights}
         onResolveAuditItem={handleResolveAuditItem}
       />
     );
