@@ -406,15 +406,31 @@ def _table_row_is_summary(line: str) -> bool:
     return label.startswith("total ")
 
 
+def _table_is_rate_schedule(header_line: str) -> bool:
+    """True for a per-unit rate table (render_personnel_loading_form_markdown's
+    "Role / Labor Category | Year-1 Hourly Rate | ..."), not a fee breakdown.
+
+    Its dollar column is a rate per role, not a line-item amount — several
+    roles' hourly rates naturally sum to a small, arbitrary number that has no
+    relationship to the project's total dollar investment. Comparing that sum
+    against the stated total (as the fee-breakdown check below does) is
+    comparing two unrelated kinds of number and always "fails": a $95/hr and a
+    $120/hr rate summing to $215 will never equal a $125,614 project total.
+    """
+    return "hourly rate" in header_line.casefold()
+
+
 def _iter_markdown_table_sums(
     markdown: str,
-) -> list[tuple[float | None, float | None]]:
-    """(line-item sum excluding totals, table's own Total row) per markdown table."""
-    out: list[tuple[float | None, float | None]] = []
+) -> list[tuple[float | None, float | None, bool]]:
+    """(line-item sum excluding totals, table's own Total row, is_rate_schedule)
+    per markdown table."""
+    out: list[tuple[float | None, float | None, bool]] = []
     for block in _markdown_table_blocks(markdown):
         line_sum = 0.0
         n = 0
         stated: float | None = None
+        is_rate_schedule = bool(block) and _table_is_rate_schedule(block[0])
         for stripped in (line.strip() for line in block):
             if re.search(r"(?i)\|\s*:?---", stripped):
                 continue
@@ -431,7 +447,7 @@ def _iter_markdown_table_sums(
                 continue
             line_sum += value
             n += 1
-        out.append((round(line_sum, 2) if n else None, stated))
+        out.append((round(line_sum, 2) if n else None, stated, is_rate_schedule))
     return out
 
 
@@ -483,7 +499,7 @@ def collect_prose_arithmetic_violations(markdown: str) -> list[str]:
                     f"{label} is ${target:,.0f}."
                 )
 
-    for line_sum, table_total in _iter_markdown_table_sums(text):
+    for line_sum, table_total, is_rate_schedule in _iter_markdown_table_sums(text):
         if line_sum is None:
             continue
         if table_total is not None:
@@ -493,7 +509,7 @@ def collect_prose_arithmetic_violations(markdown: str) -> list[str]:
                     f"Budget table line items sum to ${line_sum:,.0f}, but the table "
                     f"total row is ${table_total:,.0f}."
                 )
-        elif total_m:
+        elif total_m and not is_rate_schedule:
             stated = _money(total_m.group(1))
             fee_only = _money(fee_m.group(1)) if fee_m else None
             direct_amt = _money(direct_m.group(1)) if direct_m else 0.0

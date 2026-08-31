@@ -14,7 +14,7 @@ import {
   staticSections1to3Complete,
   stripLegacyMonolithSections,
 } from "@/lib/proposal-draft";
-import { getManuscriptSections, normalizeOutlineSectionOrder, resolveManuscriptJumpTarget, buildManuscriptIndexMap } from "@/lib/proposal-outline-tree";
+import { getManuscriptSections, normalizeOutlineSectionOrder, renumberGroupedSectionTitles, resolveManuscriptJumpTarget, buildManuscriptIndexMap, stripLeadingOutlineNumber } from "@/lib/proposal-outline-tree";
 import {
   isManuscriptSectionDrafted,
   isSectionDrafted,
@@ -66,7 +66,6 @@ import { getLlmCostForRfp, type LlmCostRfpBreakdown } from "@/lib/llm-cost-servi
 import type { OutlineSection, ProposalBudget, ProposalOutline, ProposalResearch, PreSubmitReview } from "@/types/proposal";
 import type { RfpRecord } from "@/types/rfp";
 import { ProposalSectionTree, reorderSectionsById } from "./ProposalSectionTree";
-import { MatchRfpPacketControl } from "./MatchRfpPacketControl";
 import { CapabilityHoverTip } from "./CapabilityHoverTip";
 import { ManuscriptSelectionBubble } from "./ManuscriptSelectionBubble";
 import {
@@ -3166,8 +3165,9 @@ function ProposalDraftWorkspaceInner({
       if (anyPipelineRunning) return;
       setFulfillJustCompleted(false);
       setOutline((prev) => {
-        const sections = reorderSectionsById(prev.sections, fromId, toId);
-        if (sections === prev.sections) return prev;
+        const moved = reorderSectionsById(prev.sections, fromId, toId);
+        if (moved === prev.sections) return prev;
+        const sections = renumberGroupedSectionTitles(moved);
         return {
           ...prev,
           sections,
@@ -3192,33 +3192,9 @@ function ProposalDraftWorkspaceInner({
 
     setFulfillJustCompleted(false);
     setOutline((prev) => {
-      let bio = 0;
-      let work = 0;
-      const sections = prev.sections
-        .filter((s) => s.id !== id)
-        .map((s) => {
-          if (
-            s.id.startsWith("section-2-bio-") &&
-            s.id !== "section-2-bio-placeholder"
-          ) {
-            bio += 1;
-            const name = s.title.includes("—")
-              ? s.title.split("—").slice(1).join("—").trim()
-              : s.title;
-            return { ...s, title: `2.${bio} — ${name}` };
-          }
-          if (
-            s.id.startsWith("section-3-work-") &&
-            s.id !== "section-3-work-placeholder"
-          ) {
-            work += 1;
-            const name = s.title.includes("—")
-              ? s.title.split("—").slice(1).join("—").trim()
-              : s.title;
-            return { ...s, title: `3.${work} — ${name}` };
-          }
-          return s;
-        });
+      const sections = renumberGroupedSectionTitles(
+        prev.sections.filter((s) => s.id !== id)
+      );
       if (selectedSectionId === id) {
         setSelectedSectionId(sections[0]?.id ?? null);
       }
@@ -3976,30 +3952,6 @@ function ProposalDraftWorkspaceInner({
                           : "Review & fix"}
                   </button>
                 </CapabilityHoverTip>
-                <details
-                  className="relative"
-                  open={
-                    isAligningRfpOutline ||
-                    isPlacingPacketContent ||
-                    undefined
-                  }
-                >
-                  <summary className="zo-btn secondary !py-2 !px-3 !text-sm cursor-pointer list-none select-none [&::-webkit-details-marker]:hidden">
-                    Staff tools
-                  </summary>
-                  <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 flex min-w-[16rem] flex-wrap items-center gap-2 rounded-lg border border-zo-border bg-white p-2.5 shadow-lg">
-                    <MatchRfpPacketControl
-                      disabled={
-                        !outline.sections.some((s) => s.content.trim()) ||
-                        anyPipelineRunning
-                      }
-                      isOrdering={isAligningRfpOutline || alignPreviewLoading}
-                      isPlacing={isPlacingPacketContent || placePreviewLoading}
-                      onOrderTabs={() => void handleAlignRfpOutline()}
-                      onPlaceContent={() => void handlePlacePacketContent()}
-                    />
-                  </div>
-                </details>
                 {outline.lastFulfillReport ? (
                   <button
                     type="button"
@@ -4216,7 +4168,7 @@ function ProposalDraftWorkspaceInner({
                   >
                     <h3 className="proposal-content-section-title">
                       <span className="text-zo-text-muted">{index + 1}.</span>{" "}
-                      {section.title}
+                      {stripLeadingOutlineNumber(section.title)}
                       {sectionManualFillCount(section.id, actionableFlags) > 0 ? (
                         <span className="ml-2 text-[11px] font-medium text-amber-800">
                           · needs input
@@ -4294,7 +4246,7 @@ function ProposalDraftWorkspaceInner({
                   >
                     <h3 className="proposal-content-section-title">
                       <span className="text-zo-text-muted">{index + 1}.</span>{" "}
-                      {section.title}
+                      {stripLeadingOutlineNumber(section.title)}
                       {sectionManualFillCount(section.id, actionableFlags) > 0 ? (
                         <span className="ml-2 text-[11px] font-medium text-amber-800">
                           · needs input

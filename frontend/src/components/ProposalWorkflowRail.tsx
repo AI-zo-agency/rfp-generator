@@ -234,7 +234,7 @@ export function ProposalWorkflowRail({
                 ? manualFillCount > 0
                   ? `Final checks completed (~19 min server run). ${manualFillCount} item${manualFillCount === 1 ? "" : "s"} still need input (forms, signatures, attachments) — use the checklist or section chat.`
                   : "Final checks completed. Review the checklist, then download Word."
-                : "Hover Build my proposal for what the draft already includes. Fix outline lives under Staff tools on Review; Review & fix is optional after edits."}
+                : "Hover Build my proposal for what the draft already includes. Review & fix is optional after edits."}
             </p>
           </div>
           {buildPipelineComplete ? (

@@ -98,7 +98,7 @@ export const PROPOSAL_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     id: "moreMenu",
     name: "More",
     does: "Extra draft actions: designer-compact, reset, or restart from Case Studies / Intelligence.",
-    doesnt: "Run Build my proposal — Fix outline lives under Staff tools on Review.",
+    doesnt: "Run Build my proposal.",
   },
   {
     id: "keyPersonas",

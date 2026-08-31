@@ -385,11 +385,13 @@ def format_rfp_structure_specs_for_planner(specs: list[RfpSectionSpec]) -> str:
     for spec in specs:
         if _spec_is_rfp_title_noise(spec):
             continue
+        if _spec_is_acknowledge_only(spec):
+            continue
         if spec.satisfied_by_static_company_block:
             continue
         if is_duplicate_static_rfp_section(spec.rfp_title or ""):
             continue
-        title = (spec.rfp_title or "").strip()
+        title = _clean_spec_title((spec.rfp_title or "").strip())
         if not title:
             continue
         extra = ""
@@ -416,11 +418,13 @@ def outline_sections_from_rfp_specs(
     for spec in specs:
         if _spec_is_rfp_title_noise(spec):
             continue
+        if _spec_is_acknowledge_only(spec):
+            continue
         if spec.satisfied_by_static_company_block:
             continue
         if is_duplicate_static_rfp_section(spec.rfp_title or ""):
             continue
-        title = (spec.rfp_title or "").strip()
+        title = _clean_spec_title((spec.rfp_title or "").strip())
         if not title:
             continue
         raw = {
@@ -833,6 +837,91 @@ def _spec_is_rfp_title_noise(spec: RfpSectionSpec) -> bool:
     return False
 
 
+# extract_rfp_submission_format_specs is deliberately told to "Include EVERY
+# row the format/layout section requires the offeror to submit — narrative
+# sections, signed forms, exhibits, attachments, and compliance statements" —
+# so a pure "read this RFP-authored clause" acknowledgment (Definitions,
+# Background, Notice and Authority, Terms and Conditions, Non-Collusion) comes
+# back as its own row exactly like a real deliverable. Nothing downstream used
+# to distinguish them: outline_sections_from_rfp_specs stamped every row
+# protectFromCap=True (immune to the 8-18 section cap) and
+# format_rfp_structure_specs_for_planner told the LLM planner "Do not rename,
+# drop, or invent a parallel stack" for the same list — so even the planner's
+# own anti-bloat instincts got overridden. One real RFP produced 20+ empty
+# stub tabs this way. The extraction LLM consistently frames these rows with
+# a "Review ..." title (it has to invent some title for an inline compliance
+# paragraph that has no natural heading of its own) — a real deliverable is
+# framed as an ask ("Provide...", "Describe...", a form/exhibit name), never
+# as an instruction to read something. Narrow and phrase-anchored on purpose,
+# same reasoning as _spec_is_rfp_title_noise above: catch the acknowledgment
+# framing without swallowing a genuine "Review and complete this schedule"
+# deliverable that happens to share the first word.
+_ACKNOWLEDGE_ONLY_TITLE_PREFIXES = (
+    "review the ",
+    "review and accept ",
+    "review and agree to ",
+    "review and acknowledge ",
+)
+
+
+def _spec_is_acknowledge_only(spec: RfpSectionSpec) -> bool:
+    """True when the spec only tells the offeror to read/accept an RFP clause —
+    no proposer-authored content, so it should not become (or protect) an
+    outline tab."""
+    title = (spec.rfp_title or "").strip().casefold()
+    return title.startswith(_ACKNOWLEDGE_ONLY_TITLE_PREFIXES)
+
+
+def _strip_trailing_bare_point_value(title: str) -> str:
+    """Drop a trailing bare number that is an evaluation-table point value
+    linearized onto the criterion text ("...commissions 20" -> "...commissions"),
+    never a number that's actually part of the phrase (a currency figure, a
+    percent, a dated/section reference)."""
+    t = title.rstrip()
+    idx = t.rfind(" ")
+    if idx == -1:
+        return title
+    tail = t[idx + 1 :]
+    if tail.isdigit() and 1 <= len(tail) <= 3:
+        prefix = t[:idx].rstrip()
+        if prefix and prefix[-1] not in "$%-–—":
+            return prefix
+    return title
+
+
+def _strip_leading_duplicate_label(title: str) -> str:
+    """Drop a short leading label that just restates the start of the rest of
+    the title ("Cost Cost effectiveness..." -> "Cost effectiveness...",
+    "References References" -> "References")."""
+    words = title.split(" ")
+    if len(words) < 2:
+        return title
+    first = words[0].casefold().rstrip(",.:;")
+    rest = " ".join(words[1:])
+    rest_first_word = rest.split(" ", 1)[0].casefold().rstrip(",.:;")
+    if first and (first == rest_first_word or rest.casefold().startswith(f"{first} ")):
+        return rest
+    return title
+
+
+# extract_rfp_submission_format_specs reads whatever the RFP's evaluation
+# criteria / scoring table looks like once linearized to plain text. A table
+# with columns like [Category | Criterion | Points] reads left-to-right per
+# row with no column boundary, so "Cost | Cost effectiveness, value, and
+# transparency of fees and commissions | 20" comes out as one run-on string:
+# "Cost Cost effectiveness, value, and transparency of fees and commissions
+# 20" — the category label duplicated onto the front, the point value stuck
+# on the end. The extraction prompt's own "use the buyer's OWN wording"
+# instruction (necessary so it doesn't invent a nicer paraphrase — see
+# _spec_is_acknowledge_only above) means it faithfully copies this garbling
+# instead of cleaning it up. Deterministic, not a rewrite of the prompt: the
+# prompt still owns "don't paraphrase the RFP", this only removes a value
+# (the point score) and a duplicated word that clearly aren't part of the
+# criterion's own name.
+def _clean_spec_title(title: str) -> str:
+    return _strip_leading_duplicate_label(_strip_trailing_bare_point_value(title))
+
+
 def _is_static_1_3_section(section: ProposalSection) -> bool:
     """zö company / team / work tabs — keep in place; never rewrite for TOC labels."""
     sid = section.id or ""
@@ -1091,7 +1180,7 @@ def specs_from_scored_criteria(
     for req in requirements:
         if getattr(req, "source", "") != "scored_criterion":
             continue
-        title = str(getattr(req, "text", "") or "").strip()
+        title = _clean_spec_title(str(getattr(req, "text", "") or "").strip())
         if not title:
             continue
         key = title.casefold()

@@ -630,9 +630,17 @@ async def _run_fulfill_rfp_gaps_body(
             # mode — this is the buyer-facing final pass, so unhedged legal
             # certifications, leaked internal notes, and self-contradicting facts
             # must not ship just because the lean tail is optimizing for speed.
-            skip_fulfill_steps = frozenset({1, 2, 6, 13, 14, 15, 16})
+            # Step 1 (RFP structure/order alignment) stays IN too, in both lean and
+            # full mode — Phase 3 already applies it once while drafting, but later
+            # steps in this same tail (ledger add/cut, duplicate-section removal)
+            # can still add or drop sections after that, drifting the tab order
+            # back out of RFP-required sequence. Re-running it here is a cheap,
+            # idempotent no-op when nothing drifted (align just reports "nothing to
+            # change"), so Build My Proposal ends with the same guarantee Review &
+            # fix gives on a hand-edited draft, in one click.
+            skip_fulfill_steps = frozenset({2, 6, 13, 14, 15, 16})
         else:
-            skip_fulfill_steps = frozenset({1, 2, 6})
+            skip_fulfill_steps = frozenset({2, 6})
         scan_in_progress_phase = "build-finalize"
         # Never inherit a paused Review & fix resume pointer — only resume
         # final-checks when that same job was interrupted.

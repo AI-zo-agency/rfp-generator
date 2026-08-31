@@ -59,29 +59,55 @@ function matchesGroup(section: OutlineSection, groupId: string): boolean {
   }
 }
 
-const SECTION_1_ID_ORDER = [
-  "section-1-who-we-are",
-  "section-1-org-structure",
-  "section-1-business-info",
-  "section-1-certifications",
-  "section-1-insurance",
-  "section-1-company-overview",
-] as const;
+const OUTLINE_NUMBER_SEPARATORS = new Set(["—", "-", "–", ".", ":"]);
 
-function parseTitleMajorMinor(title: string): { major: number; minor: number } {
-  const m = title.match(/^\s*(\d+)\.(\d+)/);
-  if (m) {
-    return { major: parseInt(m[1], 10), minor: parseInt(m[2], 10) };
-  }
-  return { major: 999, minor: 999 };
+function isDigit(ch: string | undefined): boolean {
+  return ch != null && ch >= "0" && ch <= "9";
 }
 
-const LEADING_OUTLINE_NUMBER = /^\s*\d+(?:\.\d+)?\s*[—\-–.:]\s*/;
-
+/**
+ * Strip a leading "3.2 ", "3.2 — ", "3.2: " style outline number off a title
+ * that already carries the RFP's own numbering, so a display number can be
+ * prepended without doubling up ("26. 3.2 Provide…" reading as two different
+ * section numbers stapled together).
+ *
+ * Was a single leading-number regex — greedy backtracking bit it on exactly
+ * the plain "3.2 Title" case (no dash after the number): the digit group took
+ * "3", the optional dot-digit group took ".2", then it needed a separator
+ * character and found none (next char is a letter) — so the regex engine
+ * backtracked, gave back the ".2", and matched "3." instead (a bare "."
+ * counts as a separator on its own). Result: "2 Provide…" — the minor number
+ * survived as if it were the first word of the title. A plain left-to-right
+ * scan has no backtracking to get wrong.
+ */
 export function stripLeadingOutlineNumber(title: string): string {
   const trimmed = (title || "").trim();
-  const stripped = trimmed.replace(LEADING_OUTLINE_NUMBER, "").trim();
-  return stripped || trimmed;
+  const n = trimmed.length;
+
+  let i = 0;
+  while (isDigit(trimmed[i])) i++;
+  if (i === 0) return trimmed; // no leading number at all
+
+  if (trimmed[i] === "." && isDigit(trimmed[i + 1])) {
+    i++;
+    while (isDigit(trimmed[i])) i++;
+  }
+
+  let k = i;
+  while (trimmed[k] === " " || trimmed[k] === "\t") k++;
+  const hadGap = k > i;
+
+  if (OUTLINE_NUMBER_SEPARATORS.has(trimmed[k])) {
+    k++;
+    while (trimmed[k] === " " || trimmed[k] === "\t") k++;
+  } else if (!hadGap) {
+    // Number runs straight into the next character with no space or
+    // separator at all ("3.2Provide…") — not a real outline-number prefix.
+    return trimmed;
+  }
+
+  const body = trimmed.slice(k).trim();
+  return body || trimmed;
 }
 
 export function isZoStaticSubsection(section: Pick<OutlineSection, "id">): boolean {
@@ -99,60 +125,53 @@ function originalIndexMap(
   return new Map(sections.map((section, index) => [section.id, index]));
 }
 
-/** Stable proposal order: 1.x company → 2.x bios → 3.x work → RFP tabs (planner order). */
+/**
+ * Manuscript order is whatever order the array is in — no fixed tier (company
+ * → bios → work → RFP tabs) takes priority over it any more. That tier system
+ * used to override drag-and-drop: a section could be moved in the array, but
+ * this comparator silently sorted it back under its type's fixed slot every
+ * render, so e.g. an RFP tab could never be dragged above Section 1. Grouping
+ * (which sections visually cluster under "Section 1 — Company Overview" etc.)
+ * is still decided by id prefix in buildOutlineSectionTree — that's a separate
+ * concern from ordering.
+ */
 export function compareManuscriptSections(
   a: OutlineSection,
   b: OutlineSection,
   originalIndex?: ReadonlyMap<string, number>,
 ): number {
   const origOf = (id: string) => originalIndex?.get(id) ?? 0;
-  const rank = (s: OutlineSection): [number, number, number, string] => {
-    const id = s.id;
-    const { major, minor } = parseTitleMajorMinor(s.title);
+  const diff = origOf(a.id) - origOf(b.id);
+  return diff !== 0 ? diff : a.id.localeCompare(b.id);
+}
 
-    if (id.startsWith("section-1-")) {
-      const idx = SECTION_1_ID_ORDER.indexOf(
-        id as (typeof SECTION_1_ID_ORDER)[number],
-      );
-      return [1, idx >= 0 ? idx : 40 + minor, minor, id];
-    }
-    if (
-      id.startsWith("section-2-bio-") ||
-      id === "section-2-team-overview"
-    ) {
-      return [2, minor, 0, id];
-    }
-    if (
-      id.startsWith("section-3-work-") ||
-      id === "section-3-our-work"
-    ) {
-      return [3, minor, 0, id];
-    }
-    if (id.startsWith("section-4-")) {
-      return [4, major, minor, id];
-    }
-    if (id.startsWith("section-5-")) {
-      return [5, major, minor, id];
-    }
-    if (s.source === "rfp" || id.startsWith("rfp-")) {
-      // Keep Intelligence / RFP TOC order — do not sort by buyer numbers or id.
-      return [6, origOf(id), 0, id];
-    }
-    return [7, origOf(id), 0, id];
-  };
-
-  const ra = rank(a);
-  const rb = rank(b);
-  for (let i = 0; i < ra.length; i++) {
-    const av = ra[i];
-    const bv = rb[i];
-    if (av === bv) continue;
-    if (typeof av === "string" && typeof bv === "string") {
-      return av.localeCompare(bv);
-    }
-    return (av as number) - (bv as number);
-  }
-  return 0;
+/**
+ * Renumber "2.N — Name" / "3.N — Name" title prefixes to match array order.
+ * Shared by delete and drag-reorder so the visible number never drifts from
+ * where the section actually sits (Section 1 subsections carry no such
+ * number, so they need no renumbering pass).
+ */
+export function renumberGroupedSectionTitles(
+  sections: OutlineSection[],
+): OutlineSection[] {
+  let bio = 0;
+  let work = 0;
+  let changed = false;
+  const next = sections.map((s) => {
+    const isBio = s.id.startsWith("section-2-bio-") && s.id !== "section-2-bio-placeholder";
+    const isWork = s.id.startsWith("section-3-work-") && s.id !== "section-3-work-placeholder";
+    if (!isBio && !isWork) return s;
+    const prefix = isBio ? ++bio : ++work;
+    const group = isBio ? 2 : 3;
+    const name = s.title.includes("—")
+      ? s.title.split("—").slice(1).join("—").trim()
+      : s.title;
+    const title = `${group}.${prefix} — ${name}`;
+    if (title === s.title) return s;
+    changed = true;
+    return { ...s, title };
+  });
+  return changed ? next : sections;
 }
 
 export function sortManuscriptSections(
@@ -225,8 +244,14 @@ export function buildOutlineSectionTree(
   sections: OutlineSection[],
 ): OutlineTreeNode[] {
   const used = new Set<string>();
-  const nodes: OutlineTreeNode[] = [];
+  // (node, position) pairs, merged and sorted by position at the end — a
+  // group's position is its first member's array slot, so dragging any RFP
+  // tab (or any other leaf) above/below/between the template groups actually
+  // moves it there, instead of groups always leading the list regardless of
+  // where their members were dropped.
+  const positioned: { node: OutlineTreeNode; pos: number }[] = [];
   const originalIndex = originalIndexMap(sections);
+  const origOf = (id: string) => originalIndex.get(id) ?? 0;
 
   for (const { id: groupId, label } of GROUP_ORDER) {
     const children = sections.filter(
@@ -238,26 +263,23 @@ export function buildOutlineSectionTree(
     if (children.length === 0) continue;
     children.sort((a, b) => compareManuscriptSections(a, b, originalIndex));
     children.forEach((section) => used.add(section.id));
+    const pos = Math.min(...children.map((s) => origOf(s.id)));
 
     if (children.length === 1 && (groupId === "section-4" || groupId === "section-5")) {
-      nodes.push({ kind: "leaf", section: children[0] });
+      positioned.push({ node: { kind: "leaf", section: children[0] }, pos });
       continue;
     }
 
-    nodes.push({ kind: "group", id: groupId, label, sections: children });
+    positioned.push({ node: { kind: "group", id: groupId, label, sections: children }, pos });
   }
 
-  const leftovers: OutlineSection[] = [];
   for (const section of sections) {
     if (used.has(section.id) || isPlaceholder(section)) continue;
-    leftovers.push(section);
-  }
-  leftovers.sort((a, b) => compareManuscriptSections(a, b, originalIndex));
-  for (const section of leftovers) {
-    nodes.push({ kind: "leaf", section });
+    positioned.push({ node: { kind: "leaf", section }, pos: origOf(section.id) });
   }
 
-  return nodes;
+  positioned.sort((a, b) => a.pos - b.pos);
+  return positioned.map((entry) => entry.node);
 }
 
 /** RFP tabs continue 4, 5, 6… after static Sections 1–3. */

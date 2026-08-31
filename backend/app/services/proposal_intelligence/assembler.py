@@ -565,10 +565,16 @@ def build_requirement_ledger(
     # abstract category label with neither stays advisory (mandatory=False,
     # still visible in the ledger) instead of minting a duplicate section.
     from app.services.proposal_evaluation_coverage import criterion_requires_outline_tab
+    from app.services.proposal_fulfill_rfp_structure import _clean_spec_title
 
     for index, crit in enumerate(evaluation_criteria or [], start=1):
         try:
-            name = (getattr(crit, "name", "") or "").strip()
+            # A criterion table read as [Category | Criterion | Points] with no
+            # column boundary linearizes to one run-on string per row — the
+            # category duplicated onto the front, the point value stuck on the
+            # end ("Cost Cost effectiveness...commissions 20"). Same defect,
+            # same cleanup as outline_sections_from_rfp_specs.
+            name = _clean_spec_title((getattr(crit, "name", "") or "").strip())
             if not name:
                 continue
             satisfied_by = _match_outline_sections(
