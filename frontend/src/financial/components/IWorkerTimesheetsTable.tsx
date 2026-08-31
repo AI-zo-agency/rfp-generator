@@ -28,12 +28,24 @@ import {
   ChevronLeft,
   ChevronRight,
   Users,
+  Sparkles,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { expoOutEase } from "@/lib/motion";
 import { AnimatedNumber } from "./AnimatedNumber";
 import type { PeriodInsights, PeriodHistoryPoint, PeriodGranularity } from "../types/iworker";
 import { entryDateInPeriod } from "../lib/iworker-period";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip as RTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import "./AiIntelligenceDrawer.css";
 
 export interface TimesheetEntry {
   id: string;
@@ -89,6 +101,9 @@ interface IWorkerTimesheetsTableProps {
   periodFilterEnabled: boolean;
   onTogglePeriodFilter: () => void;
   timesheets: TimesheetEntry[];
+  aiHighImpact?: number;
+  aiOpen?: boolean;
+  onOpenAi?: () => void;
 }
 
 function formatDeltaPct(pct: number | null): string {
@@ -97,11 +112,86 @@ function formatDeltaPct(pct: number | null): string {
   return `${sign}${Math.round(pct)}%`;
 }
 
+const CONTRACTOR_LINE_COLORS = ["#2563eb", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"];
+
+function HoursTrendTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: { name?: string; value?: number; color?: string; dataKey?: string }[];
+  label?: string;
+}) {
+  if (!active || !payload?.length) return null;
+  const rows = [...payload].sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 shadow-lg min-w-[10rem]">
+      <p className="text-sm font-semibold text-foreground mb-2">{label}</p>
+      <div className="space-y-1.5">
+        {rows.map((p) => (
+          <div
+            key={p.dataKey}
+            className="flex items-center justify-between gap-4 text-xs text-zo-text-muted"
+          >
+            <span className="inline-flex items-center gap-2 min-w-0">
+              <span
+                className="h-2 w-2 rounded-full shrink-0"
+                style={{ backgroundColor: p.color }}
+                aria-hidden
+              />
+              <span className="truncate">{p.name}</span>
+            </span>
+            <strong className="font-semibold text-foreground tabular-nums">
+              {(p.value ?? 0).toFixed(1)}h
+            </strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function weekAxisRangeLabel(startIso: string, endIso: string): string {
+  const start = new Date(`${startIso}T12:00:00`);
+  const end = new Date(`${endIso}T12:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return startIso.slice(5);
+  }
+  const startMonth = start.toLocaleDateString("en-US", { month: "short" });
+  const endMonth = end.toLocaleDateString("en-US", { month: "short" });
+  if (startMonth === endMonth) {
+    return `${startMonth} ${start.getDate()} – ${end.getDate()}`;
+  }
+  return `${startMonth} ${start.getDate()} – ${endMonth} ${end.getDate()}`;
+}
+
 function deltaColorClass(pct: number | null): string {
   if (pct === null) return "text-zinc-400";
   if (pct > 0) return "text-emerald-600";
   if (pct < 0) return "text-red-500";
   return "text-zinc-400";
+}
+
+function utilizationHelpText(granularity: PeriodGranularity): string {
+  const periodWord = granularity === "month" ? "month" : "week";
+  return [
+    `Default target: 20 billable hrs/week per contractor (configurable via IWORKER_EXPECTED_HOURS_JSON).`,
+    `For the selected ${periodWord}, expected hours = weekly target × (elapsed days in the ${periodWord} ÷ 7).`,
+    `Utilization = logged hours ÷ expected hours × 100.`,
+    `Low utilization mid-${periodWord} usually means missing timesheet rows, not idle capacity.`,
+  ].join(" ");
+}
+
+function contractorUtilizationDetail(
+  hours: number,
+  expectedHours: number,
+  utilizationPct: number | null,
+): string {
+  if (expectedHours <= 0) return "No expected-hours target configured for this contractor.";
+  const pct =
+    utilizationPct !== null ? `${Math.round(utilizationPct)}%` : "—";
+  return `${hours.toFixed(1)} hrs logged of ${expectedHours.toFixed(1)} hrs expected (${pct} utilization).`;
 }
 
 function signalSeverityStyles(severity: string): { border: string; bg: string; icon: string } {
@@ -188,6 +278,9 @@ export function IWorkerTimesheetsTable({
   periodFilterEnabled,
   onTogglePeriodFilter,
   timesheets,
+  aiHighImpact = 0,
+  aiOpen = false,
+  onOpenAi,
 }: IWorkerTimesheetsTableProps) {
   const [sheetStatus, setSheetStatus] = useState<"connected" | "disconnected">("connected");
   const [viewMode, setViewMode] = useState<"GROUPED" | "DAILY">("GROUPED");
@@ -302,15 +395,45 @@ export function IWorkerTimesheetsTable({
     return idx >= 0 ? idx : periods.length - 1;
   }, [periodInsights.available_periods, periodInsights.selected.start]);
 
-  const trendHistory = useMemo(
-    () => periodHistory.filter((p) => p.granularity === granularity),
-    [periodHistory, granularity],
-  );
+  const weeklyInMonth = periodInsights.weekly_in_month ?? [];
 
-  const maxTrendHours = useMemo(
-    () => Math.max(...trendHistory.map((p) => p.hours), 1),
-    [trendHistory],
-  );
+  const contractorChartColors = useMemo(() => {
+    const map: Record<string, string> = {};
+    periodInsights.contractors.forEach((c, i) => {
+      map[c.name] = CONTRACTOR_LINE_COLORS[i % CONTRACTOR_LINE_COLORS.length];
+    });
+    return map;
+  }, [periodInsights.contractors]);
+
+  const trendContractors = useMemo(() => {
+    return selectedContractor && selectedContractor !== "all"
+      ? periodInsights.contractors.filter((c) => c.name === selectedContractor)
+      : periodInsights.contractors;
+  }, [periodInsights.contractors, selectedContractor]);
+
+  const hoursTrendLineData = useMemo(() => {
+    return weeklyInMonth.map((week) => {
+      const row: Record<string, string | number> = {
+        weekLabel: weekAxisRangeLabel(week.start, week.end),
+        weekStart: week.start,
+      };
+      for (const c of trendContractors) {
+        const match = week.contractors.find((wc) => wc.name === c.name);
+        row[c.name] = match?.hours ?? 0;
+      }
+      return row;
+    });
+  }, [weeklyInMonth, trendContractors]);
+
+  const handleHoursTrendClick = (
+    state: { activePayload?: { payload?: { weekStart?: string } }[] } | null,
+  ) => {
+    const weekStart = state?.activePayload?.[0]?.payload?.weekStart;
+    if (weekStart) {
+      onGranularityChange("week");
+      onPeriodStartChange(weekStart);
+    }
+  };
 
   const periodEmptyCopy =
     granularity === "month" ? "No hours logged this month" : "No hours logged this week";
@@ -585,7 +708,22 @@ export function IWorkerTimesheetsTable({
             </div>
 
             {isConnected && (
-              <div className="grid grid-cols-2 gap-2.5 sm:flex sm:shrink-0">
+              <div className="grid grid-cols-2 gap-2.5 sm:flex sm:shrink-0 sm:items-center">
+                {onOpenAi ? (
+                  <button
+                    type="button"
+                    className="qb-ai-trigger col-span-2 sm:col-span-1"
+                    onClick={onOpenAi}
+                    aria-haspopup="dialog"
+                    aria-expanded={aiOpen}
+                  >
+                    <Sparkles size={14} strokeWidth={2.25} aria-hidden />
+                    AI Intelligence
+                    {aiHighImpact > 0 ? (
+                      <span className="qb-ai-trigger-count">{aiHighImpact}</span>
+                    ) : null}
+                  </button>
+                ) : null}
                 <a
                   href={googleSheetUrl}
                   target="_blank"
@@ -653,10 +791,11 @@ export function IWorkerTimesheetsTable({
               <div className="flex items-center gap-2 flex-wrap">
                 <button
                   onClick={() => {
-                    const prev = periodInsights.available_periods[selectedPeriodIndex - 1];
-                    if (prev) onPeriodStartChange(prev.start);
+                    // available_periods is newest-first; left = older week/month
+                    const older = periodInsights.available_periods[selectedPeriodIndex + 1];
+                    if (older) onPeriodStartChange(older.start);
                   }}
-                  disabled={selectedPeriodIndex <= 0}
+                  disabled={selectedPeriodIndex >= periodInsights.available_periods.length - 1}
                   className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50 text-zinc-600 hover:border-[#3C5A56]/40 hover:text-[#3C5A56] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                   aria-label="Previous period"
                 >
@@ -667,10 +806,11 @@ export function IWorkerTimesheetsTable({
                 </span>
                 <button
                   onClick={() => {
-                    const next = periodInsights.available_periods[selectedPeriodIndex + 1];
-                    if (next) onPeriodStartChange(next.start);
+                    // right = newer week/month toward current
+                    const newer = periodInsights.available_periods[selectedPeriodIndex - 1];
+                    if (newer) onPeriodStartChange(newer.start);
                   }}
-                  disabled={selectedPeriodIndex >= periodInsights.available_periods.length - 1}
+                  disabled={selectedPeriodIndex <= 0}
                   className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50 text-zinc-600 hover:border-[#3C5A56]/40 hover:text-[#3C5A56] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                   aria-label="Next period"
                 >
@@ -793,6 +933,7 @@ export function IWorkerTimesheetsTable({
 
           {/* Contractor strip */}
           {periodInsights.contractors.length > 0 && (
+            <TooltipProvider delayDuration={200}>
             <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
               <div className="px-6 py-4 border-b border-zinc-100 bg-zinc-50/60 flex items-center gap-2">
                 <Users className="h-4 w-4 text-[#3C5A56]" />
@@ -808,7 +949,23 @@ export function IWorkerTimesheetsTable({
                       <th className="px-4 py-3 text-right">Hours</th>
                       <th className="px-4 py-3 text-right">Spend</th>
                       <th className="px-4 py-3 text-right">Scope</th>
-                      <th className="px-4 py-3 text-right">Utilization</th>
+                      <th className="px-4 py-3 text-right">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="inline-flex cursor-help items-center justify-end gap-1 text-zinc-400 hover:text-[#3C5A56] transition-colors"
+                              aria-label="How utilization is calculated"
+                            >
+                              Utilization
+                              <Info className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-xs text-left leading-relaxed">
+                            {utilizationHelpText(granularity)}
+                          </TooltipContent>
+                        </Tooltip>
+                      </th>
                       <th className="px-4 py-3 text-right">Δ Hours</th>
                     </tr>
                   </thead>
@@ -830,7 +987,24 @@ export function IWorkerTimesheetsTable({
                           ${c.scope_risk_usd.toFixed(2)}
                         </td>
                         <td className="px-4 py-3.5 text-right font-semibold text-zinc-600">
-                          {c.utilization_pct !== null ? `${Math.round(c.utilization_pct)}%` : "—"}
+                          {c.utilization_pct !== null ? (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="cursor-help border-b border-dotted border-zinc-300">
+                                  {Math.round(c.utilization_pct)}%
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="top" className="max-w-xs text-left">
+                                {contractorUtilizationDetail(
+                                  c.hours,
+                                  c.expected_hours,
+                                  c.utilization_pct,
+                                )}
+                              </TooltipContent>
+                            </Tooltip>
+                          ) : (
+                            "—"
+                          )}
                         </td>
                         <td className={`px-4 py-3.5 text-right font-semibold ${deltaColorClass(c.hours_delta_pct)}`}>
                           {formatDeltaPct(c.hours_delta_pct)}
@@ -841,48 +1015,81 @@ export function IWorkerTimesheetsTable({
                 </table>
               </div>
             </div>
+            </TooltipProvider>
           )}
 
-          {/* Trend strip */}
-          {trendHistory.length > 0 && (
+          {/* Weekly hours within selected month — contractor line chart */}
+          {granularity === "month" && hoursTrendLineData.length > 0 && trendContractors.length > 0 && (
             <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm px-6 py-5 transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
-              <div className="flex items-center justify-between mb-4">
-                <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted">
-                  Hours Trend
+              <div className="mb-4 gap-3 flex-wrap">
+                <p className="text-base font-semibold text-foreground">
+                  Contractor hours trend
                 </p>
-                <span className="text-xs text-zo-text-muted">
-                  {granularity === "month" ? "Monthly" : "Weekly"} history
-                </span>
+                <p className="text-xs text-zo-text-muted mt-0.5">
+                  Weekly hours by subcontractor in {periodInsights.selected.label}. Hover a point for
+                  exact hours; click to open that week.
+                </p>
               </div>
-              <div className="flex items-end gap-1.5 h-24">
-                {trendHistory.map((point) => {
-                  const isSelected = point.start === periodInsights.selected.start;
-                  const heightPct = Math.max((point.hours / maxTrendHours) * 100, 4);
-                  return (
-                    <button
-                      key={point.start}
-                      onClick={() => onPeriodStartChange(point.start)}
-                      title={`${point.start}: ${point.hours.toFixed(1)} hrs`}
-                      className="group flex flex-1 flex-col items-center gap-1 cursor-pointer min-w-0"
-                    >
-                      <div className="w-full flex items-end justify-center h-20">
-                        <motion.div
-                          initial={{ height: 0 }}
-                          animate={{ height: `${heightPct}%` }}
-                          transition={{ duration: 0.4, ease: expoOutEase }}
-                          className={`w-full max-w-[2rem] rounded-t-md transition-colors ${
-                            isSelected
-                              ? "bg-[#3C5A56]"
-                              : "bg-[#3C5A56]/25 group-hover:bg-[#3C5A56]/45"
-                          }`}
-                        />
-                      </div>
-                      <span className={`text-[9px] font-semibold truncate w-full text-center ${isSelected ? "text-[#3C5A56]" : "text-zinc-400"}`}>
-                        {point.start.slice(5)}
-                      </span>
-                    </button>
-                  );
-                })}
+
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart
+                  data={hoursTrendLineData}
+                  margin={{ top: 8, right: 12, bottom: 0, left: -8 }}
+                  onClick={handleHoursTrendClick}
+                >
+                  <CartesianGrid strokeDasharray="4 4" vertical={false} stroke="#e4e4e7" />
+                  <XAxis
+                    dataKey="weekLabel"
+                    tick={{ fill: "#71717a", fontSize: 11 }}
+                    axisLine={false}
+                    tickLine={false}
+                    dy={8}
+                  />
+                  <YAxis
+                    tickFormatter={(v: number) => `${v}h`}
+                    tick={{ fill: "#71717a", fontSize: 11 }}
+                    axisLine={false}
+                    tickLine={false}
+                    width={36}
+                    allowDecimals={false}
+                  />
+                  <RTooltip
+                    cursor={{ stroke: "#d4d4d8", strokeWidth: 1 }}
+                    content={<HoursTrendTooltip />}
+                  />
+                  {trendContractors.map((c) => (
+                    <Line
+                      key={c.name}
+                      type="monotone"
+                      dataKey={c.name}
+                      name={c.name}
+                      stroke={contractorChartColors[c.name] ?? CONTRACTOR_LINE_COLORS[0]}
+                      strokeWidth={2}
+                      dot={{
+                        r: 4,
+                        fill: contractorChartColors[c.name] ?? CONTRACTOR_LINE_COLORS[0],
+                        strokeWidth: 0,
+                      }}
+                      activeDot={{ r: 5, cursor: "pointer" }}
+                      isAnimationActive={false}
+                    />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+
+              <div className="mt-3 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 border-t border-zinc-100 pt-3">
+                {trendContractors.map((c) => (
+                  <span
+                    key={c.name}
+                    className="inline-flex items-center gap-1.5 text-[11px] font-medium text-zo-text-muted"
+                  >
+                    <span
+                      className="h-2.5 w-2.5 rounded-full shrink-0"
+                      style={{ backgroundColor: contractorChartColors[c.name] ?? CONTRACTOR_LINE_COLORS[0] }}
+                    />
+                    {c.name}
+                  </span>
+                ))}
               </div>
             </div>
           )}

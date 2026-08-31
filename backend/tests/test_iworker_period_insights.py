@@ -219,3 +219,39 @@ def test_spend_spike_and_scope_risk_signals():
     ids = [s["id"] for s in out["signals"]]
     assert "iworker:spend_spike" in ids
     assert any(i.startswith("iworker:scope_risk:") for i in ids)
+
+
+def test_underlogged_signal_uses_month_wording():
+    aug_now = datetime(2026, 8, 31, 15, 0, tzinfo=PT)
+    entries = [_entry(contractor="Murilo", date="August 15, 2026", hours=5.0, amount=62.5)]
+    out = build_period_insights(
+        entries,
+        granularity="month",
+        period_start="2026-08-01",
+        now=aug_now,
+        expected_hours_by_contractor={"Murilo": 20.0},
+    )
+    under = next(s for s in out["signals"] if s["id"] == "iworker:underlogged:Murilo")
+    assert "this month" in under["headline"].lower()
+    assert "this week" not in under["headline"].lower()
+
+
+def test_month_includes_weekly_contractor_breakdown():
+    aug_now = datetime(2026, 8, 31, 15, 0, tzinfo=PT)
+    entries = [
+        _entry(contractor="Murilo", date="August 5, 2026", hours=4.0, amount=50.0),
+        _entry(contractor="Marcelle Benevides", date="August 12, 2026", hours=6.0, amount=84.0),
+    ]
+    out = build_period_insights(
+        entries,
+        granularity="month",
+        period_start="2026-08-01",
+        now=aug_now,
+    )
+    weeks = out["weekly_in_month"]
+    assert len(weeks) >= 4
+    aug4 = next(w for w in weeks if w["start"] == "2026-08-03")
+    assert aug4["total_hours"] == 4.0
+    assert aug4["contractors"][0]["name"] == "Murilo"
+    aug11 = next(w for w in weeks if w["start"] == "2026-08-10")
+    assert aug11["contractors"][0]["hours"] == 6.0

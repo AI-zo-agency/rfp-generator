@@ -16,6 +16,10 @@ describe("parseFinancialTab", () => {
     expect(parseFinancialTab(null)).toBe("quickbooks");
     expect(parseFinancialTab("not-a-tab")).toBe("quickbooks");
   });
+
+  it("maps legacy ai tab URLs to iworker", () => {
+    expect(parseFinancialTab("ai")).toBe("iworker");
+  });
 });
 
 describe("parseAgencyView", () => {

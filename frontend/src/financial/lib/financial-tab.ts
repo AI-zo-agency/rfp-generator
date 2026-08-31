@@ -3,7 +3,6 @@ export const FINANCIAL_TAB_IDS = [
   "quickbooks",
   "teamwork",
   "iworker",
-  "ai",
   "sources",
 ] as const;
 
@@ -22,6 +21,7 @@ export const TEAMWORK_VIEW_IDS = ["position", "projects", "work", "time"] as con
 export type TeamworkViewId = (typeof TEAMWORK_VIEW_IDS)[number];
 
 export function parseFinancialTab(raw: string | null | undefined): FinancialTabId {
+  if (raw === "ai") return "iworker";
   return FINANCIAL_TAB_IDS.includes(raw as FinancialTabId) ? (raw as FinancialTabId) : "quickbooks";
 }
 

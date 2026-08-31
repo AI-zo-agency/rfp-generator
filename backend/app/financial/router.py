@@ -2003,6 +2003,28 @@ async def generate_ai_financial_insights(
     tasks_json = json.dumps(top_tasks, indent=2)
     over_scope_json = json.dumps(over_scope_tasks, indent=2)
 
+    contractor_capacity = insights.get("contractors") or []
+    contractors_json = json.dumps(contractor_capacity, indent=2)
+    default_weekly = 20.0  # matches DEFAULT_WEEKLY_EXPECTED_HOURS in period engine
+
+    deliverables_by_contractor: dict[str, dict[str, dict[str, Any]]] = {}
+    for t in active_entries:
+        name = str(t.get("contractor") or "Unknown").strip()
+        ai_cls = t.get("ai_classification") or {}
+        label = str(ai_cls.get("topic") or t.get("task") or "General").strip()
+        bucket = deliverables_by_contractor.setdefault(name, {})
+        if label not in bucket:
+            bucket[label] = {"deliverable": label, "hours": 0.0, "spend_usd": 0.0, "sessions": 0}
+        bucket[label]["hours"] += float(t.get("hours") or 0)
+        bucket[label]["spend_usd"] += float(t.get("amount") or 0)
+        bucket[label]["sessions"] += 1
+
+    projects_payload = {
+        name: sorted(rows.values(), key=lambda r: r["hours"], reverse=True)[:8]
+        for name, rows in deliverables_by_contractor.items()
+    }
+    projects_json = json.dumps(projects_payload, indent=2)
+
     delta = insights["delta"]
     prev_label = insights["previous"]["label"]
     grain_label = "MoM" if insights["granularity"] == "month" else "WoW"
@@ -2019,24 +2041,35 @@ async def generate_ai_financial_insights(
     )
 
     # ── Build AI prompt ───────────────────────────────────────────────────────
-    system_prompt = """You are a senior financial auditor for ZÖ Agency, a creative video production agency.
-You analyze contractor timesheet data to detect scope creep, billing risks, and operational wins.
+    system_prompt = """You are a senior operations and margin advisor for ZÖ Agency, a creative video production agency.
+You read iWorker contractor timesheets the way an agency owner does: who worked, on what deliverables, versus capacity, and where margin is leaking.
 Always respond with ONLY valid JSON — no markdown, no prose, no code fences."""
 
-    user_prompt = f"""Analyze this iWorker contractor timesheet data for ZÖ Agency and generate a leadership financial brief.
+    user_prompt = f"""Analyze this iWorker contractor timesheet data for ZÖ Agency and generate a leadership brief a business owner can act on today.
 
 SELECTED PERIOD: {period_label} ({selected["start"]} to {selected["end"]})
 PRIOR PERIOD: {prev_label}
 {grain_label} DELTAS: hours {delta["hours_pct"]}% | spend {delta["spend_pct"]}% | scope risk {delta["scope_risk_pct"]}%
 
 PERIOD METRICS (use ONLY these — do NOT quote all-time or cumulative totals):
-- Contractor: iWorker (Sonja Anderson)
-- Hourly Rate: $12.50/hr
+- Hourly Rate (sheet default): $12.50/hr
 - Period Hours: {total_hours} hrs
 - Period Spend: ${total_spend:,.2f}
 - Period Work Sessions: {len(active_entries)}
 - Period Over-Scope Spend (R3+ revisions): ${total_over_scope_spend:,.2f}
 - Analysis Date: {datetime.now().strftime('%B %d, %Y')}
+
+UTILIZATION RULE (explain this plainly if you mention utilization):
+- Default target is {default_weekly} billable hrs/week per contractor (override via IWORKER_EXPECTED_HOURS_JSON).
+- For the selected period, expected hours = weekly target × (elapsed days in period ÷ 7).
+- Utilization % = logged hours ÷ expected hours so far × 100.
+- Under ~50% utilization mid-period usually means missing timesheet rows, not idle capacity.
+
+CONTRACTOR CAPACITY (hours vs expected for this period — use these numbers):
+{contractors_json}
+
+DELIVERABLES / PROJECT WORK BY CONTRACTOR (where time went — topic or task label from sheet):
+{projects_json}
 
 AUTOMATED SIGNALS FOR THIS PERIOD:
 {signal_lines}
@@ -2049,25 +2082,30 @@ OVER-SCOPE ITEMS THIS PERIOD (Round 3+ revisions that exceed retainer):
 
 Generate a JSON response with EXACTLY this structure:
 {{
-  "leadership_brief_text": "<2-3 sentence executive summary for leadership>",
+  "leadership_brief_text": "<2-3 sentences: who worked how much vs target, top deliverables, spend/scope headline>",
   "top_3_risks": [
-    "<risk 1 — specific, quantified, actionable>",
-    "<risk 2 — specific, quantified, actionable>",
-    "<risk 3 — specific, quantified, actionable>"
+    "<risk 1 — name contractor, hours/spend, deliverable if known>",
+    "<risk 2>",
+    "<risk 3>"
   ],
   "top_3_wins": [
-    "<win 1 — concrete operational achievement>",
-    "<win 2 — concrete operational achievement>",
-    "<win 3 — concrete operational achievement>"
+    "<win 1 — concrete delivery or efficiency win with numbers>",
+    "<win 2>",
+    "<win 3>"
   ],
   "margin_recommendations": [
-    "<recommendation 1 — actionable next step>",
-    "<recommendation 2 — actionable next step>",
-    "<recommendation 3 — actionable next step>"
+    "<owner action 1 — chase logs, cap revisions, reassign, invoice, etc.>",
+    "<recommendation 2>",
+    "<recommendation 3>"
   ]
 }}
 
-IMPORTANT: Be specific about dollar amounts and hour counts for THIS PERIOD ONLY. Reference actual task names from the data. Do not invent data. Do not mention all-time or cumulative totals."""
+IMPORTANT:
+- Lead with contractor hours vs expected and which deliverables/projects consumed the time.
+- Be specific about dollar amounts and hour counts for THIS PERIOD ONLY.
+- Reference actual task/deliverable names from the data. Do not invent clients, projects, or people.
+- Do not mention all-time or cumulative totals.
+- If a contractor is under-logged, say so with their utilization % and expected hours."""
 
     messages = [
         {"role": "system", "content": system_prompt},

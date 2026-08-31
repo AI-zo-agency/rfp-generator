@@ -248,17 +248,70 @@ def expected_hours_for_period(
     return weekly * (elapsed / 7.0)
 
 
+def build_weekly_contractor_breakdown(
+    entries: list[dict[str, Any]],
+    month_start: date,
+    month_end: date,
+    contractor_filter: str | None = None,
+) -> list[dict[str, Any]]:
+    """Hours per contractor for each Mon-start week overlapping the selected month."""
+    want = (contractor_filter or "").strip().lower()
+    if want in ("", "all"):
+        want = ""
+
+    mondays: list[date] = []
+    day = month_start
+    while day <= month_end:
+        if day.weekday() == 0:
+            mondays.append(day)
+        day += timedelta(days=1)
+
+    rows: list[dict[str, Any]] = []
+    for monday in mondays:
+        wstart, wend = week_bounds(monday)
+        clip_start = max(wstart, month_start)
+        clip_end = min(wend, month_end)
+        by_name: dict[str, float] = {}
+        for entry in entries:
+            parsed = parse_entry_date(str(entry.get("date") or ""))
+            if parsed is None or parsed < clip_start or parsed > clip_end:
+                continue
+            if not _kpi_eligible(entry, parsed):
+                continue
+            name = str(entry.get("contractor") or "").strip() or "Unknown"
+            if want and name.lower() != want:
+                continue
+            hrs = float(entry.get("hours") or 0)
+            by_name[name] = by_name.get(name, 0.0) + hrs
+        rows.append(
+            {
+                "start": monday.isoformat(),
+                "end": wend.isoformat(),
+                "label": week_label(monday),
+                "contractors": [
+                    {"name": n, "hours": round(h, 2)}
+                    for n, h in sorted(by_name.items(), key=lambda item: (-item[1], item[0]))
+                ],
+                "total_hours": round(sum(by_name.values()), 2),
+            }
+        )
+    return rows
+
+
 def build_period_signals(insights: dict[str, Any], *, now: datetime | None = None) -> list[dict[str, Any]]:
     signals: list[dict[str, Any]] = []
     selected = insights["selected"]
+    grain = insights.get("granularity") or "week"
+    period_phrase = "this month" if grain == "month" else "this week"
+    vs_prior = "last month" if grain == "month" else "last week"
     spend_pct = (insights.get("delta") or {}).get("spend_pct")
     if spend_pct is not None and spend_pct >= SPEND_SPIKE_PCT:
         signals.append(
             {
                 "id": "iworker:spend_spike",
                 "severity": "cost",
-                "headline": f"Contractor spend is up {spend_pct}% vs last period",
-                "detail": "Review hours mix before this week's invoice.",
+                "headline": f"Contractor spend is up {spend_pct}% vs {vs_prior}",
+                "detail": f"Review hours mix for {period_phrase} before invoicing.",
                 "contractor": None,
             }
         )
@@ -310,8 +363,11 @@ def build_period_signals(insights: dict[str, Any], *, now: datetime | None = Non
                 {
                     "id": f"iworker:underlogged:{name}",
                     "severity": "capacity",
-                    "headline": f"{name} is under-logged this week",
-                    "detail": f"{row['hours']} hrs vs {expected:.1f} expected so far — chase missing logs or reassign.",
+                    "headline": f"{name} is under-logged for {period_phrase}",
+                    "detail": (
+                        f"{row['hours']} hrs logged vs {expected:.1f} hrs expected so far "
+                        f"({util or 0}% utilization) — chase missing logs or reassign."
+                    ),
                     "contractor": name,
                 }
             )
@@ -392,6 +448,11 @@ def build_period_insights(
         "unparsed_date_count": unparsed,
         "expected_hours": round(expected, 2),
     }
+    payload["weekly_in_month"] = (
+        build_weekly_contractor_breakdown(entries, start, end, contractor)
+        if grain == "month"
+        else []
+    )
     payload["signals"] = build_period_signals(payload, now=now)
     logger.info(
         "operation=iworker_period granularity=%s start=%s end=%s contractor=%s hours=%s",

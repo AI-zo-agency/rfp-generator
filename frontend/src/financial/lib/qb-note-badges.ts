@@ -14,7 +14,7 @@ export type NoteBadge =
 
 export type NoteRowKind = "collect" | "margin" | "fix";
 
-export type NoteSource = "quickbooks" | "teamwork" | "agency";
+export type NoteSource = "quickbooks" | "teamwork" | "agency" | "iworker";
 
 /** Rule-based signals from derive_signals (QuickBooks) or build_signals (Teamwork). */
 export function badgeForSignal(
@@ -28,6 +28,12 @@ export function badgeForSignal(
   if (source === "teamwork") {
     if (severity === "critical") return "High impact";
     return severity === "warn" ? "Risk" : "Watch";
+  }
+
+  if (source === "iworker") {
+    if (severity === "critical") return "High impact";
+    if (severity === "warn") return "Risk";
+    return "Watch";
   }
 
   if (source === "agency") {

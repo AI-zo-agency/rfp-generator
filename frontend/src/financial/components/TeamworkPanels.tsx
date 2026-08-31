@@ -9,7 +9,7 @@
  * the same glance.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { RefreshCw, Sparkles } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -21,8 +21,12 @@ import {
   daysUntil,
   describeOverdueHeat,
   formatUsdFromCents,
+  hoursChartAxisMax,
+  hoursChartAxisTicks,
   hoursChartRows,
+  hoursChartTotalLabel,
   hoursLabel,
+  hoursRowBillablePct,
 } from "../lib/teamwork-derive";
 import { parseTeamworkView, type TeamworkViewId } from "../lib/financial-tab";
 import { TeamworkProjects } from "./teamwork/TeamworkProjects";
@@ -193,7 +197,10 @@ function DeliveryLine({
 }
 
 function HoursChart({ data }: { data: TeamworkOverview }) {
-  const { rows, split } = useMemo(() => hoursChartRows(data.time.by_person), [data.time.by_person]);
+  const { rows, split } = useMemo(
+    () => hoursChartRows(data.time.by_person, { limit: null, fullNames: true }),
+    [data.time.by_person],
+  );
   const through = useMemo(() => {
     if (!data.time.period_end) return null;
     return new Date(`${data.time.period_end}T00:00:00Z`).toLocaleDateString("en-US", {
@@ -202,84 +209,173 @@ function HoursChart({ data }: { data: TeamworkOverview }) {
       timeZone: "UTC",
     });
   }, [data.time.period_end]);
-  const total = hoursLabel(data.time.total_minutes);
-  const max = Math.max(...rows.map((row) => row.hours), 1);
+  const periodLabel = useMemo(() => {
+    if (!data.time.period_start) return null;
+    return new Date(`${data.time.period_start}T00:00:00Z`).toLocaleDateString("en-US", {
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+  }, [data.time.period_start]);
+  const totalHoursText = hoursLabel(data.time.total_minutes).replace(/h$/, "");
+  const axisMax = useMemo(
+    () => hoursChartAxisMax(Math.max(...rows.map((row) => row.hours), 0)),
+    [rows],
+  );
+  const axisTicks = useMemo(() => hoursChartAxisTicks(axisMax), [axisMax]);
 
   return (
-    <Panel title="Hours this month" meta={through ? `${total} · Through ${through}` : total}>
+    <Panel
+      title="Hours by Employee"
+      action={periodLabel ? <span className="qb-panel-meta">{periodLabel}</span> : undefined}
+    >
       {rows.length ? (
         <>
-          <div className="qb-legend">
+          <p className="tw-hours-emp__summary">
+            {totalHoursText} total hours
+            {through ? <> · Through {through}</> : null}
+          </p>
+
+          <div className="tw-hours-emp__legend" aria-hidden={false}>
             {split ? (
               <>
                 <span>
-                  <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
-                  Billable
+                  <span className="tw-hours-emp__dot tw-hours-emp__dot--billable" aria-hidden />
+                  Billable hours
                 </span>
                 <span>
-                  <span className="qb-swatch" style={{ background: "var(--zo-orange)" }} aria-hidden />
-                  Non-billable
+                  <span className="tw-hours-emp__dot tw-hours-emp__dot--nb" aria-hidden />
+                  Non-billable hours
                 </span>
               </>
             ) : (
               <span>
-                <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
-                Hours
+                <span className="tw-hours-emp__dot tw-hours-emp__dot--billable" aria-hidden />
+                Hours logged
               </span>
             )}
           </div>
-          <div className="tw-hours" role="img" aria-label={`Hours this month, ${total}`}>
-            {rows.map((row) => (
-              <Tooltip key={row.name} delayDuration={0}>
-                <TooltipTrigger asChild>
-                  <button type="button" className="tw-hours__col">
-                    <div className="tw-hours__track">
+
+          <div
+            className="tw-hours-emp"
+            role="img"
+            aria-label={`Hours by employee, ${totalHoursText} total hours${through ? ` through ${through}` : ""}`}
+          >
+            <div
+              className="tw-hours-emp__scroll"
+              style={{ "--tw-hours-emp-rows": rows.length } as CSSProperties}
+            >
+              {rows.map((row) => {
+                const billablePctRow = hoursRowBillablePct(row.billable, row.hours);
+                return (
+                  <Tooltip key={row.id} delayDuration={0}>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className="tw-hours-emp__row"
+                        aria-label={`${row.name}, ${hoursChartTotalLabel(row.hours)} total${
+                          split
+                            ? `, ${hoursChartTotalLabel(row.billable)} billable, ${billablePctRow}% billable`
+                            : ""
+                        }`}
+                      >
+                        <span className="tw-hours-emp__name" title={row.name}>
+                          {row.name}
+                        </span>
+                        <div className="tw-hours-emp__bar-area">
+                          <div className="tw-hours-emp__grid" aria-hidden>
+                            {axisTicks.slice(1).map((tick) => (
+                              <span
+                                key={tick}
+                                className="tw-hours-emp__grid-line"
+                                style={{ left: `${(tick / axisMax) * 100}%` }}
+                              />
+                            ))}
+                          </div>
+                          <div className="tw-hours-emp__stack">
+                            {split ? (
+                              <>
+                                {row.billable > 0 ? (
+                                  <span
+                                    className="tw-hours-emp__seg tw-hours-emp__seg--billable"
+                                    style={{ width: `${(row.billable / axisMax) * 100}%` }}
+                                  />
+                                ) : null}
+                                {row.nonBillable > 0 ? (
+                                  <span
+                                    className="tw-hours-emp__seg tw-hours-emp__seg--nb"
+                                    style={{ width: `${(row.nonBillable / axisMax) * 100}%` }}
+                                  />
+                                ) : null}
+                              </>
+                            ) : (
+                              <span
+                                className="tw-hours-emp__seg tw-hours-emp__seg--billable"
+                                style={{ width: `${(row.hours / axisMax) * 100}%` }}
+                              />
+                            )}
+                          </div>
+                        </div>
+                        <span className="tw-hours-emp__total">{hoursChartTotalLabel(row.hours)}</span>
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent
+                      side="top"
+                      sideOffset={10}
+                      collisionPadding={16}
+                      className="qb-charttip qb-charttip--comfortable [&_.rotate-45]:hidden"
+                    >
+                      <p className="qb-charttip-title">{row.name}</p>
                       {split ? (
                         <>
-                          <span
-                            className="tw-hours__bar tw-hours__bar--billable"
-                            style={{ height: `${(row.billable / max) * 100}%` }}
-                          />
-                          <span
-                            className="tw-hours__bar tw-hours__bar--nb"
-                            style={{ height: `${(row.nonBillable / max) * 100}%` }}
-                          />
+                          <p className="qb-charttip-row">
+                            <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+                            <span>Billable</span>
+                            <strong>{hoursChartTotalLabel(row.billable)}</strong>
+                          </p>
+                          <p className="qb-charttip-row">
+                            <span className="qb-swatch" style={{ background: "var(--zo-orange)" }} aria-hidden />
+                            <span>Non-billable</span>
+                            <strong>{hoursChartTotalLabel(row.nonBillable)}</strong>
+                          </p>
+                          <div className="qb-charttip-divider" aria-hidden />
+                          <p className="qb-charttip-row">
+                            <span aria-hidden />
+                            <span>Total</span>
+                            <strong>{hoursChartTotalLabel(row.hours)}</strong>
+                          </p>
+                          <p className="qb-charttip-row">
+                            <span aria-hidden />
+                            <span>Billable</span>
+                            <strong>{billablePctRow}%</strong>
+                          </p>
                         </>
                       ) : (
-                        <span
-                          className="tw-hours__bar tw-hours__bar--billable"
-                          style={{ height: `${(row.hours / max) * 100}%` }}
-                        />
+                        <>
+                          <p className="qb-charttip-row">
+                            <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+                            <span>Hours</span>
+                            <strong>{hoursChartTotalLabel(row.hours)}</strong>
+                          </p>
+                        </>
                       )}
-                    </div>
-                    <span className="tw-hours__label">{row.name}</span>
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="top" sideOffset={8} className="qb-charttip [&_.rotate-45]:hidden">
-                  <p className="qb-charttip-title">{row.name}</p>
-                  {split ? (
-                    <>
-                      <p className="qb-charttip-row">
-                        <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
-                        <span>Billable</span>
-                        <strong>{row.billable}h</strong>
-                      </p>
-                      <p className="qb-charttip-row">
-                        <span className="qb-swatch" style={{ background: "var(--zo-orange)" }} aria-hidden />
-                        <span>Non-billable</span>
-                        <strong>{row.nonBillable}h</strong>
-                      </p>
-                    </>
-                  ) : (
-                    <p className="qb-charttip-row">
-                      <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
-                      <span>Hours</span>
-                      <strong>{row.hours}h</strong>
-                    </p>
-                  )}
-                </TooltipContent>
-              </Tooltip>
-            ))}
+                    </TooltipContent>
+                  </Tooltip>
+                );
+              })}
+            </div>
+
+            <div className="tw-hours-emp__axis" aria-hidden>
+              <span className="tw-hours-emp__axis-spacer" />
+              <div className="tw-hours-emp__axis-track">
+                {axisTicks.map((tick) => (
+                  <span key={tick} className="tw-hours-emp__axis-tick">
+                    {tick}h
+                  </span>
+                ))}
+              </div>
+              <span className="tw-hours-emp__axis-spacer tw-hours-emp__axis-spacer--total" />
+            </div>
           </div>
         </>
       ) : (

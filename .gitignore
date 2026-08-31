@@ -40,6 +40,10 @@ token.json
 *.swp
 npm-debug.log*
 
+# Local git worktrees
+.claude/worktrees/
+.worktrees/
+
 # Vercel
 .vercel/
 

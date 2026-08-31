@@ -13,10 +13,10 @@ import {
   type TeamworkViewId,
 } from "../lib/financial-tab";
 import { TabFade } from "./TabFade";
-import { IWorkerTimesheetsTable } from "./IWorkerTimesheetsTable";
-import { AiInsightsPanel, AiInsightsData } from "./AiInsightsPanel";
+import { IWorkerPanels } from "./IWorkerPanels";
+import type { AiInsightsData } from "./AiInsightsPanel";
 import type { IWorkerTimesheetsResponse, PeriodGranularity } from "../types/iworker";
-import { AuditQueueTable, AuditItem } from "./AuditQueueTable";
+import { AuditItem } from "./AuditQueueTable";
 import { DataSourcesGrid, DataSource } from "./DataSourcesGrid";
 import { QuickBooksPanels } from "./QuickBooksPanels";
 import { TeamworkPanels } from "./TeamworkPanels";
@@ -145,15 +145,10 @@ export function FinancialInsightsClient({
 
   // Audit flags come from the timesheet cache filled by the iWorker tab.
   useEffect(() => {
-    if (activeTab !== "ai") return;
-    void fetchAuditQueue();
-  }, [activeTab, fetchAuditQueue]);
-
-  // After iWorker loads or period changes, refresh audit for the AI tab.
-  useEffect(() => {
+    if (activeTab !== "iworker") return;
     if (!iworkerData) return;
     void fetchAuditQueue();
-  }, [iworkerData, granularity, periodStart, fetchAuditQueue]);
+  }, [activeTab, iworkerData, granularity, periodStart, fetchAuditQueue]);
 
   const selectTab = (id: FinancialTabId) => {
     setActiveTab(id);
@@ -199,7 +194,6 @@ export function FinancialInsightsClient({
       throw new Error("Failed to generate AI insights");
     }
     const data = await res.json();
-    // Cache the result so switching tabs doesn't lose it
     setAiInsights(data);
     return data;
   };
@@ -217,33 +211,22 @@ export function FinancialInsightsClient({
   };
 
   let iworkerPanel = null;
-  if (isContractorLoading && !iworkerData) {
+  if (activeTab === "iworker") {
     iworkerPanel = (
-      <div className="flex h-96 w-full items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-10 w-10 animate-spin rounded-full border-4 border-[#3C5A56] border-t-transparent"></div>
-          <p className="text-xs text-zo-text-muted font-medium animate-pulse">Loading iWorker timesheets...</p>
-        </div>
-      </div>
-    );
-  } else if (iworkerData) {
-    iworkerPanel = (
-      <IWorkerTimesheetsTable
-        contractor={iworkerData.contractor}
-        source={iworkerData.source}
-        tabs={iworkerData.tabs}
+      <IWorkerPanels
+        iworkerData={iworkerData}
+        isLoading={isContractorLoading}
         selectedContractor={selectedContractor}
         onSelectContractor={handleSelectContractor}
-        isLoadingContractor={isContractorLoading}
-        summary={iworkerData.summary}
-        timesheets={iworkerData.timesheets}
-        periodInsights={iworkerData.period_insights}
-        periodHistory={iworkerData.period_history}
         granularity={granularity}
         onGranularityChange={handleGranularityChange}
         onPeriodStartChange={handlePeriodStartChange}
         periodFilterEnabled={periodFilterEnabled}
         onTogglePeriodFilter={handleTogglePeriodFilter}
+        auditItems={auditItems}
+        aiInsights={aiInsights}
+        onFetchAiInsights={handleFetchAiInsights}
+        onResolveAuditItem={handleResolveAuditItem}
       />
     );
   }
@@ -311,24 +294,6 @@ export function FinancialInsightsClient({
               id="financial-panel-iworker"
             >
               {iworkerPanel}
-            </TabFade>
-
-            <TabFade
-              active={activeTab === "ai"}
-              className="min-h-0 flex-1 overflow-auto"
-              id="financial-panel-ai"
-            >
-              <div className="space-y-8">
-                <AiInsightsPanel
-                  onFetchAiInsights={handleFetchAiInsights}
-                  persistedInsights={aiInsights}
-                  onInsightsGenerated={setAiInsights}
-                />
-                <AuditQueueTable
-                  initialAuditItems={auditItems}
-                  onResolveItem={handleResolveAuditItem}
-                />
-              </div>
             </TabFade>
 
             <TabFade

@@ -8,7 +8,6 @@ import {
   FolderKanban,
   LayoutDashboard,
   PanelLeft,
-  Sparkles,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -47,14 +46,8 @@ export const FINANCIAL_TABS: FinancialNavTab[] = [
   {
     id: "iworker",
     label: "iWorker Ingestion & Logs",
-    hint: "Timesheets and contractor spend",
+    hint: "Timesheets, contractor spend, and AI audit",
     Icon: Clock3,
-  },
-  {
-    id: "ai",
-    label: "AI Audit Queue & Insights",
-    hint: "Exceptions waiting for review",
-    Icon: Sparkles,
   },
   {
     id: "sources",

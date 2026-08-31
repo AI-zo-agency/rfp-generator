@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ArrowRight,
   ArrowUp,
@@ -60,6 +60,10 @@ interface Props {
   /** Navigate the ledger underneath, then close. */
   onGo: (view: string) => void;
   chrome?: DrawerChrome;
+  /** Hide the chat composer (iWorker has no chat endpoint yet). */
+  showChat?: boolean;
+  /** Extra content below cards — e.g. audit queue with resolve actions. */
+  feedExtra?: ReactNode;
 }
 
 export function AiIntelligenceDrawer({
@@ -69,6 +73,8 @@ export function AiIntelligenceDrawer({
   chat,
   onGo,
   chrome = QUICKBOOKS_CHROME,
+  showChat = true,
+  feedExtra,
 }: Props) {
   const { data, cards, counts, loaded, busy, error, regenerate } = insights;
   const [filter, setFilter] = useState<NoteBadge | null>(null);
@@ -275,6 +281,8 @@ export function AiIntelligenceDrawer({
             </p>
           ) : null}
 
+          {feedExtra}
+
           {chat.turns.length || chat.busy ? (
             <div className="qb-ai-turns">
               {chat.turns.map((turn) => (
@@ -297,6 +305,7 @@ export function AiIntelligenceDrawer({
           <div ref={feedEnd} />
         </div>
 
+        {showChat ? (
         <div className="qb-ai-composer">
           {!chat.turns.length && !chat.busy ? (
             <div className="qb-ai-seeds">
@@ -351,6 +360,7 @@ export function AiIntelligenceDrawer({
             is not saved.
           </p>
         </div>
+        ) : null}
       </aside>
     </>
   );

@@ -56,6 +56,19 @@ export interface PeriodHistoryPoint {
   scope_risk_usd: number;
 }
 
+export interface PeriodWeeklyInMonthContractor {
+  name: string;
+  hours: number;
+}
+
+export interface PeriodWeeklyInMonth {
+  start: string;
+  end: string;
+  label: string;
+  contractors: PeriodWeeklyInMonthContractor[];
+  total_hours: number;
+}
+
 export interface PeriodInsights {
   timezone: string;
   granularity: PeriodGranularity;
@@ -68,6 +81,7 @@ export interface PeriodInsights {
   signals: PeriodSignal[];
   available_periods: PeriodWindow[];
   expected_hours: number;
+  weekly_in_month: PeriodWeeklyInMonth[];
 }
 
 export interface IWorkerTabMeta {

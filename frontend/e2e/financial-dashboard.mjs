@@ -22,7 +22,6 @@ const TABS = [
   { id: "quickbooks", label: /QuickBooks/i },
   { id: "teamwork", label: /Teamwork/i },
   { id: "iworker", label: /iWorker/i },
-  { id: "ai", label: /AI Audit|Insights/i },
   { id: "sources", label: /Data Sources/i },
 ];
 
