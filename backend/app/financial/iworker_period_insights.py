@@ -134,3 +134,165 @@ def build_period_metrics(
         },
         unparsed,
     )
+
+
+def pct_delta(current: float, previous: float) -> float | None:
+    if previous == 0:
+        return None
+    return round(((current - previous) / previous) * 100.0, 1)
+
+
+def _period_window(
+    granularity: str, day: date
+) -> tuple[date, date, date, date, str, str]:
+    if granularity == "month":
+        start, end = month_bounds(day)
+        prev_start, prev_end = previous_month_bounds(day)
+        return start, end, prev_start, prev_end, month_label(start), month_label(prev_start)
+    start, end = week_bounds(day)
+    prev_start, prev_end = previous_week_bounds(day)
+    return start, end, prev_start, prev_end, week_label(start), week_label(prev_start)
+
+
+def _resolve_selected_day(granularity: str, period_start: str | None, today: date) -> date:
+    if not period_start:
+        return today
+    try:
+        return date.fromisoformat(period_start)
+    except ValueError:
+        logger.warning("operation=iworker_period status=invalid_period_start value=%s", period_start)
+        return today
+
+
+def _available_periods(entries: list[dict[str, Any]], granularity: str, current_start: date) -> list[dict[str, str]]:
+    starts: set[date] = {current_start}
+    for entry in entries:
+        parsed = parse_entry_date(str(entry.get("date") or ""))
+        if parsed is None or not _kpi_eligible(entry, parsed):
+            continue
+        start, _ = week_bounds(parsed) if granularity != "month" else month_bounds(parsed)
+        starts.add(start)
+    rows = []
+    for start in sorted(starts, reverse=True):
+        end = week_bounds(start)[1] if granularity != "month" else month_bounds(start)[1]
+        label = week_label(start) if granularity != "month" else month_label(start)
+        rows.append({"start": start.isoformat(), "end": end.isoformat(), "label": label})
+    return rows
+
+
+def _contractor_names(entries: list[dict[str, Any]]) -> list[str]:
+    names = []
+    seen = set()
+    for entry in entries:
+        name = str(entry.get("contractor") or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    return names
+
+
+def _contractor_rate(entries: list[dict[str, Any]], name: str) -> float:
+    want = name.lower()
+    for entry in entries:
+        if str(entry.get("contractor") or "").strip().lower() != want:
+            continue
+        try:
+            return float(entry.get("rate") or 0)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def load_expected_hours_map() -> dict[str, float]:
+    return {}
+
+
+def expected_hours_for_period(*_a, **_k) -> float:
+    return DEFAULT_WEEKLY_EXPECTED_HOURS
+
+
+def build_period_signals(insights: dict[str, Any], *, now: datetime | None = None) -> list[dict[str, Any]]:
+    return []
+
+
+def build_period_insights(
+    entries: list[dict[str, Any]],
+    *,
+    granularity: str = "week",
+    period_start: str | None = None,
+    contractor: str | None = None,
+    now: datetime | None = None,
+    expected_hours_by_contractor: dict[str, float] | None = None,
+    timezone_name: str | None = None,
+) -> dict[str, Any]:
+    grain = "month" if granularity == "month" else "week"
+    tz_name = timezone_name or DEFAULT_TZ_NAME
+    today = today_in_tz(now, tz_name)
+    selected_day = _resolve_selected_day(grain, period_start, today)
+    start, end, prev_start, prev_end, label, prev_label = _period_window(grain, selected_day)
+    current_start, _ = _period_window(grain, today)[:2]
+    current, unparsed = build_period_metrics(entries, start, end, contractor)
+    previous, _ = build_period_metrics(entries, prev_start, prev_end, contractor)
+    expected_map = expected_hours_by_contractor or load_expected_hours_map()
+    expected = expected_hours_for_period(
+        grain, start, end, today, DEFAULT_WEEKLY_EXPECTED_HOURS, contractor, expected_map
+    )
+    contractors = []
+    names = [contractor] if contractor and contractor.lower() != "all" else _contractor_names(entries)
+    for name in names:
+        cur, _ = build_period_metrics(entries, start, end, name)
+        prev, _ = build_period_metrics(entries, prev_start, prev_end, name)
+        exp = expected_hours_for_period(grain, start, end, today, DEFAULT_WEEKLY_EXPECTED_HOURS, name, expected_map)
+        util = round((cur["hours"] / exp) * 100.0, 1) if exp else None
+        contractors.append(
+            {
+                "name": name,
+                "rate": _contractor_rate(entries, name),
+                "hours": cur["hours"],
+                "spend_usd": cur["spend_usd"],
+                "scope_risk_usd": cur["scope_risk_usd"],
+                "expected_hours": round(exp, 2),
+                "utilization_pct": util,
+                "hours_delta_pct": pct_delta(cur["hours"], prev["hours"]),
+                "spend_delta_pct": pct_delta(cur["spend_usd"], prev["spend_usd"]),
+            }
+        )
+    payload = {
+        "timezone": tz_name,
+        "granularity": grain,
+        "selected": {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "label": label,
+            "is_current": start == current_start,
+        },
+        "previous": {
+            "start": prev_start.isoformat(),
+            "end": prev_end.isoformat(),
+            "label": prev_label,
+        },
+        "current": current,
+        "previous_metrics": previous,
+        "delta": {
+            "hours_pct": pct_delta(current["hours"], previous["hours"]),
+            "spend_pct": pct_delta(current["spend_usd"], previous["spend_usd"]),
+            "scope_risk_pct": pct_delta(current["scope_risk_usd"], previous["scope_risk_usd"]),
+        },
+        "contractors": contractors,
+        "signals": [],
+        "available_periods": _available_periods(entries, grain, current_start),
+        "unparsed_date_count": unparsed,
+        "expected_hours": round(expected, 2),
+    }
+    payload["signals"] = build_period_signals(payload, now=now)
+    logger.info(
+        "operation=iworker_period granularity=%s start=%s end=%s contractor=%s hours=%s",
+        grain,
+        start.isoformat(),
+        end.isoformat(),
+        contractor or "all",
+        current["hours"],
+    )
+    return payload

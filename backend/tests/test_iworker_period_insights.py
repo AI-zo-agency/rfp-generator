@@ -1,6 +1,8 @@
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from app.financial.iworker_period_insights import (
+    build_period_insights,
     build_period_metrics,
     month_bounds,
     month_label,
@@ -8,6 +10,9 @@ from app.financial.iworker_period_insights import (
     week_bounds,
     week_label,
 )
+
+PT = ZoneInfo("America/Los_Angeles")
+NOW = datetime(2026, 5, 13, 15, 0, tzinfo=PT)
 
 
 def test_parse_entry_date_sheet_format():
@@ -99,3 +104,56 @@ def test_contractor_filter():
     )
     assert metrics["hours"] == 1.0
     assert metrics["active_contractors"] == 1
+
+
+def test_wow_compares_to_previous_full_week():
+    entries = [
+        _entry(date="May 13, 2026", hours=10.0, amount=100.0),
+        _entry(date="May 6, 2026", hours=8.0, amount=80.0),
+    ]
+    out = build_period_insights(entries, granularity="week", now=NOW)
+    assert out["selected"]["start"] == "2026-05-11"
+    assert out["selected"]["end"] == "2026-05-17"
+    assert out["selected"]["is_current"] is True
+    assert out["current"]["hours"] == 10.0
+    assert out["previous_metrics"]["hours"] == 8.0
+    assert out["delta"]["hours_pct"] == 25.0
+
+
+def test_mom_compares_to_previous_full_month():
+    entries = [
+        _entry(date="May 5, 2026", hours=4.0, amount=40.0),
+        _entry(date="April 10, 2026", hours=8.0, amount=80.0),
+    ]
+    out = build_period_insights(entries, granularity="month", now=NOW)
+    assert out["selected"]["start"] == "2026-05-01"
+    assert out["current"]["hours"] == 4.0
+    assert out["previous_metrics"]["hours"] == 8.0
+    assert out["delta"]["hours_pct"] == -50.0
+
+
+def test_null_previous_yields_null_deltas():
+    entries = [_entry(date="May 13, 2026", hours=2.0, amount=20.0)]
+    out = build_period_insights(entries, granularity="week", now=NOW)
+    assert out["previous_metrics"]["hours"] == 0.0
+    assert out["delta"]["hours_pct"] is None
+
+
+def test_period_start_snaps_to_monday():
+    entries = [_entry(date="May 6, 2026", hours=3.0, amount=30.0)]
+    out = build_period_insights(
+        entries, granularity="week", period_start="2026-05-07", now=NOW
+    )
+    assert out["selected"]["start"] == "2026-05-04"
+    assert out["current"]["hours"] == 3.0
+
+
+def test_contractor_rows_include_weekend():
+    entries = [
+        _entry(contractor="Murilo", date="May 16, 2026", hours=3.0, amount=37.5, rate=12.5),
+        _entry(contractor="Murilo", date="May 9, 2026", hours=2.0, amount=25.0, rate=12.5),
+    ]
+    out = build_period_insights(entries, granularity="week", now=NOW)
+    row = next(c for c in out["contractors"] if c["name"] == "Murilo")
+    assert row["hours"] == 3.0
+    assert row["hours_delta_pct"] == 50.0
