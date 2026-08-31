@@ -78,3 +78,59 @@ def week_label(monday: date) -> str:
 
 def month_label(start: date) -> str:
     return start.strftime("%B %Y")
+
+
+def _kpi_eligible(entry: dict[str, Any], parsed: date | None) -> bool:
+    if parsed is None:
+        return False
+    return float(entry.get("hours") or 0) > 0
+
+
+def build_period_metrics(
+    entries: list[dict[str, Any]],
+    start: date,
+    end: date,
+    contractor_filter: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    hours = 0.0
+    spend = 0.0
+    scope = 0.0
+    count = 0
+    contractors: set[str] = set()
+    unparsed = 0
+    want = (contractor_filter or "").strip().lower()
+    if want in ("", "all"):
+        want = ""
+
+    for entry in entries:
+        parsed = parse_entry_date(str(entry.get("date") or ""))
+        if parsed is None:
+            unparsed += 1
+            continue
+        name = str(entry.get("contractor") or "").strip()
+        if want and name.lower() != want:
+            continue
+        if parsed < start or parsed > end:
+            continue
+        if not _kpi_eligible(entry, parsed):
+            continue
+        hrs = float(entry.get("hours") or 0)
+        amt = float(entry.get("amount") or 0)
+        hours += hrs
+        spend += amt
+        count += 1
+        if name:
+            contractors.add(name)
+        if (entry.get("ai_classification") or {}).get("is_over_scope"):
+            scope += amt
+
+    return (
+        {
+            "hours": round(hours, 2),
+            "spend_usd": round(spend, 2),
+            "scope_risk_usd": round(scope, 2),
+            "entries_count": count,
+            "active_contractors": len(contractors),
+        },
+        unparsed,
+    )
