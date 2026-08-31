@@ -32,6 +32,7 @@ export interface AiInsightsData {
     active_entries: number;
     over_scope_spend: number;
     over_scope_items: number;
+    period_label?: string;
   };
 }
 
@@ -214,6 +215,7 @@ export function AiInsightsPanel({
               {insights.stats && (
                 <>
                   <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 border border-blue-200 px-3 py-1 text-xs font-semibold text-blue-600">
+                    {insights.stats.period_label ? `${insights.stats.period_label} · ` : ""}
                     {insights.stats.active_entries} sessions · {insights.stats.total_hours} hrs · ${insights.stats.total_spend.toFixed(2)}
                   </span>
                   {insights.stats.over_scope_spend > 0 && (
