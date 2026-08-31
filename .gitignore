@@ -56,5 +56,5 @@ PRODUCT.md
 DESIGN.md
 .impeccable/
 
-# Claude Code worktrees (isolated workspaces)
-.claude/worktrees/
+# Playwright artifacts
+frontend/e2e/artifacts/

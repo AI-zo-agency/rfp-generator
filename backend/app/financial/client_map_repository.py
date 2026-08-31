@@ -41,11 +41,18 @@ def list_client_map(
         query = query.eq("link_confidence", confidence)
     if status:
         query = query.eq("status", status)
-    if q:
-        needle = f"%{q.strip()}%"
-        query = query.or_(f"client_name.ilike.{needle},tag_code.ilike.{needle}")
     result = query.order("tag_code").order("client_name").execute()
     rows = _rows(result.data)
+    if q:
+        needle = q.strip().casefold()
+        if needle:
+            # ponytail: in-memory filter avoids PostgREST or_() injection; upgrade when map >>1k rows
+            rows = [
+                row
+                for row in rows
+                if needle in (row.get("client_name") or "").casefold()
+                or needle in (row.get("tag_code") or "").casefold()
+            ]
     logger.info(
         "operation=list_client_map confidence=%s status=%s q=%s row_count=%s",
         confidence,
@@ -169,6 +176,20 @@ def upsert_job_override(payload: dict[str, Any]) -> dict[str, Any]:
         (upserted or {}).get("id"),
     )
     return upserted or row
+
+
+def get_job_override_row(row_id: str) -> dict[str, Any] | None:
+    result = (
+        _get_client()
+        .table(_JOB_OVERRIDE_TABLE)
+        .select("*")
+        .eq("id", row_id)
+        .limit(1)
+        .execute()
+    )
+    row = _first(result.data)
+    logger.info("operation=get_job_override_row row_id=%s found=%s", row_id, row is not None)
+    return row
 
 
 def delete_job_override(row_id: str) -> None:

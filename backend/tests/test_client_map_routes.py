@@ -9,6 +9,7 @@ from app.financial import router as fin_router
 from app.main import app
 
 client = TestClient(app)
+PATCH_ROW_ID = "6aaec310-4b9f-4a61-8e66-b81387bf2097"
 
 
 @pytest.fixture(autouse=True)
@@ -88,12 +89,12 @@ def test_patch_client_map_promotes_suggestion(monkeypatch):
     )
 
     response = client.patch(
-        "/api/v1/financials/client-map/cm-1",
+        f"/api/v1/financials/client-map/{PATCH_ROW_ID}",
         json={"link_confidence": "confirmed"},
     )
 
     assert response.status_code == 200
-    assert calls == [("cm-1", {"link_confidence": "confirmed"})]
+    assert calls == [(PATCH_ROW_ID, {"link_confidence": "confirmed"})]
     assert response.json()["link_confidence"] == "confirmed"
 
 
@@ -113,12 +114,12 @@ def test_patch_client_map_reject_clears_qb(monkeypatch):
     }
 
     response = client.patch(
-        "/api/v1/financials/client-map/cm-1",
+        f"/api/v1/financials/client-map/{PATCH_ROW_ID}",
         json=clears,
     )
 
     assert response.status_code == 200
-    assert calls == [("cm-1", clears)]
+    assert calls == [(PATCH_ROW_ID, clears)]
 
 
 def test_post_client_map_link_runs_requested_passes(monkeypatch):

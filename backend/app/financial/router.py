@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 import logging
 from app.financial import google_sheets, ai_classifier
 from app.financial.ai_insights_repository import get_insight, get_latest_insight
@@ -25,6 +25,7 @@ from app.financial.client_map_repository import (
     delete_client_map,
     delete_job_override,
     get_client_map as get_client_map_row,
+    get_job_override_row,
     insert_client_map,
     list_client_map,
     list_job_overrides,
@@ -545,13 +546,24 @@ def _build_audit_items_from_timesheets() -> list[dict]:
     items.sort(key=lambda x: order.get(x["severity"], 9))
     return items
 
+ChecklistStatus = Literal["Pending", "In Progress", "Completed", "Blocked"]
+
+
 class ChecklistStatusUpdate(BaseModel):
     id: int
-    status: str
+    status: ChecklistStatus
+
 
 class AuditResolveRequest(BaseModel):
-    id: str
-    action: str
+    id: str = Field(..., min_length=1)
+    action: str = Field(..., min_length=1)
+
+
+def _require_uuid(row_id: str) -> str:
+    try:
+        return str(uuid.UUID(row_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid row id") from exc
 
 @router.get("/iworker-timesheets")
 def get_iworker_timesheets(
@@ -895,7 +907,7 @@ def teamwork_ai_insights_regenerate():
 
 
 class TeamworkChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=2000)
     thread_id: Optional[str] = None
     focus_id: Optional[str] = None
     messages: List[Dict[str, str]] = []
@@ -952,8 +964,8 @@ LinkConfidence = Literal["confirmed", "suggested", "unmatched"]
 
 
 class ClientMapCreate(BaseModel):
-    tag_code: str
-    client_name: str
+    tag_code: str = Field(..., min_length=1)
+    client_name: str = Field(..., min_length=1)
     qb_customer_ids: list[str] = Field(default_factory=list)
     qb_customer_names: list[str] = Field(default_factory=list)
     teamwork_company_ids: list[int] = Field(default_factory=list)
@@ -968,6 +980,14 @@ class ClientMapCreate(BaseModel):
     link_confidence: LinkConfidence = "unmatched"
     link_reason: str | None = None
     notes: str | None = None
+
+    @field_validator("tag_code", "client_name")
+    @classmethod
+    def strip_non_empty(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("must not be empty")
+        return cleaned
 
 
 class ClientMapPatch(BaseModel):
@@ -990,6 +1010,8 @@ class ClientMapPatch(BaseModel):
 
 
 class ClientMapLinkBody(BaseModel):
+    model_config = ConfigDict(strict=True)
+
     include_ai: bool = True
 
 
@@ -1259,7 +1281,7 @@ def agency_ai_insights_generate(request: Request):
 
 
 class AgencyChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=2000)
     thread_id: Optional[str] = None
     focus_id: Optional[str] = None
     messages: List[Dict[str, str]] = []
@@ -1378,6 +1400,9 @@ def create_client_map_job_override(payload: JobOverrideUpsert):
 
 @router.delete("/client-map/job-overrides/{row_id}")
 def remove_client_map_job_override(row_id: str):
+    row_id = _require_uuid(row_id)
+    if get_job_override_row(row_id) is None:
+        raise HTTPException(status_code=404, detail="Job override not found")
     delete_job_override(row_id)
     logger.info("operation=client_map_job_override_delete row_id=%s", row_id)
     return {"deleted": True, "id": row_id}
@@ -1385,6 +1410,7 @@ def remove_client_map_job_override(row_id: str):
 
 @router.patch("/client-map/{row_id}")
 def patch_client_map(row_id: str, payload: ClientMapPatch):
+    row_id = _require_uuid(row_id)
     row = update_client_map(row_id, payload.model_dump(exclude_unset=True))
     if row is None:
         raise HTTPException(status_code=404, detail="Client map row not found")
@@ -1394,6 +1420,9 @@ def patch_client_map(row_id: str, payload: ClientMapPatch):
 
 @router.delete("/client-map/{row_id}")
 def remove_client_map(row_id: str):
+    row_id = _require_uuid(row_id)
+    if get_client_map_row(row_id) is None:
+        raise HTTPException(status_code=404, detail="Client map row not found")
     delete_client_map(row_id)
     logger.info("operation=client_map_delete row_id=%s", row_id)
     return {"deleted": True, "id": row_id}
@@ -1533,7 +1562,7 @@ def _load_overview(year: int) -> dict[str, Any]:
 
 @router.get("/quickbooks/overview")
 def quickbooks_overview(
-    year: int = Query(default_factory=lambda: datetime.now().year),
+    year: int = Query(default_factory=lambda: datetime.now().year, ge=2000, le=2100),
     since: Optional[str] = Query(None, description="ISO timestamp for the activity feed"),
     refresh: bool = Query(False, description="Deprecated; snapshots refresh during sync"),
 ):
@@ -1688,7 +1717,7 @@ def quickbooks_ai_insights_regenerate():
 
 
 class QbChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=2000)
     # Absent on the first question of a conversation; the server mints one.
     thread_id: Optional[str] = None
     # The note card the reader pinned, if any.
@@ -1728,7 +1757,7 @@ async def quickbooks_ai_insights_chat(payload: QbChatRequest):
 
 
 @router.get("/quickbooks/ai-insights/chat/cost")
-def quickbooks_ai_insights_chat_cost(thread_id: str = Query(...)):
+def quickbooks_ai_insights_chat_cost(thread_id: str = Query(..., min_length=1)):
     """This thread's LLM spend. Reads financial_llm_calls, never llm_call_log."""
     return financial_llm_cost.thread_breakdown(thread_id)
 
@@ -1741,6 +1770,9 @@ def get_audit_queue():
 
 @router.post("/audit-queue/resolve")
 def resolve_audit_item(payload: AuditResolveRequest):
+    known_ids = {item["id"] for item in _build_audit_items_from_timesheets()}
+    if payload.id not in known_ids:
+        raise HTTPException(status_code=404, detail="Audit item not found")
     _AUDIT_RESOLUTIONS[payload.id] = f"Resolved ({payload.action})"
     logger.info(f"[AUDIT] Resolved item {payload.id!r} with action={payload.action!r}")
     return {"success": True, "id": payload.id, "status": _AUDIT_RESOLUTIONS[payload.id]}
