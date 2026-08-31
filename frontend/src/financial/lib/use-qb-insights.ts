@@ -196,6 +196,8 @@ export interface QbInsights {
   busy: boolean;
   error: string | null;
   regenerate: () => Promise<void>;
+  /** Selected period label (iWorker drawer empty state). */
+  periodLabel?: string | null;
 }
 
 /**

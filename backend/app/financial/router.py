@@ -831,8 +831,26 @@ def iworker_sync(request: Request):
     data = get_iworker_timesheets(persist_snapshots=True)
     meta = data.get("meta") or {}
     upserted = meta.get("snapshot_upserted")
-    logger.info("operation=iworker_sync status=completed snapshot_upserted=%s", upserted)
-    return {"status": "ok", "snapshot_upserted": upserted, "spreadsheet_id": meta.get("spreadsheet_id")}
+    insight_status = "skipped"
+    try:
+        result = asyncio.run(
+            generate_ai_financial_insights(granularity="week", period_start=None),
+        )
+        insight_status = "ok" if result.get("stored") else "failed"
+    except Exception:  # noqa: BLE001 — insight generation must not fail the sync
+        logger.exception("operation=iworker_sync step=ai_insights status=failed")
+        insight_status = "failed"
+    logger.info(
+        "operation=iworker_sync status=completed snapshot_upserted=%s ai_insight_status=%s",
+        upserted,
+        insight_status,
+    )
+    return {
+        "status": "ok",
+        "snapshot_upserted": upserted,
+        "spreadsheet_id": meta.get("spreadsheet_id"),
+        "ai_insight_status": insight_status,
+    }
 
 
 @router.get("/checklist")

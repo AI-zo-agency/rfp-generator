@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AiInsightsData } from "../components/AiInsightsPanel";
 import type { AuditItem } from "../components/AuditQueueTable";
@@ -140,36 +140,43 @@ export function useIworkerInsights(
   periodInsights: PeriodInsights | undefined,
   auditItems: AuditItem[],
   granularity: PeriodGranularity,
-  periodStart: string | null,
 ): QbInsights {
   const [aiInsights, setAiInsights] = useState<AiInsightsData | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const requestGen = useRef(0);
+
+  const periodKey = periodInsights?.selected.start ?? null;
+  const periodLabel = periodInsights?.selected.label ?? null;
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ granularity });
-    if (periodStart) params.set("period_start", periodStart);
+    if (periodKey) params.set("period_start", periodKey);
     return params.toString();
-  }, [granularity, periodStart]);
+  }, [granularity, periodKey]);
 
   const load = useCallback(async () => {
-    if (!periodInsights) return;
+    if (!periodKey) return;
+    const gen = ++requestGen.current;
     try {
       const res = await fetch(`${API_BASE}/api/v1/financials/iworker/ai-insights?${query}`);
       if (!res.ok) throw new Error(`${res.status}`);
       const raw = await res.json();
+      if (gen !== requestGen.current) return;
       setAiInsights(isAiInsightsPayload(raw) ? raw : null);
       setError(null);
     } catch {
+      if (gen !== requestGen.current) return;
       setError("Couldn't load insights.");
       setAiInsights(null);
     } finally {
-      setLoaded(true);
+      if (gen === requestGen.current) setLoaded(true);
     }
-  }, [periodInsights, query]);
+  }, [query, periodKey]);
 
   useEffect(() => {
+    setAiInsights(null);
     setLoaded(false);
     void load();
   }, [load]);
@@ -195,6 +202,7 @@ export function useIworkerInsights(
   const highImpact = counts.find((c) => c.badge === "High impact")?.count ?? 0;
 
   const regenerate = useCallback(async () => {
+    const gen = ++requestGen.current;
     setBusy(true);
     setError(null);
     try {
@@ -204,15 +212,18 @@ export function useIworkerInsights(
       );
       if (!res.ok) throw new Error(`${res.status}`);
       const raw = await res.json();
+      if (gen !== requestGen.current) return;
       if (!isAiInsightsPayload(raw)) throw new Error("invalid payload");
       setAiInsights(raw);
+      setLoaded(true);
       if (raw.generated === "failed" || raw.stored === false) {
         setError("Brief generated but could not be saved. It will disappear on refresh.");
       }
     } catch {
+      if (gen !== requestGen.current) return;
       setError("Couldn't generate a new brief. The flags below are still current.");
     } finally {
-      setBusy(false);
+      if (gen === requestGen.current) setBusy(false);
     }
   }, [query]);
 
@@ -221,9 +232,10 @@ export function useIworkerInsights(
     cards,
     counts,
     highImpact,
-    loaded: loaded && Boolean(periodInsights),
+    loaded: loaded && Boolean(periodKey),
     busy,
     error,
     regenerate,
+    periodLabel,
   };
 }

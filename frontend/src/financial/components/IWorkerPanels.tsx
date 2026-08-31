@@ -67,7 +67,6 @@ export function IWorkerPanels({
     iworkerData?.period_insights,
     auditItems,
     granularity,
-    periodStart,
   );
 
   if (isLoading && !iworkerData) {

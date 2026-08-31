@@ -76,7 +76,7 @@ export function AiIntelligenceDrawer({
   showChat = true,
   feedExtra,
 }: Props) {
-  const { data, cards, counts, loaded, busy, error, regenerate } = insights;
+  const { data, cards, counts, loaded, busy, error, regenerate, periodLabel } = insights;
   const [filter, setFilter] = useState<NoteBadge | null>(null);
   const [pinned, setPinned] = useState<NoteCard | null>(null);
   const [draft, setDraft] = useState("");
@@ -212,9 +212,11 @@ export function AiIntelligenceDrawer({
             <p className="qb-ai-brief">{data.brief}</p>
           ) : loaded ? (
             <p className="qb-ai-empty">
-              {data?.cadence === "weekly"
-                ? "No weekly brief yet. Monday's job writes one, or generate it now."
-                : "No brief yet. The nightly sync writes one, or generate it now."}
+              {periodLabel
+                ? `No brief for ${periodLabel} yet. Generate one now, or use the arrows to pick a week with logged hours.`
+                : data?.cadence === "weekly"
+                  ? "No weekly brief yet. Monday's job writes one, or generate it now."
+                  : "No brief yet. The nightly sync writes one, or generate it now."}
             </p>
           ) : null}
 
