@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Instrument_Serif } from "next/font/google";
 import { motion } from "motion/react";
 import { ZoLogo } from "@/components/ZoLogo";
 import {
@@ -13,12 +12,6 @@ import {
   IconRfp,
 } from "@/components/ui/icons";
 import { expoOutEase } from "@/lib/motion";
-
-const chooseSerif = Instrument_Serif({
-  weight: "400",
-  subsets: ["latin"],
-  display: "swap",
-});
 
 interface StoredUser {
   email?: string;
@@ -95,9 +88,7 @@ export default function ChooseWorkspacePage() {
           transition={{ duration: 0.5, ease: expoOutEase }}
           className="mb-10 md:mb-14"
         >
-          <h1
-            className={`${chooseSerif.className} text-3xl leading-[1.05] tracking-tight text-foreground sm:text-4xl md:text-[3.25rem]`}
-          >
+          <h1 className="font-heading text-3xl leading-tight text-foreground sm:text-4xl md:text-[3.25rem]">
             {name ? `Welcome back, ${name}.` : "Welcome back."}
           </h1>
           <p className="mt-3 max-w-xl text-base leading-7 text-zo-text-muted md:text-lg">
@@ -207,9 +198,7 @@ function WorkspaceCard({
           {icon}
         </div>
 
-        <h2
-          className={`${chooseSerif.className} text-2xl leading-[1.1] tracking-tight text-[#0a0f1a] sm:text-[1.75rem]`}
-        >
+        <h2 className="font-heading text-2xl leading-tight text-[#0a0f1a] sm:text-[1.75rem]">
           {title}
         </h2>
 
