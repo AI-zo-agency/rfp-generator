@@ -30,6 +30,63 @@ def test_audit_queue_skips_iworker_when_cache_empty(monkeypatch):
     assert get_audit_queue() == {"audit_items": []}
 
 
+def test_audit_queue_filters_to_selected_week(monkeypatch):
+    from app.financial import router
+
+    payload = {
+        "timesheets": [
+            {
+                "date": "May 13, 2026",
+                "hours": 9.0,
+                "amount": 90.0,
+                "task": "Huge May task",
+                "ai_classification": {"is_over_scope": False, "topic": "Huge May task", "work_category": "Unknown"},
+            },
+            {
+                "date": "Nov 12, 2025",
+                "hours": 9.0,
+                "amount": 90.0,
+                "task": "Huge Nov task",
+                "ai_classification": {"is_over_scope": True, "topic": "Huge Nov task", "detected_round": 3, "ai_reasoning": "R3"},
+            },
+        ]
+    }
+    monkeypatch.setattr(router, "_TIMESHEET_CACHE", {"default": (0.0, payload)})
+    items = get_audit_queue(granularity="week", period_start="2026-05-11")["audit_items"]
+    reasons = " ".join(i["reason"] for i in items)
+    assert "Huge May task" in reasons
+    assert "Huge Nov task" not in reasons
+
+
+def test_audit_queue_includes_capacity_signals(monkeypatch):
+    from datetime import date
+
+    from app.financial import iworker_period_insights as period
+    from app.financial import router
+
+    payload = {
+        "timesheets": [
+            {
+                "date": "May 13, 2026",
+                "hours": 1.0,
+                "amount": 12.5,
+                "rate": 12.5,
+                "contractor": "Murilo",
+                "task": "Light week",
+                "ai_classification": {
+                    "is_over_scope": False,
+                    "topic": "Light week",
+                    "work_category": "Video",
+                },
+            }
+        ]
+    }
+    monkeypatch.setattr(router, "_TIMESHEET_CACHE", {"default": (0.0, payload)})
+    monkeypatch.setattr(period, "today_in_tz", lambda now=None, tz_name=None: date(2026, 5, 13))
+    items = get_audit_queue(granularity="week", period_start="2026-05-11")["audit_items"]
+    assert any(i["id"] == "iworker:underlogged:Murilo" for i in items)
+
+
 def test_iworker_timesheets_data(monkeypatch):
     from app.financial import router
 

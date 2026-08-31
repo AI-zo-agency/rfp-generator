@@ -393,21 +393,85 @@ def _timesheets_from_cache_payload(cached: dict) -> list[dict]:
     return cached.get("timesheets", [])
 
 
-def _build_audit_items_from_timesheets() -> list[dict]:
-    """Dynamically generate audit queue items from live timesheet data.
-    Reads from the cache if available so we don't re-classify.
-
-    Empty cache returns [] — never triggers get_iworker_timesheets(). That pull
-    is reserved for the iWorker tab (and explicit AI-insights generate).
-    """
-    timesheets: list[dict] = []
+def _load_timesheets_from_cache() -> list[dict]:
+    """Read classified timesheets from cache without triggering a sheet pull."""
     for _key, (_ts, payload) in _TIMESHEET_CACHE.items():
-        timesheets = _timesheets_from_cache_payload(payload)
-        break
+        return _timesheets_from_cache_payload(payload)
+    logger.info("operation=audit_queue status=skipped reason=timesheet_cache_empty")
+    return []
 
+
+def _timesheets_in_period(
+    timesheets: list[dict],
+    *,
+    granularity: str,
+    period_start: str | None,
+) -> tuple[list[dict], dict]:
+    """Filter entries to the selected calendar period; return insights for signals."""
+    insights = build_period_insights(
+        timesheets,
+        granularity=granularity,
+        period_start=period_start,
+    )
+    start = date.fromisoformat(insights["selected"]["start"])
+    end = date.fromisoformat(insights["selected"]["end"])
+    in_period: list[dict] = []
+    for entry in timesheets:
+        parsed = parse_entry_date(str(entry.get("date") or ""))
+        if parsed is None or parsed < start or parsed > end:
+            continue
+        in_period.append(entry)
+    return in_period, insights
+
+
+def _capacity_signal_to_audit_item(signal: dict) -> dict:
+    return {
+        "id": signal["id"],
+        "severity": "MEDIUM" if signal["severity"] == "capacity" else "HIGH",
+        "type": signal["headline"],
+        "source": "iWorker / Google Sheets",
+        "reason": signal["detail"],
+        "recommended_action": signal["headline"],
+        "status": _AUDIT_RESOLUTIONS.get(signal["id"], "Pending"),
+        "amount": 0,
+        "hours": 0,
+        "client_project": signal.get("contractor") or "All contractors",
+        "age": "",
+    }
+
+
+def _build_audit_queue(
+    granularity: str = "week",
+    period_start: str | None = None,
+) -> list[dict]:
+    """Build period-scoped audit flags plus capacity signals from cached timesheets."""
+    timesheets = _load_timesheets_from_cache()
     if not timesheets:
-        logger.info("operation=audit_queue status=skipped reason=timesheet_cache_empty")
         return []
+    in_period, insights = _timesheets_in_period(
+        timesheets,
+        granularity=granularity,
+        period_start=period_start,
+    )
+    items = _build_audit_items_from_timesheets(in_period)
+    seen_ids = {item["id"] for item in items}
+    for signal in insights.get("signals", []):
+        item = _capacity_signal_to_audit_item(signal)
+        if item["id"] in seen_ids:
+            continue
+        seen_ids.add(item["id"])
+        items.append(item)
+    logger.info(
+        "operation=audit_queue granularity=%s period_start=%s item_count=%s",
+        granularity,
+        period_start,
+        len(items),
+    )
+    return items
+
+
+def _build_audit_items_from_timesheets(timesheets: list[dict]) -> list[dict]:
+    """Generate audit queue items from classified timesheet rows (already period-filtered)."""
     active = [t for t in timesheets if t.get("hours", 0) > 0]
 
     items: list[dict] = []
@@ -1836,14 +1900,21 @@ def quickbooks_ai_insights_chat_cost(thread_id: str = Query(..., min_length=1)):
 
 
 @router.get("/audit-queue")
-def get_audit_queue():
-    """Dynamically builds audit flags from live timesheet data."""
-    items = _build_audit_items_from_timesheets()
+def get_audit_queue(
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+):
+    """Dynamically builds audit flags from live timesheet data for the selected period."""
+    items = _build_audit_queue(granularity=granularity, period_start=period_start)
     return {"audit_items": items}
 
 @router.post("/audit-queue/resolve")
-def resolve_audit_item(payload: AuditResolveRequest):
-    known_ids = {item["id"] for item in _build_audit_items_from_timesheets()}
+def resolve_audit_item(
+    payload: AuditResolveRequest,
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+):
+    known_ids = {item["id"] for item in _build_audit_queue(granularity=granularity, period_start=period_start)}
     if payload.id not in known_ids:
         raise HTTPException(status_code=404, detail="Audit item not found")
     _AUDIT_RESOLUTIONS[payload.id] = f"Resolved ({payload.action})"
