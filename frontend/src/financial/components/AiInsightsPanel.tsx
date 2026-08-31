@@ -20,6 +20,10 @@ export interface AiInsightsData {
   source_data: string;
   provider?: string;
   model?: string;
+  /** Present on regenerate responses — "ok" | "failed". */
+  generated?: string;
+  /** Whether the brief was persisted to Supabase. */
+  stored?: boolean;
   summary: {
     top_3_risks: string[];
     top_3_wins: string[];
