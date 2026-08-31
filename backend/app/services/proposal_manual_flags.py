@@ -178,6 +178,27 @@ def format_verify_tag(ask: str) -> str:
     return f"[VERIFY: {interior}]"
 
 
+# Truncation debris sits at the END of whatever region got cut off — it is
+# never buried in the middle of unrelated, already-finished prose. Bounding
+# the regex to only the trailing slice of each gap (instead of the gap's full
+# length, which for a "no VERIFY tags left" section is the ENTIRE body) means
+# it can physically never reach back into real content earlier in a section,
+# no matter what that content says. 400 matches the regex's own longest
+# possible span (160 + 240 chars of context around the marker phrase).
+_ORPHAN_LEFTOVER_WINDOW = 400
+
+
+def _scrub_orphan_tail(segment: str) -> tuple[str, int]:
+    if len(segment) <= _ORPHAN_LEFTOVER_WINDOW:
+        return _ORPHAN_VERIFY_LEFTOVER_RE.subn("", segment)
+    head, tail = (
+        segment[: -_ORPHAN_LEFTOVER_WINDOW],
+        segment[-_ORPHAN_LEFTOVER_WINDOW :],
+    )
+    cleaned_tail, n = _ORPHAN_VERIFY_LEFTOVER_RE.subn("", tail)
+    return head + cleaned_tail, n
+
+
 def repair_orphan_verify_leftovers(content: str) -> tuple[str, int]:
     """Strip contradiction VERIFY tails left after a premature ``]`` closed the tag."""
     body = content or ""
@@ -185,17 +206,18 @@ def repair_orphan_verify_leftovers(content: str) -> tuple[str, int]:
         return body, 0
     # Only operate on text *outside* well-formed VERIFY chips — otherwise a
     # legitimate ``[VERIFY: … | RFP requires: …]`` would be eaten by the orphan
-    # pattern matching the interior through the closing bracket.
+    # pattern matching the interior through the closing bracket. And within
+    # each such gap, only its trailing window — see _scrub_orphan_tail.
     parts: list[str] = []
     last = 0
     removed = 0
     for match in VERIFY_TAG_RE.finditer(body):
-        chunk, n = _ORPHAN_VERIFY_LEFTOVER_RE.subn("", body[last : match.start()])
+        chunk, n = _scrub_orphan_tail(body[last : match.start()])
         removed += n
         parts.append(chunk)
         parts.append(match.group(0))
         last = match.end()
-    chunk, n = _ORPHAN_VERIFY_LEFTOVER_RE.subn("", body[last:])
+    chunk, n = _scrub_orphan_tail(body[last:])
     removed += n
     parts.append(chunk)
     if not removed:
@@ -210,7 +232,25 @@ def repair_orphan_verify_leftovers(content: str) -> tuple[str, int]:
 def repair_orphan_verify_leftovers_in_draft(
     draft: ProposalDraft,
 ) -> tuple[ProposalDraft, list[str]]:
-    """Draft-wide orphan VERIFY cleanup; hollow shells get a MANUAL FILL stub."""
+    """Draft-wide orphan VERIFY cleanup; hollow shells get a MANUAL FILL stub.
+
+    Runs unconditionally on every Final Checks / Complete & Clean pass — it
+    has no step-skip gate, unlike everything around it. That makes the
+    wipe-to-stub decision below load-bearing: it used to classify health on
+    ``cleaned`` (the text AFTER this pass's own regex ran) rather than the
+    original ``body``. When a section has no [VERIFY] tags left to bound the
+    cleanup — i.e. it's already fully drafted — repair_orphan_verify_leftovers
+    scans the section's ENTIRE body instead of just the gaps between tags. A
+    false-positive match on ordinary prose (any "...the RFP requires: X [Y]"
+    phrasing with no other bracket in between) then reads as "this section
+    looks unhealthy" purely because THIS PASS just cut a chunk out of it —
+    and a real, finished section gets replaced with a bare MANUAL FILL stub.
+    Confirmed in production: fully-drafted tabs (Work Plan, Contractor's
+    Reimbursable Expenses Information, ...) reset to "needs input" on a
+    Final Checks run. Deciding from the section's health BEFORE this pass
+    touched it closes that hole — a section that was already real prose can
+    never be undrafted by this cleanup, no matter what its regex matches.
+    """
     from app.services.proposal_section_health import SectionHealth, classify_section_health
 
     logs: list[str] = []
@@ -224,13 +264,29 @@ def repair_orphan_verify_leftovers_in_draft(
             continue
         changed = True
         title = (section.title or section.id or "section").strip()
+        # classify_section_health is narrowly scoped on purpose (empty, an
+        # exact failure-sentinel tag, or a heading+placeholder skeleton) — it
+        # does not recognize free-floating non-prose fragments as unhealthy,
+        # so a short body that's nothing but leftover garbage would read as
+        # "healthy" too. A minimum real word count is what actually
+        # distinguishes "this was a drafted section" from "this was noise" —
+        # word_count(25) is the same bar stub_fill_landed uses elsewhere for
+        # "counts as real content".
+        was_healthy = (
+            classify_section_health(body) is None
+            and len(body.split()) >= 25
+        )
         health = classify_section_health(cleaned)
-        if health in {
-            SectionHealth.EMPTY,
-            SectionHealth.PLACEHOLDER_ONLY,
-            SectionHealth.DRAFT_FAILED,
-            SectionHealth.NO_EVIDENCE,
-        } or len(cleaned.strip()) < 40:
+        if not was_healthy and (
+            health
+            in {
+                SectionHealth.EMPTY,
+                SectionHealth.PLACEHOLDER_ONLY,
+                SectionHealth.DRAFT_FAILED,
+                SectionHealth.NO_EVIDENCE,
+            }
+            or len(cleaned.strip()) < 40
+        ):
             cleaned = (
                 f"## {title}\n\n"
                 f"[MANUAL FILL: Draft this RFP-required section — {title}]\n"
