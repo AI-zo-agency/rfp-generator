@@ -10,6 +10,12 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 import logging
 from app.financial import google_sheets, ai_classifier
+from app.financial.iworker_period_insights import build_period_insights
+from app.financial.iworker_snapshots import (
+    list_period_history,
+    rows_for_current_periods,
+    upsert_period_snapshots,
+)
 from app.financial.ai_insights_repository import get_insight, get_latest_insight
 from app.financial.client_map_import import import_tags_sheet
 from app.financial.client_map_link import run_link as run_client_map_link
@@ -380,6 +386,13 @@ IWORKER_TIMESHEETS = [
 _AUDIT_RESOLUTIONS: dict[str, str] = {}
 
 
+def _timesheets_from_cache_payload(cached: dict) -> list[dict]:
+    """Ingest cache shape stores classified rows under timesheets; legacy entries may be full HTTP responses."""
+    if isinstance(cached, dict) and "is_live" in cached:
+        return cached.get("timesheets", [])
+    return cached.get("timesheets", [])
+
+
 def _build_audit_items_from_timesheets() -> list[dict]:
     """Dynamically generate audit queue items from live timesheet data.
     Reads from the cache if available so we don't re-classify.
@@ -387,16 +400,14 @@ def _build_audit_items_from_timesheets() -> list[dict]:
     Empty cache returns [] — never triggers get_iworker_timesheets(). That pull
     is reserved for the iWorker tab (and explicit AI-insights generate).
     """
-    cached = None
-    for _key, (_ts, _resp) in _TIMESHEET_CACHE.items():
-        cached = _resp
-        break  # Use the first available cached response
+    timesheets: list[dict] = []
+    for _key, (_ts, payload) in _TIMESHEET_CACHE.items():
+        timesheets = _timesheets_from_cache_payload(payload)
+        break
 
-    if not cached:
+    if not timesheets:
         logger.info("operation=audit_queue status=skipped reason=timesheet_cache_empty")
         return []
-
-    timesheets = cached.get("timesheets", [])
     active = [t for t in timesheets if t.get("hours", 0) > 0]
 
     items: list[dict] = []
@@ -565,77 +576,16 @@ def _require_uuid(row_id: str) -> str:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Invalid row id") from exc
 
-@router.get("/iworker-timesheets")
-def get_iworker_timesheets(
-    sheet_url: Optional[str] = None,
-    contractor: Optional[str] = None,
-):
-    """Returns iWorker timesheets across all contractor tabs with rate extraction and AI classification."""
-    cache_key = f"{sheet_url or 'default'}:{contractor or 'all'}"
-    now = time.monotonic()
-
-    # ── Cache hit: serve immediately ───────────────────
-    if cache_key in _TIMESHEET_CACHE:
-        cached_at, cached_response = _TIMESHEET_CACHE[cache_key]
-        age_seconds = now - cached_at
-        if age_seconds < _TIMESHEET_CACHE_TTL_SECONDS:
-            return cached_response
-        else:
-            del _TIMESHEET_CACHE[cache_key]
-
-    is_live = False
-    fetched_entries = None
-    tabs_meta: List[Dict[str, Any]] = []
-
-    try:
-        sp_id = google_sheets.extract_spreadsheet_id(sheet_url) if sheet_url else None
-        res_data = google_sheets.fetch_all_tabs_and_timesheets(sp_id)
-        if res_data and res_data.get("timesheets"):
-            fetched_entries = res_data["timesheets"]
-            tabs_meta = res_data.get("tabs", [])
-            is_live = True
-    except Exception as e:
-        logger.info(f"Using fallback dataset for Google Sheet tabs: {e}")
-
-    # Fallback multi-tab dataset if offline
-    if not is_live or not fetched_entries:
-        tabs_meta = [
-            {"name": "Murilo Mendes", "rate": 12.50, "total_hours": 1243.77, "total_spend": 12830.25, "active_entries": 690},
-            {"name": "Marcelle Benevides", "rate": 13.99, "total_hours": 627.48, "total_spend": 8241.21, "active_entries": 456},
-            {"name": "Kelvin Kiruthu", "rate": 11.99, "total_hours": 183.13, "total_spend": 2195.84, "active_entries": 140},
-            {"name": "Erick Parra", "rate": 9.99, "total_hours": 2214.65, "total_spend": 17664.03, "active_entries": 501},
-        ]
-        # Tag fallback entries with Murilo Mendes
-        fetched_entries = []
-        for item in IWORKER_TIMESHEETS:
-            c_item = dict(item)
-            c_item["contractor"] = "Murilo Mendes"
-            c_item["rate"] = 12.50
-            fetched_entries.append(c_item)
-
-    active_timesheets = fetched_entries
-
-    # Filter by contractor tab if requested
-    if contractor and contractor.lower() != "all":
-        active_timesheets = [
-            t for t in active_timesheets
-            if t.get("contractor", "").lower() == contractor.lower()
-        ]
-
-    # ── AI Classification (skip off/zero-hour entries) ──
-    classified_count = 0
-    skipped_count = 0
-    enriched_timesheets = []
-    for t in active_timesheets:
+def _classify_timesheet_entries(entries: list[dict]) -> list[dict]:
+    enriched: list[dict] = []
+    for t in entries:
         t_copy = dict(t)
         task_text = (t_copy.get("task") or "").strip()
         task_lower = task_text.lower()
-
         should_skip = (
             task_lower in ("off / no hours logged", "weekend", "") or
             t_copy.get("hours", 0) == 0
         )
-
         if should_skip:
             t_copy["ai_classification"] = {
                 "raw_task": task_text,
@@ -645,34 +595,141 @@ def get_iworker_timesheets(
                 "is_over_scope": False,
                 "work_category": "Non-Billable / Off Day",
                 "status_tag": "Off Day",
-                "ai_reasoning": "Zero-hour entry — skipped classification to preserve tokens."
+                "ai_reasoning": "Zero-hour entry — skipped classification to preserve tokens.",
             }
-            skipped_count += 1
         else:
             t_copy["ai_classification"] = ai_classifier.classify_timesheet_task(task_text)
-            classified_count += 1
+        enriched.append(t_copy)
+    return enriched
 
-        enriched_timesheets.append(t_copy)
 
-    total_hours = sum(t["hours"] for t in enriched_timesheets)
-    total_spend = sum(t["amount"] for t in enriched_timesheets)
-    active_tasks = len(set(t["task"] for t in enriched_timesheets if t["task"] not in ["Off / No hours logged", "Weekend"]))
+def _load_classified_timesheets(sheet_url: Optional[str] = None) -> tuple[dict, bool]:
+    """Fetch, classify, and cache all contractor timesheets. Returns (payload, cache_hit)."""
+    cache_key = sheet_url or "default"
+    now = time.monotonic()
 
-    weeks = {}
-    for t in enriched_timesheets:
-        we = t["week_ending"]
-        if we not in weeks:
-            weeks[we] = {"week_ending": we, "total_hours": 0.0, "total_amount": 0.0, "entries_count": 0}
-        weeks[we]["total_hours"] += t["hours"]
-        weeks[we]["total_amount"] += t["amount"]
-        if t["hours"] > 0:
-            weeks[we]["entries_count"] += 1
+    if cache_key in _TIMESHEET_CACHE:
+        cached_at, cached_payload = _TIMESHEET_CACHE[cache_key]
+        if now - cached_at < _TIMESHEET_CACHE_TTL_SECONDS:
+            logger.info("operation=iworker_timesheets cache_hit=true cache_key=%s", cache_key)
+            return cached_payload, True
+        del _TIMESHEET_CACHE[cache_key]
+
+    is_live = False
+    fetched_entries: list[dict] | None = None
+    tabs_meta: List[Dict[str, Any]] = []
+    spreadsheet_id = google_sheets.DEFAULT_REAL_SPREADSHEET_ID
+
+    try:
+        sp_id = google_sheets.extract_spreadsheet_id(sheet_url) if sheet_url else None
+        if sp_id:
+            spreadsheet_id = sp_id
+        res_data = google_sheets.fetch_all_tabs_and_timesheets(sp_id)
+        if res_data and res_data.get("timesheets"):
+            fetched_entries = res_data["timesheets"]
+            tabs_meta = res_data.get("tabs", [])
+            is_live = True
+    except Exception as e:
+        logger.info("Using fallback dataset for Google Sheet tabs: %s", e)
+
+    if not is_live or not fetched_entries:
+        tabs_meta = [
+            {"name": "Murilo Mendes", "rate": 12.50, "total_hours": 1243.77, "total_spend": 12830.25, "active_entries": 690},
+            {"name": "Marcelle Benevides", "rate": 13.99, "total_hours": 627.48, "total_spend": 8241.21, "active_entries": 456},
+            {"name": "Kelvin Kiruthu", "rate": 11.99, "total_hours": 183.13, "total_spend": 2195.84, "active_entries": 140},
+            {"name": "Erick Parra", "rate": 9.99, "total_hours": 2214.65, "total_spend": 17664.03, "active_entries": 501},
+        ]
+        fetched_entries = []
+        for item in IWORKER_TIMESHEETS:
+            c_item = dict(item)
+            c_item["contractor"] = "Murilo Mendes"
+            c_item["rate"] = 12.50
+            fetched_entries.append(c_item)
+
+    payload = {
+        "tabs": tabs_meta,
+        "timesheets": _classify_timesheet_entries(fetched_entries),
+        "is_live": is_live,
+        "spreadsheet_id": spreadsheet_id,
+    }
+    _TIMESHEET_CACHE[cache_key] = (time.monotonic(), payload)
+    logger.info(
+        "operation=iworker_timesheets cache_hit=false cache_key=%s is_live=%s entry_count=%s",
+        cache_key,
+        is_live,
+        len(payload["timesheets"]),
+    )
+    return payload, False
+
+
+@router.get("/iworker-timesheets")
+def get_iworker_timesheets(
+    sheet_url: Optional[str] = None,
+    contractor: Optional[str] = None,
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+    persist_snapshots: bool = True,
+):
+    """Returns iWorker timesheets across all contractor tabs with rate extraction and AI classification."""
+    payload, cache_hit = _load_classified_timesheets(sheet_url)
+    all_timesheets = payload["timesheets"]
+    tabs_meta = payload["tabs"]
+    is_live = payload["is_live"]
+    spreadsheet_id = payload["spreadsheet_id"]
+
+    filtered = all_timesheets
+    if contractor and contractor.lower() != "all":
+        filtered = [
+            t for t in all_timesheets
+            if t.get("contractor", "").lower() == contractor.lower()
+        ]
+
+    contractor_filter = contractor if contractor and contractor.lower() != "all" else None
+    period_insights = build_period_insights(
+        filtered,
+        granularity=granularity,
+        period_start=period_start,
+        contractor=contractor_filter,
+    )
+    unparsed = period_insights.pop("unparsed_date_count", 0)
+
+    grain = "month" if granularity == "month" else "week"
+    period_history: list[dict] = []
+    try:
+        raw_history = list_period_history(spreadsheet_id, grain)
+        period_history = [
+            {
+                "granularity": grain,
+                "start": row["period_start"],
+                "hours": row["hours"],
+                "spend_usd": row["spend_usd"],
+                "scope_risk_usd": row["scope_risk_usd"],
+            }
+            for row in raw_history
+        ]
+    except Exception:
+        logger.warning(
+            "operation=iworker_timesheets period_history=failed spreadsheet_id=%s granularity=%s",
+            spreadsheet_id,
+            grain,
+            exc_info=True,
+        )
+
+    snapshot_upserted = False
+    if persist_snapshots and not cache_hit and is_live:
+        captured_at = datetime.now().isoformat()
+        rows = rows_for_current_periods(spreadsheet_id, all_timesheets, captured_at=captured_at)
+        snapshot_upserted = upsert_period_snapshots(rows) > 0
+
+    total_hours = sum(t["hours"] for t in filtered)
+    total_spend = sum(t["amount"] for t in filtered)
+    active_tasks = len(set(t["task"] for t in filtered if t["task"] not in ["Off / No hours logged", "Weekend"]))
 
     selected_contractor = contractor if contractor and contractor.lower() != "all" else "All Contractors"
     active_tab_obj = next((tb for tb in tabs_meta if tb["name"].lower() == selected_contractor.lower()), None)
     active_rate = active_tab_obj["rate"] if active_tab_obj else 12.50
 
-    response = {
+    return {
         "contractor": selected_contractor,
         "source": "Google Sheets (iWorker Time Tracker)",
         "status": "Connected & Ingested Live" if is_live else "Connected (Synced Dataset)",
@@ -683,14 +740,16 @@ def get_iworker_timesheets(
             "total_spend_usd": round(total_spend, 2),
             "active_tasks_count": active_tasks,
             "hourly_rate_usd": active_rate,
-            "unbilled_risk_amount": 99.00
         },
-        "weekly_totals": list(weeks.values()),
-        "timesheets": enriched_timesheets
+        "timesheets": filtered,
+        "period_insights": period_insights,
+        "period_history": period_history,
+        "meta": {
+            "unparsed_date_count": unparsed,
+            "snapshot_upserted": snapshot_upserted,
+            "spreadsheet_id": spreadsheet_id,
+        },
     }
-
-    _TIMESHEET_CACHE[cache_key] = (time.monotonic(), response)
-    return response
 
 @router.get("/checklist")
 def get_checklist():

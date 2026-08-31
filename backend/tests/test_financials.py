@@ -10,8 +10,9 @@ from app.financial.router import (
 from app.main import app
 
 def test_iworker_timesheets_defaults_are_plain_none():
-    """Direct Python callers (ai-insights, audit queue) must not receive Query objects."""
-    assert get_iworker_timesheets.__defaults__ == (None, None)
+    """Direct Python callers must not receive Query objects."""
+    assert get_iworker_timesheets.__defaults__[:2] == (None, None)
+    assert "Query" not in type(get_iworker_timesheets.__defaults__[0]).__name__
 
 
 def test_audit_queue_skips_iworker_when_cache_empty(monkeypatch):
@@ -27,12 +28,26 @@ def test_audit_queue_skips_iworker_when_cache_empty(monkeypatch):
     assert get_audit_queue() == {"audit_items": []}
 
 
-def test_iworker_timesheets_data():
-    res = get_iworker_timesheets()
+def test_iworker_timesheets_data(monkeypatch):
+    from app.financial import router
+
+    monkeypatch.setattr(router, "upsert_period_snapshots", lambda rows: 0)
+    monkeypatch.setattr(router, "list_period_history", lambda *_a, **_k: [])
+
+    res = get_iworker_timesheets(period_start="2026-05-11", granularity="week")
     assert res["contractor"] == "All Contractors"
     assert "Connected" in res["status"]
     assert len(res["timesheets"]) > 0
-    assert res["summary"]["total_logged_hours"] > 0
+    assert "weekly_totals" not in res
+    assert "unbilled_risk_amount" not in res.get("summary", {})
+    insights = res["period_insights"]
+    assert insights["granularity"] == "week"
+    assert insights["selected"]["start"] == "2026-05-11"
+    assert insights["current"]["hours"] > 0
+    assert "hours_pct" in insights["delta"]
+    assert isinstance(insights["contractors"], list)
+    assert "period_history" in res
+    assert res["meta"]["unparsed_date_count"] >= 0
 
 def test_checklist_data():
     res = get_checklist()
