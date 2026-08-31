@@ -4,13 +4,13 @@ import json
 import re
 import time
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 import logging
 from app.financial import google_sheets, ai_classifier
-from app.financial.iworker_period_insights import build_period_insights
+from app.financial.iworker_period_insights import build_period_insights, parse_entry_date
 from app.financial.iworker_snapshots import (
     list_period_history,
     rows_for_current_periods,
@@ -1851,27 +1851,61 @@ def resolve_audit_item(payload: AuditResolveRequest):
     return {"success": True, "id": payload.id, "status": _AUDIT_RESOLUTIONS[payload.id]}
 
 @router.post("/ai-insights")
-async def generate_ai_financial_insights():
+async def generate_ai_financial_insights(
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+):
     """Generates real AI leadership brief from live iWorker Google Sheets data.
-    
+
+    Scoped to the selected calendar week or month — never lifetime totals.
     Uses the financial OpenRouter key/model when configured
     (OPENROUTER_API_KEY_FINANCIAL / OPENROUTER_MODEL_FINANCIAL).
     """
     model_used = resolve_llm_model("light", node_name="financial.ai_insights")
-    
-    logger.info("operation=financial_ai_insights status=start model=%s", model_used)
 
-    # ── Fetch live timesheet data ─────────────────────────────────────────────
-    data = get_iworker_timesheets()
+    logger.info(
+        "operation=financial_ai_insights status=start model=%s granularity=%s period_start=%s",
+        model_used,
+        granularity,
+        period_start,
+    )
+
+    # ── Fetch live timesheet data (no snapshot side effects) ──────────────────
+    data = get_iworker_timesheets(
+        granularity=granularity,
+        period_start=period_start,
+        persist_snapshots=False,
+    )
     timesheets = data.get("timesheets", [])
-    active_entries = [t for t in timesheets if t["hours"] > 0]
-    total_hours = round(sum(t["hours"] for t in active_entries), 2)
-    total_spend = round(sum(t["amount"] for t in active_entries), 2)
+    insights = data["period_insights"]
+    selected = insights["selected"]
+    period_label = selected["label"]
+    period_start_date = date.fromisoformat(selected["start"])
+    period_end_date = date.fromisoformat(selected["end"])
+    current = insights["current"]
+    total_hours = current["hours"]
+    total_spend = current["spend_usd"]
+    total_over_scope_spend = current["scope_risk_usd"]
 
-    logger.info(f"[AI-INSIGHTS] Timesheet context: {len(active_entries)} active entries | {total_hours} hrs | ${total_spend}")
+    def _in_selected_period(entry: dict) -> bool:
+        parsed = parse_entry_date(str(entry.get("date") or ""))
+        if parsed is None:
+            return False
+        if parsed < period_start_date or parsed > period_end_date:
+            return False
+        return float(entry.get("hours") or 0) > 0
 
-    # ── Build compact timesheet context for prompt ────────────────────────────
-    # Group by task so we don't overflow context with 600+ raw rows
+    active_entries = [t for t in timesheets if _in_selected_period(t)]
+
+    logger.info(
+        "[AI-INSIGHTS] Period context: label=%s entries=%s hrs=%s spend=%s",
+        period_label,
+        len(active_entries),
+        total_hours,
+        total_spend,
+    )
+
+    # ── Build compact timesheet context for prompt (selected period only) ─────
     task_summary: dict[str, dict] = {}
     for t in active_entries:
         key = t["task"].strip()
@@ -1892,15 +1926,26 @@ async def generate_ai_financial_insights():
         if ai_cls.get("is_over_scope"):
             task_summary[key]["is_over_scope"] = True
 
-    # Top deliverables by hours (cap at 20 for prompt size)
     top_tasks = sorted(task_summary.values(), key=lambda x: x["total_hours"], reverse=True)[:20]
     over_scope_tasks = [t for t in task_summary.values() if t["is_over_scope"]]
-    total_over_scope_spend = round(sum(t["total_spend"] for t in over_scope_tasks), 2)
 
     tasks_json = json.dumps(top_tasks, indent=2)
     over_scope_json = json.dumps(over_scope_tasks, indent=2)
 
-    logger.info(f"[AI-INSIGHTS] Prompt context: {len(top_tasks)} top deliverables | {len(over_scope_tasks)} over-scope items | ${total_over_scope_spend} risk")
+    delta = insights["delta"]
+    prev_label = insights["previous"]["label"]
+    grain_label = "MoM" if insights["granularity"] == "month" else "WoW"
+    signal_lines = "\n".join(
+        f"- {s['headline']}: {s.get('detail', '')}" for s in insights.get("signals", [])
+    ) or "- (no automated signals for this period)"
+
+    logger.info(
+        "[AI-INSIGHTS] Prompt context: period=%s top_deliverables=%s over_scope_items=%s risk=%s",
+        period_label,
+        len(top_tasks),
+        len(over_scope_tasks),
+        total_over_scope_spend,
+    )
 
     # ── Build AI prompt ───────────────────────────────────────────────────────
     system_prompt = """You are a senior financial auditor for ZÖ Agency, a creative video production agency.
@@ -1909,19 +1954,26 @@ Always respond with ONLY valid JSON — no markdown, no prose, no code fences.""
 
     user_prompt = f"""Analyze this iWorker contractor timesheet data for ZÖ Agency and generate a leadership financial brief.
 
-CONTEXT:
+SELECTED PERIOD: {period_label} ({selected["start"]} to {selected["end"]})
+PRIOR PERIOD: {prev_label}
+{grain_label} DELTAS: hours {delta["hours_pct"]}% | spend {delta["spend_pct"]}% | scope risk {delta["scope_risk_pct"]}%
+
+PERIOD METRICS (use ONLY these — do NOT quote all-time or cumulative totals):
 - Contractor: iWorker (Sonja Anderson)
 - Hourly Rate: $12.50/hr
-- Total Active Hours: {total_hours} hrs
-- Total Spend: ${total_spend:,.2f}
-- Total Work Sessions: {len(active_entries)}
-- Over-Scope Spend (R3+ revisions): ${total_over_scope_spend:,.2f}
+- Period Hours: {total_hours} hrs
+- Period Spend: ${total_spend:,.2f}
+- Period Work Sessions: {len(active_entries)}
+- Period Over-Scope Spend (R3+ revisions): ${total_over_scope_spend:,.2f}
 - Analysis Date: {datetime.now().strftime('%B %d, %Y')}
 
-TOP 20 DELIVERABLES BY HOURS:
+AUTOMATED SIGNALS FOR THIS PERIOD:
+{signal_lines}
+
+TOP 20 DELIVERABLES BY HOURS (this period only):
 {tasks_json}
 
-OVER-SCOPE ITEMS (Round 3+ revisions that exceed retainer):
+OVER-SCOPE ITEMS THIS PERIOD (Round 3+ revisions that exceed retainer):
 {over_scope_json}
 
 Generate a JSON response with EXACTLY this structure:
@@ -1944,7 +1996,7 @@ Generate a JSON response with EXACTLY this structure:
   ]
 }}
 
-IMPORTANT: Be specific about dollar amounts and hour counts. Reference actual task names from the data. Do not invent data."""
+IMPORTANT: Be specific about dollar amounts and hour counts for THIS PERIOD ONLY. Reference actual task names from the data. Do not invent data. Do not mention all-time or cumulative totals."""
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -1999,5 +2051,6 @@ IMPORTANT: Be specific about dollar amounts and hour counts. Reference actual ta
             "active_entries": len(active_entries),
             "over_scope_spend": total_over_scope_spend,
             "over_scope_items": len(over_scope_tasks),
+            "period_label": period_label,
         }
     }

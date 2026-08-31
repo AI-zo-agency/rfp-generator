@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi.testclient import TestClient
 
 from app.financial.router import (
@@ -78,11 +80,51 @@ def test_sources_status(monkeypatch):
     assert qb["active_data"] is True
     assert qb["status"] == "Connected"
 
-def test_ai_insights():
-    res = generate_ai_financial_insights()
+def test_ai_insights(monkeypatch):
+    from app.financial import router
+
+    async def fake_chat_json(messages, **_k):
+        return (
+            {
+                "leadership_brief_text": "Brief",
+                "top_3_risks": ["r1", "r2", "r3"],
+                "top_3_wins": ["w1", "w2", "w3"],
+                "margin_recommendations": ["m1", "m2", "m3"],
+            },
+            "test",
+        )
+
+    monkeypatch.setattr(router, "chat_json", fake_chat_json)
+    res = asyncio.run(generate_ai_financial_insights())
     assert res["status"] == "success"
     assert len(res["summary"]["top_3_risks"]) == 3
     assert len(res["summary"]["top_3_wins"]) == 3
+
+
+def test_ai_insights_prompt_uses_period_metrics(monkeypatch):
+    from app.financial import router
+
+    captured = {}
+
+    async def fake_chat_json(messages, **_k):
+        captured["user"] = messages[1]["content"]
+        return (
+            {
+                "leadership_brief_text": "Brief",
+                "top_3_risks": ["r1", "r2", "r3"],
+                "top_3_wins": ["w1", "w2", "w3"],
+                "margin_recommendations": ["m1", "m2", "m3"],
+            },
+            "test",
+        )
+
+    monkeypatch.setattr(router, "chat_json", fake_chat_json)
+    res = asyncio.run(
+        generate_ai_financial_insights(granularity="week", period_start="2026-05-11")
+    )
+    assert res["stats"]["total_hours"] > 0
+    assert "2026-05-11" in captured["user"] or "May 11" in captured["user"]
+    assert "lifetime" not in captured["user"].lower()
 
 
 def test_teamwork_overview_reads_cached_payload(monkeypatch):
