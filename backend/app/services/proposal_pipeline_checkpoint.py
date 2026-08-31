@@ -34,6 +34,7 @@ PHASE_LABELS: dict[str, str] = {
     "phase-3-5-budget": "Budget build",
     "phase-4-review": "Pre-submit review",
     "fulfill-scan": "Complete & clean draft",
+    "align-rfp-outline": "Align to RFP outline",
     "complete": "Complete",
 }
 
@@ -450,6 +451,55 @@ async def record_phase_completed(rfp_id: str, phase: str) -> None:
         await complete_fulfill_scan(rfp_id)
         return
 
+    if phase == "align-rfp-outline":
+        # Standalone layout job — clear spinner only; leave Generate resume alone.
+        research = await aget_research_cache(rfp_id)
+        if research and research.pipeline_checkpoint:
+            cp = research.pipeline_checkpoint
+            await _save_checkpoint(
+                rfp_id,
+                cp.model_copy(
+                    update={
+                        "in_progress_phase": (
+                            None
+                            if cp.in_progress_phase == "align-rfp-outline"
+                            else cp.in_progress_phase
+                        ),
+                        "activity_label": None,
+                        "activity_detail": None,
+                        "step_index": None,
+                        "step_total": None,
+                        "updated_at": _now_iso(),
+                    }
+                ),
+            )
+        logger.info("Pipeline checkpoint: %s completed align-rfp-outline", rfp_id)
+        return
+
+    if phase == "packet-redistribute":
+        research = await aget_research_cache(rfp_id)
+        if research and research.pipeline_checkpoint:
+            cp = research.pipeline_checkpoint
+            await _save_checkpoint(
+                rfp_id,
+                cp.model_copy(
+                    update={
+                        "in_progress_phase": (
+                            None
+                            if cp.in_progress_phase == "packet-redistribute"
+                            else cp.in_progress_phase
+                        ),
+                        "activity_label": None,
+                        "activity_detail": None,
+                        "step_index": None,
+                        "step_total": None,
+                        "updated_at": _now_iso(),
+                    }
+                ),
+            )
+        logger.info("Pipeline checkpoint: %s completed packet-redistribute", rfp_id)
+        return
+
     if phase == "sections-1-3":
         from app.services.proposal_repository import aget_proposal_draft
 
@@ -495,6 +545,39 @@ async def record_phase_completed(rfp_id: str, phase: str) -> None:
 async def record_phase_failed(rfp_id: str, phase: str, error: str) -> None:
     research = await aget_research_cache(rfp_id)
     prior = research.pipeline_checkpoint if research else None
+    if phase == "align-rfp-outline":
+        # Do not set resumeFromPhase to align — that would break Generate Continue.
+        checkpoint = ProposalPipelineCheckpoint(
+            lastCompletedPhase=prior.last_completed_phase if prior else None,
+            inProgressPhase=None,
+            lastFailedPhase=phase,
+            lastError=error[:2000] if error else None,
+            resumeFromPhase=prior.resume_from_phase if prior else None,
+            updatedAt=_now_iso(),
+        )
+        await _save_checkpoint(rfp_id, checkpoint)
+        logger.warning(
+            "Pipeline checkpoint: %s failed at align-rfp-outline — %s",
+            rfp_id,
+            error[:200],
+        )
+        return
+    if phase == "packet-redistribute":
+        checkpoint = ProposalPipelineCheckpoint(
+            lastCompletedPhase=prior.last_completed_phase if prior else None,
+            inProgressPhase=None,
+            lastFailedPhase=phase,
+            lastError=error[:2000] if error else None,
+            resumeFromPhase=prior.resume_from_phase if prior else None,
+            updatedAt=_now_iso(),
+        )
+        await _save_checkpoint(rfp_id, checkpoint)
+        logger.warning(
+            "Pipeline checkpoint: %s failed at packet-redistribute — %s",
+            rfp_id,
+            error[:200],
+        )
+        return
     checkpoint = ProposalPipelineCheckpoint(
         lastCompletedPhase=prior.last_completed_phase if prior else None,
         inProgressPhase=None,
@@ -522,6 +605,34 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
     research = await aget_research_cache(rfp_id)
     prior = research.pipeline_checkpoint if research else None
     active = phase or (prior.in_progress_phase if prior else None) or "phase-3"
+    if active == "align-rfp-outline" or (
+        prior is not None and prior.in_progress_phase == "align-rfp-outline"
+    ):
+        checkpoint = ProposalPipelineCheckpoint(
+            lastCompletedPhase=prior.last_completed_phase if prior else None,
+            inProgressPhase=None,
+            lastFailedPhase=None,
+            lastError="Align to RFP outline stopped",
+            resumeFromPhase=prior.resume_from_phase if prior else None,
+            updatedAt=_now_iso(),
+        )
+        await _save_checkpoint(rfp_id, checkpoint)
+        logger.info("Pipeline checkpoint: %s stopped during align-rfp-outline", rfp_id)
+        return
+    if active == "packet-redistribute" or (
+        prior is not None and prior.in_progress_phase == "packet-redistribute"
+    ):
+        checkpoint = ProposalPipelineCheckpoint(
+            lastCompletedPhase=prior.last_completed_phase if prior else None,
+            inProgressPhase=None,
+            lastFailedPhase=None,
+            lastError="Place content stopped",
+            resumeFromPhase=prior.resume_from_phase if prior else None,
+            updatedAt=_now_iso(),
+        )
+        await _save_checkpoint(rfp_id, checkpoint)
+        logger.info("Pipeline checkpoint: %s stopped during packet-redistribute", rfp_id)
+        return
     if active == "fulfill-scan" or (
         prior is not None
         and active not in PIPELINE_PHASES

@@ -25,7 +25,105 @@ const TITLE_STOPWORDS = new Set([
   "an",
 ]);
 
-/** True when the user explicitly scopes to the open/pinned tab. */
+/** True when the message is basically a pasted section title (clarify reply). */
+export function messageLooksLikeSectionNameOnly(
+  message: string,
+  section: OutlineSection
+): boolean {
+  const text = (message || "").trim();
+  const title = section.title || "";
+  if (!text || text.length > 160 || !title.trim()) return false;
+  if (!messageMentionsSectionTitle(text, title)) return false;
+  const core = sectionTitleCore(title);
+  if (core.length < 8) return false;
+  // Long instruction paragraphs that merely mention the title are not name-only.
+  return text.length <= Math.max(core.length + 48, 100);
+}
+
+/**
+ * True when the user is asking to *edit* this section — not merely citing it
+ * as where content already lives ("already in §21", "move into Experience").
+ */
+export function messagePrimaryEditTargetsSection(
+  message: string,
+  section: OutlineSection
+): boolean {
+  const text = (message || "").trim();
+  const title = section.title || "";
+  if (!text || !title.trim()) return false;
+
+  const core = sectionTitleCore(title);
+  const full = normalizeTitlePhrase(title);
+  const mentions = messageMentionsSectionTitle(text, title);
+
+  // Destination / inventory language — stay on the Improve-pinned tab.
+  const destinationOnly =
+    /(?:already\s+exists?(?:\s+in\s+full)?\s+in|in\s+full\s+in|move\s+(?:\w+\s+){0,8}into|paste\s+into|pull\s+.{0,80}\s+into|fix\s+the\s+blank\s+row\s+in|duplicate\s+of|broken\s+duplicate\s+of|addressed\s+in|cross-?reference)/i.test(
+      text
+    ) &&
+    !/\b(?:fix|edit|rewrite|update|patch|improve|clean|revise)\s+(?:the\s+)?(?:§\s*|sec(?:tion)?\.?\s*)?\d+\b/i.test(
+      text
+    );
+
+  if (destinationOnly && !/\b(?:fix|edit|rewrite|clean|improve)\s+(?:the\s+)?[A-Z]/i.test(text)) {
+    // Still allow "Clean the Past Performance…" below; block Orland-style
+    // "already exists in §21 / move into §21" inventory asks.
+  }
+
+  if (mentions && core.length >= 4) {
+    const needle = (full.length >= 8 ? full : normalizeTitlePhrase(core)).slice(
+      0,
+      64
+    );
+    const esc = escapeRegExp(needle);
+    if (
+      new RegExp(
+        `\\b(?:fix|edit|rewrite|update|patch|improve|clean|revise|scrub)\\s+(?:the\\s+)?${esc}`,
+        "i"
+      ).test(text)
+    ) {
+      return true;
+    }
+    if (
+      new RegExp(`\\b${esc}\\s+section\\b`, "i").test(text) &&
+      /\b(?:fix|edit|rewrite|update|patch|improve|clean|revise|scrub)\b/i.test(text)
+    ) {
+      return true;
+    }
+  }
+
+  const markNum = title.match(/^(\d+)\s*[.:—–\-)]/);
+  if (markNum) {
+    const n = markNum[1];
+    if (
+      new RegExp(
+        `\\b(?:fix|edit|rewrite|update|patch|improve|clean|revise)\\s+(?:the\\s+)?(?:§\\s*|sec(?:tion)?\\.?\\s*)${n}\\b`,
+        "i"
+      ).test(text)
+    ) {
+      return true;
+    }
+  }
+
+  // Case-study / client rewrite while a different tab is pinned.
+  const clientBlob = `${sectionPersonName(title)} ${title}`.toLowerCase();
+  const clientNeedles = (
+    clientBlob.match(
+      /\b(?:umatilla|rock the locks|carbondale|maricopa|deschutes|medford|santa clara)\b/g
+    ) || []
+  ).filter((n) => text.toLowerCase().includes(n));
+  if (
+    clientNeedles.length > 0 &&
+    /\b(?:rewrite|fix|edit|update|revise|replace|address(?:ed)?)\b/i.test(text) &&
+    !/(?:already\s+exists?|in\s+full\s+in|move\s+(?:\w+\s+){0,8}into)/i.test(text)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/** True when the message is basically a pasted section title (clarify reply). */
 export function messagePointsAtOpenSection(message: string): boolean {
   return /\b(here|this\s+section|this\s+tab|this\s+part|open\s+(?:section|tab)|in\s+this(?:\s+(?:section|tab|part))?|for\s+this\s+(?:section|tab)|improve\s+this\s+section|(?:fill|fix|update|complete|resolve|replace|correct)\s+this)\b/i.test(
     message || ""
@@ -41,8 +139,17 @@ export function resolveSectionByMarkNumber(
   message: string
 ): OutlineSection | null {
   const text = message || "";
+  // Require intentional targeting — bare "makes §18 a duplicate of §26" in an
+  // issue list must NOT steal Improve-full-section away from the pinned tab.
   const match =
-    text.match(/(?:§|sec(?:tion)?\.?)\s*(\d+)\b(?!\s*\.\d)/i) ||
+    text.match(
+      /\b(?:fix|edit|rewrite|update|patch|improve|scrub)\s+(?:the\s+)?(?:§\s*|sec(?:tion)?\.?\s*)(\d+)\b/i
+    ) ||
+    // §21 References / §21 only — title-like word (≥6 letters) or "only", not
+    // prose like "§18 a broken duplicate".
+    text.match(
+      /(?:§|sec(?:tion)?\.?)\s*(\d+)\b(?!\s*\.\d)(?:\s*[—\-–:]\s*|\s+)(?:only\b|[A-Za-z]{6,}[\w &/'’-]*)/i
+    ) ||
     text.match(/\b(?:fix|edit|rewrite|update|patch)\s+(?:§\s*)?(\d+)\b/i);
   if (!match) return null;
   const n = match[1];
@@ -97,6 +204,17 @@ export function messageTargetsUniqueTopic(
         `\\b${topic}\\s+(?:section|tab|contacts?|integrity|only)\\b|` +
         `(?:§|sec(?:tion)?\\.?)\\s*\\d+[^\\n]{0,60}\\b${topic}\\b|` +
         `\\b(?:upon\\s+request|pre-?cleared)\\b`,
+      "i"
+    ).test(text);
+  }
+
+  // Same for insurance / certifications — "professional liability insurance"
+  // inside an Exhibit defect list must not steal to the Insurance tab.
+  if (topic === "insurance" || topic === "certifications") {
+    return new RegExp(
+      `(?:fix|edit|rewrite|update|patch|fill|improve|scrub)\\s+(?:the\\s+|§\\s*\\d+\\s+)?${topic}\\b|` +
+        `\\b${topic}\\s+(?:section|tab|certification|information|only)\\b|` +
+        `(?:§|sec(?:tion)?\\.?)\\s*\\d+[^\\n]{0,60}\\b${topic}\\b`,
       "i"
     ).test(text);
   }
@@ -843,11 +961,47 @@ export function resolveChatTarget(
     };
   }
 
+  // Improve / Revise pin binds THIS tab. Cross-refs like "already in §21" /
+  // "move into Experience" are context — not retargets. Yield only when the
+  // user clearly makes another section the *primary* edit target (or pastes
+  // a short section name as a clarify reply).
+  if (pinned && !messageLooksOutlineStructure(text)) {
+    const others = sections.filter((s) => s.id !== pinned.id);
+    const primaryHit = others.find((s) =>
+      messagePrimaryEditTargetsSection(text, s)
+    );
+    if (primaryHit) {
+      return {
+        kind: "resolved",
+        section: primaryHit,
+        confidence: "high",
+        reason: "title",
+      };
+    }
+    const nameOnly = others.find((s) =>
+      messageLooksLikeSectionNameOnly(text, s)
+    );
+    if (nameOnly) {
+      return {
+        kind: "resolved",
+        section: nameOnly,
+        confidence: "high",
+        reason: "title",
+      };
+    }
+    return {
+      kind: "resolved",
+      section: pinned,
+      confidence: "high",
+      reason: "pinned",
+    };
+  }
+
   const byTitle = [...sections].sort(
     (a, b) => (b.title?.length ?? 0) - (a.title?.length ?? 0)
   );
 
-  // Named section ALWAYS beats pin/open tab — user said which part to patch.
+  // Named section beats open tab when there is no Improve pin (handled above).
   const titleHits = byTitle.filter((section) =>
     messageMentionsSectionTitle(text, section.title || "")
   );
@@ -951,7 +1105,6 @@ export function resolveChatTarget(
   }
 
   // Unique "References" / "Pricing" tab — only when intentionally targeted.
-  // Before pin so "fix References" isn't trapped on a stale Improve pin.
   const byTopic = resolveSectionByUniqueTopic(sections, text);
   if (byTopic) {
     return {
@@ -959,16 +1112,6 @@ export function resolveChatTarget(
       section: byTopic,
       confidence: "high",
       reason: "unique-topic",
-    };
-  }
-
-  // Active Improve / Revise pin — before client-name hijacks and case-study clarify.
-  if (pinned && !messageLooksOutlineStructure(text) && !messageLooksProposalWide(text)) {
-    return {
-      kind: "resolved",
-      section: pinned,
-      confidence: "high",
-      reason: "pinned",
     };
   }
 

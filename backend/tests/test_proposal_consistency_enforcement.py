@@ -53,6 +53,15 @@ class DuplicateReferenceEmailTests(unittest.TestCase):
         self.assertEqual(out.casefold().count("sonja@zo.agency"), 1)
         self.assertIn("[VERIFY: distinct reference contact", out)
 
+    def test_collapses_triplicate_connect_email(self) -> None:
+        body = (
+            "1. Ref A — connect@zo.agency\n"
+            "2. Ref B — connect@zo.agency\n"
+        )
+        out, logs = scrub_duplicate_reference_emails(body)
+        self.assertTrue(logs)
+        self.assertEqual(out.casefold().count("connect@zo.agency"), 1)
+
 
 class ScheduleApproachDedupeTests(unittest.TestCase):
     def test_compresses_schedule_that_restates_approach_phases(self) -> None:

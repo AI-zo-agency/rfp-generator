@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import logging
 
+from app.services.proposal_evaluation_coverage import (
+    char_limit_to_word_budget,
+    criterion_char_limit,
+    criterion_for_section_title,
+    criterion_items,
+    criterion_writer_directive,
+    evaluation_priority_brief,
+)
 from app.services.proposal_intelligence.agent_base import clamp_confidence, safe_chat_json
 from app.services.proposal_intelligence.plan_ops import append_decision, set_provider
 from app.services.proposal_intelligence.schemas import ProposalExecutionPlan, SectionPlans
@@ -14,6 +22,18 @@ AGENT = "section_strategy_planner"
 _SYSTEM = """Section Strategy Planner. For each outline section, define the writer brief.
 
 HARD RULES:
+- NEVER PUT POINT VALUES IN THE PROPOSAL. Points tell you where to invest effort; they are
+  never content. writerInstructions MUST forbid printing "(40 points)", "[40 pts]", or
+  "UP TO N POINTS POSSIBLE" in any heading or paragraph. Section titles carry the buyer's
+  heading only — never the points fragment.
+- SCORED SECTIONS FIRST. The user message lists this RFP's scored evaluation criteria with
+  points. For a tab that answers one of them, writerInstructions MUST name every numbered
+  sub-ask (III.1, III.2 …) as its own labelled sub-heading, in the RFP's order, in the
+  buyer's own wording. evaluationCriteria MUST list those item codes. An evaluator scores
+  item by item off their form — a merged or missing answer scores zero for that item.
+- When the RFP states a per-response character limit, say so in writerInstructions and size
+  wordBudget to it. That limit is the real budget for scored tabs; do not shrink a scored
+  tab below what the buyer's fields allow, and never exceed them.
 - Each section has ONE distinct job — purpose must NOT overlap another section's purpose.
 - Be concise and designer-ready for EVERY tab: prefer wordBudget 250–500; short lead +
   tables/bullets + [DESIGNER NOTE] for layout — never essay walls or "designer will cut later."
@@ -95,6 +115,7 @@ async def run_section_strategy_planner(
             {
                 "role": "user",
                 "content": (
+                    f"{evaluation_priority_brief(plan.opportunity.evaluation)}\n\n"
                     f"{page_limit_line}\n\n"
                     f"Outline:\n{plan.writing.proposal_outline.model_dump_json()}\n"
                     f"Strategy:\n{plan.opportunity.strategy.model_dump_json()}\n"
@@ -154,6 +175,11 @@ def apply_section_strategy_from_raw(
         narrative_words = max(400, int(page_limit * 350 * 0.65))
         soft_cap = max(200, min(550, narrative_words // section_count))
 
+    evaluation = plan.opportunity.evaluation
+    # A stated page limit still governs; without one (typical of portal RFPs that
+    # cap by character instead) the buyer's field budget is the only real ceiling.
+    honour_char_budget = not (page_limit and page_limit > 0)
+
     attachment_guard = (
         "Emit ONLY a short attachment checklist with [DESIGNER NOTE: Attach …] and "
         "[MANUAL FILL: attach …] — do not write insurance/COI/W-9 essay prose; "
@@ -168,6 +194,36 @@ def apply_section_strategy_from_raw(
         existing = existing_patterns.get(section_plan.section_id)
         if existing and not section_plan.winning_pattern.confidence:
             section_plan.winning_pattern = existing
+
+        criterion = criterion_for_section_title(evaluation, section_plan.title)
+        if criterion is not None:
+            directive = criterion_writer_directive(criterion, evaluation)
+            instr = (section_plan.writer_instructions or "").strip()
+            if "SCORED:" not in instr:
+                section_plan.writer_instructions = (
+                    f"{instr}\n\n{directive}".strip() if instr else directive
+                )
+            codes = [
+                str(getattr(item, "item_code", "") or "").strip()
+                for item in criterion_items(criterion)
+            ]
+            for code in [c for c in codes if c]:
+                if code not in section_plan.evaluation_criteria:
+                    section_plan.evaluation_criteria.append(code)
+            char_budget = char_limit_to_word_budget(
+                criterion_char_limit(criterion, evaluation),
+                responses=max(1, len(codes)),
+            )
+            if char_budget and honour_char_budget:
+                # The buyer's own field budget — never clamped by the soft cap below.
+                section_plan.word_budget = char_budget
+                if lean_guard.casefold() not in (
+                    section_plan.writer_instructions or ""
+                ).casefold():
+                    section_plan.writer_instructions = (
+                        f"{section_plan.writer_instructions}\n{lean_guard}".strip()
+                    )
+                continue
 
         sid = section_plan.section_id or ""
         if _is_checklist_tab(sid):

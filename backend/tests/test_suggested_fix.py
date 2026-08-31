@@ -277,3 +277,50 @@ def test_resolve_rfp_fit_fallback_uses_replace_not_contact_scrub():
     assert "Replace weak example" in fix.summary
     assert "KB-backed tourism" in fix.instruction
     assert "invented contacts" not in fix.instruction.casefold()
+
+
+_EXHIBIT5_BOARD_VERIFY = """
+Your note is exactly right. The CNM board member list is CNM's own data — zö has no
+way to independently verify current board composition.
+
+Recommended action before submission:
+[VERIFY: Ella / Rachel] — Confirm this is CNM's current board roster against the
+official CNM Board of Trustees page or the RFP's own Exhibit 5 language.
+
+The disclosure table itself (all "None" responses) and Sonja Anderson's contact
+details are correct per KB — no changes needed there.
+
+Contact fields in the draft are verified correct:
+Email: `connect@zo.agency` ✓ [source: 01_companyfacts verified.docx]
+Phone: `(541) 678-4048` ✓ [source: 01_companyfacts verified.docx]
+
+No structural edits needed — just the board roster verification before you sign and submit.
+"""
+
+
+def test_resolve_offers_apply_fix_for_board_verify_tag_not_contact_scrub():
+    """Exhibit 5: contacts OK + recommended [VERIFY] on board → Apply the fix."""
+    draft = ProposalDraft(
+        rfpId="r1",
+        updatedAt="2026-08-10T00:00:00Z",
+        sections=[
+            ProposalSection(
+                id="exhibit-5",
+                title="Exhibit 5 — Campaign Contribution Disclosure",
+                content="## Board of Trustees\nAlarid, Chavez…\n",
+            ),
+        ],
+    )
+    fix = resolve_advisory_suggested_fix(
+        {"reply": _EXHIBIT5_BOARD_VERIFY, "hasFix": False},
+        fallback_section_id="exhibit-5",
+        section_title="Exhibit 5 — Campaign Contribution Disclosure",
+        draft=draft,
+    )
+    assert fix is not None
+    assert fix.section_id == "exhibit-5"
+    assert "VERIFY" in fix.instruction
+    assert "board" in fix.instruction.casefold() or "roster" in fix.instruction.casefold()
+    # Must NOT scrub verified connect@ / phone as invented contacts.
+    assert "remove contact" not in fix.instruction.casefold()
+    assert "invented contacts" not in fix.summary.casefold()

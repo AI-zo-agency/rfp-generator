@@ -501,16 +501,28 @@ def stamp_outline_evaluation_weights(
     return sections
 
 
-def max_rfp_outline_sections(page_limit: int | None = None) -> int:
+def max_rfp_outline_sections(
+    page_limit: int | None = None,
+    *,
+    min_sections: int = 0,
+) -> int:
     """Hard ceiling for RFP outline tabs (excludes static Sections 1–3).
 
     Page-budget heuristic: ~55% of narrative words for RFP tabs at ~400 words/tab.
     Without a page limit, default as if ~20 pages. Absolute floor 8 / ceiling 18 —
     evaluators cannot finish a 30–40 tab manuscript.
+
+    ``min_sections`` raises that floor when the RFP itself dictates the section
+    count — a published evaluation-criteria response form with nine scored
+    sections needs nine tabs, and our page arithmetic does not get a vote.
+    Callers pass ``min_outline_sections_for_evaluation(...)``.
     """
     pages = page_limit if page_limit and page_limit > 0 else 20
     soft = int((pages * 350 * 0.55) // 400)
-    return max(8, min(18, soft))
+    cap = max(8, min(18, soft))
+    if min_sections > cap:
+        return min_sections
+    return cap
 
 
 def enforce_outline_section_cap(
@@ -721,11 +733,28 @@ def filter_lean_outline_sections(
             dropped.append(f"{original_title} (knowledge-base filename, not a section)")
             continue
         title = enrich_outline_title_from_rfp(original_title, rfp_context)
+        # Strip points-table wording a wrapped PDF row leaks into a heading
+        # ("SECTION III Strategic Planning - UP TO 160"). Applied at this shared
+        # choke point so no outline consumer can carry the fragment into a
+        # manuscript the buyer reads.
+        from app.services.proposal_evaluation_coverage import clean_criterion_name
+
+        tidy = clean_criterion_name(title)
+        if tidy and tidy != title:
+            title = tidy
         # A section carrying evaluation points is never dropped as generic
         # filler or a static duplicate — see section_carries_evaluation_points.
         scored = section_carries_evaluation_points(section)
         protected = section_protect_from_cap(section)
-        if not scored and (
+        # A stamped buyer INSTRUMENT (form / disclosure / references / cost) is
+        # never "owned by Sections 1–3". Exhibit 4 — "New Mexico Resident,
+        # Native American, Recycled Content & Veteran's Preference
+        # Certification" — is a mandatory form the buyer requires back, but it
+        # matches our Certifications block by title and was dropped as a static
+        # duplicate, taking a required submittal out of the proposal. Our
+        # certifications narrative and a form we must return are different
+        # things that happen to share vocabulary.
+        if not scored and not protected and (
             should_skip_rfp_section_as_static_duplicate(
                 title=title,
                 duplicate_of_static_section=_dup_static(section),

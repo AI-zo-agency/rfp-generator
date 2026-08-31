@@ -129,13 +129,17 @@ import {
   buildPipelineStatus,
   normalizeCheckpointForDisplay,
   phaseCompleteOnServer,
+  phaseIndex,
   phaseIsComplete,
+  PIPELINE_PHASE_ORDER,
   shouldRunPhase,
   shouldSkipCompletedPhase,
   type PipelinePhase,
   type PipelineInProgressPhase,
   type ProposalPipelineStatus,
   FULFILL_SCAN_PHASE,
+  ALIGN_RFP_OUTLINE_PHASE,
+  PACKET_REDISTRIBUTE_PHASE,
 } from "./proposal-pipeline-checkpoint";
 import { staticSections1to3Complete } from "./proposal-draft";
 import { PROPOSAL_STAGE_TIMEOUT_MS } from "./proposal-stage-timeout";
@@ -179,12 +183,33 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 function throwIfProposalStopped(res: Response, data: { detail?: string }): void {
-  if (res.status === 409) {
-    throw new DOMException(
-      data.detail ?? "Proposal generation stopped",
-      "AbortError"
-    );
+  // Only cooperative Stop / cancel conflicts — never "another job is running"
+  // (that is a Celery chain race; callers attach and wait instead).
+  if (res.status !== 409) return;
+  const detail = data.detail ?? "";
+  if (/already running \(/i.test(detail)) {
+    throw new Error(detail || "Another proposal job is already running");
   }
+  throw new DOMException(
+    detail || "Proposal generation stopped",
+    "AbortError"
+  );
+}
+
+function asGeneratePipelinePhase(
+  value: string | null | undefined
+): PipelinePhase | null {
+  if (!value || value === "complete") return null;
+  return (PIPELINE_PHASE_ORDER as string[]).includes(value)
+    ? (value as PipelinePhase)
+    : null;
+}
+
+/** Parse FastAPI "Another proposal job is already running (phase-3-5-budget)." */
+function parseAlreadyRunningJobType(detail: string): string | null {
+  const match = detail.match(/already running \(([^)]+)\)/i);
+  const jobType = match?.[1]?.trim();
+  return jobType || null;
 }
 
 /** Tell backend to stop LLM/Supermemory and save pipeline checkpoint. */
@@ -267,7 +292,9 @@ export type FullProposalProgress =
 export function fullProposalProgressFromInFlight(
   phase: PipelineInProgressPhase | null | undefined
 ): FullProposalProgress | null {
-  if (!phase || phase === FULFILL_SCAN_PHASE) return null;
+  if (!phase || phase === FULFILL_SCAN_PHASE || phase === ALIGN_RFP_OUTLINE_PHASE || phase === PACKET_REDISTRIBUTE_PHASE) {
+    return null;
+  }
   switch (phase) {
     case "sections-1-3":
     case "phase-2":
@@ -277,7 +304,8 @@ export function fullProposalProgressFromInFlight(
     case "phase-4-review":
       return phase;
     default:
-      return "phase-3";
+      // Never invent "RFP tabs" for standalone jobs (Align, Scan, etc.).
+      return null;
   }
 }
 
@@ -500,7 +528,7 @@ export async function getProposalJobStatus(
 async function startProposalPhaseJob(
   path: string,
   signal?: AbortSignal,
-  options?: { body?: string }
+  options?: { body?: string; phase?: PipelinePhase | string }
 ): Promise<
   | { mode: "async"; alreadyRunning: boolean }
   | {
@@ -557,6 +585,21 @@ async function startProposalPhaseJob(
 
   if (res.status === 202 || res.ok) {
     return { mode: "async", alreadyRunning: Boolean(data.alreadyRunning) };
+  }
+
+  // After budget (etc.) completes, Celery still holds that job lock while it
+  // chains senior-editor. A naive POST for the next phase gets 409 — treat it
+  // as alreadyRunning and wait, instead of aborting Generate.
+  if (res.status === 409) {
+    const detail = formatApiDetail(data.detail, "");
+    const runningPhase = asGeneratePipelinePhase(
+      parseAlreadyRunningJobType(detail)
+    );
+    const requestedPhase = asGeneratePipelinePhase(options?.phase ?? null);
+    if (runningPhase && requestedPhase) {
+      return { mode: "async", alreadyRunning: true };
+    }
+    throwIfProposalStopped(res, { detail });
   }
 
   throwIfProposalStopped(res, data);
@@ -616,10 +659,25 @@ async function waitForProposalPhase(
     const cp = snapshot.research?.pipelineCheckpoint;
     const job = await fetchProposalJobStatus(rfpId);
 
+    const inProg = asGeneratePipelinePhase(cp?.inProgressPhase);
+    const lastDone = asGeneratePipelinePhase(cp?.lastCompletedPhase);
+    const jobPhase = asGeneratePipelinePhase(job?.jobType ?? null);
+
     if (cp?.inProgressPhase === phase) {
       observedRunning = true;
     }
     if (job?.jobType === phase && job.status === "running") {
+      observedRunning = true;
+    }
+    // Predecessor still finishing (Celery about to chain to us).
+    if (inProg && phaseIndex(inProg) < phaseIndex(phase)) {
+      observedRunning = true;
+    }
+    if (
+      jobPhase &&
+      job?.status === "running" &&
+      phaseIndex(jobPhase) < phaseIndex(phase)
+    ) {
       observedRunning = true;
     }
 
@@ -635,6 +693,22 @@ async function waitForProposalPhase(
       }
     }
 
+    // Checkpoint already advanced past this phase (server chain or prior run).
+    if (lastDone && phaseIndex(lastDone) >= phaseIndex(phase) && inProg !== phase) {
+      return { draft: snapshot.draft, research: snapshot.research };
+    }
+    // Successor already running — Celery chained past us.
+    if (inProg && phaseIndex(inProg) > phaseIndex(phase)) {
+      return { draft: snapshot.draft, research: snapshot.research };
+    }
+    if (
+      jobPhase &&
+      job?.status === "running" &&
+      phaseIndex(jobPhase) > phaseIndex(phase)
+    ) {
+      return { draft: snapshot.draft, research: snapshot.research };
+    }
+
     if (observedRunning && cp?.inProgressPhase !== phase) {
       if (cp?.lastFailedPhase === phase) {
         const err = cp.lastError ?? `${phase} failed`;
@@ -642,6 +716,19 @@ async function waitForProposalPhase(
           throw new DOMException(err, "AbortError");
         }
         throw new Error(err);
+      }
+      // Still on an earlier generate phase — keep waiting for the chain.
+      if (inProg && phaseIndex(inProg) < phaseIndex(phase)) {
+        await sleep(STAGE_POLL_INTERVAL_MS);
+        continue;
+      }
+      if (
+        jobPhase &&
+        job?.status === "running" &&
+        phaseIndex(jobPhase) < phaseIndex(phase)
+      ) {
+        await sleep(STAGE_POLL_INTERVAL_MS);
+        continue;
       }
       if (
         cp?.lastCompletedPhase === phase ||
@@ -776,7 +863,7 @@ async function runProposalPhaseAsync(
   budget?: ProposalBudget;
   review?: PreSubmitReview;
 }> {
-  const started = await startProposalPhaseJob(path, signal);
+  const started = await startProposalPhaseJob(path, signal, { phase });
   if (started.mode === "sync") {
     return {
       draft: started.draft ? apiDraftToOutline(started.draft) : null,
@@ -1847,6 +1934,302 @@ export async function runFulfillRfpGaps(
   };
 }
 
+async function waitForNamedPhaseJob(
+  rfpId: string,
+  phase: string,
+  signal: AbortSignal | undefined,
+  options: { label: string; maxMs?: number }
+): Promise<{
+  draft: ProposalOutline | null;
+  research: ProposalResearch | null;
+}> {
+  const label = options.label;
+  const maxMs = options.maxMs ?? 10 * 60 * 1000;
+  const deadline = Date.now() + maxMs;
+  let observedRunning = false;
+  const startedWall = Date.now();
+
+  while (Date.now() < deadline) {
+    throwIfAborted(signal);
+    const snapshot = await fetchProposalDraft(rfpId);
+    const cp = snapshot.research?.pipelineCheckpoint;
+    const job = await fetchProposalJobStatus(rfpId);
+
+    if (cp?.inProgressPhase === phase) observedRunning = true;
+    if (job?.jobType === phase && job.status === "running") observedRunning = true;
+
+    if (job?.jobType === phase) {
+      if (job.status === "cancelled") {
+        throw new DOMException(
+          job.error ?? "Proposal generation stopped",
+          "AbortError"
+        );
+      }
+      if (job.status === "failed") {
+        throw new Error(job.error ?? `${label} failed`);
+      }
+      if (job.status === "completed" && cp?.inProgressPhase !== phase) {
+        return { draft: snapshot.draft, research: snapshot.research };
+      }
+    }
+
+    if (observedRunning && cp?.inProgressPhase !== phase) {
+      if (cp?.lastError && /stopped|cancel/i.test(cp.lastError)) {
+        throw new DOMException(cp.lastError, "AbortError");
+      }
+      if (cp?.lastFailedPhase === phase) {
+        throw new Error(cp.lastError ?? `${label} failed`);
+      }
+      return { draft: snapshot.draft, research: snapshot.research };
+    }
+
+    if (!observedRunning && Date.now() - startedWall > 60_000) {
+      throw new Error(
+        `Timed out waiting for ${label} to start. Check that the backend is running.`
+      );
+    }
+
+    await sleep(STAGE_POLL_INTERVAL_MS);
+  }
+
+  throw new Error(`Timed out waiting for ${label} to finish.`);
+}
+
+/** Reorder / stub sidebar tabs to RFP submission order — no prose rewrite. */
+/** Poll until an in-flight Align to RFP outline job finishes (no POST — reconnect only). */
+export async function pollAlignRfpOutlineCompletion(
+  rfpId: string,
+  signal?: AbortSignal
+): Promise<{
+  draft: ProposalOutline | null;
+  research: ProposalResearch | null;
+}> {
+  return waitForNamedPhaseJob(rfpId, ALIGN_RFP_OUTLINE_PHASE, signal, {
+    label: "Align to RFP outline",
+    maxMs: 10 * 60 * 1000,
+  });
+}
+
+export type AlignOutlinePreview = {
+  currentTitles?: string[];
+  proposedTitles?: string[];
+  rfpNeededTitles?: string[];
+  changes?: string[];
+  addedTitles?: string[];
+  nothingToChange?: boolean;
+  summary?: string;
+  humanDecisionGaps?: string[];
+};
+
+export async function previewAlignRfpOutline(
+  rfpId: string,
+  options?: { signal?: AbortSignal }
+): Promise<{
+  ok: boolean;
+  preview: AlignOutlinePreview;
+  nothingToChange: boolean;
+}> {
+  throwIfAborted(options?.signal);
+  const res = await fetch(
+    `/api/rfps/${rfpId}/proposal/align-rfp-outline/preview`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      signal: options?.signal,
+    }
+  );
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    ok?: boolean;
+    preview?: AlignOutlinePreview;
+    nothingToChange?: boolean;
+  } = {};
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from align preview.");
+  }
+  if (!res.ok) {
+    throw new Error(formatApiDetail(data.detail, "Align preview failed"));
+  }
+  return {
+    ok: Boolean(data.ok ?? true),
+    preview: data.preview ?? {},
+    nothingToChange: Boolean(
+      data.nothingToChange ?? data.preview?.nothingToChange
+    ),
+  };
+}
+
+export async function runAlignRfpOutline(
+  rfpId: string,
+  options?: { signal?: AbortSignal }
+): Promise<{
+  draft: ProposalOutline;
+  research: ProposalResearch | null;
+  report: {
+    mode?: string;
+    beforeTitles?: string[];
+    afterTitles?: string[];
+    logs?: string[];
+    summary?: string;
+    changed?: boolean;
+  };
+}> {
+  throwIfAborted(options?.signal);
+  await clearProposalGenerationStop(rfpId);
+  const started = await startProposalPhaseJob(
+    `/api/rfps/${rfpId}/proposal/align-rfp-outline`,
+    options?.signal
+  );
+  if (started.mode === "sync") {
+    if (!started.draft) {
+      throw new Error("Incomplete Align to RFP outline response");
+    }
+    const outline = apiDraftToOutline(started.draft);
+    return {
+      draft: outline,
+      research: started.research ?? null,
+      report: (outline.lastFulfillReport ?? {}) as {
+        mode?: string;
+        beforeTitles?: string[];
+        afterTitles?: string[];
+        logs?: string[];
+        summary?: string;
+        changed?: boolean;
+      },
+    };
+  }
+  const waited = await waitForNamedPhaseJob(
+    rfpId,
+    ALIGN_RFP_OUTLINE_PHASE,
+    options?.signal,
+    { label: "Align to RFP outline", maxMs: 10 * 60 * 1000 }
+  );
+  if (!waited.draft) {
+    throw new Error("Incomplete Align to RFP outline response");
+  }
+  return {
+    draft: waited.draft,
+    research: waited.research,
+    report: (waited.draft.lastFulfillReport ?? {}) as {
+      mode?: string;
+      beforeTitles?: string[];
+      afterTitles?: string[];
+      logs?: string[];
+      summary?: string;
+      changed?: boolean;
+    },
+  };
+}
+
+export type PacketRedistributeReport = {
+  mode?: string;
+  movedCount?: number;
+  plannedMoves?: number;
+  moveSummaries?: string[];
+  skipped?: string[];
+  humanGaps?: string[];
+  stubFillIds?: string[];
+  stubTitles?: string[];
+  summary?: string;
+  changed?: boolean;
+  logs?: string[];
+};
+
+export type PacketPlacePreview = {
+  issues?: string[];
+  moves?: Array<{
+    kind?: string;
+    heading?: string;
+    fromTitle?: string;
+    toTitle?: string;
+    summary?: string;
+  }>;
+  humanGaps?: string[];
+  stubTitles?: string[];
+  plannedMoves?: number;
+  summary?: string;
+  nothingToMove?: boolean;
+};
+
+export async function previewPacketRedistribute(
+  rfpId: string,
+  options?: { signal?: AbortSignal }
+): Promise<{ ok: boolean; preview: PacketPlacePreview; plannedMoves: number }> {
+  throwIfAborted(options?.signal);
+  const res = await fetch(
+    `/api/rfps/${rfpId}/proposal/packet-redistribute/preview`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      signal: options?.signal,
+    }
+  );
+  const text = await res.text();
+  let data: {
+    detail?: string;
+    ok?: boolean;
+    preview?: PacketPlacePreview;
+    plannedMoves?: number;
+  } = {};
+  try {
+    data = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Invalid response from place preview.");
+  }
+  if (!res.ok) {
+    throw new Error(formatApiDetail(data.detail, "Place preview failed"));
+  }
+  return {
+    ok: Boolean(data.ok ?? true),
+    preview: data.preview ?? {},
+    plannedMoves: data.plannedMoves ?? data.preview?.plannedMoves ?? 0,
+  };
+}
+
+export async function runPacketRedistribute(
+  rfpId: string,
+  options?: { signal?: AbortSignal }
+): Promise<{
+  draft: ProposalOutline;
+  research: ProposalResearch | null;
+  report: PacketRedistributeReport;
+}> {
+  throwIfAborted(options?.signal);
+  await clearProposalGenerationStop(rfpId);
+  const started = await startProposalPhaseJob(
+    `/api/rfps/${rfpId}/proposal/packet-redistribute`,
+    options?.signal
+  );
+  if (started.mode === "sync") {
+    if (!started.draft) {
+      throw new Error("Incomplete Place content response");
+    }
+    const outline = apiDraftToOutline(started.draft);
+    return {
+      draft: outline,
+      research: started.research ?? null,
+      report: (outline.lastFulfillReport ?? {}) as PacketRedistributeReport,
+    };
+  }
+  const waited = await waitForNamedPhaseJob(
+    rfpId,
+    PACKET_REDISTRIBUTE_PHASE,
+    options?.signal,
+    { label: "Place content", maxMs: 15 * 60 * 1000 }
+  );
+  if (!waited.draft) {
+    throw new Error("Incomplete Place content response");
+  }
+  return {
+    draft: waited.draft,
+    research: waited.research,
+    report: (waited.draft.lastFulfillReport ?? {}) as PacketRedistributeReport,
+  };
+}
+
 export async function restoreProposalSnapshot(
   rfpId: string,
   savedAt: string
@@ -1864,7 +2247,7 @@ export async function restoreProposalSnapshot(
     throw new Error("Invalid response from restore snapshot.");
   }
   if (!res.ok) {
-    throw new Error(data.detail ?? "Could not restore snapshot.");
+    throw new Error(formatApiDetail(data.detail, "Could not restore snapshot."));
   }
   if (!data.draft) {
     throw new Error("Incomplete restore snapshot response.");

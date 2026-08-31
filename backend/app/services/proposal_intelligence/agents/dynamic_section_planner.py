@@ -4,19 +4,55 @@ from __future__ import annotations
 
 import logging
 
+from app.services.proposal_evaluation_coverage import (
+    ensure_missing_submittals_coverage,
+    ensure_scored_criteria_coverage,
+    evaluation_priority_brief,
+    evaluation_response_char_limit,
+    min_outline_sections_for_evaluation,
+)
 from app.services.proposal_rfp_excerpt import (
     closing_package_excerpt,
     submission_documents_excerpt,
 )
 from app.services.proposal_intelligence.agent_base import clamp_confidence, safe_chat_json
 from app.services.proposal_intelligence.plan_ops import append_decision, set_provider
-from app.services.proposal_intelligence.schemas import ProposalExecutionPlan, ProposalOutline
+from app.services.proposal_intelligence.schemas import (
+    OutlineSection,
+    ProposalExecutionPlan,
+    ProposalOutline,
+)
 
 logger = logging.getLogger(__name__)
 AGENT = "dynamic_section_planner"
 
 _SYSTEM = """Dynamic Section Planner. Decide which proposal sections must be generated
 FOR THIS RFP ONLY — read the RFP TOC / submission instructions in the excerpt.
+
+RULE 0 — SUBMISSION FORMAT OUTRANKS SCOREBOARD LABELS WHEN THEY CONFLICT.
+When THIS RFP publishes a section that defines mandatory proposal content format,
+submission layout, or required packet structure, that section's headings and order
+outrank evaluation-criteria numbers or labels from elsewhere in the RFP for tab
+TITLES and ORDER. Copy the buyer's format-section labels verbatim — do not rename
+tabs using evaluation-point numbering when the format section uses different labels.
+
+The user message lists this RFP's SCORED EVALUATION CRITERIA with their points.
+Those criteria are not hints; they are the sections an evaluator opens, scores and totals.
+- EVERY scored parent criterion gets its OWN tab. No exceptions, no merging two scored
+  criteria into one tab, no folding a scored criterion into a forms/exhibit tab.
+  A 160-point criterion with no tab of its own is 160 points forfeited.
+- Use the buyer's own heading for the tab title, keeping their section code when they
+  publish one ("SECTION III — Strategic Planning", "Tab 4 — Technical Approach").
+- Numbered sub-asks (III.1, III.2 …) are NOT tabs. They are required sub-headings INSIDE
+  the parent tab — list them in that section's `children` as the codes they carry.
+- Order scored tabs the way the RFP's criteria form orders them.
+- Set evaluationWeight to the criterion's points and protectFromCap=true on every scored tab.
+- When the RFP publishes an evaluation-criteria RESPONSE FORM (a form the offeror fills in
+  per criterion), the scored criteria ARE the proposal body. Do NOT emit a single
+  "Evaluation Criteria Response Form" wrapper tab — emit the criteria themselves.
+- Anything NOT scored and NOT a required submittal is padding. Drop it. In particular drop
+  restatements of the buyer's own Scope of Work, and acknowledgment essays for documents
+  the RFP says to send only on request (sample agreements, insurance certificates).
 
 Rules:
 - zö static Sections 1–3 (company / team / experience) are ALWAYS drafted first and keep
@@ -156,15 +192,33 @@ async def run_dynamic_section_planner(
     from app.services.proposal_outline_dedup import max_rfp_outline_sections
 
     page_limit = _parse_page_limit(rfp_meta)
-    section_cap = max_rfp_outline_sections(page_limit)
+    evaluation = plan.opportunity.evaluation
+    # The RFP's own criteria count sets the floor — our page arithmetic cannot
+    # shrink a buyer-published section list.
+    section_cap = max_rfp_outline_sections(
+        page_limit,
+        min_sections=min_outline_sections_for_evaluation(evaluation),
+    )
+    scoreboard = evaluation_priority_brief(evaluation)
+    package_char_limit = evaluation_response_char_limit(evaluation)
+    char_limit_line = (
+        f"Per-response character limit stated by this RFP: {package_char_limit} characters "
+        "per response field — plan tabs the writer can answer within that budget."
+        if package_char_limit
+        else "No per-response character limit stated by this RFP."
+    )
     raw, provider = await safe_chat_json(
         [
             {"role": "system", "content": _SYSTEM},
             {
                 "role": "user",
                 "content": (
+                    f"{scoreboard}\n\n"
+                    f"{char_limit_line}\n"
                     f"HARD MAXIMUM RFP outline tabs (excluding static Sections 1–3): {section_cap}. "
-                    f"Emit at most {section_cap} sections in the JSON array — merge aggressively.\n"
+                    f"Emit at most {section_cap} sections in the JSON array — merge aggressively, "
+                    f"but NEVER merge or drop a scored criterion to fit the cap; "
+                    f"cut unscored narrative instead.\n"
                     f"Page limit from RFP: {page_limit if page_limit else 'not stated'}.\n\n"
                     f"Understanding:\n{plan.opportunity.understanding.model_dump_json()}\n"
                     f"Compliance item count: {len(plan.opportunity.compliance.items)}\n"
@@ -188,8 +242,6 @@ async def run_dynamic_section_planner(
         outline = ProposalOutline(confidence=0.2)
     if not outline.sections:
         # Minimal fallback from evaluation emphasis + scope — NEVER force Methodology.
-        from app.services.proposal_intelligence.schemas import OutlineSection
-
         titles: list[str] = []
         for crit in plan.opportunity.evaluation.criteria[:6]:
             name = (crit.name or "").strip()
@@ -262,6 +314,36 @@ async def run_dynamic_section_planner(
             drop_generic_filler=False,
         )
         dropped = list(dropped) + list(post_dropped)
+    # Deterministic backstop: the planner is an LLM under 20+ anti-bloat rules,
+    # and the passes above are all subtractive. Whatever they did, every scored
+    # criterion gets a tab of its own here.
+    #
+    # This MUST run BEFORE the cap. Run after, and the cap budgets its free
+    # slots against an outline the scored tabs are still missing from — it then
+    # admits unscored filler (a Scope-of-Work restatement, an acknowledgment
+    # essay) into slots the buyer's own scored sections were about to claim,
+    # and the outline finishes over cap with padding the RFP never asked for.
+    # Running first makes every scored tab count as protected, so the cap
+    # spends what is left on filler: nothing.
+    kept, scored_added, scored_dropped = ensure_scored_criteria_coverage(
+        kept,
+        evaluation,
+        section_factory=lambda raw: OutlineSection.model_validate(raw),
+    )
+    dropped = list(dropped) + list(scored_dropped)
+    # A second, FOCUSED LLM pass — one question only: what is this outline
+    # still missing? Closing-component detection above is one call juggling
+    # ~20 instructions at once and was observed to vary run-to-run on
+    # identical input (a live RFP went 9 sections then 8 across two Phase 2
+    # runs — Exhibit 3 present in one, missing in the next). A model asked
+    # ONE question is far more reliable than the same model mid-way through
+    # twenty, so this checks the outline actually produced rather than
+    # re-deriving it from scratch.
+    kept, exhibit_added = await ensure_missing_submittals_coverage(
+        kept,
+        rfp_context,
+        section_factory=lambda raw: OutlineSection.model_validate(raw),
+    )
     kept, cap_dropped = enforce_outline_section_cap(kept, section_cap)
     dropped = list(dropped) + list(cap_dropped)
     if dropped:
@@ -277,6 +359,20 @@ async def run_dynamic_section_planner(
             AGENT,
             len(closing_added),
             closing_added[:12],
+        )
+    if exhibit_added:
+        logger.warning(
+            "%s completeness check injected %d missing submittal tab(s): %s",
+            AGENT,
+            len(exhibit_added),
+            exhibit_added[:12],
+        )
+    if scored_added:
+        logger.warning(
+            "%s injected %d uncovered scored criterion tab(s): %s",
+            AGENT,
+            len(scored_added),
+            scored_added[:12],
         )
     if cap_dropped:
         logger.info(
@@ -295,6 +391,7 @@ async def run_dynamic_section_planner(
         agent=AGENT,
         decision_text=(
             f"Outline sections: {len(outline.sections)} (cap {section_cap})"
+            + (f"; scored criteria added: {len(scored_added)}" if scored_added else "")
             + (f"; closing added: {len(closing_added)}" if closing_added else "")
             + (f"; hard-cap dropped: {len(cap_dropped)}" if cap_dropped else "")
         ),

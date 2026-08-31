@@ -33,6 +33,7 @@ class SuggestedFix:
 _RECOMMENDATION_REPLY_RE = re.compile(
     r"(?is)\b("
     r"recommendation(?:s)?|"
+    r"recommended\s+action|"
     r"apply\s+these\s+fixes|"
     r"factual\s+errors?|"
     r"\*\*incorrect\*\*|"
@@ -43,7 +44,8 @@ _RECOMMENDATION_REPLY_RE = re.compile(
     r"invented\s+these\s+details|"
     r"remove\s+or\s+verify|"
     r"flag\s+for\s+sonja|"
-    r"\[pricing\s+flag:"
+    r"\[pricing\s+flag:|"
+    r"\[verify:"
     r")"
 )
 
@@ -52,6 +54,23 @@ _CONTACT_AUDIT_RE = re.compile(
     r"contact|phone|email|reference|clientlist|"
     r"invented\s+contact|wrong\s+client"
     r")\b"
+)
+
+_CONTACTS_VERIFIED_OK_RE = re.compile(
+    r"(?is)\b("
+    r"contact\s+fields?\s+(?:in\s+the\s+draft\s+)?(?:are\s+)?verified\s+correct|"
+    r"contact\s+details\s+are\s+correct|"
+    r"no\s+changes?\s+needed\s+there|"
+    r"no\s+structural\s+edits?\s+needed"
+    r")\b"
+)
+
+_VERIFY_TAG_RECOMMEND_RE = re.compile(
+    r"(?is)"
+    r"(?:recommended\s+action|before\s+submission|board\s+roster).{0,120}"
+    r"\[VERIFY:[^\]]+\]"
+    r"|\[VERIFY:[^\]]+\].{0,120}"
+    r"(?:confirm|board\s+roster|cross-?check|before\s+(?:you\s+)?sign)"
 )
 
 _PRICING_CAPACITY_AUDIT_RE = re.compile(
@@ -134,6 +153,8 @@ def reply_offers_actionable_fixes(reply: str) -> bool:
     text = (reply or "").strip()
     if not text or len(text) < 80:
         return False
+    if _VERIFY_TAG_RECOMMEND_RE.search(text):
+        return True
     if _CLEAN_PASS_RE.search(text) and not _RECOMMENDATION_REPLY_RE.search(text):
         if not re.search(r"(?is)\[pricing\s+flag:", text):
             return False
@@ -142,6 +163,11 @@ def reply_offers_actionable_fixes(reply: str) -> bool:
     ):
         return True
     return bool(_RECOMMENDATION_REPLY_RE.search(text))
+
+
+def reply_recommends_verify_tag_insert(reply: str) -> bool:
+    """True when the reply asks to plant a [VERIFY: …] flag (not rewrite contacts)."""
+    return bool(_VERIFY_TAG_RECOMMEND_RE.search(reply or ""))
 
 
 _RFP_FIT_AUDIT_RE = re.compile(
@@ -158,6 +184,29 @@ _RFP_FIT_AUDIT_RE = re.compile(
 def reply_recommends_rfp_fit_replacement(reply: str) -> bool:
     """True when audit says an example is a weak RFP fit and should be swapped."""
     return bool(_RFP_FIT_AUDIT_RE.search(reply or ""))
+
+
+def build_verify_tag_instruction(
+    *,
+    section_title: str,
+    reply: str,
+) -> str:
+    """Insert the recommended [VERIFY: …] flag; do not invent board/contact facts."""
+    title = (section_title or "this section").strip() or "this section"
+    audit = re.sub(r"\s+", " ", (reply or "").strip())[:1800]
+    tags = re.findall(r"\[VERIFY:[^\]]+\]", reply or "", flags=re.I)
+    tag_line = tags[0] if tags else "[VERIFY: confirm before submission]"
+    return (
+        f"Edit ONLY the sidebar section titled “{title}”. "
+        "Do NOT invent board members, contacts, or compliance facts.\n"
+        f"1) Near the board roster / trustees list (or at the top of the form), insert "
+        f"exactly once: {tag_line}\n"
+        "2) If that VERIFY tag is already present, leave it — do not duplicate.\n"
+        "3) Keep disclosure table answers and verified contact fields unchanged "
+        "(email/phone/address/legal name that the audit marked correct).\n"
+        "4) Do NOT remove or rewrite board names — human confirmation only.\n\n"
+        f"Audit to follow:\n{audit}"
+    )
 
 
 def build_rfp_fit_replace_instruction(
@@ -258,7 +307,10 @@ def resolve_advisory_suggested_fix(
         hit = next((s for s in draft.sections if s.id == fallback_section_id), None)
         title = (hit.title if hit else "") or ""
 
-    if reply_recommends_rfp_fit_replacement(reply):
+    if reply_recommends_verify_tag_insert(reply):
+        instruction = build_verify_tag_instruction(section_title=title, reply=reply)
+        summary = "Insert recommended [VERIFY] flag (no invented facts)"
+    elif reply_recommends_rfp_fit_replacement(reply):
         instruction = build_rfp_fit_replace_instruction(
             section_title=title, reply=reply
         )
@@ -268,11 +320,12 @@ def resolve_advisory_suggested_fix(
     ):
         instruction = build_pricing_flag_instruction(section_title=title, reply=reply)
         summary = "Add PRICING FLAG from audit (capacity/pricing)"
-    elif _CONTACT_AUDIT_RE.search(reply):
+    elif _CONTACT_AUDIT_RE.search(reply) and not _CONTACTS_VERIFIED_OK_RE.search(reply):
         instruction = build_safe_scrub_instruction(section_title=title, reply=reply)
         summary = "Apply safe scrub from audit (no invented contacts)"
     else:
-        # Generic audit with no contact/pricing shape — do not offer a misleading button.
+        # Generic audit with no contact/pricing/VERIFY shape — do not offer a
+        # misleading button (including when contacts were marked correct).
         return None
 
     synthesized = SuggestedFix(

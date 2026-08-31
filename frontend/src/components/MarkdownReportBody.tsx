@@ -879,12 +879,14 @@ function renderInline(
 
     if (part.startsWith("**") && part.endsWith("**")) {
       const inner = part.slice(2, -2);
-      // LLM sometimes wraps the entire section in **…** — don't render that as bold.
-      if (inner.split(/\s+/).filter(Boolean).length > 12) {
+      // LLM sometimes wraps an entire section body in one **…** — don't treat that
+      // as emphasis. Normal paragraphs / phrases the user bolds must still render.
+      const wordCount = inner.split(/\s+/).filter(Boolean).length;
+      if (wordCount > 100) {
         return <span key={index}>{inner}</span>;
       }
       return (
-        <strong key={index} className="font-semibold text-foreground">
+        <strong key={index} className="font-bold text-inherit">
           {inner}
         </strong>
       );
@@ -948,7 +950,7 @@ export function MarkdownReportBody({
 
   if (variant === "document") {
     return (
-      <div className="proposal-prose proposal-prose--manuscript">
+      <div className="proposal-prose proposal-prose--manuscript selection:bg-blue-500/20 selection:text-inherit">
         {blocks.map((block, index) => {
           if (block.type === "hr") {
             return (

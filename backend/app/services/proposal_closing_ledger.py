@@ -194,16 +194,35 @@ async def get_or_extract_closing_ledger(
     """
     if research is not None and not force:
         cached = getattr(research, "closing_requirement_ledger", None)
+        if cached is None and hasattr(research, "model_dump"):
+            # Tolerate camelCase payload keys from older/partial loads.
+            dumped = research.model_dump(by_alias=True)
+            cached = dumped.get("closingRequirementLedger") or dumped.get(
+                "closing_requirement_ledger"
+            )
+        if isinstance(cached, ClosingRequirementLedger):
+            logger.info(
+                "Closing ledger cache hit (%d row(s))",
+                len(cached.requirements),
+            )
+            return cached, research
         if isinstance(cached, dict) and (
-            cached.get("requirements") is not None or "confidence" in cached
+            cached.get("requirements") is not None
+            or cached.get("Requirements") is not None
+            or "confidence" in cached
+            or "Confidence" in cached
         ):
             try:
                 ledger = ClosingRequirementLedger.model_validate(cached)
+                if ledger.requirements:
+                    logger.info(
+                        "Closing ledger cache hit (%d row(s))",
+                        len(ledger.requirements),
+                    )
+                    return ledger, research
                 logger.info(
-                    "Closing ledger cache hit (%d row(s))",
-                    len(ledger.requirements),
+                    "Closing ledger cache empty — re-extracting for this RFP"
                 )
-                return ledger, research
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Closing ledger cache invalid — re-extracting: %s", exc)
 

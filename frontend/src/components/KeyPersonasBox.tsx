@@ -41,11 +41,6 @@ export function KeyPersonasBox({
         type="button"
         onClick={() => setIsOpen(true)}
         className="zo-btn secondary flex items-center gap-2 px-3.5 py-2 text-xs font-semibold shadow-xs transition-smooth hover:border-[#ef5018] hover:text-[#ef5018]"
-        title={
-          count === 0
-            ? "No key personas selected yet — pick them when you Generate Proposal"
-            : `${count} key persona${count === 1 ? "" : "s"} selected for this proposal`
-        }
       >
         <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#ef5018]/12 text-[#ef5018]">
           <svg

@@ -98,87 +98,138 @@ async def _enqueue_pipeline_phase(
     holding the per-rfp job lock (the 409 other-operations-blocked behavior)
     indefinitely.
     """
-    existing = await get_proposal_job(rfp_id)
-    if existing and existing.status == "running":
-        if existing.job_type == phase:
-            return JSONResponse(
-                status_code=202,
-                content={
-                    "ok": True,
-                    "started": False,
-                    "alreadyRunning": True,
-                    "phase": phase,
-                    "job": proposal_job_to_dict(existing),
-                },
+    try:
+        existing = await get_proposal_job(rfp_id)
+        if existing and existing.status == "running":
+            if existing.job_type == phase:
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "ok": True,
+                        "started": False,
+                        "alreadyRunning": True,
+                        "phase": phase,
+                        "job": proposal_job_to_dict(existing),
+                    },
+                )
+            # Client often POSTs the *next* Generate phase the moment the prior
+            # checkpoint flips to completed, while Celery is still inside that
+            # prior task chaining forward. Returning 409 made the UI abort with
+            # resume stuck at senior-editor (budget → self-edit). Attach instead
+            # when both sides are Generate pipeline phases.
+            from app.services.proposal_pipeline_checkpoint import PIPELINE_PHASES
+
+            if existing.job_type in PIPELINE_PHASES and phase in PIPELINE_PHASES:
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "ok": True,
+                        "started": False,
+                        "alreadyRunning": True,
+                        "phase": existing.job_type,
+                        "requestedPhase": phase,
+                        "job": proposal_job_to_dict(existing),
+                    },
+                )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Another proposal job is already running ({existing.job_type}). "
+                    "Stop it or wait before starting a different phase."
+                ),
             )
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Another proposal job is already running ({existing.job_type}). "
-                "Stop it or wait before starting a different phase."
-            ),
+
+        from app.services.proposal_generation_cancel import clear_generation_cancel
+        from app.services.proposal_pipeline_checkpoint import record_phase_started
+
+        # A prior Stop leaves an in-memory cancel flag. Starting a new job is an
+        # explicit "run again" — drop the stale flag or the first cancelled-check
+        # kills the work immediately (looks like the scan "just stopped").
+        clear_generation_cancel(rfp_id)
+
+        # Mark in-progress before returning so the first poll sees the phase.
+        await record_phase_started(rfp_id, phase)
+
+        import uuid
+
+        from app.services.llm_call_context import llm_call_context
+
+        run_id = str(uuid.uuid4())
+
+        async def _run() -> Any:
+            import asyncio
+
+            try:
+                async with pipeline_phase(rfp_id, phase):
+                    with llm_call_context(rfp_id=rfp_id, run_id=run_id, node_name=phase):
+                        if timeout_sec is not None:
+                            return await asyncio.wait_for(work(), timeout=timeout_sec)
+                        return await work()
+            except TimeoutError:
+                # pipeline_phase's own except-Exception cleanup does not run here:
+                # wait_for cancels work() by raising CancelledError inside the
+                # "async with" block, which is a BaseException the phase context
+                # manager does not catch — so the checkpoint is repaired explicitly
+                # here instead, the same way POST /stop does it.
+                from app.services.proposal_pipeline_checkpoint import record_phase_failed
+
+                await record_phase_failed(
+                    rfp_id,
+                    phase,
+                    f"Timed out after {int(timeout_sec or 0)}s without completing. "
+                    "Progress up to the last saved step is kept — run it again to resume.",
+                )
+                raise
+
+        def _celery_dispatch() -> Any:
+            from app.celery_app import run_pipeline_phase_task
+
+            return run_pipeline_phase_task.delay(rfp_id, phase, job_kwargs or {})
+
+        record = await start_proposal_job(
+            rfp_id, phase, _run, celery_dispatch=_celery_dispatch
         )
-
-    from app.services.proposal_generation_cancel import clear_generation_cancel
-    from app.services.proposal_pipeline_checkpoint import record_phase_started
-
-    # A prior Stop leaves an in-memory cancel flag. Starting a new job is an
-    # explicit "run again" — drop the stale flag or the first cancelled-check
-    # kills the work immediately (looks like the scan "just stopped").
-    clear_generation_cancel(rfp_id)
-
-    # Mark in-progress before returning so the first poll sees the phase.
-    await record_phase_started(rfp_id, phase)
-
-    import uuid
-
-    from app.services.llm_call_context import llm_call_context
-
-    run_id = str(uuid.uuid4())
-
-    async def _run() -> Any:
-        import asyncio
-
-        try:
-            async with pipeline_phase(rfp_id, phase):
-                with llm_call_context(rfp_id=rfp_id, run_id=run_id, node_name=phase):
-                    if timeout_sec is not None:
-                        return await asyncio.wait_for(work(), timeout=timeout_sec)
-                    return await work()
-        except TimeoutError:
-            # pipeline_phase's own except-Exception cleanup does not run here:
-            # wait_for cancels work() by raising CancelledError inside the
-            # "async with" block, which is a BaseException the phase context
-            # manager does not catch — so the checkpoint is repaired explicitly
-            # here instead, the same way POST /stop does it.
-            from app.services.proposal_pipeline_checkpoint import record_phase_failed
-
-            await record_phase_failed(
-                rfp_id,
-                phase,
-                f"Timed out after {int(timeout_sec or 0)}s without completing. "
-                "Progress up to the last saved step is kept — run it again to resume.",
-            )
-            raise
-
-    def _celery_dispatch() -> Any:
-        from app.celery_app import run_pipeline_phase_task
-
-        return run_pipeline_phase_task.delay(rfp_id, phase, job_kwargs or {})
-
-    record = await start_proposal_job(
-        rfp_id, phase, _run, celery_dispatch=_celery_dispatch
-    )
-    return JSONResponse(
-        status_code=202,
-        content={
-            "ok": True,
-            "started": True,
-            "alreadyRunning": False,
-            "phase": phase,
-            "job": proposal_job_to_dict(record),
-        },
-    )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "started": True,
+                "alreadyRunning": False,
+                "phase": phase,
+                "job": proposal_job_to_dict(record),
+            },
+        )
+    except HTTPException:
+        raise
+    except httpx.HTTPError as exc:
+        # Supabase "Server disconnected" during checkpoint/job start — never HTML 500.
+        logging.getLogger(__name__).warning(
+            "Transient data-store error starting phase %s for %s: %s",
+            phase,
+            rfp_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Temporary data-store connection issue while starting this job. "
+                "Wait a few seconds and try again."
+            ),
+        ) from exc
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "OS/network error starting phase %s for %s: %s",
+            phase,
+            rfp_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Temporary connection issue while starting this job. "
+                "Wait a few seconds and try again."
+            ),
+        ) from exc
 
 
 def _slim_research(research: ProposalResearchCache | None) -> ProposalResearchCache | None:
@@ -984,11 +1035,24 @@ async def improve_section_endpoint(
             research = await aget_research_cache(rfp_id) or ProposalResearchCache(
                 rfpId=rfp_id
             )
-            draft, draft_changed, salvage_logs = await _salvage_draft_after_improve_failure(
-                rfp_id, prior_draft=prior_draft, research=research
-            )
-            section = _section_by_id(draft, section_id) or draft.sections[0]
             note = str(exc).strip() or "Could not complete this instruction."
+            # Selection-edit no-op is a routing failure, not a fabrication salvage
+            # case — do not surface unrelated budget DISQUALIFY flags as the recap.
+            # Pricing playbook refusals are intentional policy replies — never run
+            # manuscript-wide ZF / agentic QC salvage on unrelated tabs.
+            skip_salvage = (
+                "Selection edit did not change the excerpt" in note
+                or "reverse-engineer line items" in note.casefold()
+            )
+            if skip_salvage:
+                draft = prior_draft
+                draft_changed = False
+                salvage_logs: list[str] = []
+            else:
+                draft, draft_changed, salvage_logs = await _salvage_draft_after_improve_failure(
+                    rfp_id, prior_draft=prior_draft, research=research
+                )
+            section = _section_by_id(draft, section_id) or draft.sections[0]
             if draft_changed:
                 assistant_message = (
                     f"{note} Applied deterministic roster/bio stubs so invented "
@@ -1193,6 +1257,73 @@ async def fulfill_rfp_gaps_endpoint(
 
 
 @router.post(
+    "/{rfp_id}/proposal/align-rfp-outline/preview",
+)
+async def align_rfp_outline_preview_endpoint(rfp_id: str) -> dict[str, Any]:
+    """Preview left-list vs RFP order — does not change the draft until Apply."""
+    from app.services.proposal_align_rfp_outline import preview_align_to_rfp_outline
+
+    try:
+        return await preview_align_to_rfp_outline(rfp_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{rfp_id}/proposal/align-rfp-outline",
+)
+async def align_rfp_outline_endpoint(rfp_id: str) -> JSONResponse:
+    """Reorder / stub sidebar tabs to RFP submission order — no prose rewrite.
+
+    Uses pending Align preview when present (no second structure pass).
+    """
+    from app.services.proposal_align_rfp_outline import run_align_to_rfp_outline
+
+    async def work() -> None:
+        await run_align_to_rfp_outline(rfp_id)
+
+    return await _enqueue_pipeline_phase(
+        rfp_id,
+        "align-rfp-outline",
+        work,
+        timeout_sec=10 * 60,
+        job_kwargs={},
+    )
+
+
+@router.post(
+    "/{rfp_id}/proposal/packet-redistribute/preview",
+)
+async def packet_redistribute_preview_endpoint(rfp_id: str) -> dict[str, Any]:
+    """Scan misplaced blocks — returns a preview; does not change the draft body."""
+    from app.services.proposal_packet_redistribute import preview_packet_redistribute
+
+    try:
+        return await preview_packet_redistribute(rfp_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{rfp_id}/proposal/packet-redistribute",
+)
+async def packet_redistribute_endpoint(rfp_id: str) -> JSONResponse:
+    """Apply Place moves (uses pending preview plan when present — no second LLM)."""
+    from app.services.proposal_packet_redistribute import run_packet_redistribute
+
+    async def work() -> None:
+        await run_packet_redistribute(rfp_id)
+
+    return await _enqueue_pipeline_phase(
+        rfp_id,
+        "packet-redistribute",
+        work,
+        timeout_sec=15 * 60,
+        job_kwargs={},
+    )
+
+
+@router.post(
     "/{rfp_id}/proposal/restore-snapshot",
     response_model=ProposalRestoreSnapshotResponse,
 )
@@ -1230,7 +1361,13 @@ async def restore_proposal_snapshot_endpoint(
         )
     restored = prune_clutter_snapshots(restored)
     await asave_proposal_draft(restored)
-    return ProposalRestoreSnapshotResponse(draft=restored)
+    # Slim snapshot bodies in the HTTP response — full copies stay in DB.
+    # Returning every checkpoint body used to blow past proxy limits so Restore
+    # looked broken (timeout / truncated JSON) even though the DB write succeeded.
+    slim = slim_draft_for_api(restored)
+    return ProposalRestoreSnapshotResponse(
+        draft=ProposalDraft.model_validate(slim)
+    )
 
 
 @router.post("/{rfp_id}/proposal/export/docx")

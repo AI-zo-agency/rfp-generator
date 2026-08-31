@@ -15,9 +15,11 @@ from app.services.proposal_hallucination_detector import VERIFIED_CERTIFICATIONS
 
 logger = logging.getLogger(__name__)
 
-# Agency-level certs we may state when publicly verifiable (companyfacts / B Lab registry).
+# Agency-level certs we may state — companyfacts only (WBENC / WOSB).
+# B Corp / B Corporation is a REPEAT fabrication pattern across RFPs and must
+# never ship (same denylist as go_no_go_evidence_scrub).
 PUBLICLY_VERIFIABLE_AGENCY_CERTS = frozenset(
-    {*(c.upper() for c in VERIFIED_CERTIFICATIONS), "B CORPORATION", "B CORP"}
+    {*(c.upper() for c in VERIFIED_CERTIFICATIONS)}
 )
 
 # Diversity program designations zö does not hold as separate certs (WBENC/WOSB are verified).
@@ -63,6 +65,8 @@ _STANDALONE_WBE_RE = re.compile(
 )
 
 # Marketing / platform badges not on the verified agency cert list.
+# Do NOT add B Corp here — use go_no_go_evidence_scrub.scrub_evidence_text
+# (single shared denylist) so we never fork another cert synonym regex table.
 _UNVERIFIED_MARKETING_CERT_RES: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"1\s*%\s*for\s*the\s*Planet(?:\s+membership)?", re.I),
@@ -153,7 +157,11 @@ def _is_verified_agency_cert_mention(text: str) -> bool:
 
 
 def user_asks_cert_claim_scrub(text: str) -> bool:
-    """True when chat should deterministically remove fabricated / unverified certs."""
+    """True when chat should deterministically remove fabricated / unverified certs.
+
+    Intent is matched on remove/false-cert language only — no ``retain only …``
+    synonym regex tables (see no-regex-evidence-matching).
+    """
     raw = (text or "").strip()
     if not raw:
         return False
@@ -170,11 +178,6 @@ def user_asks_cert_claim_scrub(text: str) -> bool:
         raw,
     ):
         return True
-    if re.search(
-        r"(?is)\bretain\s+only\b.{0,80}\b(?:WBENC|WOSB|B\s+Corp)",
-        raw,
-    ):
-        return True
     return False
 
 
@@ -183,6 +186,11 @@ def _segment_has_fabricated_cert(segment: str) -> bool:
     upper = seg.upper()
     if "WBENC" in upper and re.search(r"WBE-\d", seg, re.I):
         return False
+    # Shared Go/No-Go denylist (B Corp, 1% Planet, LinkedIn Gold) — do not fork.
+    from app.services.go_no_go_evidence_scrub import evidence_has_fabricated_certs
+
+    if evidence_has_fabricated_certs(seg):
+        return True
     for pattern, _code in _DIVERSITY_FABRICATED_RES:
         if pattern.search(seg):
             return True
@@ -301,6 +309,15 @@ def scrub_section_cert_claims(section: ProposalSection) -> tuple[ProposalSection
         before = updated
         updated = pattern.sub("", updated)
         if updated != before:
+            logs.append(f"removed unverified marketing cert ({code})")
+
+    # Shared Go/No-Go denylist (B Corp etc.) — never fork a second regex table.
+    from app.services.go_no_go_evidence_scrub import scrub_fabricated_agency_cert_mentions
+
+    shared, fab_codes = scrub_fabricated_agency_cert_mentions(updated)
+    if fab_codes:
+        updated = shared
+        for code in fab_codes:
             logs.append(f"removed unverified marketing cert ({code})")
 
     if re.search(r"certif", updated, re.I):

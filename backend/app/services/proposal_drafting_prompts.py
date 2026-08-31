@@ -45,7 +45,7 @@ HEALTH / COALITION / STIGMA RFPs:
 
 VERIFIED FACTS ONLY:
 - Agency founded: 2013 (August 21, 2013). Years in operation = current calendar year − 2013 (13 in 2026).
-- Certifications: WBENC, WOSB (ONLY these two are verified)
+- Certifications: WBENC, WOSB (ONLY these two are verified — never B Corp / B Corporation)
 - E-Verify: NOT a verified company fact in KB — always [VERIFY] until Operations confirms
 - Conflict disclosures: NOT auto-assertable — always [VERIFY] until Sonja/leadership confirms
 - Client retention: DO NOT cite a specific average retention rate (not formally tracked)

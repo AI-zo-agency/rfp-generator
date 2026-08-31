@@ -252,7 +252,9 @@ def evidence_policy_prompt_stanza(
     if decision.action == EvidenceDecision.WRITE_FROM_CANONICAL_BUDGET:
         return (
             f"Evidence policy for {sid}: write_from_canonical_budget — use ledger / "
-            "money slots / pricing guide only. Never invent fee totals."
+            "money slots / pricing guide only. Never invent fee totals. "
+            "Professional fees = agency fee lines only (never fold travel into fees); "
+            "travel/reimbursables stay separate; total = fees + travel + pass-through."
         )
     if decision.action == EvidenceDecision.RETRIEVE_THEN_WRITE:
         return (

@@ -179,6 +179,11 @@ Rules:
    Multi-item recommendation lists still count as one single-section hasFix —
    put the full scrub checklist into applyInstruction. Never invent KB contacts
    in applyInstruction (say remove or [VERIFY: Sonja…]).
+   When the only safe edit is inserting a [VERIFY: …] flag (e.g. buyer board
+   roster zö cannot independently confirm) — still set hasFix=true with
+   applyInstruction that inserts that exact VERIFY tag once and leaves verified
+   contact fields / disclosure answers unchanged. "No structural rewrite" does
+   NOT mean hasFix=false when a VERIFY flag should be planted.
 9a. Highlighted excerpt + verify/confirm/check — OR the user says the excerpt is
     wrong/incorrect: they want a VERDICT on that text, not a rewrite. You MUST use
     the Verified KB facts block when present — never answer from memory alone.
@@ -1519,6 +1524,39 @@ def _message_targets_non_references_section(user_message: str) -> bool:
     return False
 
 
+def _user_asks_reference_integrity_fix(
+    user_message: str,
+    *,
+    apply_fix: bool = False,
+) -> bool:
+    """Broader reference scrub triggers — duplicates, Exhibit K, Apply fix from review."""
+    text = user_message or ""
+    if _message_targets_non_references_section(text):
+        return False
+    if re.search(
+        r"(?i)revert|restore|leave\s+(?:as-?is|alone)|do\s+not\s+add\s+a?\s*verify|"
+        r"available\s+on\s+request[\"']?\s*\.?\s*do\s+not",
+        text,
+    ):
+        return False
+    if apply_fix and re.search(
+        r"(?i)\b(?:reference|exhibit\s+[a-k]\b|duplicate|inconsistency)",
+        text,
+    ):
+        return True
+    if re.search(
+        r"(?i)"
+        r"duplicate.{0,60}reference|reference.{0,60}duplicate|"
+        r"same\s+reference\s+twice|listed\s+the\s+same\s+reference|"
+        r"exhibit\s+k|agency\s+director|sonja\s+anderson|connect@zo\.agency|"
+        r"fix.{0,40}reference|reference.{0,40}integrity|"
+        r"remove\s+duplicate|scrub\s+reference|fill\s+in\s+content",
+        text,
+    ):
+        return True
+    return _user_asks_reference_contact_fix(text)
+
+
 def _user_asks_reference_contact_fix(user_message: str) -> bool:
     text = user_message or ""
     if _message_targets_non_references_section(text):
@@ -1690,11 +1728,13 @@ def _try_deterministic_references_fix(
     section: ProposalSection,
     user_message: str,
     conversation_history: list[dict[str, str]] | None,
+    apply_fix: bool = False,
+    research: ProposalResearchCache | None = None,
 ) -> tuple[ProposalSection, str] | None:
-    """Apply §21 References contact fixes without LLM — no fabrications.
+    """Apply References integrity fixes without LLM — no fabrications.
 
-    Only runs when the LATEST user message asks for a references contact fix.
-    Never re-runs from chat history alone (that stole §11 Umatilla edits).
+    Runs on explicit contact-fill asks, Apply-fix from review, or duplicate/
+    agency-contact defects on a references tab.
     """
     del conversation_history  # Intentionally unused — latest message only.
     if _message_targets_non_references_section(user_message):
@@ -1711,15 +1751,50 @@ def _try_deterministic_references_fix(
     if revert is not None:
         return revert
 
-    if not _user_asks_reference_contact_fix(user_message):
-        return None
-
-    contacts = _extract_contacts_from_ask(user_message)
-    scrubbed, scrub_logs = _apply_reference_contacts_to_content(
-        section.content or "", contacts
+    from app.services.proposal_integrity_guards import (
+        apply_reference_content_scrubs,
+        apply_reference_post_fill_scrubs,
+        reference_section_has_scrubbable_defects,
     )
 
-    if scrubbed.strip() == (section.content or "").strip():
+    locks = research.manuscript_locks if research else None
+    primary = (locks.primary_contact_name if locks else "") or ""
+    body = section.content or ""
+    wants_integrity = _user_asks_reference_integrity_fix(
+        user_message, apply_fix=apply_fix
+    )
+    wants_contacts = _user_asks_reference_contact_fix(user_message)
+    has_defects = reference_section_has_scrubbable_defects(body)
+    run_scrub = wants_integrity or (
+        apply_fix and is_ref_section and has_defects
+    )
+
+    if not run_scrub and not wants_contacts:
+        return None
+
+    scrubbed = body
+    scrub_logs: list[str] = []
+
+    if wants_contacts:
+        from app.services.proposal_integrity_guards import scrub_reference_withholding
+
+        contacts = _extract_contacts_from_ask(user_message)
+        withheld, ref_logs = scrub_reference_withholding(scrubbed)
+        scrub_logs.extend(ref_logs)
+        scrubbed, contact_logs = _apply_reference_contacts_to_content(
+            withheld, contacts
+        )
+        scrub_logs.extend(contact_logs)
+        scrubbed, post_logs = apply_reference_post_fill_scrubs(
+            scrubbed, primary_contact_name=primary
+        )
+        scrub_logs.extend(post_logs)
+    elif run_scrub:
+        scrubbed, scrub_logs = apply_reference_content_scrubs(
+            scrubbed, primary_contact_name=primary
+        )
+
+    if scrubbed.strip() == body.strip():
         return None
 
     working = section.model_copy(update={"content": scrubbed, "status": "generated"})
@@ -1729,15 +1804,22 @@ def _try_deterministic_references_fix(
     ]
     for line in scrub_logs:
         parts.append(f"- {line}")
-    if "oregon" in contacts:
-        parts.append(f"- Oregon Employment Department → {contacts['oregon']}")
-    if "carbondale" in contacts:
-        parts.append(f"- City of Carbondale → {contacts['carbondale']}")
-    if "maricopa" in contacts:
-        parts.append(f"- Maricopa County → {contacts['maricopa']}")
-    parts.append(
-        "No fabricated contacts. Pre-cleared / agreed-to-respond claims removed."
-    )
+    if wants_contacts:
+        contacts = _extract_contacts_from_ask(user_message)
+        if "oregon" in contacts:
+            parts.append(f"- Oregon Employment Department → {contacts['oregon']}")
+        if "carbondale" in contacts:
+            parts.append(f"- City of Carbondale → {contacts['carbondale']}")
+        if "maricopa" in contacts:
+            parts.append(f"- Maricopa County → {contacts['maricopa']}")
+        parts.append(
+            "No fabricated contacts. Pre-cleared / agreed-to-respond claims removed."
+        )
+    elif has_defects:
+        parts.append(
+            "Removed duplicate or agency-contact placeholder rows. "
+            "Use verified ClientList contacts only — or leave MANUAL FILL for Sonja."
+        )
     return working, "\n".join(parts)
 
 
@@ -2687,6 +2769,11 @@ whole section regenerated or the change cannot be localized.
 NEVER choose full_rewrite when the user asks to ADD / CREATE a new sidebar section or tab
 (alongside existing content). Those are structural adds handled elsewhere — not rewrites
 of the open tab.
+
+When the user reports MISSING subsections (e.g. I.2 Active Client List entirely
+missing, jumps I.1 → I.3), empty headers, empty table cells, or a numbered list of
+structural defects: mode MUST be full_rewrite. A surgical patch cannot insert a
+heading that is not in the current content.
 
 When the user asks to REPLACE this section with a DIFFERENT / OTHER RFP need (scan RFP,
 another requirement, not the same topic): mode=full_rewrite. The instruction MUST change
@@ -5964,9 +6051,37 @@ async def _persist_section_improve_draft(
     section_title: str,
 ) -> ProposalDraft:
     """Save improved manuscript + an After snapshot so versions keep chat content."""
+    from app.services.proposal_cross_reference_resolver import (
+        resolve_tags_from_manuscript,
+    )
+    from app.services.proposal_pointer_page_integrity import (
+        apply_pointer_page_integrity_to_draft,
+    )
     from app.services.proposal_zero_fabrication import (
         apply_zero_fabrication_guards_before_persist,
     )
+
+    # Resolve VERIFY/MANUAL FILL answered elsewhere in THIS manuscript first.
+    try:
+        updated_draft, xref_logs = await resolve_tags_from_manuscript(updated_draft)
+        if xref_logs:
+            logger.info(
+                "cross-reference resolve (chat-persist): %s",
+                "; ".join(xref_logs[:8]),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cross-reference resolve skipped on chat-persist: %s", exc)
+
+    # Remap wrong Section-N cross-refs + execute/strip EDITOR NOTES before ZF.
+    try:
+        updated_draft, ptr_logs = apply_pointer_page_integrity_to_draft(updated_draft)
+        if ptr_logs:
+            logger.info(
+                "pointer-page integrity (chat-persist): %s",
+                "; ".join(ptr_logs[:8]),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pointer-page integrity skipped on chat-persist: %s", exc)
 
     guarded, _report = await apply_zero_fabrication_guards_before_persist(
         updated_draft,
@@ -6113,13 +6228,20 @@ async def _try_budget_summary_reconcile(
     str,
     bool,
 ] | None:
-    """Fix duplicated Year-1 / pass-through summary prose from the existing fee table.
+    """Sync Professional fees / travel / total labels from the canonical ledger.
 
-    Never runs Stage 3.5 — line items stay as-is.
+    On budget tabs: always compare labeled figures to the fee table — no
+    user-message keyword gate. When labels already match, return None so the
+    pricing agent can draft. Never Stage 3.5 (line items stay as-is).
     """
     ask = (user_message or "").strip()
-    if not user_asks_budget_summary_reconcile(ask):
+    # Full rebuild owns the tab — don't steal it into label-only sync.
+    if user_asks_budget_rebuild(ask) or user_asks_global_cost_rebuild(ask):
         return None
+    if not section_is_budget_related(section):
+        # Non-budget tabs: keep the existing explicit Year-1 / pass-through path.
+        if not user_asks_budget_summary_reconcile(ask):
+            return None
 
     provider = _provider_name()
     if research is None:
@@ -6130,6 +6252,12 @@ async def _try_budget_summary_reconcile(
         )
     canonical = research.budget if research else None
     if canonical is None or not (canonical.line_items or []):
+        # Budget tab with no ledger yet: fall through to the pricing agent /
+        # canonical refresh unless this is an explicit Year-1 summary ask.
+        if section_is_budget_related(section) and not user_asks_budget_summary_reconcile(
+            ask
+        ):
+            return None
         return (
             section,
             draft,
@@ -6149,22 +6277,8 @@ async def _try_budget_summary_reconcile(
         _find_draft_section(updated_draft, section.id) or section
     )
     if n <= 0:
-        from app.services.proposal_budget_content import canonical_budget_summary_figures
-
-        figs = canonical_budget_summary_figures(canonical)
-        return (
-            focus,
-            draft,
-            research,
-            provider,
-            (
-                "No duplicated Year-1 / pass-through summary blocks needed a rewrite "
-                f"(canonical agency fee ${figs['agency_fee']:,.2f}, pass-through "
-                f"${figs['passthrough']:,.2f}, total invoicing ${figs['total']:,.2f}). "
-                "Line items were left unchanged — this is not a Stage 3.5 rebuild."
-            ),
-            False,
-        )
+        # Labels already match — let the agent handle the ask.
+        return None
 
     if persist:
         updated_draft = await _persist_section_improve_draft(
@@ -6178,11 +6292,11 @@ async def _try_budget_summary_reconcile(
 
     figs = canonical_budget_summary_figures(canonical)
     reply = (
-        f"**Patches applied:** Reconciled investment summary prose from the existing "
-        f"fee table ({n} label fix(es)) — agency fee ${figs['agency_fee']:,.2f}, "
-        f"media pass-through ${figs['passthrough']:,.2f}, direct "
+        f"**Patches applied:** Synced investment summary labels from the fee ledger "
+        f"({n} label fix(es)) — professional/agency fees ${figs['agency_fee']:,.2f}, "
+        f"media pass-through ${figs['passthrough']:,.2f}, direct travel "
         f"${figs['direct']:,.2f}, total client invoicing ${figs['total']:,.2f}. "
-        "Line items were **not** regenerated (no Stage 3.5)."
+        "Phase/line items were left unchanged."
     )
     return focus, updated_draft, research, provider, reply, True
 
@@ -6582,8 +6696,7 @@ async def _try_section_cert_claim_scrub(
             provider,
             (
                 f"**{section.title}** — reviewed certification claims against the verified "
-                "agency list (WBENC, WOSB, publicly verifiable B Corp). No MBE/DBE/standalone "
-                "WBE or unverified badges remain to remove."
+                "agency list (WBENC and WOSB only). No fabricated or unverified badges remain."
             ),
             False,
         )
@@ -6604,8 +6717,7 @@ async def _try_section_cert_claim_scrub(
 
     reply = (
         f"**{section.title}** — removed fabricated / unverified certification claims "
-        f"({len(logs)} change(s)). Kept only verified agency credentials: WBENC/WOSB and "
-        "publicly verifiable B Corp where present. "
+        f"({len(logs)} change(s)). Kept only verified agency credentials: WBENC/WOSB. "
         + "; ".join(logs[:4])
         + ("…" if len(logs) > 4 else "")
     )
@@ -7611,6 +7723,28 @@ async def improve_proposal_section(
 
     # Powerful chat ops: duplicate audit / fabrication purge (content → RFP → KB)
     from app.services.proposal_chat_ops import classify_chat_op, run_chat_ops
+    from app.services.proposal_align_rfp_outline import (
+        align_draft_from_chat,
+        message_asks_align_rfp_outline,
+    )
+
+    # Whole-packet RFP order/format → Align (not Improve redraft of the open tab).
+    # Wins over pin/selection: rearrange asks must never rewrite Who We Are.
+    if not apply_fix and message_asks_align_rfp_outline(raw_user_message):
+        early = _find_draft_section(draft, section_id) or (
+            draft.sections[0] if draft.sections else None
+        )
+        if early is None:
+            raise ProposalError("Draft has no sections.", status_code=400)
+        focus, updated, research, reply, changed = await align_draft_from_chat(
+            rfp_id=rfp_id,
+            draft=draft,
+            research=research,
+            section=early,
+        )
+        return _improve_outcome(
+            focus, updated, research, _provider_name(), reply, changed
+        )
 
     chat_op = "none" if apply_fix else classify_chat_op(raw_user_message)
     if chat_op != "none" and not selection_mode:
@@ -7767,8 +7901,9 @@ async def improve_proposal_section(
             chat_intent, scope_reason = coerce_chat_intent_for_scope(
                 chat_intent, raw_user_message
             )
-            # Improve pin binds THIS tab. Questions stay advisory; change
-            # requests rewrite this tab. Only a clear add-tab ask leaves the pin.
+            # Improve pin binds THIS tab only. Mentions of §21/§22 as move
+            # destinations must never become multi_patch / remaps. Only a clear
+            # add-tab ask leaves the pin.
             if chat_intent == "structure" or is_add_section_intent(raw_user_message):
                 if chat_intent != "structure":
                     chat_intent = "structure"
@@ -7776,7 +7911,13 @@ async def improve_proposal_section(
                 scope_reason = "add_section_overrides_improve_pin"
             else:
                 intent_degraded = bool(intent_info.get("degraded"))
-                scope_reason = "improve_section_pinned"
+                if chat_intent == "multi_patch":
+                    chat_intent = "single_edit"
+                    scope_reason = "improve_pin_blocks_multi_patch"
+                else:
+                    scope_reason = "improve_section_pinned"
+                intent_info["primarySectionId"] = section_id
+                intent_info["intent"] = chat_intent
         else:
             intent_info = await classify_chat_edit_intent(
                 user_message=raw_user_message,
@@ -7901,6 +8042,8 @@ async def improve_proposal_section(
                     section=early_section,
                     user_message=raw_user_message,
                     conversation_history=conversation_history,
+                    apply_fix=apply_fix,
+                    research=research,
                 )
                 if ref_fix is not None:
                     provider = _provider_name()
@@ -9140,6 +9283,33 @@ async def improve_proposal_section(
                 section_id,
             )
 
+    # Required form slot: copy Active Client List from a sibling tab into missing I.2
+    # before edit-scope planning (selection patches cannot insert a missing heading).
+    # Draft-wide — same helper Complete Scan / Generate use — so every incomplete
+    # eval form gets the slot, not only the open tab.
+    if not selection_mode and (
+        improve_section_pinned
+        or re.search(r"(?i)active\s+client\s+list|jumps?\s+i\.?\s*1", latest_user_ask)
+    ):
+        from app.services.proposal_chat_improve_pin import (
+            fill_all_active_client_lists_from_siblings,
+            improve_pin_needs_full_rewrite,
+        )
+
+        draft, form_logs = fill_all_active_client_lists_from_siblings(draft)
+        if form_logs:
+            section = _find_draft_section(draft, section_id) or section
+            logger.info(
+                "Form-slot Active Client List fill for %s: %s",
+                rfp_id,
+                "; ".join(form_logs[:4]),
+            )
+            # Keep going through full rewrite so the rest of the issue list is fixed.
+            if improve_section_pinned and improve_pin_needs_full_rewrite(
+                latest_user_ask, section.content or ""
+            ):
+                pass  # fall through to full rewrite with I.2 already present
+
     if (
         not selection_mode
         and not is_add_section_intent(latest_user_ask)
@@ -9164,13 +9334,54 @@ async def improve_proposal_section(
                         section_id,
                         (scope_plan.understood_ask or latest_user_ask)[:80],
                     )
-                    if len(planned_spans) == 1:
+                    from app.services.proposal_chat_improve_pin import (
+                        improve_pin_needs_full_rewrite,
+                        should_collapse_edit_scope_to_selection,
+                    )
+
+                    if improve_section_pinned and improve_pin_needs_full_rewrite(
+                        latest_user_ask, section.content or ""
+                    ):
+                        # Missing I.2 / multi-issue lists cannot be selection-spliced.
+                        planned_spans = None
+                        scope_plan = EditScopePlan(
+                            understood_ask=scope_plan.understood_ask
+                            or latest_user_ask.strip(),
+                            mode="full_rewrite",
+                            patches=[],
+                            kb_queries=list(scope_plan.kb_queries or []),
+                        )
+                        logger.info(
+                            "Improve pin forced full_rewrite (structural/multi-issue) "
+                            "for %s / %s",
+                            rfp_id,
+                            section_id,
+                        )
+                    elif (
+                        len(planned_spans) == 1
+                        and should_collapse_edit_scope_to_selection(
+                            improve_section_pinned=improve_section_pinned,
+                            user_message=latest_user_ask,
+                            section_content=section.content or "",
+                            planned_span_count=1,
+                        )
+                    ):
                         selection_start, selection_end, only = planned_spans[0]
                         selection_text = (section.content or "")[
                             selection_start:selection_end
                         ]
                         selection_mode = True
                         user_message = only.editor_instruction
+                    elif len(planned_spans) == 1:
+                        # Improve pin + non-collapsible single patch → full rewrite.
+                        planned_spans = None
+                        scope_plan = EditScopePlan(
+                            understood_ask=scope_plan.understood_ask
+                            or latest_user_ask.strip(),
+                            mode="full_rewrite",
+                            patches=[],
+                            kb_queries=list(scope_plan.kb_queries or []),
+                        )
                 else:
                     logger.info(
                         "Edit-scope plan asked patch but no anchors found in %s — "

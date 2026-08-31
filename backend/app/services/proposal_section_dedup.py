@@ -47,11 +47,18 @@ RULES:
    Sections 1–3 or another scored tab. One section, one job, then stop.
 10. Evaluators skim — hit the scored asks, then stop. Prefer tables and short bullets over essay
     padding. Never invent length with filler when the RFP ask is already covered.
+10b. Technical Proposal / Executive Summary / Overview tabs: keep a short cross-ref table if useful;
+    do NOT paste whole Experience, Qualifications, Approach, Timeline, or Fee blocks that already
+    exist as dedicated TOC tabs — point to those tabs instead.
 11. ZERO REPETITION: never restate founding year, FEIN, ownership, certs, insurance limits,
     team bios, or case narratives that another section already owns.
-12. Primary contact: use ONLY the locked primary from manuscript locks everywhere — never name
+12. EXCEPTION — required RFP form / evaluation-criteria response slots: if THIS tab's
+    numbered ask (e.g. I.2 Active Client List) is missing or empty and another section
+    already has that list/table, COPY the verified list into the required slot. That is
+    form completion, not padding. Do not leave I.2 blank and point elsewhere.
+13. Primary contact: use ONLY the locked primary from manuscript locks everywhere — never name
     a second person (e.g. Haley Neff) as dedicated primary when Ron Comer is locked.
-13. Schedule must fit the RFP award→launch window; never invent dates, durations, or a
+14. Schedule must fit the RFP award→launch window; never invent dates, durations, or a
     sequential multi-month plan that overruns a short award→launch window without stating
     concurrent/post-launch work. If a figure is not in the RFP or KB, use [VERIFY] — never invent.
 """
@@ -169,6 +176,223 @@ def _plain_for_match(text: str) -> str:
     return re.sub(r"\*+", "", text).strip()
 
 
+def _heading_blocks(content: str) -> list[tuple[str, str, str]]:
+    """Split markdown into (heading_line, heading_text, body) blocks.
+
+    Leading prose before the first heading is returned as ("", "", body).
+    """
+    text = content or ""
+    if not text.strip():
+        return []
+    pattern = re.compile(r"(?m)^(#{1,4}\s+.+)$")
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return [("", "", text)]
+    blocks: list[tuple[str, str, str]] = []
+    if matches[0].start() > 0:
+        lead = text[: matches[0].start()]
+        if lead.strip():
+            blocks.append(("", "", lead))
+    for i, match in enumerate(matches):
+        heading_line = match.group(1)
+        heading_text = re.sub(r"^#{1,4}\s+", "", heading_line).strip()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[start:end]
+        blocks.append((heading_line, heading_text, body))
+    return blocks
+
+
+def _title_tokens_for_match(title: str) -> set[str]:
+    stop = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "section",
+        "part",
+        "our",
+        "of",
+        "to",
+        "a",
+        "an",
+        "or",
+        "in",
+        "on",
+        "at",
+        "by",
+        "as",
+        "is",
+        "are",
+        "this",
+        "that",
+        "assigned",
+        "relevant",
+        "similar",
+        "scope",
+        "projects",
+        "proposed",
+        "response",
+        "form",
+    }
+    raw = re.sub(r"^\d+[.)\s:—–-]*", "", title or "")
+    tokens = {
+        t
+        for t in re.findall(r"[a-z0-9]{4,}", raw.casefold())
+        if t not in stop
+    }
+    return tokens
+
+
+def _heading_matches_sibling_title(heading: str, sibling_title: str) -> bool:
+    """True when a subsection heading is naming another TOC tab."""
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    h = (heading or "").strip()
+    t = (sibling_title or "").strip()
+    if not h or not t:
+        return False
+    if outline_titles_near_duplicate(h, t, threshold=0.55):
+        return True
+    ht = _title_tokens_for_match(h)
+    tt = _title_tokens_for_match(t)
+    if not ht or not tt:
+        return False
+    # Shared headword (experience / qualifications / fee) + ≥1 more token,
+    # or ≥2 shared significant tokens.
+    shared = ht & tt
+    if len(shared) >= 2:
+        return True
+    headwords = {
+        "experience",
+        "qualification",
+        "qualifications",
+        "personnel",
+        "approach",
+        "timeline",
+        "schedule",
+        "fee",
+        "fees",
+        "pricing",
+        "budget",
+        "references",
+        "methodology",
+    }
+    if shared & headwords and len(shared) >= 1 and (ht & tt):
+        # Single strong topic word is enough when both sides share it.
+        if any(w in shared for w in headwords):
+            return True
+    return False
+
+
+def compress_sibling_restatement_blocks(
+    sections: list[Any],
+) -> tuple[list[Any], list[str]]:
+    """Replace in-section H2/H3 blocks that restate a sibling TOC tab.
+
+    Complete Scan / compact: keep unique material (e.g. a cross-ref table) and
+    swap duplicated Experience / Qualifications / Fee wholes for a one-line
+    pointer to the dedicated tab — never delete the summary tab itself.
+    """
+    from app.models.proposal import ProposalSection
+
+    logs: list[str] = []
+    if len(sections) < 2:
+        return list(sections), logs
+
+    # Dedicated siblings: substantial bodies only (the "home" for that topic).
+    siblings: list[tuple[str, str, str]] = []
+    for section in sections:
+        sid = _section_id(section)
+        title = _section_title(section)
+        body = _section_content(section)
+        if not sid or not title.strip():
+            continue
+        if word_count(body) < 20 and body.count("|") < 4:
+            continue
+        if _is_protected_budget_section(section) and "fee" not in title.casefold():
+            # Still allow Fee Proposal as a sibling home; bare budget ledger stays.
+            pass
+        siblings.append((sid, title, body))
+
+    out: list[Any] = []
+    for section in sections:
+        if not isinstance(section, ProposalSection):
+            out.append(section)
+            continue
+        sid = section.id or ""
+        title = section.title or ""
+        body = section.content or ""
+        if not body.strip() or word_count(body) < 80:
+            out.append(section)
+            continue
+        # Don't strip the dedicated home tabs — only summary / umbrella tabs.
+        title_cf = title.casefold()
+        is_umbrella = bool(
+            re.search(
+                r"\b(?:technical\s+proposal|executive\s+summary|proposal\s+summary|"
+                r"project\s+approach|overview|transmittal)\b",
+                title_cf,
+            )
+        )
+        # Also compress any tab that embeds ≥2 sibling-matching headings.
+        blocks = _heading_blocks(body)
+        if len(blocks) < 2 and not is_umbrella:
+            out.append(section)
+            continue
+
+        changed = False
+        new_parts: list[str] = []
+        replaced_titles: list[str] = []
+        for heading_line, heading_text, block_body in blocks:
+            if not heading_text:
+                new_parts.append(block_body)
+                continue
+            # Never replace the section's own title heading.
+            if _heading_matches_sibling_title(heading_text, title):
+                new_parts.append(f"{heading_line}{block_body}")
+                continue
+            home: tuple[str, str, str] | None = None
+            for sib_id, sib_title, _sib_body in siblings:
+                if sib_id == sid:
+                    continue
+                if _heading_matches_sibling_title(heading_text, sib_title):
+                    home = (sib_id, sib_title, _sib_body)
+                    break
+            if home is None:
+                new_parts.append(f"{heading_line}{block_body}")
+                continue
+            block_wc = word_count(block_body)
+            # Tiny intros under a heading stay; tables / longer restates go.
+            # When a dedicated sibling tab exists, even a short fee blurb is a
+            # restatement — prefer the pointer.
+            if block_wc < 12 and block_body.count("|") < 2:
+                new_parts.append(f"{heading_line}{block_body}")
+                continue
+            pointer = (
+                f"{heading_line}\n\n"
+                f"{_pointer_for_home(home[1])}\n\n"
+            )
+            new_parts.append(pointer)
+            replaced_titles.append(home[1])
+            changed = True
+
+        if not changed:
+            out.append(section)
+            continue
+        new_body = "".join(new_parts)
+        new_body = re.sub(r"\n{3,}", "\n\n", new_body).strip() + "\n"
+        out.append(section.model_copy(update={"content": new_body}))
+        logs.append(
+            f"{title or sid}: compressed {len(replaced_titles)} sibling "
+            f"restatement block(s) → "
+            + "; ".join(replaced_titles[:4])
+        )
+
+    return out, logs
+
+
 def compress_duplicate_case_study_sections(
     sections: list[Any],
 ) -> tuple[list[Any], int]:
@@ -244,10 +468,20 @@ def compress_duplicate_case_study_sections(
 
 def _pointer_for_home(title: str) -> str:
     home = (title or "the overlapping section").strip()
-    return (
-        f"See **{home}** for this narrative (already covered there — "
-        "not restated here)."
-    )
+    try:
+        from app.services.proposal_pointer_page_integrity import (
+            format_see_pointer_for_title,
+        )
+
+        return (
+            f"{format_see_pointer_for_title(home)} for this narrative "
+            f"(already covered there — not restated here)."
+        )
+    except Exception:  # noqa: BLE001
+        return (
+            f"See **{home}** for this narrative (already covered there — "
+            "not restated here)."
+        )
 
 
 def _replace_shared_paragraphs(body: str, shared: list[str], pointer: str) -> str:
@@ -1014,7 +1248,13 @@ def dedupe_manuscript_for_scan(
     if company_logs:
         sections = list(compressed.sections)
         logs.extend(company_logs)
+    # Order: first compress umbrella tabs that embed sibling headings
+    # (Technical Proposal → pointer to §21/§22/§26), THEN trim leftover
+    # shared paragraphs. Doing trim first can wrongly strip the dedicated
+    # sibling down to match the umbrella copy.
     if not drop_clone_tabs:
+        sections, sibling_logs = compress_sibling_restatement_blocks(sections)
+        logs.extend(sibling_logs)
         sections, trim_logs = trim_overlapping_section_prose(sections)
         logs.extend(trim_logs)
     return sections, logs

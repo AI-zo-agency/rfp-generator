@@ -37,6 +37,39 @@ _PRIORITY_PATTERNS: tuple[str, ...] = (
     r"offeror must (?:have|establish).{0,60}office|office in Oceania",
 )
 
+# CRITICAL windows are reserved budget BEFORE _PRIORITY_PATTERNS compete for it.
+#
+# Why this tier exists: priority windows are filled in DOCUMENT ORDER against a
+# shared budget. On a 99k-char, 42-page RFP whose scored criteria form sits at
+# ~65% (CNM P-472, Exhibit 1 on pages 27–31), early matches — table of
+# contents, Sections A/B terms — consumed the whole window budget and the
+# entire 1,000-point scoring table was cut. Downstream everything then behaved
+# correctly on an excerpt that simply did not contain the criteria: extraction
+# returned zero scored criteria, the outline kept only exhibit tabs, and the
+# proposal answered none of the scored sections.
+#
+# A scoring table is the single most important passage in an RFP — it IS the
+# required outline. It gets its own reserved budget and a wider span, because
+# these tables run long (25 numbered rows here) and losing the tail loses
+# sections just as completely as losing the head.
+_CRITICAL_PATTERNS: tuple[str, ...] = (
+    r"evaluation\s+criteria\s*(?:/\s*bid)?\s*(?:response|bid)?\s*form",
+    r"up\s+to\s+[\d,]+\s+points?\s+possible",
+    r"points?\s+possible",
+    r"total\s+points?\s+(?:possible|available)",
+    r"maximum\s+(?:of\s+)?[\d,]+\s+characters",
+    r"weighted\s+evaluation\s+criteria",
+)
+
+# Tight span, because scoring-table matches are DENSE (one per scored row) and
+# merge into a single contiguous window anyway. A wide span instead pads each
+# incidental mention elsewhere in the document with thousands of wasted chars.
+_CRITICAL_SPAN = 1_500
+
+# Share of the window budget reserved for critical passages before priority
+# patterns compete. The rest still goes to submission/forms/references windows.
+_CRITICAL_BUDGET_SHARE = 0.55
+
 _REFERENCE_SPEC_RE = re.compile(
     r"(?:references?\s*[—–-].{0,400}|"
     r"three\s+customers?.{0,400}|"
@@ -87,6 +120,72 @@ def _merge_windows(windows: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
+def _windows_for(body: str, patterns: tuple[str, ...], span: int) -> list[tuple[int, int]]:
+    windows: list[tuple[int, int]] = []
+    for pat in patterns:
+        for m in re.finditer(pat, body, flags=re.I | re.S):
+            windows.append((max(0, m.start() - span), min(len(body), m.end() + span)))
+    return _merge_windows(windows)
+
+
+def _match_density(body: str, window: tuple[int, int], patterns: tuple[str, ...]) -> int:
+    """How many pattern hits fall inside a window.
+
+    Document order is the wrong way to spend a scoring-table budget. A passing
+    mention of "points possible" in an early instructions paragraph is one hit;
+    the actual criteria table is thirty-two. Ranking by density spends the
+    reserved budget on the real table wherever it sits in the document —
+    Exhibit 1 at 56% through a 42-page RFP lost every time under document
+    order, which is exactly how a 1,000-point scoreboard went missing.
+    """
+    chunk = body[window[0] : window[1]]
+    return sum(len(re.findall(pat, chunk, flags=re.I | re.S)) for pat in patterns)
+
+
+def _subtract_covered(
+    window: tuple[int, int],
+    covered: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Window minus any span already selected, so budget is never spent twice."""
+    pieces = [window]
+    for cs, ce in covered:
+        nxt: list[tuple[int, int]] = []
+        for ps, pe in pieces:
+            if ce <= ps or cs >= pe:
+                nxt.append((ps, pe))
+                continue
+            if ps < cs:
+                nxt.append((ps, cs))
+            if ce < pe:
+                nxt.append((ce, pe))
+        pieces = nxt
+    return [(s, e) for s, e in pieces if e - s >= 400]
+
+
+def _take_windows(
+    candidates: list[tuple[int, int]],
+    *,
+    budget: int,
+    already: list[tuple[int, int]],
+) -> tuple[list[tuple[int, int]], int]:
+    taken: list[tuple[int, int]] = []
+    used = 0
+    for window in candidates:
+        if used >= budget:
+            break
+        for start, end in _subtract_covered(window, already + taken):
+            if used >= budget:
+                break
+            room = budget - used
+            if room < 400:
+                break
+            if end - start > room:
+                end = start + room
+            taken.append((start, end))
+            used += end - start
+    return taken, used
+
+
 def build_priority_rfp_excerpt(text: str, *, max_chars: int = 50_000) -> str:
     """Head + priority windows + tail so mid-RFP forms (e.g. page ~28) are not dropped."""
     body = (text or "").strip()
@@ -99,28 +198,42 @@ def build_priority_rfp_excerpt(text: str, *, max_chars: int = 50_000) -> str:
     tail_budget = min(int(max_chars * 0.22), 14_000)
     window_budget = max_chars - head_budget - tail_budget - 400
 
-    windows: list[tuple[int, int]] = []
-    span = 3200
-    for pat in _PRIORITY_PATTERNS:
-        for m in re.finditer(pat, body, flags=re.I | re.S):
-            windows.append((max(0, m.start() - span), min(len(body), m.end() + span)))
+    # Head and tail are always kept; never let them be re-selected as windows.
+    head_end = head_budget
+    tail_start = len(body) - tail_budget
+    already: list[tuple[int, int]] = [(0, head_end), (tail_start, len(body))]
 
-    merged = _merge_windows(windows)
+    # Scoring tables first, against reserved budget — see _CRITICAL_PATTERNS.
+    critical_budget = int(window_budget * _CRITICAL_BUDGET_SHARE)
+    critical_windows = _windows_for(body, _CRITICAL_PATTERNS, _CRITICAL_SPAN)
+    # Densest scoring passage first, not the earliest one.
+    critical_windows.sort(
+        key=lambda w: (-_match_density(body, w, _CRITICAL_PATTERNS), w[0])
+    )
+    critical_taken, critical_used = _take_windows(
+        critical_windows,
+        budget=critical_budget,
+        already=already,
+    )
+    # Unused critical budget flows back to the priority tier — never wasted.
+    priority_taken, _ = _take_windows(
+        _windows_for(body, _PRIORITY_PATTERNS, 3200),
+        budget=window_budget - critical_used,
+        already=already + critical_taken,
+    )
+
+    critical_spans = {span for span in critical_taken}
+    selected = _merge_windows(list(critical_taken) + list(priority_taken))
     priority_parts: list[str] = []
-    used = 0
-    for start, end in merged:
-        chunk = body[start:end]
-        if used + len(chunk) > window_budget:
-            remaining = window_budget - used
-            if remaining < 800:
-                break
-            chunk = chunk[:remaining]
-        priority_parts.append(
-            f"\n\n[--- RFP excerpt (priority: submission / references / pricing / forms) ---]\n{chunk}"
+    for start, end in selected:
+        label = (
+            "priority: SCORED EVALUATION CRITERIA / points table"
+            if any(cs <= start < ce or start <= cs < end for cs, ce in critical_spans)
+            else "priority: submission / references / pricing / forms"
         )
-        used += len(chunk)
-        if used >= window_budget:
-            break
+        priority_parts.append(
+            f"\n\n[--- RFP excerpt ({label}) ---]\n{body[start:end]}"
+        )
 
     head = body[:head_budget]
     tail = body[-tail_budget:]

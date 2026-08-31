@@ -895,8 +895,63 @@ def derive_legacy_fields(
             len(post_amend_dropped),
             post_amend_dropped[:12],
         )
-    section_cap = max_rfp_outline_sections(page_limit)
+    # Last gate before Phase 3 drafts: whatever the outline path did or did
+    # not do, every scored criterion must still have a tab here. Runs BEFORE
+    # the cap so scored tabs count as protected and the cap spends its free
+    # slots on nothing (see proposal_evaluation_coverage for why order matters).
+    #
+    # No submittal-completeness LLM check here — deliberately. That check
+    # already ran once inside run_dynamic_section_planner against these exact
+    # sections (plan.writing.proposal_outline.sections is what rfp_sections is
+    # derived from), and nothing between there and here removes a tab: the
+    # lean-filter call just above never drops a protected section, and every
+    # tab the completeness check injects is stamped protectFromCap=True.
+    # Re-running an LLM completeness pass here would re-pay for the same
+    # answer on the same input — cost with no coverage benefit.
+    from app.services.proposal_evaluation_coverage import (
+        ensure_scored_criteria_coverage,
+        min_outline_sections_for_evaluation,
+        uncovered_scored_criteria,
+    )
+
+    evaluation = plan.opportunity.evaluation
+    rfp_sections, scored_added, scored_dropped = ensure_scored_criteria_coverage(
+        rfp_sections,
+        evaluation,
+        section_factory=lambda raw: RfpSectionMap(
+            id=str(raw["id"]),
+            title=str(raw["title"]),
+            requirements=[str(raw.get("conditionalReason") or raw["title"])],
+            evaluationWeight=raw.get("evaluationWeight"),
+            sectionType="narrative",
+        ),
+    )
+    if scored_added:
+        logger.warning(
+            "derive_legacy_fields injected %d uncovered scored criterion tab(s): %s",
+            len(scored_added),
+            scored_added[:12],
+        )
+    if scored_dropped:
+        logger.info(
+            "derive_legacy_fields dropped %d criteria-form wrapper tab(s): %s",
+            len(scored_dropped),
+            scored_dropped[:12],
+        )
+
+    section_cap = max_rfp_outline_sections(
+        page_limit,
+        min_sections=min_outline_sections_for_evaluation(evaluation),
+    )
     rfp_sections, cap_dropped = enforce_outline_section_cap(rfp_sections, section_cap)
+    still_uncovered = uncovered_scored_criteria(rfp_sections, evaluation)
+    if still_uncovered:
+        # Should be unreachable — injected tabs are protected from the cap.
+        logger.error(
+            "derive_legacy_fields left %d scored criterion/criteria uncovered: %s",
+            len(still_uncovered),
+            still_uncovered[:12],
+        )
     if cap_dropped:
         logger.info(
             "derive_legacy_fields hard-capped RFP tabs to %d; dropped %d: %s",

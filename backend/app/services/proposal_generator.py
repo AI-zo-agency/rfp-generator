@@ -2220,19 +2220,24 @@ async def _run_phase3_drafting_inner(
 
     from app.services.proposal_fulfill_rfp_structure import (
         apply_rfp_toc_layout,
-        extract_rfp_scored_section_specs,
+        build_rfp_structure_specs,
+        ensure_missing_scored_section_stubs,
         specs_from_intelligence_outline,
     )
 
     specs: list = []
+    existing_titles = [s.title for s in merged_sections if s.title]
     try:
-        specs = await extract_rfp_scored_section_specs(
+        specs, spec_logs = await build_rfp_structure_specs(
             rfp_source_text or "",
             rfp_title=rfp.title,
-            existing_section_titles=[s.title for s in merged_sections if s.title],
+            existing_section_titles=existing_titles,
+            include_missing_submittals=False,
         )
+        for line in spec_logs[:8]:
+            logger.info("Phase 3 RFP structure specs: %s — %s", rfp_id, line)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Phase 3 RFP TOC extract skipped: %s", exc)
+        logger.warning("Phase 3 RFP structure specs skipped: %s", exc)
     if not specs:
         specs = specs_from_intelligence_outline(
             [
@@ -2250,12 +2255,23 @@ async def _run_phase3_drafting_inner(
         provider=provider,
     )
     draft, toc_logs = apply_rfp_toc_layout(draft, specs)
-    for line in toc_logs[:8]:
+    if specs:
+        draft, stub_logs = ensure_missing_scored_section_stubs(draft, specs)
+        if stub_logs:
+            draft, reorder_logs = apply_rfp_toc_layout(draft, specs)
+            toc_logs = [*toc_logs, *stub_logs, *reorder_logs]
+    for line in toc_logs[:12]:
         logger.info("Phase 3 TOC layout: %s — %s", rfp_id, line)
+    from app.services.proposal_consistency_enforcement import apply_consistency_enforcement
     from app.services.proposal_integrity_guards import apply_manuscript_integrity_guards
 
     draft, integrity_logs = apply_manuscript_integrity_guards(draft)
-    for line in integrity_logs[:12]:
+    draft, consistency_logs = apply_consistency_enforcement(
+        draft,
+        research=research,
+        rfp_text=rfp_source_text or "",
+    )
+    for line in [*integrity_logs, *consistency_logs][:12]:
         logger.info("Phase 3 integrity: %s — %s", rfp_id, line)
 
     try:
@@ -2421,6 +2437,62 @@ async def run_phase3_6_self_edit(rfp_id: str):
     """Phase 3.6: senior-editor self-edit loop (section-wise KB repair)."""
     with pipeline_phase("phase-3-6-self-edit", rfp_id=rfp_id):
         await _collapse_bio_stubs(rfp_id, log_label="Phase 3.6 start bio stub")
+
+        # Cross-reference open tags against the manuscript itself BEFORE the
+        # self-edit loop's KB repair pass — a fact already stated three
+        # sections away is free and more authoritative than a KB query, and
+        # the self-edit loop below still handles anything left unresolved.
+        # Same fix as Complete & Clean's step 11 — the "Generate proposal"
+        # pipeline is a SEPARATE path through this codebase and does not
+        # otherwise share that step, so it needs its own call here.
+        try:
+            from app.services.proposal_cross_reference_resolver import (
+                resolve_tags_from_manuscript,
+            )
+
+            pre_draft = await aget_proposal_draft(rfp_id)
+            if pre_draft:
+                updated, xref_applied = await resolve_tags_from_manuscript(pre_draft)
+                if xref_applied:
+                    await asave_proposal_draft(updated)
+                    step_trace(
+                        "phase3_6_cross_reference_resolved",
+                        rfp_id=rfp_id,
+                        resolved_count=len(xref_applied),
+                        resolved=xref_applied[:12],
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Cross-reference tag resolution during Phase 3.6 skipped for %s: %s",
+                rfp_id,
+                exc,
+            )
+
+        # Form-slot parity with Complete Scan / section chat: copy Active Client
+        # List into missing I.2 from a sibling tab before senior self-edit.
+        try:
+            from app.services.proposal_chat_improve_pin import (
+                fill_all_active_client_lists_from_siblings,
+            )
+
+            form_draft = await aget_proposal_draft(rfp_id)
+            if form_draft:
+                filled, form_logs = fill_all_active_client_lists_from_siblings(form_draft)
+                if form_logs:
+                    await asave_proposal_draft(filled)
+                    step_trace(
+                        "phase3_6_active_client_list_form_slots",
+                        rfp_id=rfp_id,
+                        filled=len(form_logs),
+                        samples=form_logs[:6],
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Active Client List form-slot fill during Phase 3.6 skipped for %s: %s",
+                rfp_id,
+                exc,
+            )
+
         draft, research, report = await run_self_edit_loop(
             rfp_id,
             lean=True,
@@ -3095,6 +3167,28 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         except Exception:
             logger.exception("Phase 4 money intelligence failed for %s", rfp_id)
 
+    # Phase 4 steps (stub fill, adversarial repair, VERIFY scrub) can rewrite
+    # reference tabs after Phase 3 — re-run deterministic reference guards last.
+    from app.services.proposal_consistency_enforcement import apply_consistency_enforcement
+    from app.services.proposal_integrity_guards import apply_manuscript_integrity_guards
+
+    content_info_final = _assess_rfp_content(rfp)
+    rfp_text_final = combine_rfp_text(
+        content_info_final.description or "", content_info_final.pdf_text or ""
+    )
+    draft, post_review_integrity = apply_manuscript_integrity_guards(draft)
+    draft, post_review_consistency = apply_consistency_enforcement(
+        draft,
+        research=research,
+        rfp_text=rfp_text_final or "",
+    )
+    if post_review_integrity or post_review_consistency:
+        await asave_proposal_draft(draft)
+        for line in post_review_integrity[:6]:
+            logger.info("Phase 4 final reference integrity %s: %s", rfp_id, line)
+        for line in post_review_consistency[:6]:
+            logger.info("Phase 4 final reference consistency %s: %s", rfp_id, line)
+
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp,
         draft=draft,
@@ -3642,9 +3736,36 @@ async def generate_full_proposal(
 
         # Final zero-fabrication pass — canonical budget, reference phones, flags.
         try:
+            from app.services.proposal_chat_improve_pin import (
+                fill_all_active_client_lists_from_siblings,
+            )
+            from app.services.proposal_pointer_page_integrity import (
+                apply_pointer_page_integrity_to_draft,
+            )
             from app.services.proposal_zero_fabrication import (
                 apply_zero_fabrication_guards_before_persist,
             )
+
+            # Safety re-run before ZF (parity with Complete Scan scan-final).
+            draft, form_logs = fill_all_active_client_lists_from_siblings(draft)
+            if form_logs:
+                step_trace(
+                    "post_self_edit_active_client_list_form_slots",
+                    rfp_id=rfp_id,
+                    filled=len(form_logs),
+                    samples=form_logs[:6],
+                )
+
+            draft, ptr_logs = apply_pointer_page_integrity_to_draft(draft)
+            if ptr_logs:
+                step_trace(
+                    "post_self_edit_pointer_page_integrity",
+                    rfp_id=rfp_id,
+                    actions=len(ptr_logs),
+                    samples=ptr_logs[:8],
+                )
+                for line in ptr_logs[:8]:
+                    logger.info("Full proposal pointer-page integrity: %s — %s", rfp_id, line)
 
             rfp_final = get_rfp(rfp_id)
             final_rfp_text = load_rfp_for_proposal(rfp_id)[2] if rfp_final else ""
@@ -3666,6 +3787,28 @@ async def generate_full_proposal(
                     phase_table_conflicts=len(zf_report.phase_table_conflicts),
                     budget_mismatches=zf_report.budget_mismatch_count,
                     samples=zf_report.logs[:10],
+                )
+
+            # Pointer inserts / form fills must not overshadow an explicit page limit.
+            from app.services.proposal_ralph import (
+                reassert_rfp_page_limit_after_content_passes,
+            )
+
+            draft, ralph_re = reassert_rfp_page_limit_after_content_passes(
+                draft,
+                page_limit=(rfp_final or rfp).page_limit if (rfp_final or rfp) else None,
+                rfp_text=final_rfp_text,
+                label="post-self-edit",
+            )
+            if ralph_re:
+                await asave_proposal_draft(draft)
+                for line in ralph_re[:10]:
+                    logger.info("Full proposal page-limit reassert: %s — %s", rfp_id, line)
+                step_trace(
+                    "post_self_edit_page_limit_reassert",
+                    rfp_id=rfp_id,
+                    actions=len(ralph_re),
+                    samples=ralph_re[:8],
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -3784,6 +3927,47 @@ async def generate_full_proposal(
                     "adversarial_repair_skipped",
                     rfp_id=rfp_id,
                     reason="adversarial_repair_loop=false",
+                )
+
+            # Stub fill / adversarial repair can add words after post-self-edit
+            # Ralph — reassert explicit RFP page limit before pre-submit.
+            try:
+                from app.services.proposal_ralph import (
+                    reassert_rfp_page_limit_after_content_passes,
+                )
+                from app.services.rfp_content import combine_rfp_text, load_local_rfp_text
+
+                _d, pdf_t, *_rest = load_local_rfp_text(rfp, max_chars=250_000)
+                limit_text = combine_rfp_text(
+                    _d or (rfp.description or ""), pdf_t, max_chars=250_000
+                )
+                if len(limit_text.strip()) < 200:
+                    limit_text = load_rfp_for_proposal(rfp_id)[2]
+                draft, ralph_pre4 = reassert_rfp_page_limit_after_content_passes(
+                    draft,
+                    page_limit=rfp.page_limit,
+                    rfp_text=limit_text,
+                    label="pre-phase-4",
+                )
+                if ralph_pre4:
+                    await asave_proposal_draft(draft)
+                    for line in ralph_pre4[:10]:
+                        logger.info(
+                            "Full proposal pre-phase-4 page-limit reassert: %s — %s",
+                            rfp_id,
+                            line,
+                        )
+                    step_trace(
+                        "pre_phase4_page_limit_reassert",
+                        rfp_id=rfp_id,
+                        actions=len(ralph_pre4),
+                        samples=ralph_pre4[:8],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Full proposal pre-phase-4 page-limit reassert skipped for %s: %s",
+                    rfp_id,
+                    exc,
                 )
 
             with pipeline_phase("phase-4-presubmit", rfp_id=rfp_id):

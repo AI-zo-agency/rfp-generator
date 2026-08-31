@@ -48,7 +48,6 @@ export function ProposalTabMoreMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        title="More proposal actions"
       >
         More
         <svg

@@ -164,6 +164,43 @@ class RalphFidelityTests(unittest.TestCase):
         budget_sec = next(s for s in updated.sections if s.id == "budget")
         self.assertIn("Fee Detail by Phase", budget_sec.content or "")
 
+    def test_reassert_after_content_passes_still_enforces_limit(self) -> None:
+        """Later integrity/fill growth must not leave the draft over the RFP cap."""
+        from app.services.proposal_ralph import reassert_rfp_page_limit_after_content_passes
+
+        fluff = "word " * 500
+        draft = ProposalDraft(
+            rfpId="rfp-reassert",
+            sections=[
+                _section(f"pad-{i}", fluff, title=f"Padding {i}", word_target=200)
+                for i in range(8)
+            ],
+            updatedAt="2026-01-01T00:00:00Z",
+        )
+        budget = ralph_document_word_budget(4)
+        assert budget is not None
+        # Simulate post-Ralph growth (hollow fill / pointer inserts).
+        grown = draft.model_copy(
+            update={
+                "sections": [
+                    s.model_copy(
+                        update={"content": (s.content or "") + (" extra " * 80)}
+                    )
+                    for s in draft.sections
+                ]
+            }
+        )
+        updated, logs = reassert_rfp_page_limit_after_content_passes(
+            grown,
+            page_limit=4,
+            rfp_text="Proposals are limited to four (4) pages.",
+            label="unit-test",
+        )
+        after = sum(len((s.content or "").split()) for s in updated.sections)
+        self.assertLessEqual(after, budget)
+        self.assertTrue(any("reassert:unit-test" in x for x in logs))
+        self.assertTrue(any("page-hard-fit" in x or "page-limit:" in x for x in logs))
+
 
 if __name__ == "__main__":
     unittest.main()

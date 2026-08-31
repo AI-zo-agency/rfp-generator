@@ -1,0 +1,46 @@
+import { NextResponse } from "next/server";
+import { longRunningFetch } from "@/lib/long-running-fetch";
+
+export const runtime = "nodejs";
+export const maxDuration = 180;
+
+export async function POST(
+  _request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  const backendUrl =
+    process.env.NEXT_PUBLIC_BACKEND_URL ||
+    process.env.BACKEND_URL ||
+    "http://localhost:8001";
+  try {
+    const response = await longRunningFetch(
+      `${backendUrl}/api/v1/rfps/${id}/proposal/packet-redistribute/preview`,
+      {
+        method: "POST",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+        timeoutMs: 120_000,
+      }
+    );
+    const text = await response.text();
+    let data: unknown = {};
+    if (text.trim()) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        return NextResponse.json(
+          { detail: "Invalid JSON from backend." },
+          { status: 502 }
+        );
+      }
+    }
+    return NextResponse.json(data, { status: response.status });
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Could not reach backend for place preview.";
+    return NextResponse.json({ detail: message }, { status: 502 });
+  }
+}

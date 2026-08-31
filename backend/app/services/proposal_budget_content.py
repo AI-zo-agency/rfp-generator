@@ -2186,6 +2186,12 @@ def reconcile_budget_summary_prose(
             agency,
         ),
         (
+            r"(Professional\s+(?:services\s+)?fees?)"
+            + _connector
+            + r"\$[\d,]+(?:\.\d{2})?",
+            agency,
+        ),
+        (
             r"(Client\s+media\s+pass-?through(?:\s*\([^)]*\))?)"
             + _connector
             + r"\$[\d,]+(?:\.\d{2})?",
@@ -2266,6 +2272,38 @@ def reconcile_draft_budget_summaries(
     return draft.model_copy(update={"sections": sections, "updated_at": now}), total_changes
 
 
+# A drafted section shorter than this is an outline stub, not real content —
+# still worth appending the internal Budget & Pricing tab in that case.
+_DRAFTED_PRICING_MIN_CHARS = 200
+
+
+def rfp_pricing_section_already_drafted(sections: list[ProposalSection]) -> bool:
+    """True when the RFP's OWN scored pricing section already has real content.
+
+    find_budget_section_index / budget_section_score exist to pick the right
+    WRITE TARGET for the internal budget render and deliberately do not match
+    a buyer title like CNM's "SECTION VII — Economy and Price" — broadening
+    them was tried and reverted: it made that function's overwrite branch
+    treat the section as its target and destroy the drafted VII.1–VII.5
+    narrative, the same failure this module's own incorporate_budget_into_draft
+    docstring already documents once happening to a different RFP's filled
+    form. This check is intentionally separate and narrower: it only answers
+    "should a NEW internal Budget & Pricing tab be skipped", never "what
+    should be overwritten" — it has no overwrite branch to be dangerous in.
+
+    Reuses proposal_outline_dedup.is_pricing_outline_title — the same
+    general, already-vetted pricing-title signal used elsewhere in the
+    outline pipeline, not a new one-off pattern for this RFP.
+    """
+    from app.services.proposal_outline_dedup import is_pricing_outline_title
+
+    return any(
+        is_pricing_outline_title(section.title or "")
+        and len((section.content or "").strip()) >= _DRAFTED_PRICING_MIN_CHARS
+        for section in sections
+    )
+
+
 def ensure_budget_section_present(
     sections: list[ProposalSection],
     budget: ProposalBudget | None,
@@ -2275,9 +2313,13 @@ def ensure_budget_section_present(
     """If the fee tab is missing but canon budget exists, append Budget & Pricing.
 
     Used after Senior Editor / Scan compact so dedupe or delete tickets cannot
-    permanently erase a token-expensive regenerated fee table.
+    permanently erase a token-expensive regenerated fee table. Skips entirely
+    when the RFP's own scored pricing section is already drafted — see
+    rfp_pricing_section_already_drafted.
     """
     if find_budget_section_index(sections) is not None:
+        return sections, False
+    if rfp_pricing_section_already_drafted(sections):
         return sections, False
     if budget is None:
         return sections, False
@@ -2401,6 +2443,18 @@ async def incorporate_budget_into_draft(
     now = datetime.now(timezone.utc).isoformat()
     sections = list(draft.sections)
     idx = find_budget_section_index(sections)
+
+    if idx is None and rfp_pricing_section_already_drafted(sections):
+        # The RFP's own scored pricing section (e.g. "SECTION VII — Economy
+        # and Price") already answers the buyer's pricing ask with real
+        # content. find_budget_section_index doesn't recognize titles like
+        # that as A write target — correctly, since teaching it to would
+        # route the OVERWRITE branch below onto that narrative and destroy it
+        # (see this function's own docstring for the prior incident that
+        # exact mistake caused on a different RFP). This check only
+        # suppresses the redundant SECOND tab; it never touches an existing
+        # section's content.
+        return draft
 
     if idx is not None:
         target = sections[idx]

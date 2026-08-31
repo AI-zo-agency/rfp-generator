@@ -99,6 +99,23 @@ class ReverseEngineerGuardTests(unittest.TestCase):
             )
         )
 
+    def test_sums_to_dollar_describing_table_is_not_reverse_engineering(self) -> None:
+        """Describing existing phase-table math must not trip the bare 'to $N' pattern."""
+        msg = (
+            'The summary line now says "Professional fees: $213,500" — but the '
+            "phase table right below it still correctly sums to $210,000 in fees "
+            "+ $3,500 travel = $213,500 total. The top-line summary got bumped by "
+            '$3,500 and now double-counts travel into "fees." Previous version '
+            "had this right."
+        )
+        self.assertFalse(user_asked_reverse_engineered_total(msg))
+        self.assertIsNone(refuse_noncompliant_budget_edit(msg, "…"))
+
+    def test_change_total_to_dollar_is_still_refused(self) -> None:
+        self.assertTrue(
+            user_asked_reverse_engineered_total("Change the total to $75000")
+        )
+
 
 class BudgetRebuildAskTests(unittest.TestCase):
     def test_fill_budget_detected(self) -> None:
@@ -171,6 +188,28 @@ class BudgetRebuildAskTests(unittest.TestCase):
         self.assertTrue(user_asks_budget_summary_reconcile(msg))
         self.assertFalse(user_asks_global_cost_rebuild(msg))
 
+    def test_fees_travel_prose_does_not_need_keyword_gate(self) -> None:
+        """Describing a fees/travel double-count must not trip reverse-engineer.
+
+        Budget-tab Improve syncs labels from the ledger without matching this
+        message to a summary-reconcile keyword list.
+        """
+        msg = (
+            'The summary line now says "Professional fees: $213,500" — but the '
+            "phase table right below it still correctly sums to $210,000 in fees "
+            "+ $3,500 travel = $213,500 total. The top-line summary got bumped by "
+            '$3,500 and now double-counts travel into "fees." Previous version '
+            "had this right."
+        )
+        self.assertFalse(user_asked_reverse_engineered_total(msg))
+        self.assertIsNone(refuse_noncompliant_budget_edit(msg, "…"))
+        # No keyword expansion required — ledger sync owns the fix on Price tabs.
+        from app.services.proposal_budget_playbook import (
+            user_asks_budget_summary_reconcile,
+        )
+
+        self.assertFalse(user_asks_budget_summary_reconcile(msg))
+
 
 class BudgetSummaryReconcileProseTests(unittest.TestCase):
     def test_rewrites_duplicated_year1_block(self) -> None:
@@ -236,6 +275,50 @@ class BudgetSummaryReconcileProseTests(unittest.TestCase):
             out,
             r"agency fee: \$248,764\.30\..*pass-through.*\$248,764\.30",
         )
+
+    def test_professional_fees_label_excludes_travel(self) -> None:
+        from app.services.proposal_budget_content import reconcile_budget_summary_prose
+
+        content = (
+            "**Professional fees: $213,500**\n\n"
+            "| Phase | Amount |\n| --- | --- |\n"
+            "| Strategy | $210,000 |\n"
+            "| Travel | $3,500 |\n"
+        )
+        budget = ProposalBudget(
+            rfpId="rfp-1",
+            updatedAt="2026-08-27T00:00:00+00:00",
+            lineItems=[
+                BudgetLineItem(
+                    id="1",
+                    description="Strategy",
+                    category="Fees",
+                    quantity=1,
+                    unit="project",
+                    rate=210000,
+                    extended=210000,
+                    lineItemType="agency_fee",
+                ),
+                BudgetLineItem(
+                    id="2",
+                    description="Travel",
+                    category="Travel",
+                    quantity=1,
+                    unit="project",
+                    rate=3500,
+                    extended=3500,
+                    lineItemType="direct_expense",
+                ),
+            ],
+            agencyFeeSubtotal=210000,
+            directExpensesTotal=3500,
+            agencyRevenueEstimate=213500,
+            totalClientInvoicing=213500,
+        )
+        out, n = reconcile_budget_summary_prose(content, budget)
+        self.assertGreater(n, 0)
+        self.assertIn("Professional fees: $210,000", out)
+        self.assertNotIn("Professional fees: $213,500", out)
 
 
 class SectionBudgetVerifyFillTests(unittest.TestCase):

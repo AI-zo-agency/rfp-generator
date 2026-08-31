@@ -256,9 +256,14 @@ async def _rewrite_section_for_contradiction(
 
 
 def _append_verify_note(section: ProposalSection, finding: ContradictionFinding) -> ProposalSection:
-    note = (
-        f"[VERIFY: resolve RFP contradiction — {finding.manuscript_contradiction[:180]} "
-        f"| RFP requires: {finding.rfp_requirement[:140]}]"
+    from app.services.proposal_manual_flags import format_verify_tag
+
+    # Sanitize interiors — a raw ] in LLM contradiction text would make
+    # VERIFY_TAG_RE match only through the first ], and optional scrub would
+    # leave a gibberish ``… RFP requires: …]`` orphan in the manuscript.
+    note = format_verify_tag(
+        f"resolve RFP contradiction — {finding.manuscript_contradiction[:180]} "
+        f"| RFP requires: {finding.rfp_requirement[:140]}"
     )
     body = section.content or ""
     if note[:60].casefold() in body.casefold():

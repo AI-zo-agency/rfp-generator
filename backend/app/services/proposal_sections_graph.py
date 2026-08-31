@@ -703,7 +703,10 @@ async def _bio_stub_kb_inputs(
 
 async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
     """Assemble bio from 04_Bio_{Name}.pdf, section RAG, and Master Template fallback."""
-    from app.services.proposal_bio_stub import is_plausible_person_name
+    from app.services.proposal_bio_stub import (
+        expected_bio_pdf_filename,
+        is_plausible_person_name,
+    )
 
     if not is_plausible_person_name(member):
         logger.info("Skip 04_Bio fetch for non-person label %r", member)
@@ -711,8 +714,11 @@ async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
     if not supermemory.is_configured():
         return "(Supermemory not configured.)", []
 
+    slug = _bio_file_slug(member)
+    target_file = expected_bio_pdf_filename(member)
     sources: list[str] = []
     full_text = ""
+    doc = None
 
     # 1) Authoritative full document by filename (not fuzzy RFP-mixed search).
     #    Also accept 04_Bio_First_Last.pdf / "04_Bio_First Last.pdf" variants.
@@ -730,7 +736,19 @@ async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
     roster_excerpt, roster_sources = await _fetch_member_roster_bio_excerpt(member)
     sources = sorted(set(sources) | set(roster_sources))
 
+    # No real 04_Bio file and no Master Template roster hit → never invent
+    # six section searches for 04_Bio_EconomicGrowth.pdf etc. (case-study /
+    # TOC titles that only look like "First Last").
+    if not doc and not (roster_excerpt or "").strip():
+        logger.info(
+            "Skip 04_Bio section RAG — no KB file or roster for %r (refusing %s)",
+            member,
+            target_file,
+        )
+        return "", []
+
     # 2) Section-scoped assembly: 04_Bio header → roster section → RAG chunks.
+    #    RAG queries only when the bio PDF actually exists.
     section_parts: list[str] = []
     for section in (
         "YEARS OF EXPERIENCE",
@@ -740,7 +758,9 @@ async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
         "LICENSES",
         "CERTIFICATIONS",
     ):
-        rag = await _rag_bio_section_chunks(member, section)
+        rag = ""
+        if doc:
+            rag = await _rag_bio_section_chunks(member, section)
         header_block = _section_block_text(full_text, section) if full_text else ""
         roster_block = (
             _section_block_text(roster_excerpt, section) if roster_excerpt else ""
@@ -786,8 +806,8 @@ async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
 
     if section_parts:
         text = f"{(preamble or '').strip()}\n\n" + "\n\n".join(section_parts)
-    else:
-        # Fallback: hybrid search limited to this bio file name.
+    elif doc:
+        # Fallback: hybrid search limited to this bio file name — only when file exists.
         query = f"04_Bio_{slug}.pdf {member}"
         try:
             hits = await supermemory.search_documents(
@@ -808,8 +828,10 @@ async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
             set(sources)
             | {_hit_file_name(h) for h in bio_hits if _hit_file_name(h)}
         )
+    else:
+        text = (roster_excerpt or "").strip()
 
-    if target_file not in sources and text.strip():
+    if target_file not in sources and text.strip() and doc:
         sources = sorted(set(sources) | {target_file})
 
     text = _normalize_bio_text_dates(text)

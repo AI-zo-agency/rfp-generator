@@ -88,7 +88,25 @@ class CertClaimScrubTests(unittest.TestCase):
         self.assertNotIn("LinkedIn Gold", body)
         self.assertIn("WBENC WBE-2401236", body)
         self.assertIn("WOSB", body)
-        self.assertIn("B Corporation", body)
+        self.assertNotIn("B Corporation", body)
+
+    def test_removes_b_corp_member_and_attachment_claims(self) -> None:
+        section = ProposalSection(
+            id="portal",
+            title="5.9 OpenGov Portal",
+            content=(
+                "| Business Classification | B Corporation member |\n"
+                "| Attachments | B Corporation Certification — already submitted |\n"
+                "We hold B-Corp certification alongside WBENC.\n"
+            ),
+            status="generated",
+        )
+        scrubbed, logs = scrub_section_cert_claims(section)
+        body = scrubbed.content or ""
+        self.assertTrue(any("b_corp" in line for line in logs))
+        self.assertNotIn("B Corporation", body)
+        self.assertNotIn("B-Corp", body)
+        self.assertIn("WBENC", body)
 
     def test_cleans_orphaned_and_after_list_removal(self) -> None:
         section = ProposalSection(
@@ -102,17 +120,23 @@ class CertClaimScrubTests(unittest.TestCase):
         )
         scrubbed, logs = scrub_section_cert_claims(section)
         self.assertTrue(logs)
-        self.assertIn("B Corporation certification.", scrubbed.content or "")
-        self.assertNotIn(", and .", scrubbed.content or "")
+        body = scrubbed.content or ""
+        self.assertNotIn("B Corporation", body)
+        self.assertNotIn("1% for the Planet", body)
+        self.assertNotIn("LinkedIn Gold", body)
+        self.assertNotIn(", and .", body)
 
     def test_user_asks_cert_claim_scrub(self) -> None:
         from app.services.proposal_cert_claim_scrub import user_asks_cert_claim_scrub
 
         self.assertTrue(
             user_asks_cert_claim_scrub(
-                "Remove three false certifications (MBE, WBE, DBE); "
-                "retain only WBENC/WOSB and B Corp."
+                "Remove three false certifications (MBE, WBE, DBE)."
             )
+        )
+        # No retain-only synonym regex — intent must say remove/false cert.
+        self.assertFalse(
+            user_asks_cert_claim_scrub("retain only WBENC/WOSB and B Corp.")
         )
         self.assertFalse(user_asks_cert_claim_scrub("What certifications do we have?"))
 

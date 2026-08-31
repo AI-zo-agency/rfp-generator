@@ -154,18 +154,67 @@ async def _repair_misstated_closing_sections(
     return draft, logs
 
 
+def _closing_form_template_stub(component: ClosingComponent) -> str:
+    """Deterministic stub for forms/attachments/signatures — no LLM.
+
+    Accuracy-safe: signed exhibits must not invent field content; the ledger
+    instructions already tell Sonja/designer what to attach. LLM drafts here
+    burned Sonnet spend and still ended as MANUAL FILL.
+    """
+    instructions = (component.draft_instructions or "").strip()
+    parts = [
+        f"## {component.title}",
+        "",
+        f"This RFP requires a closing package item matched as “{component.match_hint}”.",
+        "",
+    ]
+    if instructions:
+        parts.extend([instructions, ""])
+    parts.append(
+        f"[MANUAL FILL: complete {component.title} per RFP instructions — "
+        f"attach signed forms / fill agency form fields before export.]"
+    )
+    parts.append("")
+    parts.append(
+        "[DESIGNER NOTE: Attach the buyer-supplied signed PDF for this item. "
+        "Do not invent form field values or mark Ready until the file is attached.]"
+    )
+    return "\n".join(parts).strip() + "\n"
+
+
+def _closing_uses_template_stub(component: ClosingComponent) -> bool:
+    """True when LLM drafting cannot improve accuracy over a handoff stub.
+
+    Cover letters / letters of transmittal are NEVER template-only: the RFP
+    still needs a real offer letter body; only the wet signature / signed PDF
+    is a designer attach. Classifying them as form/attachment must not skip
+    the letter prose.
+    """
+    title = f"{component.title} {component.match_hint} {component.id}".casefold()
+    if any(
+        tok in title
+        for tok in (
+            "cover letter",
+            "letter of transmittal",
+            "transmittal letter",
+            "letter of offer",
+        )
+    ):
+        return False
+    kind = (component.kind or "").casefold().strip()
+    return kind in {"form", "attachment", "signature"}
+
+
 async def _draft_closing_section(
     *,
     component: ClosingComponent,
     rfp: RfpRecord,
     rfp_excerpt: str,
 ) -> str:
-    stub = (
-        f"## {component.title}\n\n"
-        f"This RFP requires a closing package item matched as “{component.match_hint}”.\n\n"
-        f"[MANUAL FILL: complete {component.title} per RFP instructions — "
-        f"attach signed forms / fill agency form fields before export.]\n"
-    )
+    stub = _closing_form_template_stub(component)
+    # Forms / attach-PDFs / signatures: template only (accuracy ≥ LLM, $0).
+    if _closing_uses_template_stub(component):
+        return stub
     if not llm.is_configured():
         return stub
     try:
@@ -289,6 +338,19 @@ async def ensure_closing_sections(
     for component in components:
         if component not in to_draft:
             logs.append(f"Closing already covered: {component.id}")
+
+    template_only = [c for c in to_draft if _closing_uses_template_stub(c)]
+    llm_needed = [c for c in to_draft if not _closing_uses_template_stub(c)]
+    if template_only:
+        logs.append(
+            f"Closing cost-save: {len(template_only)} form/attachment/signature "
+            f"stub(s) without LLM — {[c.id for c in template_only][:12]}"
+        )
+    if llm_needed:
+        logs.append(
+            f"Closing narrative LLM draft(s): {len(llm_needed)} — "
+            f"{[c.id for c in llm_needed][:8]}"
+        )
 
     # Each component is an independent closing/submission form — no
     # dependency between them — so draft a few concurrently instead of
@@ -1120,6 +1182,23 @@ async def _run_fulfill_rfp_gaps_body(
                 f"Dedupe: {len(dedupe_logs)} compact action(s): "
                 + "; ".join(dedupe_logs[:10])
             )
+        # Required form slots: copy Active Client List into missing I.2 from a
+        # sibling tab (same as section chat). Run after dedupe so clones are gone.
+        try:
+            from app.services.proposal_chat_improve_pin import (
+                fill_all_active_client_lists_from_siblings,
+            )
+
+            draft, form_logs = fill_all_active_client_lists_from_siblings(draft)
+            if form_logs:
+                draft = draft.model_copy(
+                    update={"updated_at": datetime.now(timezone.utc).isoformat()}
+                )
+                await asave_proposal_draft(draft)
+                report["logs"].extend(form_logs[:8])
+        except Exception as form_exc:  # noqa: BLE001
+            logger.warning("Active Client List form-slot fill after dedupe skipped: %s", form_exc)
+            report["logs"].append(f"Form-slot Active Client List fill skipped: {form_exc}")
     except ProposalGenerationCancelled:
         raise
     except FulfillStepSkip as skip:
@@ -1293,7 +1372,32 @@ async def _run_fulfill_rfp_gaps_body(
         )
         report["logs"].extend(cert_logs)
 
-        if repair_logs or consistency_logs or cert_logs:
+        # Agentic QC — LLM rewrites leftover VERIFY-as-content, signed-vs-unsigned
+        # contradictions, truncated fragments, citation conflation. Not regex patches.
+        try:
+            from app.services.proposal_agentic_qc_repair import (
+                run_agentic_manuscript_qc_repair,
+            )
+
+            await record_pipeline_activity(
+                rfp_id,
+                label="Scan RFP: consistency repairs",
+                detail="Agentic QC — rewriting leftover defects with manuscript context",
+                step_index=8,
+                step_total=len(FULFILL_STEPS),
+                in_progress_phase="fulfill-scan",
+            )
+            draft, qc_logs = await run_agentic_manuscript_qc_repair(
+                draft, rfp_text=rfp_text
+            )
+            report["logs"].extend(qc_logs)
+            if qc_logs:
+                report["agenticQcRepairs"] = qc_logs[:12]
+        except Exception as qc_exc:  # noqa: BLE001
+            logger.warning("Agentic manuscript QC skipped: %s", qc_exc)
+            report["logs"].append(f"Agentic QC skipped: {qc_exc}")
+
+        if repair_logs or consistency_logs or cert_logs or report.get("agenticQcRepairs"):
             await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
@@ -1442,6 +1546,37 @@ async def _run_fulfill_rfp_gaps_body(
             "RFP emphasizes prior work in the buyer's state/region — if the portfolio has none, "
             "acknowledge openly rather than implying local history."
         )
+
+    # Cross-reference open tags against the manuscript itself BEFORE spending
+    # an external KB query — a fact three sections away is free, faster, and
+    # more authoritative than Supermemory: it is what THIS proposal already
+    # told the evaluator. Observed live: "1.4 — Certifications" states WBENC/
+    # WOSB are current through a specific date; a different section re-asked
+    # the same question as an open [VERIFY: ...] tag anyway. Same step number
+    # as KB fact-check below — this is a cheaper first pass over the same
+    # gap, not a new pipeline stage, so no checkpoint/resume renumbering risk.
+    try:
+        await _ensure_not_stopped()
+        from app.services.proposal_cross_reference_resolver import (
+            resolve_tags_from_manuscript,
+        )
+
+        draft, xref_applied = await resolve_tags_from_manuscript(draft)
+        if xref_applied:
+            report["logs"].append(
+                f"Cross-reference: resolved {len(xref_applied)} tag(s) from "
+                "facts already stated elsewhere in this manuscript"
+            )
+            for line in xref_applied[:20]:
+                report["logs"].append(f"Cross-reference: {line}")
+            await asave_proposal_draft(draft)
+    except ProposalGenerationCancelled:
+        raise
+    except FulfillStepSkip as skip:
+        _log_resume_skip(skip.step)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Cross-reference tag resolution during Scan RFP skipped: %s", exc)
+        report["logs"].append(f"Cross-reference resolution skipped: {exc}")
 
     # Did KB fact-check (step 11) actually change the manuscript? Step 2 already
     # ran the full fact-repair pass; the post-fact-check re-run below only has
@@ -1790,6 +1925,43 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Optional placeholder scrub during Scan RFP skipped: %s", exc)
         report["logs"].append(f"Placeholder scrub skipped: {exc}")
 
+    # Orphan VERIFY tails (no opening [VERIFY) are invisible to placeholder scrub
+    # — always clear them, and stub hollow shells so gibberish never ships.
+    try:
+        from app.services.proposal_manual_flags import (
+            repair_orphan_verify_leftovers_in_draft,
+        )
+
+        draft, orphan_logs = repair_orphan_verify_leftovers_in_draft(draft)
+        if orphan_logs:
+            draft = draft.model_copy(
+                update={"updated_at": datetime.now(timezone.utc).isoformat()}
+            )
+            await asave_proposal_draft(draft)
+            report["logs"].extend(orphan_logs[:12])
+    except Exception as orphan_exc:  # noqa: BLE001
+        logger.warning("Orphan VERIFY leftover repair skipped: %s", orphan_exc)
+        report["logs"].append(f"Orphan VERIFY leftover repair skipped: {orphan_exc}")
+
+    # After optional scrub: plant required board-roster VERIFY on campaign /
+    # contribution disclosure tabs (buyer board ≠ zö KB — Ella/Rachel confirm).
+    # Must run AFTER scrub so the new flag is not stripped in the same pass.
+    try:
+        from app.services.proposal_chat_improve_pin import (
+            insert_all_board_roster_verify_flags,
+        )
+
+        draft, board_logs = insert_all_board_roster_verify_flags(draft)
+        if board_logs:
+            draft = draft.model_copy(
+                update={"updated_at": datetime.now(timezone.utc).isoformat()}
+            )
+            await asave_proposal_draft(draft)
+            report["logs"].extend(board_logs[:8])
+    except Exception as board_exc:  # noqa: BLE001
+        logger.warning("Board-roster VERIFY insert during Scan skipped: %s", board_exc)
+        report["logs"].append(f"Board-roster VERIFY insert skipped: {board_exc}")
+
     try:
         from app.services.proposal_section_dedup import dedupe_manuscript_for_scan
 
@@ -1962,6 +2134,51 @@ async def _run_fulfill_rfp_gaps_body(
 
     # Final zero-fabrication pass — keep claims grounded before ending report.
     try:
+        from app.services.proposal_chat_improve_pin import (
+            fill_all_active_client_lists_from_siblings,
+            insert_all_board_roster_verify_flags,
+        )
+        from app.services.proposal_cross_reference_resolver import (
+            resolve_tags_from_manuscript,
+        )
+        from app.services.proposal_manual_flags import (
+            repair_orphan_verify_leftovers_in_draft,
+        )
+        from app.services.proposal_manuscript import (
+            apply_designer_ready_markup_polish_to_draft,
+        )
+        from app.services.proposal_pointer_page_integrity import (
+            apply_pointer_page_integrity_to_draft,
+        )
+
+        # Safety re-run: compact / Ralph / optional scrub must not leave I.2 missing
+        # or strip board-roster VERIFY from contribution disclosure forms.
+        draft, form_logs = fill_all_active_client_lists_from_siblings(draft)
+        if form_logs:
+            report["logs"].extend(form_logs[:8])
+        # Second cross-ref pass — hollow fill / scrub may leave tags answered elsewhere.
+        draft, xref_logs = await resolve_tags_from_manuscript(draft)
+        if xref_logs:
+            report["logs"].extend(xref_logs[:8])
+            report["logs"].append(
+                f"Scan-final cross-reference resolve: {len(xref_logs)} tag(s)"
+            )
+        draft, orphan_logs = repair_orphan_verify_leftovers_in_draft(draft)
+        if orphan_logs:
+            report["logs"].extend(orphan_logs[:8])
+        draft, ptr_logs = apply_pointer_page_integrity_to_draft(draft)
+        if ptr_logs:
+            report["logs"].extend(ptr_logs[:12])
+        draft, board_logs = insert_all_board_roster_verify_flags(draft)
+        if board_logs:
+            report["logs"].extend(board_logs[:8])
+        draft, polish_logs = apply_designer_ready_markup_polish_to_draft(draft)
+        if polish_logs:
+            report["logs"].extend(polish_logs[:8])
+    except Exception as form_exc:  # noqa: BLE001
+        logger.warning("Pre-final form-slot fill skipped: %s", form_exc)
+
+    try:
         from app.services.proposal_zero_fabrication import (
             apply_zero_fabrication_guards_before_persist,
         )
@@ -1981,6 +2198,47 @@ async def _run_fulfill_rfp_gaps_body(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scan final zero-fabrication pass skipped: %s", exc)
         report["logs"].append(f"Final zero-fabrication pass skipped: {exc}")
+
+    # Post-ZF polish — forms integrity / scrub must not leave orphan VERIFY tails
+    # or prose designer-note labels.
+    try:
+        from app.services.proposal_manual_flags import (
+            repair_orphan_verify_leftovers_in_draft,
+        )
+        from app.services.proposal_manuscript import (
+            apply_designer_ready_markup_polish_to_draft,
+        )
+
+        draft, orphan_logs = repair_orphan_verify_leftovers_in_draft(draft)
+        if orphan_logs:
+            report["logs"].extend(orphan_logs[:6])
+        draft, polish_logs = apply_designer_ready_markup_polish_to_draft(draft)
+        if polish_logs:
+            report["logs"].extend(polish_logs[:6])
+    except Exception as polish_exc:  # noqa: BLE001
+        logger.warning("Post-ZF designer polish skipped: %s", polish_exc)
+
+    # Hollow fill / pointer inserts / MANUAL FILL stamps can push past the RFP
+    # page limit after step-16 Ralph — reassert before readiness scoring.
+    try:
+        from app.services.proposal_ralph import reassert_rfp_page_limit_after_content_passes
+
+        draft, ralph_final = reassert_rfp_page_limit_after_content_passes(
+            draft,
+            page_limit=rfp.page_limit,
+            rfp_text=rfp_text,
+            label="scan-pre-readiness",
+        )
+        if ralph_final:
+            report["logs"].extend(ralph_final[:12])
+            hard_fit = [
+                x for x in ralph_final if "page-hard-fit" in x or "page-limit:" in x
+            ]
+            if hard_fit:
+                report["pageLimitEnforced"] = True
+                report["pageLimitNotes"] = hard_fit[:6]
+    except Exception as ralph_exc:  # noqa: BLE001
+        logger.warning("Scan pre-readiness page-limit reassert skipped: %s", ralph_exc)
 
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp, draft=draft, research=research, finalized=False
@@ -2132,6 +2390,64 @@ async def _run_fulfill_rfp_gaps_body(
         for line in restore_logs:
             logger.warning("Scan RFP %s: %s", rfp_id, line)
         report.setdefault("logs", []).extend(restore_logs)
+
+    # HARD INVARIANT: restore must not reintroduce wrong § pointers, EDITOR NOTES
+    # work tickets, or orphan VERIFY leftovers — re-run integrity after restore.
+    try:
+        from app.services.proposal_manual_flags import (
+            repair_orphan_verify_leftovers_in_draft,
+        )
+        from app.services.proposal_manuscript import (
+            apply_designer_ready_markup_polish_to_draft,
+        )
+        from app.services.proposal_pointer_page_integrity import (
+            apply_pointer_page_integrity_to_draft,
+        )
+
+        draft, orphan_logs = repair_orphan_verify_leftovers_in_draft(draft)
+        if orphan_logs:
+            report.setdefault("logs", []).extend(orphan_logs[:6])
+        draft, ptr_logs = apply_pointer_page_integrity_to_draft(draft)
+        if ptr_logs:
+            report.setdefault("logs", []).extend(ptr_logs[:10])
+            report["logs"].append(
+                f"Post-restore pointer integrity: {len(ptr_logs)} action(s)"
+            )
+        draft, polish_logs = apply_designer_ready_markup_polish_to_draft(draft)
+        if polish_logs:
+            report.setdefault("logs", []).extend(polish_logs[:6])
+    except Exception as restore_fix_exc:  # noqa: BLE001
+        logger.warning(
+            "Post-restore integrity polish skipped for %s: %s",
+            rfp_id,
+            restore_fix_exc,
+        )
+
+    # Last content touch before save: restore can reintroduce long pre-scan
+    # bodies — never let that overshadow an explicit RFP page limit.
+    try:
+        from app.services.proposal_ralph import reassert_rfp_page_limit_after_content_passes
+
+        draft, ralph_save = reassert_rfp_page_limit_after_content_passes(
+            draft,
+            page_limit=rfp.page_limit,
+            rfp_text=rfp_text,
+            label="scan-post-restore",
+        )
+        if ralph_save:
+            report.setdefault("logs", []).extend(ralph_save[:12])
+            hard_fit = [
+                x for x in ralph_save if "page-hard-fit" in x or "page-limit:" in x
+            ]
+            if hard_fit:
+                report["pageLimitEnforced"] = True
+                report["pageLimitNotes"] = hard_fit[:6]
+    except Exception as ralph_save_exc:  # noqa: BLE001
+        logger.warning(
+            "Post-restore page-limit reassert skipped for %s: %s",
+            rfp_id,
+            ralph_save_exc,
+        )
 
     draft = attach_scan_summary_to_latest_before_scan(draft, report)
     await asave_proposal_draft(draft)

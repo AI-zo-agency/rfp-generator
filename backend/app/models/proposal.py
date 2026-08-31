@@ -792,6 +792,22 @@ class ProposalDraft(BaseModel):
     last_fulfill_report: dict[str, Any] | None = Field(
         default=None, alias="lastFulfillReport"
     )
+    pending_packet_redistribute: dict[str, Any] | None = Field(
+        default=None,
+        alias="pendingPacketRedistribute",
+        description=(
+            "Preview plan from Place-content scan (ops only). Apply executes this "
+            "mechanically with no second LLM plan call."
+        ),
+    )
+    pending_align_rfp_outline: dict[str, Any] | None = Field(
+        default=None,
+        alias="pendingAlignRfpOutline",
+        description=(
+            "Preview from Align scan (proposed outline). Apply saves this layout "
+            "without a second structure pass when present."
+        ),
+    )
     selected_key_personas: list[str] | None = Field(
         default=None, alias="selectedKeyPersonas"
     )

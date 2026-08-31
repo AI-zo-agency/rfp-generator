@@ -349,6 +349,30 @@ def apply_ralph_to_draft(
     return draft.model_copy(update={"sections": new_sections}), logs
 
 
+def reassert_rfp_page_limit_after_content_passes(
+    draft: ProposalDraft,
+    *,
+    page_limit: int | None,
+    rfp_text: str | None = None,
+    label: str = "final",
+) -> tuple[ProposalDraft, list[str]]:
+    """Re-run Ralph after hollow fill / pointer integrity / restore / stub fills.
+
+    Mid-pipeline page-fit (Generate Phase 3, Scan step 16) can be overshadowed
+    when later passes add words. Call this as the last content touch whenever
+    the RFP explicitly states a page limit — no-ops when none is stated.
+    """
+    updated, logs = apply_ralph_to_draft(
+        draft,
+        page_limit=page_limit,
+        rfp_text=rfp_text,
+    )
+    if not logs:
+        return draft, []
+    banner = f"ralph:reassert:{label}: re-applied after content passes"
+    return updated, [banner, *logs]
+
+
 def inject_ralph_into_system_prompt(system: str) -> str:
     if "RALPH — RFP FIDELITY" in (system or ""):
         return system

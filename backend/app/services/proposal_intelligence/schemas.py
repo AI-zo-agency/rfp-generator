@@ -146,12 +146,36 @@ class ScopeAnalysis(BaseModel):
     confidence: float = 0.0
 
 
+class EvaluationCriterionItem(BaseModel):
+    """One numbered, individually scored ask inside a parent criterion.
+
+    RFPs that publish an evaluation-criteria response form score each numbered
+    item separately (I.1, I.2 … VII.5), often with its own response field and
+    character limit. Flattening those into the parent's name loses both the
+    ask and the budget, so the writer never learns what it must answer.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    item_code: str = Field(default="", alias="itemCode")
+    ask: str = ""
+    weight: float | None = None
+    response_char_limit: int | None = Field(default=None, alias="responseCharLimit")
+
+
 class EvaluationCriterion(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     name: str
     weight: float | None = None
     priority_rank: int | None = Field(default=None, alias="priorityRank")
+    # Buyer's own label for the scored block ("SECTION III", "Tab 4") — used to
+    # keep outline titles and ordering faithful to the response form.
+    item_code: str = Field(default="", alias="itemCode")
+    # Numbered sub-asks scored under this criterion. Each becomes a required
+    # sub-heading in the drafted tab, not a tab of its own.
+    items: list[EvaluationCriterionItem] = Field(default_factory=list)
+    response_char_limit: int | None = Field(default=None, alias="responseCharLimit")
 
 
 class EvaluationAnalysis(BaseModel):
@@ -160,6 +184,13 @@ class EvaluationAnalysis(BaseModel):
     criteria: list[EvaluationCriterion] = Field(default_factory=list)
     emphasis: list[str] = Field(default_factory=list)
     writing_style: str = Field(default="", alias="writingStyle")
+    # True when the RFP publishes a scored response form whose criteria ARE the
+    # required proposal sections — the outline must then mirror the form.
+    scored_response_form: bool = Field(default=False, alias="scoredResponseForm")
+    total_points: float | None = Field(default=None, alias="totalPoints")
+    # Package-wide per-response cap ("each form field allows a maximum of 4,000
+    # characters"). Per-item limits override this.
+    response_char_limit: int | None = Field(default=None, alias="responseCharLimit")
     confidence: float = 0.0
 
 

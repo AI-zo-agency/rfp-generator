@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import {
+  ALIGN_RFP_OUTLINE_PHASE,
+  PACKET_REDISTRIBUTE_PHASE,
   FULFILL_SCAN_PHASE,
   FULFILL_SCAN_STEP_LABELS,
   FULL_PROPOSAL_STEP_LABELS,
@@ -11,8 +13,23 @@ import {
 } from "@/lib/proposal-pipeline-checkpoint";
 import { FULFILL_SCAN_STEP_GROUPS } from "@/lib/proposal-scan-step-groups";
 import type { LlmCostRfpBreakdown } from "@/lib/llm-cost-service";
+import { capabilityById } from "@/lib/proposal-tool-guide";
 
 const FULFILL_TOTAL_STEPS = FULFILL_SCAN_STEP_LABELS.length;
+
+const ALIGN_STEP_LABELS = [
+  "Save undo checkpoint",
+  "Read RFP tab order",
+  "Reorder / stub tabs",
+  "Save aligned outline",
+] as const;
+
+const PLACE_STEP_LABELS = [
+  "Save undo checkpoint",
+  "Read RFP tab specs",
+  "Plan block placement",
+  "Move blocks",
+] as const;
 
 interface ProposalWorkflowRailProps {
   checkpoint: ProposalPipelineCheckpoint | null | undefined;
@@ -21,6 +38,8 @@ interface ProposalWorkflowRailProps {
    *  persisted checkpoint so the rail tracks generation in real time. */
   fullProposalPhase?: string | null;
   isFulfillScanRunning?: boolean;
+  isAlignRunning?: boolean;
+  isPlaceRunning?: boolean;
   hasCompletedFulfillReport: boolean;
   manualFillCount: number;
   rfpCost: LlmCostRfpBreakdown | null;
@@ -73,6 +92,8 @@ export function ProposalWorkflowRail({
   isRunning,
   fullProposalPhase,
   isFulfillScanRunning,
+  isAlignRunning,
+  isPlaceRunning,
   hasCompletedFulfillReport,
   manualFillCount,
   rfpCost,
@@ -110,18 +131,36 @@ export function ProposalWorkflowRail({
     livePhase ?? checkpoint?.inProgressPhase ?? null;
   const isFulfillRun =
     isRunning && (isFulfillScanRunning || inProgressPhase === FULFILL_SCAN_PHASE);
-  // Generate proposal is running (any pipeline phase that is NOT the scan) — the
-  // rail must show THAT workflow, not the Complete & clean scan steps.
+  const isAlignRun =
+    isRunning &&
+    (Boolean(isAlignRunning) || inProgressPhase === ALIGN_RFP_OUTLINE_PHASE);
+  const isPlaceRun =
+    isRunning &&
+    (Boolean(isPlaceRunning) || inProgressPhase === PACKET_REDISTRIBUTE_PHASE);
+  // Generate proposal is running (any pipeline phase that is NOT scan/align/place).
   const isGenerateRun =
     isRunning &&
     !isFulfillRun &&
+    !isAlignRun &&
+    !isPlaceRun &&
     inProgressPhase != null &&
-    inProgressPhase !== FULFILL_SCAN_PHASE;
+    inProgressPhase !== FULFILL_SCAN_PHASE &&
+    inProgressPhase !== ALIGN_RFP_OUTLINE_PHASE &&
+    inProgressPhase !== PACKET_REDISTRIBUTE_PHASE;
   const generatePhaseIndex = isGenerateRun
     ? FULL_PROPOSAL_STEP_LABELS.findIndex((p) => p.phase === inProgressPhase)
     : -1;
-  const stepIndex = isFulfillRun ? checkpoint?.stepIndex ?? null : null;
-  const stepTotal = isFulfillRun ? checkpoint?.stepTotal ?? FULFILL_TOTAL_STEPS : null;
+  const stepIndex =
+    isFulfillRun || isAlignRun || isPlaceRun
+      ? checkpoint?.stepIndex ?? null
+      : null;
+  const stepTotal = isFulfillRun
+    ? checkpoint?.stepTotal ?? FULFILL_TOTAL_STEPS
+    : isAlignRun
+      ? checkpoint?.stepTotal ?? ALIGN_STEP_LABELS.length
+      : isPlaceRun
+        ? checkpoint?.stepTotal ?? PLACE_STEP_LABELS.length
+        : null;
 
   const statusLabel = isRunning
     ? (inProgressPhase ? inProgressPhaseLabel(inProgressPhase) : "Working").toUpperCase()
@@ -186,9 +225,85 @@ export function ProposalWorkflowRail({
         <div className="proposal-workflow-idle">
           <p className="proposal-workflow-idle-title">No workflow running</p>
           <p className="proposal-workflow-idle-detail">
-            Start Generate proposal or Complete &amp; clean draft — each step
-            appears here with live progress while it runs.
+            Hover Fix outline or Complete &amp; clean in the top bar to see what each
+            does. Live steps appear here while a job runs.
           </p>
+        </div>
+      ) : isAlignRun ? (
+        <div className="proposal-workflow-section">
+          <p className="proposal-workflow-section-label">Order tabs</p>
+          <p className="proposal-workflow-idle-detail" style={{ marginBottom: "0.75rem" }}>
+            <strong>Does:</strong> {capabilityById("reorder").does}
+            <br />
+            <strong>Doesn’t:</strong> {capabilityById("reorder").doesnt}
+          </p>
+          <ul
+            className="proposal-workflow-category-steps"
+            style={
+              {
+                "--wf-progress":
+                  stepIndex != null && stepTotal
+                    ? Math.max(0, (stepIndex - 1) / stepTotal)
+                    : 0,
+              } as React.CSSProperties
+            }
+          >
+            {ALIGN_STEP_LABELS.map((label, i) => {
+              const n = i + 1;
+              const done = stepIndex != null && stepIndex > n;
+              const active = stepIndex === n;
+              return (
+                <li
+                  key={label}
+                  className={`proposal-workflow-step ${done ? "is-done" : ""} ${active ? "is-active" : ""}`}
+                >
+                  <span className="proposal-workflow-step-dot" aria-hidden />
+                  <span className="proposal-workflow-step-label">{label}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : isPlaceRun ? (
+        <div className="proposal-workflow-section">
+          <p className="proposal-workflow-section-label">Place content</p>
+          <p className="proposal-workflow-idle-detail" style={{ marginBottom: "0.75rem" }}>
+            <strong>Does:</strong> {capabilityById("place").does}
+            <br />
+            <strong>Doesn’t:</strong> {capabilityById("place").doesnt}
+            {activityDetail ? (
+              <>
+                <br />
+                <strong>Now:</strong> {activityDetail}
+              </>
+            ) : null}
+          </p>
+          <ul
+            className="proposal-workflow-category-steps"
+            style={
+              {
+                "--wf-progress":
+                  stepIndex != null && stepTotal
+                    ? Math.max(0, (stepIndex - 1) / stepTotal)
+                    : 0,
+              } as React.CSSProperties
+            }
+          >
+            {PLACE_STEP_LABELS.map((label, i) => {
+              const n = i + 1;
+              const done = stepIndex != null && stepIndex > n;
+              const active = stepIndex === n;
+              return (
+                <li
+                  key={label}
+                  className={`proposal-workflow-step ${done ? "is-done" : ""} ${active ? "is-active" : ""}`}
+                >
+                  <span className="proposal-workflow-step-dot" aria-hidden />
+                  <span className="proposal-workflow-step-label">{label}</span>
+                </li>
+              );
+            })}
+          </ul>
         </div>
       ) : isGenerateRun ? (
         <div className="proposal-workflow-section">

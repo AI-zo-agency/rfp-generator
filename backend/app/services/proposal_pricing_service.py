@@ -255,7 +255,8 @@ PHASE 4b — PHASE / LINE CONSISTENCY (submission quality — do NOT skip):
    total with [PRICING FLAG: Roadmap provisional — Sonja confirm] — never leave "no final total"
    as the only state when Section 8 / cost proposal requires pricing.
    Professional fees and travel/reimbursables must be separable — never label travel as
-   "professional fees."
+   "professional fees." Professional fees = sum of agency_fee line items ONLY.
+   Never set Professional fees equal to fees+travel or to the grand total.
 6. CREDIBLE FLOOR: For a multi-phase institutional marketing plan, professional fees (excluding
    travel) must not collapse to a few thousand dollars. Scope deliverables honestly under RFP
    thresholds — never invent a percentage that shrinks guide rates ~100×.

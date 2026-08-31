@@ -133,7 +133,10 @@ def strip_verify_tags_not_required_by_rfp(
     """
     body = content or ""
     if not VERIFY_TAG_RE.search(body) and not re.search(r"\[VERIFY\]", body or "", re.I):
-        return body, 0
+        from app.services.proposal_manual_flags import repair_orphan_verify_leftovers
+
+        cleaned, orphan_n = repair_orphan_verify_leftovers(body)
+        return cleaned, orphan_n
 
     rfp_cf = (rfp_text or "").casefold()
     removed = 0
@@ -172,6 +175,12 @@ def strip_verify_tags_not_required_by_rfp(
     if bare_n:
         out = re.sub(r"\[VERIFY\]", "", out, flags=re.I)
         removed += bare_n
+    # If a prior note had ] inside the ask, VERIFY_TAG_RE only ate the prefix —
+    # strip the leftover ``… RFP requires: …]`` gibberish so it never ships.
+    from app.services.proposal_manual_flags import repair_orphan_verify_leftovers
+
+    out, orphan_n = repair_orphan_verify_leftovers(out)
+    removed += orphan_n
     out = re.sub(r"[ \t]+\n", "\n", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     out = re.sub(r"  +", " ", out)
@@ -1137,6 +1146,21 @@ async def run_verify_scrub_only_scan(
         draft = draft.model_copy(
             update={
                 "sections": scrubbed,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "last_fulfill_report": report,
+            }
+        )
+        await asave_proposal_draft(draft)
+
+    # Orphan VERIFY tails have no [VERIFY opener — always clear, even when
+    # verify_ids was empty (scrub never saw them).
+    from app.services.proposal_manual_flags import repair_orphan_verify_leftovers_in_draft
+
+    draft, orphan_logs = repair_orphan_verify_leftovers_in_draft(draft)
+    if orphan_logs:
+        report["logs"].extend(orphan_logs[:12])
+        draft = draft.model_copy(
+            update={
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "last_fulfill_report": report,
             }

@@ -121,6 +121,7 @@ class RfpSectionSpec:
     evaluation_weight: str = ""
     same_ask_as: list[str] = field(default_factory=list)
     satisfied_by_static_company_block: bool = False
+    mandated_submission_format: bool = False
 
 
 def _section_title_cf(title: str) -> str:
@@ -157,6 +158,231 @@ def detect_bmp_exhibit_required_headings(rfp_text: str) -> list[str]:
     ):
         return list(_DEFAULT_BMP_HEADINGS)
     return []
+
+
+def _row_to_rfp_section_spec(
+    row: dict,
+    *,
+    mandated_submission_format: bool = False,
+) -> RfpSectionSpec | None:
+    title = str(row.get("rfpTitle") or row.get("title") or "").strip()
+    if not title:
+        return None
+    headings = [
+        str(h).strip() for h in (row.get("requiredHeadings") or []) if str(h).strip()
+    ]
+    same_ask = [
+        str(x).strip()
+        for x in (row.get("sameAskAs") or row.get("same_ask_as") or [])
+        if str(x).strip()
+    ]
+    satisfied_static = bool(
+        row.get("satisfiedByStaticCompanyBlock")
+        or row.get("satisfied_by_static_company_block")
+    )
+    instructions = str(row.get("instructions") or "").strip()
+    if not instructions:
+        instructions = (
+            "Required by this RFP's submission format — use the buyer's exact "
+            "section label and include every element the RFP lists."
+        )
+    candidate = RfpSectionSpec(
+        rfp_title=title,
+        required_headings=headings,
+        instructions=instructions,
+        evaluation_weight=str(row.get("evaluationWeight") or "").strip(),
+        same_ask_as=same_ask,
+        satisfied_by_static_company_block=satisfied_static,
+        mandated_submission_format=mandated_submission_format,
+    )
+    if _spec_is_rfp_title_noise(candidate):
+        return None
+    return candidate
+
+
+async def extract_rfp_submission_format_specs(
+    rfp_text: str,
+    *,
+    rfp_title: str = "",
+    existing_section_titles: list[str] | None = None,
+) -> list[RfpSectionSpec]:
+    """LLM: read PROPOSAL CONTENT FORMAT / layout mandates — no regex excerpting."""
+    from app.services.proposal_rfp_excerpt import (
+        closing_package_excerpt,
+        submission_documents_excerpt,
+    )
+
+    body = (rfp_text or "").strip()
+    if not body or not llm.is_configured():
+        return []
+
+    submission_excerpt = submission_documents_excerpt(body) or body[:50000]
+    closing_excerpt = closing_package_excerpt(body)[:20000]
+    rfp_context = (
+        f"Submission-documents excerpt:\n{submission_excerpt[:36000]}\n\n"
+        f"Closing/forms excerpt:\n{closing_excerpt}"
+    )
+
+    existing_titles = [t for t in (existing_section_titles or []) if t.strip()]
+    specs: list[RfpSectionSpec] = []
+    try:
+        raw, _ = await llm.chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Read ONE RFP. Find whatever section(s) define the mandatory "
+                        "proposal content format, submission layout, or required packet "
+                        "structure — use the buyer's own section labels from THIS RFP only.\n"
+                        "Return the EXACT sequence that section mandates, in order. "
+                        "That sequence outranks evaluation-criteria numbering or labels "
+                        "from other parts of the RFP when they conflict.\n\n"
+                        "Include EVERY row the format/layout section requires the offeror "
+                        "to submit — narrative sections, signed forms, exhibits, attachments, "
+                        "and compliance statements — using the buyer's verbatim headings.\n"
+                        "When the format groups sub-asks under lettered or numbered items, "
+                        "put those labels in requiredHeadings or separate rows as the RFP does.\n"
+                        "Use the buyer's OWN wording in rfpTitle — never substitute generic "
+                        "agency tab names or evaluation-point labels from a different section.\n"
+                        "For items that are signed forms or attach-PDF submittals: instructions "
+                        "must say [DESIGNER NOTE: Attach signed PDF] / [MANUAL FILL: signature] "
+                        "— do not invent form field content.\n"
+                        "sameAskAs = existing draft tab titles that already cover the same "
+                        "mandated item (by meaning, not keyword matching).\n"
+                        "If this RFP has no dedicated format/layout section, return "
+                        '{"sections":[]}.\n'
+                        "Return JSON:\n"
+                        '{"sections":[{"rfpTitle":"<buyer heading from THIS RFP>",'
+                        '"requiredHeadings":[],"instructions":"...",'
+                        '"sameAskAs":[],"satisfiedByStaticCompanyBlock":false}]}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"RFP: {rfp_title}\n"
+                        f"Existing draft tabs:\n"
+                        + "\n".join(f"- {t}" for t in existing_titles[:80])
+                        + f"\n\n{rfp_context}\n\nReturn the JSON object."
+                    ),
+                },
+            ],
+            max_tokens=4096,
+            temperature=0.05,
+            cache_prefix=rfp_context[:45000],
+        )
+        for row in (raw or {}).get("sections") or []:
+            if not isinstance(row, dict):
+                continue
+            spec = _row_to_rfp_section_spec(
+                row,
+                mandated_submission_format=True,
+            )
+            if spec is not None:
+                specs.append(spec)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("RFP submission format spec extract failed: %s", exc)
+    return specs
+
+
+def merge_specs_submission_format_first(
+    primary: list[RfpSectionSpec],
+    secondary: list[RfpSectionSpec],
+) -> list[RfpSectionSpec]:
+    """Keep mandated format order; append non-duplicate scored/submittal specs."""
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    merged = list(primary)
+    known = [s.rfp_title for s in merged]
+    for spec in secondary:
+        if any(
+            outline_titles_near_duplicate(spec.rfp_title, title) for title in known
+        ):
+            continue
+        if any(
+            outline_titles_near_duplicate(spec.rfp_title, alias)
+            for s in merged
+            for alias in (s.same_ask_as or [])
+        ):
+            continue
+        merged.append(spec)
+        known.append(spec.rfp_title)
+    return merged
+
+
+async def build_rfp_structure_specs(
+    rfp_text: str,
+    *,
+    rfp_title: str = "",
+    existing_section_titles: list[str] | None = None,
+    include_missing_submittals: bool = True,
+) -> tuple[list[RfpSectionSpec], list[str]]:
+    """Union submission format + TOC + missing submittals for Generate and Scan."""
+    logs: list[str] = []
+    format_specs = await extract_rfp_submission_format_specs(
+        rfp_text,
+        rfp_title=rfp_title,
+        existing_section_titles=existing_section_titles,
+    )
+    if format_specs:
+        logs.append(
+            "RFP structure: "
+            f"{len(format_specs)} submission-format spec(s): "
+            + " → ".join(s.rfp_title for s in format_specs[:10])
+        )
+    scored_specs = await extract_rfp_scored_section_specs(
+        rfp_text,
+        rfp_title=rfp_title,
+        existing_section_titles=existing_section_titles,
+    )
+    specs = merge_specs_submission_format_first(format_specs, scored_specs)
+    if include_missing_submittals:
+        missing = await specs_from_missing_submittals(
+            rfp_text, existing_section_titles=existing_section_titles
+        )
+        if missing:
+            logs.append(
+                f"RFP structure: +{len(missing)} missing-submittal spec(s) from completeness check"
+            )
+        specs = merge_specs_submission_format_first(specs, missing)
+    return specs, logs
+
+
+def apply_rfp_mandated_section_titles(
+    draft: ProposalDraft,
+    specs: list[RfpSectionSpec],
+) -> tuple[ProposalDraft, list[str]]:
+    """Relabel matched tabs to the RFP spec title when labels differ by meaning."""
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    logs: list[str] = []
+    sections = list(draft.sections)
+    changed = False
+    for spec in specs:
+        working = draft.model_copy(update={"sections": sections})
+        section = _match_section_for_spec(working, spec)
+        if not section or _is_static_1_3_section(section):
+            continue
+        current = (section.title or "").strip()
+        target = (spec.rfp_title or "").strip()
+        if not target or current == target:
+            continue
+        if outline_titles_near_duplicate(current, target):
+            continue
+        aliases = list(spec.same_ask_as or [])
+        alias_match = any(
+            outline_titles_near_duplicate(alias, current) for alias in aliases
+        )
+        if not spec.mandated_submission_format and not alias_match:
+            continue
+        idx = next(i for i, s in enumerate(sections) if s.id == section.id)
+        sections[idx] = section.model_copy(update={"title": target})
+        changed = True
+        logs.append(f"RFP structure: retitled “{current}” → “{target}”")
+    if not changed:
+        return draft, logs
+    now = datetime.now(timezone.utc).isoformat()
+    return draft.model_copy(update={"sections": sections, "updated_at": now}), logs
 
 
 async def extract_rfp_scored_section_specs(
@@ -196,21 +422,16 @@ async def extract_rfp_scored_section_specs(
                         "Read ONE RFP. Return the proposer's submission sequence IN ORDER — "
                         "this RFP's TOC / 'proposal shall include' / numbered contents list.\n"
                         "Use only titles this RFP actually names. Do not invent a default stack "
-                        "(no canned cover-letter / technical / cost sequence).\n"
-                        "Never invent a generic agency-capability mega-section — 'Brand Marketing "
-                        "Plan', 'Financial Stability', 'Our Approach', or similar — unless the RFP's "
-                        "own TOC or submittal list names that exact label. A canned mega-section is "
-                        "the single most common mistake here: it silently re-covers ground already "
-                        "assigned to this RFP's own separately-lettered/numbered items (e.g. its own "
-                        "'Strategic Approach' and 'Innovation' asks), so the same content ends up "
-                        "drafted twice under two different titles.\n"
-                        "Skip text that describes the BUYER's own internal review/validation process "
-                        "(e.g. 'a campus representative will validate that proposers...') — that is "
-                        "not something the proposer submits, never a tab.\n"
-                        "Every exhibit/appendix/attachment THIS RFP's own exhibit list names gets its "
-                        "own tab, even one a sibling exhibit's instructions also mention in passing "
-                        "(e.g. Exhibit F referencing 'Exhibit G' does not make G optional — G still "
-                        "needs its own tab if the RFP's exhibit list includes it).\n"
+                        "or generic agency section labels the RFP's own TOC does not use.\n"
+                        "Never invent a mega-section that bundles multiple separately-named RFP "
+                        "items — that duplicates content under two titles.\n"
+                        "When THIS RFP has a mandatory content-format or submission-layout section, "
+                        "prefer its headings and order over evaluation-criteria labels from "
+                        "elsewhere when they conflict.\n"
+                        "Skip text that describes the BUYER's own internal review process — "
+                        "not something the proposer submits.\n"
+                        "Every exhibit, appendix, or attachment THIS RFP's submittal list marks "
+                        "as required gets its own tab.\n"
                         "If this RFP states an order, the JSON array must match that order.\n"
                         "Do NOT list evaluation-category labels that duplicate a TOC tab.\n"
                         "Do NOT emit two titles that are the same ask (near-duplicate labels for "
@@ -222,11 +443,8 @@ async def extract_rfp_scored_section_specs(
                         "If a TOC item is a scored narrative evaluators read as its own tab, set "
                         "satisfiedByStaticCompanyBlock false — substance is required.\n"
                         "Dynamic tabs are whatever else THIS RFP asks the proposer to submit.\n"
-                        "Mandatory compliance requirements that call for a detailed narrative "
-                        "response and evidence (e.g. an accessibility / VPAT section demanding a "
-                        "'detailed response' and 'verifiable evidence', not just a signed form) are "
-                        "a dynamic tab too — do not skip these as pure administrative boilerplate; "
-                        "they need real content the same as any other scored narrative section.\n"
+                        "Mandatory compliance items that require a detailed narrative response and "
+                        "evidence — not only a signed form — are dynamic tabs; do not skip them.\n"
                         "sameAskAs = existing draft titles that are the SAME ask by meaning — "
                         "not a keyword synonym list.\n"
                         "Return JSON:\n"
@@ -407,6 +625,49 @@ def _leading_concept_tokens(title: str, n: int = 2) -> list[str]:
     return toks[:n]
 
 
+def _spec_covered_by_closing_tab(
+    sections: list[ProposalSection],
+    spec: RfpSectionSpec,
+) -> bool:
+    """True when a closing-package tab (rfp-closing-*) already covers this ask."""
+    from app.services.proposal_closing_ledger import _tokens
+
+    needles = _tokens(spec.rfp_title or "")
+    for alias in spec.same_ask_as or []:
+        needles |= _tokens(alias)
+    if len(needles) < 2:
+        return False
+    for section in sections:
+        sid = section.id or ""
+        if not sid.startswith("rfp-closing-"):
+            continue
+        if len(needles & _tokens(section.title or "")) >= 2:
+            return True
+    return False
+
+
+def _spec_title_already_in_draft(
+    sections: list[ProposalSection],
+    spec: RfpSectionSpec,
+) -> bool:
+    """True when any tab already uses this RFP title (or sameAskAs alias) — no twin."""
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    title = (spec.rfp_title or "").strip()
+    if not title:
+        return False
+    aliases = list(spec.same_ask_as or [])
+    for section in sections:
+        st = (section.title or "").strip()
+        if not st:
+            continue
+        if _titles_are_same_ask(title, st, aliases):
+            return True
+        if outline_titles_near_duplicate(title, st):
+            return True
+    return False
+
+
 def _spec_covered_by_filled_section(
     sections: list[ProposalSection],
     spec: RfpSectionSpec,
@@ -530,6 +791,90 @@ def specs_from_intelligence_outline(
     return specs
 
 
+def specs_from_scored_criteria(
+    research: ProposalResearchCache | None,
+) -> list[RfpSectionSpec]:
+    """Section specs for every scored criterion the RFP publishes — no LLM call.
+
+    Complete & clean already recovers missing scored tabs, but it learned the
+    section list from one LLM read of the TOC. An RFP whose scoring lives in an
+    evaluation-criteria response form rather than its TOC therefore lost whole
+    scored sections, and the only fix on offer was regenerating the proposal
+    from scratch.
+
+    The scoreboard is already persisted on the requirement ledger from the
+    intelligence phase, so reading it here is free: an existing draft gains the
+    scored sections it is missing without re-running Phase 2, and sections that
+    already cover a criterion are matched and left untouched by
+    ``ensure_missing_scored_section_stubs``.
+    """
+    ledger = getattr(research, "requirement_ledger", None) if research else None
+    requirements = list(getattr(ledger, "requirements", []) or []) if ledger else []
+    specs: list[RfpSectionSpec] = []
+    seen: set[str] = set()
+    for req in requirements:
+        if getattr(req, "source", "") != "scored_criterion":
+            continue
+        title = str(getattr(req, "text", "") or "").strip()
+        if not title:
+            continue
+        key = title.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        points = getattr(req, "points", None)
+        specs.append(
+            RfpSectionSpec(
+                rfp_title=title,
+                instructions=(
+                    "Scored evaluation criterion — this RFP awards points for it, so it "
+                    "needs its own section answering the buyer's ask directly."
+                ),
+                evaluation_weight=f"{points:g} pts" if points else "scored",
+            )
+        )
+    return specs
+
+
+async def specs_from_missing_submittals(
+    rfp_text: str,
+    *,
+    existing_section_titles: list[str] | None = None,
+) -> list[RfpSectionSpec]:
+    """Section specs for whatever the completeness-check agent reports missing.
+
+    Closing-component detection (the LLM pass that normally finds exhibits to
+    return) is one call juggling ~20 instructions at once and was observed to
+    vary run-to-run on the SAME RFP — 9 sections one Phase 2 run, 8 the next,
+    never landing on all of them. This reuses the SAME focused, single-purpose
+    completeness agent the live Intelligence path now runs (see
+    proposal_evaluation_coverage.find_missing_submittals_via_llm) — one small
+    targeted call, not a keyword parser and not a full re-derivation — so
+    Complete & clean can add whatever an earlier run missed to an ALREADY
+    drafted proposal, without re-running Phase 2 or touching a single
+    already-drafted section. Proposals generated before this fix existed
+    don't retroactively benefit from the live-path check, which is what this
+    Complete & clean recovery is for.
+    """
+    from app.services.proposal_evaluation_coverage import find_missing_submittals_via_llm
+
+    titles = [t for t in (existing_section_titles or []) if (t or "").strip()]
+    reported = await find_missing_submittals_via_llm(rfp_text, titles)
+    return [
+        RfpSectionSpec(
+            rfp_title=item["title"],
+            instructions=(
+                (item["reason"] or "Required submittal flagged by completeness check.")
+                + " Emit a short checklist plus [DESIGNER NOTE: Attach …] / "
+                "[MANUAL FILL: …] for any signed form the buyer supplies — do "
+                "not invent form content."
+            ),
+        )
+        for item in reported
+        if item["mandatory"]
+    ]
+
+
 def apply_rfp_toc_layout(
     draft: ProposalDraft,
     specs: list[RfpSectionSpec],
@@ -551,6 +896,8 @@ def apply_rfp_toc_layout(
         now = datetime.now(timezone.utc).isoformat()
         draft = draft.model_copy(update={"sections": collapsed, "updated_at": now})
         logs.extend(cost_logs)
+    draft, relabel_logs = apply_rfp_mandated_section_titles(draft, specs)
+    logs.extend(relabel_logs)
     return draft, logs
 
 
@@ -664,7 +1011,6 @@ def order_draft_to_rfp_sequence(
     working = draft.model_copy(update={"sections": dynamic})
     used: set[str] = set()
     ordered: list[ProposalSection] = []
-    renamed = False
     for spec in specs:
         if _spec_is_rfp_title_noise(spec):
             continue
@@ -673,16 +1019,27 @@ def order_draft_to_rfp_sequence(
         section = _match_section_for_spec(working, spec)
         if section is None or section.id in used:
             continue
-        if not outline_titles_near_duplicate(spec.rfp_title, section.title or ""):
-            section = section.model_copy(update={"title": spec.rfp_title})
-            renamed = True
+        # No relabeling here — deliberately. _match_section_for_spec matches
+        # via direct title similarity OR an LLM sameAskAs alias, and only the
+        # alias path can find a section whose title differs from spec.rfp_title
+        # (a direct match, by definition, already IS a near-duplicate title).
+        # An alias match means "this section covers a different, related ask
+        # already — don't add a duplicate tab for it", a coverage signal, not
+        # an identity signal. Relabeling on it previously took a correctly
+        # drafted "SECTION I — Background and Qualifications" tab and
+        # overwrote its title with "EXHIBIT 1: Evaluation Criteria Response
+        # Form" (the alias for a DIFFERENT spec) — and did so again on every
+        # subsequent Complete & clean run, since the same alias re-matches
+        # the same way each time. This function orders tabs; it never retitles
+        # one, because it cannot tell "same ask, buyer's fuller wording" apart
+        # from "different ask, already covered" from title similarity alone.
         ordered.append(section)
         used.add(section.id)
     rest_dynamic = [s for s in dynamic if s.id not in used]
     new_sections = static + ordered + rest_dynamic
     before_ids = [s.id for s in draft.sections]
     after_ids = [s.id for s in new_sections]
-    if before_ids == after_ids and not renamed:
+    if before_ids == after_ids:
         return draft, logs
     if ordered:
         logs.append(
@@ -720,12 +1077,27 @@ def ensure_missing_scored_section_stubs(
     for spec in specs:
         if _spec_is_rfp_title_noise(spec):
             continue
-        if not spec.required_headings and not spec.instructions and not spec.evaluation_weight:
+        if (
+            not spec.required_headings
+            and not spec.instructions
+            and not spec.evaluation_weight
+            and not spec.mandated_submission_format
+        ):
             continue
         working = draft.model_copy(update={"sections": sections})
         if _spec_is_static_company_ask(working, spec):
             continue
         if _match_section_for_spec(working, spec):
+            continue
+        if _spec_title_already_in_draft(sections, spec):
+            logs.append(
+                f"RFP structure: “{spec.rfp_title}” title already in draft — no stub added"
+            )
+            continue
+        if _spec_covered_by_closing_tab(sections, spec):
+            logs.append(
+                f"RFP structure: “{spec.rfp_title}” covered by closing tab — no stub added"
+            )
             continue
         # Coverage backstop: don't mint a duplicate stub next to a section the
         # writer already drafted under a slightly different (sub-threshold) title.
@@ -901,21 +1273,46 @@ async def run_rfp_structure_alignment_pass(
     research: ProposalResearchCache | None,
     skip_section_ids: set[str],
     use_llm: bool,
+    include_missing_submittals: bool = False,
 ) -> tuple[ProposalDraft, list[str], list[str]]:
     """Walk scored RFP sections — reframe outline, redraft VERIFY stubs (any RFP)."""
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
     logs: list[str] = []
     human: list[str] = []
     excerpt = submission_documents_excerpt(rfp_text) or rfp_text[:100_000]
 
-    specs = await extract_rfp_scored_section_specs(
+    specs, build_logs = await build_rfp_structure_specs(
         rfp_text,
         rfp_title=rfp.title,
         existing_section_titles=[s.title for s in draft.sections if s.title],
+        include_missing_submittals=include_missing_submittals,
     )
+    logs.extend(build_logs)
     if not specs:
-        logs.append("RFP structure: no scored section outline detected in excerpt.")
+        logs.append("RFP structure: no section outline detected from RFP.")
     else:
-        logs.append(f"RFP structure: {len(specs)} scored section spec(s) from RFP.")
+        logs.append(f"RFP structure: {len(specs)} combined section spec(s) from RFP.")
+
+    # Union scored criterion specs from ledger when not already covered.
+    # case the TOC read misses: an RFP that scores against a criteria response
+    # form rather than its table of contents.
+    criterion_specs = specs_from_scored_criteria(research)
+    if criterion_specs:
+        known = [s.rfp_title for s in specs]
+        added = [
+            spec
+            for spec in criterion_specs
+            if not any(
+                outline_titles_near_duplicate(spec.rfp_title, title) for title in known
+            )
+        ]
+        if added:
+            specs = merge_specs_submission_format_first(specs, added)
+            logs.append(
+                f"RFP structure: +{len(added)} scored criterion spec(s) from the "
+                f"requirement ledger: {[s.rfp_title for s in added][:8]}"
+            )
 
     # Recover tabs the outline lean-filter / Phase 3 skip dropped entirely.
     draft, stub_logs = ensure_missing_scored_section_stubs(

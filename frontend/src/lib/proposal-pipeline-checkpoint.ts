@@ -1,6 +1,10 @@
 import type { ProposalOutline, ProposalResearch } from "@/types/proposal";
 import { staticSections1to3Complete } from "@/lib/proposal-draft";
 
+export const FULFILL_SCAN_PHASE = "fulfill-scan";
+export const ALIGN_RFP_OUTLINE_PHASE = "align-rfp-outline";
+export const PACKET_REDISTRIBUTE_PHASE = "packet-redistribute";
+
 export type PipelinePhase =
   | "sections-1-3"
   | "phase-2"
@@ -10,7 +14,11 @@ export type PipelinePhase =
   | "phase-4-review"
   | "complete";
 
-export type PipelineInProgressPhase = PipelinePhase | typeof FULFILL_SCAN_PHASE;
+export type PipelineInProgressPhase =
+  | PipelinePhase
+  | typeof FULFILL_SCAN_PHASE
+  | typeof ALIGN_RFP_OUTLINE_PHASE
+  | typeof PACKET_REDISTRIBUTE_PHASE;
 
 export const PIPELINE_PHASE_ORDER: PipelinePhase[] = [
   "sections-1-3",
@@ -48,8 +56,6 @@ export interface ProposalPipelineCheckpoint {
   lastCleanFulfillScanAt?: string | null;
   updatedAt: string;
 }
-
-export const FULFILL_SCAN_PHASE = "fulfill-scan";
 
 /** Live substep shown while Senior editor polish runs (maps to backend activity labels).
  * Dedupe, coverage/compliance ticketing, VERIFY-vs-RFP scrubbing, and legal gates now
@@ -593,6 +599,8 @@ export function shouldRunPhase(
 
 export function inProgressPhaseLabel(phase: PipelineInProgressPhase): string {
   if (phase === FULFILL_SCAN_PHASE) return "Complete & clean draft";
+  if (phase === ALIGN_RFP_OUTLINE_PHASE) return "Align to RFP outline";
+  if (phase === PACKET_REDISTRIBUTE_PHASE) return "Place content in RFP tabs";
   return PIPELINE_PHASE_LABELS[phase];
 }
 
@@ -675,6 +683,12 @@ export function normalizeCheckpointForDisplay(
 export function pipelineServerStillWorkingMessage(
   phase: PipelineInProgressPhase
 ): string {
+  if (phase === ALIGN_RFP_OUTLINE_PHASE) {
+    return `Still aligning tabs to the RFP outline (${inProgressPhaseLabel(phase)}). Drafted wording is not being rewritten.`;
+  }
+  if (phase === PACKET_REDISTRIBUTE_PHASE) {
+    return `Still placing content into RFP tabs (${inProgressPhaseLabel(phase)}). Moves are verbatim — no prose rewrite.`;
+  }
   return `Still generating ${inProgressPhaseLabel(phase)}. New sections will show up here as they finish.`;
 }
 

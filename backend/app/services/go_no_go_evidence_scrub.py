@@ -74,8 +74,12 @@ def evidence_has_fabricated_certs(text: str) -> bool:
     return any(p.search(text or "") for p, _ in _FABRICATED_CERT_RES)
 
 
-def scrub_evidence_text(text: str) -> tuple[str, list[str]]:
-    """Strip known fabrications from an evidence string. Returns (text, log codes)."""
+def scrub_fabricated_agency_cert_mentions(text: str) -> tuple[str, list[str]]:
+    """Strip known fabricated agency cert strings only (not foreign case-study metrics).
+
+    Single denylist for Go/No-Go evidence AND proposal manuscript cert scrub —
+    do not fork B Corp / 1% Planet / LinkedIn Gold patterns elsewhere.
+    """
     updated = text or ""
     logs: list[str] = []
     for pattern, code in _FABRICATED_CERT_RES:
@@ -83,11 +87,26 @@ def scrub_evidence_text(text: str) -> tuple[str, list[str]]:
             continue
         updated = pattern.sub("", updated)
         logs.append(code)
+    if not logs:
+        return text or "", []
+    updated = _LIST_GLUE_RE.sub(", ", updated)
+    updated = re.sub(r"\s{2,}", " ", updated)
+    updated = re.sub(r"\s+,", ",", updated)
+    updated = re.sub(r",\s*and\s*$", "", updated.strip(" ,;"))
+    updated = updated.strip(" ,;")
+    return updated, logs
+
+
+def scrub_evidence_text(text: str) -> tuple[str, list[str]]:
+    """Strip known fabrications from an evidence string. Returns (text, log codes)."""
+    updated, logs = scrub_fabricated_agency_cert_mentions(text)
     for pattern, code in _FOREIGN_METRIC_RES:
         if not pattern.search(updated):
             continue
         updated = pattern.sub("", updated)
         logs.append(code)
+    if not logs:
+        return text or "", []
     updated = _LIST_GLUE_RE.sub(", ", updated)
     updated = re.sub(r"\s{2,}", " ", updated)
     updated = re.sub(r"\s+,", ",", updated)

@@ -236,6 +236,126 @@ class ClosingLedgerCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.requirements[0].id, "references")
 
 
+class ClosingFormTemplateStubTests(unittest.IsolatedAsyncioTestCase):
+    def _rfp(self):
+        from app.models.rfp import RfpRecord
+
+        return RfpRecord(
+            id="r1",
+            title="Test RFP",
+            client="Client",
+            dueDate="2026-01-01",
+            receivedDate="2026-01-01",
+            lastActivity="2026-01-01",
+            lastActivityNote="test",
+        )
+
+    async def test_form_kind_skips_llm(self) -> None:
+        from unittest import mock
+
+        from app.services.proposal_closing_package import ClosingComponent
+        from app.services.proposal_fulfill_rfp_gaps import _draft_closing_section
+
+        component = ClosingComponent(
+            id="exhibit_j",
+            title="Exhibit J — Proposal Certification",
+            section_id="rfp-closing-exhibit_j",
+            kind="form",
+            match_hint="Exhibit J",
+            draft_instructions="Return signed Exhibit J with the proposal.",
+        )
+        with mock.patch(
+            "app.services.proposal_fulfill_rfp_gaps.llm.chat_json",
+            new=mock.AsyncMock(side_effect=AssertionError("form must not call LLM")),
+        ):
+            content = await _draft_closing_section(
+                component=component,
+                rfp=self._rfp(),
+                rfp_excerpt="Exhibit J required.",
+            )
+        self.assertIn("MANUAL FILL", content)
+        self.assertIn("DESIGNER NOTE", content)
+        self.assertIn("Exhibit J", content)
+        self.assertIn("Return signed Exhibit J", content)
+
+    async def test_cover_letter_form_kind_still_drafts_letter(self) -> None:
+        """Signed cover letter needs letter body — never template-only."""
+        from unittest import mock
+
+        from app.services.proposal_closing_package import ClosingComponent
+        from app.services.proposal_fulfill_rfp_gaps import (
+            _closing_uses_template_stub,
+            _draft_closing_section,
+        )
+
+        component = ClosingComponent(
+            id="cover_letter",
+            title="Section 1 - Cover Letter",
+            section_id="rfp-closing-cover_letter",
+            kind="form",
+            match_hint="Cover Letter",
+            draft_instructions="Signed cover letter with five elements.",
+        )
+        self.assertFalse(_closing_uses_template_stub(component))
+        mock_chat = mock.AsyncMock(
+            return_value=(
+                {
+                    "content": (
+                        "## Cover Letter\n\nDear Tseng College,\n\n"
+                        "We are pleased to submit this proposal.\n\n"
+                        "Sincerely,\n[MANUAL FILL: authorized signature]\n\n"
+                        "[DESIGNER NOTE: Attach signed PDF]"
+                    )
+                },
+                None,
+            )
+        )
+        with mock.patch(
+            "app.services.proposal_fulfill_rfp_gaps.llm.is_configured",
+            return_value=True,
+        ), mock.patch(
+            "app.services.proposal_fulfill_rfp_gaps.llm.chat_json",
+            new=mock_chat,
+        ):
+            content = await _draft_closing_section(
+                component=component,
+                rfp=self._rfp(),
+                rfp_excerpt="Cover letter required.",
+            )
+        self.assertTrue(mock_chat.await_count)
+        self.assertIn("Dear Tseng", content)
+
+    async def test_narrative_kind_may_call_llm(self) -> None:
+        from unittest import mock
+
+        from app.services.proposal_closing_package import ClosingComponent
+        from app.services.proposal_fulfill_rfp_gaps import _draft_closing_section
+
+        component = ClosingComponent(
+            id="strategic_approach",
+            title="Strategic Approach",
+            section_id="rfp-closing-strategic",
+            kind="narrative",
+            match_hint="Strategic Approach",
+            draft_instructions="Write the scored narrative.",
+        )
+        mock_chat = mock.AsyncMock(return_value=({"content": "## Strategic\n\nBody."}, None))
+        with mock.patch(
+            "app.services.proposal_fulfill_rfp_gaps.llm.is_configured",
+            return_value=True,
+        ), mock.patch(
+            "app.services.proposal_fulfill_rfp_gaps.llm.chat_json",
+            new=mock_chat,
+        ):
+            content = await _draft_closing_section(
+                component=component,
+                rfp=self._rfp(),
+                rfp_excerpt="Strategic approach required.",
+            )
+        self.assertTrue(mock_chat.await_count)
+        self.assertIn("Strategic", content)
+
+
 class FabricatedReadyRepairTests(unittest.TestCase):
     def test_demotes_ready_to_manual_fill(self) -> None:
         from app.services.proposal_closing_ledger import repair_fabricated_ready_in_draft
