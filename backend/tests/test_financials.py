@@ -49,6 +49,12 @@ def test_iworker_timesheets_data(monkeypatch):
     assert "period_history" in res
     assert res["meta"]["unparsed_date_count"] >= 0
 
+def test_iworker_sync_requires_cron_secret():
+    client = TestClient(app)
+    response = client.post("/api/v1/financials/iworker/sync")
+    assert response.status_code == 401
+
+
 def test_checklist_data():
     res = get_checklist()
     assert res["total_features"] == 19

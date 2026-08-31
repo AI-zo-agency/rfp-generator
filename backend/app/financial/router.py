@@ -751,6 +751,20 @@ def get_iworker_timesheets(
         },
     }
 
+
+@router.post("/iworker/sync")
+def iworker_sync(request: Request):
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        logger.warning("operation=iworker_sync status=unauthorized")
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+    logger.info("operation=iworker_sync status=started")
+    data = get_iworker_timesheets(persist_snapshots=True)
+    meta = data.get("meta") or {}
+    upserted = meta.get("snapshot_upserted")
+    logger.info("operation=iworker_sync status=completed snapshot_upserted=%s", upserted)
+    return {"status": "ok", "snapshot_upserted": upserted, "spreadsheet_id": meta.get("spreadsheet_id")}
+
+
 @router.get("/checklist")
 def get_checklist():
     completed = sum(1 for item in CHECKLIST_ITEMS if item["status"] == "Completed")
