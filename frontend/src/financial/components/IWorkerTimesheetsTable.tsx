@@ -25,10 +25,27 @@ import {
   Minus,
   FileSpreadsheet,
   Loader2,
+  ChevronLeft,
+  ChevronRight,
+  Users,
+  Sparkles,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { expoOutEase } from "@/lib/motion";
 import { AnimatedNumber } from "./AnimatedNumber";
+import type { PeriodInsights, PeriodHistoryPoint, PeriodGranularity } from "../types/iworker";
+import { entryDateInPeriod } from "../lib/iworker-period";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip as RTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import "./AiIntelligenceDrawer.css";
 
 export interface TimesheetEntry {
   id: string;
@@ -75,15 +92,117 @@ interface IWorkerTimesheetsTableProps {
     total_spend_usd: number;
     active_tasks_count: number;
     hourly_rate_usd: number;
-    unbilled_risk_amount: number;
   };
-  weeklyTotals: Array<{
-    week_ending: string;
-    total_hours: number;
-    total_amount: number;
-    entries_count: number;
-  }>;
+  periodInsights: PeriodInsights;
+  periodHistory: PeriodHistoryPoint[];
+  granularity: PeriodGranularity;
+  onGranularityChange: (g: PeriodGranularity) => void;
+  onPeriodStartChange: (iso: string | null) => void;
+  periodFilterEnabled: boolean;
+  onTogglePeriodFilter: () => void;
   timesheets: TimesheetEntry[];
+  aiHighImpact?: number;
+  aiOpen?: boolean;
+  onOpenAi?: () => void;
+}
+
+function formatDeltaPct(pct: number | null): string {
+  if (pct === null) return "—";
+  const sign = pct > 0 ? "+" : "";
+  return `${sign}${Math.round(pct)}%`;
+}
+
+const CONTRACTOR_LINE_COLORS = ["#2563eb", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"];
+
+function HoursTrendTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: { name?: string; value?: number; color?: string; dataKey?: string }[];
+  label?: string;
+}) {
+  if (!active || !payload?.length) return null;
+  const rows = [...payload].sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 shadow-lg min-w-[10rem]">
+      <p className="text-sm font-semibold text-foreground mb-2">{label}</p>
+      <div className="space-y-1.5">
+        {rows.map((p) => (
+          <div
+            key={p.dataKey}
+            className="flex items-center justify-between gap-4 text-xs text-zo-text-muted"
+          >
+            <span className="inline-flex items-center gap-2 min-w-0">
+              <span
+                className="h-2 w-2 rounded-full shrink-0"
+                style={{ backgroundColor: p.color }}
+                aria-hidden
+              />
+              <span className="truncate">{p.name}</span>
+            </span>
+            <strong className="font-semibold text-foreground tabular-nums">
+              {(p.value ?? 0).toFixed(1)}h
+            </strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function weekAxisRangeLabel(startIso: string, endIso: string): string {
+  const start = new Date(`${startIso}T12:00:00`);
+  const end = new Date(`${endIso}T12:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return startIso.slice(5);
+  }
+  const startMonth = start.toLocaleDateString("en-US", { month: "short" });
+  const endMonth = end.toLocaleDateString("en-US", { month: "short" });
+  if (startMonth === endMonth) {
+    return `${startMonth} ${start.getDate()} – ${end.getDate()}`;
+  }
+  return `${startMonth} ${start.getDate()} – ${endMonth} ${end.getDate()}`;
+}
+
+function deltaColorClass(pct: number | null): string {
+  if (pct === null) return "text-zinc-400";
+  if (pct > 0) return "text-emerald-600";
+  if (pct < 0) return "text-red-500";
+  return "text-zinc-400";
+}
+
+function utilizationHelpText(granularity: PeriodGranularity): string {
+  const periodWord = granularity === "month" ? "month" : "week";
+  return [
+    `Default target: 20 billable hrs/week per contractor (configurable via IWORKER_EXPECTED_HOURS_JSON).`,
+    `For the selected ${periodWord}, expected hours = weekly target × (elapsed days in the ${periodWord} ÷ 7).`,
+    `Utilization = logged hours ÷ expected hours × 100.`,
+    `Low utilization mid-${periodWord} usually means missing timesheet rows, not idle capacity.`,
+  ].join(" ");
+}
+
+function contractorUtilizationDetail(
+  hours: number,
+  expectedHours: number,
+  utilizationPct: number | null,
+): string {
+  if (expectedHours <= 0) return "No expected-hours target configured for this contractor.";
+  const pct =
+    utilizationPct !== null ? `${Math.round(utilizationPct)}%` : "—";
+  return `${hours.toFixed(1)} hrs logged of ${expectedHours.toFixed(1)} hrs expected (${pct} utilization).`;
+}
+
+function signalSeverityStyles(severity: string): { border: string; bg: string; icon: string } {
+  switch (severity) {
+    case "scope":
+      return { border: "border-orange-200", bg: "bg-orange-50/60", icon: "text-orange-600" };
+    case "capacity":
+      return { border: "border-blue-200", bg: "bg-blue-50/60", icon: "text-blue-600" };
+    default:
+      return { border: "border-red-200", bg: "bg-red-50/60", icon: "text-red-600" };
+  }
 }
 
 function getMonthYearKey(dateStr: string): string {
@@ -151,8 +270,17 @@ export function IWorkerTimesheetsTable({
   onSelectContractor,
   isLoadingContractor = false,
   summary,
-  weeklyTotals,
+  periodInsights,
+  periodHistory,
+  granularity,
+  onGranularityChange,
+  onPeriodStartChange,
+  periodFilterEnabled,
+  onTogglePeriodFilter,
   timesheets,
+  aiHighImpact = 0,
+  aiOpen = false,
+  onOpenAi,
 }: IWorkerTimesheetsTableProps) {
   const [sheetStatus, setSheetStatus] = useState<"connected" | "disconnected">("connected");
   const [viewMode, setViewMode] = useState<"GROUPED" | "DAILY">("GROUPED");
@@ -261,9 +389,63 @@ export function IWorkerTimesheetsTable({
     });
   }, [timesheets]);
 
+  const selectedPeriodIndex = useMemo(() => {
+    const periods = periodInsights.available_periods;
+    const idx = periods.findIndex((p) => p.start === periodInsights.selected.start);
+    return idx >= 0 ? idx : periods.length - 1;
+  }, [periodInsights.available_periods, periodInsights.selected.start]);
+
+  const weeklyInMonth = periodInsights.weekly_in_month ?? [];
+
+  const contractorChartColors = useMemo(() => {
+    const map: Record<string, string> = {};
+    periodInsights.contractors.forEach((c, i) => {
+      map[c.name] = CONTRACTOR_LINE_COLORS[i % CONTRACTOR_LINE_COLORS.length];
+    });
+    return map;
+  }, [periodInsights.contractors]);
+
+  const trendContractors = useMemo(() => {
+    return selectedContractor && selectedContractor !== "all"
+      ? periodInsights.contractors.filter((c) => c.name === selectedContractor)
+      : periodInsights.contractors;
+  }, [periodInsights.contractors, selectedContractor]);
+
+  const hoursTrendLineData = useMemo(() => {
+    return weeklyInMonth.map((week) => {
+      const row: Record<string, string | number> = {
+        weekLabel: weekAxisRangeLabel(week.start, week.end),
+        weekStart: week.start,
+      };
+      for (const c of trendContractors) {
+        const match = week.contractors.find((wc) => wc.name === c.name);
+        row[c.name] = match?.hours ?? 0;
+      }
+      return row;
+    });
+  }, [weeklyInMonth, trendContractors]);
+
+  const handleHoursTrendClick = (
+    state: { activePayload?: { payload?: { weekStart?: string } }[] } | null,
+  ) => {
+    const weekStart = state?.activePayload?.[0]?.payload?.weekStart;
+    if (weekStart) {
+      onGranularityChange("week");
+      onPeriodStartChange(weekStart);
+    }
+  };
+
+  const periodEmptyCopy =
+    granularity === "month" ? "No hours logged this month" : "No hours logged this week";
+
   const filteredAndSorted = useMemo(() => {
     if (!isConnected) return [];
     let result = [...enrichedEntries];
+    if (periodFilterEnabled) {
+      result = result.filter((item) =>
+        entryDateInPeriod(item.date, periodInsights.selected.start, periodInsights.selected.end),
+      );
+    }
     if (hideOffDays) result = result.filter((item) => item.hours > 0);
     if (selectedYear !== "ALL") result = result.filter((item) => item.date.includes(selectedYear));
     if (selectedMonth !== "ALL")
@@ -308,7 +490,19 @@ export function IWorkerTimesheetsTable({
       return sortOrder === "DESC" ? dateB - dateA : dateA - dateB;
     });
     return result;
-  }, [enrichedEntries, hideOffDays, selectedYear, selectedMonth, selectedStatusFilter, searchQuery, sortOrder, isConnected]);
+  }, [
+    enrichedEntries,
+    periodFilterEnabled,
+    periodInsights.selected.start,
+    periodInsights.selected.end,
+    hideOffDays,
+    selectedYear,
+    selectedMonth,
+    selectedStatusFilter,
+    searchQuery,
+    sortOrder,
+    isConnected,
+  ]);
 
   const deliverableGroups = useMemo(() => {
     const map: {
@@ -352,11 +546,6 @@ export function IWorkerTimesheetsTable({
     });
     return groups;
   }, [filteredAndSorted]);
-
-  const liveOverScopeSpend = useMemo(
-    () => enrichedEntries.filter((e) => e.isOverScope).reduce((acc, curr) => acc + curr.amount, 0),
-    [enrichedEntries]
-  );
 
   const toggleExpand = (taskName: string) => {
     setExpandedDeliverables((prev) => ({ ...prev, [taskName]: !prev[taskName] }));
@@ -519,7 +708,22 @@ export function IWorkerTimesheetsTable({
             </div>
 
             {isConnected && (
-              <div className="grid grid-cols-2 gap-2.5 sm:flex sm:shrink-0">
+              <div className="grid grid-cols-2 gap-2.5 sm:flex sm:shrink-0 sm:items-center">
+                {onOpenAi ? (
+                  <button
+                    type="button"
+                    className="qb-ai-trigger col-span-2 sm:col-span-1"
+                    onClick={onOpenAi}
+                    aria-haspopup="dialog"
+                    aria-expanded={aiOpen}
+                  >
+                    <Sparkles size={14} strokeWidth={2.25} aria-hidden />
+                    AI Intelligence
+                    {aiHighImpact > 0 ? (
+                      <span className="qb-ai-trigger-count">{aiHighImpact}</span>
+                    ) : null}
+                  </button>
+                ) : null}
                 <a
                   href={googleSheetUrl}
                   target="_blank"
@@ -546,9 +750,9 @@ export function IWorkerTimesheetsTable({
         </div>
       </div>
 
-      {/* ─── OVERVIEW STATS — own section, room to breathe ──────────────────── */}
+      {/* ─── PERIOD OPS KPIs ─────────────────────────────────────────────────── */}
       {isConnected ? (
-        <div className="relative">
+        <div className="relative space-y-5">
           {isLoadingContractor && (
             <div className="absolute inset-0 bg-white/70 backdrop-blur-[1px] z-20 rounded-2xl flex items-center justify-center transition-all duration-300">
               <div className="inline-flex items-center gap-2.5 rounded-xl bg-white border border-[#3C5A56]/20 px-4 py-2.5 shadow-lg text-xs font-semibold text-[#3C5A56] animate-pulse">
@@ -557,58 +761,338 @@ export function IWorkerTimesheetsTable({
               </div>
             </div>
           )}
+
+          {/* Period controls */}
+          <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm px-5 py-4 transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="inline-flex items-center rounded-xl bg-zinc-100 p-1 border border-zinc-200 gap-0.5">
+                <button
+                  onClick={() => onGranularityChange("week")}
+                  className={`inline-flex cursor-pointer items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg transition-all ${
+                    granularity === "week"
+                      ? "bg-[#3C5A56] text-white shadow-sm"
+                      : "text-zinc-500 hover:text-zinc-800"
+                  }`}
+                >
+                  Week
+                </button>
+                <button
+                  onClick={() => onGranularityChange("month")}
+                  className={`inline-flex cursor-pointer items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg transition-all ${
+                    granularity === "month"
+                      ? "bg-[#3C5A56] text-white shadow-sm"
+                      : "text-zinc-500 hover:text-zinc-800"
+                  }`}
+                >
+                  Month
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => {
+                    // available_periods is newest-first; left = older week/month
+                    const older = periodInsights.available_periods[selectedPeriodIndex + 1];
+                    if (older) onPeriodStartChange(older.start);
+                  }}
+                  disabled={selectedPeriodIndex >= periodInsights.available_periods.length - 1}
+                  className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50 text-zinc-600 hover:border-[#3C5A56]/40 hover:text-[#3C5A56] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                  aria-label="Previous period"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <span className="text-sm font-semibold text-foreground min-w-[10rem] text-center">
+                  {periodInsights.selected.label}
+                </span>
+                <button
+                  onClick={() => {
+                    // right = newer week/month toward current
+                    const newer = periodInsights.available_periods[selectedPeriodIndex - 1];
+                    if (newer) onPeriodStartChange(newer.start);
+                  }}
+                  disabled={selectedPeriodIndex <= 0}
+                  className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50 text-zinc-600 hover:border-[#3C5A56]/40 hover:text-[#3C5A56] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                  aria-label="Next period"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+                {!periodInsights.selected.is_current && (
+                  <button
+                    onClick={() => onPeriodStartChange(null)}
+                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-[#3C5A56]/30 bg-[#3C5A56]/5 px-3 py-2 text-xs font-semibold text-[#3C5A56] hover:bg-[#3C5A56]/10 transition-all"
+                  >
+                    {granularity === "month" ? "This month" : "This week"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Hero KPI cards */}
           <div className={`grid grid-cols-1 sm:grid-cols-3 gap-5 transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
-            {/* Total Hours */}
             <div className="flex items-center gap-4 rounded-2xl bg-white border border-zinc-200 shadow-sm px-6 py-6">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
                 <Clock className="h-5 w-5" />
               </div>
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
-                  Total Logged Hours
+                  Period Hours
                 </p>
-                <p className="font-heading text-3xl font-bold text-foreground leading-none">
-                  <AnimatedNumber value={summary.total_logged_hours} decimals={2} />
-                  <span className="text-sm font-semibold text-zo-text-muted ml-1.5">hrs</span>
+                <div className="flex items-baseline gap-2">
+                  <p className="font-heading text-3xl font-bold text-foreground leading-none">
+                    <AnimatedNumber value={periodInsights.current.hours} decimals={2} />
+                    <span className="text-sm font-semibold text-zo-text-muted ml-1.5">hrs</span>
+                  </p>
+                  <span className={`text-xs font-bold ${deltaColorClass(periodInsights.delta.hours_pct)}`}>
+                    {formatDeltaPct(periodInsights.delta.hours_pct)}
+                  </span>
+                </div>
+                <p className="text-[11px] text-zo-text-muted mt-1.5">
+                  {periodInsights.current.hours > 0
+                    ? periodInsights.selected.label
+                    : periodEmptyCopy}
                 </p>
-                <p className="text-[11px] text-zo-text-muted mt-1.5">Across active weekly cycles</p>
               </div>
             </div>
 
-            {/* Total Spend */}
             <div className="flex items-center gap-4 rounded-2xl bg-white border border-zinc-200 shadow-sm px-6 py-6">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
                 <DollarSign className="h-5 w-5" />
               </div>
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
-                  Contractor Spend
+                  Period Spend
                 </p>
-                <p className="font-heading text-3xl font-bold text-emerald-600 leading-none">
-                  <AnimatedNumber value={summary.total_spend_usd} decimals={2} prefix="$" />
-                </p>
+                <div className="flex items-baseline gap-2">
+                  <p className="font-heading text-3xl font-bold text-emerald-600 leading-none">
+                    <AnimatedNumber value={periodInsights.current.spend_usd} decimals={2} prefix="$" />
+                  </p>
+                  <span className={`text-xs font-bold ${deltaColorClass(periodInsights.delta.spend_pct)}`}>
+                    {formatDeltaPct(periodInsights.delta.spend_pct)}
+                  </span>
+                </div>
                 <p className="text-[11px] text-zo-text-muted mt-1.5">
-                  ${summary.hourly_rate_usd.toFixed(2)} / hr · Sheet cell H4
+                  {periodInsights.current.hours > 0
+                    ? periodInsights.selected.label
+                    : periodEmptyCopy}
                 </p>
               </div>
             </div>
 
-            {/* AI Flagged Risk */}
             <div className="flex items-center gap-4 rounded-2xl bg-orange-50 border border-orange-200 shadow-sm px-6 py-6">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-orange-100 text-orange-600">
                 <AlertTriangle className="h-5 w-5" />
               </div>
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted mb-1">
-                  AI Flagged Scope Risk
+                  Scope Risk
                 </p>
-                <p className="font-heading text-3xl font-bold text-orange-600 leading-none">
-                  <AnimatedNumber value={liveOverScopeSpend} decimals={2} prefix="$" />
+                <div className="flex items-baseline gap-2">
+                  <p className="font-heading text-3xl font-bold text-orange-600 leading-none">
+                    <AnimatedNumber value={periodInsights.current.scope_risk_usd} decimals={2} prefix="$" />
+                  </p>
+                  <span className={`text-xs font-bold ${deltaColorClass(periodInsights.delta.scope_risk_pct)}`}>
+                    {formatDeltaPct(periodInsights.delta.scope_risk_pct)}
+                  </span>
+                </div>
+                <p className="text-[11px] text-zo-text-muted mt-1.5">
+                  {periodInsights.current.hours > 0
+                    ? periodInsights.selected.label
+                    : periodEmptyCopy}
                 </p>
-                <p className="text-[11px] text-zo-text-muted mt-1.5">Unbilled revision overages (R3+)</p>
               </div>
             </div>
           </div>
+
+          {/* Signals */}
+          {periodInsights.signals.length > 0 && (
+            <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
+              <div className="px-6 py-4 border-b border-zinc-100 bg-zinc-50/60">
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted">
+                  Period Signals
+                </p>
+              </div>
+              <div className="divide-y divide-zinc-100">
+                {periodInsights.signals.map((signal) => {
+                  const styles = signalSeverityStyles(signal.severity);
+                  return (
+                    <div key={signal.id} className={`px-6 py-4 ${styles.bg}`}>
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className={`h-4 w-4 shrink-0 mt-0.5 ${styles.icon}`} />
+                        <div>
+                          <p className="text-sm font-semibold text-foreground">{signal.headline}</p>
+                          <p className="text-xs text-zo-text-muted mt-1 leading-relaxed">{signal.detail}</p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Contractor strip */}
+          {periodInsights.contractors.length > 0 && (
+            <TooltipProvider delayDuration={200}>
+            <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm overflow-hidden transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
+              <div className="px-6 py-4 border-b border-zinc-100 bg-zinc-50/60 flex items-center gap-2">
+                <Users className="h-4 w-4 text-[#3C5A56]" />
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-zo-text-muted">
+                  Contractor Breakdown
+                </p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-zinc-50 border-b border-zinc-100">
+                    <tr className="text-zinc-400 font-semibold uppercase tracking-wider">
+                      <th className="px-6 py-3">Contractor</th>
+                      <th className="px-4 py-3 text-right">Hours</th>
+                      <th className="px-4 py-3 text-right">Spend</th>
+                      <th className="px-4 py-3 text-right">Scope</th>
+                      <th className="px-4 py-3 text-right">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="inline-flex cursor-help items-center justify-end gap-1 text-zinc-400 hover:text-[#3C5A56] transition-colors"
+                              aria-label="How utilization is calculated"
+                            >
+                              Utilization
+                              <Info className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-xs text-left leading-relaxed">
+                            {utilizationHelpText(granularity)}
+                          </TooltipContent>
+                        </Tooltip>
+                      </th>
+                      <th className="px-4 py-3 text-right">Δ Hours</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-50">
+                    {periodInsights.contractors.map((c) => (
+                      <tr
+                        key={c.name}
+                        onClick={() => onSelectContractor?.(c.name)}
+                        className="hover:bg-zinc-50/80 cursor-pointer transition-colors"
+                      >
+                        <td className="px-6 py-3.5 font-semibold text-[#3C5A56]">{c.name}</td>
+                        <td className="px-4 py-3.5 text-right font-mono font-semibold text-foreground">
+                          {c.hours.toFixed(1)}
+                        </td>
+                        <td className="px-4 py-3.5 text-right font-mono font-semibold text-emerald-600">
+                          ${c.spend_usd.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-3.5 text-right font-mono font-semibold text-orange-600">
+                          ${c.scope_risk_usd.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-3.5 text-right font-semibold text-zinc-600">
+                          {c.utilization_pct !== null ? (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="cursor-help border-b border-dotted border-zinc-300">
+                                  {Math.round(c.utilization_pct)}%
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="top" className="max-w-xs text-left">
+                                {contractorUtilizationDetail(
+                                  c.hours,
+                                  c.expected_hours,
+                                  c.utilization_pct,
+                                )}
+                              </TooltipContent>
+                            </Tooltip>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className={`px-4 py-3.5 text-right font-semibold ${deltaColorClass(c.hours_delta_pct)}`}>
+                          {formatDeltaPct(c.hours_delta_pct)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            </TooltipProvider>
+          )}
+
+          {/* Weekly hours within selected month — contractor line chart */}
+          {granularity === "month" && hoursTrendLineData.length > 0 && trendContractors.length > 0 && (
+            <div className={`rounded-2xl border border-zinc-200 bg-white shadow-sm px-6 py-5 transition-all duration-200 ${isLoadingContractor ? "opacity-40" : ""}`}>
+              <div className="mb-4 gap-3 flex-wrap">
+                <p className="text-base font-semibold text-foreground">
+                  Contractor hours trend
+                </p>
+                <p className="text-xs text-zo-text-muted mt-0.5">
+                  Weekly hours by subcontractor in {periodInsights.selected.label}. Hover a point for
+                  exact hours; click to open that week.
+                </p>
+              </div>
+
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart
+                  data={hoursTrendLineData}
+                  margin={{ top: 8, right: 12, bottom: 0, left: -8 }}
+                  onClick={handleHoursTrendClick}
+                >
+                  <CartesianGrid strokeDasharray="4 4" vertical={false} stroke="#e4e4e7" />
+                  <XAxis
+                    dataKey="weekLabel"
+                    tick={{ fill: "#71717a", fontSize: 11 }}
+                    axisLine={false}
+                    tickLine={false}
+                    dy={8}
+                  />
+                  <YAxis
+                    tickFormatter={(v: number) => `${v}h`}
+                    tick={{ fill: "#71717a", fontSize: 11 }}
+                    axisLine={false}
+                    tickLine={false}
+                    width={36}
+                    allowDecimals={false}
+                  />
+                  <RTooltip
+                    cursor={{ stroke: "#d4d4d8", strokeWidth: 1 }}
+                    content={<HoursTrendTooltip />}
+                  />
+                  {trendContractors.map((c) => (
+                    <Line
+                      key={c.name}
+                      type="monotone"
+                      dataKey={c.name}
+                      name={c.name}
+                      stroke={contractorChartColors[c.name] ?? CONTRACTOR_LINE_COLORS[0]}
+                      strokeWidth={2}
+                      dot={{
+                        r: 4,
+                        fill: contractorChartColors[c.name] ?? CONTRACTOR_LINE_COLORS[0],
+                        strokeWidth: 0,
+                      }}
+                      activeDot={{ r: 5, cursor: "pointer" }}
+                      isAnimationActive={false}
+                    />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+
+              <div className="mt-3 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 border-t border-zinc-100 pt-3">
+                {trendContractors.map((c) => (
+                  <span
+                    key={c.name}
+                    className="inline-flex items-center gap-1.5 text-[11px] font-medium text-zo-text-muted"
+                  >
+                    <span
+                      className="h-2.5 w-2.5 rounded-full shrink-0"
+                      style={{ backgroundColor: contractorChartColors[c.name] ?? CONTRACTOR_LINE_COLORS[0] }}
+                    />
+                    {c.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-8 py-12 text-center space-y-3">
@@ -756,6 +1240,15 @@ export function IWorkerTimesheetsTable({
 
             {/* Results Count */}
             <div className="text-xs text-zinc-500 font-medium whitespace-nowrap ml-auto flex items-center gap-2">
+              {periodFilterEnabled && (
+                <button
+                  onClick={onTogglePeriodFilter}
+                  className="inline-flex items-center gap-1 rounded-full bg-[#3C5A56]/10 text-[#3C5A56] font-semibold px-2.5 py-0.5 border border-[#3C5A56]/20 text-[11px] hover:bg-[#3C5A56]/15 transition-colors cursor-pointer"
+                >
+                  Filtered to {periodInsights.selected.label}
+                  <X className="h-3 w-3" />
+                </button>
+              )}
               {searchQuery && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-700 font-semibold px-2.5 py-0.5 border border-emerald-200 text-[11px]">
                   Filtered by "{searchQuery}"

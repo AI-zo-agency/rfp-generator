@@ -14,7 +14,7 @@ export type NoteBadge =
 
 export type NoteRowKind = "collect" | "margin" | "fix";
 
-export type NoteSource = "quickbooks" | "teamwork";
+export type NoteSource = "quickbooks" | "teamwork" | "agency" | "iworker";
 
 /** Rule-based signals from derive_signals (QuickBooks) or build_signals (Teamwork). */
 export function badgeForSignal(
@@ -28,6 +28,28 @@ export function badgeForSignal(
   if (source === "teamwork") {
     if (severity === "critical") return "High impact";
     return severity === "warn" ? "Risk" : "Watch";
+  }
+
+  if (source === "iworker") {
+    if (severity === "critical") return "High impact";
+    if (severity === "warn") return "Risk";
+    return "Watch";
+  }
+
+  if (source === "agency") {
+    if (id.startsWith("carryover:") || id.startsWith("aging:")) {
+      return severity === "critical" ? "High impact" : "Risk";
+    }
+    if (id.startsWith("priority:delivery:")) return "High impact";
+    if (id.startsWith("priority:")) return "Risk";
+    if (id === "new:week") return "Watch";
+    if (id === "invoices:unlinked" || id === "orphans:billed") {
+      return severity === "critical" ? "High impact" : "Risk";
+    }
+    if (id === "queue:baseline" || id === "ar:open") return "Watch";
+    if (severity === "critical") return "High impact";
+    if (severity === "warn") return "Risk";
+    return "Watch";
   }
 
   switch (id) {

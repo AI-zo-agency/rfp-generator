@@ -108,10 +108,18 @@ export function shortPersonName(name: string): string {
 }
 
 export interface HoursChartRow {
+  id: string;
   name: string;
   hours: number;
   billable: number;
   nonBillable: number;
+}
+
+export interface HoursChartRowsOptions {
+  /** Max rows; `null` omits the cap. Default 8. */
+  limit?: number | null;
+  /** Use full person names instead of short labels. */
+  fullNames?: boolean;
 }
 
 /**
@@ -123,23 +131,54 @@ export interface HoursChartRow {
  */
 export function hoursChartRows(
   buckets: TeamworkTimeBucket[],
-  limit = 8,
+  limitOrOptions: number | HoursChartRowsOptions = 8,
 ): { rows: HoursChartRow[]; split: boolean } {
+  const options: HoursChartRowsOptions =
+    typeof limitOrOptions === "number" ? { limit: limitOrOptions } : limitOrOptions;
+  const { limit = 8, fullNames = false } = options;
   const split = buckets.some((bucket) => (bucket.billable_minutes ?? 0) > 0);
-  const rows = [...buckets]
+  const sorted = [...buckets]
     .filter((bucket) => bucket.minutes > 0)
-    .sort((a, b) => b.minutes - a.minutes)
-    .slice(0, limit)
-    .map((bucket) => {
-      const billableMinutes = bucket.billable_minutes ?? 0;
-      return {
-        name: shortPersonName(bucket.name),
-        hours: hoursNumber(bucket.minutes),
-        billable: hoursNumber(billableMinutes),
-        nonBillable: hoursNumber(Math.max(0, bucket.minutes - billableMinutes)),
-      };
-    });
+    .sort((a, b) => b.minutes - a.minutes);
+  const capped = limit == null ? sorted : sorted.slice(0, limit);
+  const rows = capped.map((bucket) => {
+    const billableMinutes = bucket.billable_minutes ?? 0;
+    const label = fullNames ? bucket.name.trim() : shortPersonName(bucket.name);
+    return {
+      id: bucket.id,
+      name: label || bucket.name.trim(),
+      hours: hoursNumber(bucket.minutes),
+      billable: hoursNumber(billableMinutes),
+      nonBillable: hoursNumber(Math.max(0, bucket.minutes - billableMinutes)),
+    };
+  });
   return { rows, split };
+}
+
+/** Billable share for a single person's hours row. */
+export function hoursRowBillablePct(billable: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.round((billable / total) * 100);
+}
+
+/** One-decimal hour label for chart totals, e.g. 27.5h. */
+export function hoursChartTotalLabel(hours: number): string {
+  return `${hours.toFixed(1)}h`;
+}
+
+/** Nice upper bound for a horizontal hours axis. */
+export function hoursChartAxisMax(maxHours: number): number {
+  if (maxHours <= 0) return 10;
+  const step = maxHours <= 15 ? 5 : maxHours <= 40 ? 10 : 20;
+  return Math.ceil(maxHours / step) * step;
+}
+
+export function hoursChartAxisTicks(axisMax: number): number[] {
+  if (axisMax <= 0) return [0];
+  const step = axisMax <= 15 ? 5 : axisMax <= 40 ? 10 : 20;
+  const ticks: number[] = [];
+  for (let value = 0; value <= axisMax; value += step) ticks.push(value);
+  return ticks;
 }
 
 export function billablePct(billableMinutes: number, totalMinutes: number): number {

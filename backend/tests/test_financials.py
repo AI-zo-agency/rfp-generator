@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi.testclient import TestClient
 
 from app.financial.router import (
@@ -10,16 +12,107 @@ from app.financial.router import (
 from app.main import app
 
 def test_iworker_timesheets_defaults_are_plain_none():
-    """Direct Python callers (ai-insights, audit queue) must not receive Query objects."""
-    assert get_iworker_timesheets.__defaults__ == (None, None)
+    """Direct Python callers must not receive Query objects."""
+    assert get_iworker_timesheets.__defaults__[:2] == (None, None)
+    assert "Query" not in type(get_iworker_timesheets.__defaults__[0]).__name__
 
 
-def test_iworker_timesheets_data():
-    res = get_iworker_timesheets()
+def test_audit_queue_skips_iworker_when_cache_empty(monkeypatch):
+    """audit-queue must not trigger sheet + classifier when timesheets were never loaded."""
+    from app.financial import router
+
+    monkeypatch.setattr(router, "_TIMESHEET_CACHE", {})
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("audit-queue must not call get_iworker_timesheets")
+
+    monkeypatch.setattr(router, "get_iworker_timesheets", boom)
+    assert get_audit_queue() == {"audit_items": []}
+
+
+def test_audit_queue_filters_to_selected_week(monkeypatch):
+    from app.financial import router
+
+    payload = {
+        "timesheets": [
+            {
+                "date": "May 13, 2026",
+                "hours": 9.0,
+                "amount": 90.0,
+                "task": "Huge May task",
+                "ai_classification": {"is_over_scope": False, "topic": "Huge May task", "work_category": "Unknown"},
+            },
+            {
+                "date": "Nov 12, 2025",
+                "hours": 9.0,
+                "amount": 90.0,
+                "task": "Huge Nov task",
+                "ai_classification": {"is_over_scope": True, "topic": "Huge Nov task", "detected_round": 3, "ai_reasoning": "R3"},
+            },
+        ]
+    }
+    monkeypatch.setattr(router, "_TIMESHEET_CACHE", {"default": (0.0, payload)})
+    items = get_audit_queue(granularity="week", period_start="2026-05-11")["audit_items"]
+    reasons = " ".join(i["reason"] for i in items)
+    assert "Huge May task" in reasons
+    assert "Huge Nov task" not in reasons
+
+
+def test_audit_queue_includes_capacity_signals(monkeypatch):
+    from datetime import date
+
+    from app.financial import iworker_period_insights as period
+    from app.financial import router
+
+    payload = {
+        "timesheets": [
+            {
+                "date": "May 13, 2026",
+                "hours": 1.0,
+                "amount": 12.5,
+                "rate": 12.5,
+                "contractor": "Murilo",
+                "task": "Light week",
+                "ai_classification": {
+                    "is_over_scope": False,
+                    "topic": "Light week",
+                    "work_category": "Video",
+                },
+            }
+        ]
+    }
+    monkeypatch.setattr(router, "_TIMESHEET_CACHE", {"default": (0.0, payload)})
+    monkeypatch.setattr(period, "today_in_tz", lambda now=None, tz_name=None: date(2026, 5, 13))
+    items = get_audit_queue(granularity="week", period_start="2026-05-11")["audit_items"]
+    assert any(i["id"] == "iworker:underlogged:Murilo" for i in items)
+
+
+def test_iworker_timesheets_data(monkeypatch):
+    from app.financial import router
+
+    monkeypatch.setattr(router, "upsert_period_snapshots", lambda rows: 0)
+    monkeypatch.setattr(router, "list_period_history", lambda *_a, **_k: [])
+
+    res = get_iworker_timesheets(period_start="2026-05-11", granularity="week")
     assert res["contractor"] == "All Contractors"
     assert "Connected" in res["status"]
     assert len(res["timesheets"]) > 0
-    assert res["summary"]["total_logged_hours"] > 0
+    assert "weekly_totals" not in res
+    assert "unbilled_risk_amount" not in res.get("summary", {})
+    insights = res["period_insights"]
+    assert insights["granularity"] == "week"
+    assert insights["selected"]["start"] == "2026-05-11"
+    assert insights["current"]["hours"] > 0
+    assert "hours_pct" in insights["delta"]
+    assert isinstance(insights["contractors"], list)
+    assert "period_history" in res
+    assert res["meta"]["unparsed_date_count"] >= 0
+
+def test_iworker_sync_requires_cron_secret():
+    client = TestClient(app)
+    response = client.post("/api/v1/financials/iworker/sync")
+    assert response.status_code == 401
+
 
 def test_checklist_data():
     res = get_checklist()
@@ -27,20 +120,97 @@ def test_checklist_data():
     assert len(res["checklist"]) == 19
     assert len(res["phases"]) == 5
 
-def test_sources_status():
+def test_sources_status(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "quickbooks_client_id", "id")
+    monkeypatch.setattr(settings, "quickbooks_client_secret", "secret")
+    monkeypatch.setattr(settings, "quickbooks_refresh_token", "rt")
+    monkeypatch.setattr(settings, "quickbooks_realm_id", "realm")
+
     res = get_sources_status()
     sources = res["sources"]
     assert len(sources) == 5
     iworker = next(s for s in sources if s["name"] == "iWorker Timesheets")
     assert iworker["active_data"] is True
     qb = next(s for s in sources if s["name"] == "QuickBooks API")
-    assert qb["active_data"] is False
+    assert qb["active_data"] is True
+    assert qb["status"] == "Connected"
 
-def test_ai_insights():
-    res = generate_ai_financial_insights()
+def test_ai_insights(monkeypatch):
+    from app.financial import router
+
+    async def fake_chat_json(messages, **_k):
+        return (
+            {
+                "leadership_brief_text": "Brief",
+                "top_3_risks": ["r1", "r2", "r3"],
+                "top_3_wins": ["w1", "w2", "w3"],
+                "margin_recommendations": ["m1", "m2", "m3"],
+            },
+            "test",
+        )
+
+    monkeypatch.setattr(router, "chat_json", fake_chat_json)
+    res = asyncio.run(generate_ai_financial_insights())
     assert res["status"] == "success"
     assert len(res["summary"]["top_3_risks"]) == 3
     assert len(res["summary"]["top_3_wins"]) == 3
+
+
+def test_ai_insights_persists_to_supabase(monkeypatch):
+    from app.financial import router
+
+    async def fake_chat_json(messages, **_k):
+        return (
+            {
+                "leadership_brief_text": "Brief",
+                "top_3_risks": ["r1", "r2", "r3"],
+                "top_3_wins": ["w1", "w2", "w3"],
+                "margin_recommendations": ["m1", "m2", "m3"],
+            },
+            "test",
+        )
+
+    stored = {"called": False}
+
+    def fake_persist(**kwargs):
+        stored["called"] = True
+        stored["kwargs"] = kwargs
+        return True
+
+    monkeypatch.setattr(router, "chat_json", fake_chat_json)
+    monkeypatch.setattr(router, "persist_insight", fake_persist)
+    res = asyncio.run(generate_ai_financial_insights())
+    assert res["stored"] is True
+    assert stored["called"] is True
+    assert stored["kwargs"]["granularity"] in ("week", "month")
+
+
+def test_ai_insights_prompt_uses_period_metrics(monkeypatch):
+    from app.financial import router
+
+    captured = {}
+
+    async def fake_chat_json(messages, **_k):
+        captured["user"] = messages[1]["content"]
+        return (
+            {
+                "leadership_brief_text": "Brief",
+                "top_3_risks": ["r1", "r2", "r3"],
+                "top_3_wins": ["w1", "w2", "w3"],
+                "margin_recommendations": ["m1", "m2", "m3"],
+            },
+            "test",
+        )
+
+    monkeypatch.setattr(router, "chat_json", fake_chat_json)
+    res = asyncio.run(
+        generate_ai_financial_insights(granularity="week", period_start="2026-05-11")
+    )
+    assert res["stats"]["total_hours"] > 0
+    assert "2026-05-11" in captured["user"] or "May 11" in captured["user"]
+    assert "lifetime" not in captured["user"].lower()
 
 
 def test_teamwork_overview_reads_cached_payload(monkeypatch):

@@ -56,6 +56,12 @@ export interface InsightsData {
   signals?: Signal[];
   /** Teamwork capacity history readiness. */
   history?: { weeks_available?: number; ready?: boolean };
+  /** Agency weekly brief metadata. */
+  cadence?: "weekly";
+  period_label?: string | null;
+  current_week_label?: string | null;
+  /** True when no Friday snapshot exists yet — carryover counts unavailable. */
+  bootstrap?: boolean;
   as_of: string | null;
   generated_at: string | null;
   provider: string | null;
@@ -190,6 +196,8 @@ export interface QbInsights {
   busy: boolean;
   error: string | null;
   regenerate: () => Promise<void>;
+  /** Selected period label (iWorker drawer empty state). */
+  periodLabel?: string | null;
 }
 
 /**

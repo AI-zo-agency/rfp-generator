@@ -81,6 +81,27 @@ def test_quickbooks_job_is_11pm_pacific():
     assert job.timeout_seconds == 600
 
 
+def test_iworker_job_is_before_teamwork():
+    job = scheduler_jobs.job_by_id("iworker_nightly")
+    assert job is not None
+    assert job.cron == "15 22 * * *"
+    assert job.timezone == "America/Los_Angeles"
+    assert job.method == "POST"
+    assert job.path == "/api/v1/financials/iworker/sync"
+    assert job.timeout_seconds == 600
+
+
+def test_build_scheduler_registers_iworker_job():
+    scheduler = build_scheduler(
+        _settings(
+            scheduler_backend_url="http://127.0.0.1:8001",
+            scheduler_timezone="America/Los_Angeles",
+            quickbooks_cron_secret="s3cret",
+        )
+    )
+    assert scheduler.get_job("iworker_nightly") is not None
+
+
 def test_teamwork_job_is_staggered_before_quickbooks():
     job = scheduler_jobs.job_by_id("teamwork_nightly")
     assert job is not None

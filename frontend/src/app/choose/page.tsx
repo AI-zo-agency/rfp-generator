@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { Instrument_Serif } from "next/font/google";
 import { motion } from "motion/react";
 import { ZoLogo } from "@/components/ZoLogo";
 import {
@@ -12,6 +13,12 @@ import {
   IconRfp,
 } from "@/components/ui/icons";
 import { expoOutEase } from "@/lib/motion";
+
+const chooseSerif = Instrument_Serif({
+  weight: "400",
+  subsets: ["latin"],
+  display: "swap",
+});
 
 interface StoredUser {
   email?: string;
@@ -88,7 +95,9 @@ export default function ChooseWorkspacePage() {
           transition={{ duration: 0.5, ease: expoOutEase }}
           className="mb-10 md:mb-14"
         >
-          <h1 className="font-heading text-3xl leading-[1.05] text-foreground sm:text-4xl md:text-5xl">
+          <h1
+            className={`${chooseSerif.className} text-3xl leading-[1.05] tracking-tight text-foreground sm:text-4xl md:text-[3.25rem]`}
+          >
             {name ? `Welcome back, ${name}.` : "Welcome back."}
           </h1>
           <p className="mt-3 max-w-xl text-base leading-7 text-zo-text-muted md:text-lg">
@@ -96,11 +105,11 @@ export default function ChooseWorkspacePage() {
           </p>
         </motion.div>
 
-        <div className="grid gap-6 md:grid-cols-2 md:gap-6">
+        <div className="grid gap-5 sm:gap-6 lg:grid-cols-3">
           <WorkspaceCard
             href="/rfp-dashboard"
             tone="rfp"
-            icon={<IconRfp className="h-7 w-7" />}
+            icon={<IconRfp className="h-6 w-6" />}
             title="RFP Intelligence"
             description="Sync opportunities, run Go/No-Go against the knowledge base, and draft proposals grounded in real agency evidence."
             capabilities={["Go/No-Go", "Proposal Drafting", "Knowledge Base"]}
@@ -109,21 +118,21 @@ export default function ChooseWorkspacePage() {
           <WorkspaceCard
             href="/financial-insights"
             tone="financial"
-            icon={<IconFinancial className="h-7 w-7" />}
+            icon={<IconFinancial className="h-6 w-6" />}
             title="Financial Dashboard"
             description="Review ingested timesheets, AI-classified tasks, and audit queues for scope risk and review amounts."
             capabilities={["Timesheets", "Task Classification", "Audit Queues"]}
             delay={0.18}
           />
-          {false && (<WorkspaceCard
+          <WorkspaceCard
             href="/lead-finder"
             tone="leads"
-            icon={<IconPipeline className="h-7 w-7" />}
+            icon={<IconPipeline className="h-6 w-6" />}
             title="Prospect Outreach"
             description="Prioritize contacts by sector fit and engagement, then open a prep brief before you reach out."
             capabilities={["Lead Scoring", "AI Enrichment", "Prep Briefs"]}
             delay={0.28}
-          />)}
+          />
         </div>
       </main>
     </div>
@@ -134,31 +143,31 @@ type WorkspaceTone = "rfp" | "financial" | "leads";
 
 const TONES: Record<
   WorkspaceTone,
-  { hover: string; glow: string; iconBox: string; pill: string; arrow: string }
+  { card: string; hover: string; iconBox: string; pill: string; arrow: string }
 > = {
   rfp: {
+    card: "bg-[#FFF4EE] border-[#ef5018]/12",
     hover:
-      "hover:shadow-[0_24px_60px_rgba(239,80,24,0.18)] focus-visible:ring-[var(--zo-primary)]",
-    glow: "bg-[#ef5018]/15",
-    iconBox: "bg-black/[0.06] text-black",
-    pill: "bg-black/[0.06] text-black/70",
-    arrow: "bg-black text-white group-hover:bg-[var(--zo-primary)]",
+      "hover:shadow-[0_20px_48px_rgba(239,80,24,0.16)] focus-visible:ring-[var(--zo-primary)]",
+    iconBox: "bg-[#ef5018]/12 text-[#ef5018]",
+    pill: "bg-[#ef5018]/10 text-[#c43d0f]",
+    arrow: "bg-[#ef5018] text-white group-hover:bg-[#d94512]",
   },
   financial: {
+    card: "bg-[#EEF3F1] border-[#274742]/12",
     hover:
-      "hover:shadow-[0_24px_60px_rgba(60,90,86,0.22)] focus-visible:ring-[#3C5A56]",
-    glow: "bg-[#3C5A56]/12",
-    iconBox: "bg-[#3C5A56]/10 text-[#3C5A56]",
-    pill: "bg-[#3C5A56]/10 text-[#3C5A56]",
-    arrow: "bg-[#3C5A56] text-white group-hover:bg-[#2e4744]",
+      "hover:shadow-[0_20px_48px_rgba(39,71,66,0.18)] focus-visible:ring-[#274742]",
+    iconBox: "bg-[#274742]/12 text-[#274742]",
+    pill: "bg-[#274742]/10 text-[#274742]",
+    arrow: "bg-[#274742] text-white group-hover:bg-[#1e3632]",
   },
   leads: {
+    card: "bg-[#F3F0EB] border-[#6B5744]/14",
     hover:
-      "hover:shadow-[0_24px_60px_rgba(39,71,66,0.22)] focus-visible:ring-[#274742]",
-    glow: "bg-[#274742]/12",
-    iconBox: "bg-[#274742]/10 text-[#274742]",
-    pill: "bg-[#274742]/10 text-[#274742]",
-    arrow: "bg-[#274742] text-white group-hover:bg-[#1a2f2c]",
+      "hover:shadow-[0_20px_48px_rgba(107,87,68,0.18)] focus-visible:ring-[#6B5744]",
+    iconBox: "bg-[#6B5744]/12 text-[#6B5744]",
+    pill: "bg-[#6B5744]/10 text-[#6B5744]",
+    arrow: "bg-[#6B5744] text-white group-hover:bg-[#554433]",
   },
 };
 
@@ -190,38 +199,36 @@ function WorkspaceCard({
     >
       <Link
         href={href}
-        className={`group transition-smooth zo-panel-white relative flex h-full min-h-[360px] flex-col overflow-hidden rounded-2xl p-8 hover:-translate-y-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 sm:min-h-[420px] sm:p-10 ${palette.hover}`}
+        className={`group transition-smooth relative flex h-full min-h-[340px] flex-col overflow-hidden rounded-2xl border p-7 shadow-[0_8px_28px_rgba(15,23,42,0.06)] hover:-translate-y-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 sm:min-h-[400px] sm:p-8 ${palette.card} ${palette.hover}`}
       >
         <div
-          className={`pointer-events-none absolute -right-16 -top-20 h-64 w-64 rounded-full blur-3xl ${palette.glow}`}
-        />
-
-        <div
-          className={`relative z-10 mb-6 flex h-14 w-14 items-center justify-center rounded-xl ${palette.iconBox}`}
+          className={`mb-6 flex h-12 w-12 items-center justify-center rounded-xl ${palette.iconBox}`}
         >
           {icon}
         </div>
 
-        <h2 className="font-heading relative z-10 text-2xl font-semibold leading-[1.05] text-black sm:text-3xl md:text-4xl">
+        <h2
+          className={`${chooseSerif.className} text-2xl leading-[1.1] tracking-tight text-[#0a0f1a] sm:text-[1.75rem]`}
+        >
           {title}
         </h2>
 
-        <p className="relative z-10 mt-4 line-clamp-3 min-h-[4.875em] max-w-md text-sm leading-relaxed text-black/70 sm:text-base">
+        <p className="mt-3 line-clamp-4 max-w-md text-sm leading-relaxed text-[#0a0f1a]/65 sm:text-[15px] sm:leading-6">
           {description}
         </p>
 
-        <div className="relative z-10 mt-6 flex flex-wrap gap-2">
+        <div className="mt-5 flex flex-wrap gap-2">
           {capabilities.map((capability) => (
             <div
               key={capability}
-              className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.06em] ${palette.pill}`}
+              className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.06em] ${palette.pill}`}
             >
               {capability}
             </div>
           ))}
         </div>
 
-        <div className="relative z-10 mt-auto flex items-center justify-end pt-8">
+        <div className="mt-auto flex items-center justify-end pt-8">
           <div
             className={`transition-smooth flex h-11 w-11 items-center justify-center rounded-full group-hover:translate-x-1 ${palette.arrow}`}
           >

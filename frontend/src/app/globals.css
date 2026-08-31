@@ -4640,7 +4640,7 @@ main .space-y-5 > * + * {
 }
 
 /* Show where the next verification pass can come from without overstating inferred data. */
-main .space-y-5 > section h3 + span::before {
+/* main .space-y-5 > section h3 + span::before {
   content: "Monid verification available · ";
   color: #274742;
   font-weight: 700;

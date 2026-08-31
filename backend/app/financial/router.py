@@ -4,15 +4,51 @@ import json
 import re
 import time
 import uuid
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime
+from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 import logging
 from app.financial import google_sheets, ai_classifier
-from app.financial.ai_insights_repository import get_latest_insight
+from app.financial.iworker_period_insights import build_period_insights, parse_entry_date
+from app.financial.iworker_snapshots import (
+    list_period_history,
+    rows_for_current_periods,
+    upsert_period_snapshots,
+)
+from app.financial.iworker_insights import (
+    build_evidence as build_iworker_evidence,
+    get_stored_insight,
+    persist_insight,
+    response_from_row,
+)
+from app.financial.ai_insights_repository import get_insight, get_latest_insight
+from app.financial.client_map_import import import_tags_sheet
+from app.financial.client_map_link import run_link as run_client_map_link
+from app.financial.agency_overview import build_agency_overview
+from app.financial.agency_insights import SOURCE as AGENCY_INSIGHT_SOURCE
+from app.financial.agency_insights import build_evidence as build_agency_evidence
+from app.financial.agency_insights import generate_and_store as generate_agency_insight
+from app.financial.agency_insights import store_snapshot as store_agency_snapshot
+from app.financial.agency_week import brief_week_for, iso, prior_week_bounds, today_pt, week_bounds
+from app.financial import agency_chat
+from app.financial.client_map import ClientMatch, resolve_project
+from app.financial.client_map_repository import (
+    delete_client_map,
+    delete_job_override,
+    get_client_map as get_client_map_row,
+    get_job_override_row,
+    insert_client_map,
+    list_client_map,
+    list_job_overrides,
+    update_client_map,
+    upsert_invoice_resolution,
+    upsert_job_override,
+)
 from app.financial.qb_insight_rows import chase_rows, hygiene_rows
 from app.financial.qb_position import position
+from app.financial.qb_repository import list_customers
+from app.financial.qb_panels_from_db import list_invoices
 from app.financial.qb_trend import margin_rows
 from app.financial import financial_llm_cost, qb_chat
 from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
@@ -356,24 +392,92 @@ IWORKER_TIMESHEETS = [
 _AUDIT_RESOLUTIONS: dict[str, str] = {}
 
 
-def _build_audit_items_from_timesheets() -> list[dict]:
-    """Dynamically generate audit queue items from live timesheet data.
-    Reads from the cache if available so we don't re-classify.
-    """
-    # Try to pull from the live cache first
-    cached = None
-    for _key, (_ts, _resp) in _TIMESHEET_CACHE.items():
-        cached = _resp
-        break  # Use the first available cached response
+def _timesheets_from_cache_payload(cached: dict) -> list[dict]:
+    """Ingest cache shape stores classified rows under timesheets; legacy entries may be full HTTP responses."""
+    if isinstance(cached, dict) and "is_live" in cached:
+        return cached.get("timesheets", [])
+    return cached.get("timesheets", [])
 
-    if not cached:
-        # Cache is empty (e.g., server just restarted) — trigger a fresh fetch
-        try:
-            cached = get_iworker_timesheets()
-        except Exception:
-            return []
 
-    timesheets = cached.get("timesheets", [])
+def _load_timesheets_from_cache() -> list[dict]:
+    """Read classified timesheets from cache without triggering a sheet pull."""
+    for _key, (_ts, payload) in _TIMESHEET_CACHE.items():
+        return _timesheets_from_cache_payload(payload)
+    logger.info("operation=audit_queue status=skipped reason=timesheet_cache_empty")
+    return []
+
+
+def _timesheets_in_period(
+    timesheets: list[dict],
+    *,
+    granularity: str,
+    period_start: str | None,
+) -> tuple[list[dict], dict]:
+    """Filter entries to the selected calendar period; return insights for signals."""
+    insights = build_period_insights(
+        timesheets,
+        granularity=granularity,
+        period_start=period_start,
+    )
+    start = date.fromisoformat(insights["selected"]["start"])
+    end = date.fromisoformat(insights["selected"]["end"])
+    in_period: list[dict] = []
+    for entry in timesheets:
+        parsed = parse_entry_date(str(entry.get("date") or ""))
+        if parsed is None or parsed < start or parsed > end:
+            continue
+        in_period.append(entry)
+    return in_period, insights
+
+
+def _capacity_signal_to_audit_item(signal: dict) -> dict:
+    return {
+        "id": signal["id"],
+        "severity": "MEDIUM" if signal["severity"] == "capacity" else "HIGH",
+        "type": signal["headline"],
+        "source": "iWorker / Google Sheets",
+        "reason": signal["detail"],
+        "recommended_action": signal["headline"],
+        "status": _AUDIT_RESOLUTIONS.get(signal["id"], "Pending"),
+        "amount": 0,
+        "hours": 0,
+        "client_project": signal.get("contractor") or "All contractors",
+        "age": "",
+    }
+
+
+def _build_audit_queue(
+    granularity: str = "week",
+    period_start: str | None = None,
+) -> list[dict]:
+    """Build period-scoped audit flags plus capacity signals from cached timesheets."""
+    timesheets = _load_timesheets_from_cache()
+    if not timesheets:
+        return []
+    in_period, insights = _timesheets_in_period(
+        timesheets,
+        granularity=granularity,
+        period_start=period_start,
+    )
+    items = _build_audit_items_from_timesheets(in_period)
+    seen_ids = {item["id"] for item in items}
+    for signal in insights.get("signals", []):
+        item = _capacity_signal_to_audit_item(signal)
+        if item["id"] in seen_ids:
+            continue
+        seen_ids.add(item["id"])
+        items.append(item)
+    logger.info(
+        "operation=audit_queue granularity=%s period_start=%s item_count=%s",
+        granularity,
+        period_start,
+        len(items),
+    )
+    return items
+
+
+def _build_audit_items_from_timesheets(timesheets: list[dict]) -> list[dict]:
+    """Generate audit queue items from classified timesheet rows (already period-filtered)."""
     active = [t for t in timesheets if t.get("hours", 0) > 0]
 
     items: list[dict] = []
@@ -523,85 +627,35 @@ def _build_audit_items_from_timesheets() -> list[dict]:
     items.sort(key=lambda x: order.get(x["severity"], 9))
     return items
 
+ChecklistStatus = Literal["Pending", "In Progress", "Completed", "Blocked"]
+
+
 class ChecklistStatusUpdate(BaseModel):
     id: int
-    status: str
+    status: ChecklistStatus
+
 
 class AuditResolveRequest(BaseModel):
-    id: str
-    action: str
+    id: str = Field(..., min_length=1)
+    action: str = Field(..., min_length=1)
 
-@router.get("/iworker-timesheets")
-def get_iworker_timesheets(
-    sheet_url: Optional[str] = None,
-    contractor: Optional[str] = None,
-):
-    """Returns iWorker timesheets across all contractor tabs with rate extraction and AI classification."""
-    cache_key = f"{sheet_url or 'default'}:{contractor or 'all'}"
-    now = time.monotonic()
 
-    # ── Cache hit: serve immediately ───────────────────
-    if cache_key in _TIMESHEET_CACHE:
-        cached_at, cached_response = _TIMESHEET_CACHE[cache_key]
-        age_seconds = now - cached_at
-        if age_seconds < _TIMESHEET_CACHE_TTL_SECONDS:
-            return cached_response
-        else:
-            del _TIMESHEET_CACHE[cache_key]
-
-    is_live = False
-    fetched_entries = None
-    tabs_meta: List[Dict[str, Any]] = []
-
+def _require_uuid(row_id: str) -> str:
     try:
-        sp_id = google_sheets.extract_spreadsheet_id(sheet_url) if sheet_url else None
-        res_data = google_sheets.fetch_all_tabs_and_timesheets(sp_id)
-        if res_data and res_data.get("timesheets"):
-            fetched_entries = res_data["timesheets"]
-            tabs_meta = res_data.get("tabs", [])
-            is_live = True
-    except Exception as e:
-        logger.info(f"Using fallback dataset for Google Sheet tabs: {e}")
+        return str(uuid.UUID(row_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid row id") from exc
 
-    # Fallback multi-tab dataset if offline
-    if not is_live or not fetched_entries:
-        tabs_meta = [
-            {"name": "Murilo Mendes", "rate": 12.50, "total_hours": 1243.77, "total_spend": 12830.25, "active_entries": 690},
-            {"name": "Marcelle Benevides", "rate": 13.99, "total_hours": 627.48, "total_spend": 8241.21, "active_entries": 456},
-            {"name": "Kelvin Kiruthu", "rate": 11.99, "total_hours": 183.13, "total_spend": 2195.84, "active_entries": 140},
-            {"name": "Erick Parra", "rate": 9.99, "total_hours": 2214.65, "total_spend": 17664.03, "active_entries": 501},
-        ]
-        # Tag fallback entries with Murilo Mendes
-        fetched_entries = []
-        for item in IWORKER_TIMESHEETS:
-            c_item = dict(item)
-            c_item["contractor"] = "Murilo Mendes"
-            c_item["rate"] = 12.50
-            fetched_entries.append(c_item)
-
-    active_timesheets = fetched_entries
-
-    # Filter by contractor tab if requested
-    if contractor and contractor.lower() != "all":
-        active_timesheets = [
-            t for t in active_timesheets
-            if t.get("contractor", "").lower() == contractor.lower()
-        ]
-
-    # ── AI Classification (skip off/zero-hour entries) ──
-    classified_count = 0
-    skipped_count = 0
-    enriched_timesheets = []
-    for t in active_timesheets:
+def _classify_timesheet_entries(entries: list[dict]) -> list[dict]:
+    enriched: list[dict] = []
+    for t in entries:
         t_copy = dict(t)
         task_text = (t_copy.get("task") or "").strip()
         task_lower = task_text.lower()
-
         should_skip = (
             task_lower in ("off / no hours logged", "weekend", "") or
             t_copy.get("hours", 0) == 0
         )
-
         if should_skip:
             t_copy["ai_classification"] = {
                 "raw_task": task_text,
@@ -611,34 +665,141 @@ def get_iworker_timesheets(
                 "is_over_scope": False,
                 "work_category": "Non-Billable / Off Day",
                 "status_tag": "Off Day",
-                "ai_reasoning": "Zero-hour entry — skipped classification to preserve tokens."
+                "ai_reasoning": "Zero-hour entry — skipped classification to preserve tokens.",
             }
-            skipped_count += 1
         else:
             t_copy["ai_classification"] = ai_classifier.classify_timesheet_task(task_text)
-            classified_count += 1
+        enriched.append(t_copy)
+    return enriched
 
-        enriched_timesheets.append(t_copy)
 
-    total_hours = sum(t["hours"] for t in enriched_timesheets)
-    total_spend = sum(t["amount"] for t in enriched_timesheets)
-    active_tasks = len(set(t["task"] for t in enriched_timesheets if t["task"] not in ["Off / No hours logged", "Weekend"]))
+def _load_classified_timesheets(sheet_url: Optional[str] = None) -> tuple[dict, bool]:
+    """Fetch, classify, and cache all contractor timesheets. Returns (payload, cache_hit)."""
+    cache_key = sheet_url or "default"
+    now = time.monotonic()
 
-    weeks = {}
-    for t in enriched_timesheets:
-        we = t["week_ending"]
-        if we not in weeks:
-            weeks[we] = {"week_ending": we, "total_hours": 0.0, "total_amount": 0.0, "entries_count": 0}
-        weeks[we]["total_hours"] += t["hours"]
-        weeks[we]["total_amount"] += t["amount"]
-        if t["hours"] > 0:
-            weeks[we]["entries_count"] += 1
+    if cache_key in _TIMESHEET_CACHE:
+        cached_at, cached_payload = _TIMESHEET_CACHE[cache_key]
+        if now - cached_at < _TIMESHEET_CACHE_TTL_SECONDS:
+            logger.info("operation=iworker_timesheets cache_hit=true cache_key=%s", cache_key)
+            return cached_payload, True
+        del _TIMESHEET_CACHE[cache_key]
+
+    is_live = False
+    fetched_entries: list[dict] | None = None
+    tabs_meta: List[Dict[str, Any]] = []
+    spreadsheet_id = google_sheets.DEFAULT_REAL_SPREADSHEET_ID
+
+    try:
+        sp_id = google_sheets.extract_spreadsheet_id(sheet_url) if sheet_url else None
+        if sp_id:
+            spreadsheet_id = sp_id
+        res_data = google_sheets.fetch_all_tabs_and_timesheets(sp_id)
+        if res_data and res_data.get("timesheets"):
+            fetched_entries = res_data["timesheets"]
+            tabs_meta = res_data.get("tabs", [])
+            is_live = True
+    except Exception as e:
+        logger.info("Using fallback dataset for Google Sheet tabs: %s", e)
+
+    if not is_live or not fetched_entries:
+        tabs_meta = [
+            {"name": "Murilo Mendes", "rate": 12.50, "total_hours": 1243.77, "total_spend": 12830.25, "active_entries": 690},
+            {"name": "Marcelle Benevides", "rate": 13.99, "total_hours": 627.48, "total_spend": 8241.21, "active_entries": 456},
+            {"name": "Kelvin Kiruthu", "rate": 11.99, "total_hours": 183.13, "total_spend": 2195.84, "active_entries": 140},
+            {"name": "Erick Parra", "rate": 9.99, "total_hours": 2214.65, "total_spend": 17664.03, "active_entries": 501},
+        ]
+        fetched_entries = []
+        for item in IWORKER_TIMESHEETS:
+            c_item = dict(item)
+            c_item["contractor"] = "Murilo Mendes"
+            c_item["rate"] = 12.50
+            fetched_entries.append(c_item)
+
+    payload = {
+        "tabs": tabs_meta,
+        "timesheets": _classify_timesheet_entries(fetched_entries),
+        "is_live": is_live,
+        "spreadsheet_id": spreadsheet_id,
+    }
+    _TIMESHEET_CACHE[cache_key] = (time.monotonic(), payload)
+    logger.info(
+        "operation=iworker_timesheets cache_hit=false cache_key=%s is_live=%s entry_count=%s",
+        cache_key,
+        is_live,
+        len(payload["timesheets"]),
+    )
+    return payload, False
+
+
+@router.get("/iworker-timesheets")
+def get_iworker_timesheets(
+    sheet_url: Optional[str] = None,
+    contractor: Optional[str] = None,
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+    persist_snapshots: bool = True,
+):
+    """Returns iWorker timesheets across all contractor tabs with rate extraction and AI classification."""
+    payload, cache_hit = _load_classified_timesheets(sheet_url)
+    all_timesheets = payload["timesheets"]
+    tabs_meta = payload["tabs"]
+    is_live = payload["is_live"]
+    spreadsheet_id = payload["spreadsheet_id"]
+
+    filtered = all_timesheets
+    if contractor and contractor.lower() != "all":
+        filtered = [
+            t for t in all_timesheets
+            if t.get("contractor", "").lower() == contractor.lower()
+        ]
+
+    contractor_filter = contractor if contractor and contractor.lower() != "all" else None
+    period_insights = build_period_insights(
+        filtered,
+        granularity=granularity,
+        period_start=period_start,
+        contractor=contractor_filter,
+    )
+    unparsed = period_insights.pop("unparsed_date_count", 0)
+
+    grain = "month" if granularity == "month" else "week"
+    period_history: list[dict] = []
+    try:
+        raw_history = list_period_history(spreadsheet_id, grain)
+        period_history = [
+            {
+                "granularity": grain,
+                "start": row["period_start"],
+                "hours": row["hours"],
+                "spend_usd": row["spend_usd"],
+                "scope_risk_usd": row["scope_risk_usd"],
+            }
+            for row in raw_history
+        ]
+    except Exception:
+        logger.warning(
+            "operation=iworker_timesheets period_history=failed spreadsheet_id=%s granularity=%s",
+            spreadsheet_id,
+            grain,
+            exc_info=True,
+        )
+
+    snapshot_upserted = False
+    if persist_snapshots and not cache_hit and is_live:
+        captured_at = datetime.now().isoformat()
+        rows = rows_for_current_periods(spreadsheet_id, all_timesheets, captured_at=captured_at)
+        snapshot_upserted = upsert_period_snapshots(rows) > 0
+
+    total_hours = sum(t["hours"] for t in filtered)
+    total_spend = sum(t["amount"] for t in filtered)
+    active_tasks = len(set(t["task"] for t in filtered if t["task"] not in ["Off / No hours logged", "Weekend"]))
 
     selected_contractor = contractor if contractor and contractor.lower() != "all" else "All Contractors"
     active_tab_obj = next((tb for tb in tabs_meta if tb["name"].lower() == selected_contractor.lower()), None)
     active_rate = active_tab_obj["rate"] if active_tab_obj else 12.50
 
-    response = {
+    return {
         "contractor": selected_contractor,
         "source": "Google Sheets (iWorker Time Tracker)",
         "status": "Connected & Ingested Live" if is_live else "Connected (Synced Dataset)",
@@ -649,14 +810,48 @@ def get_iworker_timesheets(
             "total_spend_usd": round(total_spend, 2),
             "active_tasks_count": active_tasks,
             "hourly_rate_usd": active_rate,
-            "unbilled_risk_amount": 99.00
         },
-        "weekly_totals": list(weeks.values()),
-        "timesheets": enriched_timesheets
+        "timesheets": filtered,
+        "period_insights": period_insights,
+        "period_history": period_history,
+        "meta": {
+            "unparsed_date_count": unparsed,
+            "snapshot_upserted": snapshot_upserted,
+            "spreadsheet_id": spreadsheet_id,
+        },
     }
 
-    _TIMESHEET_CACHE[cache_key] = (time.monotonic(), response)
-    return response
+
+@router.post("/iworker/sync")
+def iworker_sync(request: Request):
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        logger.warning("operation=iworker_sync status=unauthorized")
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+    logger.info("operation=iworker_sync status=started")
+    data = get_iworker_timesheets(persist_snapshots=True)
+    meta = data.get("meta") or {}
+    upserted = meta.get("snapshot_upserted")
+    insight_status = "skipped"
+    try:
+        result = asyncio.run(
+            generate_ai_financial_insights(granularity="week", period_start=None),
+        )
+        insight_status = "ok" if result.get("stored") else "failed"
+    except Exception:  # noqa: BLE001 — insight generation must not fail the sync
+        logger.exception("operation=iworker_sync step=ai_insights status=failed")
+        insight_status = "failed"
+    logger.info(
+        "operation=iworker_sync status=completed snapshot_upserted=%s ai_insight_status=%s",
+        upserted,
+        insight_status,
+    )
+    return {
+        "status": "ok",
+        "snapshot_upserted": upserted,
+        "spreadsheet_id": meta.get("spreadsheet_id"),
+        "ai_insight_status": insight_status,
+    }
+
 
 @router.get("/checklist")
 def get_checklist():
@@ -701,10 +896,14 @@ def get_sources_status():
             {
                 "name": "QuickBooks API",
                 "type": "ERP / Invoicing",
-                "status": "Pending Integration (Phase 2)",
-                "active_data": False,
-                "details": "Not connected yet. Dummy data disabled.",
-                "last_sync": "N/A"
+                "status": "Connected" if settings.quickbooks_configured else "Pending Integration (Phase 2)",
+                "active_data": bool(settings.quickbooks_configured),
+                "details": (
+                    "Invoices, bills, P&L, and AR/AP via QuickBooks Online API."
+                    if settings.quickbooks_configured
+                    else "Not connected yet. Dummy data disabled."
+                ),
+                "last_sync": "Nightly Supabase mirror" if settings.quickbooks_configured else "N/A",
             },
             {
                 "name": "Google Ads",
@@ -869,7 +1068,7 @@ def teamwork_ai_insights_regenerate():
 
 
 class TeamworkChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=2000)
     thread_id: Optional[str] = None
     focus_id: Optional[str] = None
     messages: List[Dict[str, str]] = []
@@ -918,6 +1117,476 @@ def teamwork_sync(
         result.get("run_id"),
     )
     return result
+
+
+# ── Client map ────────────────────────────────────────────────────────────────
+
+LinkConfidence = Literal["confirmed", "suggested", "unmatched"]
+
+
+class ClientMapCreate(BaseModel):
+    tag_code: str = Field(..., min_length=1)
+    client_name: str = Field(..., min_length=1)
+    qb_customer_ids: list[str] = Field(default_factory=list)
+    qb_customer_names: list[str] = Field(default_factory=list)
+    teamwork_company_ids: list[int] = Field(default_factory=list)
+    teamwork_company_names: list[str] = Field(default_factory=list)
+    city: str | None = None
+    state: str | None = None
+    current_am: str | None = None
+    status: str | None = None
+    source: str | None = None
+    highest_value: str | None = None
+    is_internal: bool = False
+    link_confidence: LinkConfidence = "unmatched"
+    link_reason: str | None = None
+    notes: str | None = None
+
+    @field_validator("tag_code", "client_name")
+    @classmethod
+    def strip_non_empty(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("must not be empty")
+        return cleaned
+
+
+class ClientMapPatch(BaseModel):
+    tag_code: str | None = None
+    client_name: str | None = None
+    qb_customer_ids: list[str] | None = None
+    qb_customer_names: list[str] | None = None
+    teamwork_company_ids: list[int] | None = None
+    teamwork_company_names: list[str] | None = None
+    city: str | None = None
+    state: str | None = None
+    current_am: str | None = None
+    status: str | None = None
+    source: str | None = None
+    highest_value: str | None = None
+    is_internal: bool | None = None
+    link_confidence: LinkConfidence | None = None
+    link_reason: str | None = None
+    notes: str | None = None
+
+
+class ClientMapLinkBody(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    include_ai: bool = True
+
+
+class JobOverrideUpsert(BaseModel):
+    site_id: str
+    project_id: int
+    client_map_id: uuid.UUID | None = None
+    qb_customer_ids: list[str] = Field(default_factory=list)
+    qb_customer_names: list[str] = Field(default_factory=list)
+    link_confidence: LinkConfidence = "confirmed"
+    notes: str | None = None
+
+
+class InvoiceResolutionUpsert(BaseModel):
+    invoice_id: str
+    resolution: Literal["linked", "internal"]
+    project_id: str | None = None
+    client_map_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_resolution(self):
+        if self.resolution == "linked" and not self.project_id:
+            raise ValueError("A linked invoice resolution requires project_id")
+        if self.resolution == "internal" and self.project_id is not None:
+            raise ValueError("An internal invoice resolution cannot include project_id")
+        if self.resolution == "internal" and self.client_map_id is not None:
+            raise ValueError("An internal invoice resolution cannot include client_map_id")
+        return self
+
+
+@router.get("/client-map")
+def get_client_map(
+    confidence: LinkConfidence | None = Query(None),
+    status: str | None = Query(None),
+    q: str | None = Query(None),
+):
+    rows = list_client_map(confidence=confidence, status=status, q=q)
+    logger.info("operation=client_map_list row_count=%s", len(rows))
+    return rows
+
+
+@router.post("/client-map")
+def create_client_map(payload: ClientMapCreate):
+    row = insert_client_map(payload.model_dump())
+    logger.info("operation=client_map_create row_id=%s", row.get("id"))
+    return row
+
+
+@router.get("/client-map/unmatched")
+def get_unmatched_client_map_entities():
+    from app.financial.client_map_normalize import normalize_name
+
+    confirmed = list_client_map(confidence="confirmed")
+    used_qb_ids = {
+        str(customer_id)
+        for row in confirmed
+        for customer_id in (row.get("qb_customer_ids") or [])
+    }
+    used_teamwork_ids = {
+        str(company_id)
+        for row in confirmed
+        for company_id in (row.get("teamwork_company_ids") or [])
+    }
+    used_teamwork_names = {
+        normalize_name(str(name))
+        for row in confirmed
+        for name in (row.get("teamwork_company_names") or [])
+        if normalize_name(str(name))
+    }
+
+    teamwork = []
+    seen_teamwork: set[tuple[str, str]] = set()
+    for project in overview_from_cache().get("projects") or []:
+        company_id = project.get("company_id")
+        company_name = str(project.get("company_name") or "").strip()
+        key = (str(company_id) if company_id is not None else "", company_name)
+        if (company_id is None and not company_name) or key in seen_teamwork:
+            continue
+        seen_teamwork.add(key)
+        name_key = normalize_name(company_name)
+        id_matched = company_id is not None and str(company_id) in used_teamwork_ids
+        name_matched = bool(name_key) and name_key in used_teamwork_names
+        if id_matched or name_matched:
+            continue
+        teamwork.append({"id": company_id, "name": company_name})
+
+    quickbooks = [
+        customer
+        for customer in list_customers(settings.quickbooks_realm_id)
+        if str(customer.get("qbo_id")) not in used_qb_ids
+    ]
+    logger.info(
+        "operation=client_map_unmatched teamwork_count=%s quickbooks_count=%s",
+        len(teamwork),
+        len(quickbooks),
+    )
+    return {"teamwork": teamwork, "quickbooks": quickbooks}
+
+
+@router.post("/client-map/import-sheet")
+def import_client_map_sheet():
+    result = import_tags_sheet()
+    logger.info(
+        "operation=client_map_import_sheet inserted=%s skipped=%s",
+        result.get("inserted"),
+        result.get("skipped"),
+    )
+    return result
+
+
+@router.post("/client-map/link")
+async def link_client_map(payload: ClientMapLinkBody):
+    result = await run_client_map_link(include_ai=payload.include_ai)
+    logger.info(
+        "operation=client_map_link_route include_ai=%s confirmed=%s suggested=%s",
+        payload.include_ai,
+        result.get("confirmed"),
+        result.get("suggested"),
+    )
+    return result
+
+
+@router.get("/agency/overview")
+def get_agency_overview(year: int | None = Query(None, ge=2000, le=2100)):
+    payload = build_agency_overview(year=year)
+    logger.info(
+        "operation=agency_overview_route year=%s jobs=%s",
+        payload.get("year"),
+        len(payload.get("jobs") or []),
+    )
+    return payload
+
+
+def _agency_site_id() -> str:
+    return site_id_from_base_url(settings.teamwork_base_url)
+
+
+def _agency_insight_row() -> dict[str, Any] | None:
+    brief_start, _, _ = brief_week_for()
+    try:
+        return get_insight(AGENCY_INSIGHT_SOURCE, _agency_site_id(), iso(brief_start))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "operation=agency_ai_insights status=insight_lookup_failed site_id=%s error=%s",
+            _agency_site_id(),
+            str(exc)[:200],
+        )
+        return None
+
+
+def _agency_prior_chain_evidence() -> dict[str, Any] | None:
+    prev_monday, _ = prior_week_bounds(today_pt())
+    row = None
+    try:
+        row = get_insight(AGENCY_INSIGHT_SOURCE, _agency_site_id(), iso(prev_monday))
+    except Exception:  # noqa: BLE001
+        return None
+    evidence = (row or {}).get("evidence")
+    return evidence if isinstance(evidence, dict) else None
+
+
+def _agency_carryover_baseline(row: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Friday snapshot or prior stored evidence used for week-over-week diffs."""
+    snapshot_row = row
+    if not snapshot_row:
+        try:
+            monday, _ = week_bounds(today_pt())
+            snapshot_row = get_insight(AGENCY_INSIGHT_SOURCE, _agency_site_id(), iso(monday))
+        except Exception:  # noqa: BLE001
+            snapshot_row = None
+    evidence = (snapshot_row or {}).get("evidence")
+    if isinstance(evidence, dict) and (evidence.get("open_items") or []):
+        return evidence
+    return _agency_prior_chain_evidence()
+
+
+def _agency_insight_response(
+    overview: dict[str, Any],
+    row: dict[str, Any] | None,
+    *,
+    prior_evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    evidence = build_agency_evidence(overview, prior_evidence=prior_evidence, for_snapshot=False)
+    payload = (row or {}).get("payload") or {}
+    brief_start, _, _ = brief_week_for()
+    stored_as_of = (row or {}).get("as_of")
+    has_brief = bool(str(payload.get("brief") or "").strip())
+    return {
+        "status": "ok" if has_brief else "empty",
+        "brief": payload.get("brief", ""),
+        "notes": payload.get("notes", {}),
+        "signals": evidence.get("signals") or [],
+        "cadence": "weekly",
+        "period_label": payload.get("period_label") or evidence.get("period_label"),
+        "current_week_label": evidence.get("current_week_label"),
+        "bootstrap": not evidence.get("has_prior_snapshot"),
+        "as_of": stored_as_of,
+        "generated_at": (row or {}).get("generated_at"),
+        "provider": (row or {}).get("provider"),
+        "model": (row or {}).get("model") or resolve_llm_model("light", node_name="agency_insights"),
+        "stale": not has_brief or stored_as_of != iso(brief_start),
+    }
+
+
+@router.get("/agency/ai-insights")
+def agency_ai_insights():
+    overview = build_agency_overview()
+    row = _agency_insight_row()
+    prior_evidence = _agency_carryover_baseline(row)
+    return _agency_insight_response(overview, row, prior_evidence=prior_evidence)
+
+
+@router.post("/agency/ai-insights/regenerate")
+def agency_ai_insights_regenerate():
+    overview = build_agency_overview()
+    brief_start, _, _ = brief_week_for()
+    prior_evidence = _agency_carryover_baseline(_agency_insight_row())
+    status = generate_agency_insight(_agency_site_id(), overview, prior_evidence)
+    fresh = _agency_insight_row()
+    result = _agency_insight_response(overview, fresh, prior_evidence=prior_evidence)
+    result["generated"] = status
+    logger.info(
+        "operation=agency_ai_insights_regenerate site_id=%s as_of=%s status=%s",
+        _agency_site_id(),
+        iso(brief_start),
+        status,
+    )
+    return result
+
+
+@router.post("/agency/ai-insights/snapshot")
+def agency_ai_insights_snapshot(request: Request):
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+    overview = build_agency_overview()
+    status = store_agency_snapshot(_agency_site_id(), overview, _agency_prior_chain_evidence())
+    monday, _ = week_bounds(today_pt())
+    logger.info(
+        "operation=agency_ai_insights_snapshot site_id=%s as_of=%s status=%s",
+        _agency_site_id(),
+        iso(monday),
+        status,
+    )
+    return {"status": status, "as_of": iso(monday)}
+
+
+@router.post("/agency/ai-insights/generate")
+def agency_ai_insights_generate(request: Request):
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+    overview = build_agency_overview()
+    brief_start, _, _ = brief_week_for()
+    row = None
+    try:
+        row = get_insight(AGENCY_INSIGHT_SOURCE, _agency_site_id(), iso(brief_start))
+    except Exception:  # noqa: BLE001
+        row = None
+    prior_evidence = _agency_carryover_baseline(row)
+    status = generate_agency_insight(_agency_site_id(), overview, prior_evidence)
+    logger.info(
+        "operation=agency_ai_insights_generate site_id=%s as_of=%s status=%s",
+        _agency_site_id(),
+        iso(brief_start),
+        status,
+    )
+    return {"status": status, "as_of": iso(brief_start)}
+
+
+class AgencyChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+    thread_id: Optional[str] = None
+    focus_id: Optional[str] = None
+    messages: List[Dict[str, str]] = []
+
+
+@router.post("/agency/ai-insights/chat")
+async def agency_ai_insights_chat(payload: AgencyChatRequest):
+    overview = build_agency_overview()
+    row = _agency_insight_row()
+    prior_evidence = _agency_carryover_baseline(row)
+    thread_id = (payload.thread_id or "").strip() or uuid.uuid4().hex
+    result = await agency_chat.answer(
+        thread_id=thread_id,
+        question=payload.message,
+        overview=overview,
+        prior_evidence=prior_evidence,
+        history=payload.messages,
+        focus_id=payload.focus_id,
+    )
+    logger.info(
+        "operation=agency_ai_insights_chat thread=%s guarded=%s capped=%s",
+        thread_id,
+        result["guarded"],
+        result["capped"],
+    )
+    return result
+
+
+@router.post("/agency/invoice-resolutions")
+def create_invoice_resolution(payload: InvoiceResolutionUpsert):
+    realm_id = settings.quickbooks_realm_id
+    invoice = next(
+        (
+            row
+            for row in list_invoices(realm_id)
+            if str(row.get("qbo_id") or "") == payload.invoice_id
+            and not row.get("is_deleted")
+        ),
+        None,
+    )
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    selected_project: dict[str, Any] | None = None
+    if payload.resolution == "linked":
+        selected_project = next(
+            (
+                project
+                for project in overview_from_cache().get("projects") or []
+                if isinstance(project, dict) and str(project.get("id")) == payload.project_id
+            ),
+            None,
+        )
+        if selected_project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+    if payload.client_map_id is not None:
+        client_map = get_client_map_row(str(payload.client_map_id))
+        if client_map is None:
+            raise HTTPException(status_code=404, detail="Client map not found")
+        if payload.resolution == "linked" and selected_project is not None:
+            matches_invoice_customer = str(invoice.get("customer_id") or "") in {
+                str(customer_id) for customer_id in (client_map.get("qb_customer_ids") or [])
+            }
+            if not matches_invoice_customer:
+                client_rows = list_client_map()
+                site_id = site_id_from_base_url(settings.teamwork_base_url)
+                project_match = resolve_project(
+                    site_id,
+                    selected_project["id"],
+                    str(selected_project.get("name") or ""),
+                    selected_project.get("company_id"),
+                    selected_project.get("company_name"),
+                    client_rows=client_rows,
+                    overrides_loaded=True,
+                )
+                matches_project = (
+                    isinstance(project_match, ClientMatch)
+                    and str(project_match.client_map_id) == str(payload.client_map_id)
+                )
+            else:
+                matches_project = False
+            if not matches_project and not matches_invoice_customer:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Client map does not match the selected project or invoice customer",
+                )
+    row = upsert_invoice_resolution(
+        {
+            **payload.model_dump(mode="json"),
+            "realm_id": realm_id,
+        }
+    )
+    logger.info(
+        "operation=invoice_resolution_upsert invoice_id=%s resolution=%s",
+        payload.invoice_id,
+        payload.resolution,
+    )
+    return row
+
+
+@router.get("/client-map/job-overrides")
+def get_client_map_job_overrides(site_id: str | None = Query(None)):
+    rows = list_job_overrides(site_id=site_id)
+    logger.info("operation=client_map_job_overrides_list row_count=%s", len(rows))
+    return rows
+
+
+@router.post("/client-map/job-overrides")
+def create_client_map_job_override(payload: JobOverrideUpsert):
+    if payload.client_map_id is not None and get_client_map_row(str(payload.client_map_id)) is None:
+        raise HTTPException(status_code=404, detail="Client map not found")
+    row = upsert_job_override(payload.model_dump(mode="json"))
+    logger.info("operation=client_map_job_override_upsert row_id=%s", row.get("id"))
+    return row
+
+
+@router.delete("/client-map/job-overrides/{row_id}")
+def remove_client_map_job_override(row_id: str):
+    row_id = _require_uuid(row_id)
+    if get_job_override_row(row_id) is None:
+        raise HTTPException(status_code=404, detail="Job override not found")
+    delete_job_override(row_id)
+    logger.info("operation=client_map_job_override_delete row_id=%s", row_id)
+    return {"deleted": True, "id": row_id}
+
+
+@router.patch("/client-map/{row_id}")
+def patch_client_map(row_id: str, payload: ClientMapPatch):
+    row_id = _require_uuid(row_id)
+    row = update_client_map(row_id, payload.model_dump(exclude_unset=True))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Client map row not found")
+    logger.info("operation=client_map_patch row_id=%s", row_id)
+    return row
+
+
+@router.delete("/client-map/{row_id}")
+def remove_client_map(row_id: str):
+    row_id = _require_uuid(row_id)
+    if get_client_map_row(row_id) is None:
+        raise HTTPException(status_code=404, detail="Client map row not found")
+    delete_client_map(row_id)
+    logger.info("operation=client_map_delete row_id=%s", row_id)
+    return {"deleted": True, "id": row_id}
 
 
 # ── QuickBooks ────────────────────────────────────────────────────────────────
@@ -1054,7 +1723,7 @@ def _load_overview(year: int) -> dict[str, Any]:
 
 @router.get("/quickbooks/overview")
 def quickbooks_overview(
-    year: int = Query(default_factory=lambda: datetime.now().year),
+    year: int = Query(default_factory=lambda: datetime.now().year, ge=2000, le=2100),
     since: Optional[str] = Query(None, description="ISO timestamp for the activity feed"),
     refresh: bool = Query(False, description="Deprecated; snapshots refresh during sync"),
 ):
@@ -1209,7 +1878,7 @@ def quickbooks_ai_insights_regenerate():
 
 
 class QbChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=2000)
     # Absent on the first question of a conversation; the server mints one.
     thread_id: Optional[str] = None
     # The note card the reader pinned, if any.
@@ -1249,45 +1918,90 @@ async def quickbooks_ai_insights_chat(payload: QbChatRequest):
 
 
 @router.get("/quickbooks/ai-insights/chat/cost")
-def quickbooks_ai_insights_chat_cost(thread_id: str = Query(...)):
+def quickbooks_ai_insights_chat_cost(thread_id: str = Query(..., min_length=1)):
     """This thread's LLM spend. Reads financial_llm_calls, never llm_call_log."""
     return financial_llm_cost.thread_breakdown(thread_id)
 
 
 @router.get("/audit-queue")
-def get_audit_queue():
-    """Dynamically builds audit flags from live timesheet data."""
-    items = _build_audit_items_from_timesheets()
+def get_audit_queue(
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+):
+    """Dynamically builds audit flags from live timesheet data for the selected period."""
+    items = _build_audit_queue(granularity=granularity, period_start=period_start)
     return {"audit_items": items}
 
 @router.post("/audit-queue/resolve")
-def resolve_audit_item(payload: AuditResolveRequest):
+def resolve_audit_item(
+    payload: AuditResolveRequest,
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+):
+    known_ids = {item["id"] for item in _build_audit_queue(granularity=granularity, period_start=period_start)}
+    if payload.id not in known_ids:
+        raise HTTPException(status_code=404, detail="Audit item not found")
     _AUDIT_RESOLUTIONS[payload.id] = f"Resolved ({payload.action})"
     logger.info(f"[AUDIT] Resolved item {payload.id!r} with action={payload.action!r}")
     return {"success": True, "id": payload.id, "status": _AUDIT_RESOLUTIONS[payload.id]}
 
+
 @router.post("/ai-insights")
-async def generate_ai_financial_insights():
+async def generate_ai_financial_insights(
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+):
     """Generates real AI leadership brief from live iWorker Google Sheets data.
-    
+
+    Scoped to the selected calendar week or month — never lifetime totals.
     Uses the financial OpenRouter key/model when configured
     (OPENROUTER_API_KEY_FINANCIAL / OPENROUTER_MODEL_FINANCIAL).
     """
     model_used = resolve_llm_model("light", node_name="financial.ai_insights")
-    
-    logger.info("operation=financial_ai_insights status=start model=%s", model_used)
 
-    # ── Fetch live timesheet data ─────────────────────────────────────────────
-    data = get_iworker_timesheets()
+    logger.info(
+        "operation=financial_ai_insights status=start model=%s granularity=%s period_start=%s",
+        model_used,
+        granularity,
+        period_start,
+    )
+
+    # ── Fetch live timesheet data (no snapshot side effects) ──────────────────
+    data = get_iworker_timesheets(
+        granularity=granularity,
+        period_start=period_start,
+        persist_snapshots=False,
+    )
     timesheets = data.get("timesheets", [])
-    active_entries = [t for t in timesheets if t["hours"] > 0]
-    total_hours = round(sum(t["hours"] for t in active_entries), 2)
-    total_spend = round(sum(t["amount"] for t in active_entries), 2)
+    insights = data["period_insights"]
+    selected = insights["selected"]
+    period_label = selected["label"]
+    period_start_date = date.fromisoformat(selected["start"])
+    period_end_date = date.fromisoformat(selected["end"])
+    current = insights["current"]
+    total_hours = current["hours"]
+    total_spend = current["spend_usd"]
+    total_over_scope_spend = current["scope_risk_usd"]
 
-    logger.info(f"[AI-INSIGHTS] Timesheet context: {len(active_entries)} active entries | {total_hours} hrs | ${total_spend}")
+    def _in_selected_period(entry: dict) -> bool:
+        parsed = parse_entry_date(str(entry.get("date") or ""))
+        if parsed is None:
+            return False
+        if parsed < period_start_date or parsed > period_end_date:
+            return False
+        return float(entry.get("hours") or 0) > 0
 
-    # ── Build compact timesheet context for prompt ────────────────────────────
-    # Group by task so we don't overflow context with 600+ raw rows
+    active_entries = [t for t in timesheets if _in_selected_period(t)]
+
+    logger.info(
+        "[AI-INSIGHTS] Period context: label=%s entries=%s hrs=%s spend=%s",
+        period_label,
+        len(active_entries),
+        total_hours,
+        total_spend,
+    )
+
+    # ── Build compact timesheet context for prompt (selected period only) ─────
     task_summary: dict[str, dict] = {}
     for t in active_entries:
         key = t["task"].strip()
@@ -1308,59 +2022,115 @@ async def generate_ai_financial_insights():
         if ai_cls.get("is_over_scope"):
             task_summary[key]["is_over_scope"] = True
 
-    # Top deliverables by hours (cap at 20 for prompt size)
     top_tasks = sorted(task_summary.values(), key=lambda x: x["total_hours"], reverse=True)[:20]
     over_scope_tasks = [t for t in task_summary.values() if t["is_over_scope"]]
-    total_over_scope_spend = round(sum(t["total_spend"] for t in over_scope_tasks), 2)
 
     tasks_json = json.dumps(top_tasks, indent=2)
     over_scope_json = json.dumps(over_scope_tasks, indent=2)
 
-    logger.info(f"[AI-INSIGHTS] Prompt context: {len(top_tasks)} top deliverables | {len(over_scope_tasks)} over-scope items | ${total_over_scope_spend} risk")
+    contractor_capacity = insights.get("contractors") or []
+    contractors_json = json.dumps(contractor_capacity, indent=2)
+    default_weekly = 20.0  # matches DEFAULT_WEEKLY_EXPECTED_HOURS in period engine
+
+    deliverables_by_contractor: dict[str, dict[str, dict[str, Any]]] = {}
+    for t in active_entries:
+        name = str(t.get("contractor") or "Unknown").strip()
+        ai_cls = t.get("ai_classification") or {}
+        label = str(ai_cls.get("topic") or t.get("task") or "General").strip()
+        bucket = deliverables_by_contractor.setdefault(name, {})
+        if label not in bucket:
+            bucket[label] = {"deliverable": label, "hours": 0.0, "spend_usd": 0.0, "sessions": 0}
+        bucket[label]["hours"] += float(t.get("hours") or 0)
+        bucket[label]["spend_usd"] += float(t.get("amount") or 0)
+        bucket[label]["sessions"] += 1
+
+    projects_payload = {
+        name: sorted(rows.values(), key=lambda r: r["hours"], reverse=True)[:8]
+        for name, rows in deliverables_by_contractor.items()
+    }
+    projects_json = json.dumps(projects_payload, indent=2)
+
+    delta = insights["delta"]
+    prev_label = insights["previous"]["label"]
+    grain_label = "MoM" if insights["granularity"] == "month" else "WoW"
+    signal_lines = "\n".join(
+        f"- {s['headline']}: {s.get('detail', '')}" for s in insights.get("signals", [])
+    ) or "- (no automated signals for this period)"
+
+    logger.info(
+        "[AI-INSIGHTS] Prompt context: period=%s top_deliverables=%s over_scope_items=%s risk=%s",
+        period_label,
+        len(top_tasks),
+        len(over_scope_tasks),
+        total_over_scope_spend,
+    )
 
     # ── Build AI prompt ───────────────────────────────────────────────────────
-    system_prompt = """You are a senior financial auditor for ZÖ Agency, a creative video production agency.
-You analyze contractor timesheet data to detect scope creep, billing risks, and operational wins.
+    system_prompt = """You are a senior operations and margin advisor for ZÖ Agency, a creative video production agency.
+You read iWorker contractor timesheets the way an agency owner does: who worked, on what deliverables, versus capacity, and where margin is leaking.
 Always respond with ONLY valid JSON — no markdown, no prose, no code fences."""
 
-    user_prompt = f"""Analyze this iWorker contractor timesheet data for ZÖ Agency and generate a leadership financial brief.
+    user_prompt = f"""Analyze this iWorker contractor timesheet data for ZÖ Agency and generate a leadership brief a business owner can act on today.
 
-CONTEXT:
-- Contractor: iWorker (Sonja Anderson)
-- Hourly Rate: $12.50/hr
-- Total Active Hours: {total_hours} hrs
-- Total Spend: ${total_spend:,.2f}
-- Total Work Sessions: {len(active_entries)}
-- Over-Scope Spend (R3+ revisions): ${total_over_scope_spend:,.2f}
+SELECTED PERIOD: {period_label} ({selected["start"]} to {selected["end"]})
+PRIOR PERIOD: {prev_label}
+{grain_label} DELTAS: hours {delta["hours_pct"]}% | spend {delta["spend_pct"]}% | scope risk {delta["scope_risk_pct"]}%
+
+PERIOD METRICS (use ONLY these — do NOT quote all-time or cumulative totals):
+- Hourly Rate (sheet default): $12.50/hr
+- Period Hours: {total_hours} hrs
+- Period Spend: ${total_spend:,.2f}
+- Period Work Sessions: {len(active_entries)}
+- Period Over-Scope Spend (R3+ revisions): ${total_over_scope_spend:,.2f}
 - Analysis Date: {datetime.now().strftime('%B %d, %Y')}
 
-TOP 20 DELIVERABLES BY HOURS:
+UTILIZATION RULE (explain this plainly if you mention utilization):
+- Default target is {default_weekly} billable hrs/week per contractor (override via IWORKER_EXPECTED_HOURS_JSON).
+- For the selected period, expected hours = weekly target × (elapsed days in period ÷ 7).
+- Utilization % = logged hours ÷ expected hours so far × 100.
+- Under ~50% utilization mid-period usually means missing timesheet rows, not idle capacity.
+
+CONTRACTOR CAPACITY (hours vs expected for this period — use these numbers):
+{contractors_json}
+
+DELIVERABLES / PROJECT WORK BY CONTRACTOR (where time went — topic or task label from sheet):
+{projects_json}
+
+AUTOMATED SIGNALS FOR THIS PERIOD:
+{signal_lines}
+
+TOP 20 DELIVERABLES BY HOURS (this period only):
 {tasks_json}
 
-OVER-SCOPE ITEMS (Round 3+ revisions that exceed retainer):
+OVER-SCOPE ITEMS THIS PERIOD (Round 3+ revisions that exceed retainer):
 {over_scope_json}
 
 Generate a JSON response with EXACTLY this structure:
 {{
-  "leadership_brief_text": "<2-3 sentence executive summary for leadership>",
+  "leadership_brief_text": "<2-3 sentences: who worked how much vs target, top deliverables, spend/scope headline>",
   "top_3_risks": [
-    "<risk 1 — specific, quantified, actionable>",
-    "<risk 2 — specific, quantified, actionable>",
-    "<risk 3 — specific, quantified, actionable>"
+    "<risk 1 — name contractor, hours/spend, deliverable if known>",
+    "<risk 2>",
+    "<risk 3>"
   ],
   "top_3_wins": [
-    "<win 1 — concrete operational achievement>",
-    "<win 2 — concrete operational achievement>",
-    "<win 3 — concrete operational achievement>"
+    "<win 1 — concrete delivery or efficiency win with numbers>",
+    "<win 2>",
+    "<win 3>"
   ],
   "margin_recommendations": [
-    "<recommendation 1 — actionable next step>",
-    "<recommendation 2 — actionable next step>",
-    "<recommendation 3 — actionable next step>"
+    "<owner action 1 — chase logs, cap revisions, reassign, invoice, etc.>",
+    "<recommendation 2>",
+    "<recommendation 3>"
   ]
 }}
 
-IMPORTANT: Be specific about dollar amounts and hour counts. Reference actual task names from the data. Do not invent data."""
+IMPORTANT:
+- Lead with contractor hours vs expected and which deliverables/projects consumed the time.
+- Be specific about dollar amounts and hour counts for THIS PERIOD ONLY.
+- Reference actual task/deliverable names from the data. Do not invent clients, projects, or people.
+- Do not mention all-time or cumulative totals.
+- If a contractor is under-logged, say so with their utilization % and expected hours."""
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -1396,7 +2166,7 @@ IMPORTANT: Be specific about dollar amounts and hour counts. Reference actual ta
     generated_at = datetime.now().strftime("%b %d, %Y at %I:%M %p")
     logger.info(f"[AI-INSIGHTS] Successfully generated insights via {actual_provider} at {generated_at}")
 
-    return {
+    response = {
         "status": "success",
         "generated_at": generated_at,
         "provider": actual_provider,
@@ -1415,5 +2185,75 @@ IMPORTANT: Be specific about dollar amounts and hour counts. Reference actual ta
             "active_entries": len(active_entries),
             "over_scope_spend": total_over_scope_spend,
             "over_scope_items": len(over_scope_tasks),
-        }
+            "period_label": period_label,
+        },
     }
+    response["stored"] = persist_insight(
+        granularity=insights["granularity"],
+        period_start=selected["start"],
+        period_end=selected["end"],
+        result=response,
+        evidence=build_iworker_evidence(insights, response["stats"]),
+        provider=actual_provider,
+        model=model_used,
+    )
+    logger.info(
+        "operation=financial_ai_insights status=completed granularity=%s period_start=%s stored=%s",
+        insights["granularity"],
+        selected["start"],
+        response["stored"],
+    )
+    return response
+
+
+def _safe_get_iworker_insight(
+    granularity: str,
+    period_start: str,
+    period_end: str,
+) -> dict[str, Any] | None:
+    try:
+        return get_stored_insight(granularity, period_start, period_end)
+    except Exception as exc:  # noqa: BLE001 — missing table must not break the drawer
+        logger.warning(
+            "operation=iworker_ai_insights status=insight_lookup_failed granularity=%s period_start=%s error=%s",
+            granularity,
+            period_start,
+            str(exc)[:200],
+        )
+        return None
+
+
+@router.get("/iworker/ai-insights")
+def iworker_ai_insights(
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+):
+    """Latest stored brief for the selected calendar week or month."""
+    data = get_iworker_timesheets(
+        granularity=granularity,
+        period_start=period_start,
+        persist_snapshots=False,
+    )
+    selected = data["period_insights"]["selected"]
+    row = _safe_get_iworker_insight(granularity, selected["start"], selected["end"])
+    logger.info(
+        "operation=iworker_ai_insights granularity=%s period_start=%s found=%s",
+        granularity,
+        selected["start"],
+        row is not None,
+    )
+    return response_from_row(row, period_label=selected.get("label"))
+
+
+@router.post("/iworker/ai-insights/regenerate")
+async def iworker_ai_insights_regenerate(
+    granularity: str = "week",
+    period_start: Optional[str] = None,
+):
+    """Generate a fresh brief for the selected period and upsert to Supabase."""
+    result = await generate_ai_financial_insights(
+        granularity=granularity,
+        period_start=period_start,
+    )
+    result["generated"] = "ok" if result.get("status") == "success" else "failed"
+    return result

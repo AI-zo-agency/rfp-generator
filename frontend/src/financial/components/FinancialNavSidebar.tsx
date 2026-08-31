@@ -6,8 +6,8 @@ import {
   Clock3,
   Database,
   FolderKanban,
+  LayoutDashboard,
   PanelLeft,
-  Sparkles,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -26,6 +26,12 @@ export interface FinancialNavTab {
 
 export const FINANCIAL_TABS: FinancialNavTab[] = [
   {
+    id: "agency",
+    label: "Agency",
+    hint: "Jobs with delivery and money",
+    Icon: LayoutDashboard,
+  },
+  {
     id: "quickbooks",
     label: "QuickBooks Ledger",
     hint: "Books, cash, and P&L",
@@ -40,14 +46,8 @@ export const FINANCIAL_TABS: FinancialNavTab[] = [
   {
     id: "iworker",
     label: "iWorker Ingestion & Logs",
-    hint: "Timesheets and contractor spend",
+    hint: "Timesheets, contractor spend, and AI audit",
     Icon: Clock3,
-  },
-  {
-    id: "ai",
-    label: "AI Audit Queue & Insights",
-    hint: "Exceptions waiting for review",
-    Icon: Sparkles,
   },
   {
     id: "sources",
@@ -184,7 +184,7 @@ export function FinancialNavSidebar({
 
       <div
         className={cn(
-          "relative h-full max-md:w-0 max-md:shrink-0",
+          "relative h-full max-md:w-0 max-md:shrink-0 md:sticky md:top-0 md:self-start",
           "md:transition-[width] md:duration-200 md:ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:md:transition-none",
           railCollapsed ? "md:w-[56px]" : "md:w-[264px]",
         )}

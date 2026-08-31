@@ -19,6 +19,13 @@ class ScheduledJob:
 
 JOBS: tuple[ScheduledJob, ...] = (
     ScheduledJob(
+        id="iworker_nightly",
+        path="/api/v1/financials/iworker/sync",
+        cron="15 22 * * *",
+        timezone="America/Los_Angeles",
+        timeout_seconds=600,
+    ),
+    ScheduledJob(
         id="teamwork_nightly",
         path="/api/v1/financials/teamwork/sync",
         cron="45 22 * * *",
@@ -33,6 +40,20 @@ JOBS: tuple[ScheduledJob, ...] = (
         timezone="America/Los_Angeles",
         body={"mode": "auto"},
         timeout_seconds=600,
+    ),
+    ScheduledJob(
+        id="agency_weekly_snapshot",
+        path="/api/v1/financials/agency/ai-insights/snapshot",
+        cron="30 22 * * 5",
+        timezone="America/Los_Angeles",
+        timeout_seconds=300,
+    ),
+    ScheduledJob(
+        id="agency_weekly_generate",
+        path="/api/v1/financials/agency/ai-insights/generate",
+        cron="0 6 * * 1",
+        timezone="America/Los_Angeles",
+        timeout_seconds=300,
     ),
 )
 

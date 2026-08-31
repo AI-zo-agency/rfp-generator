@@ -9,6 +9,7 @@
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e:financial": "node e2e/financial-dashboard.mjs",
     "sync:justwin": "echo 'JustWin sync disabled — see src/lib/justwin-config.ts' && exit 1",
     "sync:justwin:debug": "echo 'JustWin sync disabled — see src/lib/justwin-config.ts' && exit 1",
     "sync:justwin:debug-page": "tsx scripts/justwin-sync/debug-page.ts"

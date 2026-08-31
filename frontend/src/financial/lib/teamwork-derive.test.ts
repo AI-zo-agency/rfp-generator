@@ -12,6 +12,10 @@ import {
   formatProjectDate,
   formatUsdFromCents,
   hoursChartRows,
+  hoursChartAxisMax,
+  hoursChartAxisTicks,
+  hoursChartTotalLabel,
+  hoursRowBillablePct,
   hoursLabel,
   hoursNumber,
   nameList,
@@ -170,10 +174,37 @@ describe("hoursChartRows", () => {
     expect(rows[0]).toMatchObject({ hours: 3, billable: 2, nonBillable: 1 });
   });
 
+  it("can return full names without a row cap", () => {
+    const { rows } = hoursChartRows(
+      [
+        { id: "1", name: "Ada Lovelace", minutes: 60, billable_minutes: 60 },
+        { id: "2", name: "Grace Hopper", minutes: 180, billable_minutes: 120 },
+      ],
+      { limit: null, fullNames: true },
+    );
+    expect(rows.map((row) => row.name)).toEqual(["Grace Hopper", "Ada Lovelace"]);
+  });
+
   it("does not invent a billable split when the cache omits it", () => {
     const { rows, split } = hoursChartRows([{ id: "1", name: "Ada", minutes: 120 }]);
     expect(split).toBe(false);
     expect(rows[0]).toMatchObject({ name: "Ada", hours: 2, billable: 0, nonBillable: 2 });
+  });
+});
+
+describe("hours chart helpers", () => {
+  it("formats totals with one decimal", () => {
+    expect(hoursChartTotalLabel(27.5)).toBe("27.5h");
+  });
+
+  it("computes row billable percent safely", () => {
+    expect(hoursRowBillablePct(27, 27.5)).toBe(98);
+    expect(hoursRowBillablePct(0, 0)).toBe(0);
+  });
+
+  it("builds a readable horizontal axis", () => {
+    expect(hoursChartAxisMax(27.5)).toBe(30);
+    expect(hoursChartAxisTicks(30)).toEqual([0, 10, 20, 30]);
   });
 });
 
