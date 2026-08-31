@@ -334,7 +334,7 @@ def build_period_insights(
     timezone_name: str | None = None,
 ) -> dict[str, Any]:
     grain = "month" if granularity == "month" else "week"
-    tz_name = timezone_name or DEFAULT_TZ_NAME
+    tz_name = timezone_name or getattr(settings, "iworker_tz", None) or DEFAULT_TZ_NAME
     today = today_in_tz(now, tz_name)
     selected_day = _resolve_selected_day(grain, period_start, today)
     start, end, prev_start, prev_end, label, prev_label = _period_window(grain, selected_day)
