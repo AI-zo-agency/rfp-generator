@@ -302,10 +302,39 @@ async def get_proposal(rfp_id: str) -> dict[str, object]:
         scrubbed, bio_stub_logs = repair_misplaced_bio_stub_sections(scrubbed)
         # Cheap sync fallback only — LLM won-proposal fill runs on Generate + Scan.
         scrubbed, team_logs = fill_hollow_project_team_from_bios(scrubbed)
+        from app.services.proposal_integrity_guards import apply_manuscript_integrity_guards
+
+        scrubbed, integrity_logs = apply_manuscript_integrity_guards(
+            scrubbed,
+            preserve_reference_narrative=True,
+        )
+        from app.services.proposal_section_dedup import (
+            collapse_title_near_duplicate_sections,
+            compress_redundant_reference_deliverables,
+        )
+
+        collapsed_sections, dup_logs = collapse_title_near_duplicate_sections(
+            list(scrubbed.sections)
+        )
+        if dup_logs:
+            scrubbed = scrubbed.model_copy(update={"sections": collapsed_sections})
+        ref_sections, ref_logs = compress_redundant_reference_deliverables(
+            list(scrubbed.sections)
+        )
+        if ref_logs:
+            scrubbed = scrubbed.model_copy(update={"sections": ref_sections})
         snapshots_changed = [s.saved_at for s in (pruned.snapshots or [])] != [
             s.saved_at for s in (draft.snapshots or [])
         ]
-        heal_logs = [*personnel_logs, *closing_logs, *bio_stub_logs, *team_logs]
+        heal_logs = [
+            *personnel_logs,
+            *closing_logs,
+            *bio_stub_logs,
+            *team_logs,
+            *integrity_logs,
+            *dup_logs,
+            *ref_logs,
+        ]
         if snapshots_changed or heal_logs:
             await asave_proposal_draft(scrubbed)
             draft = scrubbed
@@ -783,6 +812,17 @@ async def generate_full_proposal_endpoint(rfp_id: str) -> ProposalGenerateRespon
     )
 
 
+@router.post("/{rfp_id}/proposal/build-finalize")
+async def build_finalize_endpoint(rfp_id: str) -> JSONResponse:
+    """Final checks tail for Build My Proposal (subset of Complete Scan)."""
+    from app.services.proposal_fulfill_rfp_gaps import run_build_finalize_pass
+
+    async def work() -> None:
+        await run_build_finalize_pass(rfp_id)
+
+    return await _enqueue_pipeline_phase(rfp_id, "build-finalize", work)
+
+
 @router.post(
     "/{rfp_id}/proposal/generate/sections-1-3",
 )
@@ -957,6 +997,7 @@ def _improve_activity_for_turn(
     draft: ProposalDraft,
     draft_changed: bool,
     assistant_message: str,
+    user_message: str = "",
     extra_discrepancies: list[str] | None = None,
 ) -> ProposalAgentActivity:
     from app.services.proposal_chat_activity import build_improve_agent_activity
@@ -982,6 +1023,7 @@ def _improve_activity_for_turn(
         after=section.content or "",
         draft_changed=draft_changed,
         assistant_message=assistant_message,
+        user_message=user_message,
         extra_changes=extra_changes,
         extra_discrepancies=extra_discrepancies,
     )
@@ -1068,6 +1110,7 @@ async def improve_section_endpoint(
                 draft=draft,
                 draft_changed=draft_changed,
                 assistant_message=assistant_message,
+                user_message=body.message,
                 extra_discrepancies=extra,
             )
             return ProposalSectionImproveResponse(
@@ -1108,6 +1151,7 @@ async def improve_section_endpoint(
                 draft=draft,
                 draft_changed=draft_changed,
                 assistant_message=note,
+                user_message=body.message,
                 extra_discrepancies=extra,
             )
             return ProposalSectionImproveResponse(
@@ -1139,6 +1183,7 @@ async def improve_section_endpoint(
         draft=draft,
         draft_changed=draft_changed,
         assistant_message=assistant_message,
+        user_message=body.message,
     )
     return ProposalSectionImproveResponse(
         section=section,

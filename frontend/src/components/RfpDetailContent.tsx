@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { DashboardHeader } from "@/components/DashboardHeader";
 import { RfpGoNoGoControls } from "@/components/RfpGoNoGoControls";
 import { daysUntil, formatDate } from "@/lib/format";
+import { describeRfpIntake } from "@/lib/rfp-intake";
 import { STAGE_LABELS } from "@/lib/rfp-process";
 import { hasRfpPdf } from "@/lib/rfp-pdf";
 import { getRfpById } from "@/lib/rfp-service";
@@ -18,12 +19,13 @@ export async function RfpDetailContent({ id }: RfpDetailContentProps) {
   }
 
   const due = daysUntil(rfp.dueDate);
+  const intake = describeRfpIntake(rfp);
 
   return (
     <>
       <DashboardHeader
         title={rfp.title}
-        subtitle={`${rfp.client} · ${rfp.sector} · ${rfp.location}`}
+        subtitle={`${rfp.client} · ${rfp.sector} · ${rfp.location} — ${intake.method}, ${intake.syncedLabel}${intake.justwinDateLabel ? `, ${intake.justwinDateLabel}` : ""}`}
         showSync={false}
       />
 

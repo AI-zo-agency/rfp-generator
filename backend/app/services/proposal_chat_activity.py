@@ -2,8 +2,61 @@
 
 from __future__ import annotations
 
+import re
+
 from app.models.proposal import ProposalAgentActivity
 from app.services.proposal_section_quality import word_count
+
+_HEADING_IN_TABLE_CELL_RE = re.compile(r"(?m)\|[^|\n]*#{1,6}\s")
+_PARTIAL_SELECTION_REPLY_RE = re.compile(
+    r"(?is)revised\s+only\s+your\s+selected\s+excerpt|only\s+your\s+selected\s+excerpt|"
+    r"rest\s+of\s+the\s+section\s+is\s+unchanged"
+)
+# Recap-only — keep local so activity never depends on improve_pin import order.
+_THOROUGH_ASK_FOR_RECAP_RE = re.compile(
+    r"(?is)"
+    r"\b(?:fix|address|resolve|correct|handle|cover|repair)\b.{0,32}\b(?:all|every|each)\b"
+    r"|"
+    r"\b(?:all|every)\s+(?:issue|problem|defect|gap|item|point|concern)s?\b"
+    r"|"
+    r"\b(?:add|include|insert|put)\b.{0,40}\b(?:table|subsection|heading|block)\b"
+    r"|"
+    r"\b(?:as\s+well|too|also)\b.{0,40}\b(?:add|include|table|section|fix|address)\b"
+    r"|"
+    r"^\s*(?:\d+[\).]|[-*•])\s+\S"
+)
+
+
+def collect_chat_edit_discrepancies(
+    *,
+    before: str,
+    after: str,
+    user_message: str = "",
+    assistant_message: str = "",
+) -> list[str]:
+    """Lightweight post-edit checks for Revise content / Improve section recaps."""
+    notes: list[str] = []
+    blob = f"{after or ''}\n{assistant_message or ''}"
+    if "BUDGET_GROUNDING" in blob or "BUDGET NEEDS REVIEW" in blob.upper():
+        notes.append("Budget grounding still needs review (manuscript vs canonical ledger).")
+    if "{{budget." in (after or ""):
+        notes.append("Unresolved {{budget.}} tokens remain in this tab.")
+    if "«MFILL_" in (after or "") and "«MFILL_" not in (before or ""):
+        notes.append(
+            "Invented «MFILL_N» placeholder tokens — not valid MANUAL FILL handoffs. "
+            "Use [MANUAL FILL: …] or KB-backed facts."
+        )
+    if _HEADING_IN_TABLE_CELL_RE.search(after or ""):
+        notes.append("Markdown heading leaked into a table cell — fix table structure.")
+    ask = (user_message or "").strip()
+    reply = (assistant_message or "").strip()
+    if ask and _THOROUGH_ASK_FOR_RECAP_RE.search(ask) and _PARTIAL_SELECTION_REPLY_RE.search(
+        reply
+    ):
+        notes.append(
+            "Instruction needed a full-section fix; only a highlighted excerpt was revised."
+        )
+    return notes
 
 
 def build_improve_agent_activity(
@@ -13,6 +66,7 @@ def build_improve_agent_activity(
     after: str,
     draft_changed: bool,
     assistant_message: str = "",
+    user_message: str = "",
     extra_changes: list[str] | None = None,
     extra_discrepancies: list[str] | None = None,
 ) -> ProposalAgentActivity:
@@ -41,13 +95,12 @@ def build_improve_agent_activity(
             changes.append(extra.strip())
 
     discrepancies = [d.strip() for d in (extra_discrepancies or []) if d.strip()]
-    blob = f"{after or ''}\n{assistant_message or ''}"
-    if "BUDGET_GROUNDING" in blob or "BUDGET NEEDS REVIEW" in blob.upper():
-        note = "Budget grounding still needs review (manuscript vs canonical ledger)."
-        if note not in discrepancies:
-            discrepancies.append(note)
-    if "{{budget." in (after or ""):
-        note = "Unresolved {{budget.}} tokens remain in this tab."
+    for note in collect_chat_edit_discrepancies(
+        before=before or "",
+        after=after or "",
+        user_message=user_message or "",
+        assistant_message=assistant_message or "",
+    ):
         if note not in discrepancies:
             discrepancies.append(note)
 

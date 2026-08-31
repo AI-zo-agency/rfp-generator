@@ -93,12 +93,21 @@ export function buildSectionPinReference(
   section: OutlineSection,
   content: string
 ): SectionChatReference {
-  const body = content.trim();
+  if (content.trim()) {
+    // Selection excerpts need the quoted text; full-section pins use title only
+    // so Ralph does not show raw markdown (## headings) in the composer chip.
+    return {
+      mode: "section",
+      sectionId: section.id,
+      sectionTitle: section.title,
+      text: section.title,
+    };
+  }
   return {
     mode: "section",
     sectionId: section.id,
     sectionTitle: section.title,
-    text: body.slice(0, 1200) || section.title,
+    text: section.title,
   };
 }
 
@@ -586,12 +595,12 @@ export function ProposalSectionChatPanel({
   };
 
   return (
-    <aside className="proposal-section-chat" aria-label="Proposal assistant">
+    <aside className="proposal-section-chat" aria-label="Ask Ralph">
       <header className="proposal-section-chat-header">
         <div className="min-w-0 flex-1">
           <CapabilityHoverTip id="assistant" side="bottom">
             <p className="proposal-section-chat-kicker cursor-help">
-              Proposal assistant
+              Ask Ralph
             </p>
           </CapabilityHoverTip>
         </div>
@@ -599,7 +608,7 @@ export function ProposalSectionChatPanel({
           <button
             type="button"
             className="proposal-section-chat-icon-btn"
-            aria-label="Close assistant"
+            aria-label="Close Ask Ralph"
             onClick={onClose}
           >
             ×
@@ -748,7 +757,16 @@ export function ProposalSectionChatPanel({
                 {reference.sectionTitle}
                 {reference.mode === "selection" ? " · excerpt" : " · section"}
               </p>
-              <p className="proposal-section-chat-reference-text">“{reference.text}”</p>
+              {reference.mode === "selection" ? (
+                <p className="proposal-section-chat-reference-text">
+                  “{reference.text}”
+                </p>
+              ) : (
+                <p className="proposal-section-chat-reference-text text-zo-text-muted">
+                  Whole section pinned — describe what to change in your message
+                  below, then send.
+                </p>
+              )}
             </div>
             <button
               type="button"

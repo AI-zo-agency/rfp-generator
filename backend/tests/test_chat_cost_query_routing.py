@@ -45,6 +45,11 @@ class DeterministicIntentTests(unittest.TestCase):
         self.assertIsNotNone(hit)
         self.assertEqual(hit["intent"], "single_edit")
 
+    def test_add_awards_table_is_single_edit(self) -> None:
+        hit = _deterministic_intent_classify("Add awards table as well")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["intent"], "single_edit")
+
     def test_whats_missing_is_not_an_edit(self) -> None:
         self.assertFalse(_wants_section_edit("what's missing from this section?"))
         self.assertFalse(_wants_section_edit("what is missing here?"))

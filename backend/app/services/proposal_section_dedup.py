@@ -484,6 +484,18 @@ def _pointer_for_home(title: str) -> str:
         )
 
 
+def _strip_shared_paragraphs_only(body: str, shared: list[str]) -> str:
+    """Remove duplicated paragraphs without injecting a See-pointer."""
+    new = body
+    for para in shared:
+        plain = _plain_for_match(para)
+        if len(plain) < 80:
+            continue
+        if plain in new:
+            new = new.replace(plain, "", 1)
+    return re.sub(r"\n{3,}", "\n\n", new).strip()
+
+
 def _replace_shared_paragraphs(body: str, shared: list[str], pointer: str) -> str:
     new = body
     for para in shared:
@@ -507,6 +519,33 @@ def _shared_paragraphs(source: str, target: str, *, min_len: int = 80) -> list[s
         if len(plain) >= min_len and plain in (target or ""):
             shared.append(para)
     return shared
+
+
+def _section_has_distinct_mandated_ask(title: str) -> bool:
+    """Certifications / conference evidence tabs must not collapse to a See-pointer only."""
+    t = (title or "").casefold()
+    if not t:
+        return False
+    return any(
+        hint in t
+        for hint in (
+            "certification",
+            "conference",
+            "attendance",
+            "evidence of",
+            "mandatory",
+            "attachment",
+            "declaration",
+            "affidavit",
+            "acknowledgement",
+            "addenda",
+            "non-collusion",
+            "drug-free",
+            "iran contracting",
+            "pre-proposal",
+            "preproposal",
+        )
+    )
 
 
 def trim_overlapping_section_prose(
@@ -557,11 +596,18 @@ def trim_overlapping_section_prose(
             shared = [p for p in paras if _plain_for_match(p) in new]
             if not shared:
                 continue
+            if _section_has_distinct_mandated_ask(section.title or ""):
+                new = _strip_shared_paragraphs_only(new, shared)
+                hits += len(shared)
+                continue
             home_title = otitle
             new = _replace_shared_paragraphs(new, shared, _pointer_for_home(otitle))
             hits += len(shared)
         if hits and new != body:
-            if word_count(new) < 20:
+            if (
+                word_count(new) < 20
+                and not _section_has_distinct_mandated_ask(section.title or "")
+            ):
                 new = _pointer_for_home(home_title or "Sections 1–3")
             _set(section.model_copy(update={"content": new}))
             logs.append(
@@ -601,20 +647,26 @@ def trim_overlapping_section_prose(
                 wc_b=word_count(body_b),
             )
             if trim_b and shared_in_b and isinstance(sec_b, ProposalSection):
-                pointer = _pointer_for_home(_section_title(sec_a))
-                new = _replace_shared_paragraphs(body_b, shared_in_b, pointer)
-                if word_count(new) < 20:
-                    new = pointer
+                if _section_has_distinct_mandated_ask(sec_b.title or ""):
+                    new = _strip_shared_paragraphs_only(body_b, shared_in_b)
+                else:
+                    pointer = _pointer_for_home(_section_title(sec_a))
+                    new = _replace_shared_paragraphs(body_b, shared_in_b, pointer)
+                    if word_count(new) < 20:
+                        new = pointer
                 _set(sec_b.model_copy(update={"content": new}))
                 logs.append(
                     f"{_section_title(sec_b)}: trimmed {len(shared_in_b)} "
                     f"paragraph(s) already in {_section_title(sec_a)}"
                 )
             elif (not trim_b) and shared_in_a and isinstance(sec_a, ProposalSection):
-                pointer = _pointer_for_home(_section_title(sec_b))
-                new = _replace_shared_paragraphs(body_a, shared_in_a, pointer)
-                if word_count(new) < 20:
-                    new = pointer
+                if _section_has_distinct_mandated_ask(sec_a.title or ""):
+                    new = _strip_shared_paragraphs_only(body_a, shared_in_a)
+                else:
+                    pointer = _pointer_for_home(_section_title(sec_b))
+                    new = _replace_shared_paragraphs(body_a, shared_in_a, pointer)
+                    if word_count(new) < 20:
+                        new = pointer
                 _set(sec_a.model_copy(update={"content": new}))
                 logs.append(
                     f"{_section_title(sec_a)}: trimmed {len(shared_in_a)} "
@@ -1257,7 +1309,253 @@ def dedupe_manuscript_for_scan(
         logs.extend(sibling_logs)
         sections, trim_logs = trim_overlapping_section_prose(sections)
         logs.extend(trim_logs)
+    sections, ref_logs = compress_redundant_reference_deliverables(
+        sections, drop_soft_overlap=drop_clone_tabs
+    )
+    logs.extend(ref_logs)
     return sections, logs
+
+
+_REFERENCE_FAMILY_TITLE_RE = re.compile(
+    r"(?i)\b(?:"
+    r"references?|past\s+performance|client\s+list|active\s+client"
+    r")\b"
+)
+
+_REFERENCE_FORM_TITLE_HINTS = (
+    "reference form",
+    "client reference",
+    "reference contact",
+    "attachment",
+    "exhibit",
+    "schedule",
+    "appendix",
+)
+
+
+def _section_submission_instrument(section: Any) -> str | None:
+    raw = None
+    if hasattr(section, "submission_instrument"):
+        raw = getattr(section, "submission_instrument", None)
+    if raw is None and isinstance(section, dict):
+        raw = section.get("submissionInstrument")
+        if raw is None:
+            raw = section.get("submission_instrument")
+    text = str(raw or "").strip().casefold()
+    return text or None
+
+
+def _is_reference_family_section(section: Any) -> bool:
+    inst = _section_submission_instrument(section) or ""
+    if inst == "references":
+        return True
+    title_cf = _section_title(section).casefold()
+    return bool(_REFERENCE_FAMILY_TITLE_RE.search(title_cf))
+
+
+def is_rfp_reference_form_section(
+    *,
+    section_id: str = "",
+    title: str = "",
+    content: str = "",
+) -> bool:
+    """Buyer reference form / attachment slot — not the scored narrative tab."""
+    title_cf = (title or "").casefold()
+    sid_cf = (section_id or "").casefold()
+    if not title_cf and not sid_cf:
+        return False
+    if "reference" not in title_cf and "reference" not in sid_cf:
+        return False
+    if any(h in title_cf for h in _REFERENCE_FORM_TITLE_HINTS):
+        return True
+    if title_cf.endswith(" form") or " form " in title_cf:
+        return True
+    # Physical signed attachment stub — keep tab but pointerize duplicate body
+    body_cf = (content or "").casefold()
+    if "[manual fill" in body_cf and "attach" in body_cf and "reference" in body_cf:
+        return True
+    return False
+
+
+def _has_reference_contact_table(content: str) -> bool:
+    pipe_rows = [
+        line
+        for line in (content or "").splitlines()
+        if line.strip().startswith("|") and line.count("|") >= 3
+    ]
+    return len(pipe_rows) >= 2
+
+
+def _content_word_jaccard(a: str, b: str) -> float:
+    ta = set(re.findall(r"[a-z0-9]{3,}", (a or "").casefold()))
+    tb = set(re.findall(r"[a-z0-9]{3,}", (b or "").casefold()))
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    return inter / union if union else 0.0
+
+
+def _pick_canonical_reference_section(sections: list[Any]) -> Any | None:
+    """Best drafted references / past-performance tab (not a hollow form stub)."""
+    candidates: list[tuple[int, float, int, Any]] = []
+    for idx, section in enumerate(sections):
+        if not _is_reference_family_section(section):
+            continue
+        body = _section_content(section)
+        is_form = is_rfp_reference_form_section(
+            section_id=_section_id(section),
+            title=_section_title(section),
+            content=body,
+        )
+        wc = word_count(body)
+        if is_form and wc < 120 and not _has_reference_contact_table(body):
+            continue
+        if wc < 25 and not _has_reference_contact_table(body):
+            continue
+        candidates.append(
+            (
+                idx,
+                _section_eval_points(section),
+                wc + (80 if _has_reference_contact_table(body) else 0),
+                section,
+            )
+        )
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: (-row[1], -row[2], row[0]))
+    return candidates[0][3]
+
+
+def compress_redundant_reference_deliverables(
+    sections: list[Any],
+    *,
+    drop_soft_overlap: bool = True,
+) -> tuple[list[Any], list[str]]:
+    """One reference narrative + pointerized forms — no duplicate contact tables.
+
+    When the manuscript already has a drafted References / Past Performance tab,
+    a separate Attachment C / reference form must not restate the same table.
+    RFP-minimum procurement stubs that only repeat that narrative are dropped.
+
+    ``drop_soft_overlap=False`` (Complete Scan) keeps the deterministic,
+    hint-based moves (form pointerization, RFP-minimum-stub cross-ref) but
+    disables the soft word-overlap match below that can delete a distinct,
+    legitimately separate reference-family narrative tab (e.g. a real
+    "Past Performance" tab next to a real "References" tab) just because they
+    discuss the same client relationships in different words.
+    """
+    canon = _pick_canonical_reference_section(sections)
+    if canon is None:
+        return sections, []
+
+    canon_id = _section_id(canon)
+    canon_title = _section_title(canon) or "References"
+    canon_body = _section_content(canon)
+    logs: list[str] = []
+    drop_ids: set[str] = set()
+    updated: dict[str, Any] = {}
+
+    try:
+        from app.services.proposal_pointer_page_integrity import format_see_pointer_for_title
+
+        see_pointer = format_see_pointer_for_title(canon_title)
+    except Exception:  # noqa: BLE001
+        see_pointer = f"See **{canon_title}**"
+
+    form_pointer = (
+        f"*Reference contacts for this submission are completed in **{canon_title}** "
+        "(same clients and contacts — not a second reference narrative).*\n\n"
+        f"{see_pointer} for the reference table and past-performance summary. "
+        "If this RFP requires a physically signed reference form, include "
+        "[DESIGNER NOTE: attach signed PDF of the buyer's form before submit]."
+    )
+
+    for section in sections:
+        sid = _section_id(section)
+        if not sid or sid == canon_id or sid in drop_ids:
+            continue
+        if not _is_reference_family_section(section):
+            continue
+        title = _section_title(section)
+        body = _section_content(section)
+        is_form = is_rfp_reference_form_section(
+            section_id=sid,
+            title=title,
+            content=body,
+        )
+        title_cf = title.casefold()
+        is_minimum_stub = "minimum" in title_cf and "reference" in title_cf
+
+        if is_form:
+            if body.strip() == form_pointer.strip():
+                continue
+            if word_count(body) < 40 and "[manual fill" in body.casefold():
+                updated[sid] = section.model_copy(
+                    update={"content": form_pointer, "status": "generated"}
+                ) if hasattr(section, "model_copy") else {
+                    **section,
+                    "content": form_pointer,
+                    "status": "generated",
+                }
+                logs.append(
+                    f"{title}: reference form → cross-ref {canon_title} "
+                    "(buyer form slot kept; no duplicate table)"
+                )
+                continue
+            overlap = _content_word_jaccard(body, canon_body)
+            if overlap >= 0.35 or _has_reference_contact_table(body):
+                updated[sid] = section.model_copy(
+                    update={"content": form_pointer, "status": "generated"}
+                ) if hasattr(section, "model_copy") else {
+                    **section,
+                    "content": form_pointer,
+                    "status": "generated",
+                }
+                logs.append(
+                    f"{title}: reference form → cross-ref {canon_title} "
+                    "(duplicate contact table removed)"
+                )
+            continue
+
+        overlap = _content_word_jaccard(body, canon_body)
+        if is_minimum_stub:
+            if _has_reference_contact_table(body) and overlap < 0.55:
+                updated[sid] = section.model_copy(
+                    update={"content": form_pointer, "status": "generated"}
+                ) if hasattr(section, "model_copy") else {
+                    **section,
+                    "content": form_pointer,
+                    "status": "generated",
+                }
+                logs.append(
+                    f"{title}: RFP minimum tab → cross-ref {canon_title}"
+                )
+            else:
+                drop_ids.add(sid)
+                logs.append(
+                    f"{title} (RFP minimum stub — covered by {canon_title})"
+                )
+            continue
+        if drop_soft_overlap and overlap >= 0.48 and sid != canon_id:
+            drop_ids.add(sid)
+            logs.append(
+                f"{title} (reference narrative overlaps {canon_title})"
+            )
+
+    if not drop_ids and not updated:
+        return sections, logs
+
+    kept: list[Any] = []
+    for section in sections:
+        sid = _section_id(section)
+        if sid in drop_ids:
+            continue
+        if sid in updated:
+            kept.append(updated[sid])
+        else:
+            kept.append(section)
+    return kept, logs
 
 
 _COMPANY_IDENTITY_FORM_TITLE_RE = re.compile(

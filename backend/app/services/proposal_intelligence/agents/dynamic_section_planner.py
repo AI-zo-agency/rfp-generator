@@ -207,62 +207,97 @@ async def run_dynamic_section_planner(
         if package_char_limit
         else "No per-response character limit stated by this RFP."
     )
-    raw, provider = await safe_chat_json(
-        [
-            {"role": "system", "content": _SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    f"{scoreboard}\n\n"
-                    f"{char_limit_line}\n"
-                    f"HARD MAXIMUM RFP outline tabs (excluding static Sections 1–3): {section_cap}. "
-                    f"Emit at most {section_cap} sections in the JSON array — merge aggressively, "
-                    f"but NEVER merge or drop a scored criterion to fit the cap; "
-                    f"cut unscored narrative instead.\n"
-                    f"Page limit from RFP: {page_limit if page_limit else 'not stated'}.\n\n"
-                    f"Understanding:\n{plan.opportunity.understanding.model_dump_json()}\n"
-                    f"Compliance item count: {len(plan.opportunity.compliance.items)}\n"
-                    f"Evaluation:\n{plan.opportunity.evaluation.model_dump_json()}\n"
-                    f"Scope:\n{plan.opportunity.scope.model_dump_json()}\n"
-                    f"RFP excerpt (structure/TOC/submission forms):\n{rfp_context[:50000]}\n\n"
-                    f"Submission checklist excerpt (documents to return — read even if TOC is elsewhere):\n"
-                    f"{submission_documents_excerpt(rfp_context)[:20000]}\n\n"
-                    f"Closing / forms / attachments excerpt (must select these when present):\n"
-                    f"{closing_package_excerpt(rfp_context)[:20000]}"
-                ),
-            },
-        ],
-        max_tokens=3072,
-        agent_name=AGENT,
+    from app.services.proposal_fulfill_rfp_structure import (
+        align_outline_sections_to_rfp_specs,
+        extract_rfp_submission_format_specs,
+        outline_sections_from_rfp_specs,
+        static_company_block_titles,
     )
-    try:
-        outline = ProposalOutline.model_validate(raw or {})
-    except Exception as exc:
-        logger.warning("%s validation failed: %s", AGENT, exc)
-        outline = ProposalOutline(confidence=0.2)
-    if not outline.sections:
-        # Minimal fallback from evaluation emphasis + scope — NEVER force Methodology.
-        titles: list[str] = []
-        for crit in plan.opportunity.evaluation.criteria[:6]:
-            name = (crit.name or "").strip()
-            if name and name.casefold() not in {t.casefold() for t in titles}:
-                titles.append(name)
-        if not titles:
-            # Prefer concrete RFP-shaped asks over a generic marketing stack.
-            titles = ["Technical Approach", "Scope & Deliverables", "Pricing"]
-        outline = ProposalOutline(
-            sections=[
-                OutlineSection(
-                    id=f"rfp-sec-{i}",
-                    title=title,
-                    order=i,
-                    required=True,
-                    conditionalReason="Fallback from evaluation criteria — confirm against RFP TOC",
-                )
-                for i, title in enumerate(titles, start=1)
-            ],
-            confidence=0.35,
+
+    rfp_title = str((rfp_meta or {}).get("title") or "").strip()
+    # One Align read (submission-format / packet layout) — NOT the full
+    # format+scored+completeness stack, and NOT stacked on top of the planner.
+    # When this returns tabs, it *replaces* the planner LLM. Scored criteria
+    # coverage below is free (already on the plan). Completeness still runs
+    # once against the outline actually produced.
+    structure_specs = await extract_rfp_submission_format_specs(
+        rfp_context,
+        rfp_title=rfp_title,
+        existing_section_titles=static_company_block_titles(),
+    )
+    used_align_extract = False
+    provider = ""
+    if structure_specs:
+        from_specs = outline_sections_from_rfp_specs(
+            structure_specs,
+            section_factory=lambda raw: OutlineSection.model_validate(raw),
         )
+        if from_specs:
+            used_align_extract = True
+            logger.info(
+                "%s using Align submission-format extract as outline (%d tabs) "
+                "— skipping planner LLM",
+                AGENT,
+                len(from_specs),
+            )
+            outline = ProposalOutline(sections=from_specs, confidence=0.85)
+    if not used_align_extract:
+        raw, provider = await safe_chat_json(
+            [
+                {"role": "system", "content": _SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        f"{scoreboard}\n\n"
+                        f"{char_limit_line}\n"
+                        f"HARD MAXIMUM RFP outline tabs (excluding static Sections 1–3): {section_cap}. "
+                        f"Emit at most {section_cap} sections in the JSON array — merge aggressively, "
+                        f"but NEVER merge or drop a scored criterion to fit the cap; "
+                        f"cut unscored narrative instead.\n"
+                        f"Page limit from RFP: {page_limit if page_limit else 'not stated'}.\n\n"
+                        f"Understanding:\n{plan.opportunity.understanding.model_dump_json()}\n"
+                        f"Compliance item count: {len(plan.opportunity.compliance.items)}\n"
+                        f"Evaluation:\n{plan.opportunity.evaluation.model_dump_json()}\n"
+                        f"Scope:\n{plan.opportunity.scope.model_dump_json()}\n"
+                        f"RFP excerpt (structure/TOC/submission forms):\n{rfp_context[:50000]}\n\n"
+                        f"Submission checklist excerpt (documents to return — read even if TOC is elsewhere):\n"
+                        f"{submission_documents_excerpt(rfp_context)[:20000]}\n\n"
+                        f"Closing / forms / attachments excerpt (must select these when present):\n"
+                        f"{closing_package_excerpt(rfp_context)[:20000]}"
+                    ),
+                },
+            ],
+            max_tokens=3072,
+            agent_name=AGENT,
+        )
+        try:
+            outline = ProposalOutline.model_validate(raw or {})
+        except Exception as exc:
+            logger.warning("%s validation failed: %s", AGENT, exc)
+            outline = ProposalOutline(confidence=0.2)
+        if not outline.sections:
+            # Minimal fallback from evaluation emphasis + scope — NEVER force Methodology.
+            titles: list[str] = []
+            for crit in plan.opportunity.evaluation.criteria[:6]:
+                name = (crit.name or "").strip()
+                if name and name.casefold() not in {t.casefold() for t in titles}:
+                    titles.append(name)
+            if not titles:
+                # Prefer concrete RFP-shaped asks over a generic marketing stack.
+                titles = ["Technical Approach", "Scope & Deliverables", "Pricing"]
+            outline = ProposalOutline(
+                sections=[
+                    OutlineSection(
+                        id=f"rfp-sec-{i}",
+                        title=title,
+                        order=i,
+                        required=True,
+                        conditionalReason="Fallback from evaluation criteria — confirm against RFP TOC",
+                    )
+                    for i, title in enumerate(titles, start=1)
+                ],
+                confidence=0.35,
+            )
     outline.confidence = clamp_confidence(outline.confidence)
     from app.services.proposal_outline_dedup import (
         enforce_outline_section_cap,
@@ -331,14 +366,27 @@ async def run_dynamic_section_planner(
         section_factory=lambda raw: OutlineSection.model_validate(raw),
     )
     dropped = list(dropped) + list(scored_dropped)
-    # A second, FOCUSED LLM pass — one question only: what is this outline
-    # still missing? Closing-component detection above is one call juggling
-    # ~20 instructions at once and was observed to vary run-to-run on
-    # identical input (a live RFP went 9 sections then 8 across two Phase 2
-    # runs — Exhibit 3 present in one, missing in the next). A model asked
-    # ONE question is far more reliable than the same model mid-way through
-    # twenty, so this checks the outline actually produced rather than
-    # re-deriving it from scratch.
+    # Same stub + reorder + mandated titles as the Align to RFP outline button,
+    # applied to the plan before Phase 3 drafts — so generate ships the RFP's
+    # required tabs instead of leaving empty stubs for a later button click.
+    kept, align_logs = align_outline_sections_to_rfp_specs(
+        kept,
+        structure_specs,
+        section_factory=lambda raw: OutlineSection.model_validate(raw),
+    )
+    align_added = [
+        line
+        for line in align_logs
+        if "added missing scored section stub" in line
+    ]
+    if align_logs:
+        logger.info(
+            "%s Align-to-RFP-outline on plan: %s",
+            AGENT,
+            align_logs[:8],
+        )
+    # Focused completeness check on the outline actually produced (including
+    # any tabs Align-extract just stubbed). Same single-question pass as before.
     kept, exhibit_added = await ensure_missing_submittals_coverage(
         kept,
         rfp_context,
@@ -393,10 +441,17 @@ async def run_dynamic_section_planner(
             f"Outline sections: {len(outline.sections)} (cap {section_cap})"
             + (f"; scored criteria added: {len(scored_added)}" if scored_added else "")
             + (f"; closing added: {len(closing_added)}" if closing_added else "")
+            + (f"; Align-outline stubs: {len(align_added)}" if align_added else "")
             + (f"; hard-cap dropped: {len(cap_dropped)}" if cap_dropped else "")
         ),
         reason=(
-            "Dynamic section plan from THIS RFP structure + evaluation + closing package "
+            "Dynamic section plan from THIS RFP "
+            + (
+                "Align submission-format extract"
+                if used_align_extract
+                else "structure"
+            )
+            + " + evaluation + closing package "
             "(lean prompt + near-dup hygiene + hard section cap)"
         ),
         confidence=outline.confidence,

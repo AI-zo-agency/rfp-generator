@@ -21,6 +21,7 @@ import {
   stripLeadingTitleEcho,
 } from "@/lib/proposal-section-health";
 import { createMarkdownSourceMap } from "@/lib/markdown-source-map";
+import { repairReferenceSectionsInOutline } from "@/lib/reference-table-repair";
 import { toggleWrapMarkers } from "@/lib/markdown-inline-format";
 import { buildScanRfpSummary, type ScanRfpFulfillReport, type ScanRfpSummary } from "@/lib/proposal-scan-report";
 import { ScanRfpSummaryBanner } from "@/components/ScanRfpSummaryBanner";
@@ -118,6 +119,7 @@ import {
   FULFILL_SCAN_STEP_LABELS,
   ALIGN_RFP_OUTLINE_PHASE,
   PACKET_REDISTRIBUTE_PHASE,
+  isBuildPipelineComplete,
   pipelineServerStillWorkingMessage,
   inProgressPhaseLabel,
   type PipelineInProgressPhase,
@@ -135,15 +137,20 @@ function prepareOutline(draft: ProposalOutline): ProposalOutline {
         : s.content,
     })),
   };
-  return normalizeOutlineSectionOrder(
+  const ordered = normalizeOutlineSectionOrder(
     stripLegacyMonolithSections(cleaned),
   ) as ProposalOutline;
+  return repairReferenceSectionsInOutline(ordered);
 }
 
 type SectionRevisionMap = Record<string, SectionRevisionRecord>;
 
 function revisionsStorageKey(rfpId: string): string {
   return `zo-proposal-section-revisions:${rfpId}`;
+}
+
+function buildBannerDismissKey(rfpId: string): string {
+  return `proposal-build-banner-dismissed:${rfpId}`;
 }
 
 function loadStoredRevisions(rfpId: string): SectionRevisionMap {
@@ -172,9 +179,9 @@ function persistStoredRevisions(rfpId: string, revisions: SectionRevisionMap): v
 }
 
 const baseWorkspaceTabs = [
-  { id: "outline", label: "Sections" },
+  { id: "outline", label: "Build" },
   { id: "content", label: "Review" },
-  { id: "export", label: "Submit" },
+  { id: "export", label: "Download" },
 ];
 
 function getProposalPlainStatus(options: {
@@ -191,7 +198,7 @@ function getProposalPlainStatus(options: {
   }
   if (!options.fullProposalDone && !options.manuscriptComplete) {
     return {
-      headline: "Not started — click Generate Proposal to build the draft.",
+      headline: "Not started — click Build my proposal to build the draft.",
       tone: "action",
     };
   }
@@ -346,6 +353,7 @@ function ProposalDraftWorkspaceInner({
   // Lets the user dismiss the server-derived "finished successfully" banner
   // (the one that shows after a refresh). Reset when a new scan starts.
   const [completionBannerDismissed, setCompletionBannerDismissed] = useState(false);
+  const [buildBannerDismissed, setBuildBannerDismissed] = useState(false);
   const [provider, setProvider] = useState<string | null>(null);
   const [pipelineStatus, setPipelineStatus] =
     useState<ProposalPipelineStatus | null>(null);
@@ -429,26 +437,22 @@ function ProposalDraftWorkspaceInner({
   }, [rfpCost]);
 
   useEffect(() => {
+    if (!hydrated || draftLoadState !== "ready") return;
+
     let cancelled = false;
     let timer: number | null = null;
+    const pipelineInFlight = Boolean(research?.pipelineCheckpoint?.inProgressPhase);
+    const running =
+      isFullProposalRunning || isFulfillingRfpGaps || pipelineInFlight;
 
     const load = async () => {
       const next = await getLlmCostForRfp(rfp.id);
       if (cancelled || !next) return;
-      const prev = rfpCostRef.current;
-      if (
-        next.callCount === 0 &&
-        next.totalCostUsd === 0 &&
-        prev &&
-        (prev.callCount > 0 || prev.totalCostUsd > 0)
-      ) {
-        return;
-      }
       setRfpCost(next);
     };
 
     void load();
-    if (isFullProposalRunning || isFulfillingRfpGaps) {
+    if (running) {
       timer = window.setInterval(() => void load(), 4000);
     }
 
@@ -456,7 +460,14 @@ function ProposalDraftWorkspaceInner({
       cancelled = true;
       if (timer !== null) window.clearInterval(timer);
     };
-  }, [rfp.id, isFullProposalRunning, isFulfillingRfpGaps]);
+  }, [
+    rfp.id,
+    hydrated,
+    draftLoadState,
+    isFullProposalRunning,
+    isFulfillingRfpGaps,
+    research?.pipelineCheckpoint?.inProgressPhase,
+  ]);
 
   const requireKeyPersonas = useCallback(
     (run: () => void) => {
@@ -880,7 +891,7 @@ function ProposalDraftWorkspaceInner({
         setGenerateNotice(
           recoverableSnap
             ? `Live draft is empty — use Sections → saved version menu (“${recoverableSnap.label}”) to restore your manuscript.`
-            : "Section list restored from cached research — use Generate proposal to re-draft content."
+            : "Section list restored from cached research — use Build my proposal to re-draft content."
         );
       } else if (draft) {
         const prepared = prepareOutline(draft);
@@ -904,6 +915,16 @@ function ProposalDraftWorkspaceInner({
       cancelled = true;
     };
   }, [rfp]);
+
+  useEffect(() => {
+    try {
+      setBuildBannerDismissed(
+        sessionStorage.getItem(buildBannerDismissKey(rfp.id)) === "1"
+      );
+    } catch {
+      setBuildBannerDismissed(false);
+    }
+  }, [rfp.id]);
 
   /** Keep trying to sync while the backend is busy with generation. */
   useEffect(() => {
@@ -1244,8 +1265,14 @@ function ProposalDraftWorkspaceInner({
     [pipelineStatus]
   );
 
+  const buildPipelineComplete = useMemo(
+    () => isBuildPipelineComplete(pipelineStatus, research),
+    [pipelineStatus, research]
+  );
+
   const fullProposalDone =
-    pipelineStatus?.isComplete ?? (phase3Done && selfEditDone);
+    buildPipelineComplete ||
+    (pipelineStatus?.isComplete ?? (phase3Done && selfEditDone));
 
   const plainStatus = useMemo(
     () =>
@@ -1284,7 +1311,8 @@ function ProposalDraftWorkspaceInner({
   const canResumePipeline =
     countSectionsWithContent(outline) > 0 &&
     Boolean(pipelineStatus?.canResume) &&
-    !pipelineStatus?.isComplete;
+    !pipelineStatus?.isComplete &&
+    !buildPipelineComplete;
 
   const fulfillResumeStep = research?.pipelineCheckpoint?.resumeFulfillStep ?? null;
   const canResumeFulfillScan =
@@ -1653,11 +1681,11 @@ function ProposalDraftWorkspaceInner({
         setScanSummary(buildScanRfpSummary(report as ScanRfpFulfillReport));
         setScanSummaryExpanded(false);
       }
-      setGapResolveNotice("Saved version available (Before complete & clean).");
+      setGapResolveNotice("Saved version available (Before Review & fix).");
       setFulfillJustCompleted(true);
       setCompletionBannerDismissed(false);
       setGenerateNotice(
-        "Complete & clean finished successfully — this draft is up to date. The button stays disabled until you edit the draft again."
+        "Review & fix finished successfully — this draft is up to date. The button stays disabled until you edit the draft again."
       );
       setGenerateError(null);
       setIsFulfillingRfpGaps(false);
@@ -1755,13 +1783,13 @@ function ProposalDraftWorkspaceInner({
           // User Stop only — not poll/timeout AbortErrors.
           if (abort.signal.aborted) {
             setGenerateNotice(
-              "Complete & clean stopped — progress saved. Use Complete & clean draft to resume from the last step."
+              "Review & fix stopped — progress saved. Use Review & fix to resume from the last step."
             );
             setGenerateError(null);
             return;
           }
           const message =
-            error instanceof Error ? error.message : "Complete & clean failed";
+            error instanceof Error ? error.message : "Review & fix failed";
           setGenerateError(message);
         } finally {
           if (fulfillAbortRef.current === abort) {
@@ -1827,6 +1855,7 @@ function ProposalDraftWorkspaceInner({
         "phase-3-6-self-edit": "phase-3-6-self-edit",
         "phase-3-5-budget": "phase-3-5-budget",
         "phase-4-review": "phase-4-review",
+        "build-finalize": "build-finalize",
       };
       const mapped =
         progressMap[activePhase] ?? fullProposalProgressFromInFlight(activePhase);
@@ -2034,7 +2063,7 @@ function ProposalDraftWorkspaceInner({
         : null;
     setGenerateNotice(
       resumeLabel
-        ? `Stopped — progress saved. Use Complete & clean draft to resume from step ${resumeFulfillStep} (${resumeLabel}).`
+        ? `Stopped — progress saved. Use Review & fix to resume from step ${resumeFulfillStep} (${resumeLabel}).`
         : "Stopped — progress saved in the database. Use Continue proposal to resume."
     );
     setGenerateError(null);
@@ -2125,7 +2154,7 @@ function ProposalDraftWorkspaceInner({
     const scanOk = await confirm(
       scanAlreadyDone && !canResumeFulfillScan
         ? {
-            title: "Complete & clean already ran for this draft",
+            title: "Review & fix already ran for this draft",
             description:
               "This draft was just cleaned and nothing has changed since. Running it " +
               "again will re-check the same content and cost tokens for no new changes.\n\n" +
@@ -2136,7 +2165,7 @@ function ProposalDraftWorkspaceInner({
           }
         : canResumeFulfillScan
         ? {
-            title: "Resume complete & clean?",
+            title: "Resume Review & fix?",
             description:
               `Continue from step ${fulfillResumeStep} — ${fulfillResumeLabel}.\n\n` +
               "Earlier steps are already saved on the draft. Pre-submit refresh and submission readiness still run in full — missing answers are filled from past won proposals and the ending report is rebuilt for designer handoff.\n\n" +
@@ -2146,26 +2175,26 @@ function ProposalDraftWorkspaceInner({
           }
         : hasCompletedScanBefore
         ? {
-            title: "Run Complete & clean again?",
+            title: "Run Review & fix again?",
             description:
-              "Complete & clean already ran for this draft, and the draft has changed since. " +
+              "Review & fix already ran for this draft, and the draft has changed since. " +
               "Running it again re-checks the whole proposal in the background. A saved version is stored first.\n\n" +
               completeCleanGuide,
             confirmLabel: "Run again",
             tone: "default",
           }
         : {
-            title: "Start Complete & clean draft (first run)",
+            title: "Review & fix (optional)",
             description:
-              "Runs in the background — you can keep working while it finishes. A saved version is stored first.\n\n" +
+              "Build my proposal already matched RFP order, fact-checked, and ran Ralph trim. " +
+              "Use Review & fix only if you edited the draft and want a full re-audit. " +
+              "It re-reads the whole proposal and spends extra tokens.\n\n" +
               `${completeCleanGuide}\n\n` +
-              "Also in this pass:\n" +
-              "• Order / add tabs this RFP still needs (buyer’s list, not a fixed Cover Letter stack)\n" +
-              "• Missing closing / submission tabs\n" +
-              "• Budget rewrite only if the fee table does not add up\n" +
-              "• Fact/KB grounding and DQ gate\n\n" +
-              `Keeps Sections 1–3 and solid drafted tabs. ${capabilityById("completeClean").doesnt}`,
-            confirmLabel: "Complete & clean",
+              "If you continue:\n" +
+              "• A saved version is stored first\n" +
+              "• You can keep working while it runs\n" +
+              `• ${capabilityById("completeClean").doesnt}`,
+            confirmLabel: "Run anyway",
             tone: "default",
           }
     );
@@ -2254,7 +2283,7 @@ function ProposalDraftWorkspaceInner({
         });
         if (review) setPresubmitReview(review);
       } else if (outcome.w === "failed") {
-        throw new Error("Complete & clean failed on the server.");
+        throw new Error("Review & fix failed on the server.");
       } else {
         // Backend finished (or poll stalled while worker kept going) — pull final
         // saved state. Do NOT abort() here: that made success look like Stop.
@@ -2264,6 +2293,12 @@ function ProposalDraftWorkspaceInner({
       // Only a real user Stop (fulfillAbortRef) is "stopped". Timeout / race
       // AbortErrors must not clear a finished scan.
       if (abort.signal.aborted) {
+        // A newer run already replaced this controller (e.g. an automatic
+        // resume) — it will report its own progress, so don't flash a stale
+        // "stopped" notice for a request that isn't live anymore.
+        if (fulfillAbortRef.current !== abort) {
+          return;
+        }
         // If the safety-net effect already showed success, don't overwrite it
         // with a "stopped" banner.
         if (fulfillCompletionShownRef.current || fulfillJustCompleted) {
@@ -2272,13 +2307,13 @@ function ProposalDraftWorkspaceInner({
         setScanSummary(null);
         setScanSummaryExpanded(false);
         setGenerateNotice(
-          "Complete & clean stopped — progress saved. Use Complete & clean draft to resume from the last step."
+          "Review & fix stopped — progress saved. Use Review & fix to resume from the last step."
         );
         setGenerateError(null);
         return;
       }
       const message =
-        error instanceof Error ? error.message : "Complete & clean failed";
+        error instanceof Error ? error.message : "Review & fix failed";
       setScanSummary(null);
       setScanSummaryExpanded(false);
       setGapResolveError(message);
@@ -2553,15 +2588,6 @@ function ProposalDraftWorkspaceInner({
     // startFromCaseStudies = keep Company + Bios, re-extract Our Work, then Phase 2+.
     const startAfterSections1to3 = Boolean(options?.startAfterSections1to3);
     const startFromCaseStudies = Boolean(options?.startFromCaseStudies);
-    if (
-      canResumeFulfillScan &&
-      !startAfterSections1to3 &&
-      !startFromCaseStudies
-    ) {
-      fullProposalInFlightRef.current = false;
-      await handleFulfillRfpGaps();
-      return;
-    }
     const hasManuscriptContent = countSectionsWithContent(outline) > 0;
     // Never "resume" an empty outline — that is always a forceRestart generate.
     const shouldResume =
@@ -2608,6 +2634,20 @@ function ProposalDraftWorkspaceInner({
         fullProposalInFlightRef.current = false;
         return;
       }
+    } else if (buildPipelineComplete) {
+      const restartOk = await confirm({
+        title: "Build my proposal already ran",
+        description:
+          "This RFP already completed the full build (Sections 1–3, drafting, review, and final checks). " +
+          "Running again re-generates content and uses LLM tokens (often several dollars on large RFPs).\n\n" +
+          "Run the full build again?",
+        confirmLabel: "Run build again",
+        tone: "danger",
+      });
+      if (!restartOk) {
+        fullProposalInFlightRef.current = false;
+        return;
+      }
     } else if (fullProposalDone) {
       const restartOk = await confirm({
         title: "Start full proposal from the beginning?",
@@ -2625,6 +2665,13 @@ function ProposalDraftWorkspaceInner({
     fullProposalAbortRef.current?.abort();
     const abort = new AbortController();
     fullProposalAbortRef.current = abort;
+
+    try {
+      sessionStorage.removeItem(buildBannerDismissKey(rfp.id));
+      setBuildBannerDismissed(false);
+    } catch {
+      // ignore quota / private mode
+    }
 
     const forceRestart = !(shouldResume || startAfterSections1to3 || startFromCaseStudies);
 
@@ -2773,6 +2820,12 @@ function ProposalDraftWorkspaceInner({
       // from PHASE_START_TIMEOUT also raise AbortError — those must resume, not
       // look like the user hit Stop.
       if (abort.signal.aborted) {
+        if (fullProposalAbortRef.current !== abort) {
+          // A newer run already replaced this controller (e.g. an automatic
+          // resume) — it will report its own progress, so don't flash a
+          // stale "Stopped" notice for a request that isn't live anymore.
+          return;
+        }
         setGenerateNotice(
           "Stopped — progress saved in the database. Use Continue proposal to resume."
         );
@@ -2851,6 +2904,14 @@ function ProposalDraftWorkspaceInner({
                   snap.pipelineStatus
                 )
             );
+            if (isBuildPipelineComplete(snap.pipelineStatus, snap.research)) {
+              try {
+                sessionStorage.removeItem(buildBannerDismissKey(rfp.id));
+              } catch {
+                // ignore
+              }
+              setBuildBannerDismissed(false);
+            }
             keepClientProgress = Boolean(
               snap.research.pipelineCheckpoint?.inProgressPhase
             );
@@ -2863,7 +2924,7 @@ function ProposalDraftWorkspaceInner({
         setFullProposalProgress(null);
       }
     }
-  }, [confirm, rfp, fullProposalDone, canResumePipeline, canResumeFulfillScan, pipelineStatus, outline, handleLiveDraftUpdate, handleResearchPoll, applyOutlineFromServer, handleFulfillRfpGaps]);
+  }, [confirm, rfp, buildPipelineComplete, fullProposalDone, canResumePipeline, pipelineStatus, outline, handleLiveDraftUpdate, handleResearchPoll, applyOutlineFromServer]);
 
   const handleResetOutline = async () => {
     setIsResettingDraft(true);
@@ -3049,6 +3110,7 @@ function ProposalDraftWorkspaceInner({
       }
       if (effectiveFullProposalProgress === "phase-3-5-budget") return "Budget…";
       if (effectiveFullProposalProgress === "phase-4-review") return "Pre-submit…";
+      if (effectiveFullProposalProgress === "build-finalize") return "Final checks…";
       if (effectiveFullProposalProgress === "recovering") return "Syncing…";
       return "Working…";
     }
@@ -3057,17 +3119,15 @@ function ProposalDraftWorkspaceInner({
       if (activity) {
         return activity.length > 40 ? `${activity.slice(0, 39)}…` : activity;
       }
-      return "Completing draft…";
+      return "Review & fix…";
     }
-    if (canResumeFulfillScan) return "Continue complete & clean";
-    if (canResumePipeline) return "Continue proposal";
-    return "Generate proposal";
+    if (canResumePipeline) return "Continue build";
+    return "Build my proposal";
   }, [
     isFullProposalRunning,
     serverPipelineActive,
     effectiveFullProposalProgress,
     canResumePipeline,
-    canResumeFulfillScan,
     isFulfillingRfpGaps,
     research?.pipelineCheckpoint?.activityLabel,
     rfpTabProgress,
@@ -3313,6 +3373,25 @@ function ProposalDraftWorkspaceInner({
           <h2 className="min-w-0 flex-1 truncate text-sm font-semibold leading-tight text-foreground md:text-[0.95rem]">
             {rfp.title}
           </h2>
+          {anyPipelineRunning || isStopping ? (
+            <button
+              type="button"
+              onClick={() => void handleStopPipeline()}
+              disabled={isStopping}
+              className="proposal-stop-generation-btn shrink-0"
+              title="Stop the running build or Review & fix job"
+            >
+              {isStopping ? (
+                <span
+                  className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                  aria-hidden
+                />
+              ) : (
+                <span className="proposal-stop-generation-dot" aria-hidden />
+              )}
+              {isStopping ? "Stopping…" : "Stop Generation"}
+            </button>
+          ) : null}
           {onOpenGoRfpPicker && goRfpCount ? (
             <button
               type="button"
@@ -3365,6 +3444,36 @@ function ProposalDraftWorkspaceInner({
             <button
               type="button"
               onClick={() => setCompletionBannerDismissed(true)}
+              className="shrink-0 rounded px-1.5 py-0.5 text-emerald-700 transition-smooth hover:bg-emerald-100"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        ) : null}
+
+        {buildPipelineComplete &&
+        !isFullProposalRunning &&
+        !isFulfillingRfpGaps &&
+        !buildBannerDismissed ? (
+          <div className="flex items-center gap-2 border-t border-emerald-200/80 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 md:px-4">
+            <span aria-hidden>✓</span>
+            <span className="flex-1">
+              Build my proposal already ran for this RFP (through final checks).
+              {manualFillCount > 0
+                ? ` ${manualFillCount} form or attachment item${manualFillCount === 1 ? "" : "s"} still need manual input — use the checklist on Review.`
+                : " Open Review, then download Word."}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setBuildBannerDismissed(true);
+                try {
+                  sessionStorage.setItem(buildBannerDismissKey(rfp.id), "1");
+                } catch {
+                  // ignore
+                }
+              }}
               className="shrink-0 rounded px-1.5 py-0.5 text-emerald-700 transition-smooth hover:bg-emerald-100"
               aria-label="Dismiss"
             >
@@ -3580,26 +3689,6 @@ function ProposalDraftWorkspaceInner({
                   {isMatchingCaseStudies ? "Matching…" : "Match studies"}
                 </button>
               </CapabilityHoverTip>
-              {anyPipelineRunning || isStopping ? (
-                <button
-                  type="button"
-                  onClick={() => void handleStopPipeline()}
-                  disabled={isStopping}
-                  className="proposal-toolbar-btn proposal-toolbar-btn--danger !min-h-[2.125rem] !px-2.5 !py-1.5 !text-xs disabled:opacity-70"
-                >
-                  {isStopping ? (
-                    <>
-                      <span
-                        className="mr-1.5 inline-block h-3 w-3 animate-spin rounded-full border-2 border-current/30 border-t-current align-[-1px]"
-                        aria-hidden
-                      />
-                      Stopping…
-                    </>
-                  ) : (
-                    "Stop"
-                  )}
-                </button>
-              ) : null}
               <CapabilityHoverTip id="moreMenu" side="bottom">
                 <span className="inline-flex">
                   <ProposalTabMoreMenu
@@ -3864,18 +3953,10 @@ function ProposalDraftWorkspaceInner({
         serverPipelineActive ? (
             <div className="proposal-content-tab-shell flex min-h-0 flex-1 flex-col">
             <div className="proposal-tab-actions flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zo-border/60 px-3 py-2.5">
-              <p className="text-xs text-zo-text-muted">Full proposal text</p>
+              <p className="text-xs text-zo-text-muted">
+                After Build my proposal, use the Checklist. Review & fix is optional after edits.
+              </p>
               <div className="flex flex-wrap items-center gap-2">
-                <MatchRfpPacketControl
-                  disabled={
-                    !outline.sections.some((s) => s.content.trim()) ||
-                    anyPipelineRunning
-                  }
-                  isOrdering={isAligningRfpOutline || alignPreviewLoading}
-                  isPlacing={isPlacingPacketContent || placePreviewLoading}
-                  onOrderTabs={() => void handleAlignRfpOutline()}
-                  onPlaceContent={() => void handlePlacePacketContent()}
-                />
                 <CapabilityHoverTip id="completeClean" side="bottom">
                   <button
                     type="button"
@@ -3884,43 +3965,46 @@ function ProposalDraftWorkspaceInner({
                       anyPipelineRunning ||
                       !outline.sections.some((s) => s.content.trim())
                     }
-                    className="zo-btn !py-2 !px-3 !text-sm disabled:opacity-40"
+                    className="zo-btn secondary !py-2 !px-3 !text-sm disabled:opacity-40"
                   >
                     {isFulfillingRfpGaps
-                      ? "Completing draft…"
+                      ? "Review & fix…"
                       : scanAlreadyDone && !canResumeFulfillScan
-                        ? "✓ Complete & clean done"
+                        ? "✓ Review & fix done"
                         : canResumeFulfillScan
-                          ? "Continue complete & clean"
-                          : "Complete & clean draft"}
+                          ? "Continue Review & fix"
+                          : "Review & fix"}
                   </button>
                 </CapabilityHoverTip>
-                {anyPipelineRunning || isStopping ? (
-                  <button
-                    type="button"
-                    onClick={() => void handleStopPipeline()}
-                    disabled={isStopping}
-                    className="proposal-toolbar-btn proposal-toolbar-btn--danger !min-h-[2.125rem] !px-2.5 !py-1.5 !text-sm disabled:opacity-70"
-                    title="Stop the running Complete & clean / generation job"
-                  >
-                    {isStopping ? (
-                      <>
-                        <span
-                          className="mr-1.5 inline-block h-3 w-3 animate-spin rounded-full border-2 border-current/30 border-t-current align-[-1px]"
-                          aria-hidden
-                        />
-                        Stopping…
-                      </>
-                    ) : (
-                      "Stop"
-                    )}
-                  </button>
-                ) : null}
+                <details
+                  className="relative"
+                  open={
+                    isAligningRfpOutline ||
+                    isPlacingPacketContent ||
+                    undefined
+                  }
+                >
+                  <summary className="zo-btn secondary !py-2 !px-3 !text-sm cursor-pointer list-none select-none [&::-webkit-details-marker]:hidden">
+                    Staff tools
+                  </summary>
+                  <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 flex min-w-[16rem] flex-wrap items-center gap-2 rounded-lg border border-zo-border bg-white p-2.5 shadow-lg">
+                    <MatchRfpPacketControl
+                      disabled={
+                        !outline.sections.some((s) => s.content.trim()) ||
+                        anyPipelineRunning
+                      }
+                      isOrdering={isAligningRfpOutline || alignPreviewLoading}
+                      isPlacing={isPlacingPacketContent || placePreviewLoading}
+                      onOrderTabs={() => void handleAlignRfpOutline()}
+                      onPlaceContent={() => void handlePlacePacketContent()}
+                    />
+                  </div>
+                </details>
                 {outline.lastFulfillReport ? (
                   <button
                     type="button"
                     className="zo-btn secondary !py-2 !px-3 !text-sm"
-                    title="Re-open the last Complete & clean results panel"
+                    title="Re-open the last Review & fix results panel"
                     onClick={handleOpenLastResults}
                   >
                     {scanSummary ? "Results" : "Last results"}
@@ -4285,6 +4369,7 @@ function ProposalDraftWorkspaceInner({
               isAlignRunning={isAligningRfpOutline}
               isPlaceRunning={isPlacingPacketContent}
               hasCompletedFulfillReport={Boolean(outline.lastFulfillReport)}
+              buildPipelineComplete={buildPipelineComplete}
               manualFillCount={manualFillCount}
               rfpCost={rfpCost}
               costByRunType={costByRunType}
@@ -4459,7 +4544,7 @@ function ProposalDraftWorkspaceInner({
               ) : (
                 <div className="flex min-h-[16rem] flex-1 flex-col items-center justify-center px-4 text-center">
                   <p className="text-sm text-zo-text-muted">
-                    Generate proposal content first, then preview and export
+                    Build my proposal first, then preview and export
                     it here.
                   </p>
                 </div>

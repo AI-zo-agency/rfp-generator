@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { formatDate } from "@/lib/format";
+import { describeRfpIntake } from "@/lib/rfp-intake";
 import { STAGE_LABELS } from "@/lib/rfp-process";
 import type { RfpRecord } from "@/types/rfp";
 
@@ -45,7 +45,9 @@ export function RecentRfpsTable({ rfps, limit = 6 }: RecentRfpsTableProps) {
             </tr>
           </thead>
           <tbody>
-            {recent.map((rfp) => (
+            {recent.map((rfp) => {
+              const intake = describeRfpIntake(rfp);
+              return (
               <tr
                 key={rfp.id}
                 className="group border-b border-zo-border/60 transition-colors duration-150 last:border-b-0 hover:bg-[var(--zo-hover-bg)]"
@@ -68,12 +70,21 @@ export function RecentRfpsTable({ rfps, limit = 6 }: RecentRfpsTableProps) {
                       >
                         {rfp.title}
                       </Link>
-                      <p className="mt-1 text-xs text-zo-text-muted">
-                        {rfp.lastActivityNote
-                          ? rfp.lastActivityNote.length > 72
-                            ? `${rfp.lastActivityNote.slice(0, 71)}…`
-                            : rfp.lastActivityNote
-                          : `Created ${formatDate(rfp.receivedDate)}`}
+                      <p
+                        className="mt-1 text-xs text-zo-text-muted"
+                        title={intake.tooltip}
+                      >
+                        {intake.method}
+                        <span className="mx-1">·</span>
+                        {intake.syncedLabel}
+                        {intake.justwinDateLabel ? (
+                          <>
+                            <span className="mx-1">·</span>
+                            <span className="font-medium text-zo-text-secondary">
+                              {intake.justwinDateLabel}
+                            </span>
+                          </>
+                        ) : null}
                       </p>
                       {rfp.pdfUrl && (
                         <a
@@ -111,7 +122,8 @@ export function RecentRfpsTable({ rfps, limit = 6 }: RecentRfpsTableProps) {
                   </button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

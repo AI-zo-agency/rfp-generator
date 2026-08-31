@@ -98,8 +98,41 @@ async def _attach_phase4_manuscript_audit(
     draft: ProposalDraft,
     research: ProposalResearchCache | None,
     use_llm: bool = True,
+    presubmit_review: PreSubmitReview | None = None,
 ) -> ProposalResearchCache:
     """Persist whole-manuscript audit findings without mutating draft content."""
+    from datetime import datetime, timezone
+
+    from app.models.proposal import ProposalAdversarialAudit
+    from app.services.proposal_manuscript_auditor import (
+        _dedupe_findings,
+        _issue_to_finding,
+        _summary,
+        persist_manuscript_audit,
+        run_manuscript_auditor,
+    )
+
+    if presubmit_review is not None and not use_llm:
+        findings = _dedupe_findings(
+            [_issue_to_finding(issue) for issue in presubmit_review.issues]
+        )
+        audit = ProposalAdversarialAudit(
+            rfpId=rfp.id,
+            findings=findings,
+            summary=_summary(findings),
+            scannedAt=datetime.now(timezone.utc).isoformat(),
+            provider="deterministic",
+        )
+        updated = persist_manuscript_audit(research, audit)
+        critical = sum(1 for f in findings if f.severity == "critical")
+        logger.info(
+            "Phase 4 adversarial audit for %s: findings=%d critical=%d (from presubmit checklist)",
+            rfp.id,
+            len(findings),
+            critical,
+        )
+        return updated
+
     audit = await run_manuscript_auditor(
         draft=draft,
         research=research,
@@ -310,6 +343,7 @@ def _section3_card_is_usable(section: ProposalSection) -> bool:
 
 
 from app.services.proposal_common import ProposalError, can_start_proposal, load_rfp_for_proposal
+from app.services.proposal_generation_cancel import ProposalGenerationCancelled
 
 
 # Share of the page limit held back for content written outside the drafting
@@ -1009,6 +1043,8 @@ async def _incremental_fact_check_after_sections(
             consistency_fixes=len(consistency_logs),
             fact_contradiction_rewrites=fact_rewrites,
         )
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Incremental KB fact-check failed for %s %s: %s", rfp_id, ids, exc)
 
@@ -1297,6 +1333,8 @@ async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
             rfp_sector=rfp.sector,
             rfp_context=rfp_context,
         )
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Phase 2 roster fetch for locks failed (non-fatal): %s", exc)
 
@@ -1615,6 +1653,8 @@ async def _generate_sections_1_3_inner(
                 rfp_sector=rfp.sector,
                 rfp_context=rfp_context,
             )
+        except ProposalGenerationCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("Early locks roster fetch failed (non-fatal): %s", exc)
         from app.services.proposal_manuscript_locks import build_manuscript_locks
@@ -1877,6 +1917,8 @@ async def _generate_sections_1_3_inner(
                         sections_1_3 = [
                             improved if s.id == sid else s for s in sections_1_3
                         ]
+                except ProposalGenerationCancelled:
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "Targeted improve failed for %s (%s): %s", rfp_id, sid, exc
@@ -2236,6 +2278,8 @@ async def _run_phase3_drafting_inner(
         )
         for line in spec_logs[:8]:
             logger.info("Phase 3 RFP structure specs: %s — %s", rfp_id, line)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Phase 3 RFP structure specs skipped: %s", exc)
     if not specs:
@@ -2254,12 +2298,12 @@ async def _run_phase3_drafting_inner(
         generatedAt=now,
         provider=provider,
     )
-    draft, toc_logs = apply_rfp_toc_layout(draft, specs)
+    toc_logs: list[str] = []
     if specs:
         draft, stub_logs = ensure_missing_scored_section_stubs(draft, specs)
-        if stub_logs:
-            draft, reorder_logs = apply_rfp_toc_layout(draft, specs)
-            toc_logs = [*toc_logs, *stub_logs, *reorder_logs]
+        toc_logs.extend(stub_logs)
+    draft, layout_logs = apply_rfp_toc_layout(draft, specs)
+    toc_logs.extend(layout_logs)
     for line in toc_logs[:12]:
         logger.info("Phase 3 TOC layout: %s — %s", rfp_id, line)
     from app.services.proposal_consistency_enforcement import apply_consistency_enforcement
@@ -2290,6 +2334,8 @@ async def _run_phase3_drafting_inner(
         draft = suite.draft
         for line in suite.logs[:16]:
             logger.info("Phase 3 blocker suite: %s — %s", rfp_id, line)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Phase 3 blocker suite skipped for %s: %s", rfp_id, exc)
 
@@ -2321,6 +2367,8 @@ async def _run_phase3_drafting_inner(
         )
         for line in trunc_logs[:12]:
             logger.info("Phase 3 truncation repair: %s — %s", rfp_id, line)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Phase 3 truncation repair skipped for %s: %s", rfp_id, exc)
 
@@ -2335,6 +2383,8 @@ async def _run_phase3_drafting_inner(
         registry = None
         try:
             registry = await load_client_list_registry()
+        except ProposalGenerationCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.info(
                 "Phase 3 claim validation: client list unavailable for %s: %s",
@@ -2377,6 +2427,8 @@ async def _run_phase3_drafting_inner(
                 )
                 for line in claim_logs[:12]:
                     logger.info("Phase 3 claim validation: %s — %s", rfp_id, line)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Phase 3 claim validation skipped for %s: %s", rfp_id, exc)
 
@@ -2403,6 +2455,8 @@ async def _run_phase3_drafting_inner(
         )
         for line in hollow_logs[:12]:
             logger.info("Phase 3 hollow KB fill: %s — %s", rfp_id, line)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Phase 3 hollow KB fill skipped for %s: %s", rfp_id, exc)
 
@@ -2461,6 +2515,8 @@ async def run_phase3_6_self_edit(rfp_id: str):
                         resolved_count=len(xref_applied),
                         resolved=xref_applied[:12],
                     )
+        except ProposalGenerationCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Cross-reference tag resolution during Phase 3.6 skipped for %s: %s",
@@ -2486,6 +2542,8 @@ async def run_phase3_6_self_edit(rfp_id: str):
                         filled=len(form_logs),
                         samples=form_logs[:6],
                     )
+        except ProposalGenerationCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Active Client List form-slot fill during Phase 3.6 skipped for %s: %s",
@@ -2553,6 +2611,8 @@ async def run_phase3_5_budget_reconcile(
                 aligned_fmt,
                 rfp_id,
             )
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Budget format judge skipped on reconcile for %s: %s", rfp_id, exc)
 
@@ -2791,6 +2851,8 @@ async def _run_phase3_5_budget_inner(
                 budget_format=budget.budget_format,
                 confidence=judgment.confidence,
             )
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Budget format judge skipped for %s: %s", rfp_id, exc)
 
@@ -2975,7 +3037,10 @@ async def _run_phase3_5_budget_inner(
 
 
 async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, ProposalResearchCache]:
-    """Stage 4: fill leftover required stubs → optional adversarial repair → pre-submit audit."""
+    """Light pre-submit pass: fill empty required stubs, checklist, ending report.
+
+    Deep LLM repair + per-bio re-grounding run in Final checks (build-finalize), not here.
+    """
     rfp = get_rfp(rfp_id)
     if not rfp:
         raise ProposalError("RFP not found", status_code=404)
@@ -3067,7 +3132,7 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
             reason="leftover_required_tabs_fill",
             remaining=still_unfilled[:8],
         )
-    elif app_settings.adversarial_repair_loop:
+    elif app_settings.phase4_adversarial_repair and app_settings.adversarial_repair_loop:
         with pipeline_phase("adversarial-repair", rfp_id=rfp_id):
             draft, research, _audit, repair_report = await run_adversarial_repair_loop(
                 rfp=rfp,
@@ -3096,7 +3161,11 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         step_trace(
             "adversarial_repair_skipped",
             rfp_id=rfp_id,
-            reason="adversarial_repair_loop=false",
+            reason=(
+                "phase4_light_review"
+                if not app_settings.phase4_adversarial_repair
+                else "adversarial_repair_loop=false"
+            ),
         )
 
     collapsed = await _collapse_bio_stubs(
@@ -3119,10 +3188,23 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
 
     budget_idx = find_budget_section_index(draft.sections)
     budget_section_id = draft.sections[budget_idx].id if budget_idx is not None else None
+
+    def _phase4_skip_verify_scrub(section: ProposalSection) -> bool:
+        """Review must not LLM-scrub reference tabs — it can strip client rows."""
+        title_cf = (section.title or "").casefold()
+        sid = (section.id or "").casefold()
+        if "reference" in title_cf or "reference" in sid or "past performance" in title_cf:
+            return True
+        from app.services.proposal_integrity_guards import _reference_narrative_word_count
+
+        return _reference_narrative_word_count(section.content or "") >= 40
+
     verify_ids = {
         s.id
         for s in draft.sections
-        if s.id != budget_section_id and count_verify_tags(s.content or "") > 0
+        if s.id != budget_section_id
+        and count_verify_tags(s.content or "") > 0
+        and not _phase4_skip_verify_scrub(s)
     }
     if verify_ids:
         content_info = _assess_rfp_content(rfp)
@@ -3164,6 +3246,8 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
                     rfp_id,
                     len(money_issues),
                 )
+        except ProposalGenerationCancelled:
+            raise
         except Exception:
             logger.exception("Phase 4 money intelligence failed for %s", rfp_id)
 
@@ -3176,7 +3260,10 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
     rfp_text_final = combine_rfp_text(
         content_info_final.description or "", content_info_final.pdf_text or ""
     )
-    draft, post_review_integrity = apply_manuscript_integrity_guards(draft)
+    draft, post_review_integrity = apply_manuscript_integrity_guards(
+        draft,
+        preserve_reference_narrative=True,
+    )
     draft, post_review_consistency = apply_consistency_enforcement(
         draft,
         research=research,
@@ -3208,7 +3295,8 @@ async def run_phase4_presubmit_review(rfp_id: str) -> tuple[PreSubmitReview, Pro
         rfp=rfp,
         draft=draft,
         research=research,
-        use_llm=not still_unfilled,
+        use_llm=False,
+        presubmit_review=review,
     )
     # Preserve repair report if the audit attach path returned a copy without it.
     if (
@@ -3561,6 +3649,8 @@ async def generate_full_proposal(
                         log_sample=list(sub_logs or [])[:8],
                         manuscript_summary=summarize_sections(draft.sections),
                     )
+                except ProposalGenerationCancelled:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Full proposal submission attach pass skipped for %s: %s",
@@ -3597,6 +3687,8 @@ async def generate_full_proposal(
                                 rfp_id,
                                 line,
                             )
+                    except ProposalGenerationCancelled:
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "Full proposal post-closing blocker suite skipped for %s: %s",
@@ -3673,12 +3765,16 @@ async def generate_full_proposal(
                             shortfalls=len(shortfalls),
                             samples=[s.message[:120] for s in shortfalls[:6]],
                         )
+                except ProposalGenerationCancelled:
+                    raise
                 except Exception as comp_exc:  # noqa: BLE001
                     logger.warning(
                         "Full proposal compulsory content audit skipped for %s: %s",
                         rfp_id,
                         comp_exc,
                     )
+            except ProposalGenerationCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Full proposal structure coverage skipped for %s: %s", rfp_id, exc
@@ -3727,6 +3823,8 @@ async def generate_full_proposal(
                     repaired=len(trunc_repaired_ids),
                     still_truncated=len(trunc_still_truncated_ids),
                 )
+        except ProposalGenerationCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Full proposal post-self-edit truncation repair skipped for %s: %s",
@@ -3810,6 +3908,8 @@ async def generate_full_proposal(
                     actions=len(ralph_re),
                     samples=ralph_re[:8],
                 )
+        except ProposalGenerationCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Full proposal zero-fabrication pass skipped for %s: %s", rfp_id, exc
@@ -3848,6 +3948,8 @@ async def generate_full_proposal(
                 contradictions=suite.contradiction_count,
                 rewrites=suite.contradiction_rewrites,
             )
+        except ProposalGenerationCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Full proposal final blocker suite skipped for %s: %s", rfp_id, exc
@@ -3887,6 +3989,8 @@ async def generate_full_proposal(
                             log_count=len(stub_logs),
                             samples=stub_logs[:8],
                         )
+            except ProposalGenerationCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Full proposal stub fill skipped for %s: %s", rfp_id, exc)
 
@@ -3963,6 +4067,8 @@ async def generate_full_proposal(
                         actions=len(ralph_pre4),
                         samples=ralph_pre4[:8],
                     )
+            except ProposalGenerationCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Full proposal pre-phase-4 page-limit reassert skipped for %s: %s",
@@ -4084,4 +4190,29 @@ async def generate_full_proposal(
             manuscript_summary=summarize_sections(draft.sections),
             budget_summary=summarize_budget(research.budget if research else None),
         )
+
+        try:
+            from app.services.proposal_fulfill_rfp_gaps import run_fulfill_rfp_gaps
+
+            _review, research, draft, _finalize_report = await run_fulfill_rfp_gaps(
+                rfp_id, mode="build_finalize"
+            )
+            step_trace(
+                "build_finalize_tail_complete",
+                rfp_id=rfp_id,
+                log_count=len((_finalize_report or {}).get("logs") or []),
+            )
+        except ProposalGenerationCancelled:
+            raise
+        except Exception as finalize_exc:  # noqa: BLE001
+            logger.warning(
+                "Build finalize tail skipped for %s: %s", rfp_id, finalize_exc
+            )
+            step_trace(
+                "build_finalize_tail_skipped",
+                rfp_id=rfp_id,
+                error_type=finalize_exc.__class__.__name__,
+                error_message=str(finalize_exc)[:300],
+            )
+
         return draft, brand_voice, research

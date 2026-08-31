@@ -286,6 +286,7 @@ export type FullProposalProgress =
   | "phase-3-6-self-edit"
   | "phase-3-5-budget"
   | "phase-4-review"
+  | "build-finalize"
   | "recovering";
 
 /** Map server checkpoint in-flight phase to UI progress when the client HTTP call already ended. */
@@ -302,6 +303,7 @@ export function fullProposalProgressFromInFlight(
     case "phase-3-6-self-edit":
     case "phase-3-5-budget":
     case "phase-4-review":
+    case "build-finalize":
       return phase;
     default:
       // Never invent "RFP tabs" for standalone jobs (Align, Scan, etc.).
@@ -893,6 +895,11 @@ async function fetchWithTimeout(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new DOMException("Request timed out", "AbortError");
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -904,16 +911,20 @@ export async function fetchProposalSnapshot(
 ): Promise<NonNullable<ProposalOutline["snapshots"]>[number] | null> {
   const qs = new URLSearchParams({ savedAt });
   // Query param (not path) — ISO offsets with '+' break in path segments.
-  const res = await fetchWithTimeout(
-    `/api/rfps/${rfpId}/proposal/snapshot?${qs.toString()}`,
-    { cache: "no-store" },
-    120_000
-  );
-  if (!res.ok) return null;
-  const data = (await res.json()) as {
-    snapshot?: NonNullable<ProposalOutline["snapshots"]>[number];
-  };
-  return data.snapshot ?? null;
+  try {
+    const res = await fetchWithTimeout(
+      `/api/rfps/${rfpId}/proposal/snapshot?${qs.toString()}`,
+      { cache: "no-store" },
+      120_000
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      snapshot?: NonNullable<ProposalOutline["snapshots"]>[number];
+    };
+    return data.snapshot ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function captureProposalTimestamps(rfpId: string): Promise<{
@@ -1186,6 +1197,21 @@ export async function generateFullProposalStaged(
       const reviewed = await runPhase4PreSubmitReview(rfpId, signal);
       research = reviewed.research;
       lastRanPhaseThisInvocation = "phase-4-review";
+    }
+  }
+
+  if (run("build-finalize")) {
+    if (!(await skipIfPhaseAlreadyFinished("build-finalize"))) {
+      throwIfAborted(signal);
+      await waitForInFlightPhase(rfpId, "build-finalize", onProgress);
+      if (!(await skipIfPhaseAlreadyFinished("build-finalize"))) {
+        onProgress?.("build-finalize");
+        const finalized = await runBuildFinalize(rfpId, signal);
+        research = finalized.research;
+        if (finalized.draft) draft = finalized.draft;
+        ({ draft, research, pipelineStatus } = await refreshProposalSnapshot(rfpId));
+        lastRanPhaseThisInvocation = "build-finalize";
+      }
     }
   }
 
@@ -1796,6 +1822,28 @@ export async function runPhase4PreSubmitReview(
   return {
     review: result.research.presubmitReview,
     research: result.research,
+  };
+}
+
+export async function runBuildFinalize(
+  rfpId: string,
+  signal?: AbortSignal
+): Promise<{
+  research: ProposalResearch;
+  draft: ProposalOutline | null;
+}> {
+  const result = await runProposalPhaseAsync(
+    rfpId,
+    "build-finalize",
+    `/api/rfps/${rfpId}/proposal/build-finalize`,
+    signal
+  );
+  if (!result.research) {
+    throw new Error("No research returned after final checks");
+  }
+  return {
+    research: result.research,
+    draft: result.draft,
   };
 }
 

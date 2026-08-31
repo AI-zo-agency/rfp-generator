@@ -284,11 +284,12 @@ async def run_content_risk_repair(
                 result.logs.extend(f"{section.id}: {line}" for line in ref_logs)
                 result.sections_changed.append(section.id)
 
-    # Target sections by role
+    # Target sections by role — only when the user message names the risk class.
+    # Never blast every bio tab on an empty message (that duplicated Build + Review).
     jobs: list[tuple[int, str, str]] = []
     for idx, section in enumerate(sections):
         if _section_matches(section, "reference", "qualif", "relevant experience"):
-            if "reference" in ask or "content" in ask or not ask:
+            if "reference" in ask or ("content" in ask and "reference" in (section.title or "").casefold()):
                 jobs.append((idx, _REF_INSTRUCTION, "chat_content_risk_refs"))
             if any(
                 k in ask
@@ -302,9 +303,10 @@ async def run_content_risk_repair(
                     "maricopa",
                     "santa clara",
                     "bend",
-                    "content",
+                    "qualif",
+                    "experience",
                 )
-            ) or not ask:
+            ):
                 if _section_matches(section, "qualif", "experience", "relevant"):
                     jobs.append((idx, _CLAIM_INSTRUCTION, "chat_content_risk_claims"))
         if _section_matches(
@@ -330,9 +332,8 @@ async def run_content_risk_repair(
                     "unsubstant",
                     "unverif",
                     "fabricat",
-                    "content",
                 )
-            ) or not ask:
+            ):
                 jobs.append((idx, _CLAIM_INSTRUCTION, "chat_content_risk_capability"))
         if (section.id or "").startswith("section-2-bio-") or _section_matches(
             section, "bio", "personnel", "key staff", "team"
@@ -343,21 +344,18 @@ async def run_content_risk_repair(
                     "bio",
                     "years",
                     "inflat",
-                    "shawn",
-                    "sonja",
                     "fabricat",
                     "unverif",
-                    "content",
                 )
-            ) or not ask:
+            ):
                 jobs.append((idx, _BIO_INSTRUCTION, "chat_content_risk_bio"))
         if _section_matches(
             section, "approach", "work plan", "methodology", "schedule", "timeline"
         ):
-            if "tagline" in ask or "chapter" in ask or "positioning" in ask or "content" in ask or not ask:
+            if any(k in ask for k in ("tagline", "chapter", "positioning", "campaign theme")):
                 jobs.append((idx, _TAGLINE_INSTRUCTION, "chat_content_risk_tagline"))
         if _section_matches(section, "executive summary", "exec summary"):
-            if "executive" in ask or "criteria" in ask or "content" in ask or not ask:
+            if any(k in ask for k in ("executive", "criteria", "evaluation")):
                 jobs.append((idx, _EXEC_INSTRUCTION, "chat_content_risk_exec"))
 
     # Deduplicate jobs per section+node (keep first instruction merge for same section)

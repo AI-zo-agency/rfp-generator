@@ -46,16 +46,71 @@ _I3_HEADING_RE = re.compile(r"(?im)^(?:#{1,3}\s*)?i\.?\s*3\b[^\n]*$")
 _NEXT_HEADING_RE = re.compile(r"(?m)^#{1,3}\s+\S")
 
 
+_ADD_TABLE_OR_BLOCK_RE = re.compile(
+    r"(?is)"
+    r"\b(add|include|insert|put)\b.{0,48}\b(?:table|subsection|heading|block)\b"
+    r"|"
+    r"\b(?:table|subsection)\b.{0,32}\b(?:as\s+well|too)\b"
+    r"|"
+    r"\badd\s+(?:an?\s+)?\w+(?:\s+\w+){0,4}\s+table\b"
+)
+
+_THOROUGH_REPAIR_RE = re.compile(
+    r"(?is)"
+    r"\b(?:fix|address|resolve|correct|handle|cover|repair)\b.{0,32}\b(?:all|every|each)\b"
+    r"|"
+    r"\b(?:thoroughly|completely|fully|properly)\b.{0,40}\b(?:fix|address|resolve|update|repair)"
+    r"|"
+    r"\b(?:all|every)\s+(?:issue|problem|defect|gap|item|point|concern)s?\b"
+    r"|"
+    r"\b(?:these|client|following)\s+(?:issue|problem|defect|concern)s?\b"
+    r"|"
+    r"\bfix\s+everything\b"
+    r"|"
+    r"\b(?:make\s+sure|ensure)\b.{0,40}\b(?:all|every|each)\b"
+)
+
+_AS_WELL_BROADEN_RE = re.compile(r"(?is)\b(?:as\s+well|too|also)\b")
+
+
+def user_asks_add_table_or_subsection(user_message: str) -> bool:
+    """True when the user wants a new table/block — cannot be a selection splice."""
+    ask = (user_message or "").strip()
+    if not ask:
+        return False
+    return bool(_ADD_TABLE_OR_BLOCK_RE.search(ask))
+
+
+def user_asks_thorough_section_repair(user_message: str) -> bool:
+    """True when the ask needs a full-tab rewrite — not a Revise-content splice."""
+    ask = (user_message or "").strip()
+    if not ask:
+        return False
+    if user_asks_add_table_or_subsection(ask):
+        return True
+    if _THOROUGH_REPAIR_RE.search(ask):
+        return True
+    if _MISSING_SUBSECTION_RE.search(ask):
+        return True
+    issue_lines = _MULTI_ISSUE_RE.findall(ask)
+    if len(issue_lines) >= 2:
+        return True
+    if issue_lines and re.search(r"(?is)\b(?:fix|address|resolve|correct|handle)\b", ask):
+        return True
+    if _AS_WELL_BROADEN_RE.search(ask) and re.search(
+        r"(?is)\b(?:add|include|insert|fix|address|table|section|subsection|heading|block)\b",
+        ask,
+    ):
+        return True
+    return False
+
+
 def improve_pin_needs_full_rewrite(user_message: str, section_content: str = "") -> bool:
     """True when Improve pin must rewrite the whole tab (not a selection splice)."""
     ask = (user_message or "").strip()
     if not ask:
         return False
-    if _MISSING_SUBSECTION_RE.search(ask):
-        return True
-    # Numbered defect lists with 2+ items → structural / multi-locus repair.
-    issue_lines = _MULTI_ISSUE_RE.findall(ask)
-    if len(issue_lines) >= 2:
+    if user_asks_thorough_section_repair(ask):
         return True
     body = section_content or ""
     if body and _section_skips_i2(body) and re.search(
@@ -78,10 +133,11 @@ def should_collapse_edit_scope_to_selection(
     insert missing headings (I.2 Active Client List) and previously failed with
     DRAFT UNCHANGED. Multi-patch (span_count > 1) stays on the multi-patch path.
     """
-    del user_message, section_content  # reserved for future soft heuristics
     if planned_span_count != 1:
         return False
     if improve_section_pinned:
+        return False
+    if user_asks_thorough_section_repair(user_message):
         return False
     return True
 

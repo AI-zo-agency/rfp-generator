@@ -92,6 +92,58 @@ def test_already_tagged_block_is_not_double_wrapped() -> None:
     assert convert_instruction_blocks(text) == text
 
 
+def test_note_to_sonja_blockquote_becomes_manual_fill() -> None:
+    from app.services.proposal_manuscript import convert_note_to_staff_lines
+
+    text = (
+        "> Note to Sonja: The knowledge base confirms active engagements but no "
+        "verified contact names appear in the uploaded evidence files.\n"
+    )
+    out = convert_note_to_staff_lines(text)
+    assert "[MANUAL FILL: Sonja —" in out
+    assert "knowledge base confirms" in out
+    assert "Note to Sonja" not in out
+
+
+def test_scrub_broken_reference_pipe_rows() -> None:
+    from app.services.proposal_manuscript import scrub_broken_reference_pipe_rows
+
+    body = (
+        "| # | Contact Name | Title | Organization | Phone | Email |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| 1 | | | City of Bend | | |\n"
+        "| 2 | | | Maricopa County | | |\n"
+    )
+    out, logs = scrub_broken_reference_pipe_rows(body)
+    assert "Contact Name" in out
+    assert "| --- |" in out
+    assert "City of Bend" in out
+    assert "Maricopa County" in out
+    assert out.count("|") >= body.count("|") - 2
+    assert "[MANUAL FILL" in out
+    assert not out.strip().startswith("- ")
+    assert logs
+
+
+def test_strip_orphan_reference_header_above_bullets() -> None:
+    from app.services.proposal_manuscript import scrub_broken_reference_pipe_rows
+
+    body = (
+        "| # | Contact Name | Title | Organization | Phone | Email |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "\n"
+        "- City of Bend — [MANUAL FILL: Sonja — verified contact from ClientList/KB]\n"
+        "- Maricopa County — [MANUAL FILL: Sonja — verified contact from ClientList/KB]\n"
+    )
+    out, logs = scrub_broken_reference_pipe_rows(body)
+    assert "Contact Name" in out
+    assert "City of Bend" in out
+    assert "Maricopa County" in out
+    assert out.count("| 1 |") == 1
+    assert not out.strip().startswith("- ")
+    assert logs
+
+
 def test_find_instruction_leaks_reports_untagged_instruction_prose() -> None:
     from app.services.proposal_manuscript import find_instruction_leaks
 

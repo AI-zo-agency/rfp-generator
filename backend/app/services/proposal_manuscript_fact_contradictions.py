@@ -85,6 +85,42 @@ IS a contradiction (flag these):
 - INVENTED CASE-STUDY METRICS: impressions, clicks, CTR, or % lift in a campaign
   write-up when the 03_CS / case-study KB excerpt does not contain those numbers.
   Rewrite to qualitative outcomes from the source or [VERIFY] — never keep invented KPIs.
+- UNHEDGED LEGAL/COMPLIANCE CERTIFICATION WITHOUT EVIDENCE, OR AGAINST ITS OWN
+  FLAG: any confident, unqualified statement that a legal or compliance fact is
+  settled — no conflicts of interest, no litigation history, never
+  debarred/suspended, active E-Verify enrollment, bonding compliance, and
+  anything else in this family — is a contradiction when EITHER (a) no
+  KB/companyfacts evidence supports it, OR (b) the same section already
+  contains a flag/note saying that exact fact needs confirmation from
+  Sonja/leadership/Operations before it can be certified (a flag and a
+  confident assertion of the same fact cannot both stand). Judge this by
+  MEANING — an unhedged sworn-style certification with no source — not by
+  matching any fixed phrase list; the wording will vary by RFP and by
+  section. Severity=critical. fixAction=rewrite → replace the confident
+  assertion with a [MANUAL FILL: Sonja — confirm before submission] flag; if
+  a flag already exists for the same fact, remove the contradictory assertion
+  so only the flag remains.
+- INTERNAL PROCESS/QC NOTE LEAKED AS CONTENT: a section's answer is itself an
+  instruction, caveat, or reviewer note ADDRESSED TO whoever is writing or
+  checking the proposal (e.g. what to claim, what NOT to claim, how a fact
+  should be scoped) rather than being the actual fact or content that field
+  requires — for example a certifications exhibit's "Item" entry containing
+  guidance about how to describe a certificate instead of the certificate's
+  name and validity. Judge this by FUNCTION — does this text talk about the
+  content instead of being the content — not by matching specific words,
+  since the leaked note's wording differs every time. Severity=critical.
+  fixAction=rewrite → replace with the clean, direct fact from verified
+  companyfacts/KB evidence, or [VERIFY]/[MANUAL FILL] if the exact detail
+  (e.g. an expiration date) is not in evidence — never leave internal
+  guidance text as the visible answer.
+- INTERNAL NUMERIC SELF-CONTRADICTION: two claims about the same span or
+  count that cannot both be true appear in the same section (most often a
+  bio) — e.g. "25 years" and "three decades" describing one person's tenure,
+  or two different headcounts for the same team. Flag regardless of the
+  specific numbers or units involved. Severity=major. fixAction=rewrite →
+  keep whichever number matches companyfacts/KB evidence and remove the
+  other; if neither is grounded, state the span once without inventing which
+  one is correct.
 
 NOT a contradiction (do NOT flag):
 - RFP-specific project staffing (named roles on THIS engagement — Section 2 bios)
@@ -390,10 +426,21 @@ async def run_manuscript_fact_contradiction_pass(
             (section.id or "").startswith("section-2-bio-")
             and section.id != "section-2-bio-placeholder"
         ):
-            result.logs.append(
-                f"{finding.section_id}: skipped fact-contradiction rewrite on bio stub"
-            )
-            continue
+            from app.services.proposal_bio_stub import is_bio_pdf_designer_note
+
+            if is_bio_pdf_designer_note(section.content or ""):
+                # A designer-note stub hands the bio off to an approved PDF —
+                # there is no narrative prose here to fix, and rewriting the
+                # stub itself would fight the "insert PDF as-is" instruction.
+                result.logs.append(
+                    f"{finding.section_id}: skipped fact-contradiction rewrite "
+                    "on bio PDF designer-note stub"
+                )
+                continue
+            # Any other bio has real narrative content and gets the same
+            # fact-consistency treatment as every other section — skipping
+            # bios wholesale would silently drop real findings (e.g. two
+            # contradicting tenure claims in one bio).
         if finding.severity in {"critical", "major"}:
             updated, changed, notes = await _rewrite_section_for_fact_contradiction(
                 section,

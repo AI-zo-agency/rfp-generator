@@ -184,16 +184,21 @@ async def preview_align_to_rfp_outline(rfp_id: str) -> dict[str, Any]:
     if human:
         preview["humanDecisionGaps"] = [str(x) for x in human][:20]
 
+    saved_at = datetime.now(timezone.utc).isoformat()
     pending = {
         "preview": preview,
         "proposedDraft": proposed.model_dump(by_alias=True, mode="json"),
-        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "createdAt": saved_at,
+        # Snapshot marker so Apply can detect the draft changed underneath this
+        # preview (e.g. a gap-fill pass added sections) and re-run instead of
+        # blindly overwriting the current sections with this stale preview.
+        "basedOnUpdatedAt": saved_at,
     }
     # Keep current sections; only stash pending preview + proposed layout.
     saved = draft.model_copy(
         update={
             "pending_align_rfp_outline": pending,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": saved_at,
         }
     )
     await asave_proposal_draft(saved)
@@ -239,17 +244,30 @@ async def run_align_to_rfp_outline(rfp_id: str) -> dict[str, Any]:
     used_pending = False
     proposed_from_pending: ProposalDraft | None = None
     if isinstance(pending, dict) and isinstance(pending.get("proposedDraft"), dict):
-        try:
-            proposed_from_pending = ProposalDraft.model_validate(pending["proposedDraft"])
-            used_pending = True
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "align-rfp-outline pending draft invalid for %s — re-running",
+        if pending.get("basedOnUpdatedAt") != draft.updated_at:
+            # Draft changed since this preview was computed (e.g. new sections
+            # were added by a gap-fill pass, or the user edited content) —
+            # applying the frozen preview would silently discard that work, so
+            # fall through to a fresh pass against the current draft instead.
+            logger.info(
+                "align-rfp-outline pending preview stale for %s "
+                "(based_on=%s current=%s) — re-running instead of applying it",
                 rfp_id,
-                exc_info=True,
+                pending.get("basedOnUpdatedAt"),
+                draft.updated_at,
             )
-            proposed_from_pending = None
-            used_pending = False
+        else:
+            try:
+                proposed_from_pending = ProposalDraft.model_validate(pending["proposedDraft"])
+                used_pending = True
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "align-rfp-outline pending draft invalid for %s — re-running",
+                    rfp_id,
+                    exc_info=True,
+                )
+                proposed_from_pending = None
+                used_pending = False
 
     await _progress(
         1,

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
@@ -10,6 +11,15 @@ from pydantic import BaseModel, Field
 from app.services import supabase_db as sb
 
 router = APIRouter(prefix="/sync-jobs", tags=["sync-jobs"])
+
+# Playwright's sync API refuses to start if it detects any running asyncio
+# loop, and it does that check on whatever OS thread it's launched from. The
+# rest of the app leans hard on asyncio.to_thread(...) (proposal draft saves,
+# RFP loads, etc.), which all share Python's single default thread pool — so
+# a JustWin sync can land on a thread that pool has previously handed to
+# something else. Giving the sync its own dedicated pool means it never
+# shares a thread with that traffic.
+_justwin_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="justwin-sync")
 
 
 class SyncJobFinish(BaseModel):
@@ -141,7 +151,10 @@ async def trigger_sync_job(payload: SyncJobTrigger) -> dict[str, object]:
         try:
             from app.services.justwin_sync import run_justwin_sync
 
-            await asyncio.to_thread(run_justwin_sync, job_id, target_date, tab)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                _justwin_executor, run_justwin_sync, job_id, target_date, tab
+            )
         except Exception as exc:
             logger.error("Failed to run JustWin Playwright sync: %s", exc)
             # Runner usually marks the job failed; cover the case where it

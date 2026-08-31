@@ -381,6 +381,7 @@ class AdversarialRepairLoopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
+            mock.patch.object(settings, "phase4_adversarial_repair", True),
             mock.patch.object(settings, "adversarial_repair_loop", True),
             mock.patch(
                 "app.services.proposal_generator.get_rfp",

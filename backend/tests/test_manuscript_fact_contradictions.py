@@ -201,7 +201,91 @@ class FactContradictionPassTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.draft.sections[0].content, stub)
         self.assertEqual(chat.await_count, 1)
         self.assertTrue(
-            any("skipped fact-contradiction rewrite on bio stub" in line for line in result.logs)
+            any(
+                "skipped fact-contradiction rewrite on bio PDF designer-note stub" in line
+                for line in result.logs
+            )
+        )
+
+    async def test_rewrite_applied_on_bio_with_real_narrative_content(self) -> None:
+        """A bio with actual narrative prose (not a PDF designer-note stub) must
+        get the same fact-consistency treatment as any other section — the
+        blanket bio skip exists only to protect stubs from being clobbered."""
+        draft = ProposalDraft(
+            rfpId="rfp-x",
+            sections=[
+                ProposalSection(
+                    id="section-2-bio-sonja-anderson",
+                    title="2.1 — Sonja Anderson",
+                    content=(
+                        "### Sonja Anderson\n"
+                        "**Role on this engagement:** Agency Director\n\n"
+                        "Sonja brings 25 years of marketing industry experience and "
+                        "three decades of finding the growth pathways others miss."
+                    ),
+                    status="generated",
+                ),
+            ],
+            updatedAt="2026-08-12T00:00:00Z",
+        )
+        audit_json = {
+            "contradictions": [
+                {
+                    "sectionId": "section-2-bio-sonja-anderson",
+                    "verifiedFact": "01_companyfacts_verified: 25 years marketing experience",
+                    "manuscriptContradiction": (
+                        "Bio claims both '25 years' and 'three decades' for the same tenure"
+                    ),
+                    "severity": "major",
+                    "fixAction": "rewrite",
+                    "rewriteInstruction": "Keep 25 years only; remove 'three decades'.",
+                }
+            ],
+            "summary": "Internal numeric self-contradiction in bio.",
+        }
+        rewrite_json = {
+            "edits": [
+                {
+                    "find": (
+                        "Sonja brings 25 years of marketing industry experience and "
+                        "three decades of finding the growth pathways others miss."
+                    ),
+                    "replace": (
+                        "Sonja brings 25 years of marketing industry experience "
+                        "finding the growth pathways others miss."
+                    ),
+                }
+            ],
+            "changed": True,
+            "notes": "Removed contradicting decades claim.",
+        }
+
+        async def _fake_corpus(*_a, **_k):
+            return "01_companyfacts verified.docx\n25 years marketing experience\n", [
+                "01_companyfacts verified.docx"
+            ]
+
+        with patch(
+            "app.services.proposal_manuscript_fact_contradictions._fetch_verified_facts_corpus",
+            new=AsyncMock(side_effect=_fake_corpus),
+        ), patch(
+            "app.services.proposal_manuscript_fact_contradictions.llm.chat_json",
+            new=AsyncMock(side_effect=[(audit_json, "test"), (rewrite_json, "test")]),
+        ), patch(
+            "app.services.proposal_manuscript_fact_contradictions.llm.is_configured",
+            return_value=True,
+        ):
+            result = await run_manuscript_fact_contradiction_pass(
+                draft,
+                rfp=_rfp(),
+                use_llm=True,
+            )
+
+        self.assertEqual(result.rewrites_applied, 1)
+        self.assertNotIn("three decades", result.draft.sections[0].content or "")
+        self.assertIn("25 years", result.draft.sections[0].content or "")
+        self.assertFalse(
+            any("skipped fact-contradiction rewrite" in line for line in result.logs)
         )
 
     async def test_only_rewrite_section_ids_skips_other_tabs(self) -> None:

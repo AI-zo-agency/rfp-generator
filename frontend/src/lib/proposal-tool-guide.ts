@@ -31,14 +31,14 @@ export const PROPOSAL_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
     id: "fixOutline",
     name: "Fix outline",
-    does: "Open two jobs: reorder the left list to match the RFP, or move misplaced paragraphs under the right heading.",
-    doesnt: "Rewrite wording, invent facts, or run Complete & clean.",
+    does: "Staff salvage: reorder the left list or move misplaced paragraphs. Build my proposal already matches RFP tab order.",
+    doesnt: "Need to run after every build. Skip unless the left list still looks wrong.",
   },
   {
     id: "reorder",
     name: "Reorder the left list",
-    does: "Match section order to the RFP (you preview, then apply).",
-    doesnt: "Rewrite paragraphs or invent new facts.",
+    does: "Match section order to the RFP (preview, then apply). Only needed if Build left the list wrong.",
+    doesnt: "Rewrite paragraphs, invent facts, or replace Build my proposal.",
   },
   {
     id: "place",
@@ -48,9 +48,9 @@ export const PROPOSAL_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   },
   {
     id: "completeClean",
-    name: "Complete & clean",
-    does: "Structure, fact-check, compliance, and submission readiness on this draft. Includes Ralph (page limit & anti-invention).",
-    doesnt: "Wipe good sections or regenerate the whole proposal from scratch.",
+    name: "Review & fix",
+    does: "Optional second pass after you edit — full fact-check, compliance, and page-limit audit (all 18 checks).",
+    doesnt: "Need to run after every Build — that already runs final checks and Ralph trim.",
   },
   {
     id: "ralph",
@@ -60,14 +60,14 @@ export const PROPOSAL_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   },
   {
     id: "assistant",
-    name: "Proposal assistant",
+    name: "Ask Ralph",
     does: "Chat to revise a pinned section or excerpt. Changes stay on that tab unless you say across the proposal.",
-    doesnt: "Reorder the whole packet or run Complete & clean for you.",
+    doesnt: "Reorder the whole packet or run Review & fix for you.",
   },
   {
     id: "improveSection",
     name: "Improve full section",
-    does: "Pin this whole tab into chat so the assistant can revise it end-to-end.",
+    does: "Pin this whole tab into chat so Ralph can revise it end-to-end.",
     doesnt: "Touch other tabs or invent facts that aren’t in the knowledge base.",
   },
   {
@@ -79,7 +79,7 @@ export const PROPOSAL_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
     id: "savedVersion",
     name: "Saved version",
-    does: "Pick a checkpoint (before Align, Complete & clean, chat improve, etc.) to restore or compare.",
+    does: "Pick a checkpoint (before Align, Review & fix, chat improve, etc.) to restore or compare.",
     doesnt: "Change the live draft until you click Restore.",
   },
   {
@@ -98,25 +98,25 @@ export const PROPOSAL_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     id: "moreMenu",
     name: "More",
     does: "Extra draft actions: designer-compact, reset, or restart from Case Studies / Intelligence.",
-    doesnt: "Run Complete & clean or Fix outline — those stay on Review.",
+    doesnt: "Run Build my proposal — Fix outline lives under Staff tools on Review.",
   },
   {
     id: "keyPersonas",
     name: "Key Personas",
-    does: "Choose who appears in Team Bios for this proposal. Required before Generate.",
-    doesnt: "Edit bios by itself — open a bio section or chat after generating.",
+    does: "Choose who appears in Team Bios for this proposal. Required before Build my proposal.",
+    doesnt: "Edit bios by itself — open a bio section or Ask Ralph after building.",
   },
   {
     id: "generateProposal",
-    name: "Generate proposal",
-    does: "Draft the proposal from research, personas, and the knowledge base (full run or resume).",
-    doesnt: "Only tidy an existing draft — use Complete & clean on Review for that.",
+    name: "Build my proposal",
+    does: "Draft the full proposal: company/team, RFP tab order, writing, budget, review, and final fact-check + page-limit trim. One click.",
+    doesnt: "Need a follow-up Review & fix unless you edited the draft and want a full re-audit.",
   },
   {
     id: "editPreview",
     name: "Edit / Preview",
     does: "Switch between raw markdown editing and the formatted preview of this section.",
-    doesnt: "Send changes to the assistant — use Revise content or Improve full section for that.",
+    doesnt: "Send changes to Ralph — use Revise content or Improve full section for that.",
   },
 ] as const;
 

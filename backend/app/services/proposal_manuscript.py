@@ -203,6 +203,8 @@ _INSTRUCTION_BLOCK_MARKERS: tuple[str, ...] = (
     "cannot be submitted",
     "must be confirmed with",
     "do not invent",
+    "note to sonja",
+    "note to leadership",
 )
 
 # Routing keywords. A block that names one of these concrete RFP deliverables,
@@ -387,6 +389,193 @@ def convert_bare_confirmation_lines(text: str) -> str:
     return _BARE_CONFIRMATION_LINE_RE.sub(_repl, text)
 
 
+_NOTE_TO_STAFF_LINE_RE = re.compile(
+    r"(?im)^[ \t]*(?:>[\s]*)?"
+    r"Note\s+to\s+(?:Sonja|leadership|team)\s*[—–\-:,]\s*"
+    r"(?P<body>[^\n]+)"
+    r"[ \t]*$"
+)
+
+
+def convert_note_to_staff_lines(text: str) -> str:
+    """Turn internal 'Note to Sonja: …' blockquote lines into MANUAL FILL tags."""
+
+    def _repl(match: re.Match[str]) -> str:
+        body = (match.group("body") or "").strip()
+        if not body:
+            return ""
+        return f"[MANUAL FILL: Sonja — {body}]"
+
+    return _NOTE_TO_STAFF_LINE_RE.sub(_repl, text)
+
+
+def _is_markdown_table_separator_line(line: str) -> bool:
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return bool(cells) and all(not c or _SEP_CELL_RE.match(c) for c in cells)
+
+
+def _is_reference_table_header_line(line: str) -> bool:
+    if not line.strip().startswith("|"):
+        return False
+    low = line.casefold()
+    return (
+        "contact" in low
+        or "organization" in low
+        or "phone" in low
+        or "email" in low
+    ) and "|" in line
+
+
+def _is_hollow_reference_table_row(line: str) -> bool:
+    if not line.strip().startswith("|"):
+        return False
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    non_empty = [c for c in cells if c]
+    if not non_empty:
+        return True
+    if (
+        len(cells) >= 4
+        and len(non_empty) <= 3
+        and re.match(r"^\d+$", non_empty[0])
+    ):
+        return True
+    return False
+
+
+def _is_all_empty_pipe_row(line: str) -> bool:
+    if not line.strip().startswith("|"):
+        return False
+    return not any(c.strip() for c in line.strip().strip("|").split("|"))
+
+
+def _repair_hollow_reference_table_row(line: str, width: int, manual: str) -> str:
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    while len(cells) < width:
+        cells.append("")
+    cells = cells[:width]
+    for i, cell in enumerate(cells):
+        if not cell:
+            cells[i] = manual
+    return "| " + " | ".join(cells) + " |"
+
+
+def scrub_broken_reference_pipe_rows(text: str) -> tuple[str, list[str]]:
+    """Repair hollow reference-table rows so markdown tables stay column-aligned."""
+    if not text or "|" not in text:
+        return text, []
+    logs: list[str] = []
+    manual = "[MANUAL FILL: Sonja — verified contact from ClientList/KB]"
+    lines = text.split("\n")
+    out: list[str] = []
+    repaired = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped.startswith("|") and _is_reference_table_header_line(stripped):
+            width = len(stripped.strip("|").split("|"))
+            out.append(line)
+            i += 1
+            if i < len(lines) and _is_markdown_table_separator_line(lines[i].strip()):
+                out.append(lines[i])
+                i += 1
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                row = lines[i].strip()
+                if _is_all_empty_pipe_row(row):
+                    i += 1
+                    continue
+                if _is_hollow_reference_table_row(row):
+                    repaired += 1
+                    out.append(_repair_hollow_reference_table_row(row, width, manual))
+                else:
+                    out.append(lines[i])
+                i += 1
+            continue
+        if stripped.startswith("|") and _is_hollow_reference_table_row(stripped):
+            width = max(6, len(stripped.strip("|").split("|")))
+            repaired += 1
+            out.append(_repair_hollow_reference_table_row(stripped, width, manual))
+            i += 1
+            continue
+        out.append(line)
+        i += 1
+    if repaired:
+        logs.append(
+            f"Repaired {repaired} hollow reference table row(s) with aligned MANUAL FILL cells"
+        )
+    text = "\n".join(out)
+    text, strip_logs = _strip_orphan_reference_table_headers(text)
+    logs.extend(strip_logs)
+    return text, logs
+
+
+def _strip_orphan_reference_table_headers(text: str) -> tuple[str, list[str]]:
+    """Fix reference blocks where a table header sits above bullets instead of rows."""
+    if not text or "|" not in text:
+        return text, []
+    lines = text.split("\n")
+    out: list[str] = []
+    logs: list[str] = []
+    rebuilt = 0
+    i = 0
+    manual = "[MANUAL FILL: Sonja — verified contact from ClientList/KB]"
+    while i < len(lines):
+        stripped_line = lines[i].strip()
+        if stripped_line.startswith("|") and _is_reference_table_header_line(stripped_line):
+            header_line = lines[i]
+            width = len(stripped_line.strip("|").split("|"))
+            j = i + 1
+            sep_line = None
+            if j < len(lines) and _is_markdown_table_separator_line(lines[j].strip()):
+                sep_line = lines[j]
+                j += 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and lines[j].strip().startswith("|"):
+                out.append(lines[i])
+                i += 1
+                continue
+            bullet_rows: list[str] = []
+            k = j
+            while k < len(lines):
+                row = lines[k].strip()
+                if not row:
+                    k += 1
+                    continue
+                if row.startswith("-") or row.startswith("*") or row.startswith("[MANUAL FILL"):
+                    bullet_rows.append(row)
+                    k += 1
+                    continue
+                break
+            if bullet_rows:
+                out.append(header_line)
+                if sep_line:
+                    out.append(sep_line)
+                for idx, bullet in enumerate(bullet_rows, start=1):
+                    org = bullet
+                    if bullet.startswith("-") or bullet.startswith("*"):
+                        org = re.sub(r"^[-*]\s+", "", bullet)
+                        org = org.split("—")[0].split(" - ")[0].strip()
+                        org = re.sub(r"\*+", "", org).strip()
+                    cells = [manual] * width
+                    if width > 0:
+                        cells[0] = str(idx)
+                    org_col = 3 if width >= 4 else max(0, width - 1)
+                    if org_col < width:
+                        cells[org_col] = org
+                    out.append("| " + " | ".join(cells) + " |")
+                    rebuilt += 1
+                i = k
+                continue
+        out.append(lines[i])
+        i += 1
+    if rebuilt:
+        logs.append(
+            f"Rebuilt {rebuilt} reference table row(s) from misaligned bullet list"
+        )
+    return "\n".join(out), logs
+
+
 # Table cells and inline spans often ship "Confirm before submit — …" as visible
 # prose instead of [MANUAL FILL] tags. Match cell interiors bounded by pipes.
 _INLINE_TABLE_CONFIRM_RE = re.compile(
@@ -549,6 +738,7 @@ def scrub_client_facing_section_artifacts(text: str) -> str:
     """
     cleaned = text or ""
     cleaned = convert_instruction_blocks(cleaned)
+    cleaned = convert_note_to_staff_lines(cleaned)
     cleaned = convert_bare_confirmation_lines(cleaned)
     cleaned = convert_unresolved_template_tokens(cleaned)
     cleaned = strip_leaked_manual_fill_identifiers(cleaned)

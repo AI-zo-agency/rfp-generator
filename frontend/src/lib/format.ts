@@ -6,6 +6,18 @@ export function formatDate(dateStr: string) {
   });
 }
 
+export function formatDateTime(dateStr: string) {
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return dateStr;
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 export function formatCurrency(value: number | null) {
   if (value === null) return "—";
   return new Intl.NumberFormat("en-US", {

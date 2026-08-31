@@ -192,44 +192,64 @@ export async function getLlmCostSummary(): Promise<LlmCostSummary | null> {
   }
 }
 
+/** Match Next route `maxDuration` — backend cost rollup can take 15–20s on large runs. */
+const LLM_COST_FETCH_TIMEOUT_MS = 60_000;
+
+const inflightRfpCost = new Map<string, Promise<LlmCostRfpBreakdown | null>>();
+
 export async function getLlmCostForRfp(
   rfpId: string
 ): Promise<LlmCostRfpBreakdown | null> {
+  const key = (rfpId || "").trim();
+  if (!key) return null;
+  const pending = inflightRfpCost.get(key);
+  if (pending) return pending;
+
+  const promise = (async (): Promise<LlmCostRfpBreakdown | null> => {
+    try {
+      const safeId = encodeURIComponent(key);
+      const res = await fetch(`/api/llm-cost/rfps/${safeId}`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(LLM_COST_FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        console.warn("[llm-cost] rfp breakdown unavailable:", res.status);
+        return null;
+      }
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!data || typeof data !== "object") {
+        console.warn("[llm-cost] invalid rfp breakdown payload");
+        return null;
+      }
+      if (typeof data.error === "string" && data.error.trim()) {
+        console.warn("[llm-cost] rfp breakdown error:", data.error);
+        return null;
+      }
+      const detailedRuns = Array.isArray(data.by_run_detailed) ? data.by_run_detailed : [];
+      return {
+        rfpId: asString(data.rfp_id, rfpId),
+        title: asString(data.title),
+        totalCostUsd: Number(data.total_cost_usd ?? 0),
+        totalInputTokens: Number(data.total_input_tokens ?? 0),
+        totalOutputTokens: Number(data.total_output_tokens ?? 0),
+        callCount: Number(data.call_count ?? 0),
+        runCount: Number(data.run_count ?? 0),
+        byNode: (Array.isArray(data.by_node) ? data.by_node : []).map((r) =>
+          mapStage(r as Record<string, unknown>)
+        ),
+        byRun: detailedRuns.map((r) => mapRun(r as Record<string, unknown>)),
+      };
+    } catch (error) {
+      console.warn("[llm-cost] rfp breakdown unavailable:", error);
+      return null;
+    }
+  })();
+
+  inflightRfpCost.set(key, promise);
   try {
-    const safeId = encodeURIComponent(rfpId);
-    const res = await fetch(`/api/llm-cost/rfps/${safeId}`, {
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) {
-      console.warn("[llm-cost] rfp breakdown unavailable:", res.status);
-      return null;
-    }
-    const data = (await res.json()) as Record<string, unknown>;
-    if (!data || typeof data !== "object") {
-      console.warn("[llm-cost] invalid rfp breakdown payload");
-      return null;
-    }
-    if (typeof data.error === "string" && data.error.trim()) {
-      console.warn("[llm-cost] rfp breakdown error:", data.error);
-      return null;
-    }
-    const detailedRuns = Array.isArray(data.by_run_detailed) ? data.by_run_detailed : [];
-    return {
-      rfpId: asString(data.rfp_id, rfpId),
-      title: asString(data.title),
-      totalCostUsd: Number(data.total_cost_usd ?? 0),
-      totalInputTokens: Number(data.total_input_tokens ?? 0),
-      totalOutputTokens: Number(data.total_output_tokens ?? 0),
-      callCount: Number(data.call_count ?? 0),
-      runCount: Number(data.run_count ?? 0),
-      byNode: (Array.isArray(data.by_node) ? data.by_node : []).map((r) =>
-        mapStage(r as Record<string, unknown>)
-      ),
-      byRun: detailedRuns.map((r) => mapRun(r as Record<string, unknown>)),
-    };
-  } catch (error) {
-    console.warn("[llm-cost] rfp breakdown unavailable:", error);
-    return null;
+    return await promise;
+  } finally {
+    inflightRfpCost.delete(key);
   }
 }

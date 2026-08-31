@@ -236,6 +236,21 @@ def apply_zero_fabrication_guards(
         logger.warning("%s fabricated personnel scrub skipped: %s", label, exc)
 
     try:
+        from app.services.evidence_trust.legal_attestation_gate import (
+            apply_legal_attestation_gates,
+        )
+
+        draft, att_report = apply_legal_attestation_gates(
+            draft,
+            rfp_context=rfp_text,
+            evidence_text=_research_evidence_blob(research),
+        )
+        for line in att_report.logs:
+            report.logs.append(f"{label}: attestation — {line}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s legal attestation gate skipped: %s", label, exc)
+
+    try:
         cs_source = _research_evidence_blob(research)
         if cs_source.strip():
             draft, metric_logs = apply_case_study_metric_scrub_to_draft(
@@ -329,6 +344,17 @@ async def apply_zero_fabrication_guards_before_persist(
             report.logs.append(f"{label}: bio stub — {line}")
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s bio designer-note stub skipped: %s", label, exc)
+
+    try:
+        from app.services.evidence_trust.personnel_grounding import (
+            scrub_unverified_personnel_from_draft,
+        )
+
+        draft, roster_logs = await scrub_unverified_personnel_from_draft(draft)
+        for line in roster_logs:
+            report.logs.append(f"{label}: unverified personnel — {line}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s unverified personnel scrub skipped: %s", label, exc)
 
     return draft, report
 

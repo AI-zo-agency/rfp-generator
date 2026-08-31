@@ -13,6 +13,7 @@ client-specific edge cases.
 from __future__ import annotations
 
 import re
+from datetime import date
 from dataclasses import dataclass, field
 
 from app.models.proposal import ProposalDraft, ProposalSection
@@ -174,6 +175,163 @@ _MANUAL_FILL_RFP_OBTAINED = (
     "documents is not the complete solicitation package.]"
 )
 
+_MANUAL_FILL_CONFERENCE_ATTENDANCE = (
+    "[MANUAL FILL: Complete after the mandatory pre-proposal conference — record "
+    "attendee name, sign-in date/time, and attach any required attendance proof. "
+    "Do not certify attendance before the conference occurs.]"
+)
+
+_ATTENDANCE_ASSERTED_RE = re.compile(
+    r"(?is)"
+    r"(?:"
+    r"we\s+attended|our\s+representative\s+was\s+present|signed\s+in\s+with|"
+    r"participated\s+in\s+the\s+full\s+(?:conference|meeting)|"
+    r"was\s+present\s+at\s+the\s+designated"
+    r")"
+)
+
+_CONFERENCE_CONTEXT_RE = re.compile(
+    r"(?is)"
+    r"pre[- ]?proposal|mandatory.{0,40}conference|conference\s+attendance|"
+    r"site\s+visit|pre[- ]?bid\s+meeting|mandatory\s+meeting|"
+    r"pre[- ]?application\s+meeting"
+)
+
+_PENDING_ATTENDEE_FIELD_RE = re.compile(
+    r"(?i)(?:confirm\s+before\s+submit|insert\s+name\s+of).{0,100}"
+    r"(?:representative\s+who\s+attended|attendee\s+of\s+record|attendee)"
+)
+
+_MONTH_NAME_DATE_RE = re.compile(
+    r"\b("
+    + "|".join(
+        (
+            "january",
+            "february",
+            "march",
+            "april",
+            "may",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "november",
+            "december",
+            "jan",
+            "feb",
+            "mar",
+            "apr",
+            "jun",
+            "jul",
+            "aug",
+            "sep",
+            "sept",
+            "oct",
+            "nov",
+            "dec",
+        )
+    )
+    + r")\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(20\d{2})\b",
+    re.I,
+)
+
+_MONTHS_MAP = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "sept": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
+
+def _dates_in_text(text: str) -> list[date]:
+    found: list[date] = []
+    for match in _MONTH_NAME_DATE_RE.finditer(text or ""):
+        month_key = match.group(1).casefold()
+        month = _MONTHS_MAP.get(month_key)
+        if not month:
+            continue
+        try:
+            found.append(date(int(match.group(3)), month, int(match.group(2))))
+        except ValueError:
+            continue
+    return found
+
+
+def _replace_false_conference_attendance(
+    content: str,
+    *,
+    rfp_context: str = "",
+    reference_date: date | None = None,
+) -> tuple[str, int]:
+    """Gate past-tense conference attendance before the event date or with blank fields."""
+    text = content or ""
+    if not text.strip():
+        return text, 0
+    title_blob = text[:400]
+    if not (
+        _ATTENDANCE_ASSERTED_RE.search(text)
+        or (
+            re.search(r"(?is)\battended\b", text)
+            and _CONFERENCE_CONTEXT_RE.search(f"{title_blob}\n{text}")
+        )
+    ):
+        return text, 0
+
+    ref = reference_date or date.today()
+    event_dates = _dates_in_text(text) + _dates_in_text(rfp_context or "")
+    future_event = any(d > ref for d in event_dates)
+    pending_fields = bool(_PENDING_ATTENDEE_FIELD_RE.search(text))
+
+    if not future_event and not pending_fields:
+        return text, 0
+
+    pattern = re.compile(
+        r"(?is)"
+        r"(?:"
+        r"we\s+attended.{0,400}?(?:conference|meeting|proceedings)\b[^.!?\n]{0,200}[.!?]"
+        r"|our\s+representative\s+was\s+present.{0,400}[.!?]"
+        r"|signed\s+in\s+with.{0,200}[.!?]"
+        r"|participated\s+in\s+the\s+full\s+(?:conference|meeting).{0,200}[.!?]"
+        r")"
+    )
+    updated, n = _replace_paragraphs_matching(
+        text,
+        pattern,
+        _MANUAL_FILL_CONFERENCE_ATTENDANCE,
+    )
+    if n:
+        return updated, n
+
+    if future_event or pending_fields:
+        updated, n2 = _replace_paragraphs_matching(
+            text,
+            _ATTENDANCE_ASSERTED_RE,
+            _MANUAL_FILL_CONFERENCE_ATTENDANCE,
+        )
+        return updated, n2
+    return text, 0
+
 
 def rfp_documents_likely_incomplete(rfp_context: str) -> bool:
     """True when the RFP source looks like a notice/ad, not a full solicitation."""
@@ -291,6 +449,7 @@ class LegalAttestationReport:
     percent_time_flags: int = 0
     filler_flags: int = 0
     procurement_flags: int = 0
+    conference_attendance_flags: int = 0
     rno_flags: int = 0
     logs: list[str] = field(default_factory=list)
 
@@ -483,6 +642,16 @@ def gate_section_legal_attestations(
             f"Gated unverified procurement/compliance action in {section.title} → MANUAL FILL"
         )
 
+    content, n = _replace_false_conference_attendance(
+        content,
+        rfp_context=rfp_context,
+    )
+    if n:
+        report.conference_attendance_flags += n
+        report.logs.append(
+            f"Gated false pre-proposal conference attendance in {section.title} → MANUAL FILL"
+        )
+
     content, n = _flag_invented_hours(content)
     if n:
         report.hours_flags += n
@@ -606,6 +775,7 @@ def apply_legal_attestation_gates(
         combined.hours_flags += report.hours_flags
         combined.filler_flags += report.filler_flags
         combined.procurement_flags += report.procurement_flags
+        combined.conference_attendance_flags += report.conference_attendance_flags
         combined.logs.extend(report.logs)
 
     draft = draft.model_copy(update={"sections": updated})

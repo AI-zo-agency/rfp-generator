@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
 from app.models.rfp import RfpRecord
@@ -348,6 +349,256 @@ async def build_rfp_structure_specs(
     return specs, logs
 
 
+# Anchors so Align's "already covered by Sections 1–3" checks fire on an
+# Intelligence outline that does not yet have those tabs (they are drafted
+# in Phase 1, not by the dynamic-section planner).
+_INTELLIGENCE_STATIC_ANCHORS: tuple[tuple[str, str], ...] = (
+    ("section-1-who-we-are", "1.1 — Who We Are"),
+    ("section-1-org-structure", "1.2 — Organizational Structure"),
+    ("section-1-business-info", "1.3 — Business Information"),
+    ("section-1-certifications", "1.4 — Certifications"),
+    ("section-1-insurance", "1.5 — Insurance Information"),
+    ("section-2-team-overview", "2 — Team Overview"),
+    ("section-2-bio-anchor", "Team Bios"),
+    ("section-3-our-work", "3 — Our Work"),
+)
+
+
+def static_company_block_titles() -> list[str]:
+    """Titles Align treats as already-covered company/team/work identity."""
+    return [title for _sid, title in _INTELLIGENCE_STATIC_ANCHORS]
+
+
+def format_rfp_structure_specs_for_planner(specs: list[RfpSectionSpec]) -> str:
+    """Hard list the Align extract produced — planner must emit these tabs."""
+    if not specs:
+        return ""
+    from app.services.proposal_voice_enforcement import is_duplicate_static_rfp_section
+
+    lines = [
+        "REQUIRED SUBMISSION TABS (same extract as Align to RFP outline).",
+        "Emit EXACTLY these tabs, in this order. Copy the buyer's wording.",
+        "Do not rename, drop, or invent a parallel stack. Company/team/experience "
+        "identity is already static Sections 1–3 — do not re-emit those.",
+    ]
+    index = 1
+    for spec in specs:
+        if _spec_is_rfp_title_noise(spec):
+            continue
+        if spec.satisfied_by_static_company_block:
+            continue
+        if is_duplicate_static_rfp_section(spec.rfp_title or ""):
+            continue
+        title = (spec.rfp_title or "").strip()
+        if not title:
+            continue
+        extra = ""
+        if spec.required_headings:
+            extra = " | sub-headings: " + "; ".join(spec.required_headings[:8])
+        weight = f" | {spec.evaluation_weight}" if spec.evaluation_weight else ""
+        lines.append(f"{index}. {title}{weight}{extra}")
+        index += 1
+    if index == 1:
+        return ""
+    return "\n".join(lines)
+
+
+def outline_sections_from_rfp_specs(
+    specs: list[RfpSectionSpec],
+    *,
+    section_factory: Any,
+) -> list[Any]:
+    """Turn Align extract specs into Intelligence outline tabs — no extra LLM."""
+    from app.services.proposal_voice_enforcement import is_duplicate_static_rfp_section
+
+    sections: list[Any] = []
+    order = 1
+    for spec in specs:
+        if _spec_is_rfp_title_noise(spec):
+            continue
+        if spec.satisfied_by_static_company_block:
+            continue
+        if is_duplicate_static_rfp_section(spec.rfp_title or ""):
+            continue
+        title = (spec.rfp_title or "").strip()
+        if not title:
+            continue
+        raw = {
+            "id": f"rfp-structure-{_slug_section_id(title)}",
+            "title": title,
+            "order": order,
+            "required": True,
+            "conditionalReason": (spec.instructions or "")[:240],
+            "parentId": None,
+            "children": list(spec.required_headings or []),
+            "dependencies": [],
+            "evaluationWeight": _parse_spec_weight(spec.evaluation_weight),
+            "protectFromCap": True,
+            "submissionInstrument": None,
+        }
+        sections.append(section_factory(raw) if section_factory is not None else raw)
+        order += 1
+    return sections
+
+
+def _parse_spec_weight(raw: str) -> float | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _outline_section_id(section: Any) -> str:
+    if hasattr(section, "id"):
+        return str(getattr(section, "id") or "")
+    if isinstance(section, dict):
+        return str(section.get("id") or "")
+    return ""
+
+
+def _outline_section_title(section: Any) -> str:
+    if hasattr(section, "title"):
+        return str(getattr(section, "title") or "")
+    if isinstance(section, dict):
+        return str(section.get("title") or "")
+    return ""
+
+
+def _outline_section_children(section: Any) -> list[str]:
+    if hasattr(section, "children"):
+        return list(getattr(section, "children") or [])
+    if isinstance(section, dict):
+        return [str(x) for x in (section.get("children") or []) if str(x).strip()]
+    return []
+
+
+def _copy_outline_section(section: Any, **updates: Any) -> Any:
+    if hasattr(section, "model_copy"):
+        return section.model_copy(update=updates)
+    if isinstance(section, dict):
+        out = dict(section)
+        out.update(updates)
+        return out
+    return section
+
+
+def align_outline_sections_to_rfp_specs(
+    sections: list[Any],
+    specs: list[RfpSectionSpec],
+    *,
+    section_factory: Any,
+) -> tuple[list[Any], list[str]]:
+    """Same stub + reorder + mandated titles as Align to RFP outline, on a plan outline.
+
+    Static 1–3 anchors are used only so company-identity specs do not mint
+    duplicate RFP tabs. They are stripped before the outline is returned.
+    Newly added tabs are protectFromCap so Phase 3 drafts them on generate
+    instead of leaving empty Align stubs for a later button click.
+    """
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    if not specs:
+        return list(sections), []
+
+    original_by_id = {
+        _outline_section_id(section): section
+        for section in sections
+        if _outline_section_id(section)
+    }
+    dynamic = [
+        ProposalSection(
+            id=_outline_section_id(section),
+            title=_outline_section_title(section),
+            source="generated",
+            mode="write",
+            status="outline",
+        )
+        for section in sections
+        if _outline_section_id(section)
+    ]
+    anchors = [
+        ProposalSection(
+            id=section_id,
+            title=title,
+            source="template",
+            mode="pull",
+            status="generated",
+        )
+        for section_id, title in _INTELLIGENCE_STATIC_ANCHORS
+    ]
+    draft = ProposalDraft(
+        rfpId="intelligence-outline",
+        sections=anchors + dynamic,
+        updatedAt=datetime.now(timezone.utc).isoformat(),
+    )
+    draft, stub_logs = ensure_missing_scored_section_stubs(draft, specs)
+    draft, order_logs = order_draft_to_rfp_sequence(draft, specs)
+    draft, relabel_logs = apply_rfp_mandated_section_titles(draft, specs)
+    logs = list(stub_logs) + list(order_logs) + list(relabel_logs)
+
+    out: list[Any] = []
+    seen: set[str] = set()
+    order = 1
+    for proposal_section in draft.sections:
+        if (
+            _is_static_1_3_section(proposal_section)
+            or proposal_section.id == COMPANY_BLOCK_HEADER_ID
+        ):
+            continue
+        section_id = proposal_section.id or ""
+        if not section_id or section_id in seen:
+            continue
+        seen.add(section_id)
+        spec = next(
+            (
+                candidate
+                for candidate in specs
+                if outline_titles_near_duplicate(
+                    candidate.rfp_title, proposal_section.title or ""
+                )
+            ),
+            None,
+        )
+        existing = original_by_id.get(section_id)
+        if existing is not None:
+            updates: dict[str, Any] = {"order": order}
+            if _outline_section_title(existing) != (proposal_section.title or ""):
+                updates["title"] = proposal_section.title
+            if spec and spec.required_headings and not _outline_section_children(existing):
+                updates["children"] = list(spec.required_headings)
+            out.append(_copy_outline_section(existing, **updates))
+        else:
+            raw = {
+                "id": section_id,
+                "title": proposal_section.title,
+                "order": order,
+                "required": True,
+                "conditionalReason": (
+                    (spec.instructions or "")[:240]
+                    if spec
+                    else "Required by this RFP's submission format"
+                ),
+                "parentId": None,
+                "children": list(spec.required_headings) if spec else [],
+                "dependencies": [],
+                "evaluationWeight": _parse_spec_weight(
+                    spec.evaluation_weight if spec else ""
+                ),
+                "protectFromCap": True,
+                "submissionInstrument": None,
+            }
+            out.append(section_factory(raw) if section_factory is not None else raw)
+        order += 1
+    return out, logs
+
+
 def apply_rfp_mandated_section_titles(
     draft: ProposalDraft,
     specs: list[RfpSectionSpec],
@@ -598,7 +849,32 @@ def _titles_are_same_ask(rfp_title: str, section_title: str, aliases: list[str])
 
     if outline_titles_near_duplicate(rfp_title, section_title):
         return True
-    return any(outline_titles_near_duplicate(alias, section_title) for alias in aliases)
+    if any(outline_titles_near_duplicate(alias, section_title) for alias in aliases):
+        return True
+    # Buyer labels for the same offer-letter tab (not a KB evidence synonym table).
+    rfp_cf = (rfp_title or "").casefold()
+    sec_cf = (section_title or "").casefold()
+    if _title_is_cover_letter_family(rfp_cf) and _title_is_cover_letter_family(sec_cf):
+        return True
+    if any(
+        _title_is_cover_letter_family((alias or "").casefold())
+        for alias in aliases
+    ) and _title_is_cover_letter_family(sec_cf):
+        return True
+    return False
+
+
+def _title_is_cover_letter_family(title_cf: str) -> bool:
+    t = (title_cf or "").casefold()
+    if not t:
+        return False
+    if "cover" in t and "letter" in t:
+        return True
+    if "transmittal" in t:
+        return True
+    if "letter" in t and "offer" in t:
+        return True
+    return False
 
 
 def _match_section_for_spec(
@@ -1263,6 +1539,65 @@ def _requirements_for_section(
         if mapped.id == section_id:
             return list(mapped.requirements or [])
     return []
+
+
+async def apply_rfp_section_order_pass(
+    *,
+    draft: ProposalDraft,
+    rfp: RfpRecord,
+    rfp_text: str,
+    research: ProposalResearchCache | None,
+    skip_section_ids: set[str] | None = None,
+    add_missing_mandated_stubs: bool = False,
+    include_missing_submittals: bool = False,
+) -> tuple[ProposalDraft, list[str]]:
+    """Reorder manuscript tabs to the RFP TOC; optionally stub mandated gaps first.
+
+    Closing / ledger / compulsory paths append new tabs at the list tail — this
+    pass is the shared fix so Cover Letter and certification forms land in RFP
+    order, not after References.
+    """
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
+    logs: list[str] = []
+    specs, build_logs = await build_rfp_structure_specs(
+        rfp_text,
+        rfp_title=rfp.title,
+        existing_section_titles=[s.title for s in draft.sections if s.title],
+        include_missing_submittals=include_missing_submittals or add_missing_mandated_stubs,
+    )
+    logs.extend(build_logs)
+    if not specs:
+        logs.append("RFP order pass: no section specs extracted — layout skipped.")
+        return draft, logs
+
+    criterion_specs = specs_from_scored_criteria(research)
+    if criterion_specs:
+        known = [s.rfp_title for s in specs]
+        added = [
+            spec
+            for spec in criterion_specs
+            if not any(
+                outline_titles_near_duplicate(spec.rfp_title, title) for title in known
+            )
+        ]
+        if added:
+            specs = merge_specs_submission_format_first(specs, added)
+            logs.append(
+                f"RFP order pass: +{len(added)} scored criterion spec(s) from ledger"
+            )
+
+    if add_missing_mandated_stubs:
+        draft, stub_logs = ensure_missing_scored_section_stubs(
+            draft,
+            specs,
+            skip_section_ids=skip_section_ids or set(),
+        )
+        logs.extend(stub_logs)
+
+    draft, layout_logs = apply_rfp_toc_layout(draft, specs)
+    logs.extend(layout_logs)
+    return draft, logs
 
 
 async def run_rfp_structure_alignment_pass(

@@ -166,7 +166,25 @@ def draft_already_covers_component(
     draft: ProposalDraft | None = None,
 ) -> bool:
     """True when the manuscript already has a tab for this ledger component."""
-    if component.section_id in draft_section_ids:
+    if component.section_id in draft_section_ids and draft is not None:
+        by_id = {s.id: s for s in draft.sections}
+        direct = by_id.get(component.section_id)
+        if direct is not None:
+            from app.services.proposal_draft_structure_stubs import (
+                cover_letter_lacks_letter_body,
+                is_cover_letter_section_title,
+            )
+
+            component_blob = f"{component.title} {component.match_hint}".casefold()
+            is_cover_ask = any(
+                tok in component_blob
+                for tok in ("cover letter", "transmittal", "letter of offer")
+            )
+            if is_cover_ask or is_cover_letter_section_title(direct.title or ""):
+                if cover_letter_lacks_letter_body(direct.content or ""):
+                    return False
+            return True
+    elif component.section_id in draft_section_ids:
         return True
     if draft is not None:
         kind = component.kind if component.kind in {
@@ -180,7 +198,22 @@ def draft_already_covers_component(
             sectionId=component.section_id,
             draftInstructions=component.draft_instructions,
         )
-        return find_covering_section(draft, req) is not None
+        covering = find_covering_section(draft, req)
+        if covering is None:
+            return False
+        from app.services.proposal_draft_structure_stubs import (
+            cover_letter_lacks_letter_body,
+            is_cover_letter_section_title,
+        )
+
+        component_blob = f"{component.title} {component.match_hint}".casefold()
+        is_cover_ask = any(
+            tok in component_blob for tok in ("cover letter", "transmittal", "letter of offer")
+        )
+        if is_cover_ask or is_cover_letter_section_title(covering.title or ""):
+            if cover_letter_lacks_letter_body(covering.content or ""):
+                return False
+        return True
     from app.services.proposal_closing_ledger import _tokens
 
     needles = _tokens(component.title) | _tokens(component.match_hint) | _tokens(

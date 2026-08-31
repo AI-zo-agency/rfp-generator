@@ -132,7 +132,7 @@ def strip_verify_tags_not_required_by_rfp(
     text yet for locked/critical categories). Never invents replacements.
     """
     body = content or ""
-    if not VERIFY_TAG_RE.search(body) and not re.search(r"\[VERIFY\]", body or "", re.I):
+    if not VERIFY_TAG_RE.search(body):
         from app.services.proposal_manual_flags import repair_orphan_verify_leftovers
 
         cleaned, orphan_n = repair_orphan_verify_leftovers(body)
@@ -169,12 +169,9 @@ def strip_verify_tags_not_required_by_rfp(
         removed += 1
         return ""
 
+    # Bare [VERIFY] carries no ask (`ask` is "") so _repl's own "not ask" branch
+    # above already drops it in this same pass — no separate bare-tag pass needed.
     out = VERIFY_TAG_RE.sub(_repl, body)
-    # Bare [VERIFY] with no ask is never actionable — drop.
-    bare_n = len(re.findall(r"\[VERIFY\]", out, flags=re.I))
-    if bare_n:
-        out = re.sub(r"\[VERIFY\]", "", out, flags=re.I)
-        removed += bare_n
     # If a prior note had ] inside the ask, VERIFY_TAG_RE only ate the prefix —
     # strip the leftover ``… RFP requires: …]`` gibberish so it never ships.
     from app.services.proposal_manual_flags import repair_orphan_verify_leftovers
@@ -247,9 +244,7 @@ class VerifyOptionalScrubResult:
 
 
 def count_verify_tags(text: str) -> int:
-    return len(VERIFY_TAG_RE.findall(text or "")) + len(
-        re.findall(r"\[VERIFY\]", text or "", flags=re.I)
-    )
+    return len(VERIFY_TAG_RE.findall(text or ""))
 
 
 def count_manual_fill_tags(text: str) -> int:

@@ -24,6 +24,7 @@ PIPELINE_PHASES: tuple[str, ...] = (
     "phase-3-5-budget",
     "phase-3-6-self-edit",
     "phase-4-review",
+    "build-finalize",
 )
 
 PHASE_LABELS: dict[str, str] = {
@@ -33,6 +34,7 @@ PHASE_LABELS: dict[str, str] = {
     "phase-3-6-self-edit": "Senior editor polish",
     "phase-3-5-budget": "Budget build",
     "phase-4-review": "Pre-submit review",
+    "build-finalize": "Final checks",
     "fulfill-scan": "Complete & clean draft",
     "align-rfp-outline": "Align to RFP outline",
     "complete": "Complete",
@@ -280,7 +282,10 @@ async def record_pipeline_activity(
     """Update live sub-step text while a phase runs (polled by the UI)."""
     research = await _ensure_research(rfp_id)
     cp = research.pipeline_checkpoint
-    resume_step = step_index if (in_progress_phase or (cp.in_progress_phase if cp else None)) == "fulfill-scan" else None
+    resume_step = step_index if (
+        (in_progress_phase or (cp.in_progress_phase if cp else None))
+        in ("fulfill-scan", "build-finalize")
+    ) else None
     last_done = (step_index - 1) if resume_step and step_index and step_index > 1 else None
     if cp is None:
         cp = ProposalPipelineCheckpoint(
@@ -318,7 +323,7 @@ def fulfill_resume_step(research: ProposalResearchCache | None) -> int:
     cp = research.pipeline_checkpoint
     for raw in (
         cp.resume_fulfill_step,
-        cp.step_index if cp.in_progress_phase == "fulfill-scan" else None,
+        cp.step_index if cp.in_progress_phase in ("fulfill-scan", "build-finalize") else None,
         (cp.last_completed_fulfill_step + 1) if cp.last_completed_fulfill_step else None,
     ):
         if raw is None:
@@ -345,7 +350,9 @@ async def complete_fulfill_scan(rfp_id: str, *, scan_hash: str | None = None) ->
     cp = research.pipeline_checkpoint
     updates: dict[str, object] = {
         "in_progress_phase": (
-            None if cp.in_progress_phase == "fulfill-scan" else cp.in_progress_phase
+            None
+            if cp.in_progress_phase in ("fulfill-scan", "build-finalize")
+            else cp.in_progress_phase
         ),
         "activity_label": None,
         "activity_detail": None,
@@ -404,12 +411,12 @@ def fulfill_scan_is_already_clean(
 
 
 async def clear_fulfill_scan_activity(rfp_id: str) -> None:
-    """Clear live Scan RFP spinner without dropping a stop/resume pointer."""
+    """Clear live Scan RFP / final-checks spinner without dropping a stop/resume pointer."""
     research = await aget_research_cache(rfp_id)
     if not research or not research.pipeline_checkpoint:
         return
     cp = research.pipeline_checkpoint
-    if cp.in_progress_phase != "fulfill-scan":
+    if cp.in_progress_phase not in ("fulfill-scan", "build-finalize"):
         return
     if cp.resume_fulfill_step:
         await _save_checkpoint(
@@ -835,6 +842,9 @@ def phase_is_complete(
         # Stale pre-submit reviews (e.g. from a prior day) must not mark the
         # pipeline complete while checkpoint still points at phase-4.
         return _checkpoint_reached_phase(research, "phase-4-review")
+
+    if phase == "build-finalize":
+        return _checkpoint_reached_phase(research, "build-finalize")
 
     return False
 

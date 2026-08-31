@@ -1,5 +1,48 @@
 import { describe, expect, it } from "vitest";
-import { shouldSkipCompletedPhase } from "./proposal-pipeline-checkpoint";
+import {
+  isBuildPipelineComplete,
+  shouldSkipCompletedPhase,
+} from "./proposal-pipeline-checkpoint";
+
+describe("isBuildPipelineComplete", () => {
+  it("is true when build-finalize is in completedPhases", () => {
+    expect(
+      isBuildPipelineComplete(
+        {
+          resumeFromPhase: "complete",
+          completedPhases: ["build-finalize"],
+          isComplete: true,
+          canResume: false,
+          phaseLabels: {},
+        },
+        null
+      )
+    ).toBe(true);
+  });
+
+  it("is true when checkpoint lastCompletedPhase is build-finalize", () => {
+    expect(
+      isBuildPipelineComplete(null, {
+        pipelineCheckpoint: { lastCompletedPhase: "build-finalize" },
+      } as import("@/types/proposal").ProposalResearch)
+    ).toBe(true);
+  });
+
+  it("is false before final checks", () => {
+    expect(
+      isBuildPipelineComplete(
+        {
+          resumeFromPhase: "phase-4-review",
+          completedPhases: ["phase-4-review"],
+          isComplete: false,
+          canResume: true,
+          phaseLabels: {},
+        },
+        null
+      )
+    ).toBe(false);
+  });
+});
 
 describe("shouldSkipCompletedPhase", () => {
   it("does not skip later phases after this click re-ran Intelligence", () => {

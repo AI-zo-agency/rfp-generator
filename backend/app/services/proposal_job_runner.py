@@ -42,6 +42,40 @@ _REDIS_LOCK_TTL_SEC = 3600  # matches celery_app.py's task_time_limit
 # hard task_time_limit (+ margin) it cannot still be running, so a "STARTED"
 # task older than this is a zombie whose lock must be freed, not a live job.
 _ZOMBIE_STARTED_SEC = 3600 + 300
+# Celery AsyncResult.state is a sync broker round-trip — cap it so GET proposal
+# and job-status never block the event loop for tens of seconds when Redis is slow.
+_CELERY_STATE_TIMEOUT_SEC = 2.0
+
+
+async def _celery_task_meta(task_id: str) -> tuple[str | None, Any | None, Any | None]:
+    """Return Celery (state, result, date_done); all None when the broker check times out."""
+    from celery.result import AsyncResult
+
+    from app.celery_app import celery_app
+
+    def _read() -> tuple[str, Any, Any]:
+        ar = AsyncResult(task_id, app=celery_app)
+        return ar.state, ar.result, getattr(ar, "date_done", None)
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_read),
+            timeout=_CELERY_STATE_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Celery state check timed out after %.1fs (task_id=%s)",
+            _CELERY_STATE_TIMEOUT_SEC,
+            task_id[:16],
+        )
+        return None, None, None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Celery state check failed (task_id=%s): %s",
+            task_id[:16],
+            str(exc)[:200],
+        )
+        return None, None, None
 
 
 def _iso_age_sec(iso: str | None) -> float | None:
@@ -100,12 +134,11 @@ async def _redis_get_job(rfp_id: str, lock_key: str) -> ProposalJobRecord | None
     if not task_id:
         return record
 
-    from celery.result import AsyncResult
-
-    from app.celery_app import celery_app
-
-    result = AsyncResult(task_id, app=celery_app)
-    state = result.state
+    state, task_result, date_done = await _celery_task_meta(task_id)
+    if state is None:
+        # Broker slow/unreachable — assume still running so we don't free a live lock.
+        record.status = "running"
+        return record
     if state == "PENDING":
         # Dispatched but no worker slot free yet (task_track_started=True in
         # celery_app.py means a picked-up task moves to STARTED, not PENDING).
@@ -129,9 +162,8 @@ async def _redis_get_job(rfp_id: str, lock_key: str) -> ProposalJobRecord | None
         record.status = "cancelled"
     else:  # FAILURE and anything unexpected
         record.status = "failed"
-        record.error = str(result.result)[:2000] if result.result else state
+        record.error = str(task_result)[:2000] if task_result else state
 
-    date_done = getattr(result, "date_done", None)
     if date_done is not None:
         record.finished_at = date_done.isoformat()
     return record

@@ -39,6 +39,7 @@ from app.services.proposal_draft_llm import (
 )
 from app.services.proposal_langchain import _provider_name
 from app.services.proposal_ralph import inject_ralph_into_system_prompt
+from app.services.proposal_generation_cancel import ProposalGenerationCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,8 @@ async def _draft_sections_parallel(
                 provider = batch_provider
                 if batch_results:
                     results_by_index[index] = batch_results[0]
+            except ProposalGenerationCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Phase 3 parallel section failed for %s (%s): %s",

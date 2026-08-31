@@ -91,6 +91,48 @@ class TestReferenceIntegrity(unittest.TestCase):
         self.assertIn("Reference 1:", out)
         self.assertTrue(any("Dropped" in line for line in logs))
 
+    def test_preserves_past_performance_narrative_when_contacts_incomplete(self) -> None:
+        body = (
+            "## 28. References and Past Performance\n\n"
+            "Pasadena City College requires three client references with direct contact "
+            "information. Zö agency has delivered brand strategy, digital campaigns, and "
+            "community college outreach for public-sector clients across Oregon and California. "
+            "Representative projects include workforce marketing, enrollment campaigns, and "
+            "integrated media for municipal and education clients.\n\n"
+            "Reference 1: Oregon Employment Department\n"
+            "Contact: [VERIFY: contact name and title]\n"
+            "Phone: [VERIFY: phone number]\n"
+            "Email: [VERIFY: email address]\n\n"
+            "## 29. Interviews (at the discretion of the District)\n\n"
+            "Oral Interview Preparation: Zö agency will prepare leadership for oral interviews."
+        )
+        out, logs = drop_incomplete_reference_entries(body)
+        self.assertIn("Pasadena City College requires three client references", out)
+        self.assertIn("Oral Interview Preparation", out)
+        self.assertNotIn("[VERIFY: phone number]", out)
+        self.assertIn("MANUAL FILL", out)
+        self.assertTrue(
+            any("narrative" in line.casefold() for line in logs)
+            or any("Dropped" in line for line in logs)
+        )
+
+    def test_scrubs_note_to_sonja_and_hollow_pipe_rows(self) -> None:
+        body = (
+            "Pasadena City College requires three client references.\n\n"
+            "| # | Contact Name | Title | Organization | Phone | Email |\n"
+            "| --- | --- | --- | --- | --- | --- |\n"
+            "| 1 | | | City of Bend | | |\n"
+            "> Note to Sonja: The knowledge base confirms active engagements but "
+            "no verified contact names appear in the uploaded evidence files.\n"
+        )
+        out, logs = apply_reference_content_scrubs(body)
+        self.assertIn("City of Bend", out)
+        self.assertIn("Contact Name", out)
+        self.assertNotIn("Note to Sonja", out)
+        self.assertIn("[MANUAL FILL", out)
+        self.assertNotIn("\n- City of Bend", out)
+        self.assertTrue(logs)
+
     def test_collapses_duplicate_sonja_exhibit_k_lines(self) -> None:
         body = (
             "Sonja Anderson, Agency Director, zö agency, (541) 350-2778, connect@zo.agency\n"

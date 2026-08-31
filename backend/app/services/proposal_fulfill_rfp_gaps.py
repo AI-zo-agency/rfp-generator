@@ -519,7 +519,14 @@ async def run_fulfill_rfp_gaps(
                 "scrub",
             }:
                 return await run_verify_scrub_only_scan(rfp_id)
-            return await _run_fulfill_rfp_gaps_body(rfp_id, use_llm=use_llm)
+            scan_profile = (
+                "build_finalize"
+                if (mode or "").strip().lower() == "build_finalize"
+                else "full"
+            )
+            return await _run_fulfill_rfp_gaps_body(
+                rfp_id, use_llm=use_llm, scan_profile=scan_profile
+            )
     except ProposalGenerationCancelled:
         cancelled = True
         await record_generation_stopped(rfp_id, "fulfill-scan")
@@ -530,10 +537,20 @@ async def run_fulfill_rfp_gaps(
             await clear_fulfill_scan_activity(rfp_id)
 
 
+async def run_build_finalize_pass(rfp_id: str, **kwargs: Any) -> None:
+    """Tail of Build My Proposal — selected Complete Scan steps after Generate."""
+    await run_fulfill_rfp_gaps(
+        rfp_id,
+        use_llm=bool(kwargs.get("use_llm", True)),
+        mode="build_finalize",
+    )
+
+
 async def _run_fulfill_rfp_gaps_body(
     rfp_id: str,
     *,
     use_llm: bool = True,
+    scan_profile: str = "full",
 ) -> tuple[PreSubmitReview, ProposalResearchCache, ProposalDraft, dict[str, Any]]:
     rfp, content, _rfp_text_truncated = await aload_rfp_for_proposal(rfp_id)
     # Full PDF extract for Scan (proposal drafting uses a 50k priority excerpt in context).
@@ -581,8 +598,54 @@ async def _run_fulfill_rfp_gaps_body(
 
     resume_at = fulfill_resume_step(research)
     scan_hash = compute_fulfill_scan_hash(draft, rfp_text)
+
+    def _finalize_still_needs_work() -> bool:
+        """Do not no-op Final checks while checklist tabs are still hollow."""
+        from app.services.proposal_draft_structure_stubs import section_needs_presubmit_fill
+
+        if any(section_needs_presubmit_fill(s) for s in draft.sections):
+            return True
+        if research and research.presubmit_review is not None:
+            if not research.presubmit_review.ready_to_submit:
+                return True
+            open_issues = [
+                i
+                for i in (research.presubmit_review.issues or [])
+                if str(getattr(i, "severity", "") or "").casefold()
+                in ("critical", "high", "blocker")
+            ]
+            if open_issues:
+                return True
+        return False
+
+    skip_fulfill_steps: frozenset[int] = frozenset()
+    scan_in_progress_phase = "fulfill-scan"
+    if scan_profile == "build_finalize":
+        from app.core.config import settings as app_settings
+
+        if app_settings.build_finalize_lean:
+            # Lean tail: ledger + KB fact-check + readiness — still remove duplicate
+            # tabs (step 5) but skip heavy VERIFY scrub, line grounding, Ralph, etc.
+            # Step 12 (LLM manuscript contradiction check) stays IN even in lean
+            # mode — this is the buyer-facing final pass, so unhedged legal
+            # certifications, leaked internal notes, and self-contradicting facts
+            # must not ship just because the lean tail is optimizing for speed.
+            skip_fulfill_steps = frozenset({1, 2, 6, 13, 14, 15, 16})
+        else:
+            skip_fulfill_steps = frozenset({1, 2, 6})
+        scan_in_progress_phase = "build-finalize"
+        # Never inherit a paused Review & fix resume pointer — only resume
+        # final-checks when that same job was interrupted.
+        cp = research.pipeline_checkpoint if research else None
+        if not cp or (
+            cp.in_progress_phase != "build-finalize"
+            and cp.last_failed_phase != "build-finalize"
+        ):
+            resume_at = 1
+
     if (
-        fulfill_scan_is_already_clean(
+        scan_profile != "build_finalize"
+        and fulfill_scan_is_already_clean(
             research=research, resume_at=resume_at, current_hash=scan_hash
         )
         and research is not None
@@ -596,7 +659,23 @@ async def _run_fulfill_rfp_gaps_body(
         )
         return research.presubmit_review, research, draft, dict(draft.last_fulfill_report)
 
-    if resume_at <= 1:
+    if scan_profile == "build_finalize" and fulfill_scan_is_already_clean(
+        research=research, resume_at=resume_at, current_hash=scan_hash
+    ) and not _finalize_still_needs_work():
+        logger.info(
+            "Build finalize %s: draft unchanged since last final checks — skipping tail",
+            rfp_id,
+        )
+        from app.services.proposal_pipeline_checkpoint import record_phase_completed
+
+        await record_phase_completed(rfp_id, "build-finalize")
+        return research.presubmit_review, research, draft, dict(draft.last_fulfill_report or {})
+
+    if scan_profile == "build_finalize":
+        if resume_at <= 3:
+            draft = push_proposal_snapshot(draft, label="Before final checks")
+            await asave_proposal_draft(draft)
+    elif resume_at <= 1:
         draft = push_proposal_snapshot(draft, label="Before Scan RFP")
         await asave_proposal_draft(draft)
     else:
@@ -687,8 +766,84 @@ async def _run_fulfill_rfp_gaps_body(
         report["logs"].append(f"Resume: skipped '{label}' (already saved).")
         logger.info("Scan RFP %s resume skip step %s (%s)", rfp_id, step, label)
 
+    async def _reorder_draft_to_rfp_toc(
+        *,
+        reason: str,
+        add_missing_mandated_stubs: bool = False,
+    ) -> None:
+        nonlocal draft
+        from app.services.proposal_fulfill_rfp_structure import apply_rfp_section_order_pass
+
+        try:
+            preserved = fulfill_scan_preserve_bio_and_case_study_ids(draft)
+            draft, order_logs = await apply_rfp_section_order_pass(
+                draft=draft,
+                rfp=rfp,
+                rfp_text=rfp_text,
+                research=research,
+                skip_section_ids=preserved,
+                add_missing_mandated_stubs=add_missing_mandated_stubs,
+                include_missing_submittals=add_missing_mandated_stubs,
+            )
+            if order_logs:
+                report["logs"].extend(order_logs)
+                report.setdefault("structureScan", []).extend(order_logs)
+                await asave_proposal_draft(draft)
+                report["logs"].append(
+                    f"RFP order pass ({reason}): tabs sorted to buyer TOC sequence."
+                )
+        except ProposalGenerationCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("RFP section reorder failed (%s): %s", reason, exc)
+            report["logs"].append(f"RFP section reorder skipped ({reason}): {exc}")
+
+    async def _finalize_fill_incomplete_tabs() -> None:
+        nonlocal draft
+        if scan_profile != "build_finalize" or not use_llm or not _finalize_still_needs_work():
+            return
+        from app.services.proposal_draft_structure_stubs import (
+            draft_rfp_structure_stubs,
+            section_needs_presubmit_fill,
+        )
+
+        unfilled = [
+            s.title or s.id
+            for s in draft.sections
+            if section_needs_presubmit_fill(s)
+        ]
+        if not unfilled:
+            return
+        await record_pipeline_activity(
+            rfp_id,
+            label="Final checks: draft incomplete tabs",
+            detail=(
+                "Up to 8 tabs — "
+                + ", ".join(unfilled[:6])
+                + ("…" if len(unfilled) > 6 else "")
+            ),
+            step_index=0,
+            step_total=len(FULFILL_STEPS),
+            in_progress_phase="build-finalize",
+        )
+        draft, stub_logs = await draft_rfp_structure_stubs(
+            draft,
+            rfp_id=rfp_id,
+            rfp=rfp,
+            max_sections=8,
+        )
+        if stub_logs:
+            report["logs"].extend(
+                [f"Final checks stub fill: {line}" for line in stub_logs[:12]]
+            )
+            await asave_proposal_draft(draft)
+
+    await _finalize_fill_incomplete_tabs()
+
     async def _scan_progress(step: int, label: str, detail: str | None = None) -> None:
         nonlocal draft
+        if step in skip_fulfill_steps:
+            raise FulfillStepSkip(step)
         # Never skip the final stages — they produce the ending report and
         # designer-ready verification (hollow fill from past won proposals).
         if step < resume_at and step < _FINAL_ALWAYS_RUN_FROM:
@@ -707,7 +862,7 @@ async def _run_fulfill_rfp_gaps_body(
             detail=detail,
             step_index=step,
             step_total=len(FULFILL_STEPS),
-            in_progress_phase="fulfill-scan",
+            in_progress_phase=scan_in_progress_phase,
         )
         draft = draft.model_copy(
             update={
@@ -843,6 +998,9 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Closing & submission skipped: %s", exc)
         report["logs"].append(f"Closing & submission skipped: {exc}")
 
+    if 2 not in skip_fulfill_steps:
+        await _reorder_draft_to_rfp_toc(reason="after closing & submission")
+
     if use_llm:
         try:
             from app.services.proposal_draft_structure_stubs import (
@@ -917,59 +1075,77 @@ async def _run_fulfill_rfp_gaps_body(
     try:
         from app.services.proposal_scan_fact_repairs import run_scan_fact_repairs
 
-        await _scan_progress(
-            2,
-            "Scan RFP: fact repairs",
-            "Attach 04_Bio PDFs via designer note; scrub false vendor-registration / insurance "
-            "Compliant certifications; fill only tabs with missing answers from past won proposals.",
-        )
-        await _ensure_not_stopped()
-        draft, fact_logs = await run_scan_fact_repairs(
-            draft,
-            research=research,
-            rfp_text=rfp_text,
-            rfp_title=rfp.title or "",
-            rfp_client=rfp.client or "",
-            rfp_sector=getattr(rfp, "sector", None) or "",
-            rfp_id=rfp_id,
-        )
-        report["logs"].extend(fact_logs)
-        for line in fact_logs:
-            if line.startswith("HUMAN_GAP:"):
-                gap = line.split("HUMAN_GAP:", 1)[1].strip()
-                if gap and gap not in report["humanDecisionGaps"]:
-                    report["humanDecisionGaps"].append(gap)
-        if fact_logs:
-            await asave_proposal_draft(draft)
-        report["factRepairs"] = fact_logs[:24]
-        compliance_hits = [
-            line
-            for line in fact_logs
-            if any(
-                token in line.casefold()
-                for token in (
-                    "vendor-registration",
-                    "complete-rfp-reviewed",
-                    "bio role",
-                    "invented bio vertical",
-                    "insurance carrier",
-                    "registration confirmation",
-                    "compliant",
-                    "meets or exceeds insurance",
-                    "manual fill: sonja",
-                    "human_gap",
+        fact_repairs_skipped = 2 in skip_fulfill_steps
+        if not fact_repairs_skipped:
+            await _scan_progress(
+                2,
+                "Scan RFP: fact repairs",
+                "Attach 04_Bio PDFs via designer note; scrub false vendor-registration / insurance "
+                "Compliant certifications; fill only tabs with missing answers from past won proposals.",
+            )
+        elif scan_profile == "build_finalize":
+            # Lean Final checks skips closing (step 2) but must still run the same
+            # anti-fabrication fact-repair pass Complete Scan used — bios, compliance,
+            # vendor-registration gates — not only the lighter zero-fabrication tail.
+            await record_pipeline_activity(
+                rfp_id,
+                label="Final checks: fact repairs",
+                detail=(
+                    "Bio grounding, compliance fabrication guard, vendor-registration / "
+                    "insurance gates — same repairs as Complete Scan step 2."
+                ),
+                step_index=2,
+                step_total=len(FULFILL_STEPS),
+                in_progress_phase="build-finalize",
+            )
+        if not fact_repairs_skipped or scan_profile == "build_finalize":
+            await _ensure_not_stopped()
+            draft, fact_logs = await run_scan_fact_repairs(
+                draft,
+                research=research,
+                rfp_text=rfp_text,
+                rfp_title=rfp.title or "",
+                rfp_client=rfp.client or "",
+                rfp_sector=getattr(rfp, "sector", None) or "",
+                rfp_id=rfp_id,
+            )
+            report["logs"].extend(fact_logs)
+            for line in fact_logs:
+                if line.startswith("HUMAN_GAP:"):
+                    gap = line.split("HUMAN_GAP:", 1)[1].strip()
+                    if gap and gap not in report["humanDecisionGaps"]:
+                        report["humanDecisionGaps"].append(gap)
+            if fact_logs:
+                await asave_proposal_draft(draft)
+            report["factRepairs"] = fact_logs[:24]
+            compliance_hits = [
+                line
+                for line in fact_logs
+                if any(
+                    token in line.casefold()
+                    for token in (
+                        "vendor-registration",
+                        "complete-rfp-reviewed",
+                        "bio role",
+                        "invented bio vertical",
+                        "insurance carrier",
+                        "registration confirmation",
+                        "compliant",
+                        "meets or exceeds insurance",
+                        "manual fill: sonja",
+                        "human_gap",
+                    )
                 )
-            )
-        ]
-        if compliance_hits:
-            report["complianceFabricationRepairs"] = compliance_hits[:16]
-            report["humanDecisionGaps"].append(
-                "Fabricated compliance actions detected (vendor registration / complete RFP "
-                "review / bio role mismatch / unverified carrier) — repaired to MANUAL FILL "
-                "or VERIFY; Sonja must confirm before submission."
-            )
-        if fact_logs:
-            await asave_proposal_draft(draft)
+            ]
+            if compliance_hits:
+                report["complianceFabricationRepairs"] = compliance_hits[:16]
+                report["humanDecisionGaps"].append(
+                    "Fabricated compliance actions detected (vendor registration / complete RFP "
+                    "review / bio role mismatch / unverified carrier) — repaired to MANUAL FILL "
+                    "or VERIFY; Sonja must confirm before submission."
+                )
+            if fact_logs:
+                await asave_proposal_draft(draft)
     except ProposalGenerationCancelled:
         raise
     except FulfillStepSkip as skip:
@@ -1057,6 +1233,12 @@ async def _run_fulfill_rfp_gaps_body(
             run_scan_coverage_orchestrator,
         )
 
+        if scan_profile == "build_finalize" and resume_at <= 3:
+            await _reorder_draft_to_rfp_toc(
+                reason="build-finalize mandated submission tabs",
+                add_missing_mandated_stubs=True,
+            )
+
         await _scan_progress(
             3,
             "Scan RFP: coverage orchestrator",
@@ -1142,6 +1324,8 @@ async def _run_fulfill_rfp_gaps_body(
         logger.warning("Coverage orchestrator / DQ gate during Scan RFP skipped: %s", exc)
         report["logs"].append(f"Coverage orchestrator / DQ gate skipped: {exc}")
 
+    await _reorder_draft_to_rfp_toc(reason="after ledger ADD / compulsory gaps")
+
     try:
         from app.services.proposal_section_dedup import dedupe_manuscript_for_scan
 
@@ -1153,7 +1337,7 @@ async def _run_fulfill_rfp_gaps_body(
         await _ensure_not_stopped()
         sections, dedupe_logs = dedupe_manuscript_for_scan(
             list(draft.sections),
-            drop_clone_tabs=False,
+            drop_clone_tabs=(scan_profile == "build_finalize"),
         )
         if dedupe_logs:
             draft = draft.model_copy(
@@ -1196,6 +1380,8 @@ async def _run_fulfill_rfp_gaps_body(
                 )
                 await asave_proposal_draft(draft)
                 report["logs"].extend(form_logs[:8])
+        except ProposalGenerationCancelled:
+            raise
         except Exception as form_exc:  # noqa: BLE001
             logger.warning("Active Client List form-slot fill after dedupe skipped: %s", form_exc)
             report["logs"].append(f"Form-slot Active Client List fill skipped: {form_exc}")
@@ -1393,6 +1579,8 @@ async def _run_fulfill_rfp_gaps_body(
             report["logs"].extend(qc_logs)
             if qc_logs:
                 report["agenticQcRepairs"] = qc_logs[:12]
+        except ProposalGenerationCancelled:
+            raise
         except Exception as qc_exc:  # noqa: BLE001
             logger.warning("Agentic manuscript QC skipped: %s", qc_exc)
             report["logs"].append(f"Agentic QC skipped: {qc_exc}")
@@ -1939,6 +2127,8 @@ async def _run_fulfill_rfp_gaps_body(
             )
             await asave_proposal_draft(draft)
             report["logs"].extend(orphan_logs[:12])
+    except ProposalGenerationCancelled:
+        raise
     except Exception as orphan_exc:  # noqa: BLE001
         logger.warning("Orphan VERIFY leftover repair skipped: %s", orphan_exc)
         report["logs"].append(f"Orphan VERIFY leftover repair skipped: {orphan_exc}")
@@ -1958,6 +2148,8 @@ async def _run_fulfill_rfp_gaps_body(
             )
             await asave_proposal_draft(draft)
             report["logs"].extend(board_logs[:8])
+    except ProposalGenerationCancelled:
+        raise
     except Exception as board_exc:  # noqa: BLE001
         logger.warning("Board-roster VERIFY insert during Scan skipped: %s", board_exc)
         report["logs"].append(f"Board-roster VERIFY insert skipped: {board_exc}")
@@ -2166,15 +2358,18 @@ async def _run_fulfill_rfp_gaps_body(
         draft, orphan_logs = repair_orphan_verify_leftovers_in_draft(draft)
         if orphan_logs:
             report["logs"].extend(orphan_logs[:8])
-        draft, ptr_logs = apply_pointer_page_integrity_to_draft(draft)
-        if ptr_logs:
-            report["logs"].extend(ptr_logs[:12])
+        if scan_profile != "build_finalize":
+            draft, ptr_logs = apply_pointer_page_integrity_to_draft(draft)
+            if ptr_logs:
+                report["logs"].extend(ptr_logs[:12])
         draft, board_logs = insert_all_board_roster_verify_flags(draft)
         if board_logs:
             report["logs"].extend(board_logs[:8])
         draft, polish_logs = apply_designer_ready_markup_polish_to_draft(draft)
         if polish_logs:
             report["logs"].extend(polish_logs[:8])
+    except ProposalGenerationCancelled:
+        raise
     except Exception as form_exc:  # noqa: BLE001
         logger.warning("Pre-final form-slot fill skipped: %s", form_exc)
 
@@ -2195,6 +2390,8 @@ async def _run_fulfill_rfp_gaps_body(
             report["logs"].append(
                 f"Final zero-fabrication pass: {len(zf_final.logs)} guard action(s)"
             )
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("Scan final zero-fabrication pass skipped: %s", exc)
         report["logs"].append(f"Final zero-fabrication pass skipped: {exc}")
@@ -2239,6 +2436,77 @@ async def _run_fulfill_rfp_gaps_body(
                 report["pageLimitNotes"] = hard_fit[:6]
     except Exception as ralph_exc:  # noqa: BLE001
         logger.warning("Scan pre-readiness page-limit reassert skipped: %s", ralph_exc)
+
+    # A section can reach this scan still holding a Phase 3 draft-failure stub
+    # (transient provider outage during the original build) — Complete Scan is
+    # the buyer-facing "make it right" pass, so it must not leave that section
+    # empty. Reuse the same evidence-grounded single-section redraft chat uses
+    # to recover a dead section: it refuses to fabricate when the KB has no
+    # evidence, same as everywhere else in this file.
+    try:
+        from app.services.proposal_section_health import is_dead_section
+        from app.services.proposal_self_edit_loop import (
+            _redraft_section_via_phase3_isolated,
+        )
+
+        # is_dead_section (not is_failed_draft_stub) — this is a batch pass, not
+        # chat, so the "don't hijack an ambiguous chat 'write it' request" reason
+        # for excluding a genuinely blank section from the chat-only helper does
+        # not apply here. A blank section deserves the same recovery attempt as
+        # a failure stub. A bio/case-study PDF designer-note stub is untouched
+        # either way — classify_section_health does not treat DESIGNER NOTE tags
+        # as a placeholder marker, so it never reads as "dead".
+        dead_sections = [s for s in draft.sections if is_dead_section(s.content)]
+        for dead in dead_sections:
+            await _ensure_not_stopped()
+            draft, research, changed, detail = await _redraft_section_via_phase3_isolated(
+                rfp_id=rfp.id,
+                section_id=dead.id,
+                rewrite_brief="",
+                rfp=rfp,
+                draft=draft,
+                research=research,
+            )
+            if changed:
+                await asave_proposal_draft(draft)
+                report["logs"].append(
+                    f"{dead.title or dead.id}: recovered draft-failure stub via Phase 3 redraft"
+                )
+            else:
+                report["logs"].append(
+                    f"{dead.title or dead.id}: still no usable draft ({detail}) — "
+                    "left flagged for manual input, not fabricated"
+                )
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as dead_exc:  # noqa: BLE001
+        logger.warning("Scan dead-section recovery skipped: %s", dead_exc)
+        report["logs"].append(f"Scan dead-section recovery skipped: {dead_exc}")
+
+    # Submission polish (grammar/pronoun/voice/consistency blockers — e.g. "of we"
+    # instead of "zö agency", "were ... is" subject-verb) runs on every Build my
+    # proposal pass via run_presubmit_autofix_loop, but content this scan itself
+    # rewrote (compliance/fabrication repairs, fact-contradiction fixes, ZF passes
+    # above) never gets that same check — so a defect introduced here would ship
+    # unnoticed. Run the same non-static detect+repair pass here too.
+    try:
+        from app.services.proposal_submission_polish import run_submission_polish_pass
+
+        draft, polish_logs = await run_submission_polish_pass(
+            rfp.id, rfp=rfp, draft=draft, research=research
+        )
+        if polish_logs:
+            await asave_proposal_draft(draft)
+            report["logs"].extend(polish_logs[:12])
+            report["logs"].append(
+                f"Scan submission polish: {len(polish_logs)} section(s) checked for "
+                "grammar/pronoun/voice blockers"
+            )
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as polish_exc:  # noqa: BLE001
+        logger.warning("Scan submission polish skipped: %s", polish_exc)
+        report["logs"].append(f"Scan submission polish skipped: {polish_exc}")
 
     review = run_presubmit_review_with_manual_flags(
         rfp=rfp, draft=draft, research=research, finalized=False
@@ -2450,10 +2718,19 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
     draft = attach_scan_summary_to_latest_before_scan(draft, report)
+    if scan_profile == "build_finalize":
+        await _reorder_draft_to_rfp_toc(
+            reason="final checks complete",
+            add_missing_mandated_stubs=True,
+        )
     await asave_proposal_draft(draft)
     await asave_research_cache(updated_research)
     final_scan_hash = compute_fulfill_scan_hash(draft, rfp_text)
     await complete_fulfill_scan(rfp_id, scan_hash=final_scan_hash)
+    if scan_profile == "build_finalize":
+        from app.services.proposal_pipeline_checkpoint import record_phase_completed
+
+        await record_phase_completed(rfp_id, "build-finalize")
 
     logger.info(
         "Fulfill RFP gaps for %s: closing+%s, issues=%d, ready=%s",

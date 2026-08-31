@@ -129,7 +129,7 @@ def _deterministic_intent_classify(
     if re.search(r"\b(every|all|each|across|whole|entire)\s+(section|proposal|tab)", text, re.I):
         return None
 
-    # Recent conversation with assistant suggestion → user might be confirming
+    # Recent assistant suggestion → user might be confirming an edit (e.g. Apply the fix).
     if conversation_history and len(conversation_history) >= 2:
         last_assistant = None
         for turn in reversed(conversation_history[-4:]):
@@ -140,6 +140,12 @@ def _deterministic_intent_classify(
             s in last_assistant.casefold()
             for s in ("shall i", "want me to", "would you like", "i can", "apply")
         ):
+            if _DETERMINISTIC_EDIT_RE.match(text):
+                return {
+                    "intent": "single_edit",
+                    "primarySectionId": focus_section_id,
+                    "reason": "deterministic_confirm_edit",
+                }
             return None
 
     if _DETERMINISTIC_STRUCTURE_RE.match(text):
@@ -210,7 +216,9 @@ async def _classify_chat_edit_intent_once(
                         "gaps / missing items / compliance / whole-proposal audit WITHOUT "
                         "asking you to change the draft yet. Reviews of the full proposal "
                         "are ALWAYS advisory (never single_edit on the open tab).\n"
-                        '- "single_edit" — user wants ONE named or pinned section changed now.\n'
+                        '- "single_edit" — user wants ONE named or pinned section changed now '
+                        "(add/insert/include a table, awards block, paragraph, or fix content "
+                        "in the open tab → single_edit, NOT advisory).\n"
                         '- "multi_patch" — user wants you to APPLY fixes now across several '
                         "sections (or the whole proposal), including 'apply these fixes', "
                         "'patch-wise', 'rebuild cost and clean leftovers', etc.\n"

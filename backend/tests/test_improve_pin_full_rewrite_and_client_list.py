@@ -60,6 +60,32 @@ class ImprovePinFullRewriteTests(unittest.TestCase):
             )
         )
 
+    def test_add_awards_table_forces_full_rewrite(self) -> None:
+        self.assertTrue(
+            improve_pin_needs_full_rewrite(
+                "Add awards table as well",
+                "## Scored Capability\n| x | y |\n",
+            )
+        )
+
+    def test_fix_all_issues_forces_full_rewrite(self) -> None:
+        self.assertTrue(
+            improve_pin_needs_full_rewrite(
+                "Fix all these client issues in this section.",
+                "## A\nbody\n",
+            )
+        )
+
+    def test_add_table_ask_does_not_collapse_to_selection(self) -> None:
+        self.assertFalse(
+            should_collapse_edit_scope_to_selection(
+                improve_section_pinned=False,
+                user_message="Add awards table as well",
+                section_content="## Scored Capability\n| x | y |\n",
+                planned_span_count=1,
+            )
+        )
+
     def test_improve_pin_never_collapses_structural_ask_to_selection(self) -> None:
         self.assertFalse(
             should_collapse_edit_scope_to_selection(

@@ -130,7 +130,7 @@ class ScanDoesNotSkipTheReportTailTests(unittest.TestCase):
         from app.services import proposal_fulfill_rfp_gaps as mod
 
         src = inspect.getsource(mod._run_fulfill_rfp_gaps_body)
-        self.assertIn("step < resume_at and step < 17", src)
+        self.assertIn("step < resume_at and step < _FINAL_ALWAYS_RUN_FROM", src)
         self.assertIn("complete_fulfill_scan", src)
 
 

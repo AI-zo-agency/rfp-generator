@@ -190,7 +190,10 @@ class StructureStubRecoveryTests(unittest.TestCase):
         updated, logs = ensure_missing_scored_section_stubs(draft, specs)
         self.assertEqual(len(updated.sections), 1)
         self.assertEqual(updated.sections[0].id, "rfp-closing-exhibit_k")
-        self.assertTrue(any("closing tab" in x.casefold() for x in logs))
+        self.assertFalse(
+            any("added missing scored section stub" in x.casefold() for x in logs),
+            msg=f"unexpected stub: {logs}",
+        )
 
     def test_does_not_stub_when_rfp_title_already_present(self) -> None:
         draft = ProposalDraft(
@@ -213,7 +216,13 @@ class StructureStubRecoveryTests(unittest.TestCase):
         ]
         updated, logs = ensure_missing_scored_section_stubs(draft, specs)
         self.assertEqual(len(updated.sections), 1)
-        self.assertTrue(any("title already in draft" in x.casefold() for x in logs))
+        self.assertFalse(
+            any(
+                "added missing scored section stub" in x.casefold()
+                for x in logs
+            ),
+            msg=f"unexpected stub: {logs}",
+        )
 
 
 class IntelligenceTabOrderTests(unittest.TestCase):
@@ -411,6 +420,201 @@ class IntelligenceTabOrderTests(unittest.TestCase):
             )
         )
         self.assertFalse(_spec_is_rfp_title_noise(RfpSectionSpec(rfp_title="Cost Proposal")))
+
+
+class AlignOutlineOnIntelligencePlanTests(unittest.TestCase):
+    def test_adds_missing_rfp_tabs_and_reorders(self) -> None:
+        from app.services.proposal_fulfill_rfp_structure import (
+            align_outline_sections_to_rfp_specs,
+        )
+
+        planner = [
+            OutlineSection(id="rfp-sec-1", title="Price", order=1, required=True),
+            OutlineSection(
+                id="rfp-sec-2",
+                title="Technical Approach",
+                order=2,
+                required=True,
+            ),
+        ]
+        specs = [
+            RfpSectionSpec(rfp_title="Cover Letter", instructions="Required cover letter."),
+            RfpSectionSpec(
+                rfp_title="Technical Approach",
+                required_headings=["A. Method", "B. Timeline"],
+                instructions="Answer the technical ask.",
+            ),
+            RfpSectionSpec(
+                rfp_title="Proposal Pricing — Hourly Rates by Labor Category",
+                evaluation_weight="25 pts",
+                same_ask_as=["Price"],
+                mandated_submission_format=True,
+                instructions="Use the buyer's rate table.",
+            ),
+        ]
+        kept, logs = align_outline_sections_to_rfp_specs(
+            planner,
+            specs,
+            section_factory=lambda raw: OutlineSection.model_validate(raw),
+        )
+        titles = [s.title for s in kept]
+        self.assertEqual(titles[0], "Cover Letter")
+        self.assertEqual(titles[1], "Technical Approach")
+        # Align does not retitle a near-duplicate pricing tab ("Price" ≈
+        # "Proposal Pricing…") — it keeps the existing label and does not stub.
+        self.assertTrue(any("price" in t.casefold() for t in titles))
+        self.assertNotIn("1.1 — Who We Are", titles)
+        cover = next(s for s in kept if s.title == "Cover Letter")
+        self.assertTrue(cover.protect_from_cap)
+        self.assertTrue(any("added missing scored section stub" in x for x in logs))
+        approach = next(s for s in kept if s.title == "Technical Approach")
+        self.assertEqual(approach.children, ["A. Method", "B. Timeline"])
+        self.assertEqual(approach.id, "rfp-sec-2")
+
+    def test_static_company_ask_does_not_mint_outline_tab(self) -> None:
+        from app.services.proposal_fulfill_rfp_structure import (
+            align_outline_sections_to_rfp_specs,
+        )
+
+        planner = [
+            OutlineSection(id="rfp-sec-1", title="Technical Approach", order=1),
+        ]
+        specs = [
+            RfpSectionSpec(
+                rfp_title="Company Background",
+                satisfied_by_static_company_block=True,
+                instructions="Header only.",
+            ),
+            RfpSectionSpec(rfp_title="Technical Approach", instructions="Required."),
+        ]
+        kept, logs = align_outline_sections_to_rfp_specs(
+            planner,
+            specs,
+            section_factory=lambda raw: OutlineSection.model_validate(raw),
+        )
+        self.assertEqual([s.title for s in kept], ["Technical Approach"])
+        self.assertFalse(any("Company Background" in x for x in logs))
+
+    def test_planner_prompt_lists_required_tabs_not_static_identity(self) -> None:
+        from app.services.proposal_fulfill_rfp_structure import (
+            format_rfp_structure_specs_for_planner,
+        )
+
+        block = format_rfp_structure_specs_for_planner(
+            [
+                RfpSectionSpec(
+                    rfp_title="Who We Are",
+                    satisfied_by_static_company_block=True,
+                ),
+                RfpSectionSpec(rfp_title="Cover Letter", instructions="Required."),
+                RfpSectionSpec(
+                    rfp_title="Technical Approach",
+                    required_headings=["A. Method"],
+                    evaluation_weight="40 pts",
+                ),
+            ]
+        )
+        self.assertIn("Cover Letter", block)
+        self.assertIn("Technical Approach", block)
+        self.assertIn("A. Method", block)
+        self.assertIn("1. Cover Letter", block)
+        self.assertNotIn("Who We Are", block)
+
+
+class IntelligencePlannerUsesAlignExtractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_format_extract_replaces_planner_llm(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.proposal_fulfill_rfp_structure import RfpSectionSpec
+        from app.services.proposal_intelligence.agents.dynamic_section_planner import (
+            run_dynamic_section_planner,
+        )
+        from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
+
+        specs = [
+            RfpSectionSpec(rfp_title="Cover Letter", instructions="Required cover letter."),
+            RfpSectionSpec(rfp_title="Technical Approach", instructions="Required approach."),
+        ]
+        planner_llm = AsyncMock(side_effect=AssertionError("planner LLM must not run"))
+        rfp = (
+            "Proposal shall include:\n"
+            "1. Cover Letter\n"
+            "2. Technical Approach\n"
+        )
+        with (
+            patch(
+                "app.services.proposal_fulfill_rfp_structure.extract_rfp_submission_format_specs",
+                new=AsyncMock(return_value=specs),
+            ),
+            patch(
+                "app.services.proposal_intelligence.agents.dynamic_section_planner.safe_chat_json",
+                new=planner_llm,
+            ),
+            patch(
+                "app.services.proposal_closing_ledger.get_or_extract_closing_ledger",
+                new=AsyncMock(return_value=(None, None)),
+            ),
+            patch(
+                "app.services.proposal_intelligence.agents.dynamic_section_planner.ensure_missing_submittals_coverage",
+                new=AsyncMock(side_effect=lambda kept, *_a, **_k: (kept, [])),
+            ),
+        ):
+            plan = await run_dynamic_section_planner(
+                plan=ProposalExecutionPlan(rfpId="r1"),
+                rfp_context=rfp,
+                rfp_meta={"title": "Test RFP"},
+            )
+        planner_llm.assert_not_awaited()
+        titles = [s.title for s in plan.writing.proposal_outline.sections]
+        self.assertIn("Cover Letter", titles)
+        self.assertIn("Technical Approach", titles)
+        self.assertLess(titles.index("Cover Letter"), titles.index("Technical Approach"))
+
+    async def test_empty_format_extract_falls_back_to_planner(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.services.proposal_intelligence.agents.dynamic_section_planner import (
+            run_dynamic_section_planner,
+        )
+        from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
+
+        planner_json = {
+            "sections": [
+                {
+                    "id": "rfp-sec-1",
+                    "title": "Technical Approach",
+                    "order": 1,
+                    "required": True,
+                }
+            ],
+            "confidence": 0.8,
+        }
+        rfp = "Proposal shall include:\n1. Technical Approach\n"
+        with (
+            patch(
+                "app.services.proposal_fulfill_rfp_structure.extract_rfp_submission_format_specs",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "app.services.proposal_intelligence.agents.dynamic_section_planner.safe_chat_json",
+                new=AsyncMock(return_value=(planner_json, "test")),
+            ),
+            patch(
+                "app.services.proposal_closing_ledger.get_or_extract_closing_ledger",
+                new=AsyncMock(return_value=(None, None)),
+            ),
+            patch(
+                "app.services.proposal_intelligence.agents.dynamic_section_planner.ensure_missing_submittals_coverage",
+                new=AsyncMock(side_effect=lambda kept, *_a, **_k: (kept, [])),
+            ),
+        ):
+            plan = await run_dynamic_section_planner(
+                plan=ProposalExecutionPlan(rfpId="r1"),
+                rfp_context=rfp,
+                rfp_meta={"title": "Test RFP"},
+            )
+        titles = [s.title for s in plan.writing.proposal_outline.sections]
+        self.assertIn("Technical Approach", titles)
 
 
 if __name__ == "__main__":

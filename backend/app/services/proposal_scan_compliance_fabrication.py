@@ -458,6 +458,15 @@ async def run_compliance_fabrication_repairs(
         changed = True
         working = grounded.draft
 
+    from app.services.evidence_trust.personnel_grounding import (
+        scrub_unverified_personnel_from_draft,
+    )
+
+    working, personnel_logs = await scrub_unverified_personnel_from_draft(working)
+    if personnel_logs:
+        changed = True
+        logs.extend(personnel_logs)
+
     if not changed and not logs:
         return draft, logs
     return working, logs

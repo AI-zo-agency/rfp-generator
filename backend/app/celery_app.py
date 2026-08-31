@@ -50,6 +50,7 @@ _PHASE_DISPATCH: dict[str, tuple[str, str]] = {
     "phase-3-6-self-edit": ("app.services.proposal_generator", "run_phase3_6_self_edit"),
     "phase-3-5-budget": ("app.services.proposal_generator", "run_phase3_5_budget"),
     "phase-4-review": ("app.services.proposal_generator", "run_phase4_presubmit_review"),
+    "build-finalize": ("app.services.proposal_fulfill_rfp_gaps", "run_build_finalize_pass"),
     "fulfill-scan": ("app.services.proposal_fulfill_rfp_gaps", "run_fulfill_rfp_gaps"),
     "align-rfp-outline": (
         "app.services.proposal_align_rfp_outline",

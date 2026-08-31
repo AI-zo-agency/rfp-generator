@@ -41,6 +41,7 @@ interface ProposalWorkflowRailProps {
   isAlignRunning?: boolean;
   isPlaceRunning?: boolean;
   hasCompletedFulfillReport: boolean;
+  buildPipelineComplete?: boolean;
   manualFillCount: number;
   rfpCost: LlmCostRfpBreakdown | null;
   costByRunType: { generate: number; completeScan: number; chat: number };
@@ -95,6 +96,7 @@ export function ProposalWorkflowRail({
   isAlignRunning,
   isPlaceRunning,
   hasCompletedFulfillReport,
+  buildPipelineComplete = false,
   manualFillCount,
   rfpCost,
   costByRunType,
@@ -222,13 +224,36 @@ export function ProposalWorkflowRail({
       ) : null}
 
       {!isRunning ? (
-        <div className="proposal-workflow-idle">
-          <p className="proposal-workflow-idle-title">No workflow running</p>
-          <p className="proposal-workflow-idle-detail">
-            Hover Fix outline or Complete &amp; clean in the top bar to see what each
-            does. Live steps appear here while a job runs.
-          </p>
-        </div>
+        <>
+          <div className="proposal-workflow-idle">
+            <p className="proposal-workflow-idle-title">
+              {buildPipelineComplete ? "Build finished" : "No workflow running"}
+            </p>
+            <p className="proposal-workflow-idle-detail">
+              {buildPipelineComplete
+                ? manualFillCount > 0
+                  ? `Final checks completed (~19 min server run). ${manualFillCount} item${manualFillCount === 1 ? "" : "s"} still need input (forms, signatures, attachments) — use the checklist or section chat.`
+                  : "Final checks completed. Review the checklist, then download Word."
+                : "Hover Build my proposal for what the draft already includes. Fix outline lives under Staff tools on Review; Review & fix is optional after edits."}
+            </p>
+          </div>
+          {buildPipelineComplete ? (
+            <div className="proposal-workflow-section">
+              <p className="proposal-workflow-section-label">Build my proposal</p>
+              <ul
+                className="proposal-workflow-category-steps"
+                style={{ "--wf-progress": 1 } as React.CSSProperties}
+              >
+                {FULL_PROPOSAL_STEP_LABELS.map((p) => (
+                  <li key={p.phase} className="proposal-workflow-step is-done">
+                    <span className="proposal-workflow-step-dot" aria-hidden />
+                    <span className="proposal-workflow-step-label">{p.label}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </>
       ) : isAlignRun ? (
         <div className="proposal-workflow-section">
           <p className="proposal-workflow-section-label">Order tabs</p>
@@ -305,36 +330,7 @@ export function ProposalWorkflowRail({
             })}
           </ul>
         </div>
-      ) : isGenerateRun ? (
-        <div className="proposal-workflow-section">
-          <p className="proposal-workflow-section-label">Generate proposal</p>
-          <ul
-            className="proposal-workflow-category-steps"
-            style={
-              {
-                "--wf-progress":
-                  generatePhaseIndex >= 0
-                    ? generatePhaseIndex / FULL_PROPOSAL_STEP_LABELS.length
-                    : 0,
-              } as React.CSSProperties
-            }
-          >
-            {FULL_PROPOSAL_STEP_LABELS.map((p, i) => {
-              const done = generatePhaseIndex >= 0 && i < generatePhaseIndex;
-              const active = i === generatePhaseIndex;
-              return (
-                <li
-                  key={p.phase}
-                  className={`proposal-workflow-step ${done ? "is-done" : ""} ${active ? "is-active" : ""}`}
-                >
-                  <span className="proposal-workflow-step-dot" aria-hidden />
-                  <span className="proposal-workflow-step-label">{p.label}</span>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      ) : (
+      ) : isFulfillRun ? (
       <div className="proposal-workflow-section">
         <p className="proposal-workflow-section-label">Workflow categories</p>
         <ul className="proposal-workflow-categories">
@@ -408,6 +404,35 @@ export function ProposalWorkflowRail({
           })}
         </ul>
       </div>
+      ) : (
+        <div className="proposal-workflow-section">
+          <p className="proposal-workflow-section-label">Build my proposal</p>
+          <ul
+            className="proposal-workflow-category-steps"
+            style={
+              {
+                "--wf-progress":
+                  generatePhaseIndex >= 0
+                    ? generatePhaseIndex / FULL_PROPOSAL_STEP_LABELS.length
+                    : 0,
+              } as React.CSSProperties
+            }
+          >
+            {FULL_PROPOSAL_STEP_LABELS.map((p, i) => {
+              const done = generatePhaseIndex >= 0 && i < generatePhaseIndex;
+              const active = i === generatePhaseIndex;
+              return (
+                <li
+                  key={p.phase}
+                  className={`proposal-workflow-step ${done ? "is-done" : ""} ${active ? "is-active" : ""}`}
+                >
+                  <span className="proposal-workflow-step-dot" aria-hidden />
+                  <span className="proposal-workflow-step-label">{p.label}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
 
       <div className="proposal-workflow-section">

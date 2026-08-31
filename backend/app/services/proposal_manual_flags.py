@@ -40,9 +40,109 @@ def strip_section_draft_stub_manual_fills(text: str) -> str:
     return _SECTION_DRAFT_STUB_MFILL_RE.sub("", text or "")
 
 
-VERIFY_TAG_RE = re.compile(r"\[VERIFY:\s*([^\]]+)\]", re.I)
 PLACEHOLDER_TAG_RE = re.compile(r"\[(?:PLACEHOLDER|INSERT|TBD)[^\]]+\]", re.I)
-GENERIC_VERIFY_RE = re.compile(r"\[VERIFY\]", re.I)
+
+
+class _VerifyTagMatch:
+    """Duck-types the slice of re.Match every caller here actually uses."""
+
+    __slots__ = ("string", "_start", "_end", "_field")
+
+    def __init__(self, string: str, start: int, end: int, field: str) -> None:
+        self.string = string
+        self._start = start
+        self._end = end
+        self._field = field
+
+    def group(self, n: int = 0) -> str:
+        if n == 0:
+            return self.string[self._start : self._end]
+        if n == 1:
+            return self._field
+        raise IndexError(n)
+
+    def start(self, n: int = 0) -> int:
+        return self._start
+
+    def end(self, n: int = 0) -> int:
+        return self._end
+
+
+class _VerifyTagPattern:
+    """Static (no `re`) scanner for ``[VERIFY]`` and ``[VERIFY: field]`` tags.
+
+    A regex requiring the colon (``\\[VERIFY:\\s*([^\\]]+)\\]``) used to be the
+    only thing every caller matched on — so bare ``[VERIFY]`` tags (which the
+    drafting prompts also emit, e.g. table cells like ``| Phone | [VERIFY] |``)
+    were invisible to gap detection, KB auto-fill, and RFP-required scrubbing
+    alike. They could never be filled or dropped — they just shipped in the
+    final document. This scans both forms as one tag family so every consumer
+    agrees on what counts as an open VERIFY placeholder.
+    """
+
+    def finditer(self, text: str | None):
+        text = text or ""
+        upper = text.upper()
+        n = len(text)
+        i = 0
+        while i < n:
+            idx = upper.find("[VERIFY", i)
+            if idx == -1:
+                return
+            after = idx + 7
+            if after < n and text[after] == "]":
+                yield _VerifyTagMatch(text, idx, after + 1, "")
+                i = after + 1
+                continue
+            if after < n and text[after] == ":":
+                close = text.find("]", after)
+                if close == -1:
+                    i = idx + 1
+                    continue
+                yield _VerifyTagMatch(text, idx, close + 1, text[after + 1 : close].strip())
+                i = close + 1
+                continue
+            i = idx + 1
+
+    def search(self, text: str | None) -> "_VerifyTagMatch | None":
+        return next(self.finditer(text), None)
+
+    def findall(self, text: str | None) -> list[str]:
+        return [m.group(1) for m in self.finditer(text)]
+
+    def sub(self, repl, text: str | None) -> str:
+        text = text or ""
+        out: list[str] = []
+        last = 0
+        for m in self.finditer(text):
+            out.append(text[last : m.start()])
+            out.append(repl(m) if callable(repl) else repl)
+            last = m.end()
+        out.append(text[last:])
+        return "".join(out)
+
+
+VERIFY_TAG_RE = _VerifyTagPattern()
+
+
+def verify_tag_row_label(text: str, tag_start: int) -> str:
+    """The markdown table row's first-cell label for a tag at tag_start.
+
+    ``| Phone | [VERIFY] |`` -> ``"Phone"``. Bare tags carry no field
+    description of their own, but inside a table the row label IS the field —
+    this lets KB auto-fill match "Phone"/"Email"/etc. the same way it already
+    matches an explicit ``[VERIFY: phone]`` description. Empty outside a
+    table row.
+    """
+    line_start = text.rfind("\n", 0, tag_start) + 1
+    line_end = text.find("\n", tag_start)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    if "|" not in line:
+        return ""
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return cells[0] if cells and cells[0] else ""
 
 # VERIFY_TAG_RE stops at the first ]. If contradiction text embeds a ], append
 # produces a note the optional-scrub regex only partially deletes — leaving a
@@ -283,6 +383,31 @@ def missing_manual_fill_placeholders(content: str, originals: list[str]) -> list
     return missing
 
 
+def scrub_orphan_mfill_placeholders(content: str) -> tuple[str, list[str]]:
+    """Replace invented «MFILL_N» tokens (not from a real MANUAL FILL mask) with handoff."""
+    text = content or ""
+    if "«MFILL_" not in text:
+        return text, []
+
+    logs: list[str] = []
+    replacement = (
+        "[MANUAL FILL: Sonja — confirm from 05_Awards / companyfacts — "
+        "do not invent award rows]"
+    )
+
+    def repl(match: re.Match[str]) -> str:
+        logs.append(f"orphan «MFILL_{match.group(1)}»")
+        return replacement
+
+    cleaned = _MFILL_PLACEHOLDER_RE.sub(repl, text)
+    cleaned = re.sub(
+        r"(?m)^\|([^|]*)\|\s*#{1,6}\s+([^|]*)\|",
+        lambda m: "|" + m.group(1) + "| [MANUAL FILL: remove stray heading from table] |",
+        cleaned,
+    )
+    return cleaned, logs
+
+
 def manual_fill_tags_preserved(before: str, after: str) -> bool:
     """True when every MANUAL FILL tag text from before still appears in after."""
     before_tags = [t.text for t in extract_manual_fill_tags(before)]
@@ -476,7 +601,6 @@ def scan_tags_in_section(
         (MANUAL_FILL_TAG_RE, True),
         (VERIFY_TAG_RE, False),
         (PLACEHOLDER_TAG_RE, False),
-        (GENERIC_VERIFY_RE, False),
     )
     for pattern, is_manual in patterns:
         for match in pattern.finditer(content):
@@ -515,9 +639,7 @@ def convert_verify_tags_to_manual_fill(content: str) -> str:
         owner = _owner_for_field(field)
         return f"[MANUAL FILL: {owner} — {field}]"
 
-    content = VERIFY_TAG_RE.sub(repl, content)
-    content = GENERIC_VERIFY_RE.sub("[MANUAL FILL: Sonja — confirm before submission]", content)
-    return content
+    return VERIFY_TAG_RE.sub(repl, content)
 
 
 def apply_corpus_snippet_fills(
@@ -654,20 +776,28 @@ def _replace_verify_tags_from_blob(content: str, blob: str) -> tuple[str, int]:
     ) -> tuple[str, int]:
         count = 0
 
-        def repl(match: re.Match[str]) -> str:
+        def repl(match) -> str:
             nonlocal count
-            field = (match.group(1) or "").casefold()
+            # Bare [VERIFY] carries no field description of its own — inside a
+            # table the row label IS the field ("Phone" for `| Phone | [VERIFY] |`).
+            # Without this, a bare tag can never match a keyword list and stays
+            # unfillable forever regardless of what the KB has.
+            raw_field = match.group(1) or ""
+            effective_field = raw_field or verify_tag_row_label(
+                match.string, match.start()
+            )
+            field = effective_field.casefold()
             from app.services.evidence_trust.legal_attestation_gate import (
                 is_locked_legal_verify_tag,
             )
 
-            if is_locked_legal_verify_tag(match.group(1) or ""):
+            if is_locked_legal_verify_tag(effective_field):
                 return match.group(0)
             if not any(k in field for k in keywords):
                 return match.group(0)
             replacement = value
             if callable(field_resolver):
-                replacement = field_resolver(match.group(1) or "")
+                replacement = field_resolver(effective_field)
             if not replacement or replacement in text:
                 return match.group(0)
             count += 1
@@ -697,15 +827,18 @@ def _replace_verify_tags_from_blob(content: str, blob: str) -> tuple[str, int]:
 
     if dollar_limits:
 
-        def insurance_repl(match: re.Match[str]) -> str:
+        def insurance_repl(match) -> str:
             nonlocal fills
+            effective_field = match.group(1) or verify_tag_row_label(
+                match.string, match.start()
+            )
             from app.services.evidence_trust.legal_attestation_gate import (
                 is_locked_legal_verify_tag,
             )
 
-            if is_locked_legal_verify_tag(match.group(1) or ""):
+            if is_locked_legal_verify_tag(effective_field):
                 return match.group(0)
-            field = (match.group(1) or "").casefold()
+            field = effective_field.casefold()
             if any(k in field for k in ("insurance", "liability", "umbrella", "coverage", "limit")):
                 fills += 1
                 return dollar_limits[0]

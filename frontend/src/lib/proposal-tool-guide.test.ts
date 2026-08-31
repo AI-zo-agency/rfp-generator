@@ -25,9 +25,20 @@ describe("proposal-tool-guide", () => {
     expect(ralph.doesnt.toLowerCase()).toMatch(/invent|pad|fact/);
   });
 
+  it("treats Build as the full first draft, not a prelude to Review & fix", () => {
+    const generate = capabilityById("generateProposal");
+    expect(generate.name).toBe("Build my proposal");
+    expect(generate.does.toLowerCase()).toMatch(/rfp/);
+    expect(generate.doesnt.toLowerCase()).toMatch(/review & fix/);
+    const scan = capabilityById("completeClean");
+    expect(scan.name).toBe("Review & fix");
+    expect(scan.does.toLowerCase()).toMatch(/optional second pass/);
+    expect(scan.doesnt.toLowerCase()).toMatch(/every build/);
+  });
+
   it("formats confirm-dialog blocks without losing either tool", () => {
     const block = formatDoesDoesntBlock("completeClean", "ralph");
-    expect(block).toContain("Complete & clean");
+    expect(block).toContain("Review & fix");
     expect(block).toContain("Does:");
     expect(block).toContain("Doesn’t:");
     expect(block).toContain("Ralph");

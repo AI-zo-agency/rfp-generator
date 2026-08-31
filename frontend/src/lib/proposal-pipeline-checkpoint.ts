@@ -12,6 +12,7 @@ export type PipelinePhase =
   | "phase-3-5-budget"
   | "phase-3-6-self-edit"
   | "phase-4-review"
+  | "build-finalize"
   | "complete";
 
 export type PipelineInProgressPhase =
@@ -27,6 +28,7 @@ export const PIPELINE_PHASE_ORDER: PipelinePhase[] = [
   "phase-3-5-budget",
   "phase-3-6-self-edit",
   "phase-4-review",
+  "build-finalize",
 ];
 
 export const PIPELINE_PHASE_LABELS: Record<PipelinePhase, string> = {
@@ -36,6 +38,7 @@ export const PIPELINE_PHASE_LABELS: Record<PipelinePhase, string> = {
   "phase-3-6-self-edit": "Senior editor polish",
   "phase-3-5-budget": "Budget build",
   "phase-4-review": "Pre-submit review",
+  "build-finalize": "Final checks",
   complete: "Complete",
 };
 
@@ -180,6 +183,7 @@ export const FULL_PROPOSAL_STEP_LABELS: { phase: PipelinePhase; label: string }[
   { phase: "phase-3-5-budget", label: "Budget" },
   { phase: "phase-3-6-self-edit", label: "Senior editor" },
   { phase: "phase-4-review", label: "Review" },
+  { phase: "build-finalize", label: "Final checks" },
 ];
 
 export interface ProposalPipelineStatus {
@@ -198,6 +202,17 @@ export interface ProposalPipelineStatus {
   fulfillScanUpToDate?: boolean | null;
   /** ISO time the last Complete & clean run finished (server-side). */
   fulfillScanCompletedAt?: string | null;
+}
+
+/** True when the one-click build pipeline finished (through Final checks). */
+export function isBuildPipelineComplete(
+  pipelineStatus: ProposalPipelineStatus | null | undefined,
+  research: ProposalResearch | null | undefined
+): boolean {
+  if (pipelineStatus?.isComplete) return true;
+  if (pipelineStatus?.completedPhases?.includes("build-finalize")) return true;
+  const last = research?.pipelineCheckpoint?.lastCompletedPhase;
+  return last === "build-finalize" || last === "complete";
 }
 
 function countVerifyTags(draft: ProposalOutline | null): number {
@@ -366,6 +381,14 @@ export function phaseIsComplete(
     const lastIdx = order.indexOf(last as PipelinePhase);
     const reviewIdx = order.indexOf("phase-4-review");
     return lastIdx >= 0 && reviewIdx >= 0 && lastIdx >= reviewIdx;
+  }
+  if (phase === "build-finalize") {
+    const last = research.pipelineCheckpoint?.lastCompletedPhase;
+    if (!last) return false;
+    const order = PIPELINE_PHASE_ORDER;
+    const lastIdx = order.indexOf(last as PipelinePhase);
+    const finalizeIdx = order.indexOf("build-finalize");
+    return lastIdx >= 0 && finalizeIdx >= 0 && lastIdx >= finalizeIdx;
   }
   return false;
 }

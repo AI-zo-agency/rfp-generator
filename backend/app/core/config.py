@@ -126,8 +126,12 @@ class Settings(BaseSettings):
     overlap_gates_block: bool = False
     # ADVERSARIAL_AUDIT_BLOCK — promote persisted whole-manuscript audit criticals.
     adversarial_audit_block: bool = False
-    # ADVERSARIAL_REPAIR_LOOP — bounded validate→repair→re-validate loop after Phase 4 autofix.
+    # ADVERSARIAL_REPAIR_LOOP — bounded validate→repair→re-validate loop (autofix / staff).
     adversarial_repair_loop: bool = True
+    # Phase 4 pre-submit review — light checklist only; Final checks runs deep repair.
+    phase4_adversarial_repair: bool = False
+    # Final checks (build-finalize): skip dedupe/verify/Ralph passes that strip prose.
+    build_finalize_lean: bool = True
     adversarial_repair_max_rounds: int = 3
     adversarial_repair_max_attempts_per_finding: int = 3
     adversarial_repair_time_budget_sec: int = 540

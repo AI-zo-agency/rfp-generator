@@ -255,5 +255,44 @@ class RnoFlagTests(unittest.TestCase):
         self.assertTrue(any("cross-RFP" in log for log in report.logs))
 
 
+class ConferenceAttendanceGateTests(unittest.TestCase):
+    def test_gates_false_past_attendance_before_event_date(self) -> None:
+        from datetime import date
+
+        from app.services.evidence_trust.legal_attestation_gate import (
+            _replace_false_conference_attendance,
+        )
+
+        body = (
+            "We attended the Mandatory Pre-Proposal Conference on Tuesday, "
+            "September 15, 2026. Our representative was present at the designated "
+            "date and time, signed in with District staff, and participated in "
+            "the full conference proceedings.\n\n"
+            "Attendee of Record: Confirm before submit — Insert name of zö "
+            "representative who attended"
+        )
+        updated, n = _replace_false_conference_attendance(
+            body,
+            rfp_context="Mandatory Pre-Proposal Conference September 15, 2026",
+            reference_date=date(2026, 8, 31),
+        )
+        self.assertGreaterEqual(n, 1)
+        self.assertIn("MANUAL FILL", updated)
+        self.assertNotIn("We attended the Mandatory", updated)
+
+    def test_gate_section_conference_attendance(self) -> None:
+        section = ProposalSection(
+            id="conf",
+            title="Evidence of Mandatory Pre-Proposal Conference Attendance",
+            content=(
+                "We attended the Mandatory Pre-Proposal Conference on September 15, 2026. "
+                "Our representative signed in with District staff."
+            ),
+        )
+        updated, report = gate_section_legal_attestations(section)
+        self.assertGreaterEqual(report.conference_attendance_flags, 1)
+        self.assertIn("MANUAL FILL", updated.content or "")
+
+
 if __name__ == "__main__":
     unittest.main()

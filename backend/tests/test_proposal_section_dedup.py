@@ -8,6 +8,7 @@ from app.models.proposal import ProposalSection
 from app.services.proposal_section_dedup import (
     ANTI_DUPLICATION_RULES,
     collapse_title_near_duplicate_sections,
+    compress_redundant_reference_deliverables,
     compress_sibling_restatement_blocks,
     dedupe_manuscript_for_scan,
     format_prior_sections_block,
@@ -541,6 +542,47 @@ class SectionDedupTests(unittest.TestCase):
         # The lone lettered section with no unlettered twin must survive untouched.
         self.assertTrue(any("Strategic Approach" in t for t in titles), msg=titles)
 
+    def test_scan_drop_clone_false_keeps_distinct_reference_and_past_performance_narratives(
+        self,
+    ) -> None:
+        """Complete Scan (drop_clone_tabs=False) must not silently delete a
+        legitimate References tab and a legitimate Past Performance tab just
+        because they describe the same client relationships in different
+        words — compress_redundant_reference_deliverables's canonical-pick
+        deletion is a soft near-dup mechanism and must stay off in Scan mode,
+        same as the other soft near-dup matchers above."""
+        refs_body = (
+            "Our team has completed similar marketing engagements for numerous "
+            "municipal and tourism clients over the past several years, and each "
+            "engagement is available for reference upon request from the "
+            "contracting agency. The City of Bend selected our team for a "
+            "comprehensive brand campaign that increased visitor engagement "
+            "across digital and social channels. McMinnville Library retained "
+            "our team for a bilingual outreach program reaching underserved "
+            "communities throughout the region. Oregon Recovery Alliance "
+            "partnered with our team on a multicultural campaign that expanded "
+            "awareness of available support services."
+        )
+        past_body = (
+            "Our team has delivered comparable marketing engagements for "
+            "municipal and tourism clients over the past several years, and "
+            "each engagement below is summarized with outcomes achieved for "
+            "the contracting agency. The City of Bend selected our team for a "
+            "brand campaign engagement that increased visitor engagement "
+            "across digital and social channels. McMinnville Library retained "
+            "our team for an outreach engagement reaching underserved "
+            "communities throughout the region. Oregon Recovery Alliance "
+            "partnered with our team on a multicultural engagement that "
+            "expanded awareness of available support services."
+        )
+        sections = [
+            _sec("refs-main", "References", refs_body),
+            _sec("past-performance", "Past Performance", past_body),
+        ]
+        kept, _logs = dedupe_manuscript_for_scan(sections, drop_clone_tabs=False)
+        kept_ids = {s.id for s in kept}
+        self.assertEqual(kept_ids, {"refs-main", "past-performance"})
+
     def test_scan_drop_clone_false_keeps_soft_near_dup_toc_siblings(self) -> None:
         """Complete Scan must not merge distinct TOC tabs that merely share words."""
         body = (
@@ -580,6 +622,79 @@ class SectionDedupTests(unittest.TestCase):
                 "rfp-refs-past",
             },
         )
+
+
+class CompressRedundantReferenceDeliverablesTests(unittest.TestCase):
+    def test_reference_form_pointerizes_when_narrative_tab_exists(self) -> None:
+        narrative_body = (
+            "## References and Past Performance\n\n"
+            "| # | Client | Contact | Project |\n"
+            "|---|--------|---------|----------|\n"
+            "| 1 | City of Bend | Jane Doe | Brand campaign |\n"
+            "| 2 | McMinnville Library | John Smith | Bilingual outreach |\n"
+            "| 3 | Oregon Recovery | Mary Lane | Multicultural campaign |\n"
+        )
+        form_body = (
+            "## Attachment C — Reference Form\n\n"
+            "| # | Client | Contact | Project |\n"
+            "|---|--------|---------|----------|\n"
+            "| 1 | City of Bend | Jane Doe | Brand campaign |\n"
+            "| 2 | McMinnville Library | John Smith | Bilingual outreach |\n"
+        )
+        sections = [
+            _sec("refs-main", "§16 — References and Past Performance", narrative_body),
+            _sec("attach-c", "Attachment C — Reference Form", form_body),
+        ]
+        kept, logs = compress_redundant_reference_deliverables(sections)
+        titles = [s.title for s in kept]
+        self.assertEqual(len(titles), 2)
+        form = next(s for s in kept if s.id == "attach-c")
+        self.assertIn("References and Past Performance", form.content)
+        self.assertNotIn("City of Bend", form.content)
+        self.assertTrue(any("cross-ref" in line for line in logs))
+
+    def test_rfp_minimum_reference_stub_dropped_when_duplicate(self) -> None:
+        narrative_body = (
+            "The RFP requires three references for similar marketing engagements. "
+            "City of Bend brand campaign, McMinnville Library bilingual programming, "
+            "and Oregon Recovery multicultural outreach are comparable public-sector work. "
+        ) * 4
+        minimum_body = (
+            "RFP minimum: provide at least three references for similar marketing engagements "
+            "with contact names and project descriptions as required by the solicitation."
+        )
+        sections = [
+            _sec("refs-main", "References and Past Performance", narrative_body),
+            _sec("refs-min", "RFP minimum — references", minimum_body),
+        ]
+        kept, logs = compress_redundant_reference_deliverables(sections)
+        titles = [s.title for s in kept]
+        self.assertEqual(len(titles), 1)
+        self.assertIn("Past Performance", titles[0])
+        self.assertTrue(any("minimum" in line.casefold() for line in logs))
+
+
+class TrimOverlappingDistinctMandatedTests(unittest.TestCase):
+    def test_certification_tab_not_collapsed_to_pointer_only(self) -> None:
+        from app.services.proposal_section_dedup import trim_overlapping_section_prose
+
+        shared = (
+            "The contractor certifies compliance with all applicable drug-free workplace "
+            "requirements as stated in the RFP and will maintain those standards throughout "
+            "the contract period for Pasadena City College marketing services."
+        )
+        sections = [
+            _sec("drug-free", "Drug-Free Workplace Certification", f"## Drug-Free\n\n{shared}"),
+            _sec(
+                "pre-prop",
+                "Evidence of Mandatory Pre-Proposal Conference Attendance",
+                f"## Conference\n\n{shared}\n\nAttendance documentation is required.",
+            ),
+        ]
+        trimmed, logs = trim_overlapping_section_prose(sections)
+        pre = next(s for s in trimmed if s.id == "pre-prop")
+        self.assertIn("Attendance documentation", pre.content or "")
+        self.assertNotIn("already covered there", (pre.content or "").casefold())
 
 
 if __name__ == "__main__":

@@ -113,6 +113,128 @@ class AlignOutlineRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kwargs["include_missing_submittals"])
 
 
+class AlignOutlineStalePendingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_apply_ignores_stale_pending_preview_and_rescans(self) -> None:
+        """If the draft changed after Align preview was computed (e.g. a
+        gap-fill pass added a new section, or the user edited content), Apply
+        must not blindly overwrite the current sections with the frozen
+        preview snapshot — that would silently drop the new section and
+        revert any edits made in between."""
+        stale_proposed = ProposalDraft(
+            rfpId="rfp-align",
+            sections=[
+                ProposalSection(
+                    id="who",
+                    title="Who We Are",
+                    content="Old wording.",
+                    source="rfp",
+                    mode="write",
+                    wordTarget=200,
+                    status="generated",
+                ),
+                ProposalSection(
+                    id="price",
+                    title="Price",
+                    content="Old fees.",
+                    source="rfp",
+                    mode="write",
+                    wordTarget=200,
+                    status="generated",
+                ),
+            ],
+            updatedAt="2026-08-27T00:00:00+00:00",
+        )
+        current_draft = ProposalDraft(
+            rfpId="rfp-align",
+            sections=[
+                ProposalSection(
+                    id="who",
+                    title="Who We Are",
+                    content="New edited wording made after the preview.",
+                    source="rfp",
+                    mode="write",
+                    wordTarget=200,
+                    status="generated",
+                ),
+                ProposalSection(
+                    id="price",
+                    title="Price",
+                    content="Fees.",
+                    source="rfp",
+                    mode="write",
+                    wordTarget=200,
+                    status="generated",
+                ),
+                ProposalSection(
+                    id="scope",
+                    title="Scope of Work",
+                    content="Added by a gap-fill pass after the preview.",
+                    source="rfp",
+                    mode="write",
+                    wordTarget=200,
+                    status="generated",
+                ),
+            ],
+            updatedAt="2026-08-28T00:00:00+00:00",
+            pendingAlignRfpOutline={
+                "preview": {"changes": ["Reorder the names on the left"]},
+                "proposedDraft": stale_proposed.model_dump(by_alias=True, mode="json"),
+                "createdAt": "2026-08-27T00:00:00+00:00",
+                "basedOnUpdatedAt": "2026-08-27T00:00:00+00:00",
+            },
+        )
+        rfp = RfpRecord(
+            id="rfp-align",
+            title="Test",
+            client="Client",
+            sector="Edu",
+            source="manual",
+            dueDate="2026-09-01",
+            receivedDate="2026-08-01",
+            lastActivity="2026-08-01",
+            lastActivityNote="t",
+        )
+        fresh_result = current_draft.model_copy(
+            update={"pending_align_rfp_outline": None}
+        )
+
+        with (
+            patch(
+                "app.services.proposal_align_rfp_outline.load_rfp_for_proposal",
+                return_value=(rfp, "", "SECTION A\nSECTION B"),
+            ),
+            patch(
+                "app.services.proposal_align_rfp_outline.aget_proposal_draft",
+                new=AsyncMock(return_value=current_draft),
+            ),
+            patch(
+                "app.services.proposal_align_rfp_outline.aget_research_cache",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.services.proposal_align_rfp_outline.asave_proposal_draft",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.services.proposal_align_rfp_outline.push_proposal_snapshot",
+                side_effect=lambda d, label: d,
+            ),
+            patch(
+                "app.services.proposal_pipeline_checkpoint.record_pipeline_activity",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.services.proposal_align_rfp_outline.run_rfp_structure_alignment_pass",
+                new=AsyncMock(return_value=(fresh_result, ["reordered"], [])),
+            ) as align_pass,
+        ):
+            report = await run_align_to_rfp_outline("rfp-align")
+
+        align_pass.assert_awaited_once()
+        self.assertFalse(report["usedPendingPreview"])
+        self.assertIn("Scope of Work", report["afterTitles"])
+
+
 class AlignPreviewBuildTests(unittest.TestCase):
     def test_build_align_preview_side_by_side(self) -> None:
         preview = build_align_preview(

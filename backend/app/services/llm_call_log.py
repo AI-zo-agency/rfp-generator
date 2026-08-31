@@ -13,6 +13,9 @@ from app.services.rfp_repository import _connect, init_db as init_rfp_db
 
 logger = logging.getLogger(__name__)
 
+_RFP_COST_CACHE_TTL_S = 20.0
+_rfp_cost_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS llm_call_log (
     id TEXT PRIMARY KEY,
@@ -168,6 +171,9 @@ def _insert_supabase(row: dict[str, Any]) -> None:
 def get_rfp_cost_breakdown(rfp_id: str) -> dict[str, Any]:
     """Return total + per-node cost/token breakdown for one RFP (all runs)."""
     fid = (rfp_id or "").strip()
+    cached = _rfp_cost_cache.get(fid)
+    if cached and time.monotonic() - cached[0] < _RFP_COST_CACHE_TTL_S:
+        return dict(cached[1])
     if not fid:
         return {
             "rfp_id": "",
@@ -363,7 +369,7 @@ def get_rfp_cost_breakdown(rfp_id: str) -> dict[str, Any]:
             }
         )
 
-    return {
+    result = {
         "rfp_id": fid,
         "total_cost_usd": round(total_cost, 6),
         "total_input_tokens": total_in,
@@ -374,6 +380,8 @@ def get_rfp_cost_breakdown(rfp_id: str) -> dict[str, Any]:
         "by_run": runs,
         "by_run_detailed": run_details,
     }
+    _rfp_cost_cache[fid] = (time.monotonic(), result)
+    return result
 
 
 def get_run_total_cost_usd(run_id: str) -> float:

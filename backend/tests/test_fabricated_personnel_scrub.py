@@ -30,6 +30,26 @@ class FabricatedPersonnelScrubTests(unittest.TestCase):
         self.assertNotIn("Drew Stone", body)
         self.assertTrue(logs)
 
+    def test_removes_priyal_solanki_blocklist(self) -> None:
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="t",
+            sections=[
+                ProposalSection(
+                    id="team-bios",
+                    title="§26 — Team Bios",
+                    content=(
+                        "### Priyal Solanki, Digital Project Manager\n\n"
+                        "Priyal Solanki brings strategic digital project management expertise."
+                    ),
+                )
+            ],
+        )
+        updated, logs = scrub_fabricated_personnel_from_draft(draft)
+        body = updated.sections[0].content or ""
+        self.assertNotIn("Priyal Solanki", body)
+        self.assertTrue(logs)
+
     def test_removes_murilo_mendes_keeps_marcelle(self) -> None:
         draft = ProposalDraft(
             rfpId="r1",

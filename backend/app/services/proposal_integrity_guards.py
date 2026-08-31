@@ -166,11 +166,76 @@ def _reference_entry_is_kb_complete(block: str) -> bool:
     return False
 
 
+def _extract_reference_section_narrative(content: str) -> str:
+    """Headers and past-performance prose without Reference N blocks or contact VERIFY tags."""
+    text = content or ""
+    if not text.strip():
+        return ""
+    parts = [p for p in _REFERENCE_BLOCK_SPLIT_RE.split(text) if p is not None]
+    narrative_chunks: list[str] = []
+    for i, part in enumerate(parts):
+        chunk = part.strip("\n")
+        if not chunk.strip():
+            continue
+        looks_like_entry = bool(
+            re.match(
+                r"(?i)^\s*(?:#{1,3}\s*)?(?:\*\*)?Reference\s+\d+",
+                chunk,
+            )
+        )
+        if not looks_like_entry:
+            narrative_chunks.append(chunk.strip())
+    narrative = "\n\n".join(narrative_chunks) if narrative_chunks else text
+    narrative = _INCOMPLETE_REF_VERIFY_RE.sub("", narrative)
+    narrative = re.sub(r"\[MANUAL\s+FILL:[^\]]*\]", "", narrative, flags=re.I)
+    narrative = re.sub(r"\n{3,}", "\n\n", narrative).strip()
+    return narrative
+
+
+def _reference_narrative_word_count(content: str) -> int:
+    narrative = _extract_reference_section_narrative(content)
+    return len(re.findall(r"\b\w+\b", narrative))
+
+
+def _reference_contact_gap_note() -> str:
+    return (
+        "[MANUAL FILL: Sonja — supply verified client references from "
+        "ClientList / KB only (name, title, org, phone, email). Do not invent.]"
+    )
+
+
+def _split_trailing_subsections_from_reference_chunk(chunk: str) -> tuple[str, str]:
+    """When Reference N is last, tail subsections (## 29. Interviews) must not be dropped."""
+    text = chunk or ""
+    m = re.search(
+        r"\n(?=#{1,3}\s+\d+\.\s+(?!Reference\s+\d)\S)",
+        text,
+        re.I,
+    )
+    if not m:
+        return text.strip(), ""
+    return text[:m.start()].strip(), text[m.start():].strip()
+
+
+def _append_reference_tail(tail: str, preamble: str, kept: list[str]) -> tuple[str, list[str]]:
+    tail = (tail or "").strip()
+    if not tail:
+        return preamble, kept
+    if kept:
+        kept.append(tail)
+    elif preamble:
+        preamble = f"{preamble}\n\n{tail}"
+    else:
+        preamble = tail
+    return preamble, kept
+
+
 def drop_incomplete_reference_entries(content: str) -> tuple[str, list[str]]:
     """Omit reference rows that lack KB contact fields — never ship VERIFY shells.
 
     Product rule: if name/phone/email are not in the knowledge base, do not include
     that reference in the proposal at all. Keep only complete, verifiable entries.
+    Past-performance narrative and sibling subsections (e.g. Interviews) are preserved.
     """
     text = content or ""
     logs: list[str] = []
@@ -182,17 +247,24 @@ def drop_incomplete_reference_entries(content: str) -> tuple[str, list[str]]:
     ):
         return text, logs
 
+    gap = _reference_contact_gap_note()
+    narrative_words = _reference_narrative_word_count(text)
+
     parts = [p for p in _REFERENCE_BLOCK_SPLIT_RE.split(text) if p is not None]
     if len(parts) <= 1:
         if _INCOMPLETE_REF_VERIFY_RE.search(text) or not _reference_entry_is_kb_complete(text):
+            if narrative_words >= 35:
+                logs.append(
+                    "Kept reference/past-performance narrative; flagged contacts for manual fill"
+                )
+                body = _extract_reference_section_narrative(text)
+                if gap.casefold() not in body.casefold():
+                    body = f"{body}\n\n{gap}\n"
+                return body.strip() + "\n", logs
             logs.append(
                 "Dropped incomplete reference package (missing KB contact fields)"
             )
-            return (
-                "[MANUAL FILL: Sonja — supply verified client references from "
-                "ClientList / KB only (name, title, org, phone, email). Do not invent.]\n",
-                logs,
-            )
+            return f"{gap}\n", logs
         return text, logs
 
     preamble = ""
@@ -219,8 +291,10 @@ def drop_incomplete_reference_entries(content: str) -> tuple[str, list[str]]:
             else:
                 preamble = chunk.strip()
             continue
-        if _reference_entry_is_kb_complete(chunk):
-            kept.append(chunk.strip())
+        entry_body, tail = _split_trailing_subsections_from_reference_chunk(chunk)
+        preamble, kept = _append_reference_tail(tail, preamble, kept)
+        if _reference_entry_is_kb_complete(entry_body):
+            kept.append(entry_body.strip())
         else:
             dropped += 1
 
@@ -234,9 +308,17 @@ def drop_incomplete_reference_entries(content: str) -> tuple[str, list[str]]:
     gap = (
         "[MANUAL FILL: Sonja — remaining references must come from verified "
         "ClientList / KB contacts only (name, title, org, phone, email). "
-        "Do not invent or leave [VERIFY] shells.]\n"
+        "Do not invent or leave [VERIFY] shells.]"
     )
     if not kept:
+        if narrative_words >= 35 and preamble:
+            logs.append(
+                "Kept reference/past-performance narrative after dropping incomplete rows"
+            )
+            body = preamble.strip()
+            if gap.casefold() not in body.casefold():
+                body = f"{body}\n\n{gap}\n"
+            return body.strip() + "\n", logs
         body = gap
         if preamble:
             body = f"{preamble}\n\n{gap}"
@@ -391,8 +473,18 @@ def apply_reference_content_scrubs(
     primary_contact_name: str = "",
 ) -> tuple[str, list[str]]:
     """Run all deterministic reference integrity scrubs on one section body."""
+    from app.services.proposal_manuscript import (
+        convert_instruction_blocks,
+        convert_note_to_staff_lines,
+        scrub_broken_reference_pipe_rows,
+    )
+
     logs: list[str] = []
     text = content or ""
+    text, pipe_logs = scrub_broken_reference_pipe_rows(text)
+    logs.extend(pipe_logs)
+    text = convert_instruction_blocks(text)
+    text = convert_note_to_staff_lines(text)
     text, ref_logs = scrub_reference_withholding(text)
     logs.extend(ref_logs)
     text, drop_logs = drop_incomplete_reference_entries(text)
@@ -416,8 +508,18 @@ def apply_reference_post_fill_scrubs(
     primary_contact_name: str = "",
 ) -> tuple[str, list[str]]:
     """Dedupe + agency-contact scrub only — after contact rows are filled."""
+    from app.services.proposal_manuscript import (
+        convert_instruction_blocks,
+        convert_note_to_staff_lines,
+        scrub_broken_reference_pipe_rows,
+    )
+
     logs: list[str] = []
     text = content or ""
+    text, pipe_logs = scrub_broken_reference_pipe_rows(text)
+    logs.extend(pipe_logs)
+    text = convert_instruction_blocks(text)
+    text = convert_note_to_staff_lines(text)
     text, dup_logs = scrub_duplicate_reference_contact_lines(text)
     logs.extend(dup_logs)
     text, agency_logs = scrub_agency_contact_as_client_reference(
@@ -432,10 +534,12 @@ def apply_reference_post_fill_scrubs(
 
 
 def references_section_has_preservable_content(content: str) -> bool:
-    """True when references already have at least one complete KB contact row."""
+    """True when references have KB-complete rows or substantive past-performance prose."""
     text = (content or "").strip()
     if not text:
         return False
+    if _reference_narrative_word_count(text) >= 40:
+        return True
     if _reference_entry_is_kb_complete(text):
         return True
     parts = [p for p in _REFERENCE_BLOCK_SPLIT_RE.split(text) if p and p.strip()]
@@ -484,7 +588,11 @@ def fix_known_bio_typos(content: str) -> tuple[str, list[str]]:
     return text, logs
 
 
-def apply_manuscript_integrity_guards(draft: ProposalDraft) -> tuple[ProposalDraft, list[str]]:
+def apply_manuscript_integrity_guards(
+    draft: ProposalDraft,
+    *,
+    preserve_reference_narrative: bool = False,
+) -> tuple[ProposalDraft, list[str]]:
     """Run deterministic integrity scrubs across all sections."""
     logs: list[str] = []
     sections = []
@@ -497,8 +605,12 @@ def apply_manuscript_integrity_guards(draft: ProposalDraft) -> tuple[ProposalDra
         section_logs: list[str] = []
 
         if "reference" in title_cf or "reference" in sid.casefold():
-            new, ref_logs = apply_reference_content_scrubs(new)
-            section_logs.extend(ref_logs)
+            if preserve_reference_narrative:
+                new, ref_logs = apply_reference_post_fill_scrubs(new)
+                section_logs.extend(ref_logs)
+            else:
+                new, ref_logs = apply_reference_content_scrubs(new)
+                section_logs.extend(ref_logs)
         else:
             # Still strip upon-request deferrals anywhere (RFP often forbids withholding).
             scrubbed, ref_logs = scrub_reference_withholding(new)

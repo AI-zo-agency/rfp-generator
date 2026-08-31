@@ -551,6 +551,21 @@ def build_requirement_ledger(
         except Exception:  # noqa: BLE001 — one bad item must never block Phase 2
             continue
 
+    # Fifth instance of the same defect class as _ADMIN_INSTRUCTION_PATTERNS
+    # above and proposal_rfp_compliance.py's _ADD_ELIGIBLE_SOURCES note: every
+    # evaluation criterion used to become mandatory=True unconditionally, so
+    # missing() (mandatory + no satisfied_by) flagged plain scoring-category
+    # names — "Conflict of Interest", "Proposer's Experience and Performance",
+    # "Reference's Comments" — as sections to add, even though they just grade
+    # content required elsewhere (§6, §4, the references table) and the weak
+    # title-token matcher below has no way to link that dissimilar wording to
+    # the section that actually covers it. criterion_requires_outline_tab
+    # already encodes the right test — a scored parent with real points, or a
+    # coded/structured factor whose own ask names an offeror response — so an
+    # abstract category label with neither stays advisory (mandatory=False,
+    # still visible in the ledger) instead of minting a duplicate section.
+    from app.services.proposal_evaluation_coverage import criterion_requires_outline_tab
+
     for index, crit in enumerate(evaluation_criteria or [], start=1):
         try:
             name = (getattr(crit, "name", "") or "").strip()
@@ -572,7 +587,7 @@ def build_requirement_ledger(
                     ),
                     text=name,
                     source="scored_criterion",
-                    mandatory=True,
+                    mandatory=criterion_requires_outline_tab(crit),
                     points=float(weight) if weight is not None else None,
                     satisfiedBy=satisfied_by,
                     kbQueries=[name],

@@ -59,6 +59,7 @@ from app.services.company_qualification.schemas import (
 )
 from app.services.llm import LlmError
 from app.services.proposal_brand_voice import format_brand_voice_block, format_register_block
+from app.services.proposal_generation_cancel import ProposalGenerationCancelled
 from app.services.proposal_manuscript_locks import strip_leaked_markdown_wrappers
 from app.services.proposal_voice_enforcement import enforce_narrative_voice
 from app.services.proposal_langchain import _provider_name
@@ -105,6 +106,8 @@ async def _emit_partial(state: SectionsGraphState, accumulated_sections: list[di
         bv = ProposalBrandVoice.model_validate(bv_raw) if isinstance(bv_raw, dict) else None
         provider = str(state.get("provider") or _provider_name())
         await cb(ps, provider, bv)
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.debug("_emit_partial failed (non-fatal): %s", exc)
 
@@ -748,8 +751,9 @@ async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
         return "", []
 
     # 2) Section-scoped assembly: 04_Bio header → roster section → RAG chunks.
-    #    RAG queries only when the bio PDF actually exists.
+    #    Skip per-section Supermemory when the full PDF already loaded (common path).
     section_parts: list[str] = []
+    use_section_rag = bool(doc) and len(full_text.strip()) < 1200
     for section in (
         "YEARS OF EXPERIENCE",
         "WORK HISTORY",
@@ -759,7 +763,7 @@ async def _fetch_member_bio_kb(member: str) -> tuple[str, list[str]]:
         "CERTIFICATIONS",
     ):
         rag = ""
-        if doc:
+        if use_section_rag:
             rag = await _rag_bio_section_chunks(member, section)
         header_block = _section_block_text(full_text, section) if full_text else ""
         roster_block = (
@@ -1089,12 +1093,10 @@ def _sanitize_bio_extraction(extracted: dict[str, Any], kb_text: str) -> dict[st
         area = str(exp.get("area") or "").strip()
         years = str(exp.get("years") or "").strip()
         if area and _item_appears_in_kb(area, kb_text):
-            # Colon form is required: VERIFY_TAG_RE is r"\[VERIFY:\s*([^\]]+)\]",
-            # and every resolver (proposal_verify_optional_scrub, the section
-            # editor's KB fill-in, budget content) matches on it. A bare
-            # "[VERIFY]" is invisible to all of them, so it could never be
-            # filled from the KB nor dropped when the RFP does not ask for it —
-            # it survived to the final document by construction.
+            # Colon form gives the field a human-readable description; bare
+            # "[VERIFY]" (recognized the same as this by every resolver — see
+            # proposal_manual_flags.VERIFY_TAG_RE) works too but is less clear
+            # to a reader than naming the fact directly.
             expertise.append(
                 {"area": area, "years": years or "[VERIFY: years of experience]"}
             )
@@ -2030,6 +2032,8 @@ async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, A
         return []
     try:
         draft = await aget_proposal_draft(rfp_id)
+    except ProposalGenerationCancelled:
+        raise
     except Exception:
         logger.warning("Could not load proposal draft %s to check selected Key Personas", rfp_id)
         return []
@@ -2043,6 +2047,8 @@ async def _selected_key_personas_for_rfp(rfp_id: str | None) -> list[dict[str, A
         return []
     try:
         all_personas = await team_personas_service.get_all_key_personas()
+    except ProposalGenerationCancelled:
+        raise
     except Exception:
         logger.warning("Could not load Key Personas roster for rfp %s", rfp_id)
         return []
@@ -2469,6 +2475,8 @@ async def _validate_sections_editorial(state: SectionsGraphState) -> dict[str, A
             "section1_editorial_review": editorial.model_dump(by_alias=True),
             "provider": provider,
         }
+    except ProposalGenerationCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001 — review must not crash generation
         logger.warning("Editorial validation node failed (non-fatal): %s", str(exc)[:200])
         return {}
@@ -3002,6 +3010,8 @@ async def _build_section_3(state: SectionsGraphState) -> dict[str, Any]:
                     resolved.match_quality,
                     [resolved.display_names.get(t, t) for t in selected_studies],
                 )
+        except ProposalGenerationCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("Section 3 case study resolver failed (%s)", str(exc)[:160])
 

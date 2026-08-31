@@ -12,6 +12,7 @@ import {
   formatDate,
 } from "@/lib/format";
 import { expoOutEase } from "@/lib/motion";
+import { describeRfpIntake } from "@/lib/rfp-intake";
 import {
   getWorkflowStepDisplay,
   isNewIntake,
@@ -90,6 +91,57 @@ function filterRfps(rfps: RfpRecord[], tab: FilterTab): RfpRecord[] {
   }
 }
 
+function RfpIntakeLine({
+  rfp,
+  stacked = false,
+}: {
+  rfp: RfpRecord;
+  stacked?: boolean;
+}) {
+  const intake = describeRfpIntake(rfp);
+
+  if (stacked) {
+    return (
+      <div
+        className="text-[11px] leading-snug text-zo-text-muted"
+        title={intake.tooltip}
+      >
+        <p className="font-semibold text-zo-text-secondary">{intake.method}</p>
+        <p className="mt-1">
+          {intake.syncedLabel}
+          {intake.justwinDateLabel ? (
+            <>
+              <span className="mx-1.5 text-zo-border">·</span>
+              <span className="font-medium text-zo-text-secondary">
+                {intake.justwinDateLabel}
+              </span>
+            </>
+          ) : null}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <p
+      className="mt-1.5 text-[11px] leading-snug text-zo-text-muted"
+      title={intake.tooltip}
+    >
+      <span className="font-semibold text-zo-text-secondary">{intake.method}</span>
+      <span className="mx-1.5 text-zo-border">·</span>
+      <span>{intake.syncedLabel}</span>
+      {intake.justwinDateLabel ? (
+        <>
+          <span className="mx-1.5 text-zo-border">·</span>
+          <span className="font-medium text-zo-text-secondary">
+            {intake.justwinDateLabel}
+          </span>
+        </>
+      ) : null}
+    </p>
+  );
+}
+
 function RfpRowMeta({ rfp }: { rfp: RfpRecord }) {
   const goScore = rfpGoScore(rfp);
   const scale5 = goScore !== null && goScore <= 5;
@@ -98,14 +150,12 @@ function RfpRowMeta({ rfp }: { rfp: RfpRecord }) {
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
-        {rfp.source === "manual" && (
-          <span className="rounded-md border border-zo-teal/40 bg-zo-teal/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zo-teal">
-            Manual
-          </span>
-        )}
         <span className="text-xs text-zo-text-muted">
           {rfp.sector} · {rfp.location}
         </span>
+      </div>
+      <div className="lg:hidden">
+        <RfpIntakeLine rfp={rfp} />
       </div>
       {rfp.pdfUrl ? (
         <a
@@ -313,7 +363,7 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
               Active RFPs
             </h2>
             <p className="mt-1 text-sm text-zo-text-muted">
-              Fetched via JustWin · {rfps.length} opportunities in pipeline
+              {rfps.length} opportunities in pipeline
               {searchQuery.trim()
                 ? ` · ${filtered.length} match${filtered.length === 1 ? "" : "es"}`
                 : ""}
@@ -467,6 +517,7 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
               </th>
               <th className="px-4 py-4 lg:px-6">RFP</th>
               <th className="px-4 py-4">Client</th>
+              <th className="px-4 py-4">Intake</th>
               <th className="px-4 py-4">Workflow step</th>
               <th className="px-4 py-4">Due</th>
               <th className="px-4 py-4">Go Score</th>
@@ -486,7 +537,7 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
             {filtered.length === 0 ? (
               <tr>
                 <td
-                  colSpan={8}
+                  colSpan={9}
                   className="px-8 py-16 text-center text-sm text-zo-text-muted"
                 >
                   {searchQuery.trim()
@@ -539,6 +590,9 @@ export function RfpTable({ rfps, showFilters = true }: RfpTableProps) {
                       <p className="font-medium text-zo-text-secondary">
                         {rfp.client}
                       </p>
+                    </td>
+                    <td className="px-4 py-5 align-top">
+                      <RfpIntakeLine rfp={rfp} stacked />
                     </td>
                     <td className="px-4 py-5 align-top">
                       <p className="text-sm font-semibold text-foreground">

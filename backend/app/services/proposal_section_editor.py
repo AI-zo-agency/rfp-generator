@@ -210,6 +210,15 @@ Rules:
       @zo.agency address from memory (e.g. hello@ or info@ when companyfacts says
       connect@). Won/finalist proposals may repeat contact info but companyfacts
       wins for agency-wide Business Information.
+9b. Awards & Recognition: NEVER say the KB has no awards inventory until PACKED KB /
+    Verified KB facts blocks are present in this prompt. Plan Supermemory queries
+    for 05_Awards and companyfacts when the user asks to add or populate an awards
+    table. Populate rows ONLY from retrieved KB snippets (award name, issuer, year).
+    Never invent rows. Never output "TBD — Needs your input" placeholder tables —
+    use [MANUAL FILL: Sonja — confirm from 05_Awards] per missing cell after KB
+    search. For "add awards table" asks on the open tab: set hasFix=true with an
+    applyInstruction to query KB (05_Awards / companyfacts) and insert a populated
+    markdown table after Scored Capability (or where the section structure requires).
 10. Budget/pricing/fees: follow the pricing playbook when provided — refuse invented
     numbers and reverse-engineered totals; flag out-of-guide scope with
     [PRICING FLAG: … — Sonja review required].
@@ -726,6 +735,8 @@ async def _plan_verification_kb_queries(
         "Prefer 01_companyfacts verified.docx for agency profile (legal name, "
         "email, phone, team size, certifications). Use 03_CS / 06_WON for "
         "case-study claims. For capacity/hours/budget tables use 00_Guide_Pricing. "
+        "For awards / recognition / agency honors asks, plan queries for 05_Awards "
+        "and companyfacts awards sections — YOU decide exact query wording. "
         "Return queries only — empty list if KB cannot help.",
         f"User message: {user_message.strip()}",
         f"Open tab: {section.title or ''}",
@@ -1187,6 +1198,26 @@ async def _apply_suggested_fix_to_section(
                 "never invent specialization or years):\n"
                 f"{bio_kb[:18000]}\n\n"
             )
+
+    from app.services.proposal_section_kb_evidence import (
+        fetch_packed_section_kb_evidence,
+    )
+
+    try:
+        packed, _packed_sources = await fetch_packed_section_kb_evidence(
+            section_title=section.title or "",
+            user_message=instruction,
+            section_content=section.content or "",
+        )
+    except Exception:
+        logger.exception("Packed KB retrieve for apply-fix failed")
+        packed = ""
+    if packed.strip():
+        user_content += (
+            "PACKED KB EVIDENCE (same Supermemory retrieval as KB QA — populate "
+            "tables and facts ONLY from this block; never TBD placeholder rows):\n"
+            f"{packed[:14000]}\n\n"
+        )
 
     user_content += f"Current section content:\n{masked_prior[:12000]}"
 
@@ -2775,6 +2806,9 @@ missing, jumps I.1 → I.3), empty headers, empty table cells, or a numbered lis
 structural defects: mode MUST be full_rewrite. A surgical patch cannot insert a
 heading that is not in the current content.
 
+When the user asks to ADD a table, subsection, or block (e.g. "add awards table as well"):
+mode MUST be full_rewrite — a patch cannot insert a new table outside the anchor excerpt.
+
 When the user asks to REPLACE this section with a DIFFERENT / OTHER RFP need (scan RFP,
 another requirement, not the same topic): mode=full_rewrite. The instruction MUST change
 the section TOPIC and TITLE to a different uncovered RFP ask — do NOT polish or lightly
@@ -3377,6 +3411,34 @@ async def _section_chat_advisory_reply(
                 "section number.\n"
             )
 
+    if not _is_informational_only_ask(user_message or ""):
+        if "PACKED KB EVIDENCE" not in kb_block:
+            try:
+                packed, _packed_sources = await fetch_packed_section_kb_evidence(
+                    section_title=section.title or "",
+                    user_message=user_message or "",
+                    requirements=_rfp_section_requirements_list(research, section.id),
+                    section_content=section.content or "",
+                )
+            except Exception:
+                logger.warning(
+                    "Advisory packed KB retrieve failed for %s",
+                    section.id,
+                    exc_info=True,
+                )
+                packed = ""
+            if packed:
+                kb_block += (
+                    "\n\n"
+                    + packed
+                    + "\n\nAdvisory rule: PACKED KB EVIDENCE was retrieved live from "
+                    "Supermemory using the user's ask (same retrieval path as KB QA). "
+                    "Never say the KB lacks awards/clients/facts when this block contains "
+                    "them. Populate tables from these snippets only — never TBD placeholder "
+                    "rows. For add-table asks on the open tab: set hasFix=true with an "
+                    "applyInstruction to insert a markdown table from PACKED KB EVIDENCE.\n"
+                )
+
     history_block = ""
     if conversation_history:
         history_block = "\n\nRecent chat:\n" + "\n".join(
@@ -3526,9 +3588,15 @@ Rules:
 - kbQueries must chase specific facts those needs require (zö agency + field + doc hint like 01 companyfacts / 03_CS_).
 - For examples / case studies / references / campaign results: include at least one query that seeks
   real KB results/KPIs for clients or projects named in the draft (use those names — never the RFP buyer).
+- For awards / recognition / agency honors asks: kbQueries MUST target 05_Awards and
+  companyfacts — the query planner decides wording; never skip retrieval.
 - Never invent E-Verify enrollment as a searchable 'confirmed' fact — search companyfacts; leave enrollment VERIFY unless facts prove it.
 - If the user only wants VERIFY tags filled, say so in editorInstruction and keep surrounding prose intact.
-- editorInstruction must say: cite KPIs/results present in KB evidence; use [VERIFY] only for fields still missing after retrieval.
+- When the user lists multiple issues, defects, or requirements: editorInstruction MUST enumerate
+  each item and require the rewriter to fix ALL of them — partial fixes are unacceptable.
+- editorInstruction must say: cite KPIs/results present in KB evidence; use [VERIFY] or
+  [MANUAL FILL: Sonja — …] only for fields still missing after retrieval — never invent
+  team members, awards, carriers, metrics, or compliance statuses.
 - DEFAULT STYLE: Unless the user asks for more detail, instruct the editor to write concisely — cover every RFP requirement but in the fewest tight, proof-led sentences. No filler, no restating the RFP back to the evaluator."""
 
 SECTION_REDRAFT_PROMPT = """Rewrite ONE zö agency proposal section based on user feedback and evidence.
@@ -3573,6 +3641,12 @@ Rules:
     Also set designerNote in the JSON for the section-level layout hint.
 14. Methodology / planning / approach / work-plan sections: use phased bullets or a compact
     phase table; keep each phase to a few tight lines.
+15. THOROUGHNESS: If the user lists multiple issues, defects, or requirements, address EVERY
+    item — do not fix one bullet and ignore the rest. Confirm each listed issue is resolved
+    or marked [VERIFY] / [MANUAL FILL] with a specific handoff.
+16. NO FABRICATION: Never invent team members, clients, awards, insurance carriers, rates,
+    metrics, or "Compliant" statuses. Use KB evidence only; otherwise [VERIFY] or
+    [MANUAL FILL: Sonja — …]. Never invent «MFILL_N» tokens.
 
 Return ONLY JSON:
 {
@@ -3613,7 +3687,12 @@ Rules:
 16. Designer notes: insert ONLY a standalone paragraph `[DESIGNER NOTE: concrete layout handoff]`
     (blank line before/after). Never **Designer Note:**, HTML/div, or "styled as". Body =
     layout/production only (callout box, columns, attach form/PDF) — never meta commentary
-    ("This section establishes…")."""
+    ("This section establishes…").
+17. NEVER invent «MFILL_N» tokens. They appear only when already in the excerpt (protected
+    handoff placeholders). For empty table cells use [MANUAL FILL: Sonja — confirm from KB]
+    or [VERIFY: specific field]. If the user asks to ADD a new table or subsection that is
+    not in the excerpt, do NOT cram a partial table into the span — return the excerpt
+    unchanged."""
 
 SELECTION_KB_PLAN_PROMPT = """You plan a surgical edit to ONE highlighted excerpt inside a zö agency proposal section.
 
@@ -3638,6 +3717,8 @@ The user's apply instruction is authoritative. Obey it. Do NOT invent a differen
 The user clicked Apply the fix after an advisory audit. PRIOR CHAT holds the
 KB-backed verdict — use cited facts exactly. If a 04_Bio / companyfacts block is
 provided, that block is authoritative. Do NOT invent or substitute values.
+If PACKED KB EVIDENCE is provided for awards, populate the table ONLY from that
+block — never TBD placeholder rows.
 
 Rules:
 - Implement the apply instruction only; preserve all unrelated prose and structure.
@@ -3692,6 +3773,10 @@ PRESERVE the full BRAND VOICE block — zö core voice + RFP adaptation are mand
 - Do not flatten the previous draft's voice unless the user explicitly asked for a tone change.
 Apply WRITING AVOIDANCES when provided.
 
+THOROUGHNESS: If the user lists multiple issues or requirements, fix EVERY item — not one
+bullet and leave the rest. NO FABRICATION: never invent «MFILL_N» tokens; use [VERIFY] or
+[MANUAL FILL: Sonja — …] for gaps.
+
 These rules govern how you write; they are never content. Never write sentences about
 submission requirements, pass/fail status, what cannot be submitted, or what must be
 verified or confirmed with anyone — apply the rule silently instead of narrating it.
@@ -3714,10 +3799,15 @@ _MAX_EXCERPT_WORD_LOSS_RATIO = 0.12
 
 
 def _gap_fields_from_text(text: str) -> list[str]:
+    from app.services.proposal_manual_flags import verify_tag_row_label
+
     seen: set[str] = set()
     fields: list[str] = []
     for match in VERIFY_TAG_RE.finditer(text):
-        field = match.group(1).strip()
+        # Bare [VERIFY] has no field description of its own — use the table
+        # row's label ("Phone" for `| Phone | [VERIFY] |`) so it still shows
+        # up as a named gap instead of silently disappearing from the recap.
+        field = (match.group(1).strip() or verify_tag_row_label(text, match.start())).strip()
         key = field.casefold()
         if key and key not in seen:
             seen.add(key)
@@ -5506,6 +5596,10 @@ async def _improve_section_selection(
     from app.services.proposal_manuscript import strip_evidence_citation_markers
 
     replacement = strip_evidence_citation_markers(replacement)
+    if "«MFILL_" in replacement and "«MFILL_" not in (excerpt or ""):
+        from app.services.proposal_manual_flags import scrub_orphan_mfill_placeholders
+
+        replacement, _ = scrub_orphan_mfill_placeholders(replacement)
     # Guard: if the model over-ran the selected span and re-emitted surrounding
     # text, trim the overlap so the splice cannot duplicate the sentence.
     if replacement.strip():
@@ -7624,6 +7718,25 @@ async def improve_proposal_section(
     # classification must read this copy instead: routing on the augmented string
     # matched the stanza's own edit verbs and turned every question into an edit.
     raw_user_message = user_message.strip()
+
+    from app.services.proposal_chat_improve_pin import user_asks_thorough_section_repair
+
+    if improve_section_pinned:
+        selection_mode = False
+        selection_start = None
+        selection_end = None
+        selection_text = None
+
+    if selection_mode and user_asks_thorough_section_repair(raw_user_message):
+        logger.info(
+            "Thorough / structural ask — full section edit (not selection splice) for %s / %s",
+            rfp_id,
+            section_id,
+        )
+        selection_mode = False
+        selection_start = None
+        selection_end = None
+        selection_text = None
 
     from app.services.proposal_chat_ops import chat_ask_is_proposal_wide
 
