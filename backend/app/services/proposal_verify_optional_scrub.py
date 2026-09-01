@@ -30,7 +30,8 @@ _SELECTION_CRITICAL_ASK_RE = re.compile(
     r"gross-?receipts|not[- ]to[- ]exceed|hard\s+cap|budget\s+ceiling|"
     r"estimated\s+cost|estimated\s+fee|hourly\s+rate|billing\s+rate|"
     r"unit\s+rate|labor\s+rate|dollar\s+amount|fee\s+amount|"
-    r"pass-?through|commission\s+rate"
+    r"pass-?through|commission\s+rate|"
+    r"subcontractor|dvbe|good[- ]faith\s+effort|vendor\s+outreach"
     r")\b",
 )
 
@@ -53,7 +54,6 @@ _ALWAYS_REMOVE_VERIFY_ASK_RE = re.compile(
     r"gated\s+evidence|not\s+in\s+(?:gated\s+)?evidence\s+set|"
     r"not\s+supported\s+for|claim\s+['\"]?\w+['\"]?\s+not\s+supported|"
     r"backup\s+(?:mobile\s+)?(?:partner|vendor|firm|subcontractor)|"
-    r"subcontractor\s+name|"
     r"mobile\s+app\s+partner|"
     r"unnamed\s+partner|"
     r"optional\s+(?:name|contact|partner)|"
@@ -292,6 +292,16 @@ def _rfp_mandates_placeholder_ask(ask: str, rfp_cf: str) -> bool:
         topic_needles.extend(["w-9", "w9", "taxpayer"])
     if re.search(r"(?i)\b(reference|references)\b", ask_cf):
         topic_needles.extend(["reference", "references"])
+    if re.search(
+        r"(?i)\b(subcontractor|dvbe|good[- ]faith\s+effort|vendor\s+outreach)\b",
+        ask_cf,
+    ):
+        topic_needles.extend(
+            [
+                "subcontractor", "subcontracting", "dvbe", "mwbe",
+                "good faith effort", "vendor outreach",
+            ]
+        )
     if re.search(r"(?i)\b(percent\s*time|staffing\s+hours|%\s*time)\b", ask_cf):
         topic_needles.extend(
             ["percent-time", "percent time", "% time", "fte", "hours dedicated"]

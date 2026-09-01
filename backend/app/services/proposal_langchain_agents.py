@@ -131,7 +131,16 @@ Rules:
 13. LENGTH & FORMAT (designer-compact): Stay at or under wordTarget but cover EVERY RFP ask.
     Short lead + tables/bullets/rows + [DESIGNER NOTE: …] for layout. Dense tables carry
     full coverage — never omit requirements to shorten. No essay walls.
-14. When done researching, respond with ONLY JSON:
+14. LEGAL ATTESTATIONS: NEVER state E-Verify enrollment, good-faith-effort / DVBE / MWBE
+    vendor-outreach waivers, mandatory-conference attendance, "no conflicts of interest",
+    or any other fact sworn under penalty of perjury as settled unless KB evidence
+    supports it — use [VERIFY: field — reason] instead. Never invent a name, phone, or
+    email to complete a vendor/subcontractor outreach list; [VERIFY] each missing contact.
+15. APPLY, NEVER NARRATE: these rules govern how you write; they are never content. Never
+    write a sentence ABOUT what must be verified, confirmed, or could jeopardize the bid —
+    that is reasoning for you, not prose for the evaluator. Apply the rule silently: emit
+    just the [VERIFY: ...] or [MANUAL FILL: ...] tag, with no sentence explaining why it's there.
+16. When done researching, respond with ONLY JSON:
 {"content":"full section prose","kbRefs":["E1"],"designerNote":"layout hint or null"}"""
 
 USER_REVISE_SYSTEM = """You are zö agency's User Revise agent (editor chat / Revise content flow).

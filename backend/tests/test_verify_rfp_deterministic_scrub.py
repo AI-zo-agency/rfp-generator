@@ -75,6 +75,33 @@ class DeterministicVerifyStripTests(unittest.TestCase):
         self.assertEqual(removed, 0)
         self.assertIn("[VERIFY: reference contact", cleaned)
 
+    def test_keeps_subcontractor_verify_when_rfp_is_a_dvbe_waiver(self) -> None:
+        """A DVBE / good-faith-effort waiver is signed under penalty of perjury on
+        the vendor contacts it lists — the scrub must never silently drop that
+        [VERIFY] tag (which previously created blank rows a later pass could
+        fill with invented, non-KB contact info)."""
+        body = (
+            "Vendor 3: [VERIFY: subcontractor name]  Phone: [VERIFY: subcontractor phone]"
+        )
+        rfp = (
+            "Bidder shall document its good faith effort to solicit DVBE "
+            "subcontractor participation, listing each subcontractor contacted."
+        )
+        cleaned, removed = strip_verify_tags_not_required_by_rfp(body, rfp)
+        self.assertEqual(removed, 0)
+        self.assertIn("[VERIFY: subcontractor name]", cleaned)
+        self.assertIn("[VERIFY: subcontractor phone]", cleaned)
+
+    def test_still_removes_subcontractor_verify_when_rfp_never_mentions_one(self) -> None:
+        """Same ask, but an RFP that never mentions subcontractors at all — the
+        fail-closed default (remove when not grounded in THIS RFP) must still
+        hold; the DVBE fix must not turn this into an always-keep tag."""
+        body = "[VERIFY: subcontractor name]"
+        rfp = "Vendor shall describe technical approach, timeline, and cost proposal."
+        cleaned, removed = strip_verify_tags_not_required_by_rfp(body, rfp)
+        self.assertEqual(removed, 1)
+        self.assertNotIn("[VERIFY", cleaned)
+
 
 class ScrubAntiFabricationTests(unittest.TestCase):
     def test_rejects_new_phone_not_in_sources(self) -> None:

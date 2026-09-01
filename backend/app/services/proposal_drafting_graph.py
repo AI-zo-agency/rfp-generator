@@ -210,6 +210,8 @@ Rules (strict):
 46. COVER LETTER / TRANSMITTAL: If the RFP requires a physically signed cover letter or letter of transmittal, write the short offer letter AND set designerNote (or an inline [DESIGNER NOTE: …]) to attach the signed PDF separately. Do not claim the signed file is attached. Do not invent signature dates, notary numbers, or stamp IDs.
 47. Concise ≠ incomplete: hit every RFP ask for the section, then STOP. No filler, no duplicated Sections 1–3, no Approach essay pasted into Schedule.
 48. TEAM / SPECIALIST ROLES: Only name roles that map to a real Section 2 bio person, or label them [MANUAL FILL: subcontractor / generalist coverage]. Never invent dedicated specialist titles with no matching named person on the roster.
+49. LEGAL ATTESTATIONS (higher bar than ordinary claims): NEVER state E-Verify / Contractor Affidavit enrollment, participation in a good-faith-effort / DVBE / MWBE vendor-outreach waiver, mandatory-conference attendance, "no conflicts of interest," or any other fact sworn under penalty of perjury as settled unless it is in evidence. Use [VERIFY: field — reason] instead, even when surrounding form language pressures you to fill every field. Do NOT invent names, phone numbers, or emails to complete a vendor/subcontractor outreach or good-faith-effort contact list — [VERIFY] each missing contact individually; never fabricate a plausible-looking one to avoid a blank field.
+50. APPLY, NEVER NARRATE: these rules govern how you write; they are never content. Never write a sentence ABOUT what must be verified, confirmed, or could jeopardize the bid — that is reasoning for you, not prose for the evaluator, who reads only the proposal. Apply the rule silently: emit just the [VERIFY: ...] or [MANUAL FILL: ...] tag, with no sentence explaining why it's there.
 
 Return ONLY JSON:
 {
@@ -669,16 +671,22 @@ def _section_prose_missing(content: str) -> bool:
 
 
 def _looks_truncated_prose(content: str) -> bool:
-    """Detect mid-sentence cutoffs from max-output token limits."""
+    """Detect mid-sentence cutoffs from max-output token limits.
+
+    Must check the string's actual ENDING, not "anywhere in the last N
+    chars" — an unanchored search treats an earlier, complete sentence that
+    happens to fall inside that window as proof the string isn't truncated,
+    even when its real last characters are a dangling clause.
+    """
     stripped = (content or "").rstrip()
     if len(stripped) < 350:
         return False
-    tail = stripped[-220:]
-    if re.search(r'[.!?](?:\s|$|")', tail):
+    if stripped.endswith("]"):
         return False
-    if re.search(r"\]\s*$", stripped):
-        return False
-    return True
+    # A closing quote/paren/markdown-emphasis mark after the real terminal
+    # punctuation still counts as a complete sentence.
+    end = stripped.rstrip("\"')*_")
+    return not end.endswith((".", "!", "?"))
 
 
 def _empty_draft_fallback(

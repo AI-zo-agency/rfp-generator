@@ -186,6 +186,19 @@ def reply_recommends_rfp_fit_replacement(reply: str) -> bool:
     return bool(_RFP_FIT_AUDIT_RE.search(reply or ""))
 
 
+
+# Every legitimate VERIFY marker in this codebase's own conventions is a
+# short field name ("confirm before submission", "hourly rate — {name/role}",
+# "percent time") — never a full sentence. A chat reply can also use
+# [VERIFY: …] syntax to quote a whole paragraph of the model's OWN reasoning
+# about why something matters (analytical prose addressed to the reviewer,
+# not a field description) — that text must never become the literal
+# "insert exactly once" instruction below, or the redraft model copies it
+# verbatim into client-facing content. Bounding acceptance to short tags is
+# what keeps this instruction safe regardless of what the chat reply says.
+_MAX_PLAUSIBLE_VERIFY_INTERIOR_CHARS = 140
+
+
 def build_verify_tag_instruction(
     *,
     section_title: str,
@@ -193,9 +206,18 @@ def build_verify_tag_instruction(
 ) -> str:
     """Insert the recommended [VERIFY: …] flag; do not invent board/contact facts."""
     title = (section_title or "this section").strip() or "this section"
-    audit = re.sub(r"\s+", " ", (reply or "").strip())[:1800]
-    tags = re.findall(r"\[VERIFY:[^\]]+\]", reply or "", flags=re.I)
-    tag_line = tags[0] if tags else "[VERIFY: confirm before submission]"
+    normalized = re.sub(r"\s+", " ", (reply or "").strip())
+    audit = normalized[:1800]
+    tags = re.findall(r"\[VERIFY:[^\]]+\]", normalized, flags=re.I)
+    short_tags = [t for t in tags if len(t) <= _MAX_PLAUSIBLE_VERIFY_INTERIOR_CHARS]
+    tag_line = short_tags[0] if short_tags else "[VERIFY: confirm before submission]"
+    # The trailing "Audit to follow" excerpt below is read-only context (e.g.
+    # so the redraft model knows which fields the audit already marked
+    # correct) — an over-long tag is the same leaked-reasoning risk as
+    # tag_line above, just reachable a second way, so scrub it here too.
+    for long_tag in tags:
+        if len(long_tag) > _MAX_PLAUSIBLE_VERIFY_INTERIOR_CHARS:
+            audit = audit.replace(long_tag, "[VERIFY: see note above]")
     return (
         f"Edit ONLY the sidebar section titled “{title}”. "
         "Do NOT invent board members, contacts, or compliance facts.\n"

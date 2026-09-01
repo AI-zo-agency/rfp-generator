@@ -35,6 +35,7 @@ from app.services.proposal_fulfill_rfp_accuracy import (
 from app.services.proposal_rfp_submission_requirements import (
     detect_narrative_submission_gaps,
 )
+from app.services.proposal_draft_structure_stubs import section_is_rfp_draft_stub
 from app.services.proposal_manuscript_cleanup import (
     GRAMMAR_GLITCH_RE,
     budget_mentions_subcontractors,
@@ -524,9 +525,18 @@ def _scan_copy_paste(
                             excerpt=section.content[:200],
                         )
                     )
+            section_is_undrafted_stub = section_is_rfp_draft_stub(section)
             for match in _PLACEHOLDER_RE.finditer(section.content):
                 tag = match.group(0)
-                sev = "critical" if tag.upper().startswith("[VERIFY") else "warning"
+                # A whole RFP-required section that was never drafted at all is
+                # categorically worse than an ordinary human-input placeholder
+                # (a signature, a date) inside an otherwise-complete section —
+                # every tag in it must block readiness, not just VERIFY ones.
+                sev = (
+                    "critical"
+                    if tag.upper().startswith("[VERIFY") or section_is_undrafted_stub
+                    else "warning"
+                )
                 issues.append(
                     PreSubmitIssue(
                         severity=sev,
@@ -568,9 +578,14 @@ def _scan_copy_paste(
                     )
                 )
 
+        section_is_undrafted_stub = section_is_rfp_draft_stub(section)
         for match in _PLACEHOLDER_RE.finditer(section.content):
             tag = match.group(0)
-            sev = "critical" if tag.upper().startswith("[VERIFY") else "warning"
+            sev = (
+                "critical"
+                if tag.upper().startswith("[VERIFY") or section_is_undrafted_stub
+                else "warning"
+            )
             issues.append(
                 PreSubmitIssue(
                     severity=sev,
@@ -690,14 +705,27 @@ def _compliance_checklist(
     rfp: RfpRecord,
     rfp_text: str | None = None,
 ) -> list[ComplianceCheckItem]:
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+
     items: list[ComplianceCheckItem] = []
-    section_titles = {s.title.strip().casefold() for s in draft.sections}
     section_by_title = {s.title.strip().casefold(): s for s in draft.sections}
+
+    def _find_draft_match(title: str) -> ProposalSection | None:
+        exact = section_by_title.get(title.strip().casefold())
+        if exact is not None:
+            return exact
+        # A section renamed after research.rfp_sections was last computed
+        # (apply_rfp_mandated_section_titles, a later reorder/relabel pass)
+        # must not read as "missing" from the compliance checklist just
+        # because its exact title string changed underneath the mapping.
+        for section in draft.sections:
+            if outline_titles_near_duplicate(title, section.title or "", threshold=0.6):
+                return section
+        return None
 
     mapped = research.rfp_sections if research else []
     for mapped_section in mapped:
-        title_key = mapped_section.title.strip().casefold()
-        draft_match = section_by_title.get(title_key)
+        draft_match = _find_draft_match(mapped_section.title)
         has_content = bool(draft_match and draft_match.content.strip())
 
         if mapped_section.requirements:
@@ -763,7 +791,7 @@ def _compliance_checklist(
                             notes=f"Missing content for {mapped_section.title}",
                         )
                     )
-        elif title_key in section_titles and has_content:
+        elif draft_match is not None and has_content:
             items.append(
                 ComplianceCheckItem(
                     item=mapped_section.title,

@@ -1374,6 +1374,16 @@ async def _run_fulfill_rfp_gaps_body(
                 f"Dedupe: {len(dedupe_logs)} compact action(s): "
                 + "; ".join(dedupe_logs[:10])
             )
+        # Advisory only — never deletes, so it must never gate the save above
+        # (a scored tab duplicating a sibling elsewhere shouldn't force a
+        # write when nothing else in this pass actually changed anything).
+        from app.services.proposal_section_dedup import (
+            detect_possible_scored_duplicate_pairs,
+        )
+
+        dup_flags = detect_possible_scored_duplicate_pairs(sections)
+        if dup_flags:
+            report.setdefault("logs", []).extend(dup_flags[:6])
         # Required form slots: copy Active Client List into missing I.2 from a
         # sibling tab (same as section chat). Run after dedupe so clones are gone.
         try:
@@ -2203,6 +2213,14 @@ async def _run_fulfill_rfp_gaps_body(
                 f"Final compact: {len(final_logs)} action(s): "
                 + "; ".join(final_logs[:10])
             )
+        # Advisory only — never deletes, must never gate the save above.
+        from app.services.proposal_section_dedup import (
+            detect_possible_scored_duplicate_pairs,
+        )
+
+        dup_flags = detect_possible_scored_duplicate_pairs(sections)
+        if dup_flags:
+            report.setdefault("logs", []).extend(dup_flags[:6])
         # Hard guarantee: Compact must never leave the proposal without Budget.
         from app.services.proposal_budget_content import ensure_budget_section_present
 
@@ -2726,11 +2744,15 @@ async def _run_fulfill_rfp_gaps_body(
         )
 
     draft = attach_scan_summary_to_latest_before_scan(draft, report)
-    if scan_profile == "build_finalize":
-        await _reorder_draft_to_rfp_toc(
-            reason="final checks complete",
-            add_missing_mandated_stubs=True,
-        )
+    # Unconditional (not just build_finalize): steps above this point — dedupe,
+    # compact, Ralph page-fit, hollow-fill — can each add, drop, or reposition
+    # a section, and the ONLY other reorder calls in this function are earlier
+    # (after step 2, after step 3-4) — plain "Scan RFP" used to skip this
+    # entirely and could ship visibly out of RFP order.
+    await _reorder_draft_to_rfp_toc(
+        reason="final checks complete",
+        add_missing_mandated_stubs=True,
+    )
     await asave_proposal_draft(draft)
     await asave_research_cache(updated_research)
     final_scan_hash = compute_fulfill_scan_hash(draft, rfp_text)

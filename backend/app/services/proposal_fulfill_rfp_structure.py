@@ -1805,6 +1805,17 @@ async def run_rfp_structure_alignment_pass(
                         f"“{section.title}” reframe may have truncated — re-run Scan or restore snapshot."
                     )
                     continue
+                from app.services.proposal_consistency import regression_vs_prior
+
+                if regression_vs_prior(
+                    section, section.model_copy(update={"content": new_content})
+                ):
+                    human.append(
+                        f"“{section.title}” reframe would have thinned an already-drafted "
+                        f"section — kept the existing content. Add {', '.join(missing[:6]) or 'the missing headings'} "
+                        "directly (or via section chat) instead of re-running Scan."
+                    )
+                    continue
                 sections[idx] = section.model_copy(
                     update={"content": new_content, "status": "generated"}
                 )

@@ -83,6 +83,23 @@ class AssemblerTests(unittest.TestCase):
         self.assertEqual(plan.proposal_memory.facts.get("clientName"), "City of Test")
         self.assertEqual(plan.proposal_memory.facts.get("pricingModel"), "Fixed Fee")
 
+    def test_outline_required_sub_headings_reach_the_writer(self) -> None:
+        """A tab's RFP-required sub-headings (OutlineSection.children — e.g. an
+        Exhibit A "A. Vision" layout) must reach the writer's requirements list
+        up front, not only get discovered by a post-draft reframe pass."""
+        plan = _sample_ready_plan()
+        plan.writing.proposal_outline.sections[0].children = [
+            "A. Vision",
+            "B. Market Analysis",
+        ]
+        legacy = derive_legacy_fields(plan)
+        section_map = next(s for s in legacy["rfpSections"] if s.id == "rfp-sec-1")
+        joined = " | ".join(section_map.requirements)
+        self.assertIn("A. Vision", joined)
+        self.assertIn("B. Market Analysis", joined)
+        # The brief's own key message must still be present alongside them.
+        self.assertIn("Collaborative", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

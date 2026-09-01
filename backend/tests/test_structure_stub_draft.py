@@ -326,6 +326,51 @@ class RestoreEmptiedSectionsTests(unittest.TestCase):
         self.assertEqual(out.sections[0].content, restructured)
         self.assertEqual(logs, [])
 
+    def test_restores_when_reframe_shrinks_good_section_without_stub_marker(self) -> None:
+        """A structure-reframe that thins a good section out must still be caught —
+        not just the literal MANUAL FILL / bio-stub shapes _degraded() already knew."""
+        from app.services.proposal_draft_structure_stubs import (
+            restore_sections_emptied_by_scan,
+        )
+
+        full = (
+            "Kitsap County needs a differentiated tourism brand built on measurable "
+            "outcomes rather than generic slogans. A. Vision: we position the county "
+            "as the Pacific gateway for weekend explorers, anchoring every campaign "
+            "in that single idea so paid, owned, and earned channels reinforce one "
+            "message instead of competing narratives. B. Market Analysis: primary "
+            "research shows 40% of visitors originate in the Seattle metro, 25% from "
+            "Portland, and a fast-growing share arrive via cruise transfer during "
+            "shoulder season, which reshapes our media calendar toward April and "
+            "October. C. KPI Targets: grow lodging tax revenue 12% year over year, "
+            "lift direct referral traffic 30%, and hold cost per acquisition under "
+            "the county's current benchmark. D. Target Audience: drive-market "
+            "families, off-season retirees, and outdoor-recreation groups get "
+            "distinct creative tracks rather than one blended persona. E. "
+            "Strategies: phased campaigns across paid social, connected TV, and "
+            "search close the awareness-to-booking gap the county's last plan left "
+            "open. F. Campaigns: a countywide events calendar links every listing "
+            "back to bookable itineraries with direct referral tracking on each "
+            "link. G. Activity Measures Methodology: quarterly dashboards report "
+            "against every KPI above so the county can reallocate spend mid-year "
+            "instead of waiting for an annual review."
+        )
+        # A plausible reframe result: keeps a lettered-heading shape (so it is
+        # neither the literal MANUAL FILL stub marker nor a bio stub) but drops
+        # nearly everything the drafted version actually said.
+        thin_reframe = (
+            "## Brand Marketing Plan\n\n"
+            "A. Vision\nB. Market Analysis\nC. KPI Targets\n\n"
+            "These headings are required by the RFP and should be addressed here."
+        )
+        draft = self._draft(
+            [ProposalSection(id="s4", title="Brand Marketing Plan", content=thin_reframe, status="generated")]
+        )
+        prior = [ProposalSection(id="s4", title="Brand Marketing Plan", content=full, status="generated")]
+        out, logs = restore_sections_emptied_by_scan(draft, prior)
+        self.assertEqual(out.sections[0].content, full)
+        self.assertEqual(len(logs), 1)
+
     def test_restores_good_section_overwritten_by_bio_stub(self) -> None:
         from app.services.proposal_draft_structure_stubs import (
             restore_sections_emptied_by_scan,

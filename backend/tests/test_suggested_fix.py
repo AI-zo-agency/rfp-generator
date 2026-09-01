@@ -324,3 +324,42 @@ def test_resolve_offers_apply_fix_for_board_verify_tag_not_contact_scrub():
     # Must NOT scrub verified connect@ / phone as invented contacts.
     assert "remove contact" not in fix.instruction.casefold()
     assert "invented contacts" not in fix.summary.casefold()
+
+
+_ATTENDANCE_LEAKED_ANALYSIS_REPLY = (
+    "Recommended action before submission:\n"
+    "[VERIFY: confirm the attendee of record actually attended the mandatory "
+    "pre-proposal conference — this is the kind of thing that could void the "
+    "whole bid if caught, since attendance is the single hardest compliance "
+    "gate in this RFP]\n\n"
+    "Everything else in this section reads fine."
+)
+
+
+def test_resolve_verify_tag_fallback_never_leaks_long_analysis_into_instruction():
+    """A chat reply's own [VERIFY: …] span can be the model's whole reasoning
+    paragraph about bid risk, not a short field name — that text must never
+    become the literal "insert exactly once" instruction, or the redraft
+    model copies the reviewer-facing analysis verbatim into client-facing
+    proposal content."""
+    draft = ProposalDraft(
+        rfpId="r1",
+        updatedAt="2026-08-10T00:00:00Z",
+        sections=[
+            ProposalSection(
+                id="attendance",
+                title="Attendance Confirmation",
+                content="## Attendance Confirmation\n",
+            ),
+        ],
+    )
+    fix = resolve_advisory_suggested_fix(
+        {"reply": _ATTENDANCE_LEAKED_ANALYSIS_REPLY, "hasFix": False},
+        fallback_section_id="attendance",
+        section_title="Attendance Confirmation",
+        draft=draft,
+    )
+    assert fix is not None
+    assert "void the whole bid" not in fix.instruction
+    assert "hardest compliance gate" not in fix.instruction
+    assert "[VERIFY: confirm before submission]" in fix.instruction

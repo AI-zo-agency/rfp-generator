@@ -624,6 +624,89 @@ class SectionDedupTests(unittest.TestCase):
         )
 
 
+_INNOVATION_BODY = (
+    "Our innovation process begins with a structured discovery sprint where "
+    "cross-functional teams map the client's current workflow, identify "
+    "friction points, and prioritize the highest-impact opportunities using "
+    "a weighted scoring matrix. From there we run rapid prototyping cycles, "
+    "testing each concept against real user feedback before committing "
+    "engineering resources, so only validated ideas reach production. Every "
+    "initiative is measured against baseline KPIs set during discovery, with "
+    "a quarterly retrospective that feeds lessons back into the next cycle."
+)
+
+
+class PossibleScoredDuplicateFlagTests(unittest.TestCase):
+    """prune_near_duplicate_sections deliberately never deletes a scored tab —
+    this advisory-only detector is the backstop that still surfaces it when
+    two sections (at least one scored) answer the same requirement."""
+
+    def test_flags_scored_tab_duplicated_under_an_unrelated_title(self) -> None:
+        from app.services.proposal_section_dedup import (
+            detect_possible_scored_duplicate_pairs,
+        )
+
+        scored = _sec(
+            "rfp-sec-innovation",
+            "F. Innovation Process",
+            _INNOVATION_BODY,
+            weight=15,
+        )
+        # Same requirement, restated near-verbatim under an unrelated title —
+        # exactly the shape prune_near_duplicate_sections cannot see, because
+        # the scored tab above never enters its comparison pool at all.
+        buried = _sec(
+            "rfp-sec-org-capacity",
+            "Organizational Capacity Response Form",
+            _INNOVATION_BODY + " This closes our organizational capacity response.",
+        )
+        flags = detect_possible_scored_duplicate_pairs([scored, buried])
+        self.assertEqual(len(flags), 1)
+        self.assertIn("Innovation Process", flags[0])
+        self.assertIn("Organizational Capacity Response Form", flags[0])
+
+    def test_does_not_flag_two_genuinely_different_scored_sections(self) -> None:
+        from app.services.proposal_section_dedup import (
+            detect_possible_scored_duplicate_pairs,
+        )
+
+        innovation = _sec(
+            "rfp-sec-innovation", "F. Innovation Process", _INNOVATION_BODY, weight=15
+        )
+        budget = _sec(
+            "rfp-sec-budget",
+            "G. Cost Proposal",
+            (
+                "Our not-to-exceed fee for this engagement is structured as a "
+                "fixed monthly retainer covering strategy, production, and "
+                "reporting, with media spend passed through at no markup and "
+                "itemized monthly against the approved budget ceiling stated "
+                "in the RFP, reconciled quarterly against actuals."
+            ),
+            weight=10,
+        )
+        flags = detect_possible_scored_duplicate_pairs([innovation, budget])
+        self.assertEqual(flags, [])
+
+    def test_never_mutates_input_sections(self) -> None:
+        from app.services.proposal_section_dedup import (
+            detect_possible_scored_duplicate_pairs,
+        )
+
+        scored = _sec(
+            "rfp-sec-innovation", "F. Innovation Process", _INNOVATION_BODY, weight=15
+        )
+        buried = _sec(
+            "rfp-sec-org-capacity",
+            "Organizational Capacity Response Form",
+            _INNOVATION_BODY + " This closes our organizational capacity response.",
+        )
+        sections = [scored, buried]
+        before = [s.model_copy() for s in sections]
+        detect_possible_scored_duplicate_pairs(sections)
+        self.assertEqual(sections, before)
+
+
 class CompressRedundantReferenceDeliverablesTests(unittest.TestCase):
     def test_reference_form_pointerizes_when_narrative_tab_exists(self) -> None:
         narrative_body = (

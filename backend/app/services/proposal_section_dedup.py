@@ -1141,6 +1141,66 @@ def prune_near_duplicate_sections(
     return kept, dropped_labels
 
 
+def detect_possible_scored_duplicate_pairs(
+    sections: list[Any],
+    *,
+    content_jaccard_threshold: float = 0.42,
+    containment_threshold: float = 0.72,
+) -> list[str]:
+    """Flag — never delete — a protected/scored tab that looks like it answers
+    the same RFP requirement as another section.
+
+    prune_near_duplicate_sections above deliberately never compares or drops a
+    protected/scored section — auto-deleting one on a heuristic misfire could
+    silently forfeit RFP evaluation points. That safety leaves a real gap: two
+    DIFFERENT sections can each independently answer the same underlying ask
+    (a scored criterion gets its own tab, AND a sibling response-form section
+    embeds the same sub-item under an unrelated title) with nothing ever
+    surfacing that to a human — the proposal ships the requirement answered
+    twice, uncombined. This only ever returns advisory strings for a human to
+    act on; it never touches `sections`.
+    """
+    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+    from app.services.proposal_section_quality import word_count
+    from difflib import SequenceMatcher
+
+    substantial = [
+        s for s in sections if _section_id(s) and word_count(_section_content(s)) >= 40
+    ]
+    protected_ids = {
+        _section_id(s) for s in substantial if _is_protected_scan_section(s)
+    }
+    flags: list[str] = []
+    for i, sec_a in enumerate(substantial):
+        if _section_id(sec_a) not in protected_ids:
+            continue
+        title_a = _section_title(sec_a)
+        body_a = _section_content(sec_a)
+        for sec_b in substantial[i + 1 :]:
+            if _section_id(sec_b) == _section_id(sec_a):
+                continue
+            title_b = _section_title(sec_b)
+            body_b = _section_content(sec_b)
+            title_dup = outline_titles_near_duplicate(title_a, title_b, threshold=0.55)
+            jaccard = _content_jaccard(body_a, body_b)
+            seq_ratio = SequenceMatcher(
+                None, body_a.casefold()[:5000], body_b.casefold()[:5000]
+            ).ratio()
+            content_dup = jaccard >= content_jaccard_threshold or seq_ratio >= 0.72
+            containment = (
+                _content_coverage(body_a, body_b) >= containment_threshold
+                or _content_coverage(body_b, body_a) >= containment_threshold
+            )
+            if not title_dup and not content_dup and not containment:
+                continue
+            flags.append(
+                f"Possible duplicate answer: “{title_a}” and “{title_b}” "
+                "look like they answer the same RFP requirement — review and "
+                "combine into one response instead of leaving both in the proposal."
+            )
+    return flags
+
+
 def _sibling_titles_embedded(parent_body: str, sibling_titles: list[str]) -> list[str]:
     """Return sibling titles that are restated as headings / long phrases in parent."""
     from app.services.proposal_outline_dedup import normalize_outline_title, outline_title_tokens

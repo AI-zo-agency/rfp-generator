@@ -366,6 +366,38 @@ class RealDefectCaughtTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(looks_truncated_for_fulfill(new_content))
         self.assertTrue(new_content.rstrip().endswith("."))
 
+    async def test_mid_sentence_cutoff_not_masked_by_earlier_period_in_tail_window(
+        self,
+    ) -> None:
+        """The detector used to search for terminal punctuation anywhere in the
+        last 220 characters, not anchored to the string's real end — so a
+        genuinely truncated section with one complete, unrelated sentence
+        sitting earlier in that window was wrongly read as "not truncated."
+        This reproduces that exact shape (QA-observed: a required-response
+        section that cuts off mid-clause) and proves the real, unmocked
+        detector now catches it."""
+        from app.services.proposal_fulfill_truncation_repair import (
+            looks_truncated_for_fulfill,
+        )
+
+        truncated = (
+            "Our creative process begins with a discovery workshop where we "
+            "align on goals, audience, and success metrics with your team "
+            "before any design work starts, and every deliverable maps back "
+            "to the client's own KPIs so nothing we produce is disconnected "
+            "from what actually moves the account forward once the initial "
+            "creative brief is signed off by every stakeholder on the "
+            "client side. From there, we move into execution, refining "
+            "tone, structure, and the"
+        )
+        self.assertGreaterEqual(len(truncated), 350)
+        # The period ending "...signed off by every stakeholder on the
+        # client side." sits inside the last 220 characters, ahead of the
+        # real (dangling) ending — the exact shape that fooled the old,
+        # unanchored "anywhere in the tail" search.
+        self.assertIn(".", truncated[-220:])
+        self.assertTrue(looks_truncated_for_fulfill(truncated))
+
     def test_invented_case_study_client_is_reverted_by_real_fabrication_guard(
         self,
     ) -> None:

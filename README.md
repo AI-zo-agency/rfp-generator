@@ -61,7 +61,7 @@ Proposal-pipeline and Go/No-Go jobs run in-process by default — no extra setup
 
 ```bash
 # Redis must be reachable at REDIS_URL first, e.g.:
-docker run -d -p 6379:6379 redis:7-alpine
+docker run -d -p 6380:6380 redis:7-alpine
 
 cd backend
 .venv/bin/celery -A app.celery_app worker --loglevel=info --concurrency=2

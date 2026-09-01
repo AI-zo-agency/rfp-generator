@@ -185,8 +185,16 @@ def restore_sections_emptied_by_scan(
         looks_like_bio_stub_body,
     )
 
+    from app.services.proposal_consistency import regression_vs_prior
+
     def _degraded(section: ProposalSection, prior: ProposalSection) -> bool:
-        """The scan turned a good section into a stub / bio-stub / empty body."""
+        """The scan turned a good section into a stub / bio-stub / empty body —
+        or just quietly thinned it out without matching any of those literal
+        shapes (e.g. a structure reframe that rewrote real prose into a short
+        list of headings plus a line about what the RFP still wants). The
+        three checks above only catch known corruption *shapes*; regression_vs_prior
+        catches the general case — a real word-count / evidence collapse versus
+        the pre-scan body — regardless of what shape the replacement took."""
         body = section.content or ""
         if not body.strip():
             return True
@@ -200,6 +208,8 @@ def restore_sections_emptied_by_scan(
             and looks_like_bio_stub_body(body)
             and not looks_like_bio_stub_body(prior.content or "")
         ):
+            return True
+        if regression_vs_prior(prior, section):
             return True
         return False
 

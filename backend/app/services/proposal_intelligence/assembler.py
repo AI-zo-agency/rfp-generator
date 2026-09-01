@@ -799,6 +799,19 @@ def derive_legacy_fields(
         if brief:
             requirements.extend(brief.key_messages)
             requirements.extend(brief.evidence_needed)
+        # RFP-required sub-headings/sub-asks the outline step already found for
+        # this tab (e.g. "A. Vision" from an Exhibit-A-style layout, or "III.1"
+        # from a numbered scored criterion — see OutlineSection.children) were
+        # computed but never reached the writer before this, so the first draft
+        # would omit them and a later reframe pass had to add them back in.
+        # Prepended (not appended) so they survive the requirements[:12] cap
+        # below even on a section whose brief already has a full key-message list.
+        heading_requirements = [
+            f"Must cover the RFP's required sub-heading: {heading}"
+            for heading in section.children
+            if not any(heading.casefold() in req.casefold() for req in requirements)
+        ]
+        requirements = heading_requirements + requirements
         if not requirements:
             requirements = [f"Address {section.title} per RFP"]
 
