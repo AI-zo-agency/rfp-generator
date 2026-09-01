@@ -125,7 +125,7 @@ class MissingAnswersAgentTests(unittest.IsolatedAsyncioTestCase):
                 return_value=[
                     {
                         "sectionId": "rfp-team",
-                        "kbQuery": "06_WON key personnel",
+                        "kbQueries": ["06_WON key personnel", "06_WON Sonja Anderson"],
                         "gaps": ["empty fields: Qualifications"],
                     }
                 ]
@@ -138,7 +138,7 @@ class MissingAnswersAgentTests(unittest.IsolatedAsyncioTestCase):
                     ["06_WON_Medford.pdf"],
                 )
             ),
-        ), patch(
+        ) as mock_retrieve, patch(
             "app.services.proposal_hollow_kb_fill._llm_fill_section",
             new=AsyncMock(return_value=filled),
         ):
@@ -154,6 +154,290 @@ class MissingAnswersAgentTests(unittest.IsolatedAsyncioTestCase):
             updated.sections[2].content,
             "## Approach\n\nFull methodology with phases and City review gates.",
         )
+        # Both of _plan_fills's per-gap kbQueries reached _retrieve_queries,
+        # flattened — not just the first one, and not dropped because the
+        # planner returned the new plural-array shape.
+        mock_retrieve.assert_awaited_once_with(
+            ["06_WON key personnel", "06_WON Sonja Anderson"]
+        )
+
+
+class PlanFillsMultiQueryTests(unittest.IsolatedAsyncioTestCase):
+    """_plan_fills must plan several targeted KB queries per gap, not one —
+    this is the fix for "chat's Improve section works well, the automated
+    fill doesn't": chat runs several targeted searches per ask, the
+    automated pass was running exactly one generic one per section."""
+
+    def _gap(self):
+        from app.services.proposal_hollow_kb_fill import MissingAnswerGap
+
+        return MissingAnswerGap(
+            section_id="rfp-references",
+            title="References",
+            reasons=["empty reference list"],
+            snippet="",
+        )
+
+    async def test_multiple_kb_queries_per_gap_are_parsed(self) -> None:
+        from app.services.proposal_hollow_kb_fill import _plan_fills
+
+        response = {
+            "fills": [
+                {
+                    "sectionId": "rfp-references",
+                    "kbQueries": [
+                        "06_WON Maricopa County reference contact",
+                        "06_WON Hillsboro Public Library reference contact",
+                        "07_FIN references similar scope",
+                    ],
+                    "gaps": ["empty reference list"],
+                }
+            ]
+        }
+        with patch(
+            "app.services.llm.is_configured", return_value=True
+        ), patch(
+            "app.services.llm.chat_json",
+            new=AsyncMock(return_value=(response, "openrouter")),
+        ):
+            planned = await _plan_fills(
+                [self._gap()],
+                rfp_title="Test RFP",
+                rfp_client="Test City",
+                rfp_sector="government",
+                known_case_study_clients=["Maricopa County", "Hillsboro Public Library"],
+            )
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(len(planned[0]["kbQueries"]), 3)
+        self.assertIn("Maricopa County", planned[0]["kbQueries"][0])
+
+    async def test_legacy_single_kb_query_shape_still_works(self) -> None:
+        """Back-compat: if the model (or a cached/older path) returns the old
+        singular "kbQuery" key, it must still normalize into a 1-item list,
+        not silently vanish and leave that section with no search at all."""
+        from app.services.proposal_hollow_kb_fill import _plan_fills
+
+        response = {
+            "fills": [
+                {
+                    "sectionId": "rfp-references",
+                    "kbQuery": "06_WON references",
+                    "gaps": ["empty reference list"],
+                }
+            ]
+        }
+        with patch(
+            "app.services.llm.is_configured", return_value=True
+        ), patch(
+            "app.services.llm.chat_json",
+            new=AsyncMock(return_value=(response, "openrouter")),
+        ):
+            planned = await _plan_fills(
+                [self._gap()],
+                rfp_title="Test RFP",
+                rfp_client="Test City",
+                rfp_sector="government",
+            )
+        self.assertEqual(planned[0]["kbQueries"], ["06_WON references"])
+
+    async def test_known_case_study_clients_reach_the_planner_prompt(self) -> None:
+        from app.services.proposal_hollow_kb_fill import _plan_fills
+
+        captured: dict = {}
+
+        async def fake_chat_json(messages, **kwargs):
+            captured["messages"] = messages
+            return {"fills": []}, "openrouter"
+
+        with patch(
+            "app.services.llm.is_configured", return_value=True
+        ), patch(
+            "app.services.llm.chat_json", new=fake_chat_json
+        ):
+            await _plan_fills(
+                [self._gap()],
+                rfp_title="Test RFP",
+                rfp_client="Test City",
+                rfp_sector="government",
+                known_case_study_clients=["Maricopa County", "Hillsboro Public Library"],
+            )
+        user_content = captured["messages"][1]["content"]
+        self.assertIn("Maricopa County", user_content)
+        self.assertIn("Hillsboro Public Library", user_content)
+
+
+class InstructionalChecklistRejectionTests(unittest.IsolatedAsyncioTestCase):
+    """Regression: a fill that describes what a human should do instead of
+    doing it must never ship — reject it like any other failed fill, leaving
+    the section as-is, rather than saving a to-do list as if it were content."""
+
+    async def test_checklist_shaped_fill_is_rejected(self) -> None:
+        from app.services.proposal_hollow_kb_fill import _llm_fill_section
+
+        section = ProposalSection(
+            id="rfp-references",
+            title="References (Three Satisfactory References)",
+            content="[MANUAL FILL: Draft full References for this RFP.]",
+        )
+        checklist_response = {
+            "content": (
+                "## References (Three Satisfactory References)\n\n"
+                "REFERENCE SUBMITTAL CHECKLIST\n\n"
+                "[ ] Confirm whether the City has issued a standard reference "
+                "form (some RFPs include a fillable reference contact sheet).\n\n"
+                "[ ] For each reference, provide: client/organization name, "
+                "contact name and title, phone number, email address, and a "
+                "brief description of the services performed.\n\n"
+                "[ ] Select three references similar in scope to this "
+                "engagement, completed within the past three years.\n"
+            )
+        }
+        with patch(
+            "app.services.llm.is_configured", return_value=True
+        ), patch(
+            "app.services.llm.chat_json",
+            new=AsyncMock(return_value=(checklist_response, "openrouter")),
+        ):
+            result = await _llm_fill_section(
+                section=section,
+                gaps=["missing references"],
+                evidence="### KB\nsome evidence",
+                draft_context="OUR WORK: Hillsboro Public Library",
+                rfp_title="Test RFP",
+                rfp_client="Test City",
+            )
+        self.assertIsNone(result)
+
+    async def test_real_reference_content_with_inline_verify_tags_is_accepted(
+        self,
+    ) -> None:
+        from app.services.proposal_hollow_kb_fill import _llm_fill_section
+
+        section = ProposalSection(
+            id="rfp-references",
+            title="References (Three Satisfactory References)",
+            content="[MANUAL FILL: Draft full References for this RFP.]",
+        )
+        real_response = {
+            "content": (
+                "## References (Three Satisfactory References)\n\n"
+                "1. **Hillsboro Public Library** — Contact: [VERIFY: contact "
+                "name], [VERIFY: phone], [VERIFY: email]. Social media "
+                "management, 2023-2024.\n"
+                "2. **Maricopa County** — Contact: [VERIFY: contact name], "
+                "[VERIFY: phone], [VERIFY: email]. Public sector "
+                "communications, 2022-present.\n"
+                "3. **Hampton Lumber** — Contact: [VERIFY: contact name], "
+                "[VERIFY: phone], [VERIFY: email]. Brand marketing, 2023.\n"
+            )
+        }
+        with patch(
+            "app.services.llm.is_configured", return_value=True
+        ), patch(
+            "app.services.llm.chat_json",
+            new=AsyncMock(return_value=(real_response, "openrouter")),
+        ):
+            result = await _llm_fill_section(
+                section=section,
+                gaps=["missing references"],
+                evidence="### KB\nsome evidence",
+                draft_context="OUR WORK: Hillsboro Public Library",
+                rfp_title="Test RFP",
+                rfp_client="Test City",
+            )
+        self.assertIsNotNone(result)
+        self.assertIn("Hillsboro Public Library", result)
+
+    async def test_nested_bare_verify_tag_inside_manual_fill_is_sanitized(
+        self,
+    ) -> None:
+        """Real incident repro: the model used "[VERIFY]" (no colon — not a
+        real tag) as a word inside its own [MANUAL FILL: ...] note ("do not
+        leave [VERIFY] shells"). The canonical MANUAL_FILL_TAG_RE (and every
+        other tag regex in this codebase) matches up to the FIRST "]" it
+        finds, so this nested bracket split the outer tag in two — corrupting
+        both backend tag-scanning and the UI's chip rendering. The saved
+        content must never contain that inner bare tag."""
+        from app.services.proposal_hollow_kb_fill import _llm_fill_section
+
+        section = ProposalSection(
+            id="rfp-compulsory-gap-references",
+            title="Qualifications and Experience of the Firm",
+            content="[MANUAL FILL: Draft full References for this RFP.]",
+        )
+        raw_response = {
+            "content": (
+                "## Qualifications and Experience of the Firm\n\n"
+                "**Reference 1 — Maricopa County**\n"
+                "Contact: Anna Le, Procurement Officer\n"
+                "Phone: [VERIFY: phone from KB reference doc]\n"
+                "Email: anna.le@maricopa.gov\n\n"
+                "[MANUAL FILL: Sonja — remaining references must come from "
+                "verified ClientList / KB contacts only (name, title, org, "
+                "phone, email). Do not invent or leave [VERIFY] shells.]"
+            )
+        }
+        with patch(
+            "app.services.llm.is_configured", return_value=True
+        ), patch(
+            "app.services.llm.chat_json",
+            new=AsyncMock(return_value=(raw_response, "openrouter")),
+        ):
+            result = await _llm_fill_section(
+                section=section,
+                gaps=["missing references"],
+                evidence="### KB\nsome evidence",
+                draft_context="OUR WORK: Maricopa County",
+                rfp_title="Test RFP",
+                rfp_client="Test City",
+            )
+        self.assertIsNotNone(result)
+        # The real, well-formed tag must survive untouched.
+        self.assertIn("[VERIFY: phone from KB reference doc]", result)
+        # The nested bare tag must be neutralized — no "[VERIFY]" left in the
+        # saved content anywhere.
+        self.assertNotIn("[VERIFY]", result)
+        self.assertIn("leave VERIFY shells", result)
+
+    async def test_rfp_demanded_submission_checklist_is_accepted(self) -> None:
+        """An RFP can legitimately require a submission/compliance checklist
+        as the actual deliverable — that must never be rejected just because
+        it uses the same "[ ]" shape as the process-narration failure mode."""
+        from app.services.proposal_hollow_kb_fill import _llm_fill_section
+
+        section = ProposalSection(
+            id="rfp-submittal-checklist",
+            title="Submittal Checklist",
+            content="[MANUAL FILL: Draft full Submittal Checklist for this RFP.]",
+        )
+        checklist_response = {
+            "content": (
+                "## Submittal Checklist\n\n"
+                "[ ] Cover Letter — Included, see Tab 1\n\n"
+                "[ ] Signed Addendum #1 Acknowledgment — Attached as Exhibit A\n\n"
+                "[ ] W-9 Form — [VERIFY: confirm current copy is on file with "
+                "accounting]\n\n"
+                "[ ] Certificate of Insurance — [VERIFY: attach current "
+                "certificate before submission]\n\n"
+                "[ ] Statement of Qualifications — Included, see Tab 3\n"
+            )
+        }
+        with patch(
+            "app.services.llm.is_configured", return_value=True
+        ), patch(
+            "app.services.llm.chat_json",
+            new=AsyncMock(return_value=(checklist_response, "openrouter")),
+        ):
+            result = await _llm_fill_section(
+                section=section,
+                gaps=["missing submittal checklist"],
+                evidence="### KB\nsome evidence",
+                draft_context="COMPANY: 1.1 — Who We Are",
+                rfp_title="Test RFP",
+                rfp_client="Test City",
+            )
+        self.assertIsNotNone(result)
+        self.assertIn("Cover Letter", result)
 
 
 if __name__ == "__main__":

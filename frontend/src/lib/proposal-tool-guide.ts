@@ -16,6 +16,7 @@ export type ToolCapabilityId =
   | "restore"
   | "matchStudies"
   | "moreMenu"
+  | "advancedOptions"
   | "keyPersonas"
   | "generateProposal"
   | "editPreview";
@@ -99,6 +100,12 @@ export const PROPOSAL_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     name: "More",
     does: "Extra draft actions: designer-compact, reset, or restart from Case Studies / Intelligence.",
     doesnt: "Run Build my proposal.",
+  },
+  {
+    id: "advancedOptions",
+    name: "Advanced options",
+    does: "Everything you don't need every session, in one place: restore a saved version, find matching case studies, and the extra draft actions below.",
+    doesnt: "Run Build my proposal, or change anything until you pick an action inside it.",
   },
   {
     id: "keyPersonas",

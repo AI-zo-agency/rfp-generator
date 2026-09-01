@@ -13,10 +13,15 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.services import llm
+from app.services.proposal_draft_structure_stubs import (
+    content_looks_like_instructional_checklist,
+)
+from app.services.proposal_manual_flags import sanitize_bare_bracket_tag_words
 
 logger = logging.getLogger(__name__)
 
@@ -679,16 +684,18 @@ async def _llm_rewrite(
     user: str,
     node_name: str,
     rfp_id: str = "",
+    cache_prefix: str | Sequence[str] | None = None,
 ) -> tuple[ProposalSection, bool, str]:
     if not llm.is_configured():
         return section, False, ""
     try:
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.0,
             node_name=node_name,
             rfp_id=rfp_id or None,
+            cache_prefix=cache_prefix,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s failed for %s: %s", node_name, section.id, exc)
@@ -696,6 +703,15 @@ async def _llm_rewrite(
     if not isinstance(raw, dict):
         return section, False, ""
     content = str(raw.get("content") or "").strip()
+    content = sanitize_bare_bracket_tag_words(content)
+    if content and content_looks_like_instructional_checklist(content):
+        logger.info(
+            "%s: rewrite wrote a to-do checklist instead of content — "
+            "rejected (%s)",
+            node_name,
+            section.id,
+        )
+        return section, False, "rejected: instructional checklist"
     changed = bool(raw.get("changed")) and bool(content)
     if not changed or content == (section.content or "").strip():
         return section, False, str(raw.get("notes") or "")
@@ -778,16 +794,16 @@ async def scrub_ungrounded_past_capability_claims(
         if not section_asserts_past_proven_capability(body):
             sections.append(section)
             continue
-        user = (
-            f"PROOF CORPUS (only cite past delivery if supported here):\n{proof[:20_000]}\n\n"
-            f"SECTION TO FIX: {section.title} (id={sid})\n\n{body[:12_000]}"
-        )
+        # proof is identical for every section in this loop — cache it instead
+        # of resending the full corpus fresh on each of up to N section rewrites.
+        user = f"SECTION TO FIX: {section.title} (id={sid})\n\n{body[:12_000]}"
         updated, did, notes = await _llm_rewrite(
             section,
             system=_CAPABILITY_SYSTEM,
             user=user,
             node_name=f"capability_past_proven_scrub:{sid}",
             rfp_id=rfp_id,
+            cache_prefix=f"PROOF CORPUS (only cite past delivery if supported here):\n{proof[:20_000]}\n\n",
         )
         if did:
             changed = True

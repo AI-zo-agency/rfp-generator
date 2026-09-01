@@ -838,24 +838,26 @@ async def _find_missing_submittals_once(
     )
 
     titles_block = "\n".join(f"- {t}" for t in outline_titles if (t or "").strip())
+    # rfp_context/outline_titles are identical across both temperature samples
+    # this function's caller runs concurrently, and across repeat calls at other
+    # points in the pipeline — cache the whole prompt instead of resending it.
+    stable_content = (
+        f"Current outline ({len(outline_titles)} tabs):\n"
+        f"{titles_block or '(empty)'}\n\n"
+        "Submission-documents excerpt (what the RFP asks to be "
+        f"returned):\n{submission_documents_excerpt(rfp_context)[:24000]}\n\n"
+        "Closing/forms/attachments excerpt:\n"
+        f"{closing_package_excerpt(rfp_context)[:16000]}"
+    )
     raw, _provider = await safe_chat_json(
         [
             {"role": "system", "content": _MISSING_SUBMITTALS_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    f"Current outline ({len(outline_titles)} tabs):\n"
-                    f"{titles_block or '(empty)'}\n\n"
-                    "Submission-documents excerpt (what the RFP asks to be "
-                    f"returned):\n{submission_documents_excerpt(rfp_context)[:24000]}\n\n"
-                    "Closing/forms/attachments excerpt:\n"
-                    f"{closing_package_excerpt(rfp_context)[:16000]}"
-                ),
-            },
+            {"role": "user", "content": ""},
         ],
         max_tokens=2048,
         temperature=temperature,
         agent_name="missing_submittals_check",
+        cache_prefix=stable_content,
     )
     missing = raw.get("missing") if isinstance(raw, dict) else None
     if not isinstance(missing, list):

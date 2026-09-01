@@ -527,7 +527,7 @@ async def _plan_proposal_kb_queries(
     ]
     empty = {key: [] for key in PROPOSAL_KB_BUCKETS}
     try:
-        raw, provider = await llm.chat_json(messages, max_tokens=1024, temperature=0.2)
+        raw, provider = await llm.chat_json(messages, max_tokens=16000, temperature=0.2)
         logger.info("Planned proposal KB queries via %s for %s", provider, rfp_client)
         planned: dict[str, list[str]] = {}
         for bucket, key in (

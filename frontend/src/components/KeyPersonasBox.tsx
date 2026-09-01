@@ -40,9 +40,9 @@ export function KeyPersonasBox({
       <button
         type="button"
         onClick={() => setIsOpen(true)}
-        className="zo-btn secondary flex items-center gap-2 px-3.5 py-2 text-xs font-semibold shadow-xs transition-smooth hover:border-[#ef5018] hover:text-[#ef5018]"
+        className="inline-flex min-h-[2.125rem] items-center gap-1.5 rounded-lg border border-zo-border/80 bg-white px-2.5 py-1.5 text-xs font-semibold text-zo-text-secondary transition-smooth hover:bg-[#fafbfc]"
       >
-        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#ef5018]/12 text-[#ef5018]">
+        <span className="flex h-4 w-4 items-center justify-center text-[#ef5018]">
           <svg
             className="h-3.5 w-3.5"
             fill="none"
@@ -59,7 +59,7 @@ export function KeyPersonasBox({
         </span>
         <span>Key Personas</span>
         <span
-          className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+          className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
             count === 0
               ? "bg-[#e5e7eb] text-[#6b7280]"
               : "bg-[#ef5018] text-white"

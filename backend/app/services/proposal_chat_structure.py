@@ -2329,7 +2329,7 @@ async def _build_case_study_section(
                         ),
                     },
                 ],
-                max_tokens=900,
+                max_tokens=16000,
                 temperature=0.15,
             )
             content = str((raw or {}).get("content") or "").strip()

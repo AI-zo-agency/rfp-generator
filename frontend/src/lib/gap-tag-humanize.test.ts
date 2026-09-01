@@ -16,6 +16,29 @@ describe("humanizeGapTag", () => {
     expect(h.title).toBe("Confirm before submit");
     expect(h.detail).toContain("Deschutes");
   });
+
+  it("does not split the owner on a plain hyphen inside the body", () => {
+    // "pre-proposal" has its own hyphen well before the real em dash later
+    // in the sentence — the whole clause before that dash is too long to be
+    // a real owner name, so it must fall back to the full, undivided body
+    // rather than truncating mid-word ("...mandatory pre") like the old
+    // hyphen-or-em-dash regex did.
+    const h = humanizeGapTag(
+      "[MANUAL FILL: Complete after the mandatory pre-proposal conference — record attendee name, sign-in date/time, and attach any required attendance proof.]"
+    );
+    expect(h.owner).toBeNull();
+    expect(h.detail).toContain("mandatory pre-proposal conference");
+    expect(h.detail).toContain("record attendee name");
+    expect(h.detail.startsWith("MANUAL FILL:")).toBe(false);
+  });
+
+  it("keeps a short real owner name and splits on the em dash", () => {
+    const h = humanizeGapTag(
+      "[MANUAL FILL: Sonja — confirm insurance coverage amounts on the current COI]"
+    );
+    expect(h.owner).toBe("Sonja");
+    expect(h.detail).toBe("confirm insurance coverage amounts on the current COI");
+  });
 });
 
 describe("gapChecklistLabel", () => {

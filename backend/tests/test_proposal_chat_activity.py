@@ -20,6 +20,32 @@ class ImproveAgentActivityTests(unittest.TestCase):
         self.assertTrue(any("Updated" in c for c in activity.changes))
         self.assertEqual(activity.discrepancies, [])
 
+    def test_flags_apply_fix_that_changed_nothing(self) -> None:
+        """A swallowed Apply click must read as needs_review, not a clean run."""
+        activity = build_improve_agent_activity(
+            section_title="1.1 — Who We Are",
+            before="same",
+            after="same",
+            draft_changed=False,
+            assistant_message="Reviewed certification claims. None fabricated.",
+            user_message="Apply the fix: replace the certifications paragraph.",
+            apply_fix=True,
+        )
+        self.assertEqual(activity.outcome, "needs_review")
+        self.assertTrue(any("not applied" in d.casefold() for d in activity.discrepancies))
+
+    def test_unchanged_chat_turn_is_not_flagged(self) -> None:
+        activity = build_improve_agent_activity(
+            section_title="1.1 — Who We Are",
+            before="same",
+            after="same",
+            draft_changed=False,
+            assistant_message="Nothing to change here.",
+            user_message="Does this section cite our certifications?",
+        )
+        self.assertEqual(activity.outcome, "unchanged")
+        self.assertEqual(activity.discrepancies, [])
+
     def test_flags_invented_mfill_tokens(self) -> None:
         activity = build_improve_agent_activity(
             section_title="Firm Qualifications",

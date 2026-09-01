@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
@@ -9,9 +9,11 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 /** Every proposal-pipeline job currently queued or running, across all RFPs. */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const response = await fetch(`${BACKEND_URL}/api/v1/proposals/jobs/active`, {
+    const includeGoNoGo = request.nextUrl.searchParams.get("includeGoNoGo");
+    const query = includeGoNoGo ? `?includeGoNoGo=${includeGoNoGo}` : "";
+    const response = await fetch(`${BACKEND_URL}/api/v1/proposals/jobs/active${query}`, {
       method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",

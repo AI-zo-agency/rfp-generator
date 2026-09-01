@@ -280,7 +280,7 @@ async def _repair_eval_percentages(
                     ),
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.0,
         )
         content = str((raw or {}).get("content") or "").strip()
@@ -500,7 +500,7 @@ async def _repair_bio_subsection_block(
                     ),
                 },
             ],
-            max_tokens=2048,
+            max_tokens=16000,
             temperature=0.0,
         )
         new_block = str((raw or {}).get("content") or "").strip()
@@ -763,7 +763,7 @@ async def _run_requirement_aligned_fact_check_agent(
     try:
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=6144,
+            max_tokens=16000,
             temperature=0.0,
         )
         content = str((raw or {}).get("content") or "").strip()
@@ -911,7 +911,7 @@ async def _repair_false_verify_stub(
                     ),
                 },
             ],
-            max_tokens=8192,
+            max_tokens=16000,
             temperature=0.0,
         )
         content = str((raw or {}).get("content") or "").strip()
@@ -1031,7 +1031,7 @@ async def _flag_unverified_metrics_in_case_study(
                     ),
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.0,
         )
         content = str((raw or {}).get("content") or "").strip()

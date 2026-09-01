@@ -145,5 +145,114 @@ class ApplySuggestedFixFastPathTests(unittest.IsolatedAsyncioTestCase):
         plan_scope.assert_not_called()
 
 
+    async def _assert_apply_fix_reaches_rewrite(
+        self, section: ProposalSection, instruction: str
+    ) -> None:
+        """Apply the fix must always reach the rewrite, whatever the wording."""
+        draft = ProposalDraft(
+            rfpId="r1",
+            updatedAt="2026-08-10T00:00:00Z",
+            sections=[section],
+        )
+
+        async def fake_apply(**kwargs):
+            self.assertEqual(kwargs["instruction"], instruction)
+            return (
+                section.model_copy(update={"content": "rewritten"}),
+                draft,
+                None,
+                "stub",
+                "Applied.",
+                True,
+            )
+
+        with (
+            patch.object(editor, "aload_rfp_for_proposal", new_callable=AsyncMock) as load_rfp,
+            patch.object(editor, "aget_proposal_draft", new_callable=AsyncMock, return_value=draft),
+            patch.object(editor, "aget_research_cache", new_callable=AsyncMock, return_value=None),
+            patch.object(editor.llm, "is_configured", return_value=True),
+            patch.object(
+                editor, "_apply_suggested_fix_to_section", side_effect=fake_apply
+            ) as apply_fn,
+        ):
+            load_rfp.return_value = (
+                RfpRecord(
+                    id="r1",
+                    title="RFP",
+                    client="PCC",
+                    sector="Education",
+                    source="manual",
+                    dueDate="2026-09-01",
+                    receivedDate="2026-08-01",
+                    lastActivity="2026-08-01",
+                    lastActivityNote="t",
+                ),
+                "",
+                "",
+            )
+            *_rest, changed, _extra = await editor.improve_proposal_section(
+                "r1",
+                section.id,
+                instruction,
+                apply_fix=True,
+                improve_section_pinned=True,
+                persist=False,
+            )
+
+        apply_fn.assert_called_once()
+        self.assertTrue(changed)
+
+    async def test_apply_fix_survives_deterministic_audit_keywords(self) -> None:
+        """No keyword-triggered audit may answer an Apply click with "no change".
+
+        Regression: the instruction said "remove … WBENC …", which matched the
+        deterministic cert scrub. WBENC is verified, so the scrub changed
+        nothing, reported a clean cert review, and the click did nothing. The
+        same hole existed for every audit that pre-empts the rewrite.
+        """
+        cases = [
+            (
+                "cert scrub",
+                ProposalSection(
+                    id="section-1-who-we-are",
+                    title="1.1 — Who We Are",
+                    content=(
+                        "We started zö agency in Bend, Oregon in 2013.\n\n"
+                        "We are a women-owned business, certified by WBENC and the "
+                        "U.S. Small Business Administration. Our team is 35 people.\n\n"
+                        "**Our promise:** we treat PCC's goals as our own."
+                    ),
+                    mode="write",
+                    word_target=232,
+                ),
+                (
+                    "Remove the WBENC/SBA certification, state-registration and "
+                    "team-size sentence and replace it with a punchier, "
+                    "voice-driven paragraph about how zö works.\n\n"
+                    "Additional user instructions:\n"
+                    "Carry the embedded-team energy forward, no credentials list."
+                ),
+            ),
+            (
+                "forms integrity audit",
+                ProposalSection(
+                    id="rfp-req-forms-attachments",
+                    title="Forms & Attachments",
+                    content=(
+                        "We will submit every required form with the proposal.\n\n"
+                        "| Form | Status |\n| --- | --- |\n"
+                        "| Signature Page | Included |\n"
+                    ),
+                    mode="write",
+                    word_target=120,
+                ),
+                "Remove the duplicate attachment line and tighten the intro sentence.",
+            ),
+        ]
+        for label, section, instruction in cases:
+            with self.subTest(hijack=label):
+                await self._assert_apply_fix_reaches_rewrite(section, instruction)
+
+
 if __name__ == "__main__":
     unittest.main()

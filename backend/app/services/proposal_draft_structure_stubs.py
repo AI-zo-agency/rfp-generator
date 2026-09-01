@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
@@ -102,6 +103,126 @@ def section_is_rfp_draft_stub(section: ProposalSection) -> bool:
     return False
 
 
+_CHECKLIST_INSTRUCTION_VERBS = frozenset(
+    {
+        "confirm",
+        "select",
+        "obtain",
+        "provide",
+        "match",
+        "ensure",
+        "verify",
+        "check",
+        "determine",
+        "review",
+        "gather",
+        "collect",
+        "identify",
+        "choose",
+        "ask",
+        "contact",
+    }
+)
+
+
+def content_looks_like_instructional_checklist(content: str) -> bool:
+    """True when `content` reads like a to-do list telling a human what to
+    do, not a filled proposal section — e.g. "[ ] Confirm whether the City
+    has issued a form" instead of naming the actual, known answer. See
+    proposal_hollow_kb_fill.py for the incident this guards against (a
+    References section that described the process instead of naming the
+    case-study clients it already had in draft context).
+
+    Not every "[ ]" line is bad — an RFP can legitimately demand a
+    submission/compliance checklist as real content, e.g.
+    "[ ] Cover Letter — Included, see Tab 1" or "[ ] W-9 — [VERIFY: confirm
+    current copy on file]", and that must never be rejected. The
+    distinguishing signal is whether the checkbox is followed by an
+    imperative verb directed at the writer (confirm, select, obtain,
+    provide...) within its first few words, rather than the name of an
+    actual item and its status. Only the text before any [VERIFY: ...] /
+    [MANUAL FILL: ...] / [DESIGNER NOTE: ...] tag is scanned, so a
+    legitimate inline VERIFY on a real checklist item — whose own wording
+    may well include "confirm" or "verify" — is never mistaken for the
+    instruction itself.
+    """
+    hits = 0
+    for raw_line in (content or "").splitlines():
+        line = raw_line.strip()
+        if line[:1] in ("-", "*"):
+            line = line[1:].strip()
+        if not line.startswith("[ ]"):
+            continue
+        after_box = line[3:].strip()
+        tag_start = after_box.find("[")
+        if tag_start != -1:
+            after_box = after_box[:tag_start]
+        words = after_box.casefold().replace(",", " ").replace(":", " ").split()[:8]
+        if any(w in _CHECKLIST_INSTRUCTION_VERBS for w in words):
+            hits += 1
+            if hits >= 2:
+                return True
+    return False
+
+
+_TABLE_SEPARATOR_ROW_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+_BARE_ROW_LABEL_RE = re.compile(r"^\d+[.)]?$")
+_PROSE_ROW_WORD_THRESHOLD = 45
+
+
+def repair_prose_disguised_as_table_rows(content: str) -> str:
+    """Pull explanatory prose that got written as fake pipe-delimited table
+    rows back out into normal paragraphs after the table.
+
+    Real incident: a chat "Improve section" rewrite produced a References
+    table with 3 well-formed client rows, then appended "row 4" and "row 5"
+    whose only real content was multi-sentence paragraphs ("Why these
+    three: ...", "Before submission, we will confirm...") — using a bare
+    "1"/"2" as a fake row label. The model meant these as prose after the
+    table, not table data; left inside it, every downstream renderer shows
+    mismatched, broken-looking cells instead of the paragraphs they are.
+
+    A real table row's cells are short, dense facts — a name, a date, a
+    one-line scope. A row whose combined cell text runs to multiple
+    sentences is a paragraph wearing pipe delimiters, not data, regardless
+    of which exact table this is or what its columns mean.
+    """
+    lines = (content or "").splitlines()
+    out: list[str] = []
+    extracted: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if (
+            line.strip().startswith("|")
+            and i + 1 < n
+            and _TABLE_SEPARATOR_ROW_RE.match(lines[i + 1])
+        ):
+            out.append(line)
+            out.append(lines[i + 1])
+            i += 2
+            while i < n and lines[i].strip().startswith("|"):
+                row = lines[i]
+                cells = [c.strip() for c in row.strip().strip("|").split("|")]
+                if sum(len(c.split()) for c in cells) > _PROSE_ROW_WORD_THRESHOLD:
+                    prose = " ".join(
+                        c for c in cells if c and not _BARE_ROW_LABEL_RE.match(c)
+                    ).strip()
+                    if prose:
+                        extracted.append(prose)
+                else:
+                    out.append(row)
+                i += 1
+            continue
+        out.append(line)
+        i += 1
+    result = "\n".join(out)
+    if extracted:
+        result = result.rstrip() + "\n\n" + "\n\n".join(extracted)
+    return result
+
+
 def _is_stub_chrome_line(line: str) -> bool:
     cf = line.casefold().strip()
     return (
@@ -109,6 +230,8 @@ def _is_stub_chrome_line(line: str) -> bool:
         or cf.startswith("rfp required outline")
         or cf.startswith("rfp instructions")
         or cf.startswith("evaluation weight")
+        or cf.startswith("[manual fill")
+        or cf.startswith("[ledger-xref")
         or _DRAFT_STUB_MARKER in cf
     )
 
@@ -192,9 +315,11 @@ def restore_sections_emptied_by_scan(
         or just quietly thinned it out without matching any of those literal
         shapes (e.g. a structure reframe that rewrote real prose into a short
         list of headings plus a line about what the RFP still wants). The
-        three checks above only catch known corruption *shapes*; regression_vs_prior
-        catches the general case — a real word-count / evidence collapse versus
-        the pre-scan body — regardless of what shape the replacement took."""
+        checks above only catch known corruption *shapes*; the meaningful-word
+        comparison below catches the general case — a real content collapse
+        versus the pre-scan body — regardless of what shape the replacement
+        took, and regardless of whether MANUAL FILL / LEDGER-XREF chrome pads
+        the raw word count enough to hide the collapse from a naive count."""
         body = section.content or ""
         if not body.strip():
             return True
@@ -209,7 +334,32 @@ def restore_sections_emptied_by_scan(
             and not looks_like_bio_stub_body(prior.content or "")
         ):
             return True
+        # The misplaced-bio-stub repair's own placeholder is not bio-stub-shaped
+        # by the time it lands here (it already replaced the "Role on this
+        # engagement" text), so the check above cannot see it — recognize its
+        # exact wording directly instead.
+        if "wrongly replaced this body with a team-bio stub" in body.casefold():
+            return True
         if regression_vs_prior(prior, section):
+            return True
+        # regression_vs_prior only engages above a 120-word prior and compares
+        # raw word counts, so a moderate-length section (like a compact forms
+        # tab) that collapses to a MANUAL FILL placeholder plus a couple of
+        # padded LEDGER-XREF notes can dodge it — those are chrome, not real
+        # content. Re-compare on the chrome-stripped body with a lower floor.
+        # Real Section 2 bio tabs are exempt — a big drop from a raw resume
+        # dump to a compact designer-note stub is the correct, intended shape
+        # for those, not corruption (same exemption as the bio-stub check above).
+        if is_section2_bio_id(section.id or ""):
+            return False
+        prior_meaningful_words = word_count(
+            _meaningful_body(prior.content or "", prior.title or "")
+        )
+        new_meaningful_words = word_count(_meaningful_body(body, section.title or ""))
+        if (
+            prior_meaningful_words >= min_prior_words
+            and new_meaningful_words < prior_meaningful_words * 0.5
+        ):
             return True
         return False
 

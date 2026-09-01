@@ -2154,7 +2154,7 @@ async def _adjudicate_capabilities(
                     {"role": "system", "content": ADJUDICATOR_PROMPT},
                     {"role": "user", "content": body[:60_000]},
                 ],
-                max_tokens=3500,
+                max_tokens=16000,
                 temperature=0.0,
                 tier="heavy",
                 node_name="capability_adjudicator",
@@ -2219,7 +2219,7 @@ async def _adjudicate_capabilities(
                         {"role": "system", "content": GAP_RECOVER_PROMPT},
                         {"role": "user", "content": recover_body[:40_000]},
                     ],
-                    max_tokens=2500,
+                    max_tokens=16000,
                     temperature=0.0,
                     tier="heavy",
                     node_name="capability_gap_recover",
@@ -2718,11 +2718,18 @@ EVIDENCE DISCIPLINE FOR THIS RUN:
     analysis: GoNoGoAnalysis | None = None
     for attempt in range(2):
         try:
-            # Bounded output + scores-first prompt; coerce fills null matrix scores
-            # so truncation does not force a second ~2min Sonnet call.
+            # Scores-first prompt; coerce still fills null matrix scores if a
+            # response is truncated anyway. The token budget itself used to be
+            # much tighter (3200) as a deliberate speed trade-off, tolerating
+            # truncation — but Sonnet 5's adaptive thinking spends a large,
+            # variable share of any budget on invisible reasoning before the
+            # first visible content token, so a tight cap risked the whole
+            # budget going to reasoning and returning empty content (a hard
+            # failure the coerce fallback can't help with) instead of
+            # merely-truncated JSON it could.
             raw, provider = await llm.chat_json(
                 messages,
-                max_tokens=3200,
+                max_tokens=16000,
                 temperature=0.0,
                 node_name="go_no_go_analysis",
             )

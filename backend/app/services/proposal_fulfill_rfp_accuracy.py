@@ -188,13 +188,13 @@ async def extract_rfp_scoring_facts_llm(rfp_excerpt: str) -> RfpScoringFacts:
                         "}"
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": f"RFP excerpt:\n{rfp_excerpt[:38000]}",
-                },
+                {"role": "user", "content": ""},
             ],
-            max_tokens=2048,
+            max_tokens=16000,
             temperature=0.1,
+            # Called from 4 sites across this file and proposal_fulfill_rfp_budget_kpi.py
+            # with the same excerpt/rfp_text slice within one pipeline run — cache it.
+            cache_prefix=f"RFP excerpt:\n{rfp_excerpt[:38000]}",
         )
         data = raw or {}
         count = data.get("contractorKpiCount")
@@ -410,7 +410,7 @@ async def _redraft_section_for_accuracy(
                     ),
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.2,
         )
         content = str((raw or {}).get("content") or "").strip()

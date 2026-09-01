@@ -177,7 +177,7 @@ async def _analyze_rfp(state: RetrievalGraphState) -> dict[str, Any]:
                     ),
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.25,
             node_name="retrieval_rfp_analyzer",
         )
@@ -389,7 +389,7 @@ async def _plan_queries_for_sections(
                         ),
                     },
                 ],
-                max_tokens=2048,
+                max_tokens=16000,
                 temperature=0.25,
                 node_name="retrieval_query_planner_batch",
             )
@@ -588,7 +588,7 @@ async def _evaluate_coverage_batch(
                             "content": json.dumps(batch_input, indent=2),
                         },
                     ],
-                    max_tokens=2048,
+                    max_tokens=16000,
                     temperature=0.2,
                     node_name="retrieval_coverage_evaluator_batch",
                 )

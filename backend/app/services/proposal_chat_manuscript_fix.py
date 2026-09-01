@@ -570,7 +570,7 @@ async def _apply_surgical_section_fix(
                 {"role": "system", "content": _CHAT_PATCH_SYSTEM},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.15,
             tier="heavy",
             node_name="chat_manuscript_surgical_patch",

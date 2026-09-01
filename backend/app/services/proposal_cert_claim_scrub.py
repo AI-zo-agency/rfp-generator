@@ -165,10 +165,13 @@ def user_asks_cert_claim_scrub(text: str) -> bool:
     raw = (text or "").strip()
     if not raw:
         return False
+    # ``\b`` AFTER the designation matters: without it "WBENC" matched the WBE
+    # alternative, so "remove the WBENC sentence" ran a scrub that must keep
+    # WBENC — a no-op that swallowed the user's edit.
     if re.search(
         r"(?is)\b(?:remove|delete|strip|drop|eliminate)\b.{0,80}\b"
-        r"(?:MBE|WBE|DBE|false\s+certif|fabricated\s+certif|unverified\s+certif|"
-        r"certifications?\s+that\s+do\s+not\s+exist)",
+        r"(?:(?:MBE|WBE|DBE)\b|false\s+certif|fabricated\s+certif|"
+        r"unverified\s+certif|certifications?\s+that\s+do\s+not\s+exist)",
         raw,
     ):
         return True

@@ -225,7 +225,7 @@ async def audit_and_repair_forms_attachments(
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": user[:24_000]},
             ],
-            max_tokens=2500,
+            max_tokens=16000,
             temperature=0.1,
             node_name="forms_attachments_integrity",
         )

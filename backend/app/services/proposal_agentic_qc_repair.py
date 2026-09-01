@@ -19,7 +19,11 @@ from datetime import datetime, timezone
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.services import llm
+from app.services.proposal_draft_structure_stubs import (
+    content_looks_like_instructional_checklist,
+)
 from app.services.proposal_edge_case_guards import collect_bio_person_names
+from app.services.proposal_manual_flags import sanitize_bare_bracket_tag_words
 from app.services.proposal_rfp_excerpt import submission_documents_excerpt
 
 logger = logging.getLogger(__name__)
@@ -263,19 +267,32 @@ async def _agent_rewrite_section(
                     "content": (
                         f"Section title: {title}\n"
                         f"Defects to fix: {', '.join(reasons)}\n\n"
-                        f"LIVE BIO TOC (manuscript Section 2):\n{bio_block}\n\n"
-                        f"EXHIBIT / CLOSING STATUS DIGEST:\n{exhibit_digest}\n\n"
-                        f"RFP excerpt (document structure):\n{rfp_excerpt[:14000]}\n\n"
                         f"CURRENT SECTION BODY:\n{body}"
                     ),
                 },
             ],
-            max_tokens=3500,
+            max_tokens=16000,
             temperature=0.1,
             tier="heavy",
             node_name=f"agentic_qc_repair:{(section.id or 'section')[:48]}",
+            # bio_toc/exhibit_digest/rfp_excerpt are identical for every flagged
+            # section this pass rewrites (up to _MAX_SECTIONS=10 per run) — cache
+            # them instead of resending unchanged on each section's call.
+            cache_prefix=(
+                f"LIVE BIO TOC (manuscript Section 2):\n{bio_block}\n\n"
+                f"EXHIBIT / CLOSING STATUS DIGEST:\n{exhibit_digest}\n\n"
+                f"RFP excerpt (document structure):\n{rfp_excerpt[:14000]}\n\n"
+            ),
         )
         content = str((raw or {}).get("content") or "").strip()
+        content = sanitize_bare_bracket_tag_words(content)
+        if content and content_looks_like_instructional_checklist(content):
+            logger.warning(
+                "Agentic QC rewrite for %s wrote a to-do checklist instead of "
+                "content — rejected",
+                section.id or title,
+            )
+            return None
         return content or None
     except Exception as exc:  # noqa: BLE001
         logger.warning(

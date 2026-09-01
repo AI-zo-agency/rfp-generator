@@ -808,7 +808,7 @@ async def _retry_plan_driven_section(
     state: DraftingGraphState,
     *,
     payload: dict[str, Any],
-    max_tokens: int = 8192,
+    max_tokens: int = 16000,
     reason: str = "empty",
 ) -> dict[str, Any] | None:
     """One focused retry when a plan-driven narrative section fails or truncates."""
@@ -1414,7 +1414,7 @@ async def _draft_batch_once(
 
     # Keep ≤ Fireworks 8192 output cap so prefer/fallback Fireworks can serve
     # when Gemini/OpenRouter are unavailable (expired models / credit exhaustion).
-    draft_max_tokens = 8192
+    draft_max_tokens = 16000
 
     async with state["llm_semaphore"]:
         from app.services.llm_call_context import llm_call_context

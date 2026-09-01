@@ -69,6 +69,7 @@ def build_improve_agent_activity(
     user_message: str = "",
     extra_changes: list[str] | None = None,
     extra_discrepancies: list[str] | None = None,
+    apply_fix: bool = False,
 ) -> ProposalAgentActivity:
     title = (section_title or "this section").strip() or "this section"
     steps = [
@@ -95,6 +96,14 @@ def build_improve_agent_activity(
             changes.append(extra.strip())
 
     discrepancies = [d.strip() for d in (extra_discrepancies or []) if d.strip()]
+    if apply_fix and not (draft_changed and (before or "") != (after or "")):
+        # One-click Apply that changes nothing means the instruction was routed
+        # somewhere else (a deterministic audit) or refused — never let that
+        # read as a clean run in the recap.
+        discrepancies.append(
+            "Apply the fix changed nothing — the instruction was not applied. "
+            "Rephrase it, or select the exact line and ask again."
+        )
     for note in collect_chat_edit_discrepancies(
         before=before or "",
         after=after or "",

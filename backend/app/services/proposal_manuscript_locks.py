@@ -622,7 +622,7 @@ async def audit_manuscript_locks_with_llm(
                 ),
             },
         ],
-        max_tokens=2048,
+        max_tokens=16000,
         temperature=0.0,
     )
 

@@ -14,6 +14,13 @@
   --zo-mid: #4c4c4c;
   --zo-orange-soft: #ff8939;
   --zo-danger: #cf2e2e;
+  /* Alias — several components reference --zo-error directly (this Stop
+     button among them) but it was never defined, so it silently resolved
+     to nothing: transparent backgrounds, invisible white-on-white text.
+     --zo-danger is the token actually wired up (Delete buttons, confirm
+     dialogs, the financial module) — point --zo-error at the same color
+     instead of introducing a second, separately-maintained red. */
+  --zo-error: var(--zo-danger);
   --zo-black: #000000;
   --zo-white: #ffffff;
   --zo-teal-dark: #1e3632;
@@ -1008,6 +1015,89 @@ h4 {
     grid-template-columns: minmax(0, 17rem) minmax(0, 1fr) minmax(18rem, 24rem);
     gap: 1.25rem;
     padding: 0.75rem;
+  }
+}
+
+/* Build tab, narrow workspace (below the 1100px true-3-col tier): the section
+   list and Ask Ralph used to squeeze into the same limited width/height as
+   the editor (stacked with small height caps below 720px, or sharing a row
+   below 1100px) — cramped either way. Below 1100px they now become full-height
+   slide-over panels toggled by two small buttons in the toolbar instead, so
+   the editor always gets the full, comfortable width. Overrides the two
+   tiers above within this range; the >=1100px true-3-col tier is untouched. */
+.proposal-mobile-panel-toggle {
+  display: none;
+}
+
+@container proposal-workspace (max-width: 1099.98px) {
+  .proposal-mobile-panel-toggle {
+    display: inline-flex;
+  }
+
+  .proposal-outline-layout {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: minmax(0, 1fr) !important;
+    position: relative;
+  }
+
+  .proposal-outline-layout .proposal-editor-pane {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .proposal-outline-layout .proposal-section-list,
+  .proposal-outline-layout .proposal-assistant-pane {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    z-index: 70;
+    width: min(22rem, 88vw);
+    max-height: none;
+    min-height: 0;
+    box-shadow: 0 24px 64px rgba(10, 15, 26, 0.28);
+    transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+    background: #fff;
+  }
+
+  .proposal-outline-layout .proposal-section-list {
+    left: 0;
+    transform: translateX(-105%);
+  }
+
+  .proposal-outline-layout .proposal-section-list.is-mobile-open {
+    transform: translateX(0);
+  }
+
+  .proposal-outline-layout .proposal-assistant-pane {
+    right: 0;
+    transform: translateX(105%);
+  }
+
+  .proposal-outline-layout .proposal-assistant-pane.is-mobile-open {
+    transform: translateX(0);
+  }
+
+  .proposal-mobile-panel-scrim {
+    position: fixed;
+    inset: 0;
+    background: rgba(10, 15, 26, 0.38);
+    z-index: 65;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.22s ease;
+  }
+
+  .proposal-mobile-panel-scrim.is-open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .proposal-outline-layout .proposal-section-list,
+  .proposal-outline-layout .proposal-assistant-pane,
+  .proposal-mobile-panel-scrim {
+    transition: none;
   }
 }
 
@@ -2250,28 +2340,34 @@ h4 {
   overflow-y: auto;
 }
 
+/* Matches the Revise content / Improve full section buttons (light
+   orange-tinted, not a dark floating pill) so a text selection offers the
+   same visual language as the rest of the editing toolbar, not a different
+   one. */
 .proposal-selection-revise-btn {
   position: fixed;
   z-index: 80;
   transform: translateX(-50%);
   border-radius: 9999px;
-  border: 0;
-  background: #1f2937;
-  color: #fff;
-  padding: 0.45rem 0.9rem;
+  border: 1.5px solid rgba(239, 80, 24, 0.35);
+  background: #fff5ee;
+  color: var(--zo-orange);
+  padding: 0.4rem 0.85rem;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.01em;
-  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.28);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
   cursor: pointer;
   white-space: nowrap;
   transition:
     transform 0.15s var(--ease-smooth),
-    background 0.15s;
+    background 0.15s,
+    border-color 0.15s;
 }
 
 .proposal-selection-revise-btn:hover {
-  background: #111827;
+  background: #ffe9dc;
+  border-color: var(--zo-orange);
   transform: translateX(-50%) translateY(-1px);
 }
 
@@ -2600,6 +2696,11 @@ h4 {
   background: rgba(255, 255, 255, 0.55);
 }
 
+/* A fully-drafted proposal means most rows show "checked" — a solid green
+   fill on every one of them reads as a wall of color, not a signal. Checked
+   is now a quiet outline-free checkmark; only "needs attention" (the rows
+   that actually want the eye) gets a filled, colored treatment, so it's the
+   one thing that visually stands out in a long list. */
 .proposal-section-checkbox {
   display: inline-flex;
   height: 1.25rem;
@@ -2608,19 +2709,22 @@ h4 {
   align-items: center;
   justify-content: center;
   border-radius: 0.25rem;
-  border: 1.5px solid rgba(17, 24, 39, 0.22);
-  background: #fff;
-  color: #fff;
+  border: 1.5px solid rgba(17, 24, 39, 0.16);
+  background: transparent;
+  color: transparent;
   margin-top: 0.1rem;
 }
 
 .proposal-section-checkbox.is-checked {
-  border-color: #059669;
-  background: #10b981;
+  border-color: transparent;
+  background: transparent;
+  color: #059669;
 }
 
 .proposal-section-checkbox.needs-attention {
   border-color: #d97706;
+  background: #fef3e2;
+  color: #b45309;
 }
 
 .proposal-section-tree-group-label {
@@ -3769,12 +3873,12 @@ h4 {
 .proposal-checklist-btn {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.4rem;
   border-radius: 9999px;
   border: 1px solid rgba(17, 24, 39, 0.16);
   background: #fff;
-  padding: 0.45rem 0.9rem;
-  font-size: 0.9375rem;
+  padding: 0.4rem 0.85rem;
+  font-size: 13.5px;
   font-weight: 700;
   letter-spacing: 0.01em;
   line-height: 1.2;
@@ -3813,13 +3917,13 @@ h4 {
 
 .proposal-checklist-count {
   display: inline-flex;
-  min-width: 1.5rem;
+  min-width: 1.375rem;
   align-items: center;
   justify-content: center;
   border-radius: 9999px;
   background: #c2410c;
   padding: 0.1rem 0.4rem;
-  font-size: 0.8125rem;
+  font-size: 12px;
   font-weight: 800;
   color: #fff;
   font-variant-numeric: tabular-nums;

@@ -42,6 +42,22 @@ def strip_section_draft_stub_manual_fills(text: str) -> str:
 
 PLACEHOLDER_TAG_RE = re.compile(r"\[(?:PLACEHOLDER|INSERT|TBD)[^\]]+\]", re.I)
 
+# Every real tag in this system is TAGNAME: description — a bare [VERIFY] /
+# [MANUAL FILL] / [DESIGNER NOTE] with no colon is never an intentional tag;
+# it's the model using the tag word inside its own sentence (e.g. "do not
+# leave [VERIFY] shells"). MANUAL_FILL_TAG_RE above (and every other tag
+# regex in this codebase) matches "[^\]]*" — up to the FIRST "]" — so a bare
+# tag nested inside a real one splits the outer tag at that first bracket,
+# corrupting both parsing and the UI's chip rendering. Strip the brackets so
+# the word survives as plain text instead of a broken, half-parsed tag.
+_BARE_BRACKET_TAG_WORD_RE = re.compile(
+    r"\[(VERIFY|MANUAL FILL|DESIGNER NOTE)\](?!:)", re.I
+)
+
+
+def sanitize_bare_bracket_tag_words(content: str) -> str:
+    return _BARE_BRACKET_TAG_WORD_RE.sub(r"\1", content or "")
+
 
 class _VerifyTagMatch:
     """Duck-types the slice of re.Match every caller here actually uses."""

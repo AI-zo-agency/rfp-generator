@@ -519,7 +519,7 @@ Current section (minimal edits only):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_block},
                 ],
-                max_tokens=2048 if register == "procurement" else 4096,
+                max_tokens=16000,
                 temperature=0.15,
             )
         except LlmError:

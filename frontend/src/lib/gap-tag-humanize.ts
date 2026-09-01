@@ -12,12 +12,28 @@ function stripBrackets(tag: string): string {
   return (tag || "").trim().replace(/^\[/, "").replace(/\]$/, "").trim();
 }
 
+function bodyWithoutPrefix(inner: string): string {
+  return inner.replace(/^MANUAL\s+FILL:\s*/i, "").trim();
+}
+
 function parseManualFillInner(inner: string): { owner: string | null; body: string } {
-  const match = inner.match(/^MANUAL\s+FILL:\s*([^—\-]+?)\s*[—\-]\s*(.+)$/i);
+  // Only an em dash ("—") separates owner from body in these tags — a plain
+  // hyphen is common inside ordinary body text ("pre-proposal conference")
+  // and must never be mistaken for the separator, or the split lands mid-word.
+  const match = inner.match(/^MANUAL\s+FILL:\s*([^—]+?)\s*—\s*(.+)$/i);
   if (!match) {
-    return { owner: null, body: inner };
+    return { owner: null, body: bodyWithoutPrefix(inner) };
   }
-  return { owner: match[1].trim(), body: match[2].trim() };
+  const owner = match[1].trim();
+  // A real owner is a short name/label ("Sonja", "Ella", "Operations",
+  // "Designer") — when the text before the first em dash is a whole clause
+  // instead, this tag never had a named owner at all, and that dash is just
+  // a natural break inside plain instructions. Splitting there would show a
+  // full sentence as the bold "owner" label instead of a short tag.
+  if (owner.length > 30 || /[.!?]/.test(owner)) {
+    return { owner: null, body: bodyWithoutPrefix(inner) };
+  }
+  return { owner, body: match[2].trim() };
 }
 
 function splitCodeAndDetail(body: string): { code: string; detail: string } {

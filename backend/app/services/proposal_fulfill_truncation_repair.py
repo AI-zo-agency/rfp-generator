@@ -97,7 +97,7 @@ async def _llm_complete_truncated_section(
     try:
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.15,
         )
         content = str((raw or {}).get("content") or "").strip()
@@ -357,7 +357,7 @@ async def _complete_one_truncated_section_from_kb(
     try:
         raw, provider = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.1,
             node_name="scan_truncation_kb_repair",
         )

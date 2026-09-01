@@ -589,6 +589,13 @@ async def align_fee_narrative_with_budget(
     slot_values = _canonical_slot_values(budget)
     updated_sections = list(sections)
     batch_size = 6
+    # rfp/canonical/rfp_context are identical across every batch in this loop —
+    # cache them instead of resending them fresh on each batch's call.
+    cache_prefix = (
+        f"RFP: {rfp.title}\nClient: {rfp.client}\n\n"
+        f"=== CANONICAL BUDGET ===\n{canonical}\n\n"
+        f"RFP fee excerpt:\n{rfp_context[:4000]}\n\n"
+    )
     for batch_start in range(0, len(targets), batch_size):
         batch = targets[batch_start : batch_start + batch_size]
         payload = [
@@ -605,17 +612,13 @@ async def align_fee_narrative_with_budget(
                     {"role": "system", "content": FEE_SLOT_PLAN_PROMPT},
                     {
                         "role": "user",
-                        "content": (
-                            f"RFP: {rfp.title}\nClient: {rfp.client}\n\n"
-                            f"=== CANONICAL BUDGET ===\n{canonical}\n\n"
-                            f"=== SECTIONS ===\n{payload}\n\n"
-                            f"RFP fee excerpt:\n{rfp_context[:4000]}"
-                        ),
+                        "content": f"=== SECTIONS ===\n{payload}",
                     },
                 ],
-                max_tokens=4096,
+                max_tokens=16000,
                 temperature=0.0,
                 node_name="fee_slot_fill_plan",
+                cache_prefix=cache_prefix,
             )
         except LlmError as exc:
             logger.warning("Fee slot sync batch failed for %s: %s", rfp_id, exc)
@@ -695,15 +698,14 @@ async def run_budget_grounding_check(
                 {"role": "system", "content": FEE_GROUNDING_CHECK_PROMPT},
                 {
                     "role": "user",
-                    "content": (
-                        f"RFP ID: {rfp_id}\n\n"
-                        f"=== CANONICAL BUDGET ===\n{canonical}\n\n"
-                        f"=== MANUSCRIPT SECTIONS ===\n{sections}"
-                    ),
+                    "content": f"=== MANUSCRIPT SECTIONS ===\n{sections}",
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.0,
+            # canonical is the same budget facts align_fee_narrative_with_budget
+            # caches above — this sibling call gets its own cache entry for it.
+            cache_prefix=f"RFP ID: {rfp_id}\n\n=== CANONICAL BUDGET ===\n{canonical}\n\n",
             node_name="budget_claim_grounding_check",
         )
     except LlmError as exc:

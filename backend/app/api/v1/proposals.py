@@ -999,6 +999,7 @@ def _improve_activity_for_turn(
     assistant_message: str,
     user_message: str = "",
     extra_discrepancies: list[str] | None = None,
+    apply_fix: bool = False,
 ) -> ProposalAgentActivity:
     from app.services.proposal_chat_activity import build_improve_agent_activity
 
@@ -1026,6 +1027,7 @@ def _improve_activity_for_turn(
         user_message=user_message,
         extra_changes=extra_changes,
         extra_discrepancies=extra_discrepancies,
+        apply_fix=apply_fix,
     )
 
 
@@ -1184,6 +1186,7 @@ async def improve_section_endpoint(
         draft_changed=draft_changed,
         assistant_message=assistant_message,
         user_message=body.message,
+        apply_fix=body.apply_fix,
     )
     return ProposalSectionImproveResponse(
         section=section,
@@ -1784,18 +1787,23 @@ proposals_direct_router = APIRouter(prefix="/proposals", tags=["proposals"])
 
 
 @proposals_direct_router.get("/jobs/active")
-async def list_active_proposal_jobs_endpoint() -> dict[str, object]:
+async def list_active_proposal_jobs_endpoint(
+    include_go_no_go: bool = Query(False, alias="includeGoNoGo"),
+) -> dict[str, object]:
     """Every proposal-pipeline job currently queued or running, across all
     RFPs — so a newly-queued job's UI can show what's ahead of it instead of
     just "generating..." with no explanation of why nothing is happening
-    yet. Excludes Go/No-Go (tracked here too, but under its own lock — not
-    what occupies a proposal-pipeline worker slot)."""
+    yet. Excludes Go/No-Go by default (tracked here too, but under its own
+    lock — not what occupies a proposal-pipeline worker slot, so it doesn't
+    belong in that queue-depth count); pass includeGoNoGo=true for a caller
+    that wants a plain "what's running anywhere" view instead."""
     from app.services.proposal_job_runner import list_active_proposal_jobs
+    from app.services.proposal_pipeline_checkpoint import PHASE_LABELS
 
     records = await list_active_proposal_jobs()
     jobs = []
     for record in records:
-        if record.job_type == "go-no-go":
+        if record.job_type == "go-no-go" and not include_go_no_go:
             continue
         rfp = get_rfp(record.rfp_id)
         jobs.append(
@@ -1803,6 +1811,7 @@ async def list_active_proposal_jobs_endpoint() -> dict[str, object]:
                 "rfpId": record.rfp_id,
                 "title": rfp.title if rfp else record.rfp_id,
                 "jobType": record.job_type,
+                "jobLabel": PHASE_LABELS.get(record.job_type, record.job_type),
                 "status": record.status,
                 "startedAt": record.started_at,
             }

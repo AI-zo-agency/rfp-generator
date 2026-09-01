@@ -274,7 +274,7 @@ async def _llm_rewrite_kpi_detail_section(
     try:
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=8192,
+            max_tokens=16000,
             temperature=0.25,
         )
         content = str((raw or {}).get("content") or "").strip()

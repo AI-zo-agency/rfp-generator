@@ -22,10 +22,25 @@ function parseSubheadingLine(line: string): string | null {
   return null;
 }
 
-function tryManualFillCallout(text: string): string | null {
+/** A [MANUAL FILL: …] tag's own body never contains a real "]" (the backend
+ * sanitizes that before the tag is written) — so the first "]" in the line
+ * is always the tag's true close. A line missing that close entirely (cut
+ * off mid-generation) still gets one appended, same as before; but a line
+ * where real prose follows the tag on the same paragraph must split there
+ * instead of swallowing that prose into the tag's own detail text. */
+function tryManualFillCallout(
+  text: string,
+): { tag: string; trailing: string } | null {
   const trimmed = (text || "").trim();
   if (!isManualFillTag(trimmed)) return null;
-  return trimmed.endsWith("]") ? trimmed : `${trimmed}]`;
+  const closeIdx = trimmed.indexOf("]");
+  if (closeIdx < 0) {
+    return { tag: `${trimmed}]`, trailing: "" };
+  }
+  return {
+    tag: trimmed.slice(0, closeIdx + 1),
+    trailing: trimmed.slice(closeIdx + 1).trim(),
+  };
 }
 
 function InlineGapTag({
@@ -125,10 +140,12 @@ function pushParagraphBlock(blocks: Block[], paragraphLines: string[]) {
     }
     const gapTag = tryManualFillCallout(paragraphLines[0]!);
     if (gapTag) {
-      if (isInternalScanTag(gapTag)) {
-        return;
+      if (!isInternalScanTag(gapTag.tag)) {
+        blocks.push({ type: "gap_callout", tag: gapTag.tag });
       }
-      blocks.push({ type: "gap_callout", tag: gapTag });
+      if (gapTag.trailing) {
+        blocks.push({ type: "paragraph", text: gapTag.trailing });
+      }
       return;
     }
   }

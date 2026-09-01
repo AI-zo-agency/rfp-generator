@@ -166,7 +166,6 @@ export function DraftSectionEditor({
       const target = event.target as HTMLElement | null;
       if (!target) return;
       if (target.closest(".proposal-selection-revise-btn")) return;
-      if (target.closest(".proposal-revise-toolbar-btn")) return;
       if (target === textareaRef.current) return;
       if (previewRef.current?.contains(target)) return;
       clearSelection();
@@ -276,23 +275,14 @@ export function DraftSectionEditor({
                   View what changed
                 </button>
               ) : null}
-              <CapabilityHoverTip id="reviseSelection" side="bottom">
-                <button
-                  type="button"
-                  disabled={busy || !onOpenRevisionChat}
-                  onClick={() => openChat("selection")}
-                  className="proposal-revise-toolbar-btn text-[11px] font-semibold text-zo-orange transition-smooth hover:underline disabled:opacity-50"
-                >
-                  Revise content
-                </button>
-              </CapabilityHoverTip>
               <CapabilityHoverTip id="improveSection" side="bottom">
                 <button
                   type="button"
                   disabled={busy || !onOpenRevisionChat}
                   onClick={() => openChat("section")}
-                  className="text-[11px] font-semibold text-zo-orange transition-smooth hover:underline disabled:opacity-50"
+                  className="flex items-center gap-1 rounded-md border border-zo-orange/35 bg-zo-orange/10 px-2 py-1 text-[11px] font-semibold text-zo-orange transition-smooth hover:border-zo-orange hover:bg-zo-orange/15 disabled:cursor-not-allowed disabled:opacity-50"
                 >
+                  <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></svg>
                   Improve full section
                 </button>
               </CapabilityHoverTip>
@@ -362,11 +352,12 @@ export function DraftSectionEditor({
                   >
                     <button
                       type="button"
-                      className="rounded-md px-2 py-1 text-[11px] font-semibold text-[var(--zo-orange)]"
+                      className="flex items-center gap-1 rounded-md px-1 py-1 text-[11px] font-semibold text-[var(--zo-orange)]"
                       title={`${capabilityById("reviseSelection").does} ${capabilityById("reviseSelection").doesnt}`}
                       onClick={() => openChat("selection")}
                     >
-                      Change…
+                      <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                      Ask to change this
                     </button>
                   </div>,
                   document.body

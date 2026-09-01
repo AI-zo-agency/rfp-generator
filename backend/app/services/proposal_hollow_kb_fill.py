@@ -15,6 +15,10 @@ from typing import Any, Awaitable, Callable
 
 from app.models.proposal import ProposalDraft, ProposalSection
 from app.services import llm
+from app.services.proposal_draft_structure_stubs import (
+    content_looks_like_instructional_checklist as _looks_like_instructional_checklist,
+)
+from app.services.proposal_manual_flags import sanitize_bare_bracket_tag_words
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +43,15 @@ _PLACEHOLDER_VALUE_RE = re.compile(
 
 _MAX_SECTIONS_PER_PASS = 6
 _MAX_PLAN_FILLS = _MAX_SECTIONS_PER_PASS
-_MAX_KB_QUERIES = 3
+# Each gap can now plan up to 3 queries instead of 1 (see _plan_fills) — raise
+# the search cap to match, so a 6-section batch isn't still bottlenecked down
+# to 3 total searches. Supermemory lookups are cheap, non-LLM calls; raising
+# this does not add LLM cost. _EVIDENCE_CHARS is unchanged, so the fill LLM
+# call's input size does not grow either — more, smaller, better-targeted
+# slices fill the exact same total budget instead of a few generic ones.
+_MAX_KB_QUERIES = 8
 _EVIDENCE_CHARS = 14_000
-_FILL_MAX_TOKENS = 4096
+_FILL_MAX_TOKENS = 16000
 
 # Hard ceilings so this stage can never hang indefinitely — an item that blows
 # its budget is skipped (left as a gap for the next pass) rather than stalling
@@ -208,8 +218,16 @@ async def _plan_fills(
     rfp_title: str,
     rfp_client: str,
     rfp_sector: str,
+    known_case_study_clients: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """One planner call — which gaps to fill and which KB queries to run."""
+    """One planner call — which gaps to fill and which KB queries to run each.
+
+    Each gap gets up to 3 queries, not 1 — the automated pass was giving each
+    section one shot at a vague query while the chat "Improve section" flow
+    runs several targeted ones per ask; this is that same idea applied here,
+    still one planner call and the evidence budget (_EVIDENCE_CHARS) is
+    unchanged, so this does not add an LLM call or grow the fill prompt.
+    """
     if not gaps:
         return []
     if not llm.is_configured():
@@ -219,10 +237,12 @@ async def _plan_fills(
             out.append(
                 {
                     "sectionId": gap.section_id,
-                    "kbQuery": (
-                        f"06_WON 07_FIN {rfp_sector} {gap.title} "
-                        f"{' '.join(gap.reasons)[:80]}"
-                    ).strip(),
+                    "kbQueries": [
+                        (
+                            f"06_WON 07_FIN {rfp_sector} {gap.title} "
+                            f"{' '.join(gap.reasons)[:80]}"
+                        ).strip()
+                    ],
                     "gaps": gap.reasons,
                 }
             )
@@ -238,14 +258,25 @@ async def _plan_fills(
         "Given a mechanical inventory of gaps (empty fields, MANUAL FILL stubs, "
         "TBD lines, empty table cells — VERIFY tags are NOT required), pick up to "
         f"{_MAX_PLAN_FILLS} sections to fill now.\n"
-        "For each, write ONE focused KB query preferring 06_WON / 07_FIN past won "
-        "or finalist proposals, then 04_Bio / 03_CS.\n"
+        "For each, write 1-3 focused KB queries — not a single generic one. "
+        "Prefer 06_WON / 07_FIN past won or finalist proposals, then 04_Bio / "
+        "03_CS. When the client/case-study names already in this draft (listed "
+        "below, if any) are relevant to the gap, name them directly in at "
+        "least one query instead of only a generic gap-title search — a query "
+        "naming the real client finds their reference/contact details far "
+        "better than a query built from the RFP's own generic field label.\n"
         "Skip gaps that are designer-only PDF handoffs or cannot be answered from KB.\n"
         "Do not invent facts. Return JSON only:\n"
-        '{"fills":[{"sectionId":"...","kbQuery":"06_WON ...","gaps":["..."]}]}'
+        '{"fills":[{"sectionId":"...","kbQueries":["06_WON ...","..."],'
+        '"gaps":["..."]}]}'
+    )
+    case_studies_block = (
+        "\n".join(f"- {c}" for c in (known_case_study_clients or [])[:20])
+        or "(none)"
     )
     user = (
         f"RFP: {rfp_title}\nClient: {rfp_client}\nSector: {rfp_sector}\n\n"
+        f"Client/case-study names already in this draft:\n{case_studies_block}\n\n"
         f"Gap inventory:\n{inventory}"
     )
     try:
@@ -255,7 +286,7 @@ async def _plan_fills(
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                max_tokens=2048,
+                max_tokens=16000,
                 temperature=0.1,
                 node_name="missing_answers_plan",
             ),
@@ -266,7 +297,7 @@ async def _plan_fills(
         return [
             {
                 "sectionId": g.section_id,
-                "kbQuery": f"06_WON 07_FIN {g.title}",
+                "kbQueries": [f"06_WON 07_FIN {g.title}"],
                 "gaps": g.reasons,
             }
             for g in gaps[:_MAX_PLAN_FILLS]
@@ -277,7 +308,7 @@ async def _plan_fills(
         return [
             {
                 "sectionId": g.section_id,
-                "kbQuery": f"06_WON 07_FIN {g.title}",
+                "kbQueries": [f"06_WON 07_FIN {g.title}"],
                 "gaps": g.reasons,
             }
             for g in gaps[:_MAX_PLAN_FILLS]
@@ -290,13 +321,19 @@ async def _plan_fills(
         sid = str(item.get("sectionId") or item.get("section_id") or "").strip()
         if not sid or sid not in valid_ids:
             continue
-        query = str(item.get("kbQuery") or item.get("kb_query") or "").strip()
-        if not query:
-            query = f"06_WON 07_FIN {sid}"
+        raw_queries = item.get("kbQueries") or item.get("kb_queries")
+        queries: list[str] = []
+        if isinstance(raw_queries, list):
+            queries = [str(q).strip()[:200] for q in raw_queries if str(q).strip()][:3]
+        if not queries:
+            # Back-compat with a model that still returns the old single-query
+            # shape, and the ultimate fallback if it returns neither.
+            single = str(item.get("kbQuery") or item.get("kb_query") or "").strip()
+            queries = [single[:200]] if single else [f"06_WON 07_FIN {sid}"]
         planned.append(
             {
                 "sectionId": sid,
-                "kbQuery": query[:200],
+                "kbQueries": queries,
                 "gaps": item.get("gaps") or [],
             }
         )
@@ -383,6 +420,16 @@ async def _llm_fill_section(
         "- Prefer 06_WON / 07_FIN past won/finalist proposals, then 04_Bio / 03_CS / "
         "draft roster. Never invent clients, metrics, degrees, or contacts.\n"
         "- If evidence is thin for a field, use [VERIFY: …] — never fabricate.\n"
+        "- Never write a checklist, numbered to-do list, or description of what "
+        "someone else should do instead (\"confirm whether...\", \"select three "
+        "references...\", \"obtain contact info...\") — that is process narration, "
+        "not content, and this section ships to the client as-is. Commit to real "
+        "structure using the named facts you DO have (e.g. specific client / "
+        "case-study names already in the draft context) and mark only the "
+        "individual missing facts inline as [VERIFY: field] on that same entry — "
+        "a reference entry naming the real client with [VERIFY: contact name], "
+        "[VERIFY: phone], [VERIFY: email] beats a generic instructions list "
+        "every time.\n"
         "- No full resume dumps. Evaluator-ready markdown for THIS section only.\n"
         "- These rules govern how you write; they are never content. Never write "
         "sentences about verification requirements or your own constraints — apply "
@@ -394,10 +441,18 @@ async def _llm_fill_section(
         f"RFP: {rfp_title}\nClient: {rfp_client}\n"
         f"Section: {section.title}\n"
         f"Gaps to fill: {gaps or ['missing answers']}\n\n"
-        f"Current section:\n{body[:12_000]}\n\n"
-        f"Draft roster / Our Work / company tabs:\n{draft_context[:5_000]}\n\n"
-        f"KB evidence (won proposals + bios):\n{evidence[:_EVIDENCE_CHARS]}"
+        f"Current section:\n{body[:12_000]}"
     )
+    # draft_context/evidence are the same across every section this batch fills
+    # (built once in fill_missing_answers_from_won_proposals before the fan-out) —
+    # cache them instead of re-sending them fresh on every concurrent call.
+    # cache_prefix segments are separate content blocks with no separator
+    # auto-inserted between them (or before the user tail) — each must carry its
+    # own trailing blank line to keep the same spacing the inlined version had.
+    cache_prefix = [
+        f"Draft roster / Our Work / company tabs:\n{draft_context[:5_000]}\n\n",
+        f"KB evidence (won proposals + bios):\n{evidence[:_EVIDENCE_CHARS]}\n\n",
+    ]
     try:
         raw, _ = await asyncio.wait_for(
             llm.chat_json(
@@ -408,6 +463,7 @@ async def _llm_fill_section(
                 max_tokens=_FILL_MAX_TOKENS,
                 temperature=0.2,
                 node_name="missing_answers_fill",
+                cache_prefix=cache_prefix,
             ),
             timeout=_FILL_CALL_TIMEOUT_SEC,
         )
@@ -416,6 +472,14 @@ async def _llm_fill_section(
         return None
     content = str((raw or {}).get("content") or "").strip()
     if not content or len(content) < 40:
+        return None
+    content = sanitize_bare_bracket_tag_words(content)
+    if _looks_like_instructional_checklist(content):
+        logger.warning(
+            "Missing-answers fill for %s wrote a to-do checklist instead of "
+            "content — rejected, section left as-is for a later pass",
+            section.id,
+        )
         return None
     return content
 
@@ -441,19 +505,25 @@ async def fill_missing_answers_from_won_proposals(
         f"Missing-answers inventory: {len(gaps)} section(s) with gaps "
         "(empty fields / MANUAL FILL / TBD — VERIFY not required)"
     ]
+    draft_ctx = _draft_context_block(draft)
+    known_case_study_clients = [
+        line[len("OUR WORK: ") :].strip()
+        for line in draft_ctx.splitlines()
+        if line.startswith("OUR WORK: ")
+    ]
     planned = await _plan_fills(
         gaps,
         rfp_title=rfp_title,
         rfp_client=rfp_client,
         rfp_sector=rfp_sector,
+        known_case_study_clients=known_case_study_clients,
     )
     if not planned:
         logs.append("Missing-answers planner: nothing to fill this pass")
         return draft, logs
 
-    queries = [str(p.get("kbQuery") or "") for p in planned]
+    queries = [q for p in planned for q in (p.get("kbQueries") or [])]
     evidence, sources = await _retrieve_queries(queries)
-    draft_ctx = _draft_context_block(draft)
     if not evidence.strip() and not draft_ctx.strip():
         logs.append("Missing-answers: no KB/draft evidence — gaps left open")
         return draft, logs

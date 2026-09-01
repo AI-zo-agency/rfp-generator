@@ -289,7 +289,7 @@ async def _rewrite_section_for_fact_contradiction(
     try:
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.0,
             node_name=f"manuscript_fact_contradiction_rewrite:{section.id}",
             rfp_id=rfp.id,
@@ -369,7 +369,7 @@ async def run_manuscript_fact_contradiction_pass(
         try:
             raw, _ = await llm.chat_json(
                 [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
-                max_tokens=4096,
+                max_tokens=16000,
                 temperature=0.0,
                 node_name="manuscript_fact_contradiction_audit",
                 rfp_id=rfp.id,

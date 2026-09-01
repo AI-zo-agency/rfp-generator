@@ -162,7 +162,7 @@ async def build_proof_points_for_rfp(
                     ),
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.25,
         )
     except LlmError as exc:

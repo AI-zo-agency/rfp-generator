@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from app.services import llm
@@ -40,6 +41,7 @@ async def safe_chat_json(
     max_tokens: int = 3072,
     temperature: float = 0.15,
     agent_name: str = "agent",
+    cache_prefix: str | Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """LLM JSON call that never raises — returns ({}, 'none') on failure."""
     try:
@@ -49,6 +51,7 @@ async def safe_chat_json(
             temperature=temperature,
             # Prefer explicit agent names; fall back to graph contextvar node_name.
             node_name=agent_name if agent_name and agent_name != "agent" else None,
+            cache_prefix=cache_prefix,
         )
         if isinstance(raw, dict):
             return raw, provider

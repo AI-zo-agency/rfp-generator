@@ -560,7 +560,7 @@ async def _parse_json_from_agent_text(text: str) -> dict[str, Any]:
             {"role": "system", "content": "Extract JSON object from agent output. Return only JSON."},
             {"role": "user", "content": text[:12000]},
         ],
-        max_tokens=4096,
+        max_tokens=16000,
         temperature=0.0,
         node_name="agent_json_salvage",
     )

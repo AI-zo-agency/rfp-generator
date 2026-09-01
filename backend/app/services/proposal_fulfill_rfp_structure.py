@@ -268,7 +268,7 @@ async def extract_rfp_submission_format_specs(
                     ),
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.05,
             cache_prefix=rfp_context[:45000],
         )
@@ -719,7 +719,7 @@ async def extract_rfp_scored_section_specs(
                     ),
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.1,
             cache_prefix=excerpt[:45000],
         )
@@ -934,11 +934,28 @@ def _is_static_1_3_section(section: ProposalSection) -> bool:
 
 
 def _titles_are_same_ask(rfp_title: str, section_title: str, aliases: list[str]) -> bool:
-    from app.services.proposal_outline_dedup import outline_titles_near_duplicate
+    from app.services.proposal_outline_dedup import (
+        outline_title_tokens,
+        outline_titles_near_duplicate,
+    )
 
     if outline_titles_near_duplicate(rfp_title, section_title):
         return True
-    if any(outline_titles_near_duplicate(alias, section_title) for alias in aliases):
+    # An alias only proves rfp_title and section_title are the same ask if it
+    # actually links the two — the LLM extracting these can hallucinate one
+    # (e.g. claiming an existing "Qualifications and Experience" tab is the
+    # same ask as an RFP-mandated "Response File" label, sharing not one
+    # word). Require the alias to share at least one real token with
+    # rfp_title before trusting it enough to relabel a section by it — a
+    # missed relabel just keeps the section's current (still reasonable)
+    # title; a wrong one silently renames real content to something
+    # unrelated and orphans whatever the RFP title actually asked for.
+    rfp_tokens = outline_title_tokens(rfp_title)
+    if any(
+        outline_titles_near_duplicate(alias, section_title)
+        and (not rfp_tokens or rfp_tokens & outline_title_tokens(alias))
+        for alias in aliases
+    ):
         return True
     # Buyer labels for the same offer-letter tab (not a KB evidence synonym table).
     rfp_cf = (rfp_title or "").casefold()
@@ -1578,7 +1595,7 @@ async def _reframe_section_to_rfp_spec(
     # multi-page essay it later gets crudely truncated to. ~1.6 tokens/word of
     # prose + headroom for markdown tables/bullets, floored so short targets
     # still fit a complete answer.
-    max_out = min(8192, max(1400, int(word_target * 2.4)))
+    max_out = min(16000, max(1400, int(word_target * 2.4)))
     user = (
         f"Client: {rfp.client}\nRFP: {rfp.title}\n"
         f"Section: {section.title}\n"

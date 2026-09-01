@@ -469,6 +469,7 @@ Research questions:
                 "role": "user",
                 "content": f"Questions: {json.dumps(questions)}\n\nResearch:\n{final_text[:15000]}",
             },
-        ]
+        ],
+        max_tokens=16000,
     )
     return structured.get("answers", []), provider

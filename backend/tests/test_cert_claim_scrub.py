@@ -139,6 +139,18 @@ class CertClaimScrubTests(unittest.TestCase):
             user_asks_cert_claim_scrub("retain only WBENC/WOSB and B Corp.")
         )
         self.assertFalse(user_asks_cert_claim_scrub("What certifications do we have?"))
+        # WBENC / WOSB are verified — asking to move that sentence out of a
+        # narrative tab is a rewrite, not a fabricated-cert scrub.
+        self.assertFalse(
+            user_asks_cert_claim_scrub(
+                "Remove the WBENC/SBA certification and state-registration sentence "
+                "from Who We Are and replace it with voice-driven copy."
+            )
+        )
+        # A standalone WBE designation (not the WBENC certificate) still scrubs.
+        self.assertTrue(
+            user_asks_cert_claim_scrub("Remove the WBE and DBE designations.")
+        )
 
     def test_cert_scrub_does_not_flatten_multiline_table(self) -> None:
         table = (

@@ -150,21 +150,22 @@ async def extract_closing_requirement_ledger(
 
     excerpt = submission_documents_excerpt(body, max_chars=24_000)
     closing = closing_package_excerpt(body, max_chars=16_000)
+    # This whole prompt is a pure function of rfp_text, and this function is
+    # called from 6 sites across the pipeline on the same rfp_text — cache the
+    # entire thing rather than re-extracting fresh (and re-billing) every time.
     raw, _provider = await safe_chat_json(
         [
             {"role": "system", "content": _EXTRACT_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    "Build the closing requirement ledger for THIS RFP only.\n\n"
-                    f"Submission / documents excerpt:\n{excerpt}\n\n"
-                    f"Closing / forms excerpt:\n{closing}"
-                ),
-            },
+            {"role": "user", "content": ""},
         ],
         max_tokens=3072,
         temperature=0.1,
         agent_name=AGENT,
+        cache_prefix=(
+            "Build the closing requirement ledger for THIS RFP only.\n\n"
+            f"Submission / documents excerpt:\n{excerpt}\n\n"
+            f"Closing / forms excerpt:\n{closing}"
+        ),
     )
     ledger = _parse_ledger_payload(raw if isinstance(raw, dict) else {})
     if always_include_commitment and not any(

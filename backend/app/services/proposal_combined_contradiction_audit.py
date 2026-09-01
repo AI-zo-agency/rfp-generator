@@ -105,24 +105,29 @@ async def detect_all_contradictions(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Combined audit: verified corpus fetch failed: %s", exc)
 
-    user = (
+    # Client/title/due-date, verified company facts, and RFP text are all
+    # identical across every one of this function's ~6 call sites for a given
+    # RFP — only the manuscript digest changes as the draft evolves. Cache the
+    # stable prefix instead of resending it (and re-scoring it) on every call.
+    cache_prefix = (
         f"Client: {rfp.client}\nRFP title: {rfp.title}\n"
         f"Due date: {getattr(rfp, 'due_date', None) or 'unknown'}\n\n"
         f"VERIFIED COMPANY FACTS (01_companyfacts_verified — authoritative):\n"
         f"{verified_corpus or '(corpus unavailable — still flag cross-section conflicts)'}\n\n"
         f"RFP TEXT (authoritative for dimension 2):\n{(rfp_text or '')[:38_000]}\n\n"
-        f"FULL MANUSCRIPT (check EVERY tab):\n{digest}"
     )
+    user = f"FULL MANUSCRIPT (check EVERY tab):\n{digest}"
     try:
         raw, _ = await llm.chat_json(
             [
                 {"role": "system", "content": _COMBINED_SYSTEM},
                 {"role": "user", "content": user},
             ],
-            max_tokens=6144,
+            max_tokens=16000,
             temperature=0.0,
             node_name="combined_contradiction_audit",
             rfp_id=rfp.id,
+            cache_prefix=cache_prefix,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Combined contradiction audit failed: %s", exc)

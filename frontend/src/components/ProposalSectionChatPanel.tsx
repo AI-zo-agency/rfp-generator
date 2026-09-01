@@ -65,7 +65,12 @@ interface ProposalSectionChatPanelProps {
   onRevisionRecorded?: (sectionId: string, revision: SectionRevisionRecord) => void;
   onRevisionDrawerOpenChange?: (sectionId: string, open: boolean) => void;
   onFocusSection?: (sectionId: string) => void;
+  /** Lifted from the parent (not local state) so an in-flight request's status
+   * survives this panel unmounting when the user switches tabs and back. */
+  busy: boolean;
   onBusyChange?: (busy: boolean) => void;
+  statusLine: string | null;
+  onStatusLineChange: (statusLine: string | null) => void;
   showClose?: boolean;
   onClose?: () => void;
 }
@@ -124,14 +129,15 @@ export function ProposalSectionChatPanel({
   onRevisionRecorded,
   onRevisionDrawerOpenChange,
   onFocusSection,
+  busy,
   onBusyChange,
+  statusLine,
+  onStatusLineChange,
   showClose = false,
   onClose,
 }: ProposalSectionChatPanelProps) {
   const [input, setInput] = useState("");
-  const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [statusLine, setStatusLine] = useState<string | null>(null);
   const [liveStepIndex, setLiveStepIndex] = useState(0);
   const [pendingApply, setPendingApply] = useState<{
     messageId: string;
@@ -144,10 +150,10 @@ export function ProposalSectionChatPanel({
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, isRunning, liveStepIndex]);
+  }, [messages, busy, liveStepIndex]);
 
   useEffect(() => {
-    if (!isRunning) {
+    if (!busy) {
       setLiveStepIndex(0);
       return;
     }
@@ -155,7 +161,7 @@ export function ProposalSectionChatPanel({
       setLiveStepIndex((n) => n + 1);
     }, 2200);
     return () => window.clearInterval(id);
-  }, [isRunning]);
+  }, [busy]);
 
   useEffect(() => {
     if (reference?.text) {
@@ -182,12 +188,12 @@ export function ProposalSectionChatPanel({
 
   const openApplyPanel = useCallback(
     (messageId: string, fix: SectionChatSuggestedFix) => {
-      if (isRunning || disabled) return;
+      if (busy || disabled) return;
       setPendingApply({ messageId, fix });
       setApplyExtras("");
       setError(null);
     },
-    [disabled, isRunning]
+    [disabled, busy]
   );
 
   const cancelApplyPanel = useCallback(() => {
@@ -198,7 +204,7 @@ export function ProposalSectionChatPanel({
   const sendMessage = useCallback(
     async (message: string) => {
       const trimmed = message.trim();
-      if (!trimmed || isRunning || sections.length === 0) return;
+      if (!trimmed || busy || sections.length === 0) return;
 
       // 1) Explicit pin (Revise excerpt / Improve full section) wins when it
       //    matches the ask. 2) Otherwise resolve from the query. 3) If ambiguous,
@@ -304,9 +310,8 @@ export function ProposalSectionChatPanel({
           resolution.reason === "outline-structure" ||
           messageLooksProposalWide(trimmed));
 
-      setIsRunning(true);
       setError(null);
-      setStatusLine(
+      onStatusLineChange(
         chatBusyStatusLabel(trimmed, targetSection.title, {
           proposalWide: proposalWideAsk,
           referenceMode: activeReference?.mode ?? null,
@@ -411,15 +416,15 @@ export function ProposalSectionChatPanel({
           },
         ]);
       } finally {
-        setIsRunning(false);
-        setStatusLine(null);
+        onStatusLineChange(null);
         onBusyChange?.(false);
       }
     },
     [
-      isRunning,
+      busy,
       messages,
       onBusyChange,
+      onStatusLineChange,
       onMessagesChange,
       onRevisionDrawerOpenChange,
       onRevisionRecorded,
@@ -435,7 +440,7 @@ export function ProposalSectionChatPanel({
 
   const applySuggestedFix = useCallback(
     async (messageId: string, fix: SectionChatSuggestedFix, extras: string) => {
-      if (isRunning || disabled) return;
+      if (busy || disabled) return;
       // Always the audited tab from suggestedFix — never the currently open
       // sidebar tab (that rewrote Exhibit 2 when Exhibit 5's Apply was clicked).
       const target = resolveApplyFixTarget(sections, fix, viewingSectionId);
@@ -462,9 +467,8 @@ export function ProposalSectionChatPanel({
       onMessagesChange(nextMessages);
       setPendingApply(null);
       setApplyExtras("");
-      setIsRunning(true);
       setError(null);
-      setStatusLine(`Applying fix on ${target.title}…`);
+      onStatusLineChange(`Applying fix on ${target.title}…`);
       onBusyChange?.(true);
       onFocusSection?.(target.id);
 
@@ -540,16 +544,16 @@ export function ProposalSectionChatPanel({
           },
         ]);
       } finally {
-        setIsRunning(false);
-        setStatusLine(null);
+        onStatusLineChange(null);
         onBusyChange?.(false);
       }
     },
     [
       disabled,
-      isRunning,
+      busy,
       messages,
       onBusyChange,
+      onStatusLineChange,
       onFocusSection,
       onMessagesChange,
       onRevisionDrawerOpenChange,
@@ -579,7 +583,7 @@ export function ProposalSectionChatPanel({
   }, [viewingSection?.title, reference?.sectionTitle]);
 
   const pinViewingSection = () => {
-    if (!viewingSection || disabled || isRunning) return;
+    if (!viewingSection || disabled || busy) return;
     onSetReference(
       buildSectionPinReference(viewingSection, viewingSection.content || "")
     );
@@ -587,7 +591,7 @@ export function ProposalSectionChatPanel({
   };
 
   const pinReviseSection = () => {
-    if (!viewingSection || disabled || isRunning) return;
+    if (!viewingSection || disabled || busy) return;
     onSetReference(
       buildSectionPinReference(viewingSection, viewingSection.content || "")
     );
@@ -669,7 +673,7 @@ export function ProposalSectionChatPanel({
                             ref={applyExtrasRef}
                             value={applyExtras}
                             onChange={(e) => setApplyExtras(e.target.value)}
-                            disabled={disabled || isRunning}
+                            disabled={disabled || busy}
                             rows={2}
                             placeholder="e.g. keep Bend, only scrub invented contacts…"
                             className="proposal-section-chat-apply-extras"
@@ -692,7 +696,7 @@ export function ProposalSectionChatPanel({
                             <button
                               type="button"
                               className="proposal-section-chat-apply-btn proposal-section-chat-apply-btn--ghost"
-                              disabled={disabled || isRunning}
+                              disabled={disabled || busy}
                               onClick={cancelApplyPanel}
                             >
                               Cancel
@@ -700,7 +704,7 @@ export function ProposalSectionChatPanel({
                             <button
                               type="button"
                               className="proposal-section-chat-apply-btn"
-                              disabled={disabled || isRunning}
+                              disabled={disabled || busy}
                               onClick={() =>
                                 void applySuggestedFix(
                                   msg.id,
@@ -718,7 +722,7 @@ export function ProposalSectionChatPanel({
                           <button
                             type="button"
                             className="proposal-section-chat-apply-btn"
-                            disabled={disabled || isRunning}
+                            disabled={disabled || busy}
                             onClick={() =>
                               openApplyPanel(msg.id, msg.suggestedFix!)
                             }
@@ -741,7 +745,7 @@ export function ProposalSectionChatPanel({
             </div>
           ))
         )}
-        {isRunning ? (
+        {busy ? (
           <ChatLiveTicker
             statusLine={statusLine}
             stepIndex={liveStepIndex}
@@ -786,7 +790,7 @@ export function ProposalSectionChatPanel({
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            disabled={disabled || isRunning}
+            disabled={disabled || busy}
             rows={1}
             placeholder="Ask anything…"
             className="proposal-section-chat-input"
@@ -799,7 +803,7 @@ export function ProposalSectionChatPanel({
           />
           <button
             type="button"
-            disabled={disabled || isRunning || !input.trim()}
+            disabled={disabled || busy || !input.trim()}
             className="proposal-section-chat-send"
             aria-label="Send"
             onClick={() => void sendMessage(input)}
@@ -813,7 +817,7 @@ export function ProposalSectionChatPanel({
             <>
               <button
                 type="button"
-                disabled={disabled || isRunning}
+                disabled={disabled || busy}
                 onClick={pinReviseSection}
                 className="proposal-section-chat-quick-btn proposal-section-chat-quick-btn--primary"
               >
@@ -821,7 +825,7 @@ export function ProposalSectionChatPanel({
               </button>
               <button
                 type="button"
-                disabled={disabled || isRunning}
+                disabled={disabled || busy}
                 onClick={pinViewingSection}
                 className="proposal-section-chat-quick-btn proposal-section-chat-quick-btn--primary"
               >
@@ -833,7 +837,7 @@ export function ProposalSectionChatPanel({
             <button
               key={prompt}
               type="button"
-              disabled={disabled || isRunning}
+              disabled={disabled || busy}
               onClick={() => void sendMessage(prompt)}
               className="proposal-section-chat-quick-btn"
             >

@@ -76,7 +76,7 @@ async def generate_fee_justification_memo(
                     ),
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.2,
         )
     except LlmError as exc:

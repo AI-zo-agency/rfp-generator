@@ -497,17 +497,24 @@ export type ActiveProposalJob = {
   rfpId: string;
   title: string;
   jobType: string;
+  /** Plain-language phase name ("Final checks", "Go/No-Go analysis") — show this, not jobType. */
+  jobLabel: string;
   status: "queued" | "running";
   startedAt: string;
 };
 
 /** Every proposal-pipeline job currently queued or running, across all RFPs
  * — lets the UI explain a queued job instead of showing "Generating..."
- * with no visible progress and no reason why. */
-export async function listActiveProposalJobs(): Promise<ActiveProposalJob[]> {
+ * with no visible progress and no reason why. Go/No-Go is excluded by
+ * default (see backend docstring); pass includeGoNoGo for a plain
+ * "what's running anywhere" view instead of a queue-depth count. */
+export async function listActiveProposalJobs(
+  options: { includeGoNoGo?: boolean } = {}
+): Promise<ActiveProposalJob[]> {
   try {
+    const query = options.includeGoNoGo ? "?includeGoNoGo=true" : "";
     const res = await fetchWithTimeout(
-      `/api/proposals/jobs/active`,
+      `/api/proposals/jobs/active${query}`,
       { cache: "no-store" },
       15_000
     );

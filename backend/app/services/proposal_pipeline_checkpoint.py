@@ -38,6 +38,7 @@ PHASE_LABELS: dict[str, str] = {
     "fulfill-scan": "Complete & clean draft",
     "align-rfp-outline": "Align to RFP outline",
     "complete": "Complete",
+    "go-no-go": "Go/No-Go analysis",
 }
 
 
@@ -289,7 +290,9 @@ async def record_pipeline_activity(
     last_done = (step_index - 1) if resume_step and step_index and step_index > 1 else None
     if cp is None:
         cp = ProposalPipelineCheckpoint(
-            inProgressPhase=in_progress_phase or "phase-3",
+            # Same fabricate-a-phase anti-pattern as the old record_generation_stopped
+            # default — leave it unset rather than guessing "phase-3" out of thin air.
+            inProgressPhase=in_progress_phase,
             activityLabel=label[:500],
             activityDetail=detail[:500] if detail else None,
             stepIndex=step_index,
@@ -611,7 +614,13 @@ async def record_generation_stopped(rfp_id: str, phase: str | None = None) -> No
     """User hit Stop — clear in-progress, keep completed work, set resume pointer."""
     research = await aget_research_cache(rfp_id)
     prior = research.pipeline_checkpoint if research else None
-    active = phase or (prior.in_progress_phase if prior else None) or "phase-3"
+    # Never fabricate a phase when the current one is unknown (e.g. staleness
+    # cleanup already cleared in_progress_phase to None before this ran) —
+    # "phase-3" here used to win the `active in PIPELINE_PHASES` check below
+    # unconditionally, burying the correct prior.resume_from_phase fallback
+    # and rewinding a near-finished proposal (e.g. mid build-finalize) all the
+    # way back to drafting on the next Continue, re-spending real LLM tokens.
+    active = phase or (prior.in_progress_phase if prior else None)
     if active == "align-rfp-outline" or (
         prior is not None and prior.in_progress_phase == "align-rfp-outline"
     ):

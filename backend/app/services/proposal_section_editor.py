@@ -36,6 +36,9 @@ from app.services.proposal_repository import (
     asave_proposal_draft,
     asave_research_cache,
 )
+from app.services.proposal_draft_structure_stubs import (
+    repair_prose_disguised_as_table_rows,
+)
 from app.services.proposal_manual_flags import (
     VERIFY_TAG_RE,
     _EMAIL_RE,
@@ -902,7 +905,7 @@ async def _pick_and_draft_replacement_rfp_section(
             },
             {"role": "user", "content": prompt},
         ],
-        max_tokens=4500,
+        max_tokens=16000,
         temperature=0.2,
         tier="heavy",
         node_name="chat_replace_section_rfp_need",
@@ -1230,7 +1233,7 @@ async def _apply_suggested_fix_to_section(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
-        max_tokens=4096,
+        max_tokens=16000,
         temperature=0.2,
         node_name="chat_apply_suggested_fix",
     )
@@ -3517,7 +3520,7 @@ async def _section_chat_advisory_reply(
         )
         if full_detail:
             system_prompt = f"{system_prompt}\n\n{BUDGET_EXPLAIN_ADVISORY_RULES}"
-    max_tokens = 2000 if user_asks_budget_explanation(user_message) else 1200
+    max_tokens = 16000
     # Advisory replies are long markdown wrapped in {"reply": "..."} and the model
     # intermittently emits JSON this strict parser rejects, which surfaced to the
     # user as a 502 on roughly half of all questions. Repair once before failing —
@@ -4587,7 +4590,7 @@ async def _plan_selection_edit(
             {"role": "system", "content": SELECTION_KB_PLAN_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        max_tokens=1024,
+        max_tokens=16000,
         temperature=0.2,
         node_name="chat_selection_kb_plan",
     )
@@ -5442,7 +5445,12 @@ async def _improve_section_selection(
             )
 
         table_excerpt = (masked_excerpt or "").count("|") >= 4
-        sel_max_tokens = 4096 if table_excerpt else (2048 if not lean else 1200)
+        # Sonnet 5 (tier="heavy") can spend a large, variable share of any
+        # budget on invisible adaptive-thinking tokens before the first
+        # visible content token — a tight cap risks empty/truncated output.
+        # Haiku 4.5 (tier="light", the lean path) doesn't have that behavior,
+        # so its smaller, table-aware budget is left as-is.
+        sel_max_tokens = (4096 if table_excerpt else 1200) if lean else 16000
         try:
             raw, provider = await llm.chat_json(
                 [
@@ -5804,7 +5812,7 @@ async def _redraft_rfp_section(
     if mfill_originals:
         redraft_system = f"{SECTION_REDRAFT_PROMPT}\n\n{_MANUAL_FILL_PRESERVE_CONSTRAINT}"
 
-    max_tokens = 8192 if section.word_target >= 1500 else 6144
+    max_tokens = 16000
     content = ""
     provider = _provider_name()
     raw: dict[str, Any] = {}
@@ -5991,7 +5999,9 @@ async def _redraft_rfp_section(
             zo_mode=section.mode,
         )
     # KB references removed - not included in proposals
-    
+
+    content = repair_prose_disguised_as_table_rows(content)
+
     updated = section.model_copy(
         update={
             "content": content,
@@ -6096,7 +6106,7 @@ async def _improve_static_section(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.28,
             node_name="chat_full_redraft",
         )
@@ -6682,6 +6692,7 @@ async def _try_forms_attachments_integrity_repair(
     research: ProposalResearchCache | None,
     user_message: str,
     persist: bool,
+    apply_fix: bool = False,
 ) -> tuple[
     ProposalSection,
     ProposalDraft,
@@ -6717,6 +6728,10 @@ async def _try_forms_attachments_integrity_repair(
     )
 
     if not result.findings and not result.changed:
+        if apply_fix:
+            # Nothing to repair — let the Apply-the-fix rewrite run instead of
+            # answering an audit the user never asked for.
+            return None
         return (
             section,
             draft,
@@ -6755,6 +6770,7 @@ async def _try_section_cert_claim_scrub(
     research: ProposalResearchCache | None,
     user_message: str,
     persist: bool,
+    apply_fix: bool = False,
 ) -> tuple[
     ProposalSection,
     ProposalDraft,
@@ -6783,6 +6799,10 @@ async def _try_section_cert_claim_scrub(
 
     scrubbed, logs = scrub_section_cert_claims(section)
     if not logs and (scrubbed.content or "") == (section.content or ""):
+        if apply_fix:
+            # Nothing fabricated to remove — Apply the fix must fall through to
+            # the rewrite, not report a cert review and drop the instruction.
+            return None
         return (
             section,
             draft,
@@ -7793,7 +7813,9 @@ async def improve_proposal_section(
         raw_user_message,
         open_section_id=section_id,
     )
-    if merge_plan is not None and not selection_mode:
+    # Apply the fix is a single-section rewrite by construction — a keyword
+    # merge plan must never reinterpret the instruction it carries.
+    if merge_plan is not None and not selection_mode and not apply_fix:
         provider = _provider_name()
         if research is None:
             research = ProposalResearchCache(
@@ -8223,6 +8245,7 @@ async def improve_proposal_section(
                     research=research,
                     user_message=raw_user_message,
                     persist=persist,
+                    apply_fix=apply_fix,
                 )
                 if forms_integrity is not None:
                     return (*forms_integrity, None)
@@ -8234,6 +8257,7 @@ async def improve_proposal_section(
                     research=research,
                     user_message=raw_user_message,
                     persist=persist,
+                    apply_fix=apply_fix,
                 )
                 if cert_scrub is not None:
                     return (*cert_scrub, None)

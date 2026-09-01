@@ -278,7 +278,7 @@ async def _draft_closing_section(
                     ),
                 },
             ],
-                max_tokens=2048,
+                max_tokens=16000,
                 temperature=0.2,
                 node_name="fulfill_scan_closing_section",
             ),

@@ -168,7 +168,7 @@ async def build_loss_lessons_for_rfp(
                 ),
             },
         ],
-        max_tokens=3072,
+        max_tokens=16000,
         temperature=0.25,
     )
 

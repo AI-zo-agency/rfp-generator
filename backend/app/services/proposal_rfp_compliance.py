@@ -1547,7 +1547,7 @@ async def _draft_one_added_section(
                     ),
                 },
             ],
-            max_tokens=1024,
+            max_tokens=16000,
             temperature=0.35,
             node_name="ledger_add_query_planner",
         )
@@ -1631,7 +1631,7 @@ async def _draft_one_added_section(
                 {"role": "system", "content": SECTION_REDRAFT_PROMPT},
                 {"role": "user", "content": user_block},
             ],
-            max_tokens=6144,
+            max_tokens=16000,
             temperature=0.3,
             node_name="ledger_add_section_draft",
         )

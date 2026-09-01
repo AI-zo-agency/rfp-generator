@@ -243,7 +243,7 @@ async def _run_llm_residual_audit(
                 {"role": "system", "content": _AUDIT_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.0,
             tier="heavy",
             node_name="manuscript_auditor",

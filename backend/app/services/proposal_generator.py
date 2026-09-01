@@ -449,7 +449,8 @@ async def _map_rfp_sections(rfp_context: str) -> list[RfpSectionMap]:
                 ),
             },
             {"role": "user", "content": rfp_context[:12000]},
-        ]
+        ],
+        max_tokens=16000,
     )
     sections = raw.get("sections", [])
     if not isinstance(sections, list):
@@ -486,7 +487,8 @@ async def _build_research_questions(
                     f"Mapped sections: {[s.model_dump(by_alias=True) for s in rfp_sections]}"
                 ),
             },
-        ]
+        ],
+        max_tokens=16000,
     )
     questions = raw.get("questions", [])
     result: list[ResearchQuestion] = []
@@ -541,7 +543,8 @@ async def _fill_static_section(
                     "role": "user",
                     "content": f"RFP: {rfp.title} / {rfp.sector}\n\nCase studies:\n{text[:8000]}",
                 },
-            ]
+            ],
+            max_tokens=16000,
         )
         selected = selection.get("selected", [])
         rationale = selection.get("rationale", "")
@@ -570,7 +573,8 @@ async def _fill_static_section(
                         f"Team bios KB:\n{text[:8000]}\n\nRFP research:\n{research_summary[:3000]}"
                     ),
                 },
-            ]
+            ],
+            max_tokens=16000,
         )
         layout = selection.get("layout", "multi")
         bios = selection.get("bios", [])
@@ -620,7 +624,8 @@ async def _write_custom_section(
                     f"RFP excerpt:\n{rfp_context[:8000]}"
                 ),
             },
-        ]
+        ],
+        max_tokens=16000,
     )
     section.content = str(raw.get("content", "")).strip()
     section.designer_note = raw.get("designerNote")

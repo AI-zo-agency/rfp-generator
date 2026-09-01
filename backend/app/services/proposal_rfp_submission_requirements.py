@@ -182,7 +182,7 @@ async def _draft_narrative_submission_section(
                     ),
                 },
             ],
-            max_tokens=2048,
+            max_tokens=16000,
             temperature=0.2,
         )
         content = str((raw or {}).get("content") or "").strip()
@@ -266,7 +266,7 @@ async def inventory_rfp_submission_requirements(
                     "content": f"RFP: {rfp_title}\n\nSubmission excerpt:\n{excerpt[:46000]}",
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.1,
         )
     except Exception as exc:  # noqa: BLE001
@@ -482,7 +482,7 @@ async def _draft_generic_deliverable(
                     ),
                 },
             ],
-            max_tokens=2048,
+            max_tokens=16000,
             temperature=0.2,
         )
         content = str((raw or {}).get("content") or "").strip()

@@ -472,6 +472,31 @@ _MAX_TRANSPORT_RETRIES = 1
 _TRANSPORT_RETRY_BACKOFF_SECONDS = 2.0
 
 
+def _claude_rejects_sampling_params(model_l: str) -> bool:
+    """Claude Fable/Mythos 5, Opus 5, Sonnet 5, and Opus 4.7/4.8 return a 400
+    if temperature/top_p/top_k are sent at all — adaptive thinking replaced
+    fixed sampling on this generation. Opus/Sonnet 4.6 and older still
+    accept it. OpenRouter forwards Anthropic's own validation as-is, so this
+    must be checked before ever putting `temperature` in the request body
+    for one of these models. model_l is already lower-cased by the caller."""
+    if "claude" not in model_l and "anthropic" not in model_l:
+        return False
+    if "fable" in model_l or "mythos" in model_l:
+        return True
+    # Normalize "4.5"/"4.7" (seen in some OpenRouter slugs) to "4-5"/"4-7" so
+    # both spellings match the same checks below.
+    normalized = model_l.replace(".", "-")
+    if (
+        ("sonnet" in normalized or "opus" in normalized)
+        and normalized.endswith("-5")
+        and not normalized.endswith("4-5")
+    ):
+        return True
+    if "opus" in normalized and ("4-7" in normalized or "4-8" in normalized):
+        return True
+    return False
+
+
 @_langsmith_traceable(
     name="llm.post_chat",
     run_type="llm",
@@ -513,8 +538,16 @@ async def _post_chat(
     body: dict[str, Any] = {
         "model": model,
         "messages": cached_messages,
-        "temperature": temperature,
     }
+    if _claude_rejects_sampling_params(model_l):
+        logger.info(
+            "LLM request: model=%s does not accept temperature — omitting "
+            "(caller asked for %.2f)",
+            model,
+            temperature,
+        )
+    else:
+        body["temperature"] = temperature
     if effective_json_mode:
         body["response_format"] = {"type": "json_object"}
     if max_tokens is not None:

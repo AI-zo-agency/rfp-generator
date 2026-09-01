@@ -161,21 +161,25 @@ async def resolve_tags_from_manuscript(
         if (s.content or "").strip()
     )
 
+    # This runs twice per Scan-RFP pass (plus more elsewhere) against a
+    # manuscript that's mostly unchanged between calls — sections before the
+    # first one edited in between still share a byte-identical prefix, so this
+    # is worth caching even though it isn't guaranteed byte-identical overall.
     raw, _provider = await safe_chat_json(
         [
             {"role": "system", "content": _RESOLVE_SYSTEM},
             {
                 "role": "user",
-                "content": (
-                    f"Open tags to check:\n{tags_block}\n\n"
-                    f"Full manuscript (a tag's own section may itself be one of "
-                    f"these — only a DIFFERENT section counts as a source):\n"
-                    f"{manuscript_block[:90000]}"
-                ),
+                "content": f"Open tags to check:\n{tags_block}",
             },
         ],
         max_tokens=3072,
         agent_name="cross_reference_resolver",
+        cache_prefix=(
+            f"Full manuscript (a tag's own section may itself be one of "
+            f"these — only a DIFFERENT section counts as a source):\n"
+            f"{manuscript_block[:90000]}\n\n"
+        ),
     )
     proposed = raw.get("resolved") if isinstance(raw, dict) else None
     if not isinstance(proposed, list):

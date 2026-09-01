@@ -97,7 +97,6 @@ import { ProposalVersionCompare } from "./ProposalVersionCompare";
 import { KeyPersonasBox } from "./KeyPersonasBox";
 import { KeyPersonasModal } from "./KeyPersonasModal";
 import { CaseStudyMatchModal } from "./CaseStudyMatchModal";
-import { ProposalTabMoreMenu } from "./ProposalTabMoreMenu";
 import { OutlineTabs, TabPanel } from "./ui/OutlineTabs";
 import {
   ConfirmDialogProvider,
@@ -146,10 +145,6 @@ type SectionRevisionMap = Record<string, SectionRevisionRecord>;
 
 function revisionsStorageKey(rfpId: string): string {
   return `zo-proposal-section-revisions:${rfpId}`;
-}
-
-function buildBannerDismissKey(rfpId: string): string {
-  return `proposal-build-banner-dismissed:${rfpId}`;
 }
 
 function loadStoredRevisions(rfpId: string): SectionRevisionMap {
@@ -334,6 +329,41 @@ function ProposalDraftWorkspaceInner({
   const [budget, setBudget] = useState<ProposalBudget | null>(null);
   const [research, setResearch] = useState<ProposalResearch | null>(null);
   const [newSectionTitle, setNewSectionTitle] = useState("");
+  const [advancedMenuOpen, setAdvancedMenuOpen] = useState(false);
+  const advancedMenuRef = useRef<HTMLDivElement | null>(null);
+  const [mobileSectionsOpen, setMobileSectionsOpen] = useState(false);
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
+
+  useEffect(() => {
+    if (!advancedMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!advancedMenuRef.current?.contains(event.target as Node)) {
+        setAdvancedMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAdvancedMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [advancedMenuOpen]);
+
+  useEffect(() => {
+    if (!mobileSectionsOpen && !mobileChatOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileSectionsOpen(false);
+        setMobileChatOpen(false);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [mobileSectionsOpen, mobileChatOpen]);
+
   const [hydrated, setHydrated] = useState(false);
   const [draftLoadState, setDraftLoadState] = useState<
     "idle" | "loading" | "ready" | "error"
@@ -345,6 +375,9 @@ function ProposalDraftWorkspaceInner({
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
   const [scanSummary, setScanSummary] = useState<ScanRfpSummary | null>(null);
   const [scanSummaryExpanded, setScanSummaryExpanded] = useState(false);
+  // Drives the Results badge count without waiting for the panel to open.
+  const scanActionCount =
+    scanSummary?.groups.find((g) => g.tone === "action")?.rows.length ?? 0;
   // True right after a Complete & clean run finishes successfully, so the UI can
   // confirm completion and disable the button until the draft actually changes
   // (avoids a needless re-run). Cleared on any edit / new scan / stop.
@@ -352,7 +385,6 @@ function ProposalDraftWorkspaceInner({
   // Lets the user dismiss the server-derived "finished successfully" banner
   // (the one that shows after a refresh). Reset when a new scan starts.
   const [completionBannerDismissed, setCompletionBannerDismissed] = useState(false);
-  const [buildBannerDismissed, setBuildBannerDismissed] = useState(false);
   const [provider, setProvider] = useState<string | null>(null);
   const [pipelineStatus, setPipelineStatus] =
     useState<ProposalPipelineStatus | null>(null);
@@ -386,6 +418,9 @@ function ProposalDraftWorkspaceInner({
     null
   );
   const [sectionChatBusy, setSectionChatBusy] = useState(false);
+  // Lifted (not local to the panel) so an in-flight Ask Ralph request survives
+  // the panel unmounting when the user switches to Review/Download and back.
+  const [sectionChatStatusLine, setSectionChatStatusLine] = useState<string | null>(null);
   const [sectionChatMessages, setSectionChatMessages] = useState<SectionChatMessage[]>([]);
   const [showKeyPersonas, setShowKeyPersonas] = useState(true);
   const assistantPaneRef = useRef<HTMLDivElement>(null);
@@ -915,15 +950,6 @@ function ProposalDraftWorkspaceInner({
     };
   }, [rfp]);
 
-  useEffect(() => {
-    try {
-      setBuildBannerDismissed(
-        sessionStorage.getItem(buildBannerDismissKey(rfp.id)) === "1"
-      );
-    } catch {
-      setBuildBannerDismissed(false);
-    }
-  }, [rfp.id]);
 
   /** Keep trying to sync while the backend is busy with generation. */
   useEffect(() => {
@@ -1948,9 +1974,18 @@ function ProposalDraftWorkspaceInner({
     applyFulfillScanSuccessUi,
   ]);
 
-  /** Don't keep a stale "Stopped" banner while the server job is still running. */
+  /** Keep the banner and workflow-rail phase synced to the true server job.
+   * Two cases: (1) don't keep a stale "Stopped" banner while the server job
+   * is still running, and (2) while a full-proposal run is active, the
+   * backend chains phases via Celery — sections-1-3 can hand off straight
+   * into phase-2 server-side before this tab's own generateFullProposalStaged
+   * await-chain even reaches its onProgress("phase-2") call, so the banner
+   * and rail freeze on the phase that was current when this run started
+   * until this poll independently re-syncs them from the real job status. */
   useEffect(() => {
-    if (!hydrated || !generateNotice?.startsWith("Stopped")) return;
+    if (!hydrated) return;
+    const stoppedStale = generateNotice?.startsWith("Stopped");
+    if (!stoppedStale && !isFullProposalRunning) return;
 
     let cancelled = false;
     const syncRunningJob = async () => {
@@ -1981,7 +2016,7 @@ function ProposalDraftWorkspaceInner({
       cancelled = true;
       clearInterval(interval);
     };
-  }, [hydrated, rfp.id, generateNotice]);
+  }, [hydrated, rfp.id, generateNotice, isFullProposalRunning]);
 
   const rfpTabProgress = useMemo(() => {
     const ids = new Set(research?.rfpSections?.map((s) => s.id) ?? []);
@@ -2665,13 +2700,6 @@ function ProposalDraftWorkspaceInner({
     const abort = new AbortController();
     fullProposalAbortRef.current = abort;
 
-    try {
-      sessionStorage.removeItem(buildBannerDismissKey(rfp.id));
-      setBuildBannerDismissed(false);
-    } catch {
-      // ignore quota / private mode
-    }
-
     const forceRestart = !(shouldResume || startAfterSections1to3 || startFromCaseStudies);
 
     setIsFullProposalRunning(true);
@@ -2903,14 +2931,6 @@ function ProposalDraftWorkspaceInner({
                   snap.pipelineStatus
                 )
             );
-            if (isBuildPipelineComplete(snap.pipelineStatus, snap.research)) {
-              try {
-                sessionStorage.removeItem(buildBannerDismissKey(rfp.id));
-              } catch {
-                // ignore
-              }
-              setBuildBannerDismissed(false);
-            }
             keepClientProgress = Boolean(
               snap.research.pipelineCheckpoint?.inProgressPhase
             );
@@ -3345,7 +3365,7 @@ function ProposalDraftWorkspaceInner({
   return (
     <section className="proposal-workspace-card">
       <div className="proposal-workspace-chrome shrink-0 border-b border-zo-border/80 bg-white">
-        <div className="flex items-center gap-3 px-3 py-2 md:px-4">
+        <div className="flex items-center gap-3 px-3 pb-1.5 pt-2.5 md:px-4">
           <h2 className="min-w-0 flex-1 truncate text-sm font-semibold leading-tight text-foreground md:text-[0.95rem]">
             {rfp.title}
           </h2>
@@ -3412,7 +3432,7 @@ function ProposalDraftWorkspaceInner({
         !isFulfillingRfpGaps &&
         !fulfillJustCompleted &&
         !completionBannerDismissed ? (
-          <div className="flex items-center gap-2 border-t border-emerald-200/80 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 md:px-4">
+          <div className="flex items-center gap-2 border-t border-emerald-200/80 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-900 md:px-4">
             <span aria-hidden>✓</span>
             <span className="flex-1">
               Complete &amp; clean finished successfully — this draft is up to date.
@@ -3428,34 +3448,28 @@ function ProposalDraftWorkspaceInner({
           </div>
         ) : null}
 
-        {buildPipelineComplete &&
-        !isFullProposalRunning &&
-        !isFulfillingRfpGaps &&
-        !buildBannerDismissed ? (
-          <div className="flex items-center gap-2 border-t border-emerald-200/80 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 md:px-4">
-            <span aria-hidden>✓</span>
-            <span className="flex-1">
-              Build my proposal already ran for this RFP (through final checks).
-              {manualFillCount > 0
-                ? ` ${manualFillCount} form or attachment item${manualFillCount === 1 ? "" : "s"} still need manual input — use the checklist on Review.`
-                : " Open Review, then download Word."}
+        {/* Ask Ralph keeps running when the user leaves Build — the request
+            itself is not tied to this tab's lifecycle (see sectionChatBusy).
+            Above the tabs, not below, and above the scan summary too — the
+            highest tier of this header — so it's the first thing visible on
+            Review/Download no matter what else is stacked underneath it. */}
+        {sectionChatBusy && activeTab !== "outline" ? (
+          <button
+            type="button"
+            onClick={() => setActiveTab("outline")}
+            className="flex w-full items-center gap-2 border-b border-blue-200/80 bg-blue-50 px-3 py-2 text-left text-xs font-semibold text-blue-900 transition-smooth hover:bg-blue-100 md:px-4"
+          >
+            <span className="relative flex h-2 w-2 shrink-0">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-500" />
             </span>
-            <button
-              type="button"
-              onClick={() => {
-                setBuildBannerDismissed(true);
-                try {
-                  sessionStorage.setItem(buildBannerDismissKey(rfp.id), "1");
-                } catch {
-                  // ignore
-                }
-              }}
-              className="shrink-0 rounded px-1.5 py-0.5 text-emerald-700 transition-smooth hover:bg-emerald-100"
-              aria-label="Dismiss"
-            >
-              ✕
-            </button>
-          </div>
+            <span className="flex-1 truncate">
+              Ask Ralph is still working{sectionChatStatusLine ? ` — ${sectionChatStatusLine}` : "…"}
+            </span>
+            <span className="shrink-0 rounded-full bg-blue-600 px-2.5 py-1 text-[11px] font-bold text-white">
+              View
+            </span>
+          </button>
         ) : null}
 
         {(scanSummary || generateNotice || generateError || placeReport) && (
@@ -3464,7 +3478,7 @@ function ProposalDraftWorkspaceInner({
                 finished — shown ABOVE the results summary so the user always
                 knows the run completed (vs got stuck). */}
             {fulfillJustCompleted && generateNotice ? (
-              <div className="flex items-center gap-2 border-t border-emerald-200/80 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 md:px-4">
+              <div className="flex items-center gap-2 border-t border-emerald-200/80 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-900 md:px-4">
                 <span aria-hidden>✓</span>
                 <span>{generateNotice}</span>
               </div>
@@ -3475,7 +3489,12 @@ function ProposalDraftWorkspaceInner({
                 onDismiss={() => setPlaceReport(null)}
               />
             ) : null}
-            {scanSummary ? (
+            {/* Download only — Build surfaces the same "N items need input" as
+                a toolbar badge instead of a banner, and Review now shows its
+                own copy inside its own tab content (see the Review TabPanel
+                below), so it reads as belonging to that tab, not to shared
+                chrome sitting above the tab strip. */}
+            {scanSummary && activeTab === "export" ? (
               <ScanRfpSummaryBanner
                 summary={scanSummary}
                 defaultExpanded={scanSummaryExpanded}
@@ -3550,7 +3569,10 @@ function ProposalDraftWorkspaceInner({
           top strip was a duplicate of it, so it is intentionally not rendered
           here anymore — reclaiming the vertical space above the editor. */}
 
-      {rfpCost && activeTab !== "content" ? (
+      {/* Hidden on Build — this telemetry now lives inside Advanced options on
+          that tab (see below) so Build's header stays short; still shown
+          here on Download where there's no toolbar to tuck it into. */}
+      {rfpCost && activeTab === "export" ? (
         <div className="border-b border-zo-border/70 bg-[#fafbfc] px-3 py-2 md:px-4">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zo-text-muted">
             <span className="font-semibold text-foreground">
@@ -3578,75 +3600,96 @@ function ProposalDraftWorkspaceInner({
       {/* Outline tab */}
       <TabPanel id="outline" activeTab={activeTab} className="proposal-workspace-tab">
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="proposal-tab-actions flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-zo-border/60 px-3 py-2">
-            <span className="mr-auto text-[13px] font-semibold tabular-nums text-zo-text-muted">
-              {manuscriptProgress.complete}/{manuscriptProgress.total} drafted
-            </span>
-            <div className="proposal-tab-actions-toolbar">
-            <label className="proposal-snapshot-field">
-              <CapabilityHoverTip id="savedVersion" side="bottom">
-                <span className="proposal-snapshot-field-label">
-                  Saved version
-                </span>
-              </CapabilityHoverTip>
-              <span className="proposal-snapshot-field-control">
-                <CapabilityHoverTip id="savedVersion" side="bottom">
-                  <select
-                    value={restoreSnapshotAt}
-                    onChange={(e) =>
-                      handleSnapshotDropdownChange(e.target.value)
-                    }
-                    disabled={
-                      isRestoringSnapshot ||
-                      anyPipelineRunning ||
-                      (outline.snapshots?.length ?? 0) === 0
-                    }
-                    className="proposal-snapshot-select"
-                    aria-label="Choose a saved proposal version"
-                    aria-busy={isRestoringSnapshot}
-                  >
-                    {(outline.snapshots?.length ?? 0) === 0 ? (
-                      <option value="">No versions yet</option>
-                    ) : (
-                      [...(outline.snapshots ?? [])].reverse().map((snap) => (
-                        <option key={snap.savedAt} value={snap.savedAt}>
-                          {snap.label}
-                          {" · "}
-                          {new Date(snap.savedAt).toLocaleString(undefined, {
-                            month: "short",
-                            day: "numeric",
-                            hour: "numeric",
-                            minute: "2-digit",
-                          })}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </CapabilityHoverTip>
+          <div className="proposal-tab-actions flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-zo-border/60 px-3 py-1.5">
+            {/* Narrow workspace only (see globals.css .proposal-mobile-panel-toggle) —
+                the section list and Ask Ralph become slide-over panels below
+                1100px, opened from here instead of squeezing beside the editor.
+                Hidden once that panel is already open — a button that opens
+                something already open has nothing left to do. */}
+            {!mobileSectionsOpen ? (
+              <button
+                type="button"
+                className="proposal-mobile-panel-toggle items-center justify-center rounded-lg border border-zo-border/80 bg-white p-2 text-zo-text-secondary hover:bg-[#fafbfc] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#ef5018]/30"
+                onClick={() => setMobileSectionsOpen(true)}
+                aria-label="Open sections"
+              >
+                <svg className="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+            ) : null}
+            {/* "Built" and "ready to submit" are two different facts — a
+                proposal can be fully built and still have manual-fill items
+                open, so this must show on its own, not only inside the
+                "N things need attention" badge below (which only appears
+                when something's outstanding and would otherwise be the only
+                sign the build ever ran at all). */}
+            {buildPipelineComplete && !isFullProposalRunning && !isFulfillingRfpGaps ? (
+              <span className="flex shrink-0 items-center gap-1 rounded-full border border-emerald-300 bg-emerald-100 px-2.5 py-1 text-[12.5px] font-bold text-emerald-800">
+                <svg className="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
+                </svg>
+                Built
               </span>
-              <CapabilityHoverTip id="restore" side="bottom">
+            ) : null}
+            {/* A real badge, not text quietly sharing a line with the word
+                count — small text next to other small text is easy to skip
+                past entirely. Filled color + its own shape + a click straight
+                to the checklist is what actually gets noticed, without going
+                back to a full banner row. */}
+            {buildPipelineComplete && !isFullProposalRunning && !isFulfillingRfpGaps && manualFillCount > 0 ? (
+              <button
+                type="button"
+                onClick={() => setActiveTab("content")}
+                className="flex shrink-0 items-center gap-1.5 rounded-full border border-amber-300 bg-amber-100 px-2.5 py-1 text-[12.5px] font-bold text-amber-900 transition-smooth hover:bg-amber-200"
+              >
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-600" aria-hidden />
+                {manualFillCount} thing{manualFillCount === 1 ? "" : "s"} need
+                {manualFillCount === 1 ? "s" : ""} your attention
+              </button>
+            ) : null}
+            <span className="mr-auto flex items-center gap-1.5 text-[13px] font-semibold tabular-nums text-zo-text-muted">
+              {manuscriptProgress.complete}/{manuscriptProgress.total} drafted
+              {rfpCost ? (
+                <>
+                  <span aria-hidden className="text-zo-text-muted/50">
+                    ·
+                  </span>
+                  <span title="Total LLM cost for this proposal so far">
+                    {fmtUsd(rfpCost.totalCostUsd)}
+                  </span>
+                </>
+              ) : null}
+            </span>
+            {/* Hidden once the chat panel is already open — see the Sections
+                toggle above for why. */}
+            {!mobileChatOpen ? (
+              <button
+                type="button"
+                className="proposal-mobile-panel-toggle items-center justify-center rounded-lg border border-zo-border/80 bg-white p-2 text-zo-text-secondary hover:bg-[#fafbfc] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#ef5018]/30"
+                onClick={() => setMobileChatOpen(true)}
+                aria-label="Open Ask Ralph"
+              >
+                <svg className="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 11.5a8.4 8.4 0 01-8.9 8.5 8.5 8.5 0 01-3.8-.9L3 20l1-5.3a8.5 8.5 0 01-1-4A8.4 8.4 0 0111.9 2a8.5 8.5 0 019 9z" />
+                </svg>
+              </button>
+            ) : null}
+            <div className="proposal-tab-actions-toolbar">
+            {/* Advanced options — Restore / Match studies / Designer-compact /
+                Start-from-X / Reset draft, tucked behind one clearly-labeled
+                trigger instead of five competing controls in the main row.
+                Every handler below is unchanged from before; only the grouping
+                and labels changed. */}
+            <div className="relative shrink-0" ref={advancedMenuRef}>
+              <CapabilityHoverTip id="advancedOptions" side="bottom">
                 <button
                   type="button"
-                  className="proposal-tab-text-btn"
-                  disabled={
-                    !restoreSnapshotAt ||
-                    isRestoringSnapshot ||
-                    anyPipelineRunning ||
-                    (outline.snapshots?.length ?? 0) === 0
-                  }
-                  onClick={() => void handleRestoreSnapshot()}
-                >
-                  {isRestoringSnapshot ? "Restoring…" : "Restore"}
-                </button>
-              </CapabilityHoverTip>
-            </label>
-            <div className="flex shrink-0 items-center gap-1.5">
-              <CapabilityHoverTip id="matchStudies" side="bottom">
-                <button
-                  type="button"
-                  onClick={() => void handleMatchCaseStudies()}
-                  disabled={anyPipelineRunning || isMatchingCaseStudies}
-                  className="inline-flex min-h-[2.125rem] items-center gap-1.5 rounded-lg border border-[#ef5018]/30 bg-[#ef5018]/10 px-2.5 py-1.5 text-xs font-semibold text-[#ef5018] hover:bg-[#ef5018]/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex min-h-[2.125rem] items-center gap-1.5 rounded-lg border border-zo-border/80 bg-white px-2.5 py-1.5 text-xs font-semibold text-zo-text-secondary hover:bg-[#fafbfc] disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={anyPipelineRunning}
+                  aria-haspopup="menu"
+                  aria-expanded={advancedMenuOpen}
+                  onClick={() => setAdvancedMenuOpen((value) => !value)}
                 >
                   <svg
                     className="h-3.5 w-3.5 shrink-0"
@@ -3656,61 +3699,159 @@ function ProposalDraftWorkspaceInner({
                     strokeWidth={2}
                     aria-hidden
                   >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
-                    />
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.4a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 004.6 15a1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 009 4.6a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z" />
                   </svg>
-                  {isMatchingCaseStudies ? "Matching…" : "Match studies"}
+                  Advanced options
                 </button>
               </CapabilityHoverTip>
-              <CapabilityHoverTip id="moreMenu" side="bottom">
-                <span className="inline-flex">
-                  <ProposalTabMoreMenu
+              {advancedMenuOpen ? (
+                <div
+                  className="absolute right-0 top-[calc(100%+0.35rem)] z-40 w-[19rem] rounded-lg border border-zo-border/80 bg-white p-2 shadow-lg"
+                  role="menu"
+                >
+                  <div className="px-1.5 pb-2">
+                    <CapabilityHoverTip id="savedVersion" side="bottom">
+                      <span className="proposal-snapshot-field-label">
+                        Go back to an earlier version
+                      </span>
+                    </CapabilityHoverTip>
+                    <div className="mt-1 flex items-center gap-1.5">
+                      <CapabilityHoverTip id="savedVersion" side="bottom">
+                        <select
+                          value={restoreSnapshotAt}
+                          onChange={(e) =>
+                            handleSnapshotDropdownChange(e.target.value)
+                          }
+                          disabled={
+                            isRestoringSnapshot ||
+                            anyPipelineRunning ||
+                            (outline.snapshots?.length ?? 0) === 0
+                          }
+                          className="proposal-snapshot-select min-w-0 flex-1"
+                          aria-label="Choose a saved proposal version"
+                          aria-busy={isRestoringSnapshot}
+                        >
+                          {(outline.snapshots?.length ?? 0) === 0 ? (
+                            <option value="">No versions yet</option>
+                          ) : (
+                            [...(outline.snapshots ?? [])].reverse().map((snap) => (
+                              <option key={snap.savedAt} value={snap.savedAt}>
+                                {snap.label}
+                                {" · "}
+                                {new Date(snap.savedAt).toLocaleString(undefined, {
+                                  month: "short",
+                                  day: "numeric",
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                })}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                      </CapabilityHoverTip>
+                      <CapabilityHoverTip id="restore" side="bottom">
+                        <button
+                          type="button"
+                          className="proposal-tab-text-btn shrink-0"
+                          disabled={
+                            !restoreSnapshotAt ||
+                            isRestoringSnapshot ||
+                            anyPipelineRunning ||
+                            (outline.snapshots?.length ?? 0) === 0
+                          }
+                          onClick={() => {
+                            setAdvancedMenuOpen(false);
+                            void handleRestoreSnapshot();
+                          }}
+                        >
+                          {isRestoringSnapshot ? "Restoring…" : "Restore"}
+                        </button>
+                      </CapabilityHoverTip>
+                    </div>
+                  </div>
+                  <div className="my-1 h-px bg-zo-border/60" />
+                  <CapabilityHoverTip id="matchStudies" side="bottom">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setAdvancedMenuOpen(false);
+                        void handleMatchCaseStudies();
+                      }}
+                      disabled={anyPipelineRunning || isMatchingCaseStudies}
+                      className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium leading-snug text-foreground hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isMatchingCaseStudies
+                        ? "Matching…"
+                        : "Find matching past projects"}
+                    </button>
+                  </CapabilityHoverTip>
+                  <div className="my-1 h-px bg-zo-border/60" />
+                  <CapabilityHoverTip id="moreMenu" side="bottom">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="Rewrite overlong tabs as designer-ready tables/bullets"
+                      onClick={() => {
+                        setAdvancedMenuOpen(false);
+                        void handleDesignerCompactAll();
+                      }}
+                      disabled={
+                        anyPipelineRunning ||
+                        isDesignerCompacting ||
+                        manuscriptProgress.complete === 0
+                      }
+                      className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium leading-snug text-foreground hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Designer-compact all
+                    </button>
+                  </CapabilityHoverTip>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    title="Keeps Company + Team Bios; re-extracts case studies"
+                    onClick={() => {
+                      setAdvancedMenuOpen(false);
+                      requireKeyPersonas(() =>
+                        void handleGenerateFullProposal({ startFromCaseStudies: true })
+                      );
+                    }}
                     disabled={anyPipelineRunning}
-                    items={[
-                      {
-                        id: "designer-compact",
-                        label: "Designer-compact all",
-                        title: "Rewrite overlong tabs as designer-ready tables/bullets",
-                        disabled:
-                          anyPipelineRunning ||
-                          isDesignerCompacting ||
-                          manuscriptProgress.complete === 0,
-                        onClick: () => void handleDesignerCompactAll(),
-                      },
-                      {
-                        id: "reset",
-                        label: "Reset draft",
-                        disabled: isResettingDraft,
-                        tone: "danger",
-                        onClick: () => setResetConfirmOpen(true),
-                      },
-                      {
-                        id: "from-case-studies",
-                        label: "Start from Case Studies",
-                        title: "Keeps Company + Team Bios; re-extracts case studies",
-                        disabled: anyPipelineRunning,
-                        onClick: () =>
-                          requireKeyPersonas(() =>
-                            void handleGenerateFullProposal({ startFromCaseStudies: true })
-                          ),
-                      },
-                      {
-                        id: "from-intelligence",
-                        label: "Start from Intelligence",
-                        title: "Keeps Sections 1–3; rebuilds Intelligence onward",
-                        disabled: anyPipelineRunning,
-                        onClick: () =>
-                          requireKeyPersonas(() =>
-                            void handleGenerateFullProposal({ startAfterSections1to3: true })
-                          ),
-                      },
-                    ]}
-                  />
-                </span>
-              </CapabilityHoverTip>
+                    className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium leading-snug text-foreground hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Start from Case Studies
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    title="Keeps Sections 1–3; rebuilds Intelligence onward"
+                    onClick={() => {
+                      setAdvancedMenuOpen(false);
+                      requireKeyPersonas(() =>
+                        void handleGenerateFullProposal({ startAfterSections1to3: true })
+                      );
+                    }}
+                    disabled={anyPipelineRunning}
+                    className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium leading-snug text-foreground hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Start from Intelligence
+                  </button>
+                  <div className="my-1 h-px bg-zo-border/60" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAdvancedMenuOpen(false);
+                      setResetConfirmOpen(true);
+                    }}
+                    disabled={isResettingDraft}
+                    className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium leading-snug text-red-700 hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Reset draft
+                  </button>
+                </div>
+              ) : null}
             </div>
             <CapabilityHoverTip id="keyPersonas" side="bottom">
               <span className="inline-flex">
@@ -3756,11 +3897,23 @@ function ProposalDraftWorkspaceInner({
           <div
             className="proposal-outline-layout grid min-h-0 min-w-0 flex-1 overflow-hidden"
           >
-          <div className="proposal-section-list flex min-h-0 min-w-0 flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-2xl lg:border lg:border-zo-border/80">
+          <div
+            className={`proposal-section-list flex min-h-0 min-w-0 flex-col overflow-hidden rounded-none border-b border-zo-border lg:rounded-2xl lg:border lg:border-zo-border/80 ${mobileSectionsOpen ? "is-mobile-open" : ""}`}
+          >
             <div className="flex shrink-0 items-center justify-between border-b border-zo-border/60 px-3 py-2.5">
               <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-zo-text-muted">
                 Sections
               </p>
+              <button
+                type="button"
+                className="proposal-mobile-panel-toggle items-center justify-center rounded-md p-1 text-zo-text-secondary hover:bg-black/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#ef5018]/30"
+                onClick={() => setMobileSectionsOpen(false)}
+                aria-label="Close section list"
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
             </div>
             <ul className="custom-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
               <ProposalSectionTree
@@ -3771,7 +3924,10 @@ function ProposalDraftWorkspaceInner({
                 manualFillFlags={actionableFlags}
                 sectionRevisions={sectionRevisions}
                 sectionButtonRefs={sectionButtonRefs}
-                onSelectSection={selectSection}
+                onSelectSection={(id) => {
+                  selectSection(id);
+                  setMobileSectionsOpen(false);
+                }}
                 onOpenRevision={(sectionId) => {
                   selectSection(sectionId);
                   setRevisionDrawerSectionId(sectionId);
@@ -3891,8 +4047,18 @@ function ProposalDraftWorkspaceInner({
 
           <div
             ref={assistantPaneRef}
-            className="proposal-assistant-pane flex min-h-0 min-w-0 flex-col overflow-hidden rounded-none border-t border-zo-border lg:rounded-2xl lg:border lg:border-zo-border/80"
+            className={`proposal-assistant-pane relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-none border-t border-zo-border lg:rounded-2xl lg:border lg:border-zo-border/80 ${mobileChatOpen ? "is-mobile-open" : ""}`}
           >
+            <button
+              type="button"
+              className="proposal-mobile-panel-toggle absolute right-2 top-2 z-10 items-center justify-center rounded-md bg-white p-1.5 text-zo-text-secondary shadow-sm hover:bg-black/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#ef5018]/30"
+              onClick={() => setMobileChatOpen(false)}
+              aria-label="Close Ask Ralph"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </button>
             <ProposalSectionChatPanel
               rfpId={rfp.id}
               sections={outline.sections}
@@ -3915,10 +4081,20 @@ function ProposalDraftWorkspaceInner({
               onFocusSection={(sectionId) => {
                 selectSection(sectionId);
               }}
+              busy={sectionChatBusy}
               onBusyChange={setSectionChatBusy}
+              statusLine={sectionChatStatusLine}
+              onStatusLineChange={setSectionChatStatusLine}
             />
           </div>
         </div>
+        <div
+          className={`proposal-mobile-panel-scrim ${mobileSectionsOpen || mobileChatOpen ? "is-open" : ""}`}
+          onClick={() => {
+            setMobileSectionsOpen(false);
+            setMobileChatOpen(false);
+          }}
+        />
         </div>
       </TabPanel>
 
@@ -3928,7 +4104,20 @@ function ProposalDraftWorkspaceInner({
         isFullProposalRunning ||
         serverPipelineActive ? (
             <div className="proposal-content-tab-shell flex min-h-0 flex-1 flex-col">
-            <div className="proposal-tab-actions flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zo-border/60 px-3 py-2.5">
+            {/* No standalone row at all — folded into the Results badge below
+                (click to open, click again to close), the same way Build
+                folds its own status into toolbar badges instead of a banner. */}
+            {scanSummary && scanSummaryExpanded ? (
+              <ScanRfpSummaryBanner
+                summary={scanSummary}
+                defaultExpanded={scanSummaryExpanded}
+                onDismiss={() => {
+                  setScanSummary(null);
+                  setScanSummaryExpanded(false);
+                }}
+              />
+            ) : null}
+            <div className="proposal-tab-actions flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zo-border/60 px-3 py-1.5">
               <p className="text-xs text-zo-text-muted">
                 After Build my proposal, use the Checklist. Review & fix is optional after edits.
               </p>
@@ -3941,7 +4130,7 @@ function ProposalDraftWorkspaceInner({
                       anyPipelineRunning ||
                       !outline.sections.some((s) => s.content.trim())
                     }
-                    className="zo-btn secondary !py-2 !px-3 !text-sm disabled:opacity-40"
+                    className="inline-flex min-h-[2.375rem] items-center gap-1.5 rounded-lg border border-zo-border/80 bg-white px-3 py-2 text-[13px] font-semibold text-zo-text-secondary hover:bg-[#fafbfc] disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {isFulfillingRfpGaps
                       ? "Review & fix…"
@@ -3955,11 +4144,24 @@ function ProposalDraftWorkspaceInner({
                 {outline.lastFulfillReport ? (
                   <button
                     type="button"
-                    className="zo-btn secondary !py-2 !px-3 !text-sm"
-                    title="Re-open the last Review & fix results panel"
-                    onClick={handleOpenLastResults}
+                    className={`proposal-checklist-btn ${
+                      scanActionCount > 0
+                        ? "proposal-checklist-btn--alert"
+                        : "proposal-checklist-btn--idle"
+                    } ${scanSummary && scanSummaryExpanded ? "is-open" : ""}`}
+                    title="Show the last Review & fix results"
+                    onClick={() => {
+                      if (scanSummary && scanSummaryExpanded) {
+                        setScanSummaryExpanded(false);
+                      } else {
+                        handleOpenLastResults();
+                      }
+                    }}
                   >
                     {scanSummary ? "Results" : "Last results"}
+                    {scanActionCount > 0 ? (
+                      <span className="proposal-checklist-count">{scanActionCount}</span>
+                    ) : null}
                   </button>
                 ) : null}
                 <button

@@ -371,6 +371,55 @@ class RestoreEmptiedSectionsTests(unittest.TestCase):
         self.assertEqual(out.sections[0].content, full)
         self.assertEqual(len(logs), 1)
 
+    def test_restores_cost_file_blanked_by_misplaced_bio_stub_repair(self) -> None:
+        """Real incident repro: a forms/budget tab (~100 words, under regression_vs_
+        prior's 120-word floor) got misclassified as a bio elsewhere, rewritten, then
+        caught by the misplaced-bio-stub repair and blanked to its own MANUAL FILL
+        placeholder — padded by two LEDGER-XREF notes just long enough to dodge a
+        naive raw word-count ratio check. Must still be restored."""
+        from app.services.proposal_draft_structure_stubs import (
+            restore_sections_emptied_by_scan,
+        )
+
+        real_budget = (
+            "## Cost File\n\n"
+            "This budget reflects a fixed-fee engagement covering account strategy, "
+            "creative production, and media management for the 12-month contract "
+            "term. Rates are held firm through the option-year renewal and include "
+            "standard overhead, benefits, and profit consistent with our current "
+            "government rate agreement. No travel or reimbursable expenses are "
+            "included above the fee shown; those are billed at cost with prior "
+            "written approval.\n\n"
+            "| Line Item | Rate | Hours | Total |\n"
+            "|---|---|---|---|\n"
+            "| Account strategy | $185/hr | 120 | $22,200 |\n"
+            "| Creative production | $150/hr | 200 | $30,000 |\n\n"
+            "Total not-to-exceed fee: $52,200 over the 12-month engagement."
+        )
+        blanked = (
+            "## Cost File\n\n"
+            "[MANUAL FILL: Draft full «Cost File» for this RFP. Cover every scored "
+            "ask in the RFP for this tab. A prior pass wrongly replaced this body "
+            "with a team-bio stub — rewrite the actual requirement here.]\n\n"
+            "[LEDGER-XREF:scored-method-of-approach] _Cross-reference: this "
+            "requirement is fully addressed in “Method of Approach” — see that "
+            "section; not restated here to avoid duplication_.\n\n"
+            "[LEDGER-XREF:scored-project-costs] _Cross-reference: this requirement "
+            "is fully addressed in “Project Costs” — see that section; not "
+            "restated here to avoid duplication_."
+        )
+        prior = [
+            ProposalSection(
+                id="section-cost-file", title="Cost File", content=real_budget, status="generated"
+            )
+        ]
+        draft = self._draft(
+            [ProposalSection(id="section-cost-file", title="Cost File", content=blanked, status="generated")]
+        )
+        out, logs = restore_sections_emptied_by_scan(draft, prior)
+        self.assertEqual(out.sections[0].content, real_budget)
+        self.assertEqual(len(logs), 1)
+
     def test_restores_good_section_overwritten_by_bio_stub(self) -> None:
         from app.services.proposal_draft_structure_stubs import (
             restore_sections_emptied_by_scan,
@@ -421,6 +470,85 @@ class RestoreEmptiedSectionsTests(unittest.TestCase):
         )
         out, logs = restore_sections_emptied_by_scan(draft, prior_stub)
         self.assertEqual(logs, [])
+
+
+class RepairProseDisguisedAsTableRowsTests(unittest.TestCase):
+    """Regression: a chat "Improve section" rewrite produced a References
+    table with 3 real client rows, then appended two fake numbered rows
+    ("1", "2") whose only content was multi-sentence explanatory prose
+    ("Why these three: ...") stuffed into table cells with pipe delimiters —
+    rendering as broken, mismatched cells instead of the paragraphs they
+    actually were."""
+
+    REAL_TABLE = (
+        "## References\n\n"
+        "| Client | Contact | Title | Phone | Email | Scope | Engagement Period |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| Maricopa County | | | | | Preferred vendor and multi-department "
+        "brand and marketing partner across public health, judicial "
+        "services, libraries, and the sheriff's office | Five-year "
+        "contract, current |\n"
+        "| City of Bend | | | | | Full brand audit across 100+ department "
+        "applications; unified template library used citywide | "
+        "[VERIFY: engagement dates] |\n"
+    )
+    FAKE_ROW_1 = (
+        "| 1 | | | Why these three: Each engagement required us to hold "
+        "one brand and communications standard across departments with "
+        "different audiences, different risk levels, and different "
+        "approval chains, the same operating problem the City, NBPD, and "
+        "NBFD present together. Maricopa County spans departments from "
+        "public health to the sheriff's office. Bend required unifying "
+        "more than 100 department-level applications into one consistent "
+        "system. | | | |\n"
+    )
+    FAKE_ROW_2 = (
+        "| 2 | | | Before submission, we will confirm current named "
+        "contacts, titles, phone numbers, and email addresses with each "
+        "client, and complete the City's reference form exactly as issued "
+        "if one is included in the RFP package. We will not submit a "
+        "reference contact we have not personally confirmed. | | | |\n"
+    )
+
+    def test_disguised_prose_rows_are_extracted_as_paragraphs(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            repair_prose_disguised_as_table_rows,
+        )
+
+        content = self.REAL_TABLE + self.FAKE_ROW_1 + self.FAKE_ROW_2
+        repaired = repair_prose_disguised_as_table_rows(content)
+
+        # The 3 real rows survive untouched, still inside the table.
+        self.assertIn(
+            "| Maricopa County | | | | | Preferred vendor", repaired
+        )
+        self.assertIn("| City of Bend | | | | | Full brand audit", repaired)
+        # The fake numbered rows are gone from the table.
+        self.assertNotIn("| 1 | | | Why these three", repaired)
+        self.assertNotIn("| 2 | | | Before submission", repaired)
+        # Their real content survives as plain paragraphs, not table rows,
+        # and the fake "1"/"2" row-label is dropped, not leaked into the text.
+        self.assertIn("Why these three: Each engagement required us", repaired)
+        self.assertNotIn("1 Why these three", repaired)
+        self.assertIn("Before submission, we will confirm", repaired)
+
+    def test_real_short_rows_alone_are_left_completely_untouched(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            repair_prose_disguised_as_table_rows,
+        )
+
+        self.assertEqual(
+            repair_prose_disguised_as_table_rows(self.REAL_TABLE).rstrip(),
+            self.REAL_TABLE.rstrip(),
+        )
+
+    def test_non_table_content_is_unaffected(self) -> None:
+        from app.services.proposal_draft_structure_stubs import (
+            repair_prose_disguised_as_table_rows,
+        )
+
+        prose = "## Method of Approach\n\nWe will run phased campaigns across paid, owned, and earned channels."
+        self.assertEqual(repair_prose_disguised_as_table_rows(prose), prose)
 
 
 if __name__ == "__main__":

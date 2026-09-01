@@ -1398,7 +1398,7 @@ async def _extract_key_accounts_via_rag_llm(accounts_section: str) -> list[str]:
                 },
                 {"role": "user", "content": accounts_section[:40_000]},
             ],
-            max_tokens=512,
+            max_tokens=16000,
             temperature=0.0,
         )
     except LlmError:
@@ -1491,7 +1491,7 @@ async def _extract_member_bio_facts(member: str, kb_text: str) -> dict[str, Any]
                 {"role": "system", "content": extraction_prompt},
                 {"role": "user", "content": f"04_Bio approved file content:\n{scoped_user}"},
             ],
-            max_tokens=8192,
+            max_tokens=16000,
             temperature=0.0,
         )
         parsed = _parse_bio_sections_from_text(kb_text, member)
@@ -1762,6 +1762,7 @@ async def _synthesize_proposal_voice(state: SectionsGraphState) -> dict[str, Any
                 },
             ],
             temperature=0.4,
+            max_tokens=16000,
         )
         # Ensure string fields are strings to avoid validation errors
         for field in ("clientExpectations", "zoCoreVoice", "rfpAdaptationNotes", "tone", "formality"):
@@ -2706,7 +2707,7 @@ async def _build_section_1(state: SectionsGraphState) -> dict[str, Any]:
                         ),
                     },
                 ],
-                max_tokens=4096 if sec_id == "section-1-org-structure" else 3072,
+                max_tokens=16000,
                 # Who We Are needs creative range; factual subsections stay cold.
                 temperature=0.55 if sec_id == "section-1-who-we-are" else 0.0,
             )

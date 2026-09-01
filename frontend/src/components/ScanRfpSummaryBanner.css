@@ -6,7 +6,7 @@
   --scan-tab: 0.75rem;
   --scan-body: 0.875rem;
   --scan-note: 0.75rem;
-  --scan-bar-pad: 0.45rem 0.75rem;
+  --scan-bar-pad: 0.25rem 0.75rem;
   border-top: 1px solid var(--zo-border, rgba(17, 24, 39, 0.12));
   background: var(--zo-cream-light, #ffffff);
   color: var(--zo-text, #0a0f1a);
@@ -33,7 +33,7 @@
   align-items: center;
   gap: 0.5rem;
   padding: var(--scan-bar-pad);
-  min-height: 2.5rem;
+  min-height: 2rem;
 }
 
 .proposal-scan-v2__bar-main {

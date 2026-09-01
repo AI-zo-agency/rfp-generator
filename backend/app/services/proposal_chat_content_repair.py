@@ -15,6 +15,10 @@ from dataclasses import dataclass, field
 from app.models.proposal import ProposalDraft, ProposalResearchCache, ProposalSection
 from app.models.rfp import RfpRecord
 from app.services import llm
+from app.services.proposal_draft_structure_stubs import (
+    content_looks_like_instructional_checklist,
+)
+from app.services.proposal_manual_flags import sanitize_bare_bracket_tag_words
 
 logger = logging.getLogger(__name__)
 
@@ -142,12 +146,18 @@ async def _llm_repair_section(
         except Exception:
             logger.exception("04_Bio pack for content-risk repair failed")
             bio_kb = ""
-    user = (
-        f"Client: {rfp.client}\nRFP: {rfp.title}\n"
-        f"Section: {section.title} (id={section.id})\n\n"
-        f"Instruction:\n{instruction}\n\n"
+    # rfp_excerpt/evidence are built once by the caller and identical for every
+    # matched job (refs/claims/bio/tagline/exec) this pass repairs — cache them.
+    # bio_kb is per-section (fetched above from THIS section/instruction), so it
+    # stays in the varying tail along with everything else that changes per call.
+    cache_prefix = (
+        f"Client: {rfp.client}\nRFP: {rfp.title}\n\n"
         f"RFP excerpt:\n{(rfp_excerpt or '')[:8_000]}\n\n"
         f"KB / evidence (authoritative for claims):\n{(evidence or '')[:14_000]}\n\n"
+    )
+    user = (
+        f"Section: {section.title} (id={section.id})\n\n"
+        f"Instruction:\n{instruction}\n\n"
     )
     if bio_kb.strip():
         user += (
@@ -159,10 +169,11 @@ async def _llm_repair_section(
     try:
         raw, _ = await llm.chat_json(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.0,
             node_name=node_name,
             rfp_id=rfp.id,
+            cache_prefix=cache_prefix,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Content-risk repair failed for %s: %s", section.id, exc)
@@ -170,6 +181,15 @@ async def _llm_repair_section(
     if not isinstance(raw, dict):
         return section, False, ""
     content = str(raw.get("content") or "").strip()
+    content = sanitize_bare_bracket_tag_words(content)
+    if content and content_looks_like_instructional_checklist(content):
+        logger.info(
+            "%s: rewrite wrote a to-do checklist instead of content — "
+            "rejected (%s)",
+            node_name,
+            section.id,
+        )
+        return section, False, "rejected: instructional checklist"
     changed = bool(raw.get("changed")) and bool(content)
     if not changed or content == (section.content or "").strip():
         return section, False, str(raw.get("notes") or "")

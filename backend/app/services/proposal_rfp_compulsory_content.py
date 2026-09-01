@@ -226,7 +226,12 @@ def count_reference_entries(draft: ProposalDraft) -> int:
         if cells[0].casefold() in {"name", "client", "organization", "firm"}:
             continue
         table_rows += 1
-    numbered = len(re.findall(r"(?m)^\s*(?:\d+[.)]|[-*])\s+\S+", blob))
+    # A "- [ ] Confirm whether..." checklist line matches this bullet shape
+    # too, but it is a to-do item, not a named reference — exclude it so a
+    # process-narration checklist can never inflate the found count.
+    numbered = len(
+        re.findall(r"(?m)^\s*(?:\d+[.)]|[-*])\s+(?!\[\s\])\S+", blob)
+    )
     headings = len(re.findall(r"(?m)^#{2,3}\s+\S+", blob))
     return max(table_rows, numbered, headings)
 

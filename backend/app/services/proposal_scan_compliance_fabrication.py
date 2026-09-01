@@ -327,8 +327,17 @@ async def run_compliance_fabrication_repairs(
             # bogus 04_Bio_RfpAcknowledgement.pdf KB lookup).
             candidate = _member_name_from_bio_section(section.title or "")
             member = candidate if is_plausible_person_name(candidate) else ""
-        else:
+        elif re.search(r"(?i)^\s*(?:section\s+)?\d+\.\d+\s*[—\-–:]", section.title or ""):
             member = person_name_from_tab_title(section.title or "")
+        else:
+            # Bare title alone is not a safe signal — a forms/closing tab like
+            # "Cost File" or "Response File" is two Title-Case words too, the
+            # same shape is_plausible_person_name accepts for "Sonja Anderson".
+            # Real Section 2 bio tabs are always numbered ("2.1 — Name"); require
+            # that same signal used by is_named_person_bio_tab everywhere else,
+            # instead of relying solely on the org-roster check below (which
+            # no-ops whenever org_roles comes back empty for this RFP).
+            member = ""
         # `is_plausible_person_name` accepts any two/three Title-Case words —
         # including document/section labels like "Proposal Certification" or
         # "Descriptive Literature" — so it alone would let a bio stub be written

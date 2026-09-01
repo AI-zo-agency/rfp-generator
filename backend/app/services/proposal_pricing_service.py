@@ -1043,7 +1043,7 @@ async def _run_budget_grounding_audit(
                     ),
                 },
             ],
-            max_tokens=4096,
+            max_tokens=16000,
             temperature=0.0,
             node_name="stage35a_budget_grounding",
         )
@@ -1235,7 +1235,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         with pipeline_step("budget_llm_json"):
             raw, provider = await llm.chat_json(
                 messages,
-                max_tokens=8192,
+                max_tokens=16000,
                 temperature=0.2,
             )
     except LlmError as exc:
@@ -1264,7 +1264,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
                         {"role": "system", "content": STAGE3_BUDGET_PROMPT},
                         {"role": "user", "content": compact_user},
                     ],
-                    max_tokens=6144,
+                    max_tokens=16000,
                     temperature=0.2,
                 )
             except LlmError as retry_exc:
@@ -1323,7 +1323,7 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
                         {"role": "assistant", "content": json.dumps(raw)},
                         {"role": "user", "content": _LINE_ITEMS_RETRY_USER},
                     ],
-                    max_tokens=8192,
+                    max_tokens=16000,
                     temperature=0.2,
                 )
             except LlmError as retry_exc:
