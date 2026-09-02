@@ -167,4 +167,28 @@ export interface QuickBooksOverview {
     cash: number;
     net_cash_change: number | null;
   } | null;
+  /**
+   * Bills arrive after the month they belong to, so a recent month's cost is
+   * incomplete and its margin reads high. `adjusted_gross_margin_pct` is the
+   * same span with the missing cost estimated in — never a ledger actual.
+   */
+  cost_completeness: {
+    as_of: string;
+    curve: { days: number; pct: number }[];
+    /** Last month whose own margin can be quoted without a caveat. */
+    settled_through: string | null;
+    unsettled_months: string[];
+    missing_cost: number;
+    reported_gross_margin_pct: number | null;
+    adjusted_gross_margin_pct: number | null;
+    overstated_points: number | null;
+    months: {
+      month: string;
+      age_days: number;
+      completeness_pct: number;
+      booked_cost: number;
+      expected_cost: number | null;
+      settled: boolean;
+    }[];
+  } | null;
 }

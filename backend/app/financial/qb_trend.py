@@ -66,6 +66,20 @@ def _overlap(
     return names, current_by, prior_by
 
 
+def _settled(data: dict[str, Any], names: list[str]) -> list[str]:
+    """`names` minus the months whose bills are still arriving.
+
+    Absent panel means no filter rather than no rows: `cost_completeness`
+    degrades to None on a short history, and a missing panel must not silently
+    delete the margin row it was only meant to trim.
+    """
+    completeness = data.get("cost_completeness") or {}
+    unsettled = {
+        _short(month) for month in (completeness.get("unsettled_months") or [])
+    }
+    return [name for name in names if name not in unsettled] if unsettled else names
+
+
 def _revenue_trend(names: list[str], current: dict, prior: dict) -> dict | None:
     current_total = sum(current[n]["amount"] for n in names)
     prior_total = sum(prior[n]["amount"] for n in names)
@@ -222,8 +236,17 @@ def margin_rows(
         data.get("monthly_trend"), (prior or {}).get("monthly_trend")
     )
     if len(names) >= _MIN_OVERLAP_MONTHS:
-        for builder in (_revenue_trend, _margin_trend):
-            row = builder(names, current, prior_by)
+        row = _revenue_trend(names, current, prior_by)
+        if row is not None:
+            rows.append(row)
+        # Income is whole the day a month closes; cost is not, because bills are
+        # entered weeks later. Comparing a part-costed current year against a
+        # fully-costed prior one flatters this year by several points — the same
+        # trap as the partial month above, one ledger side further along. Only
+        # months whose cost has stopped arriving can be compared.
+        settled = _settled(data, names)
+        if len(settled) >= _MIN_OVERLAP_MONTHS:
+            row = _margin_trend(settled, current, prior_by)
             if row is not None:
                 rows.append(row)
 

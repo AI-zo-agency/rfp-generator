@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import settings
@@ -247,6 +248,42 @@ async def upload_knowledge_base_document(
     if note_error:
         payload["noteError"] = note_error
     return payload
+
+
+@router.delete("/documents/{document_id:path}")
+async def delete_knowledge_base_document(
+    document_id: str,
+    custom_id: str = "",
+) -> dict[str, object]:
+    _require_supermemory()
+    try:
+        await knowledge_base_service.delete_document(
+            document_id=document_id,
+            custom_id=custom_id or None,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except supermemory.SupermemoryError as exc:
+        raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+    return {"deleted": document_id}
+
+
+@router.get("/documents/{document_id:path}/open")
+async def open_knowledge_base_document(
+    document_id: str,
+    custom_id: str = "",
+) -> RedirectResponse:
+    _require_supermemory()
+    try:
+        url = await knowledge_base_service.resolve_open_url(
+            document_id=document_id,
+            custom_id=custom_id or None,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except supermemory.SupermemoryError as exc:
+        raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+    return RedirectResponse(url=url, status_code=302)
 
 
 @router.get("/folders", response_model=KnowledgeBaseFoldersResponse)

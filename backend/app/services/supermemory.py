@@ -202,8 +202,9 @@ def invalidate_document_cache() -> None:
 
 async def delete_document(document_id: str) -> bool:
     """Hard-delete a document. Returns False when the endpoint is unavailable."""
+    key = document_id.strip()
     try:
-        await _request("DELETE", f"/v3/documents/{document_id}")
+        await _request("DELETE", f"/v3/documents/{key}")
     except SupermemoryError as exc:
         if exc.status_code in {404, 405, 501}:
             logger.warning(
@@ -213,6 +214,7 @@ async def delete_document(document_id: str) -> bool:
             )
             return False
         raise
+    _doc_content_cache.pop(key, None)
     invalidate_document_cache()
     return True
 
@@ -258,6 +260,17 @@ async def get_document(
         return {}
     data = await _request("GET", f"/v3/documents/{key}", allow_status={404})
     return data if isinstance(data, dict) else {}
+
+
+async def get_document_file_url(*, document_key: str) -> str:
+    """Fresh presigned download URL (24h) from GET /v3/documents/{id}/file-url."""
+    key = document_key.strip()
+    if not key:
+        return ""
+    data = await _request("GET", f"/v3/documents/{key}/file-url", allow_status={404})
+    if isinstance(data, dict):
+        return str(data.get("url") or "").strip()
+    return ""
 
 
 async def get_document_content(
