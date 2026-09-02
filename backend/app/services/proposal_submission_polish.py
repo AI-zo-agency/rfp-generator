@@ -69,6 +69,12 @@ async def run_submission_polish_pass(
         if section_id_preserved_in_fulfill(section_id, draft.sections):
             logs.append(f"{section_id}: skipped — preserved section")
             continue
+        # Skip sections that already have substantial content (>100 words) —
+        # they don't need a full LLM rewrite, saving tokens on already-drafted sections.
+        section = next((s for s in draft.sections if s.id == section_id), None)
+        if section and len((section.content or "").split()) > 100:
+            logs.append(f"{section_id}: skipped — already drafted ({len((section.content or '').split())} words)")
+            continue
         brief = build_submission_repair_brief(
             section_blockers,
             draft=draft,

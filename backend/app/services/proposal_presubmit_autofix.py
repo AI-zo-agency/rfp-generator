@@ -69,7 +69,11 @@ _AUTO_FIX_CATEGORIES = frozenset({
 _SEV_RANK = {"critical": 0, "warning": 1, "info": 2}
 _CAT_RANK = {"placeholder": 0, "copy_paste": 1, "grammar": 2, "voice": 3, "consistency": 4, "compliance": 5}
 
+from app.services.proposal_drafting_prompts import GLOBAL_AGENT_PROMPT_RULES
+
 SURGICAL_FIX_PROMPT = """You repair ONE proposal section to resolve ALL listed pre-submit review issues.
+
+""" + GLOBAL_AGENT_PROMPT_RULES + """
 
 MANDATORY:
 1. Preserve section structure — headings, lists, paragraph order, approximate length, and any [DESIGNER NOTE: ...] blocks.
@@ -86,6 +90,7 @@ MANDATORY:
 12. Do NOT add new [VERIFY] tags. Do NOT add new paragraphs unless required to replace a tag.
 13. Keep strong existing prose — change only what is needed to clear the listed issues.
 14. Edit ONLY text related to the listed issues — leave every other sentence unchanged.
+15. CRITICAL: Do NOT refuse to apply fixes by leaving meta-comments (e.g. "Please provide..."). If a fix requires missing information, you MUST insert a [VERIFY: missing fact] tag to hold the space. NEVER fabricate facts or completely rewrite the section to fill a gap.
 
 Return ONLY JSON: {"content": "full updated section text", "kbRefs": ["E1"]}"""
 
@@ -97,6 +102,8 @@ MANDATORY:
 3. Replace [VERIFY: ...] ONLY when the answer is explicitly in the section or evidence; otherwise shorten to a minimal [VERIFY: brief note].
 4. Do NOT add new [VERIFY] tags. Do NOT quote other clients from evidence.
 5. Do NOT expand length. Change the minimum text needed.
+6. NO BLANK REFUSALS: Never leave the section empty with a meta-comment (e.g. "Please provide details"). Draft the best possible form/letter and use [VERIFY: missing fact] for gaps.
+7. NO FABRICATION: Do not invent client names, metrics, or missing facts.
 
 Return ONLY JSON: {"content": "full updated section text"}"""
 
@@ -426,6 +433,28 @@ async def _enrich_section_evidence(
         if research and corpus != list(research.evidence_corpus or []):
             research = research.model_copy(update={"evidence_corpus": corpus})
 
+    if "reference" in section.title.lower() or "past performance" in section.title.lower():
+        text, _ = await proposal_knowledge_base_tools.search_knowledge_base(
+            "client references past performance 08_References",
+            limit=5,
+            rfp_client=rfp.client,
+            rfp_sector=rfp.sector,
+        )
+        if text:
+            kb_block += f"\n\n=== VERIFIED KNOWLEDGE BASE REFERENCES ===\n{text[:5000]}\nMUST USE these exact references to build the section."
+
+    if "case " in section.title.lower() or "our work" in section.title.lower() or "past performance" in section.title.lower():
+        from app.services.proposal_case_study_match import match_case_studies_for_rfp
+        try:
+            match_res = await match_case_studies_for_rfp(rfp, save_to_cache=False, fetch_full_text=False)
+            cs_block = ""
+            if match_res.studies:
+                for st in match_res.studies[:4]:
+                    cs_block += f"- **{st.title}** (Fit: {st.fit_label})\n  {st.excerpt}\n"
+                kb_block += f"\n\n=== Recommended Case Studies (via Auto-Match) ===\n{cs_block}\nMUST USE these exact case studies to build the section."
+        except Exception:
+            pass
+
     evidence = _evidence_for_section(section.id, corpus)
     return evidence, kb_block, research, methods
 
@@ -602,7 +631,6 @@ async def run_presubmit_autofix_loop(
     sections_targeted = 0
 
     from app.services.proposal_submission_polish import run_submission_polish_pass
-    from app.services.proposal_rfp_compliance import run_rfp_compliance_polish_pass
 
     try:
         working, polish_logs = await run_submission_polish_pass(
@@ -617,18 +645,10 @@ async def run_presubmit_autofix_loop(
     except Exception as exc:
         logger.warning("Pre-submit submission polish skipped: %s", exc)
 
-    try:
-        working, compliance_logs = await run_rfp_compliance_polish_pass(
-            rfp.id,
-            rfp=rfp,
-            draft=working,
-            research=working_research,
-        )
-        if compliance_logs:
-            await asave_proposal_draft(working)
-            sections_targeted += len(compliance_logs)
-    except Exception as exc:
-        logger.warning("Pre-submit RFP compliance polish skipped: %s", exc)
+    # NOTE: run_rfp_compliance_polish_pass removed — it was redundant with the
+    # autofix loop below and the gap finalizer, AND was the root cause of
+    # destructive section deletions (e.g. Cover Letter wipes). Compliance gaps
+    # are handled by the autofix loop's _llm_surgical_fix + gap finalizer pass.
 
     initial_review = run_presubmit_review(rfp=rfp, draft=working, research=working_research)
 
@@ -775,7 +795,11 @@ async def run_presubmit_autofix_loop(
                     # rewrites are still useful — accept non-worsening patches that
                     # change content or clear placeholders.
                     accept = False
-                    if repaired.strip() and repaired != best_content:
+                    # Protect against LLM completely wiping out a built section with a short apology or refusal
+                    is_catastrophic_wipe = len(best_content) > 150 and (
+                        len(repaired) < 80 or len(repaired) < (len(best_content) * 0.4)
+                    )
+                    if repaired.strip() and repaired != best_content and not is_catastrophic_wipe:
                         if llm_score < best_score:
                             accept = True
                         elif llm_score <= best_score and (

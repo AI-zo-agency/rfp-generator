@@ -511,8 +511,9 @@ function personNamedInSectionContent(
 export function isOurWorkSection(section: OutlineSection | null | undefined): boolean {
   if (!section) return false;
   return (
-    section.id.startsWith("section-3-work-") &&
-    section.id !== "section-3-work-placeholder"
+    (section.id.startsWith("section-3-work-") &&
+      section.id !== "section-3-work-placeholder") ||
+    /\bcase\s*stud(?:y|ies)\b/i.test(section.title || "")
   );
 }
 
@@ -777,6 +778,27 @@ export function messageNeedsCaseStudyClarify(message: string): boolean {
       text
     ) ||
     /\b(existing|current|these|those)\s+\d*\s*case\s*stud/i.test(text)
+  );
+}
+
+/**
+ * True when the user is asking about case study relevance, fit, or
+ * requesting alternatives from the KB. Distinct from
+ * messageNeedsCaseStudyClarify (which asks *which* tab) — this asks
+ * *whether* the current case study suits the RFP and whether to swap it.
+ */
+export function messageAsksCaseStudyRelevance(message: string): boolean {
+  const text = (message || "").trim();
+  if (!text) return false;
+  return (
+    /\b(?:is|are)\s+(?:this|these)\s+(?:case\s*stud(?:y|ies)|relevant|a?\s*good\s+(?:fit|match))\b/i.test(text) ||
+    /\brelevance?\b.{0,40}\b(?:rfp|proposal|requirements?)\b/i.test(text) ||
+    /\b(?:suggest|find|show|surface|recommend)\b.{0,40}\b(?:alternative|better|other|different)\b.{0,40}\b(?:case\s*stud|work|example)/i.test(text) ||
+    /\b(?:swap|replace|switch|substitute)\b.{0,40}\b(?:this|the)?\s*case\s*stud/i.test(text) ||
+    /\bbest[- ]?match(?:ing)?\s+case\s*stud/i.test(text) ||
+    /\b(?:add|pull|use)\b.{0,40}\b(?:best|better|matching|relevant)\b.{0,40}\b(?:case\s*stud|from\s+(?:the\s+)?(?:kb|knowledge))/i.test(text) ||
+    /\bstrengthen\s+relevance\b/i.test(text) ||
+    /\btie\s+(?:outcomes?|results?)\s+to\b.{0,40}\brequirements?\b/i.test(text)
   );
 }
 

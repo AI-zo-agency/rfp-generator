@@ -475,6 +475,15 @@ class ProposalBudget(BaseModel):
         alias="rfpBudgetCap",
         description="Hard fee / compensation NTE from the RFP (not program media envelope).",
     )
+    rfp_budget_floor: float | None = Field(
+        default=None,
+        alias="rfpBudgetFloor",
+        description=(
+            "RFP-stated MINIMUM budget / low end of a stated budget range. "
+            "Distinct from proposal_budget_floor.py, which is zo's own "
+            "00_Guide_Pricing rate floor rather than the buyer's stated one."
+        ),
+    )
     rfp_media_or_program_envelope: float | None = Field(
         default=None,
         alias="rfpMediaOrProgramEnvelope",

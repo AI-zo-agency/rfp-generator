@@ -603,6 +603,49 @@ def _ground_quote(
     return False, source_text or full_text
 
 
+def _reattribute_quote(
+    quote: str,
+    cited_source: str,
+    available: dict[str, str],
+    full_available: dict[str, str] | None = None,
+) -> tuple[str, str, str] | None:
+    """Find which retrieved document a quote is actually verbatim in.
+
+    zö's KB holds several documents per engagement — 03_CS_*, 06_WON_* and
+    04_Bio_* routinely describe the same work — so the model can quote the right
+    sentence and still name the wrong file. ``_ground_quote`` checks only the
+    cited document, which turned that citation slip into a permanent capability
+    gap: on the Gilroy run the phased-campaign language was quoted from the
+    Umatilla case study when it lives in the Umatilla won proposal, and the row
+    was discarded with "quoted evidence does not appear in ...".
+
+    The verbatim standard is unchanged — the text must still appear word for
+    word in a document actually retrieved FOR THIS REQUIREMENT. Only the
+    attribution is repaired. Returns (document, usable quote, document text),
+    or None when no retrieved document contains the quote.
+    """
+    cited = _normalize(cited_source)
+    pool: dict[str, str] = {}
+    for mapping in (available or {}, full_available or {}):
+        for display, text in mapping.items():
+            if not text or _normalize(display) == cited:
+                continue
+            # A rate card cannot evidence delivery no matter what it says.
+            if not source_can_evidence_capability(display):
+                continue
+            pool[display] = f"{pool.get(display, '')}\n{text}".strip()
+
+    for display, text in pool.items():
+        if quote_is_grounded(quote, text):
+            return display, (quote or "").strip(), text
+    # Same paraphrase allowance the cited document already gets.
+    for display, text in pool.items():
+        salvaged = salvage_grounded_quote(quote, text)
+        if salvaged:
+            return display, salvaged, text
+    return None
+
+
 
 def best_matching_excerpt(text: str, requirement: str, max_chars: int) -> str:
     """Return the span of ``text`` that best matches ``requirement``.
@@ -825,6 +868,23 @@ def rows_from_assessments(
                     usable_quote = salvaged
                     grounded = True
                     grounded_text = salvage_pool
+            if not grounded:
+                # The right sentence cited to the wrong sibling document is a
+                # citation slip, not absent evidence. Repair the attribution
+                # rather than discarding proof that was genuinely retrieved.
+                repaired = _reattribute_quote(
+                    quote, kb_source, available, full_available
+                )
+                if repaired:
+                    corrected, usable_quote, grounded_text = repaired
+                    logger.info(
+                        "go_no_go quote reattributed for %r: %r -> %r",
+                        name,
+                        kb_source,
+                        corrected,
+                    )
+                    kb_source = corrected
+                    grounded = True
             if not grounded:
                 failure = f"quoted evidence does not appear in '{kb_source}'"
                 quote_recoverable.add(name)

@@ -74,7 +74,11 @@ def assert_rate_card_usable(
         )
 
 
+from app.services.proposal_drafting_prompts import GLOBAL_AGENT_PROMPT_RULES
+
 STAGE3_BUDGET_PROMPT = """You are zö agency's Stage 3 Budget assistant. Build a complete, defensible budget using ONLY:
+""" + GLOBAL_AGENT_PROMPT_RULES + """
+
 - The Pricing Guide menu below (tier ranges)
 - 00_Guide_Pricing excerpts from the knowledge base
 - Stage 1 Go/No-Go analysis, Stage 2 structural map, and RFP excerpt
@@ -99,6 +103,7 @@ PHASE 1 — Extract five signals from the RFP and prior stages (align with playb
 PHASE 2 — Pick ONE pricing tier (Low / Average / High) for the entire proposal.
 
 PHASE 3 — Map every RFP deliverable to a Pricing Guide line item as a PHASE / DELIVERABLE row:
+- CRITICAL: You MUST include every single requirement and deliverable requested in the RFP. If you cannot find a matching Pricing Guide item in the KB for an RFP requirement, DO NOT omit it. You MUST include it as a line item, set `isManualFill=true` or use a `[VERIFY: Missing pricing]` tag, and add a pricing flag. Never silently skip a requirement.
 - description MUST name the phase + deliverable (e.g. "Phase 1 Discovery — Stakeholder interviews
   (RFP §6.2 Item 1)"). NEVER use bare "Strategy Lead — Name" as the only description.
 - category = phase name (Discovery / Strategy / Tactical Plan / Roadmap / etc.)
@@ -363,6 +368,16 @@ Return ONLY JSON:
 }
 
 lineItems must be a flat array (one row per line). Do not back-fill to the budget ceiling.
+
+CRITICAL — RFP-STATED MINIMUM BUDGET (money left on the table if wrong):
+- If the RFP states a MINIMUM budgeted amount, a budget range, or "no less than $X"
+  for the contract/project (NOT insurance limits, bonds, or vendor revenue thresholds),
+  the proposed total must land AT OR ABOVE that figure.
+- Reach it by scoping the work to the depth the RFP actually calls for — more content,
+  a fuller term, real measurement and reporting — never by padding rows or inflating
+  rates out of their 00_Guide_Pricing band.
+- A bid far under a stated minimum reads as under-reading the scope. Do not "save the
+  buyer money" against a floor they published.
 
 CRITICAL — HARD CAP / YEAR ALLOCATIONS (submission disqualifier if wrong):
 - If the RFP states a maximum compensation / NTE / total proposed price ceiling (e.g. $2,950,000),
@@ -1086,6 +1101,261 @@ async def _run_budget_grounding_audit(
     return grounding, flags
 
 
+# --- Phase 3.5b — RFP-stated minimum budget repair ------------------------
+# Incident: a Kitsap County RFP stated a $500,000 minimum budgeted amount; this
+# pipeline priced $278,400 bottom-up and every gate passed, because the money
+# model was ceiling-only (rfp_budget_cap / NTE) with no counterpart for a floor.
+#
+# Unlike proposal_budget_floor (zo's OWN 00_Guide_Pricing floor, which raises
+# 422), a buyer's stated minimum is a scoping signal rather than a submission
+# disqualifier — so this retries a bounded number of times and then flags
+# loudly, never halting the build.
+
+MINIMUM_REPAIR_ATTEMPTS = 3
+
+_MINIMUM_REPAIR_SYSTEM = """You are re-pricing a proposal budget that came in UNDER \
+the minimum budget the RFP itself states the buyer has allocated.
+
+Bidding far under a stated minimum loses twice: it leaves money on the table and \
+tells the evaluator you under-read the scope. Re-price the SAME engagement at the \
+level the buyer said they budgeted.
+
+HOW TO CLOSE THE GAP — in this order:
+1. Re-scope existing line items to the depth the RFP actually calls for. A bid at
+   ~55% of the stated minimum is usually under-serving real requirements: too few
+   content pieces, too short a term, too thin a media plan, no revision rounds, no
+   measurement/reporting cadence.
+2. Move line items to a higher 00_Guide_Pricing tier where the RFP's demands
+   genuinely justify it (Low -> Average -> High).
+3. Add deliverables the RFP REQUIRES that the budget omits entirely, priced from
+   the guide.
+
+ABSOLUTE PROHIBITIONS — violating one is worse than missing the minimum:
+- NEVER invent a deliverable the RFP does not ask for, just to absorb dollars.
+- NEVER inflate a rate beyond its 00_Guide_Pricing band.
+- NEVER add a row whose description you cannot tie to specific RFP language.
+- NEVER exceed a stated RFP maximum / NTE if one is given.
+If honest re-scoping cannot reach the minimum, get as close as the scope genuinely
+supports and say so in notes. Landing short with defensible pricing beats padding.
+
+Every line item carries description, quantity, rate, extended (= quantity x rate),
+rateSource (the 00_Guide_Pricing menu item), and notes naming the RFP requirement
+the line answers.
+
+Return ONLY JSON:
+{
+  "lineItems": [
+    {"id": "li-1", "category": "labor", "description": "string", "unit": "flat",
+     "quantity": 1, "rate": 0, "extended": 0, "rateSource": "string",
+     "notes": "RFP requirement this line answers", "lineItemType": "agency_fee"}
+  ],
+  "scopeAdjustments": ["what you deepened and which RFP requirement drove it"]
+}"""
+
+
+def _minimum_repair_prompt(
+    budget: ProposalBudget,
+    *,
+    rfp_context: str,
+    guide_text: str,
+    attempt: int,
+    shortfall: float,
+) -> str:
+    from app.services.evidence_trust.rfp_money_constraints import (
+        budget_total_for_minimum_check,
+    )
+
+    cap = budget.rfp_budget_cap
+    cap_line = (
+        f"RFP MAXIMUM / NTE (must not exceed): ${float(cap):,.2f}"
+        if cap
+        else "RFP MAXIMUM / NTE: none stated."
+    )
+    items = [
+        {
+            "description": li.description,
+            "quantity": li.quantity,
+            "rate": li.rate,
+            "extended": li.extended,
+            "rateSource": li.rate_source,
+        }
+        for li in (budget.line_items or [])
+    ]
+    escalation = (
+        ""
+        if attempt <= 1
+        else (
+            f"\nAttempt {attempt} of {MINIMUM_REPAIR_ATTEMPTS}. The last attempt was "
+            f"still ${shortfall:,.2f} short. Re-read the RFP scope for requirements "
+            f"the budget does not price AT ALL — that is almost always where the "
+            f"remaining gap lives. Do NOT close it by raising rates out of band.\n"
+        )
+    )
+    return (
+        f"RFP-STATED MINIMUM BUDGET: ${float(budget.rfp_budget_floor or 0):,.2f}\n"
+        f"Current proposed total: ${budget_total_for_minimum_check(budget):,.2f}\n"
+        f"Shortfall to close: ${shortfall:,.2f}\n"
+        f"{cap_line}\n{escalation}\n"
+        f"RFP money constraint excerpts:\n{budget.rfp_money_constraint_notes[:2000]}\n\n"
+        f"Current line items:\n{items}"
+    )
+
+
+def _minimum_repair_cache_prefix(rfp_context: str, guide_text: str) -> list[str]:
+    """Stable reference material for the repair loop, as cache breakpoints.
+
+    Both segments are identical across every retry, so re-sending them uncached
+    burned ~8.5k input tokens per extra attempt. Ordered most-reusable first:
+    00_Guide_Pricing is the same on every RFP and every call, the RFP scope is
+    constant only within this build. Separate breakpoints keep the guide's cache
+    alive even if the scope segment changes.
+    """
+    return [
+        f"00_Guide_Pricing (authoritative bands):\n{guide_text[:14000]}\n\n",
+        f"RFP scope:\n{rfp_context[:20000]}\n\n",
+    ]
+
+
+async def repair_budget_to_rfp_minimum(
+    budget: ProposalBudget,
+    *,
+    rfp_id: str,
+    rfp_context: str = "",
+    guide_text: str = "",
+    rate_card: Any = None,
+    rfp_sections: Any = None,
+    max_attempts: int = MINIMUM_REPAIR_ATTEMPTS,
+) -> tuple[ProposalBudget, list[str]]:
+    """Re-price ``budget`` up to its RFP-stated minimum, at most ``max_attempts`` times.
+
+    Can only improve or no-op: an attempt that fails the editor pass, breaches the
+    RFP cap, or does not raise the total is discarded and the previous budget
+    stands. After the last attempt any remaining shortfall becomes a pricing flag
+    rather than a halt.
+    """
+    from app.services.evidence_trust.rfp_money_constraints import (
+        budget_total_for_minimum_check,
+        collect_under_minimum_flags,
+    )
+
+    logs: list[str] = []
+    floor = budget.rfp_budget_floor
+    if floor is None or float(floor) <= 0:
+        return budget, logs
+    floor = float(floor)
+
+    cap = budget.rfp_budget_cap
+    if cap is not None and float(cap) > 0 and floor > float(cap):
+        # Contradictory extraction is not a mandate to breach the ceiling.
+        flag = (
+            f"[PRICING FLAG: RFP money constraints conflict — extracted minimum "
+            f"${floor:,.2f} exceeds extracted maximum ${float(cap):,.2f}. Budget left "
+            f"as priced; Sonja confirm which figure is real before submission]"
+        )
+        logs.append("minimum repair skipped — extracted floor exceeds extracted cap")
+        return _append_pricing_flags(budget, [flag]), logs
+
+    if not collect_under_minimum_flags(budget):
+        return budget, logs
+    if not llm.is_configured():
+        return _append_pricing_flags(budget, collect_under_minimum_flags(budget)), logs
+
+    best = budget
+    for attempt in range(1, max_attempts + 1):
+        shortfall = floor - budget_total_for_minimum_check(best)
+        try:
+            raw, _provider = await llm.chat_json(
+                [
+                    {"role": "system", "content": _MINIMUM_REPAIR_SYSTEM},
+                    {
+                        "role": "user",
+                        "content": _minimum_repair_prompt(
+                            best,
+                            rfp_context=rfp_context,
+                            guide_text=guide_text,
+                            attempt=attempt,
+                            shortfall=shortfall,
+                        ),
+                    },
+                ],
+                max_tokens=8192,
+                node_name="budget_minimum_repair",
+                rfp_id=rfp_id,
+                cache_prefix=_minimum_repair_cache_prefix(rfp_context, guide_text),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logs.append(f"minimum repair attempt {attempt} failed: {str(exc)[:200]}")
+            break
+
+        line_items = _parse_line_items_from_raw(raw)
+        if not line_items:
+            logs.append(f"minimum repair attempt {attempt}: no line items returned")
+            continue
+
+        candidate = best.model_copy(
+            update={
+                "line_items": line_items,
+                "scope_adjustments": [
+                    *(best.scope_adjustments or []),
+                    *[s for s in (str(x).strip() for x in (raw.get("scopeAdjustments") or [])) if s],
+                ],
+            }
+        )
+        try:
+            candidate = run_budget_editor_pass(
+                candidate,
+                rfp_sections=rfp_sections or [],
+                rfp_context=rfp_context,
+                rate_card=rate_card,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # An attempt that breaks a budget invariant is discarded outright: the
+            # pre-repair budget is wrong about the floor but internally sound, and
+            # shipping an inconsistent ledger is the worse failure.
+            logs.append(
+                f"minimum repair attempt {attempt} rejected by editor pass: {str(exc)[:200]}"
+            )
+            continue
+
+        new_total = budget_total_for_minimum_check(candidate)
+        if cap is not None and float(cap) > 0 and new_total > float(cap) + 0.01:
+            logs.append(
+                f"minimum repair attempt {attempt} discarded — ${new_total:,.2f} "
+                f"breaches RFP cap ${float(cap):,.2f}"
+            )
+            continue
+        if new_total <= budget_total_for_minimum_check(best):
+            logs.append(
+                f"minimum repair attempt {attempt} did not raise the total "
+                f"(${new_total:,.2f}) — keeping previous"
+            )
+            continue
+
+        best = candidate
+        logs.append(f"minimum repair attempt {attempt}: total now ${new_total:,.2f}")
+        if not collect_under_minimum_flags(best):
+            logs.append(f"minimum repair met the RFP floor ${floor:,.2f}")
+            return best, logs
+
+    remaining = collect_under_minimum_flags(best)
+    if remaining:
+        logs.append(
+            f"minimum repair exhausted {max_attempts} attempts, still under ${floor:,.2f}"
+        )
+        best = _append_pricing_flags(best, remaining)
+    return best, logs
+
+
+def _append_pricing_flags(budget: ProposalBudget, flags: list[str]) -> ProposalBudget:
+    existing = list(budget.pricing_flags or [])
+    for flag in flags:
+        if flag not in existing:
+            existing.append(flag)
+    if existing == list(budget.pricing_flags or []):
+        return budget
+    return budget.model_copy(update={"pricing_flags": existing})
+
+
 async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, ProposalResearchCache]:
     """Stage 3 budget: Stage 1 + Stage 2 + 00_Guide_Pricing + RFP excerpt → single LLM pass."""
     if not llm.is_configured():
@@ -1537,6 +1807,27 @@ async def generate_proposal_budget(rfp_id: str) -> tuple[ProposalBudget, Proposa
         audit_flags=len(audit_flags or []),
         **summarize_budget(budget),
     )
+
+    # Phase 3.5b — lift the bid to an RFP-stated minimum before client display,
+    # so the narrative and tables render from the repaired ledger.
+    budget, minimum_logs = await repair_budget_to_rfp_minimum(
+        budget,
+        rfp_id=rfp_id,
+        rfp_context=rfp_context,
+        guide_text=guide_text,
+        rate_card=rate_card,
+        rfp_sections=prior_research.rfp_sections if prior_research else [],
+    )
+    for line in minimum_logs:
+        logger.info("Pricing minimum repair for %s: %s", rfp_id, line)
+    if minimum_logs:
+        step_trace(
+            "pricing_minimum_repair",
+            rfp_id=rfp_id,
+            rfp_budget_floor=float(budget.rfp_budget_floor or 0),
+            attempts=len(minimum_logs),
+            **summarize_budget(budget),
+        )
 
     from app.services.proposal_budget_content import (
         normalize_fixed_pricing_narrative,

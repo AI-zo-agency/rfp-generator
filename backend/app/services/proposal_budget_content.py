@@ -1282,10 +1282,25 @@ def _mix_table_from_line_items(line_items: list | None, total: float | None) -> 
         label = (phase or desc or "Fees").strip()
         key = label.casefold()
         if key in used_labels:
-            short = re.split(r"\s+[—\-]\s+", desc or "", maxsplit=1)[0].strip()
-            if short and short.casefold() not in used_labels:
-                label = short[:48]
-                key = label.casefold()
+            # Disambiguate by using the category directly (e.g., "Discovery & Transition")
+            # instead of truncating raw description text.
+            cat = getattr(item, "category", "") or ""
+            cat = cat.strip()
+            if cat and cat.casefold() != key:
+                label = cat
+            else:
+                # Try the original description's phase prefix (before the em dash).
+                raw_desc = (item.description or "").strip()
+                phase_prefix = re.split(r"\s*[—:\-]\s+", raw_desc, maxsplit=1)[0].strip()
+                if phase_prefix and len(phase_prefix) < 60 and phase_prefix.casefold() != key:
+                    label = phase_prefix
+                else:
+                    # Last resort: append a numeric suffix
+                    suffix = 2
+                    while f"{label} ({suffix})".casefold() in used_labels:
+                        suffix += 1
+                    label = f"{label} ({suffix})"
+            key = label.casefold()
         used_labels.add(key)
         share = int(round(100.0 * float(amount) / float(total)))
         rows.append((label, f"{share}%", _usd(float(amount)), ""))
@@ -1452,9 +1467,20 @@ def _scrub_internal_budget_jargon(text: str) -> str:
 
 
 def _client_deliverable_label(description: str) -> str:
-    """Strip internal menu ids — keep human deliverable names only."""
+    """Strip internal menu ids and redundant Phase prefixes for clean table output.
+
+    The Phase column already carries the phase name, so the Scope/deliverable
+    column should contain only the actual deliverable description.
+    """
     desc = (description or "").strip()
     desc = _MENU_ID_PREFIX_RE.sub("", desc).strip()
+    # Strip redundant "Phase N <Name> — " prefix (already shown in Phase column)
+    desc = re.sub(
+        r"^Phase\s+\d+\s+[^—–-]+[—–-]\s*",
+        "",
+        desc,
+        flags=re.IGNORECASE,
+    ).strip()
     return desc or "Professional services"
 
 
@@ -1512,11 +1538,9 @@ def _rollup_phase_fee_rows(
     for phase, data in buckets.items():
         descs = list(data["descs"])  # type: ignore[arg-type]
         if len(descs) > 4:
-            scope = "; ".join(descs[:4]) + f"; +{len(descs) - 4} more"
+            scope = f"{'; '.join(descs[:4])}; +{len(descs) - 4} more"
         else:
             scope = "; ".join(descs) if descs else "Professional services"
-        if len(scope) > 200:
-            scope = scope[:197].rstrip("; ") + "…"
         amount: float | None
         if data["has_amount"]:
             amount = round(float(data["amount"]), 2)
@@ -1816,7 +1840,7 @@ def _client_line_label(item: BudgetLineItem) -> tuple[str, str]:
     }
     if generic and item.named_person:
         role = (item.role_title or "Team").strip()
-        desc = f"{role} — {item.named_person}"
+        desc = f"{role} - {item.named_person}"
     if not desc:
         desc = cat
     return phase, desc

@@ -405,6 +405,46 @@ def format_rfp_structure_specs_for_planner(specs: list[RfpSectionSpec]) -> str:
     return "\n".join(lines)
 
 
+# A buyer's "what to send us" list is not a section — its headings ARE the
+# sections. Left as one spec, the whole proposal collapsed into a single tab
+# ("4. Proposal Submission Requirements") with Executive Summary / Case Studies /
+# Budget / References demoted to children. The planner LLM already forbids this
+# ("Do NOT create a wrapper tab ... when the individual headings already exist"),
+# but this Align extract path SHORT-CIRCUITS the planner, so that rule never ran.
+#
+# Collapsing costs more than tidiness: downstream machinery keys off tab TITLES,
+# so a buried "References" never triggers reference retrieval and a buried
+# "Budget & Cost Breakdown" never presents as the cost tab.
+_SUBMISSION_WRAPPER_TITLE_HINTS = (
+    "proposal submission requirement",
+    "submission requirement",
+    "submittal requirement",
+    "proposal requirement",
+    "proposal content",
+    "required content",
+    "proposal format",
+    "format of proposal",
+    "submission checklist",
+    "proposal package",
+    "required submittal",
+    "items to submit",
+)
+
+# Below this, the headings are more likely genuine sub-parts of one real section
+# (e.g. "SECTION III — Technical Approach" with III.1/III.2) than a packet list.
+_SUBMISSION_WRAPPER_MIN_HEADINGS = 3
+
+
+def spec_is_submission_wrapper(spec: RfpSectionSpec) -> bool:
+    """True when a spec is the buyer's packet list, not a section of its own."""
+    title = _clean_spec_title((spec.rfp_title or "").strip()).casefold()
+    if not title:
+        return False
+    if len(spec.required_headings or []) < _SUBMISSION_WRAPPER_MIN_HEADINGS:
+        return False
+    return any(hint in title for hint in _SUBMISSION_WRAPPER_TITLE_HINTS)
+
+
 def outline_sections_from_rfp_specs(
     specs: list[RfpSectionSpec],
     *,
@@ -427,6 +467,34 @@ def outline_sections_from_rfp_specs(
         title = _clean_spec_title((spec.rfp_title or "").strip())
         if not title:
             continue
+
+        # Packet list -> emit its headings as the tabs, not the wrapper.
+        if spec_is_submission_wrapper(spec):
+            for heading in spec.required_headings or []:
+                child_title = _clean_spec_title(str(heading or "").strip())
+                if not child_title or is_duplicate_static_rfp_section(child_title):
+                    continue
+                child_raw = {
+                    "id": f"rfp-structure-{_slug_section_id(child_title)}",
+                    "title": child_title,
+                    "order": order,
+                    "required": True,
+                    "conditionalReason": (
+                        f"Required by {title} — {(spec.instructions or '')[:200]}"
+                    ),
+                    "parentId": None,
+                    "children": [],
+                    "dependencies": [],
+                    "evaluationWeight": None,
+                    "protectFromCap": True,
+                    "submissionInstrument": None,
+                }
+                sections.append(
+                    section_factory(child_raw) if section_factory is not None else child_raw
+                )
+                order += 1
+            continue
+
         raw = {
             "id": f"rfp-structure-{_slug_section_id(title)}",
             "title": title,
@@ -1458,6 +1526,17 @@ def ensure_missing_scored_section_stubs(
 
     for spec in specs:
         if _spec_is_rfp_title_noise(spec):
+            continue
+        # A packet list must never mint a tab of its own. Its headings are
+        # already tabs (outline_sections_from_rfp_specs expands them), so
+        # stubbing the wrapper too produced BOTH "4. Proposal Submission
+        # Requirements" AND its five children on the Gilroy build — six tabs
+        # for a five-deliverable RFP, with the wrapper duplicating all of them.
+        if spec_is_submission_wrapper(spec):
+            logs.append(
+                f"skipped stub for submission-format wrapper {spec.rfp_title!r} "
+                "— its required headings are the tabs"
+            )
             continue
         if (
             not spec.required_headings

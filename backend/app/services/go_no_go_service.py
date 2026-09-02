@@ -19,6 +19,7 @@ from app.models.rfp import RfpRecord
 from app.services import llm, supermemory
 from app.services.go_no_go_requirements import (
     REQUIREMENT_PLANNER_PROMPT,
+    SUBMISSION_CATEGORY,
     RfpRequirement,
     parse_requirements,
 )
@@ -2381,10 +2382,14 @@ def _enforce_capability_evidence(
     # Fabricated cert badges / cross-stitched case-study metrics — even when a
     # polluted KB chunk or salvage pass left them in a "verified" quote.
     validated = scrub_capability_rows(scrubbed_rows)
+    # Submission rows are excluded: "no KB document evidences this" is the
+    # expected state for a fee schedule or a reference list, so listing them as
+    # unverified capability claims buried the real gaps under packet paperwork.
     downgrades = [
         f"{row.requirement}: {row.downgrade_reason}"
         for row in validated
         if row.downgrade_reason
+        and (row.category or "service").casefold() != SUBMISSION_CATEGORY
     ]
     updates: dict[str, Any] = {"capability_matrix": validated}
 

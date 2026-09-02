@@ -569,7 +569,6 @@ function rollupFeeDetailTableForDisplay(
       b.scopes.length > 4
         ? `${b.scopes.slice(0, 4).join("; ")}; +${b.scopes.length - 4} more`
         : b.scopes.join("; ");
-    if (scope.length > 200) scope = `${scope.slice(0, 197).replace(/;?\s*$/, "")}…`;
     if (!scope) scope = "Professional services";
     return [phase, scope, b.hasAmount ? _formatFeeUsd(b.amount) : "—"];
   });

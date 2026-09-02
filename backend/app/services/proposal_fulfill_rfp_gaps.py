@@ -2753,6 +2753,52 @@ async def _run_fulfill_rfp_gaps_body(
         reason="final checks complete",
         add_missing_mandated_stubs=True,
     )
+
+    # The reorder above can CREATE mandated stubs, and
+    # the only pass that drafts a stub into real content —
+    # _finalize_fill_incomplete_tabs — already ran near the START of this scan.
+    # So any tab minted here was persisted as a bare
+    # "[MANUAL FILL: Draft this RFP-required section — X]" plus RFP instructions,
+    # with nothing left to fill it. That is why References and Executive Summary
+    # shipped as instructions instead of content.
+    #
+    # Fill them now, after the last step that can create one. No-ops when nothing
+    # is hollow, so a clean draft costs nothing.
+    try:
+        await _finalize_fill_incomplete_tabs()
+    except ProposalGenerationCancelled:
+        raise
+    except Exception as late_fill_exc:  # noqa: BLE001
+        logger.warning(
+            "Late stub fill after final reorder skipped for %s: %s",
+            rfp_id,
+            late_fill_exc,
+        )
+
+    # FINAL WORD before persisting. restore_sections_emptied_by_scan already ran
+    # above, but FIVE mutating passes run after it — orphan-VERIFY repair (which
+    # can rewrite a body to a MANUAL FILL stub), pointer integrity, markup
+    # polish, Ralph's page-limit refit, and the reorder immediately above with
+    # mandated-stub reorder. Any of them can undo the restore, and the
+    # save happens regardless.
+    #
+    # That is how a 553-word Executive Summary was persisted as
+    # "[MANUAL FILL: Draft this RFP-required section — Executive Summary]" plus
+    # the RFP instructions: the guard fired, the section was restored, and a
+    # later pass re-stubbed it with nothing left to check the result.
+    #
+    # Re-running the same guard here is idempotent — it only touches sections
+    # that are hollow NOW and were substantial pre-scan — so it costs nothing
+    # when everything is fine and makes the invariant actually hold.
+    draft, final_guard_logs = restore_sections_emptied_by_scan(
+        draft, restore_candidates
+    )
+    if final_guard_logs:
+        for line in final_guard_logs:
+            logger.warning("Scan RFP %s (final save guard): %s", rfp_id, line)
+        report.setdefault("logs", []).extend(final_guard_logs)
+        report["degradedSectionsRestoredAtSave"] = len(final_guard_logs)
+
     await asave_proposal_draft(draft)
     await asave_research_cache(updated_research)
     final_scan_hash = compute_fulfill_scan_hash(draft, rfp_text)

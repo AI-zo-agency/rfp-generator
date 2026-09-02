@@ -720,7 +720,10 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
         lines.append(json.dumps(memory, indent=2)[:3000])
     understanding = (plan.get("opportunity") or {}).get("understanding") or {}
     if isinstance(understanding, dict) and any(understanding.values()):
-        lines.append("Opportunity Understanding (restate in zö voice; do not invent facts):")
+        lines.append(
+            "Opportunity Understanding (write these facts into the section in zö "
+            "voice; do not invent facts, and do not narrate that you were given them):"
+        )
         lines.append(json.dumps(understanding, indent=2)[:3000])
     brief = _plan_section_brief(state, section_id)
     section_title = ""
@@ -736,12 +739,45 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
             )
             break
     if brief:
-        lines.append("Section Strategy (explain the plan — do not invent methodology/budget):")
+        # PRIVATE DIRECTION, not source material. This block used to be headed
+        # "Section Strategy (explain the plan …)" and dumped purpose /
+        # writerInstructions / successDefinition in one JSON blob next to
+        # content-bearing facts — so the model paraphrased its own brief into
+        # the section body ("This section is important because…") and shipped
+        # it to the client. The direction is now named as direction and fenced
+        # off from anything quotable.
+        lines.append(
+            "SECTION DIRECTION — PRIVATE. This is direction TO you about how to "
+            "write; it is NOT material FOR the proposal. Execute it silently. "
+            "Never restate, summarize, paraphrase, quote, or allude to any of it "
+            "in the section body. Never explain what the section is for, why it "
+            "matters, what an evaluator should conclude, or what you were told to "
+            "do. A reader must not be able to tell a brief existed. If you have "
+            "too little evidence to write the section, write the part you can "
+            "support and mark the specific missing fact inline — never fill the "
+            "space with a description of the section's own purpose.\n"
+            "COVERAGE IS MANDATORY: every item in evaluationCriteria must be "
+            "substantively answered somewhere in this section's body — with "
+            "specifics, not a sentence acknowledging the criterion exists. Work "
+            "through them one by one before you finish. Never print a criterion, "
+            "its point value, or the words \"evaluation criteria\" in the body; "
+            "the evaluator must be able to score every one of them from what you "
+            "wrote without ever seeing that you had the list."
+        )
         lines.append(
             json.dumps(
                 {
                     "purpose": brief.get("purpose"),
                     "keyMessages": brief.get("keyMessages"),
+                    # What THIS tab is scored on, and the proof it needs. The
+                    # planner has always produced both, but neither reached the
+                    # writer — so a section could read well and still miss the
+                    # points it was being graded against. Safe to include now
+                    # that the block is fenced as unquotable: never print a
+                    # criterion or its point value, just make sure the section
+                    # answers every one of them.
+                    "evaluationCriteria": brief.get("evaluationCriteria"),
+                    "evidenceNeeded": brief.get("evidenceNeeded"),
                     "writerInstructions": brief.get("writerInstructions"),
                     "successDefinition": brief.get("successDefinition"),
                     "wordBudget": brief.get("wordBudget"),
@@ -750,6 +786,7 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
                 indent=2,
             )
         )
+        lines.append("END SECTION DIRECTION — everything above is unquotable.")
         winning_pattern = brief.get("winningPattern") or {}
         if isinstance(winning_pattern, dict) and any(winning_pattern.values()):
             lines.append(
@@ -767,7 +804,8 @@ def _format_plan_context(state: DraftingGraphState, section_id: str) -> str:
     methodology = (plan.get("delivery") or {}).get("methodology") or {}
     if isinstance(methodology, dict) and (methodology.get("phases") or methodology.get("confidence")):
         lines.append(
-            "Delivery Methodology Plan (explain this structure in zö voice — do not invent phases):"
+            "Delivery Methodology Plan (WRITE the methodology this describes, in zö "
+            "voice — never describe the plan itself, and do not invent phases):"
         )
         lines.append(json.dumps(methodology, indent=2)[:3000])
     timeline = (plan.get("delivery") or {}).get("timeline") or {}
@@ -1526,6 +1564,23 @@ async def _draft_batch_once(
                 title=title,
                 zo_mode=zo_mode,
             )
+        # Last line of defence for the section brief leaking into the body. The
+        # prompt now fences the brief off as private direction; this catches the
+        # cases where the model paraphrases it anyway — which is how tabs shipped
+        # reading "This section is important because…" instead of answering.
+        echo_brief = _plan_section_brief(state, sid)
+        if echo_brief:
+            from app.services.proposal_manuscript import strip_brief_echo_sentences
+
+            content = strip_brief_echo_sentences(
+                content,
+                [
+                    str(echo_brief.get("purpose") or ""),
+                    str(echo_brief.get("writerInstructions") or ""),
+                    str(echo_brief.get("successDefinition") or ""),
+                ],
+            )
+
         kb_refs = _extract_kb_refs(content, item.get("kbRefs") or item.get("kb_refs"))
         results.append(
             {

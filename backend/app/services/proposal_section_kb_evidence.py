@@ -27,7 +27,21 @@ ACCURATE_KB_EDITOR_RULES = """ACCURATE KB EVIDENCE RULES (mandatory):
 6) Never write [VERIFY] tags that are instructions to Sonja/Ella or meta-commentary about
    RFP fit (e.g. "Request from Sonja whether…"). VERIFY labels must be short missing-field
    names only — or omit VERIFY and state the gap in plain prose.
-7) Do not replace KB-backed prose with new long [VERIFY] blocks; prefer citing packed evidence."""
+7) Do not replace KB-backed prose with new long [VERIFY] blocks; prefer citing packed evidence.
+8) FILL FIRST, DEFER ONLY WHAT YOU CANNOT KNOW. A handoff tag is for a fact that
+   exists outside your reach — a phone number, a signature, a file. It is NOT for
+   work you can do yourself. Judgement calls are yours: which past project best
+   matches this RFP, why it is relevant, how to frame it. You have the case
+   studies and you have the RFP, so decide and write it. Never emit a tag asking a
+   human to "confirm relevance", "confirm framing", "review fit" or similar — that
+   is your job, and handing it back reads as the agent refusing to think.
+9) A DEFERRED FIELD MUST NAME ITSELF. When you genuinely must defer, the tag names
+   the exact missing field and the entity it belongs to — "[MANUAL FILL: Sonja —
+   phone number for Chantal Strobel, Deschutes Public Library]" — never a vague
+   instruction like "provide reference contacts before submission". Commit to
+   every part you DO have (the organization, the person, the scope, the email) and
+   tag only the specific hole. A row naming a real client with one tagged field
+   beats a paragraph explaining that you cannot supply references."""
 
 # User wants content pulled from KB into the open tab (not a chat-only answer).
 _KB_FETCH_FILL_RE = re.compile(

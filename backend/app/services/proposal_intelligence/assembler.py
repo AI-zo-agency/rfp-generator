@@ -867,7 +867,15 @@ def derive_legacy_fields(
                 ProofPoint(
                     requirement=need,
                     caseStudy=need,
-                    narrativeHook=brief.purpose,
+                    # NOT brief.purpose. narrativeHook's contract is an
+                    # outcome statement ("We built… / We led…", see
+                    # proposal_proof_points.py) that the writer is told to LEAD
+                    # WITH. Putting the section's meta purpose here
+                    # ("Demonstrate to the evaluator that…") handed the writer
+                    # its own brief labelled as proof content — a root cause of
+                    # agent instructions appearing in section bodies. A planned
+                    # placeholder has no hook yet; leave it empty.
+                    narrativeHook="",
                     relevance="planned",
                     sectionIds=[brief.section_id],
                     evaluationWeight=None,

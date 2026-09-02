@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from app.models.go_no_go import GoNoGoCapabilityRow, GoNoGoDecisionMatrixRow
+from app.services.go_no_go_requirements import SUBMISSION_CATEGORY
 
 _STATUS_ICON = {
     "verified": "✅",
@@ -32,6 +33,16 @@ def _cell(text: str) -> str:
 
 
 def _status_display(row: GoNoGoCapabilityRow) -> str:
+    # Proposal-content asks are authored at submission time, so "no KB document
+    # evidences this" is the expected state, not a finding. Reading them as
+    # capability gaps is what made an assemble-the-packet checklist look like
+    # five holes in the agency's craft.
+    if (row.category or "").casefold() == SUBMISSION_CATEGORY and row.status not in {
+        "verified",
+        "partial",
+    }:
+        return "📋 Assemble at submission — written for this bid, not drawn from past work"
+
     icon = _STATUS_ICON.get(row.status, "🔴")
     label = _STATUS_LABEL.get(row.status, "Gap")
     # Evidence already has its own column — do not repeat it in Status.

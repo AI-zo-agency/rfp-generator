@@ -264,6 +264,34 @@ def _meaningful_body(content: str, title: str) -> str:
     return "\n".join(keep)
 
 
+def _verifiable_record_count(body: str) -> tuple[int, int]:
+    """(contact-ish tokens, table data rows) — the checkable facts in a body.
+
+    Deliberately structural, not semantic: an address token is anything with an
+    "@" and a dot inside it, a data row is a pipe row that is not the header
+    separator. No vocabulary, no topic matching — the same body is compared
+    against itself before and after, so shape is all that is needed.
+    """
+    contacts = 0
+    rows = 0
+    for raw in (body or "").splitlines():
+        line = raw.strip()
+        if line.startswith("|"):
+            cells = line.strip("|").split("|")
+            if not (set(line) <= set("|-: \t")):
+                rows += 1
+            for cell in cells:
+                token = cell.strip()
+                if "@" in token and "." in token.split("@")[-1]:
+                    contacts += 1
+        else:
+            for token in line.split():
+                stripped = token.strip("<>(),;:[]")
+                if "@" in stripped and "." in stripped.split("@")[-1]:
+                    contacts += 1
+    return contacts, rows
+
+
 def restore_sections_emptied_by_scan(
     draft: ProposalDraft,
     prior_sections: "list[ProposalSection] | None",
@@ -342,6 +370,27 @@ def restore_sections_emptied_by_scan(
             return True
         if regression_vs_prior(prior, section):
             return True
+        # STRUCTURED-DATA LOSS. Length and shape checks both miss the worst
+        # regression: a section whose verifiable records were deleted and
+        # replaced with fluent prose of similar length that asserts nothing.
+        #
+        # Real case — the References tab held three named contacts in a table
+        # with working email addresses, and came back as 162 words saying "We
+        # are not able to publish complete reference contact records." It is
+        # well written, it is a similar length, it is not stub-shaped, and it
+        # passes every check above while having lost every checkable fact the
+        # RFP actually asked for.
+        #
+        # Contacts and table rows are the checkable payload of a section. If a
+        # prior body carried them and the new one carries none, real evidence
+        # was dropped — restore it. (Only fires when the prior HAD records, so
+        # a prose section that never had any is untouched.)
+        prior_contacts, prior_rows = _verifiable_record_count(prior.content or "")
+        new_contacts, new_rows = _verifiable_record_count(body)
+        if prior_contacts and not new_contacts:
+            return True
+        if prior_rows >= 2 and not new_rows:
+            return True
         # regression_vs_prior only engages above a 120-word prior and compares
         # raw word counts, so a moderate-length section (like a compact forms
         # tab) that collapses to a MANUAL FILL placeholder plus a couple of
@@ -377,16 +426,30 @@ def restore_sections_emptied_by_scan(
             if cand is not None and cand.id not in current_ids:
                 prior = cand
         if prior is not None and _degraded(section, prior):
+            degraded_body = section.content or ""
             section = section.model_copy(
                 update={
                     "content": prior.content or "",
                     "status": prior.status or section.status or "generated",
                 }
             )
+            # Name the actual reason. A log that says "reduced to a stub" when
+            # the real loss was deleted contact records sends the next person
+            # debugging this down the wrong path.
+            prior_contacts, prior_rows = _verifiable_record_count(prior.content or "")
+            new_contacts, new_rows = _verifiable_record_count(degraded_body)
+            if prior_contacts and not new_contacts:
+                why = (
+                    f"lost all {prior_contacts} contact record(s) — replaced with "
+                    "prose that asserts nothing checkable"
+                )
+            elif prior_rows >= 2 and not new_rows:
+                why = f"lost all {prior_rows} table data row(s)"
+            else:
+                why = "reduced a good section to a stub / bio-stub / empty body"
             logs.append(
                 f"Restored “{section.title or section.id}” — Complete & Clean had "
-                "reduced a good section to a stub / bio-stub / empty body; pre-scan "
-                "content kept."
+                f"{why}; pre-scan content kept."
             )
             changed = True
         new_sections.append(section)

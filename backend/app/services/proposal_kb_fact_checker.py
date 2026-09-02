@@ -149,10 +149,6 @@ def _priority_kb_queries(
     rfp_context: str = "",
 ) -> list[str]:
     """Deterministic queries for known legal / critique gaps (not title mash / LLM filler)."""
-    from app.services.evidence_trust.legal_attestation_gate import (
-        rfp_needs_health_coalition_proof,
-    )
-
     title = (section.title or "").casefold()
     body = (section.content or "").casefold()
     sid = section.id or ""
@@ -186,12 +182,14 @@ def _priority_kb_queries(
             "relevant experience",
         )
     ) or sid.startswith("section-3")
-    if rfp_needs_health_coalition_proof(rfp, rfp_context) and refs_or_exp:
+    if refs_or_exp:
+        # Retrieve by what THIS RFP asks for. Naming a specific client here
+        # steered every bid toward one case study regardless of fit.
         out.append(
-            "03_CS Recovery Network of Oregon RNO Oregon Recovers coalition stigma health"
-        )
-        out.append(
-            "Recovery Network of Oregon zö agency case study outcomes references contact"
+            (
+                "03_CS zö agency case study references contacts outcomes "
+                f"{(getattr(rfp, 'sector', '') or '').strip()}"
+            ).strip()
         )
 
     seen: set[str] = set()
@@ -614,7 +612,6 @@ async def _plan_kb_queries(
                     "Fact-check pass: plan Supermemory queries from the mapped RFP "
                     "requirements and this section's draft gaps. Prefer specific "
                     "01_companyfacts / 03_CS / 04_Bio queries. For health/coalition RFPs "
-                    "include Recovery Network of Oregon when experience/references are "
                     "needed. NEVER plan queries that would invent E-Verify enrollment or "
                     "conflict-free disclosures — those stay VERIFY unless companyfacts "
                     "explicitly confirm."
@@ -735,7 +732,6 @@ async def _run_requirement_aligned_fact_check_agent(
         "requirements using KB evidence and brand voice. Do not invent a generic section.\n"
         "6. LEGAL ATTESTATIONS: Never assert E-Verify enrollment or 'no conflicts of "
         "interest' as fact. Keep or insert [VERIFY: … Sonja/Operations must confirm]. "
-        "For health/coalition RFPs, prefer Recovery Network of Oregon in experience/"
         "references when KB supports it; otherwise FLAG for Sonja. Never invent staffing "
         "hours or a '10-year partnership' credential (founded 2013).\n"
         f"{specs_note}\n"
@@ -814,14 +810,6 @@ def _kb_query_for_section(
     if "disclosure" in title_cf or "conflict" in title_cf:
         return "01_companyfacts zö agency conflict of interest disclosure"[:240]
     if any(h in title_cf for h in ("reference", "previous experience", "past performance")):
-        from app.services.evidence_trust.legal_attestation_gate import (
-            rfp_needs_health_coalition_proof,
-        )
-
-        if rfp_needs_health_coalition_proof(rfp):
-            return (
-                "03_CS Recovery Network of Oregon RNO Oregon Recovers coalition"
-            )[:240]
         return "03_CS zö agency client references past performance contacts"[:240]
 
     if mapped and mapped.retrieval_focus:

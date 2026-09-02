@@ -7,6 +7,7 @@ import {
   messageLooksOutlineStructure,
   messageLooksStructural,
   messageNeedsCaseStudyClarify,
+  messageAsksCaseStudyRelevance,
   messagePointsAtOpenSection,
   pinnedSectionConflictsWithMessage,
   resolveChatTarget,
@@ -820,5 +821,21 @@ describe("resolveChatTarget", () => {
       expect(result.section.id).toBe("rfp-sec-23");
       expect(result.reason).toBe("in-place-bio");
     }
+  });
+});
+
+describe("messageAsksCaseStudyRelevance", () => {
+  it("detects relevance intent", () => {
+    expect(messageAsksCaseStudyRelevance("is this case study relevant?")).toBe(true);
+    expect(messageAsksCaseStudyRelevance("strengthen relevance to the rfp")).toBe(true);
+    expect(messageAsksCaseStudyRelevance("suggest a better case study")).toBe(true);
+    expect(messageAsksCaseStudyRelevance("swap this case study")).toBe(true);
+    expect(messageAsksCaseStudyRelevance("add the best-matching case studies from the knowledge base")).toBe(true);
+    expect(messageAsksCaseStudyRelevance("tie outcomes to requirements")).toBe(true);
+  });
+
+  it("ignores non-relevance case study mentions", () => {
+    expect(messageAsksCaseStudyRelevance("rewrite this case study")).toBe(false);
+    expect(messageAsksCaseStudyRelevance("fix typos in the case study")).toBe(false);
   });
 });

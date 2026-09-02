@@ -200,7 +200,6 @@ Rules:
 - Buyer requirements are NOT planned as KB queries — those use the RFP tool at edit time.
 - Use hints: 01 companyfacts, 02 master template, 03_CS case studies, 04 bio, certifications, org chart, references.
 - When [VERIFY] gaps are listed, dedicate a query to each missing zö field.
-- For health/coalition/stigma RFPs, include Recovery Network of Oregon (RNO) / Oregon Recovers when the section is experience, references, or case studies.
 - Do NOT invent queries that imply E-Verify is confirmed — search 01_companyfacts only; enrollment stays VERIFY unless facts explicitly confirm.
 - BUDGET / COST / FEES / PRICING sections: do NOT plan queries like "<client> marketing plan budget hours rate".
   Plan ONLY 00_Guide_Pricing queries (tier Low Average High, menu rates, PM floor) — RFP budget ceilings are read via the RFP tool, not Supermemory client docs.

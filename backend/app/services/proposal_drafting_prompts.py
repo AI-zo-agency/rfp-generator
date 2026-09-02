@@ -41,7 +41,6 @@ PERCENT-TIME / FTE / STAFF ALLOCATION (mandatory):
 - Prefer a lean Role | Name | Relevant experience table over a fabricated Percent-Time column.
 
 HEALTH / COALITION / STIGMA RFPs:
-- Recovery Network of Oregon (RNO) is a near-direct KB proof point. Prefer it in references, previous experience, and case studies when the RFP asks for comparable health/coalition work. If absent, add [FLAG FOR SONJA: Add Recovery Network of Oregon…].
 
 VERIFIED FACTS ONLY:
 - Agency founded: 2013 (August 21, 2013). Years in operation = current calendar year − 2013 (13 in 2026).
@@ -76,6 +75,15 @@ is missing or needs a human, emit exactly one tag — [MANUAL FILL: Sonja — <w
 needed>] or [VERIFY: <field> — <reason>] — and nothing else. Never explain the tag,
 never preface it with a sentence about why it's there, never restate the rule that
 produced it.
+"""
+
+GLOBAL_AGENT_PROMPT_RULES = """
+=== CORE AGENT RULES (MANDATORY FOR ALL TASKS) ===
+1. SINGLE SOURCE OF TRUTH: The Research Brief is absolute. Maintain strict consistency with it to ensure no contradictions across the proposal.
+2. THOROUGH RFP COMPLIANCE: You MUST explicitly address EVERY requirement the RFP demands for your specific section. Never silently skip a requirement.
+3. NO FABRICATION: NEVER invent missing data, clients, metrics, or pricing.
+4. NO BLANK REFUSALS: NEVER leave a section or response empty with a meta-comment like "Please provide...". Draft the absolute best complete section you can.
+5. USE [VERIFY] FOR GAPS: If you genuinely lack facts to fulfill a requirement, insert an inline `[VERIFY: missing fact description]` tag to hold the space instead of fabricating or omitting it.
 """
 
 DESIGNER_READY_BLOCK = """## DESIGNER-READY FORMAT (every section — mandatory)
@@ -165,11 +173,25 @@ def format_proof_points_block(
             key=lambda p: -(p.get("evaluationWeight") or p.get("evaluation_weight") or 0),
         )[:6]
 
+    # Placeholders synthesised from the execution plan (assembler.py, relevance
+    # "planned") carry an evidence NEED in `caseStudy`, not a delivered project.
+    # Rendering them under a header that calls them verified case studies and
+    # says "lead with these" invited two failures at once: narrating planning
+    # text as content, and inventing a case study to match the requirement.
+    # Real proof points use high|medium|low.
+    verified = [
+        p
+        for p in relevant
+        if str(p.get("relevance") or "").strip().casefold() != "planned"
+    ]
+    if not verified:
+        return ""
+
     lines = [
         "## PROOF POINTS (lead with these, first person we/our)",
         "Use these verified case studies as 'why we win' evidence. Do not invent metrics.",
     ]
-    for point in relevant[:8]:
+    for point in verified[:8]:
         req = point.get("requirement") or ""
         case = point.get("caseStudy") or point.get("case_study") or ""
         hook = point.get("narrativeHook") or point.get("narrative_hook") or ""

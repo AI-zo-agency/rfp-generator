@@ -425,6 +425,48 @@ async def run_fulfill_budget_scan(
         logs.extend(cost_logs)
         meta["budgetChanged"] = True
 
+    # An under-minimum canonical budget must be repaired BEFORE the staleness
+    # checks below. Those checks restore the manuscript tab from canon, so a
+    # user's manual correction was being overwritten with the same too-low
+    # number that prompted the correction (the Kitsap $278,400 vs $500,000
+    # report). Fixing canon first makes the restore write the right figure.
+    if research and research.budget and research.budget.rfp_budget_floor:
+        from app.services.evidence_trust.rfp_money_constraints import (
+            collect_under_minimum_flags,
+        )
+
+        if collect_under_minimum_flags(research.budget):
+            floor = float(research.budget.rfp_budget_floor)
+            logs.append(
+                f"Budget: proposed total is under the RFP-stated minimum "
+                f"${floor:,.0f} — re-pricing before manuscript sync."
+            )
+            try:
+                from app.services.proposal_pricing_service import (
+                    repair_budget_to_rfp_minimum,
+                )
+                from app.services.proposal_repository import asave_research_cache
+
+                repaired, repair_logs = await repair_budget_to_rfp_minimum(
+                    research.budget,
+                    rfp_id=rfp_id,
+                    rfp_context=rfp_text,
+                    rfp_sections=research.rfp_sections if research else [],
+                )
+                logs.extend(f"Budget: {line}" for line in repair_logs)
+                if repaired is not research.budget:
+                    research = research.model_copy(update={"budget": repaired})
+                    await asave_research_cache(research)
+                    meta["budgetChanged"] = True
+                    meta["budgetStatus"] = "repaired"
+                    meta["budgetRepairedNotes"] = [
+                        *(meta.get("budgetRepairedNotes") or []),
+                        f"re-priced toward RFP minimum ${floor:,.0f}",
+                    ]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("RFP-minimum budget repair during Scan failed: %s", exc)
+                logs.append(f"Budget: RFP-minimum repair failed ({exc}).")
+
     if manuscript_budget_is_missing(draft, research):
         logs.append(
             "Budget: pricing model missing professional fee line items — "
@@ -882,4 +924,17 @@ def summarize_budget_kpi_findings(
         rev = research.budget.agency_revenue_estimate
         if cap and rev:
             lines.append(f"budget_cap: ${cap:,.0f} vs agency revenue ${float(rev):,.0f}")
+        from app.services.evidence_trust.rfp_money_constraints import (
+            budget_total_for_minimum_check,
+            collect_under_minimum_flags,
+        )
+
+        floor = research.budget.rfp_budget_floor
+        if floor:
+            total = budget_total_for_minimum_check(research.budget)
+            status = "UNDER" if collect_under_minimum_flags(research.budget) else "ok"
+            lines.append(
+                f"budget_minimum: RFP floor ${float(floor):,.0f} vs proposed "
+                f"${total:,.0f} ({status})"
+            )
     return lines

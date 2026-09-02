@@ -3,7 +3,7 @@
 Converts confident-but-unverified certifications (E-Verify under perjury, conflict
 disclosures, completed vendor registration / procurement downloads, false complete-RFP
 review claims) into [VERIFY]/[MANUAL FILL] tags. Also flags invented staffing hours,
-filler credentials, and missing near-direct case studies (e.g. Recovery Network of Oregon).
+filler credentials, and unsupported procurement assertions.
 
 Principle: any statement that certifies an external compliance action was ALREADY
 completed must trace to KB evidence or become MANUAL FILL — never a growing list of
@@ -75,16 +75,6 @@ _TEN_YEAR_FILLER_RE = re.compile(
     r"|ten[-\s]?year\s+(?:corporate[-\s]?creative\s+)?partnership",
 )
 
-_HEALTH_COALITION_RFP_RE = re.compile(
-    r"(?i)health\s+polic|ARCHI|public\s+health|stigma|coalition|"
-    r"social\s+market|behavioral\s+health|recovery|substance|"
-    r"community\s+engagement|lived\s+experience",
-)
-
-_RNO_MENTION_RE = re.compile(
-    r"(?i)recovery\s+network\s+of\s+oregon|\bRNO\b|oregon\s+recovers",
-)
-
 _EVERIFY_VERIFY = verify_gap(
     "E-Verify enrollment",
     "unconfirmed in KB — Sonja/Operations must confirm before any sworn affidavit "
@@ -119,12 +109,6 @@ _TABLE_PCT_CELL_RE = re.compile(
 _PROSE_PCT_TIME_RE = re.compile(
     r"(?i)\b(\d{1,3}(?:\s*[-–—]\s*\d{1,3})?\s*%)(\s+"
     r"(?:of\s+(?:their|his|her|our)\s+time|time(?:\s+commitment)?|FTE|allocation))\b"
-)
-
-_RNO_FLAG = (
-    "[FLAG FOR SONJA: Add Recovery Network of Oregon (RNO) — near-direct coalition "
-    "health/stigma communications proof with metrics; strongest KB match for this RFP "
-    "scope; prefer for references / previous experience / case studies]"
 )
 
 # --- Procurement / submission action assertions (general — any buyer portal) ----
@@ -450,28 +434,12 @@ class LegalAttestationReport:
     filler_flags: int = 0
     procurement_flags: int = 0
     conference_attendance_flags: int = 0
-    rno_flags: int = 0
     logs: list[str] = field(default_factory=list)
 
 
 def is_locked_legal_verify_tag(tag_inner: str) -> bool:
     """True when a VERIFY tag must not be auto-cleared by KB fill / VERIFY cleanup."""
     return bool(LEGAL_VERIFY_LOCK_RE.search(tag_inner or ""))
-
-
-def rfp_needs_health_coalition_proof(
-    rfp: RfpRecord | object | None,
-    rfp_context: str = "",
-) -> bool:
-    blob = " ".join(
-        [
-            str(getattr(rfp, "title", "") or ""),
-            str(getattr(rfp, "client", "") or ""),
-            str(getattr(rfp, "sector", "") or ""),
-            rfp_context or "",
-        ]
-    )
-    return bool(_HEALTH_COALITION_RFP_RE.search(blob))
 
 
 def _replace_asserted_everify(content: str) -> tuple[str, int]:
@@ -575,28 +543,6 @@ def _section_is_attestation_like(section: ProposalSection) -> bool:
     return any(h in title or h in body[:500] for h in hints)
 
 
-def _pick_rno_section(draft: ProposalDraft) -> ProposalSection | None:
-    ranked: list[tuple[int, ProposalSection]] = []
-    for section in draft.sections:
-        title = (section.title or "").casefold()
-        sid = (section.id or "").casefold()
-        score = 0
-        if "reference" in title:
-            score = 50
-        elif "previous experience" in title or "past performance" in title:
-            score = 40
-        elif sid.startswith("section-3") or "case stud" in title or "our work" in title:
-            score = 30
-        elif "experience" in title:
-            score = 20
-        if score and (section.content or "").strip():
-            ranked.append((score, section))
-    if not ranked:
-        return None
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    return ranked[0][1]
-
-
 def gate_section_legal_attestations(
     section: ProposalSection,
     *,
@@ -678,81 +624,6 @@ def gate_section_legal_attestations(
     return section, report
 
 
-def ensure_rno_flagged_for_health_rfp(
-    draft: ProposalDraft,
-    *,
-    rfp: RfpRecord | object | None,
-    rfp_context: str = "",
-) -> tuple[ProposalDraft, LegalAttestationReport]:
-    """If RFP needs coalition-health proof and RNO is absent, FLAG the best section."""
-    report = LegalAttestationReport()
-    if not rfp_needs_health_coalition_proof(rfp, rfp_context):
-        return draft, report
-
-    blob = "\n".join(s.content or "" for s in draft.sections)
-    if _RNO_MENTION_RE.search(blob):
-        return draft, report
-
-    target = _pick_rno_section(draft)
-    if not target:
-        report.logs.append(
-            "Health/coalition RFP but no section available to FLAG Recovery Network of Oregon"
-        )
-        return draft, report
-
-    body = (target.content or "").rstrip()
-    if _RNO_FLAG in body:
-        return draft, report
-    updated = f"{body}\n\n{_RNO_FLAG}\n"
-    sections = [
-        s.model_copy(update={"content": updated}) if s.id == target.id else s
-        for s in draft.sections
-    ]
-    report.rno_flags = 1
-    report.logs.append(
-        f"FLAGGED missing Recovery Network of Oregon on {target.title} "
-        "(near-direct coalition health proof)"
-    )
-    return draft.model_copy(update={"sections": sections}), report
-
-
-def strip_rno_flags_when_not_health_rfp(
-    draft: ProposalDraft,
-    *,
-    rfp: RfpRecord | object | None,
-    rfp_context: str = "",
-) -> tuple[ProposalDraft, LegalAttestationReport]:
-    """Remove Recovery Network of Oregon FLAGS left over from health RFPs on other bids."""
-    report = LegalAttestationReport()
-    if rfp_needs_health_coalition_proof(rfp, rfp_context):
-        return draft, report
-
-    flag_re = re.compile(
-        r"\n*\s*\[FLAG FOR SONJA:[^\]]*Recovery Network of Oregon[^\]]*\]\s*",
-        re.I | re.S,
-    )
-    changed = False
-    sections: list[ProposalSection] = []
-    for section in draft.sections:
-        body = section.content or ""
-        if not flag_re.search(body):
-            sections.append(section)
-            continue
-        updated = flag_re.sub("\n\n", body)
-        updated = re.sub(r"\n{3,}", "\n\n", updated).strip() + "\n"
-        sections.append(section.model_copy(update={"content": updated}))
-        changed = True
-        report.logs.append(
-            f"Removed cross-RFP Recovery Network of Oregon FLAG from {section.title} "
-            "(not a health/coalition RFP)"
-        )
-        report.rno_flags += 1
-
-    if not changed:
-        return draft, report
-    return draft.model_copy(update={"sections": sections}), report
-
-
 def apply_legal_attestation_gates(
     draft: ProposalDraft,
     *,
@@ -760,7 +631,7 @@ def apply_legal_attestation_gates(
     rfp_context: str = "",
     evidence_text: str = "",
 ) -> tuple[ProposalDraft, LegalAttestationReport]:
-    """Run attestation + filler + procurement + RNO gates across the manuscript."""
+    """Run attestation + filler + procurement gates across the manuscript."""
     combined = LegalAttestationReport()
     updated: list[ProposalSection] = []
     for section in draft.sections:
@@ -779,13 +650,10 @@ def apply_legal_attestation_gates(
         combined.logs.extend(report.logs)
 
     draft = draft.model_copy(update={"sections": updated})
-    draft, strip_report = strip_rno_flags_when_not_health_rfp(
-        draft, rfp=rfp, rfp_context=rfp_context
-    )
-    combined.logs.extend(strip_report.logs)
-    draft, rno_report = ensure_rno_flagged_for_health_rfp(
-        draft, rfp=rfp, rfp_context=rfp_context
-    )
-    combined.rno_flags += rno_report.rno_flags
-    combined.logs.extend(rno_report.logs)
+    # No client-specific case-study steering here. A keyword detector used to
+    # classify the RFP and inject a named client ("Recovery Network of Oregon")
+    # into references/experience; it misfired on "social media architecture"
+    # and put a health-stigma flag into a garlic-festival proposal. Which past
+    # work is relevant is decided by KB retrieval and the evidence trust gate —
+    # never by a name or keyword baked into this module.
     return draft, combined

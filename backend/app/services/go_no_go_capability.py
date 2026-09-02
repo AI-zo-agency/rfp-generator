@@ -24,6 +24,7 @@ import re
 from typing import Any, Iterable
 
 from app.models.go_no_go import GoNoGoCapabilityRow
+from app.services.go_no_go_requirements import SUBMISSION_CATEGORY
 
 logger = logging.getLogger(__name__)
 
@@ -657,12 +658,19 @@ def unmet_disqualifying_requirements(rows: list[GoNoGoCapabilityRow]) -> list[st
     Averaging one into a matrix produced a 2.8/5 "GO WITH CONDITIONS" on an RFP
     the agency could not answer without inventing case studies. An unmet
     disqualifier ends the pursuit regardless of what the other dimensions say.
+
+    Proposal-content rows are excluded no matter how they are flagged. "Provide
+    three client references" is a form every bidder can fill out; it is not a
+    threshold zö can fail. On the Gilroy run two such rows arrived
+    disqualifying=true, forced NO-GO outright, and suppressed every calibration
+    floor while the scope itself matched a won proposal already in the KB.
     """
     return [
         row.requirement
         for row in rows
         if getattr(row, "disqualifying", False)
         and row.status not in {"verified", "partial"}
+        and (row.category or "service").casefold() != SUBMISSION_CATEGORY
     ]
 
 

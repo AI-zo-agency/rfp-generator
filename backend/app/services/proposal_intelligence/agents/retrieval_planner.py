@@ -65,6 +65,77 @@ async def run_retrieval_planner(
     return apply_retrieval_plan_from_raw(plan, raw, provider=provider)
 
 
+# A References tab asks for something no other section wants: the contact
+# records for past clients (name, title, phone, email), which live inside the
+# reference tables of past proposals rather than in case-study narrative. The
+# planner, left to itself, writes case-study-shaped queries for it, so the tab
+# reached the writer with no reference evidence at all and the model fell back
+# to narrating the process ("select three references, obtain contact info") —
+# which then shipped to the client as the section body.
+_REFERENCE_TITLE_HINT = "reference"
+
+
+def section_wants_client_references(title: str) -> bool:
+    """True for a tab that must name actual past clients and their contacts.
+
+    Deliberately narrow: "reference" in the title. Broadening this to past
+    performance / qualifications would attach contact-record queries to
+    narrative experience tabs that do not want them.
+    """
+    lowered = (title or "").casefold()
+    if _REFERENCE_TITLE_HINT not in lowered:
+        return False
+    # "Reference" also appears in cross-reference / referenced-document tabs,
+    # which are about the RFP's own documents, not past clients.
+    for phrase in ("cross-reference", "cross reference", "referenced document", "reference number"):
+        if phrase in lowered:
+            return False
+    return True
+
+
+def client_reference_queries(rfp_client: str, rfp_sector: str) -> list[str]:
+    """KB questions that actually surface reference rows from past proposals."""
+    queries = [
+        "zö agency client references list with contact name, title, phone and email "
+        "from past submitted proposals",
+        "zö agency past client reference contacts and the project scope and dates "
+        "delivered for each",
+    ]
+    sector = (rfp_sector or "").strip()
+    if sector:
+        queries.append(
+            f"zö agency {sector} client references with contact information and "
+            f"comparable scope of work"
+        )
+    client = (rfp_client or "").strip()
+    if client:
+        queries.append(
+            f"zö agency references for public sector clients comparable to {client}"
+        )
+    return queries
+
+
+def _attach_reference_queries(
+    retrieval: RetrievalPlan, plan: ProposalExecutionPlan
+) -> RetrievalPlan:
+    """Give every References tab explicit contact-record queries."""
+    titles = {p.section_id: p.title for p in plan.writing.section_plans.plans}
+    client = plan.opportunity.understanding.client or ""
+    sector = plan.opportunity.understanding.industry or ""
+    for entry in retrieval.entries:
+        if not section_wants_client_references(titles.get(entry.section_id, "")):
+            continue
+        extra = client_reference_queries(client, sector)
+        existing = list(entry.queries or [])
+        entry.queries = extra + [q for q in existing if q not in extra]
+        for source in ("references", "won_proposals"):
+            if source not in entry.expected_sources:
+                entry.expected_sources.append(source)
+        if "client reference contacts" not in entry.required_assets:
+            entry.required_assets.append("client reference contacts")
+    return retrieval
+
+
 def apply_retrieval_plan_from_raw(
     plan: ProposalExecutionPlan,
     raw: dict | None,
@@ -110,6 +181,7 @@ def apply_retrieval_plan_from_raw(
             ],
             confidence=0.35,
         )
+    retrieval = _attach_reference_queries(retrieval, plan)
     retrieval.confidence = clamp_confidence(retrieval.confidence)
     plan.writing.retrieval_plan = retrieval
     plan.writing.reviewer_personas = None

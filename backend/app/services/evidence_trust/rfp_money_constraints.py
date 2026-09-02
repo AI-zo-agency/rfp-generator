@@ -22,6 +22,63 @@ logger = logging.getLogger(__name__)
 
 CONSTRAINT_HARD_FEE_NTE = "hard_fee_nte"
 CONSTRAINT_PROGRAM_OR_MEDIA_ENVELOPE = "program_or_media_envelope"
+CONSTRAINT_MINIMUM_BUDGET = "minimum_budget"
+
+# --- RFP-stated minimum budget -------------------------------------------
+# The buyer telling you the floor of what they expect to spend. Distinct from
+# proposal_budget_floor.py, which is zo's OWN 00_Guide_Pricing rate floor.
+# Incident: a $500,000 "minimum budgeted amount" had nowhere to land, so a
+# $278,400 bid passed every gate and left ~$220k on the table.
+
+_MINIMUM_LANGUAGE_RE = re.compile(
+    r"(?:minimum|at\s+least|no\s+less\s+than|not\s+less\s+than|no\s+lower\s+than|"
+    r"floor\s+of|starting\s+at)",
+    re.I,
+)
+
+# A minimum only counts when it is a minimum OF THE ENGAGEMENT'S MONEY.
+_BUDGET_TOPIC_RE = re.compile(
+    r"(?:budget(?:ed|ing)?|compensation|professional\s+fees?|"
+    r"contract\s+(?:value|amount|award|price)|award\s+amount|"
+    r"project\s+(?:budget|value|cost|amount)|"
+    r"(?:cost|fee|price)\s+proposal|"
+    r"total\s+(?:project|contract|proposed)\s+(?:cost|price|amount|value)|"
+    r"estimated\s+(?:cost|value|spend)|anticipated\s+(?:budget|value|award|spend))",
+    re.I,
+)
+
+# "minimum" in an RFP is overwhelmingly an insurance / bonding / eligibility
+# word. A false floor is worse than a missed one — it drives the repair loop to
+# inflate a correctly-priced bid — so every one of these vetoes the match.
+_MINIMUM_BUDGET_EXCLUSION_RE = re.compile(
+    r"(?:insurance|liabilit|coverage|indemnit|\bbond(?:s|ed|ing)?\b|surety|"
+    r"workers?'?\s+comp|umbrella|aggregate|per\s+occurrence|deductible|"
+    r"self[-\s]insured\s+retention|"
+    r"annual\s+(?:gross\s+)?(?:revenue|receipts|sales)|net\s+worth|"
+    r"bid\s+(?:security|guarantee)|liquidated\s+damages|penalt|"
+    r"prevailing\s+wage|payroll|salar)",
+    re.I,
+)
+
+# Explicit ceiling wording. Used to break the tie when a window carries BOTH
+# minimum and maximum language — e.g. "minimum contract value", where
+# "contract value" alone sits inside _HARD_FEE_CONTEXT_RE and would otherwise
+# make one dollar figure serve as both the floor and the ceiling.
+_EXPLICIT_MAXIMUM_RE = re.compile(
+    r"(?:not\s+to\s+exceed|\bNTE\b|shall\s+not\s+exceed|cannot\s+exceed|"
+    r"must\s+not\s+exceed|may\s+not\s+exceed|maximum|ceiling|"
+    r"up\s+to|no\s+more\s+than|\bcap(?:ped)?\b)",
+    re.I,
+)
+
+# "$500,000 to $750,000" / "between $250,000 and $400,000" — the low end is the
+# stated floor. Requires a budget topic in the window (below) to fire.
+_BUDGET_RANGE_RE = re.compile(
+    r"\$\s*([\d,]+(?:\.\d+)?)\s*(million|billion|m|b|k|thousand)?"
+    r"\s*(?:to|through|and|-|\u2013|\u2014)\s*"
+    r"\$\s*([\d,]+(?:\.\d+)?)\s*(million|billion|m|b|k|thousand)?",
+    re.I,
+)
 
 _HARD_FEE_CONTEXT_RE = re.compile(
     r"(?:fixed[\s-]?price|not\s+to\s+exceed|NTE|"
@@ -214,6 +271,13 @@ def extract_rfp_money_constraints(text: str) -> list[RfpMoneyConstraint]:
             continue
         if not _HARD_FEE_CONTEXT_RE.search(window):
             continue
+        # A stated MINIMUM is not a ceiling. Several _HARD_FEE_CONTEXT_RE
+        # alternatives are ambiguous on their own ("contract value", "budget
+        # of"), so "the minimum contract value is $500,000" matched here and
+        # the one figure became both floor and cap. Explicit ceiling wording
+        # anywhere in the window still wins.
+        if _MINIMUM_LANGUAGE_RE.search(window) and not _EXPLICIT_MAXIMUM_RE.search(window):
+            continue
         # Year 2/3 option dollars are not the Year 1 bid ceiling.
         if _nearest_year_kind(body, start, end) == "later":
             continue
@@ -248,6 +312,45 @@ def extract_rfp_money_constraints(text: str) -> list[RfpMoneyConstraint]:
             CONSTRAINT_HARD_FEE_NTE,
             _window_excerpt(body, start, end),
         )
+
+    def _minimum_blocked(window: str) -> bool:
+        return bool(
+            _ELIGIBILITY_DOLLAR_CONTEXT_RE.search(window)
+            or _MINIMUM_BUDGET_EXCLUSION_RE.search(window)
+        )
+
+    # Stated budget RANGE — the low end is the floor. No minimum wording is
+    # needed ("budget of $500,000 to $750,000"), so this pass leans entirely on
+    # the budget topic to stay off unrelated dollar pairs.
+    for match in _BUDGET_RANGE_RE.finditer(body):
+        low = _parse_money_groups(match.group(1), match.group(2))
+        high = _parse_money_groups(match.group(3), match.group(4))
+        if low is None or high is None or low >= high:
+            continue
+        start, end = match.start(), match.end()
+        window = body[max(0, start - 140) : min(len(body), end + 60)]
+        if _minimum_blocked(window) or not _BUDGET_TOPIC_RE.search(window):
+            continue
+        if _nearest_year_kind(body, start, end) == "later":
+            continue
+        _add(low, CONSTRAINT_MINIMUM_BUDGET, _window_excerpt(body, start, end))
+
+    # Scalar stated minimum — requires minimum wording AND a budget topic.
+    for match in _MONEY_RE.finditer(body):
+        amount = _parse_money_groups(match.group(1), match.group(2))
+        if amount is None:
+            continue
+        start, end = match.start(), match.end()
+        window = body[max(0, start - 140) : min(len(body), end + 100)]
+        if _minimum_blocked(window):
+            continue
+        if not _MINIMUM_LANGUAGE_RE.search(window):
+            continue
+        if not _BUDGET_TOPIC_RE.search(window):
+            continue
+        if _nearest_year_kind(body, start, end) == "later":
+            continue
+        _add(amount, CONSTRAINT_MINIMUM_BUDGET, _window_excerpt(body, start, end))
 
     logger.info(
         "rfp_money_constraints extracted count=%s kinds=%s",
@@ -400,6 +503,21 @@ def primary_program_media_envelope(
     return min(env, key=lambda c: c.amount)
 
 
+def primary_minimum_budget(
+    constraints: list[RfpMoneyConstraint],
+) -> RfpMoneyConstraint | None:
+    """Lowest extracted floor wins.
+
+    Same reasoning as the ceiling picks, mirrored: taking the max would let one
+    over-eager match force a correctly-priced bid upward, and this figure feeds
+    a repair loop that rewrites the budget.
+    """
+    mins = [c for c in constraints if c.kind == CONSTRAINT_MINIMUM_BUDGET]
+    if not mins:
+        return None
+    return min(mins, key=lambda c: c.amount)
+
+
 def format_money_constraints_block(constraints: list[RfpMoneyConstraint]) -> str:
     if not constraints:
         return (
@@ -408,11 +526,12 @@ def format_money_constraints_block(constraints: list[RfpMoneyConstraint]) -> str
         )
     lines = ["### RFP money constraints (deterministic — cite; do not invent)"]
     for c in constraints:
-        label = (
-            "Hard fee / compensation NTE"
-            if c.kind == CONSTRAINT_HARD_FEE_NTE
-            else "Program / media spend envelope"
-        )
+        if c.kind == CONSTRAINT_HARD_FEE_NTE:
+            label = "Hard fee / compensation NTE"
+        elif c.kind == CONSTRAINT_MINIMUM_BUDGET:
+            label = "RFP-stated MINIMUM budget (bid at or above this)"
+        else:
+            label = "Program / media spend envelope"
         lines.append(f"- {label}: ${c.amount:,.2f} — {c.excerpt}")
     lines.append(
         "- Never label the proposal's own bid total as the RFP ceiling/allocation "
@@ -457,6 +576,11 @@ def apply_constraints_to_budget_fields(
                     nte.amount,
                 )
 
+    floor = primary_minimum_budget(constraints)
+    if floor is not None:
+        updates["rfp_budget_floor"] = floor.amount
+        notes_parts.append(f"minimum_budget={floor.amount:,.2f}: {floor.excerpt}")
+
     envelope = primary_program_media_envelope(constraints)
     if envelope is not None:
         updates["rfp_media_or_program_envelope"] = envelope.amount
@@ -479,6 +603,46 @@ def apply_constraints_to_budget_fields(
     if not updates:
         return budget
     return budget.model_copy(update=updates)
+
+
+# A stated floor is a budget signal, not an arithmetic identity. Only a
+# materially short bid is worth rewriting; a rounding gap is not.
+MINIMUM_BUDGET_TOLERANCE = 0.99
+
+
+def budget_total_for_minimum_check(budget: ProposalBudget) -> float:
+    """The dollar the buyer compares against their stated minimum.
+
+    Their floor describes what they expect the engagement to cost them, so the
+    richest available client-facing total wins — a fee-only figure would read as
+    a shortfall on any engagement whose media pass-through carries real dollars.
+    """
+    candidates = [
+        budget.total_client_invoicing,
+        budget.lump_sum_total,
+        budget.agency_revenue_estimate,
+        budget.agency_fee_subtotal,
+        budget.line_item_sum,
+    ]
+    return max((float(c) for c in candidates if c is not None), default=0.0)
+
+
+def collect_under_minimum_flags(budget: ProposalBudget) -> list[str]:
+    """Pricing flags when the bid falls under an RFP-stated minimum budget."""
+    floor = budget.rfp_budget_floor
+    if floor is None or float(floor) <= 0:
+        return []
+    total = budget_total_for_minimum_check(budget)
+    if total <= 0:
+        return []
+    if total >= float(floor) * MINIMUM_BUDGET_TOLERANCE:
+        return []
+    shortfall = float(floor) - total
+    return [
+        f"[PRICING FLAG: UNDERBID — proposed total ${total:,.2f} is below the "
+        f"RFP-stated minimum budget ${float(floor):,.2f} (${shortfall:,.2f} left "
+        f"on the table). Scope up to the stated minimum or confirm with Sonja]"
+    ]
 
 
 def collect_over_authority_flags(budget: ProposalBudget) -> list[str]:

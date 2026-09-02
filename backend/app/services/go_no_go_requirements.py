@@ -20,7 +20,20 @@ from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
-REQUIREMENT_CATEGORIES = ("service", "role", "technical", "compliance", "logistics")
+REQUIREMENT_CATEGORIES = (
+    "service",
+    "role",
+    "technical",
+    "compliance",
+    "logistics",
+    "submission",
+)
+
+# Proposal-content asks. Real requirements — the proposal is non-responsive
+# without them — but they are authored at submission time, not demonstrated
+# from past work, so no knowledge base can ever evidence them. Scoring them as
+# capabilities put permanent zero-earned rows in the Technical denominator.
+SUBMISSION_CATEGORY = "submission"
 
 
 class RfpRequirement(BaseModel):
@@ -56,14 +69,19 @@ written (roles, tools, deliverables). Never use the buyer's name as subject.
 isCore=true when the RFP makes the requirement mandatory, scores it, or it is
 central to the scope of work. isCore=false for incidental or optional items.
 
-disqualifying=true ONLY for a stated minimum threshold that makes a proposal
-non-responsive when unmet — a counted track record ("at least five comparable
-municipal projects completed within the past five years"), a mandatory license,
-registration, certification, or bond required to bid, or a mandatory reference
-count. These are pass/fail, not scored preferences: a vendor that cannot meet
-one cannot win by writing well. Everything the RFP merely scores, weights, or
-prefers is disqualifying=false — do NOT flag a capability just because it is
-important or heavily weighted.
+disqualifying=true ONLY for a stated minimum threshold the vendor must ALREADY
+MEET before bidding, which makes a proposal non-responsive when unmet — a
+counted track record ("at least five comparable municipal projects completed
+within the past five years"), or a mandatory license, registration,
+certification, or bond required to bid. These are pass/fail, not scored
+preferences: a vendor that cannot meet one cannot win by writing well.
+Everything the RFP merely scores, weights, or prefers is disqualifying=false —
+do NOT flag a capability just because it is important or heavily weighted.
+
+Never set disqualifying=true on something the vendor SUPPLIES in the proposal.
+"Provide three client references" is a form any agency with clients fills out;
+"have completed five comparable projects in five years" is a track record you
+either have or do not. Only the second is a qualification.
 
 category MUST be accurate — scoring depends on it:
 - technical = platforms/tools/methods (CMS, WordPress, ADA/WCAG audit, hosting,
@@ -73,10 +91,27 @@ category MUST be accurate — scoring depends on it:
 - compliance = certifications, insurance, registrations, EEO/policy affirmations,
   ability to contract with the buyer (search 01_companyfacts — never the buyer name)
 - logistics = office location, geography, on-site presence
+- submission = what the PROPOSAL DOCUMENT must contain, authored at submission
+  time rather than demonstrated from past work: client references, an itemized
+  budget or fee schedule, a cost breakdown, a project plan / timeline / approach
+  narrative, a statement of philosophy or understanding, resumes or an org chart
+  compiled for this bid, signed forms, addenda acknowledgements, page limits,
+  and requests to "include N case studies" as an exhibit.
 Do NOT label a platform skill as "role" just because a person would do it.
 
+Read the RFP's submission-instructions section for submission rows. The scope
+of work is where capabilities come from. A capability is something zö either
+can or cannot DO; a submission item is something zö WRITES. "Sponsorship
+package development" is a service. "Include an itemized budget" is submission.
+
+Do NOT re-extract the evaluation criteria as requirements. Scoring sections
+("demonstrated ability to work with an established brand", "strong capabilities
+in data-driven optimization") restate scope you have already enumerated —
+emitting them again creates duplicate rows that double-count the same gap.
+Enumerate each capability ONCE, from the scope of work.
+
 Return ONLY JSON:
-{"requirements":[{"requirement":"...","category":"service|role|technical|compliance|logistics",
+{"requirements":[{"requirement":"...","category":"service|role|technical|compliance|logistics|submission",
   "isCore":true,"disqualifying":false,"rfpQuote":"short verbatim phrase from the RFP",
   "kbQueries":["...","..."]}]}"""
 
@@ -139,12 +174,24 @@ def parse_requirements(raw: dict[str, Any]) -> list[RfpRequirement]:
         if literal.casefold() not in {q.casefold() for q in queries}:
             queries.append(literal)
 
+        # A submission deliverable is authored, not demonstrated: every bidder
+        # can satisfy it, so it can never be the threshold that ends a pursuit.
+        # Enforced here rather than trusted to the prompt — one mis-flagged row
+        # forces NO-GO outright and suppresses every calibration floor.
+        disqualifying = bool(row.get("disqualifying"))
+        if disqualifying and category == SUBMISSION_CATEGORY:
+            logger.info(
+                "go_no_go dropped disqualifying flag on submission row: %s",
+                requirement,
+            )
+            disqualifying = False
+
         out.append(
             RfpRequirement(
                 requirement=requirement,
                 category=category,
                 isCore=bool(row.get("isCore") or row.get("is_core")),
-                disqualifying=bool(row.get("disqualifying")),
+                disqualifying=disqualifying,
                 rfpQuote=_clean(row.get("rfpQuote") or row.get("rfp_quote"), limit=240),
                 kbQueries=queries,
             )

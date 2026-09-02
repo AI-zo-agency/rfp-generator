@@ -2183,7 +2183,7 @@ def _is_our_work_section(section: ProposalSection | None) -> bool:
     if section is None:
         return False
     sid = section.id or ""
-    return sid.startswith("section-3-work-") and sid != "section-3-work-placeholder"
+    return (sid.startswith("section-3-work-") and sid != "section-3-work-placeholder") or bool(re.search(r"(?i)\bcase\s*stud(?:y|ies)\b", section.title or ""))
 
 
 def _case_study_clarify_reply(
@@ -2283,8 +2283,8 @@ def _is_our_work_section(section: ProposalSection | None) -> bool:
     if section is None:
         return False
     return (
-        section.id.startswith("section-3-work-")
-        and section.id != "section-3-work-placeholder"
+        (section.id.startswith("section-3-work-") and section.id != "section-3-work-placeholder")
+        or bool(re.search(r"(?i)\bcase\s*stud(?:y|ies)\b", section.title or ""))
     )
 
 
@@ -3633,9 +3633,10 @@ Rules:
     the point. Never pad with filler, restated RFP criteria, generic boilerplate, or
     multi-page essays. One strong sentence beats three weak ones. Let designer notes and
     visual layouts carry density instead of prose.
-12. FORMAT: Prefer short paragraphs, markdown bullet lists, and markdown tables for phases,
+12. FORMAT & STRUCTURE: Prefer short paragraphs, markdown bullet lists, and markdown tables for phases,
     process steps, cadence, comparisons, and roles — whenever that improves evaluator scanability.
-    Dense, scannable layouts score better than walls of text.
+    Dense, scannable layouts score better than walls of text. If the user explicitly asks to "convert to bullet points" or "format as a table", you MUST rewrite the content into that exact markdown format.
+12a. PRESERVE EXISTING TABLES: If the previous draft contains a markdown table or bulleted list, you MUST preserve it as a table/list in your output. Do not flatten existing tables into paragraphs.
 13. DESIGNER NOTES: Insert ONLY as a standalone paragraph
     `[DESIGNER NOTE: concrete layout handoff]` after a blank line — never **Designer Note:**,
     HTML/div, or "styled as". Content is a production handoff (callout box title + placement,
@@ -3680,6 +3681,7 @@ Rules:
      person/row/sentence. Keep every other sentence, heading, and table row verbatim.
      Never blank the whole excerpt because they said "remove".
    - If they asked to ADD a person, sentence, or row: insert it and preserve the rest.
+   - If they asked to REFORMAT or CONVERT (e.g. "convert to bullet points", "make this a table", "add to table"): completely rewrite the excerpt into the requested markdown format (bullet points, numbered list, or markdown table) while preserving all facts.
 9. Budget/pricing excerpts: NEVER change agency revenue or commission lines to $0 — use commission rate × pass-through or canonical fee from section context; if unknown use [VERIFY: Sonja confirm commission rate and annual media estimate].
 10. Do NOT reverse-engineer dollar amounts to hit a user-requested total — each line must trace to the Pricing Guide; suggest tier/scope changes instead (option C).
 11. One-time setup/development lines must not be multiplied by 12 unless the excerpt is explicitly a monthly recurring service from the guide.
@@ -6155,6 +6157,32 @@ async def _persist_section_improve_draft(
     section_title: str,
 ) -> ProposalDraft:
     """Save improved manuscript + an After snapshot so versions keep chat content."""
+    from app.services.proposal_draft_structure_stubs import (
+        restore_sections_emptied_by_scan,
+    )
+    from app.services.proposal_repository import aget_proposal_draft as _aget_prior
+
+    # A chat rewrite must not delete the checkable facts it was asked to work on.
+    # Observed: the user typed "Fill this table" on Case Studies and the rewrite
+    # returned a table with its header and BOTH data rows removed — then reported
+    # "DISCREPANCIES: None found". Word count even went up (330 -> 378), so no
+    # length or shape check could see it.
+    #
+    # Same invariant the Complete & Clean scan enforces, applied at the chat
+    # commit seam: if the stored version of a section carried contact records or
+    # table rows and the rewrite carries none, keep the stored body. Only fires
+    # on total loss, so legitimate restructuring is untouched.
+    try:
+        prior_draft = await _aget_prior(updated_draft.rfp_id)
+        if prior_draft and prior_draft.sections:
+            updated_draft, record_logs = restore_sections_emptied_by_scan(
+                updated_draft, list(prior_draft.sections)
+            )
+            for line in record_logs:
+                logger.warning("chat-persist record guard: %s", line)
+    except Exception as guard_exc:  # noqa: BLE001
+        logger.warning("chat-persist record guard skipped: %s", guard_exc)
+
     from app.services.proposal_cross_reference_resolver import (
         resolve_tags_from_manuscript,
     )
@@ -8696,6 +8724,25 @@ async def improve_proposal_section(
             rfp_context = (
                 f"{rfp_context}\n\n=== 00_Guide_Pricing (Supermemory) ===\n{guide_text[:20_000]}"
             )
+
+    if _is_our_work_section(section):
+        from app.services.proposal_case_study_match import match_case_studies_for_rfp
+
+        try:
+            match_res = await match_case_studies_for_rfp(
+                rfp, save_to_cache=False, fetch_full_text=False
+            )
+            if match_res.studies:
+                cs_block = "=== Knowledge Base Case Study Matches (Best fits for this RFP) ===\n"
+                for st in match_res.studies[:4]:
+                    cs_block += f"- {st.title} (Fit: {st.fit_label}): {st.excerpt}\n"
+                if match_res.gaps:
+                    cs_block += "\nMissing/Weak RFP capabilities:\n"
+                    for g in match_res.gaps[:2]:
+                        cs_block += f"- {g.capability}: {g.gap_reason}\n"
+                rfp_context = f"{rfp_context}\n\n{cs_block}"
+        except Exception as exc:
+            logger.warning("Case study auto-match failed in chat for %s: %s", rfp_id, exc)
 
     if chat_intent not in {"single_edit", "multi_patch"} and not _wants_section_edit(
         raw_user_message, conversation_history=conversation_history

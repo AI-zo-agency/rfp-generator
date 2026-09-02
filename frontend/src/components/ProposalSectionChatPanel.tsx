@@ -5,6 +5,7 @@ import { improveProposalSection } from "@/lib/proposal-api";
 import {
   chatBusyStatusLabel,
   chatLiveWorkSteps,
+  isOurWorkSection,
   messageLooksOutlineStructure,
   messageLooksProposalWide,
   pinnedSectionConflictsWithMessage,
@@ -91,6 +92,15 @@ const REFERENCE_QUICK_PROMPTS = [
   "Does this meet the RFP?",
 ];
 
+const CASE_STUDY_QUICK_PROMPTS = [
+  "Is this case study relevant to the RFP? Suggest alternatives from KB if not.",
+  "Add the best-matching case studies from the knowledge base.",
+  "Strengthen relevance to the RFP — tie outcomes to their requirements.",
+  "Check facts against the knowledge base.",
+  "Designer-compact: tables + layout, keep every RFP ask.",
+  "Does this meet the RFP?",
+];
+
 const SECTION_PIN_LABEL = "Improve this section";
 const REVISE_PIN_LABEL = "Revise content";
 
@@ -171,9 +181,14 @@ export function ProposalSectionChatPanel({
       // Always bind the compose box to the newly pinned tab — do not keep a
       // leftover question about Client References after Improve on another tab.
       const titleCf = (reference.sectionTitle ?? "").toLowerCase();
+      const pinnedSection = sections.find((s) => s.id === reference.sectionId) ?? null;
       if (titleCf.includes("reference") || titleCf.includes("exhibit k")) {
         setInput(
           "Fix reference contacts — verified ClientList only, no duplicate rows, no agency staff."
+        );
+      } else if (isOurWorkSection(pinnedSection)) {
+        setInput(
+          "Check this case study's relevance to the RFP. If weak, suggest a better match from the knowledge base."
         );
       } else {
         setInput("Improve this section for the RFP.");
@@ -579,8 +594,11 @@ export function ProposalSectionChatPanel({
     if (title.includes("reference") || title.includes("exhibit k")) {
       return REFERENCE_QUICK_PROMPTS;
     }
+    if (isOurWorkSection(viewingSection)) {
+      return CASE_STUDY_QUICK_PROMPTS;
+    }
     return QUICK_PROMPTS;
-  }, [viewingSection?.title, reference?.sectionTitle]);
+  }, [viewingSection?.title, viewingSection, reference?.sectionTitle]);
 
   const pinViewingSection = () => {
     if (!viewingSection || disabled || busy) return;

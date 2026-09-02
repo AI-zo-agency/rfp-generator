@@ -2352,19 +2352,81 @@ def _case_study_display_title(index: int, study: str) -> str:
     return clean_case_study_label(study, index=index)
 
 
+def _no_eligible_case_study_section(
+    state: SectionsGraphState, reason: str
+) -> dict[str, Any]:
+    """Section 3 when the evidence trust gate admitted nothing.
+
+    Incident (Gilroy Garlic Festival): 6 case-study candidates were retrieved and
+    all 6 were rejected by the trust gate, so this node returned {} — zero cards.
+    The Sections 1-3 completeness check then raised "missing: Section 3 (Our
+    Work). Click Reset, then Draft Sections 1-3 again", which is advice that
+    cannot work: the gate is deterministic, so every retry rejects the same
+    candidates and burns another full run. The log shows it failing identically
+    twice, 85 seconds apart.
+
+    A gate rejecting everything is a real answer, not a crash. It means "no
+    VERIFIED past project may be cited for this claim" — so the section states
+    capability at a general level, names NO project, and hands the human one
+    explicit decision. That is the same rule the FPP policy applies to client
+    content: where nothing is verifiable, state the capability generally, never
+    illustrate it with an unverified project.
+
+    Never fabricated, never blank, never a dead build.
+    """
+    sector = str(state.get("rfp_sector") or "").strip()
+    focus = f"{sector} " if sector else ""
+    content = (
+        "## Our Work\n\n"
+        "zö agency's project experience is documented in our case study library "
+        "and summarized in Sections 1 and 2 of this response, which set out the "
+        "team, capabilities, and delivery model we would apply to this "
+        f"{focus}engagement.\n\n"
+        "[MANUAL FILL: Sonja — select the approved case studies to feature here. "
+        "The automated match found no case study that cleared verification for "
+        f"this scope ({reason}). Attach the approved PDFs and name the client, "
+        "scope, and outcome for each.]\n"
+    )
+    return _section_payload(
+        section_id="section-3-work-01-pending-selection",
+        title="Our Work",
+        mode="select",
+        word_target=80,
+        page_limit=state.get("page_limit"),
+        page_ratio=0.03,
+        designer_note_default=(
+            "Our Work: awaiting approved case study selection — do not lay out "
+            "until the featured projects are attached."
+        ),
+        raw={"content": content, "kbRefs": []},
+        kb_sources=[],
+    )
+
+
 async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
     """Case Study Builder — full retrieval per selected study only."""
     if state.get("skip_section_3"):
         return {}
 
+    existing_sections = state.get("sections") or []
+
+    def _fallback(reason: str) -> dict[str, Any]:
+        logger.warning("Section 3 fallback (%s) — emitting capability-level card", reason)
+        section = _no_eligible_case_study_section(state, reason)
+        if not (isinstance(section, dict) and "id" in section and "title" in section):
+            return {}
+        return {"sections": _merge_section_list(existing_sections, [section])}
+
     selection_raw = state.get("evidence_selection")
     if not selection_raw:
-        return {}
+        return _fallback("evidence selection did not run")
 
     evidence = EvidenceSelectionResult.model_validate(selection_raw)
     selected_studies = evidence.selected_studies
     if not selected_studies:
-        return {}
+        return _fallback(
+            f"{evidence.candidates_considered} candidate(s) rejected by the evidence trust gate"
+        )
 
     from app.services.proposal_case_study_eligibility import (
         is_eligible_section3_case_study_title,
@@ -2380,10 +2442,7 @@ async def _build_case_studies(state: SectionsGraphState) -> dict[str, Any]:
         )
     ]
     if not selected_studies:
-        logger.warning(
-            "Section 3: all evidence selections were ineligible dumps/templates"
-        )
-        return {}
+        return _fallback("all selections were multi-project dumps or templates")
 
     merged_state = await _ensure_brand_voice(state)
     existing = merged_state.get("sections") or []

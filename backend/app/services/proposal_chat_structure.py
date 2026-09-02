@@ -1742,10 +1742,83 @@ def unused_case_study_name_from_sources(
     return None
 
 
+def _own_team_member_named_in(draft: ProposalDraft, label: str) -> str | None:
+    """The zö team member named in `label`, if any — read from this draft's bios.
+
+    Section 2 bio tabs ARE the roster for this proposal, so no external list or
+    vocabulary is needed: compare the proposed title against the names we are
+    already presenting as our own people.
+    """
+    haystack = (label or "").casefold()
+    if not haystack:
+        return None
+    for section in draft.sections:
+        if not (section.id or "").startswith("section-2-bio-"):
+            continue
+        title = (section.title or "").strip()
+        # Bio tabs are titled like "2.2 — Ella Lindau"; take the name half.
+        for separator in ("—", "-", ":"):
+            if separator in title:
+                title = title.split(separator)[-1]
+        name = title.strip()
+        # Require both name parts so a common first name alone cannot match.
+        parts = [p for p in name.casefold().split() if len(p) > 1]
+        if len(parts) >= 2 and all(part in haystack for part in parts):
+            return name
+    return None
+
+
 def _plan_add_named_case_study(draft: ProposalDraft, name: str) -> StructurePlan:
+    from app.services.proposal_case_study_eligibility import (
+        is_eligible_section3_case_study_title,
+    )
+
+    label = (name or "").strip() or "Case study"
+
+    # Same gate the build path uses. Without it this function minted an Our Work
+    # tab from ANY KB document name — including company news, which is how
+    # "3.3 — Update: Ella Lindau Promoted to Operations Director" became a case
+    # study. An internal staff promotion is not delivered client work, and a tab
+    # like that in Our Work is worse than a missing one in front of a board.
+    #
+    # unused_case_study_name_from_sources (above) already applied this check;
+    # every other caller reached here ungated.
+    # Our Work is about CLIENTS. A title naming one of our own people is company
+    # news, not delivered client work — "Update: Ella Lindau Promoted to
+    # Operations Director" is a staff announcement that the shared title gate
+    # (which screens multi-project dumps and templates) has no reason to catch.
+    #
+    # No keyword list: the draft already carries our roster as Section 2 bio
+    # tabs, so the team's own names are data we have. If the proposed case study
+    # is named after someone with a bio in this very proposal, it is us, not a
+    # client.
+    own_person = _own_team_member_named_in(draft, label)
+    if own_person:
+        logger.info("Case-study ADD refused — names our own staff: %s", label)
+        return StructurePlan(
+            action="clarify",
+            assistantNote=(
+                f"“{label}” names {own_person}, who is on our team — that is a "
+                "company update, not delivered client work, and Our Work must "
+                "show client projects. Tell me which client project to feature "
+                "and I will add that instead."
+            ),
+        )
+
+    if not is_eligible_section3_case_study_title(label):
+        logger.info("Case-study ADD refused — not a client project: %s", label)
+        return StructurePlan(
+            action="clarify",
+            assistantNote=(
+                f"“{label}” is not a client project case study — it reads as a "
+                "company update or a multi-project document, so adding it to Our "
+                "Work would misrepresent it as delivered work. Name the client "
+                "project you want featured and I will add that instead."
+            ),
+        )
+
     cases = _case_study_sections(draft.sections)
     after = cases[-1].id if cases else None
-    label = (name or "").strip() or "Case study"
     logger.info("Case-study ADD: %s (after=%s)", label, after)
     return StructurePlan(
         action="add_sections",

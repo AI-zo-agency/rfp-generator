@@ -529,32 +529,30 @@ async def _fill_static_section(
             f"{text[:3500]}"
         )
     elif mode == "select" and "case" in section.id.lower():
-        selection, _ = await llm.chat_json(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "Select 2-4 case studies from the excerpts. Return JSON: "
-                        '{"selected":["filename"],"rationale":"...","designerNote":"..."} '
-                        "Use only documents explicitly listed. Never invent clients."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"RFP: {rfp.title} / {rfp.sector}\n\nCase studies:\n{text[:8000]}",
-                },
-            ],
-            max_tokens=16000,
-        )
-        selected = selection.get("selected", [])
-        rationale = selection.get("rationale", "")
-        body = (
-            f"{designer}\n\n"
-            f"Selected case studies: {', '.join(selected) if isinstance(selected, list) else selected}\n"
-            f"Rationale: {rationale}\n\n"
-            f"--- KB excerpts ---\n{text[:3000]}"
-        )
-        # KB references removed - not included in proposals
+        from app.services.proposal_case_study_match import match_case_studies_for_rfp
+        
+        try:
+            match_res = await match_case_studies_for_rfp(
+                rfp, save_to_cache=False, fetch_full_text=False
+            )
+            cs_block = ""
+            if match_res.studies:
+                for st in match_res.studies[:4]:
+                    cs_block += f"- **{st.title}** (Fit: {st.fit_label})\n"
+            else:
+                cs_block = "- No matching case studies found in KB."
+            
+            body = (
+                f"{designer}\n\n"
+                f"[DESIGNER NOTE: Pull standard designed assets for these case studies]\n\n"
+                f"=== Recommended Case Studies (via Auto-Match) ===\n\n"
+                f"{cs_block}"
+            )
+        except Exception as exc:
+            from app.core.logger import logger
+            logger.exception("Failed to match case studies during build for %s", rfp.id)
+            body = f"{designer}\n\nFailed to match case studies: {exc}\n\n{text[:3000]}"
+            
         section.kb_refs = []
     else:
         selection, _ = await llm.chat_json(
@@ -600,6 +598,24 @@ async def _write_custom_section(
     research_summary: str,
     rfp_context: str,
 ) -> ProposalSection:
+    extra_context = ""
+    if "reference" in section.title.lower() or "past performance" in section.title.lower():
+        from app.services.proposal_knowledge_base_tools import search_knowledge_base
+        try:
+            ref_text, _ = await search_knowledge_base(
+                "client references past performance 08_References",
+                limit=5,
+                rfp_client=rfp.client,
+                rfp_sector=rfp.sector,
+            )
+            if ref_text:
+                extra_context = f"\n\n=== VERIFIED KNOWLEDGE BASE REFERENCES ===\n{ref_text[:5000]}\nMUST USE these exact references to build the section."
+        except Exception as e:
+            from app.core.logger import logger
+            logger.warning("Failed to fetch references for custom section %s: %s", section.id, e)
+
+    from app.services.proposal_drafting_prompts import GLOBAL_AGENT_PROMPT_RULES
+
     raw, _ = await llm.chat_json(
         [
             {
@@ -609,7 +625,8 @@ async def _write_custom_section(
                     f"{format_register_block('narrative')}\n"
                     "Use ONLY facts from the research brief and RFP excerpt. "
                     "Flag unverified items as [VERIFY: ...]. "
-                    "Include [DESIGNER NOTE: ...] where layout is needed. "
+                    "Include [DESIGNER NOTE: ...] where layout is needed.\n"
+                    f"{GLOBAL_AGENT_PROMPT_RULES}\n"
                     'Return JSON: {"content":"full section prose","designerNote":"..."}'
                 ),
             },
@@ -620,7 +637,7 @@ async def _write_custom_section(
                     f"Word target: {section.word_target}\n"
                     f"Client: {rfp.client}\n"
                     f"RFP: {rfp.title}\n\n"
-                    f"Research brief:\n{research_summary[:14000]}\n\n"
+                    f"Research brief:\n{research_summary[:14000]}{extra_context}\n\n"
                     f"RFP excerpt:\n{rfp_context[:8000]}"
                 ),
             },
@@ -838,6 +855,57 @@ def _is_section_placeholder_id(section_id: str) -> bool:
     return (
         section_id in _SECTION_PLACEHOLDER_IDS
         or section_id.endswith("-placeholder")
+    )
+
+
+_GROUP_RECOVERY_SPECS: dict[str, tuple[str, str, str]] = {
+    # label -> (section id, title, what the human must supply)
+    "Section 2 (Team)": (
+        "section-2-team-pending-selection",
+        "Our Team",
+        "select the team members to feature and attach their approved 04_Bio PDFs",
+    ),
+    "Section 3 (Our Work)": (
+        "section-3-work-01-pending-selection",
+        "Our Work",
+        "select the approved case studies to feature and attach their PDFs",
+    ),
+}
+
+
+def _recovery_section_for_group(label: str) -> ProposalSection | None:
+    """An honest, human-actionable card for a group nothing could fill.
+
+    Last-resort safety net behind the per-builder fallbacks. A group can end up
+    empty for reasons that are ANSWERS rather than faults — most often an
+    evidence trust gate admitting nothing, which is deterministic — and raising
+    there told the user to "Click Reset and try again" on a run that would fail
+    identically every time (the Gilroy Garlic Festival build failed twice, 85
+    seconds apart, for exactly this).
+
+    Section 1 is deliberately absent from the recovery table: its subsections are
+    company facts that must come from the KB, so an empty Section 1 is a genuine
+    configuration problem worth surfacing loudly rather than papering over.
+    """
+    spec = _GROUP_RECOVERY_SPECS.get(label)
+    if spec is None:
+        return None
+    section_id, title, ask = spec
+    return ProposalSection(
+        id=section_id,
+        title=title,
+        content=(
+            f"## {title}\n\n"
+            f"[MANUAL FILL: Sonja — {ask}. The automated pass could not verify "
+            f"any entry for this section, so nothing has been asserted here "
+            f"rather than risk an unsupported claim.]\n"
+        ),
+        required=True,
+        custom=False,
+        source="template",
+        mode="select",
+        status="outline",
+        word_target=80,
     )
 
 
@@ -1950,11 +2018,33 @@ async def _generate_sections_1_3_inner(
                     status_code=502,
                 )
         if still_missing:
-            raise ProposalError(
-                "Sections 1–3 incomplete after generation — missing: "
-                f"{', '.join(still_missing)}. Click Reset, then Draft Sections 1–3 again.",
-                status_code=502,
-            )
+            # Do not kill the build. A group can be empty because a gate gave a
+            # real answer ("nothing here is verifiable"), which no retry changes
+            # — so recover what can be recovered and surface the rest as an
+            # explicit human decision inside the draft. Only groups with no
+            # honest placeholder (Section 1 company facts) still raise.
+            unrecovered: list[str] = []
+            for label in still_missing:
+                recovery = _recovery_section_for_group(label)
+                if recovery is None:
+                    unrecovered.append(label)
+                    continue
+                sections_1_3 = [s for s in sections_1_3 if s.id != recovery.id]
+                sections_1_3.append(recovery)
+                logger.warning(
+                    "Sections 1–3 for %s: %s could not be filled — inserted a "
+                    "MANUAL FILL card instead of failing the run.",
+                    rfp_id,
+                    label,
+                )
+            if unrecovered:
+                raise ProposalError(
+                    "Sections 1–3 incomplete after generation — missing: "
+                    f"{', '.join(unrecovered)}. This is a knowledge-base gap, not a "
+                    "transient error: check the KB (02_ company overview) before "
+                    "re-running, because a retry alone will produce the same result.",
+                    status_code=502,
+                )
 
     now = datetime.now(timezone.utc).isoformat()
     existing = await aget_proposal_draft(rfp_id)
