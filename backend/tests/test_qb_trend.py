@@ -219,3 +219,22 @@ def test_rows_are_ordered_top_line_profit_risk_then_trust():
 def test_an_empty_payload_produces_no_rows():
     assert margin_rows({}, None) == []
     assert margin_rows({}, {}) == []
+
+
+def test_margin_row_only_compares_months_whose_cost_has_landed():
+    """August is 62% costed and July 79%. Comparing them against a fully-costed
+    2025 reports a margin gain that is partly just missing bills."""
+    data = _current(cost_completeness={
+        "unsettled_months": ["Jun 2026", "Jul 2026", "Aug 2026"],
+        "adjusted_gross_margin_pct": 48.3,
+    })
+    rows = {r["kind"]: r for r in margin_rows(data, _prior())}
+    assert "revenue_trend" in rows, "income is complete; its row must survive"
+    assert rows["margin_trend"]["detail"].startswith("Jan-May")
+
+
+def test_margin_row_unfiltered_when_completeness_panel_is_absent():
+    """The panel degrades to None on a short history. That must not delete the
+    margin row it was only meant to trim."""
+    rows = {r["kind"]: r for r in margin_rows(_current(), _prior())}
+    assert "margin_trend" in rows

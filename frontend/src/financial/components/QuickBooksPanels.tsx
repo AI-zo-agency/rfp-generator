@@ -85,6 +85,27 @@ function trimTrailing<T>(rows: T[], hasValue: (row: T) => boolean) {
 
 /* ── position ──────────────────────────────────────────────────────────── */
 
+/** Rounding to whole points: a tenth of a point of margin is below the
+ *  precision an estimated cost can carry, and printing it implies otherwise. */
+const _POINTS_WORTH_SAYING = 0.5;
+
+/**
+ * Margin reads high while a month's bills are still arriving, so the caveat
+ * rides on the figure itself. Without it the strip states 53% all quarter and
+ * the reader has no way to know 48% is the truer number.
+ */
+function marginSub(
+  pct: number | null | undefined,
+  completeness: QuickBooksOverview["cost_completeness"],
+) {
+  if (pct == null) return undefined;
+  const base = `${pct}% of booked`;
+  const adjusted = completeness?.adjusted_gross_margin_pct;
+  const over = completeness?.overstated_points;
+  if (adjusted == null || over == null || over < _POINTS_WORTH_SAYING) return base;
+  return `${base} · ~${Math.round(adjusted)}% once late costs land`;
+}
+
 function MoneyLine({
   data,
   net,
@@ -160,11 +181,7 @@ function MoneyLine({
           size="lg"
           metric="margin"
           value={money(pl.gross_profit)}
-          sub={
-            pl.gross_margin_pct != null
-              ? `${pl.gross_margin_pct}% of booked`
-              : undefined
-          }
+          sub={marginSub(pl.gross_margin_pct, data.cost_completeness)}
         />
       ) : null}
       {typeof pl?.net_income === "number" ? (
