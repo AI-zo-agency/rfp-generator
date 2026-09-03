@@ -78,6 +78,11 @@ CREATE TABLE IF NOT EXISTS llm_call_log (
   provider TEXT NOT NULL DEFAULT '',
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
+  -- Prompt-cache token counts. llm_call_log.record_llm_call writes these; when
+  -- they are absent it falls back to a second, legacy insert, so every LLM call
+  -- costs an extra failed round-trip until this exists in the live table.
+  cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
   cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
   latency_ms INTEGER NOT NULL DEFAULT 0,
   tokens_estimated BOOLEAN NOT NULL DEFAULT FALSE,

@@ -60,6 +60,11 @@ class GoNoGoCapabilityRow(BaseModel):
     # related but materially different work. These are different findings:
     # absent may be fixable by re-ingesting; contradicted never is.
     evidence_state: str = Field(default="", alias="evidenceState")
+    # Carried from RfpRequirement.track. Empty means this requirement applies
+    # to every track (or the RFP is single-scope); non-empty is the buyer's
+    # own label for the track/lot this requirement belongs to, so the matrix
+    # can be scored per track instead of pooling unrelated scope together.
+    track: str = Field(default="", alias="track")
 
 
 class GoNoGoFlag(BaseModel):

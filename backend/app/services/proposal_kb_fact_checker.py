@@ -1243,6 +1243,7 @@ async def run_kb_fact_check_pass(
     research: ProposalResearchCache | None = None,
     only_section_ids: list[str] | None = None,
     force_full_check: bool = False,
+    on_progress: Callable[[int, int, str], Awaitable[None]] | None = None,
 ) -> tuple[ProposalDraft, FactCheckReport]:
     """Cross-verify sections; repair from KB when evidence exists.
 
@@ -1281,8 +1282,12 @@ async def run_kb_fact_check_pass(
         work.append((idx, section))
 
     sem = asyncio.Semaphore(FACT_CHECK_SECTION_PARALLEL)
+    completed_count = 0
 
     async def _run(idx: int, section: ProposalSection) -> tuple[int, ProposalSection, FactCheckReport]:
+        nonlocal completed_count
+        if on_progress:
+            await on_progress(completed_count + 1, len(work), section.title or section.id)
         async with sem:
             updated, partial = await _fact_check_one_section(
                 section,
@@ -1292,6 +1297,7 @@ async def run_kb_fact_check_pass(
                 brand_voice=brand_voice,
                 force_full_check=force_full,
             )
+            completed_count += 1
             return idx, updated, partial
 
     if work:

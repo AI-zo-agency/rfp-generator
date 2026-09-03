@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 from app.models.proposal import (
+    ManuscriptLocks,
     PreSubmitReview,
     ProposalBrandVoice,
     ProposalBudget,
@@ -253,6 +254,26 @@ STATIC_SECTION_IDS = (
 
 # Pre-subsection monoliths — never keep these once 1.1–1.5 / bios / work cards exist.
 LEGACY_MONOLITH_SECTION_IDS = frozenset(STATIC_SECTION_IDS)
+
+
+def _locks_are_plan_informed(locks: ManuscriptLocks | None) -> bool:
+    """True when existing manuscript locks need not be rebuilt in phase-2.
+
+    Sections-1-3 can build locks on a cold run (plan=None) before phase-2's
+    execution plan exists; phase-2 then rebuilds them unconditionally with a
+    plan and a fresh roster fetch — genuinely better-informed on a cold run,
+    but wasted work if a prior phase-2 pass already produced complete,
+    plan-informed locks. Skip only when ALL of: locks exist, carry a primary
+    contact name, don't need human confirmation, and were built with the
+    execution plan available.
+    """
+    if locks is None:
+        return False
+    return bool(
+        (locks.primary_contact_name or "").strip()
+        and not locks.needs_human_confirm
+        and locks.built_with_plan
+    )
 
 
 def _is_legacy_monolith_section_id(section_id: str) -> bool:
@@ -1399,26 +1420,35 @@ async def _run_phase2_retrieval_inner(rfp_id: str) -> ProposalResearchCache:
         rfp_context=rfp_context,
     )
 
-    roster_excerpt = ""
-    try:
-        roster_excerpt, _roster_sources = await proposal_knowledge_base_tools.fetch_master_team_roster(
-            rfp_client=rfp.client,
-            rfp_sector=rfp.sector,
-            rfp_context=rfp_context,
+    existing_locks = prior_research.manuscript_locks if prior_research else None
+    if _locks_are_plan_informed(existing_locks):
+        manuscript_locks = existing_locks
+        logger.info(
+            "Phase 2 reused plan-informed manuscript locks for %s (skipped roster "
+            "fetch + rebuild)",
+            rfp_id,
         )
-    except ProposalGenerationCancelled:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Phase 2 roster fetch for locks failed (non-fatal): %s", exc)
+    else:
+        roster_excerpt = ""
+        try:
+            roster_excerpt, _roster_sources = await proposal_knowledge_base_tools.fetch_master_team_roster(
+                rfp_client=rfp.client,
+                rfp_sector=rfp.sector,
+                rfp_context=rfp_context,
+            )
+        except ProposalGenerationCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Phase 2 roster fetch for locks failed (non-fatal): %s", exc)
 
-    from app.services.proposal_manuscript_locks import build_manuscript_locks
+        from app.services.proposal_manuscript_locks import build_manuscript_locks
 
-    manuscript_locks = await build_manuscript_locks(
-        rfp=rfp,
-        rfp_context=rfp_context,
-        plan=plan,
-        roster_excerpt=roster_excerpt or "",
-    )
+        manuscript_locks = await build_manuscript_locks(
+            rfp=rfp,
+            rfp_context=rfp_context,
+            plan=plan,
+            roster_excerpt=roster_excerpt or "",
+        )
 
     from app.core.config import settings as app_settings
     from app.services.evidence_allocator import build_evidence_allocation_ledger
@@ -4287,7 +4317,15 @@ async def generate_full_proposal(
         )
 
         try:
+            from app.core.config import settings as app_settings
             from app.services.proposal_fulfill_rfp_gaps import run_fulfill_rfp_gaps
+
+            if not app_settings.build_finalize_enabled:
+                # Final checks is switched OFF (see config.build_finalize_enabled).
+                # The pass itself is untouched — this only skips running it.
+                logger.info("Build finalize tail disabled by config for %s", rfp_id)
+                step_trace("build_finalize_tail_disabled", rfp_id=rfp_id)
+                return draft, brand_voice, research
 
             _review, research, draft, _finalize_report = await run_fulfill_rfp_gaps(
                 rfp_id, mode="build_finalize"

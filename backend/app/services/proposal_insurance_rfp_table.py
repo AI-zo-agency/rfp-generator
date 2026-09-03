@@ -169,7 +169,11 @@ def _limits_markdown_table(limits: RfpInsuranceLimits) -> str:
         rows.append(f"| Automobile Liability | {limits.auto} |")
     if limits.eo:
         rows.append(f"| Professional Liability / E&O | {limits.eo} |")
-    rows.append("| Certificates of Insurance | [MANUAL FILL: attach COI naming HTA as additional insured] |")
+    # Extended 6-coverage table fallbacks
+    rows.append("| Workers' Compensation & Employers' Liability | Statutory / $1,000,000 policy limit |")
+    rows.append("| Umbrella / Excess Liability | $1,000,000 - $5,000,000 per occurrence / aggregate |")
+    rows.append("| Uninsured / Underinsured Motorist & Vehicle Comp/Collision | Included per policy terms |")
+    rows.append("| Certificates of Insurance | [MANUAL FILL: attach COI naming client as additional insured] |")
     return "\n".join(rows)
 
 

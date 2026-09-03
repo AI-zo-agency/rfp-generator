@@ -779,6 +779,7 @@ def rows_from_assessments(
         is_core = bool(getattr(requirement, "is_core", False))
         category = str(getattr(requirement, "category", "") or "service").casefold()
         disqualifying = bool(getattr(requirement, "disqualifying", False))
+        track = str(getattr(requirement, "track", "") or "")
         item = by_requirement.get(name.casefold())
         available = sources.get(name, {})
 
@@ -799,6 +800,7 @@ def rows_from_assessments(
                     isCore=is_core,
                     disqualifying=disqualifying,
                     category=category,
+                    track=track,
                     evidenceState=evidence_state,
                     downgradeReason=reason
                     or (
@@ -835,6 +837,7 @@ def rows_from_assessments(
                         isCore=is_core,
                         disqualifying=disqualifying,
                         category=category,
+                        track=track,
                         evidenceState="adjacent",
                         downgradeReason=(
                             "FLAG: confirm at bid — operational commitment, "
@@ -906,6 +909,7 @@ def rows_from_assessments(
                             isCore=is_core,
                             disqualifying=disqualifying,
                             category=category,
+                            track=track,
                             evidenceState="adjacent",
                             downgradeReason=(
                                 "FLAG SONJA: assign a current roster person as "
@@ -938,6 +942,7 @@ def rows_from_assessments(
                             isCore=is_core,
                             disqualifying=disqualifying,
                             category=category,
+                            track=track,
                         )
                     )
                     continue
@@ -952,6 +957,7 @@ def rows_from_assessments(
                 isCore=is_core,
                 disqualifying=disqualifying,
                 category=category,
+                track=track,
                 downgradeReason=failure,
             )
         )

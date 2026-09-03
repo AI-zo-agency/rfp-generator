@@ -45,6 +45,11 @@ class RfpRequirement(BaseModel):
     disqualifying: bool = False
     rfp_quote: str = Field(default="", alias="rfpQuote")
     kb_queries: list[str] = Field(default_factory=list, alias="kbQueries")
+    # Empty means a single-scope RFP — the overwhelmingly common case. A
+    # non-empty value is the buyer's OWN label for the track/lot/category this
+    # requirement belongs to (e.g. "Track 1", "Lot B"), used to segment
+    # capability scoring per track instead of pooling unrelated scope.
+    track: str = ""
 
 
 REQUIREMENT_PLANNER_PROMPT = """You decompose an RFP into the discrete capabilities a vendor must have,
@@ -110,10 +115,23 @@ in data-driven optimization") restate scope you have already enumerated —
 emitting them again creates duplicate rows that double-count the same gap.
 Enumerate each capability ONCE, from the scope of work.
 
+Some RFPs split their scope into separate tracks, lots, categories, or service
+areas, and let a vendor bid on one, several, or all of them — e.g. "Track 1:
+Creative & Brand" and "Track 2: Media Relations", or "Lot A" / "Lot B". When
+THIS RFP does that, every requirement must carry the buyer's own VERBATIM
+short label for the track it belongs to, in "track" — copy the label as the
+RFP writes it (e.g. "Track 1", "Lot B", "Category 2 — Earned Media"), do not
+paraphrase or renumber it. Requirements that apply to every track regardless
+of which one a vendor bids — compliance forms, insurance, references, general
+submission instructions — must leave "track" EMPTY, because they belong to
+all tracks at once, not to any one of them. When the RFP has NO such split,
+leave "track" empty on every requirement — do NOT invent tracks where the RFP
+describes one unified scope.
+
 Return ONLY JSON:
 {"requirements":[{"requirement":"...","category":"service|role|technical|compliance|logistics|submission",
   "isCore":true,"disqualifying":false,"rfpQuote":"short verbatim phrase from the RFP",
-  "kbQueries":["...","..."]}]}"""
+  "kbQueries":["...","..."],"track":"verbatim track/lot label, or empty string"}]}"""
 
 
 _MAX_REQUIREMENTS = 24
@@ -194,6 +212,7 @@ def parse_requirements(raw: dict[str, Any]) -> list[RfpRequirement]:
                 disqualifying=disqualifying,
                 rfpQuote=_clean(row.get("rfpQuote") or row.get("rfp_quote"), limit=240),
                 kbQueries=queries,
+                track=_clean(row.get("track"), limit=60),
             )
         )
         if len(out) >= _MAX_REQUIREMENTS:

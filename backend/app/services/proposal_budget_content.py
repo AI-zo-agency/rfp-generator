@@ -1515,7 +1515,7 @@ def _rollup_phase_fee_rows(
         kind = infer_line_item_type(item)
         desc_raw = (item.description or "").strip()
         is_manual_fill = desc_raw.startswith("[MANUAL FILL")
-        # Pass-through dollars live in the investment header — except MANUAL FILL
+        # Pass-through dollars live in the investment hea   der — except MANUAL FILL
         # placeholders, which must remain visible until a human confirms them.
         if kind == "client_passthrough" and not is_manual_fill:
             continue

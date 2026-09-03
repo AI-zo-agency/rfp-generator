@@ -561,6 +561,11 @@ class ProposalPipelineCheckpoint(BaseModel):
         description="Human-readable sub-step (e.g. drafting section title, KPI scan).",
     )
     activity_detail: str | None = Field(default=None, alias="activityDetail")
+    scan_profile: str | None = Field(
+        default=None,
+        alias="scanProfile",
+        description="The scan profile currently running, e.g. 'targeted_fix' or 'full'.",
+    )
     step_index: int | None = Field(default=None, alias="stepIndex")
     step_total: int | None = Field(default=None, alias="stepTotal")
     last_completed_fulfill_step: int | None = Field(
@@ -590,6 +595,40 @@ class ProposalPipelineCheckpoint(BaseModel):
             "The draft is 'already clean' for the UI when it has not been edited "
             "since (draft.updatedAt <= this). Survives refresh / other users "
             "because it is written server-side by the Celery task."
+        ),
+    )
+    targeted_fix_done_section_ids: list[str] = Field(
+        default_factory=list,
+        alias="targetedFixDoneSectionIds",
+        description=(
+            "Section ids already reviewed by an interrupted Review & Fix "
+            "(targeted_fix) run. The next run skips these and picks up where "
+            "it stopped; cleared when the run completes."
+        ),
+    )
+    targeted_fix_structure_done: bool = Field(
+        default=False,
+        alias="targetedFixStructureDone",
+        description=(
+            "The Review & Fix RFP-structure/order pass already finished for "
+            "this run. A resumed run skips it instead of re-paying for its "
+            "RFP-extraction LLM calls; cleared when the run completes."
+        ),
+    )
+    targeted_fix_contradiction_done: bool = Field(
+        default=False,
+        alias="targetedFixContradictionDone",
+        description=(
+            "The Review & Fix cross-section contradiction pass already "
+            "finished for this run; a resumed run skips it."
+        ),
+    )
+    targeted_fix_won_fill_done: bool = Field(
+        default=False,
+        alias="targetedFixWonFillDone",
+        description=(
+            "The Review & Fix past-WON-proposal gap fill already finished "
+            "for this run; a resumed run skips it."
         ),
     )
     updated_at: str = Field(alias="updatedAt")
@@ -631,6 +670,15 @@ class ManuscriptLocks(BaseModel):
     required_kpis: list[str] = Field(default_factory=list, alias="requiredKpis")
     decision_rationale: str = Field(default="", alias="decisionRationale")
     needs_human_confirm: bool = Field(default=False, alias="needsHumanConfirm")
+    built_with_plan: bool = Field(
+        default=False,
+        alias="builtWithPlan",
+        description=(
+            "Locks were built with the execution plan available. Cold-run "
+            "locks are built with plan=None and must be recomputed in "
+            "phase-2; plan-informed locks need not be."
+        ),
+    )
     updated_at: str = Field(default="", alias="updatedAt")
 
 
@@ -705,6 +753,15 @@ class ProposalResearchCache(BaseModel):
     )
     proposal_execution_plan: Any | None = Field(
         default=None, alias="proposalExecutionPlan"
+    )
+    intelligence_checkpoint: dict[str, Any] | None = Field(
+        default=None,
+        alias="intelligenceCheckpoint",
+        description=(
+            "Partial Phase 2 intelligence-graph state: the plan as of the "
+            "last completed node plus the list of nodes already done, so a "
+            "crashed phase resumes instead of re-paying for every node."
+        ),
     )
     fact_ledger: dict[str, Any] | None = Field(
         default=None,

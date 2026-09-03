@@ -2197,16 +2197,7 @@ function ProposalDraftWorkspaceInner({
             confirmLabel: "Run again anyway",
             tone: "default",
           }
-        : canResumeFulfillScan
-        ? {
-            title: "Resume Review & fix?",
-            description:
-              `Continue from step ${fulfillResumeStep} — ${fulfillResumeLabel}.\n\n` +
-              "Earlier steps are already saved on the draft. Pre-submit refresh and submission readiness still run in full — missing answers are filled from past won proposals and the ending report is rebuilt for designer handoff.\n\n" +
-              completeCleanGuide,
-            confirmLabel: "Resume",
-            tone: "default",
-          }
+
         : hasCompletedScanBefore
         ? {
             title: "Run Review & fix again?",
@@ -2218,13 +2209,16 @@ function ProposalDraftWorkspaceInner({
             tone: "default",
           }
         : {
-            title: "Review & fix (optional)",
+            title: "Review & fix (Missing sections + Contradictions)",
             description:
               "Build my proposal already matched RFP order, fact-checked, and ran Ralph trim. " +
-              "Use Review & fix only if you edited the draft and want a full re-audit. " +
-              "It re-reads the whole proposal and spends extra tokens.\n\n" +
-              `${completeCleanGuide}\n\n` +
+              "Use Review & fix if you want to quickly check for missing sections and catch contradictions after manual edits.\n\n" +
               "If you continue:\n" +
+              "• Identifies missing sections based on RFP criteria and adds them\n" +
+              "• Uses the KB to securely generate content ONLY for newly added sections\n" +
+              "• Checks every section for fabrications against the KB, flagging gaps with [VERIFY]\n" +
+              "• Runs a fast contradiction sweep to ensure no manual edits conflict with the RFP\n" +
+              "• Skips deep full-document rewrites to save time and tokens\n" +
               "• A saved version is stored first\n" +
               "• You can keep working while it runs\n" +
               `• ${capabilityById("completeClean").doesnt}`,
@@ -2263,7 +2257,8 @@ function ProposalDraftWorkspaceInner({
       // job-status watcher so completion is detected either way.
       const requestOutcome = runFulfillRfpGaps(rfp.id, {
         signal: abort.signal,
-        mode: "full",
+        mode: "targeted_fix",
+        onResearchUpdate: handleResearchPoll,
       })
         .then((r) => ({ via: "request" as const, r }))
         .catch((e) => ({ via: "error" as const, e }));
@@ -4136,9 +4131,7 @@ function ProposalDraftWorkspaceInner({
                       ? "Review & fix…"
                       : scanAlreadyDone && !canResumeFulfillScan
                         ? "✓ Review & fix done"
-                        : canResumeFulfillScan
-                          ? "Continue Review & fix"
-                          : "Review & fix"}
+                        : "Review & fix"}
                   </button>
                 </CapabilityHoverTip>
                 {outline.lastFulfillReport ? (
@@ -4534,6 +4527,9 @@ function ProposalDraftWorkspaceInner({
               onViewLastResults={handleOpenLastResults}
               goRfpCount={goRfpCount}
               onOpenGoRfpPicker={onOpenGoRfpPicker}
+              outline={outline}
+              optimisticScanProfile={isFulfillingRfpGaps ? "targeted_fix" : null}
+              buildFinalizeEnabled={pipelineStatus?.buildFinalizeEnabled}
             />
             </div>
             </div>

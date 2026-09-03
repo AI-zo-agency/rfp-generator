@@ -15,6 +15,7 @@ from app.models.proposal import (
     ProposalDraft,
     ProposalResearchCache,
     ProposalSection,
+    PreSubmitIssue,
     PreSubmitReview,
 )
 from app.models.rfp import RfpRecord
@@ -152,6 +153,13 @@ async def _repair_misstated_closing_sections(
         now = datetime.now(timezone.utc).isoformat()
         draft = draft.model_copy(update={"sections": sections, "updated_at": now})
     return draft, logs
+
+
+def _is_static_company_block_section(section_id: str) -> bool:
+    """Static Sections 1-3 (company / team / our work) — not RFP-driven tabs."""
+    return (section_id or "").startswith(
+        ("section-1-", "section-2-", "section-3-")
+    )
 
 
 def _closing_form_template_stub(component: ClosingComponent) -> str:
@@ -522,7 +530,7 @@ async def run_fulfill_rfp_gaps(
             scan_profile = (
                 "build_finalize"
                 if (mode or "").strip().lower() == "build_finalize"
-                else "full"
+                else "targeted_fix" if (mode or "").strip().lower() == "targeted_fix" else "full"
             )
             return await _run_fulfill_rfp_gaps_body(
                 rfp_id, use_llm=use_llm, scan_profile=scan_profile
@@ -539,6 +547,23 @@ async def run_fulfill_rfp_gaps(
 
 async def run_build_finalize_pass(rfp_id: str, **kwargs: Any) -> None:
     """Tail of Build My Proposal — selected Complete Scan steps after Generate."""
+    from app.core.config import settings as app_settings
+
+    # Gate HERE, not only at the callers. Celery's _PHASE_DISPATCH maps
+    # "build-finalize" straight to this function, so the phase chain
+    # (phase-4-review -> build-finalize) reached it without passing either the
+    # generator tail or the API endpoint gate — and Final checks ran anyway
+    # with the flag off. This is the one chokepoint every path goes through.
+    # Returning early still completes the phase: pipeline_phase() records
+    # start/complete around this call, so the pipeline finishes rather than
+    # hanging on a phase that never reports.
+    if not app_settings.build_finalize_enabled:
+        logger.info(
+            "Final checks (build-finalize) skipped for %s — disabled by config.",
+            rfp_id,
+        )
+        return
+
     await run_fulfill_rfp_gaps(
         rfp_id,
         use_llm=bool(kwargs.get("use_llm", True)),
@@ -594,10 +619,692 @@ async def _run_fulfill_rfp_gaps_body(
         fulfill_resume_step,
         fulfill_scan_is_already_clean,
         record_pipeline_activity,
+        record_targeted_fix_contradiction_done,
+        record_targeted_fix_section_done,
+        record_targeted_fix_structure_done,
+        record_targeted_fix_won_fill_done,
+        targeted_fix_contradiction_is_done,
+        targeted_fix_done_sections,
+        targeted_fix_structure_is_done,
+        targeted_fix_won_fill_is_done,
     )
 
     resume_at = fulfill_resume_step(research)
     scan_hash = compute_fulfill_scan_hash(draft, rfp_text)
+
+    if scan_profile == "targeted_fix":
+        async def _run_targeted_fix_per_section_loop():
+            nonlocal draft, research
+            report = {"mode": "targeted_fix", "logs": []}
+            kb_gaps: list[dict[str, str]] = []
+            # Checkpoint: sections a previous interrupted run already reviewed.
+            # Read BEFORE the order pass, which mutates the section list.
+            done_section_ids = targeted_fix_done_sections(research)
+            # One line that answers "why did it start over?" without a DB dig.
+            _cp = research.pipeline_checkpoint if research else None
+            logger.info(
+                "Review & Fix resume state for %s: done_sections=%d structure_done=%s "
+                "contradiction_done=%s won_fill_done=%s scan_profile=%s cp_updated=%s",
+                rfp_id,
+                len(done_section_ids),
+                bool(_cp and _cp.targeted_fix_structure_done),
+                bool(_cp and _cp.targeted_fix_contradiction_done),
+                bool(_cp and _cp.targeted_fix_won_fill_done),
+                (_cp.scan_profile if _cp else None),
+                (_cp.updated_at if _cp else None),
+            )
+            if done_section_ids:
+                report["logs"].append(
+                    f"Resume: {len(done_section_ids)} section(s) already reviewed "
+                    "in the interrupted run — picking up where it stopped."
+                )
+
+            # One continuous step space so the UI can always answer "what step
+            # am I on?": 2 prep stages, then one step per reviewed section, then
+            # 3 finishing stages. Frontend mirrors this in
+            # TARGETED_FIX_PREP_STEP_LABELS / TARGETED_FIX_FINISH_STEP_LABELS —
+            # keep the two in sync.
+            prep_steps = 2
+            finish_steps = 3
+            # The DQ audit below can append compulsory-gap stubs, and the
+            # structure/order pass further below can add missing sections —
+            # both change the section count this is based on. This early
+            # estimate is only good enough for the two prep-stage progress
+            # reports; it is recomputed for real right before the per-section
+            # loop starts (see below), and every report uses the larger of
+            # the two totals so the number never goes DOWN mid-run (a
+            # shrinking total looks broken).
+            review_positions = [
+                idx
+                for idx, s in enumerate(draft.sections)
+                if not _is_static_company_block_section(s.id)
+            ]
+            review_total = len(review_positions)
+            total_steps = prep_steps + review_total + finish_steps
+
+            # Disqualification-risk audit runs BEFORE the structure/order block
+            # below (even on a resume where that block is skipped) so that any
+            # compulsory-gap stubs it merges in are present when the order pass
+            # runs and get arranged into the RFP's demanded position in the same
+            # pass, instead of landing wherever list-append happened to put them.
+            dq_risks: list[str] = []
+            try:
+                from app.services.proposal_rfp_compulsory_content import (
+                    audit_draft_against_rfp_compulsory_content,
+                    merge_compulsory_gap_stubs,
+                )
+                from app.services.proposal_scan_dq_orchestrator import (
+                    collect_rfp_text_dq_risks,
+                )
+
+                await record_pipeline_activity(
+                    rfp_id,
+                    label="Checking RFP-mandated sections",
+                    detail=(
+                        "Auditing the draft against the sections and minimums "
+                        "this RFP requires to stay responsive..."
+                    ),
+                    step_index=1,
+                    step_total=total_steps,
+                    in_progress_phase="fulfill-scan",
+                    scan_profile="targeted_fix",
+                )
+                shortfalls = await audit_draft_against_rfp_compulsory_content(
+                    draft, rfp_text
+                )
+                if shortfalls:
+                    draft, compulsory_logs = merge_compulsory_gap_stubs(draft, shortfalls)
+                    if compulsory_logs:
+                        report["logs"].extend(compulsory_logs)
+                        await asave_proposal_draft(draft)
+                    dq_risks.extend(
+                        s.message for s in shortfalls if s.ask.pass_fail
+                    )
+                dq_risks.extend(
+                    collect_rfp_text_dq_risks(
+                        rfp=rfp, draft=draft, rfp_text=rfp_text, ledger_result=None
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Review & Fix DQ audit skipped: %s", exc)
+                report["logs"].append(f"DQ audit skipped: {exc}")
+
+            # De-duplicate case-insensitively while preserving order, same as
+            # the full-scan orchestrator does for these risk strings.
+            seen_dq: set[str] = set()
+            deduped_dq_risks: list[str] = []
+            for risk in dq_risks:
+                key = risk.casefold()
+                if key in seen_dq:
+                    continue
+                seen_dq.add(key)
+                deduped_dq_risks.append(risk)
+            dq_risks = deduped_dq_risks
+            for risk in dq_risks:
+                report["logs"].append(f"Disqualification risk — {risk}")
+
+            # The structure pass costs ~4 RFP-extraction LLM calls. It compares
+            # the section TITLES against the RFP outline and adds missing tabs —
+            # it does not depend on section bodies, so once it has run for this
+            # run there is nothing to gain by paying for it again on a resume.
+            if targeted_fix_structure_is_done(research):
+                report["logs"].append(
+                    "Resume: RFP structure/order pass already done — skipped."
+                )
+            else:
+                from app.services.proposal_fulfill_rfp_structure import (
+                    apply_rfp_section_order_pass,
+                )
+
+                await record_pipeline_activity(
+                    rfp_id,
+                    label="Reviewing proposal sections against the RFP",
+                    detail=(
+                        "Comparing the proposal outline to the RFP's required "
+                        "sections and adding any missing tabs..."
+                    ),
+                    step_index=2,
+                    step_total=total_steps,
+                    in_progress_phase="fulfill-scan",
+                    scan_profile="targeted_fix",
+                )
+                draft, order_logs = await apply_rfp_section_order_pass(
+                    draft=draft,
+                    rfp=rfp,
+                    rfp_text=rfp_text,
+                    research=research,
+                    add_missing_mandated_stubs=True,
+                    include_missing_submittals=True,
+                )
+                if order_logs:
+                    report["logs"].extend(order_logs)
+                await asave_proposal_draft(draft)
+                await record_targeted_fix_structure_done(rfp_id)
+
+            total_sections = len(draft.sections)
+            # Recompute now that the DQ audit's compulsory-gap stubs and the
+            # structure/order pass's missing-tab inserts have both had a
+            # chance to change the section list — the early value computed
+            # above (used for the two prep-stage reports) may be stale.
+            # Progress is counted over the sections this run will actually review —
+            # a counter over draft positions would start the UI at "9 of 25" and
+            # leave the skipped static chips looking stuck.
+            review_positions = [
+                idx
+                for idx, s in enumerate(draft.sections)
+                if not _is_static_company_block_section(s.id)
+            ]
+            review_total = len(review_positions)
+            # Never let the total shrink mid-run — a shrinking total looks broken.
+            # Free, deterministic, and idempotent — so it must NOT sit behind the
+            # structure checkpoint. A resumed run skips the structure pass, and
+            # without this the RFP clause-fragment tabs would survive forever.
+            from app.services.proposal_fulfill_rfp_structure import (
+                drop_non_deliverable_rfp_sections,
+            )
+
+            draft, junk_logs = drop_non_deliverable_rfp_sections(draft)
+            if junk_logs:
+                report["logs"].extend(junk_logs)
+                await asave_proposal_draft(draft)
+                review_positions = [
+                    idx
+                    for idx, s in enumerate(draft.sections)
+                    if not _is_static_company_block_section(s.id)
+                ]
+                review_total = len(review_positions)
+
+            total_steps = max(total_steps, prep_steps + review_total + finish_steps)
+            # Counted as sections are reviewed, not looked up by draft index:
+            # a step in this loop can insert a section, and a shifted index is
+            # not guaranteed to be in review_positions (ValueError mid-run).
+            reviewed_count = 0
+            n = sum(
+                1 for s in draft.sections if _is_static_company_block_section(s.id)
+            )
+            if n:
+                report["logs"].append(
+                    f"Static Sections 1-3 ({n} tab(s)) skipped — per-section "
+                    "review starts at the first RFP-driven section."
+                )
+            from app.services.proposal_kb_fact_checker import _fact_check_one_section, _brand_voice_payload
+            from app.services.proposal_manual_flags import VERIFY_TAG_RE
+            from app.services.proposal_blocker_prevention import apply_feedback_blocker_suite
+            from app.services.proposal_draft_structure_stubs import (
+                draft_rfp_structure_stubs,
+                section_needs_presubmit_fill,
+            )
+            
+            brand_voice = _brand_voice_payload(research)
+            # Same rfp_context every other fact-check caller passes: the raw RFP
+            # text. research.rfp_sections holds RfpSectionMap entries
+            # (requirements / retrieval focus), which carry no RFP body content.
+            rfp_context_str = rfp_text
+                
+            from app.services.proposal_generation_cancel import check_generation_cancelled
+
+            # Ordered work list, built ONCE before the batch loop: positions of
+            # sections that are neither static nor already checkpointed as done.
+            # Everything below still walks draft.sections by these positions —
+            # a later sequential-tail step can still shrink the list, so every
+            # index is re-checked against the CURRENT len(draft.sections)
+            # before use (see the bounds guards in the fan-out and tail below).
+            work_indices = [
+                idx
+                for idx, s in enumerate(draft.sections)
+                if not _is_static_company_block_section(s.id)
+                and s.id not in done_section_ids
+            ]
+            from app.core.config import settings as app_settings
+
+            batch_size = max(1, app_settings.review_fix_section_concurrency)
+
+            async def _fact_check_task(idx: int):
+                # Cancellation is checked FIRST inside each task so a Stop
+                # click is honoured promptly even mid-batch.
+                await check_generation_cancelled(rfp_id)
+                sec = draft.sections[idx]
+                # _fact_check_one_section returns (section, FactCheckReport) —
+                # in that order. Unpacking it the other way round put the
+                # report into draft.sections[idx] and blew up on .copy().
+                checked_section, section_report = await _fact_check_one_section(
+                    sec, rfp=rfp, rfp_context=rfp_context_str, research=research,
+                    brand_voice=brand_voice, force_full_check=True
+                )
+                return checked_section, section_report
+
+            for batch_start in range(0, len(work_indices), batch_size):
+                batch = work_indices[batch_start:batch_start + batch_size]
+                # A step in a previous batch's sequential tail can have
+                # shortened draft.sections; drop any index that no longer
+                # exists rather than IndexError out of a run whose finished
+                # sections are already checkpointed.
+                batch = [idx for idx in batch if idx < len(draft.sections)]
+                if not batch:
+                    continue
+
+                first_section = draft.sections[batch[0]]
+                if len(batch) > 1:
+                    batch_detail = (
+                        f"Scanning {len(batch)} sections in parallel against "
+                        "RFP requirements..."
+                    )
+                else:
+                    batch_detail = "Scanning section against RFP requirements..."
+                await record_pipeline_activity(
+                    rfp_id,
+                    label=first_section.title or first_section.id,
+                    detail=batch_detail,
+                    step_index=prep_steps + reviewed_count + 1,
+                    step_total=total_steps,
+                    in_progress_phase="fulfill-scan",
+                    scan_profile="targeted_fix",
+                )
+
+                # Fan-out: run the pure per-section fact-check concurrently.
+                # Every draft/DB write stays out of this step and happens in
+                # the strictly sequential tail below.
+                results = await asyncio.gather(
+                    *[_fact_check_task(idx) for idx in batch],
+                    return_exceptions=True,
+                )
+
+                batch_sections: dict[int, Any] = {}
+                for idx, result in zip(batch, results):
+                    if isinstance(result, ProposalGenerationCancelled):
+                        # The run is being stopped — do not swallow it.
+                        raise result
+                    if isinstance(result, BaseException):
+                        failed_section = draft.sections[idx]
+                        failed_title = failed_section.title or failed_section.id
+                        logger.warning(
+                            "Review & Fix fact-check failed for section %s: %s",
+                            failed_section.id,
+                            result,
+                        )
+                        report["logs"].append(
+                            f"Fact-check failed for {failed_title} — section "
+                            f"kept unchanged: {result}"
+                        )
+                        # One bad section must not kill the batch: keep its
+                        # original content and continue reviewing the rest.
+                        batch_sections[idx] = failed_section
+                        continue
+                    checked_section, section_report = result
+                    batch_sections[idx] = checked_section
+                    if section_report.logs:
+                        report["logs"].extend(section_report.logs)
+
+                # Sequential apply, strictly in the batch's original order —
+                # everything here reads or writes the whole draft, so
+                # concurrent writers would lose updates.
+                for idx in batch:
+                    if idx >= len(draft.sections):
+                        # An earlier entry in THIS batch's tail can also have
+                        # shrunk the list.
+                        continue
+                    reviewed_count += 1
+                    section = batch_sections.get(idx, draft.sections[idx])
+                    draft.sections[idx] = section
+
+                    res_blocker = await apply_feedback_blocker_suite(
+                        draft, rfp=rfp, research=research, rfp_text=rfp_text,
+                        skip_section_ids={s.id for s in draft.sections if s.id != section.id}
+                    )
+                    draft = res_blocker.draft
+                    if idx < len(draft.sections):
+                        section = draft.sections[idx]
+                    if res_blocker.logs:
+                        report["logs"].extend(res_blocker.logs)
+
+                    # Signature is (draft, *, rfp_id, rfp, max_sections) — it
+                    # picks its own pending list, so there is no per-section
+                    # arg. Only pay for a stub-fill call when THIS section is
+                    # actually hollow.
+                    if section_needs_presubmit_fill(section):
+                        draft, stub_logs = await draft_rfp_structure_stubs(
+                            draft, rfp_id=rfp_id, rfp=rfp, max_sections=1
+                        )
+                        if stub_logs:
+                            report["logs"].extend(stub_logs)
+
+                    from app.services.proposal_verify_optional_scrub import (
+                        strip_placeholder_tags_not_required_by_rfp,
+                    )
+
+                    if idx < len(draft.sections):
+                        scrub_target = draft.sections[idx]
+                        scrubbed, removed = strip_placeholder_tags_not_required_by_rfp(
+                            scrub_target.content or "", rfp_text
+                        )
+                        if removed:
+                            draft.sections[idx] = scrub_target.model_copy(
+                                update={"content": scrubbed}
+                            )
+                            section = draft.sections[idx]
+                            report["logs"].append(
+                                f"Removed {removed} optional placeholder tag(s) not "
+                                f"required by the RFP in {scrub_target.title or scrub_target.id}"
+                            )
+
+                    await asave_proposal_draft(draft)
+                    # Checkpoint only AFTER the section's fixes are persisted,
+                    # so a crash between the two replays the section rather
+                    # than losing it.
+                    done_id = draft.sections[idx].id if idx < len(draft.sections) else section.id
+                    done_section_ids.add(done_id)
+                    await record_targeted_fix_section_done(
+                        rfp_id,
+                        done_id,
+                        step_index=prep_steps + reviewed_count,
+                        step_total=total_steps,
+                    )
+
+                    final_section = draft.sections[idx] if idx < len(draft.sections) else section
+                    reason: str | None = None
+                    if section_needs_presubmit_fill(final_section):
+                        reason = (
+                            "Section is still empty / heading-only — no zö KB "
+                            "evidence to fill it."
+                        )
+                    elif "insufficient evidence in corpus" in (
+                        final_section.content or ""
+                    ).casefold():
+                        reason = (
+                            "Writer marked insufficient evidence in corpus — no "
+                            "zö KB source to support this section."
+                        )
+                    elif VERIFY_TAG_RE.search(final_section.content or ""):
+                        # Same tags build_presubmit_manual_fill_flags turns into
+                        # manual-fill flags — surface them in THIS run's report too,
+                        # so the gap is visible right after the button finishes.
+                        # Any [VERIFY: ...] tag still present survived the scrub
+                        # above (which only strips tags the RFP does NOT actually
+                        # require), so a leftover tag here means the RFP genuinely
+                        # mandates it — correctly flagging it as a KB gap.
+                        reason = (
+                            "Content still carries [VERIFY: …] tags — the zö KB had "
+                            "no source to confirm these facts."
+                        )
+                    if reason:
+                        title = final_section.title or final_section.id
+                        kb_gaps.append(
+                            {
+                                "sectionId": final_section.id,
+                                "sectionTitle": title,
+                                "reason": reason,
+                            }
+                        )
+                        report["logs"].append(
+                            f"Manual review needed — {title}: {reason}"
+                        )
+
+            if targeted_fix_contradiction_is_done(research):
+                report["logs"].append(
+                    "Resume: cross-section contradiction pass already done — skipped."
+                )
+            else:
+                await record_pipeline_activity(
+                    rfp_id,
+                    label="Checking contradictions across sections",
+                    detail=(
+                        "Comparing every section against the others and "
+                        "patching conflicts..."
+                    ),
+                    step_index=prep_steps + review_total + 1,
+                    step_total=total_steps,
+                    in_progress_phase="fulfill-scan",
+                    scan_profile="targeted_fix",
+                )
+                res_cross = await apply_feedback_blocker_suite(
+                    draft, rfp=rfp, research=research, rfp_text=rfp_text
+                )
+                draft = res_cross.draft
+                if res_cross.logs:
+                    report["logs"].extend(
+                        [f"Cross-section: {line}" for line in res_cross.logs]
+                    )
+                await asave_proposal_draft(draft)
+                await record_targeted_fix_contradiction_done(rfp_id)
+
+            if targeted_fix_won_fill_is_done(research):
+                report["logs"].append(
+                    "Resume: WON-proposal gap fill already done — skipped."
+                )
+            else:
+                try:
+                    from app.services.proposal_hollow_kb_fill import (
+                        fill_hollow_sections_for_pipeline,
+                    )
+
+                    async def _won_fill_progress(done: int, total: int, title: str) -> None:
+                        # Sub-step ticks so the UI doesn't look frozen during the
+                        # sequential per-section LLM fill loop, mirroring the full
+                        # scan's _hollow_fill_progress.
+                        await record_pipeline_activity(
+                            rfp_id,
+                            label="Filling gaps from past won proposals",
+                            detail=f"Retrieving verified answers from the knowledge base — {done}/{total}: {title}",
+                            step_index=prep_steps + review_total + 2,
+                            step_total=total_steps,
+                            in_progress_phase="fulfill-scan",
+                            scan_profile="targeted_fix",
+                        )
+
+                    await record_pipeline_activity(
+                        rfp_id,
+                        label="Filling gaps from past won proposals",
+                        detail="Retrieving verified answers from the knowledge base...",
+                        step_index=prep_steps + review_total + 2,
+                        step_total=total_steps,
+                        in_progress_phase="fulfill-scan",
+                        scan_profile="targeted_fix",
+                    )
+                    draft, hollow_logs = await fill_hollow_sections_for_pipeline(
+                        draft,
+                        rfp_title=rfp.title or "",
+                        rfp_client=rfp.client or "",
+                        rfp_sector=getattr(rfp, "sector", None) or "",
+                        rfp_text=rfp_text,
+                        rfp_id=rfp_id,
+                        on_progress=_won_fill_progress,
+                    )
+                    if hollow_logs:
+                        report["logs"].extend(hollow_logs)
+                    await asave_proposal_draft(draft)
+                    await record_targeted_fix_won_fill_done(rfp_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Review & Fix WON-proposal gap fill skipped: %s", exc)
+                    report["logs"].append(f"WON-proposal gap fill skipped: {exc}")
+
+            # Budget-vs-RFP money audit: the hard fee NTE, any stated minimum,
+            # and the program/media envelope. Runs after every pass above that
+            # can still change the budget or the section bodies it is checked
+            # against, and before extra_issues so its findings ship in the
+            # same presubmit review as the KB-gap / DQ-risk issues.
+            budget_issues: list[str] = []
+            budget_manual: list[dict[str, str]] = []
+            constraint_updated_budget = None
+            try:
+                from app.services.evidence_trust.rfp_money_constraints import (
+                    apply_constraints_to_budget_fields,
+                    collect_invented_ceiling_mismatches,
+                    collect_over_authority_flags,
+                    collect_under_minimum_flags,
+                    extract_rfp_money_constraints_with_llm_fallback,
+                )
+
+                await record_pipeline_activity(
+                    rfp_id,
+                    label="Checking budget against RFP limits",
+                    detail=(
+                        "Comparing the cost section to the RFP's stated cap, "
+                        "minimum, and program envelope..."
+                    ),
+                    step_index=prep_steps + review_total + 3,
+                    step_total=total_steps,
+                    in_progress_phase="fulfill-scan",
+                    scan_profile="targeted_fix",
+                )
+
+                constraints = await extract_rfp_money_constraints_with_llm_fallback(
+                    rfp_text
+                )
+                if not constraints:
+                    report["logs"].append(
+                        "Budget-vs-RFP audit: the RFP states no money "
+                        "constraints this pass could find — nothing to check "
+                        "the budget against."
+                    )
+                elif research is not None and research.budget is not None:
+                    constraint_updated_budget = apply_constraints_to_budget_fields(
+                        research.budget, constraints
+                    )
+                    budget_issues.extend(
+                        collect_over_authority_flags(constraint_updated_budget)
+                    )
+                    budget_issues.extend(
+                        collect_under_minimum_flags(constraint_updated_budget)
+                    )
+
+                    # Identify the budget/cost section by a simple title check,
+                    # same keywords used elsewhere in this module for pricing
+                    # tabs — used only to label manual-review entries, never
+                    # invented if no such section exists.
+                    budget_section_id: str | None = None
+                    budget_section_title: str | None = None
+                    for s in draft.sections:
+                        title_cf = (s.title or "").casefold()
+                        if any(
+                            k in title_cf
+                            for k in (
+                                "budget",
+                                "pricing",
+                                "cost proposal",
+                                "quotation",
+                                "fee",
+                            )
+                        ):
+                            budget_section_id = s.id
+                            budget_section_title = s.title
+                            break
+
+                    for s in draft.sections:
+                        mismatches = collect_invented_ceiling_mismatches(
+                            s.content or "",
+                            budget=constraint_updated_budget,
+                            section_id=s.id,
+                            section_title=s.title or s.id,
+                        )
+                        for mismatch in mismatches:
+                            budget_issues.append(mismatch.note)
+
+                    for line_item in constraint_updated_budget.line_items:
+                        if line_item.is_manual_fill or not line_item.source_rate_id:
+                            if budget_section_id:
+                                sec_id = budget_section_id
+                                sec_title = budget_section_title or budget_section_id
+                            else:
+                                sec_id = line_item.id
+                                sec_title = line_item.description or line_item.id
+                            budget_manual.append(
+                                {
+                                    "sectionId": sec_id,
+                                    "sectionTitle": sec_title,
+                                    "reason": (
+                                        f"Line item '{line_item.description or line_item.category}' "
+                                        "rate is not bound to a verified zö KB rate "
+                                        "card — needs manual confirmation."
+                                    ),
+                                }
+                            )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Review & Fix budget-vs-RFP audit skipped: %s", exc)
+                report["logs"].append(f"Budget-vs-RFP audit skipped: {exc}")
+
+            if budget_issues:
+                report["logs"].append(
+                    f"{len(budget_issues)} budget-vs-RFP issue(s) flagged."
+                )
+            if budget_manual:
+                report["logs"].append(
+                    f"{len(budget_manual)} budget line item(s) flagged for manual "
+                    "review — rate not bound to a verified zö KB rate card."
+                )
+
+            extra_issues = [
+                PreSubmitIssue(
+                    severity="critical" if "still empty" in gap["reason"] else "warning",
+                    category="Knowledge base gap",
+                    message=gap["reason"],
+                    sectionId=gap["sectionId"],
+                    sectionTitle=gap["sectionTitle"],
+                )
+                for gap in kb_gaps
+            ]
+            extra_issues.extend(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="Disqualification risk",
+                    message=risk,
+                )
+                for risk in dq_risks
+            )
+            extra_issues.extend(
+                PreSubmitIssue(
+                    severity="critical",
+                    category="Budget vs RFP",
+                    message=flag,
+                )
+                for flag in budget_issues
+            )
+            review = run_presubmit_review_with_manual_flags(
+                rfp=rfp, draft=draft, research=research, extra_issues=extra_issues, kb_searched=True
+            )
+            report["manualReview"] = kb_gaps + budget_manual
+            report["disqualificationRisks"] = dq_risks
+            report["budgetIssues"] = budget_issues
+            # Same shape the full scan emits, so the scan-report UI reads one
+            # field for both profiles instead of falling back to a length.
+            report["disqualificationRiskCount"] = len(dq_risks)
+            if kb_gaps:
+                report["logs"].append(
+                    f"{len(kb_gaps)} section(s) flagged for manual review — the zö KB "
+                    "has no evidence to complete them."
+                )
+            if dq_risks:
+                report["logs"].append(
+                    f"{len(dq_risks)} disqualification risk(s) flagged for manual review."
+                )
+            now = datetime.now(timezone.utc).isoformat()
+            # Re-read before saving: the per-section checkpoint writes during the
+            # loop are newer than the `research` snapshot loaded at the top of
+            # this run, and asave_research_cache replaces the whole row — saving
+            # the stale object would roll the resume checkpoint back.
+            latest = (
+                await aget_research_cache(rfp_id)
+                or research
+                or ProposalResearchCache(rfpId=rfp_id, updatedAt=now)
+            )
+            research_update: dict[str, Any] = {
+                "presubmit_review": review,
+                "updated_at": now,
+            }
+            if constraint_updated_budget is not None:
+                research_update["budget"] = constraint_updated_budget
+            research = latest.model_copy(update=research_update)
+            await asave_research_cache(research)
+
+            # Clears the per-section checkpoint: the next click reviews everything.
+            await complete_fulfill_scan(rfp_id, scan_hash=compute_fulfill_scan_hash(draft))
+            return (
+                review,
+                research,
+                draft,
+                report,
+            )
+            
+        return await _run_targeted_fix_per_section_loop()
 
     def _finalize_still_needs_work() -> bool:
         """Do not no-op Final checks while checklist tabs are still hollow."""
@@ -642,6 +1349,19 @@ async def _run_fulfill_rfp_gaps_body(
         else:
             skip_fulfill_steps = frozenset({2, 6})
         scan_in_progress_phase = "build-finalize"
+    elif scan_profile == "targeted_fix":
+        # Ultra-light "Review & Fix":
+        # Keeps:
+        # 1-2: Missing section / structure alignment (Identify missing tabs)
+        # 9: Compliance fabrication guard (Ensure no invented facts)
+        # 11: KB fact-check (Flag missing KB info with [VERIFY])
+        # 12: RFP contradiction check (Ensures new/edited content doesn't contradict)
+        # 17-18: Pre-submit stub fill & readiness (Fills newly added empty tabs)
+        # Skips all deep rewrite loops (line grounding, adversarial review, etc)
+        skip_fulfill_steps = frozenset({3, 4, 5, 6, 7, 8, 10, 13, 14, 15, 16})
+        scan_in_progress_phase = "fulfill-scan"
+        
+    if scan_profile in ("build_finalize", "targeted_fix"):
         # Never inherit a paused Review & fix resume pointer — only resume
         # final-checks when that same job was interrupted.
         cp = research.pipeline_checkpoint if research else None
@@ -864,13 +1584,22 @@ async def _run_fulfill_rfp_gaps_body(
             # real position. This local log call is enough for visibility —
             # _log_resume_skip only touches in-memory `report["logs"]`.
             raise FulfillStepSkip(step)
+        actual_step = step
+        actual_total = len(FULFILL_STEPS)
+        if scan_profile == "targeted_fix":
+            # Map the 7 unskipped steps to a clean 1-7 index for the UI
+            target_map = {1: 1, 2: 2, 9: 3, 11: 4, 12: 5, 17: 6, 18: 7}
+            actual_step = target_map.get(step, step)
+            actual_total = 7
+
         await record_pipeline_activity(
             rfp_id,
             label=label,
             detail=detail,
-            step_index=step,
-            step_total=len(FULFILL_STEPS),
+            step_index=actual_step,
+            step_total=actual_total,
             in_progress_phase=scan_in_progress_phase,
+            scan_profile=scan_profile,
         )
         draft = draft.model_copy(
             update={
@@ -891,6 +1620,16 @@ async def _run_fulfill_rfp_gaps_body(
         )
         await _ensure_not_stopped()
         preserved_pre = fulfill_scan_preserve_bio_and_case_study_ids(draft)
+        async def _structure_progress(done: int, total: int, title: str) -> None:
+            await record_pipeline_activity(
+                rfp_id,
+                label="Scan RFP: structure & missing sections",
+                detail=f"Checking section {done}/{total}: {title}",
+                step_index=1,
+                step_total=len(FULFILL_STEPS),
+                in_progress_phase=scan_in_progress_phase,
+            )
+
         draft, struct_logs, struct_human = await run_rfp_structure_alignment_pass(
             draft=draft,
             rfp=rfp,
@@ -898,6 +1637,7 @@ async def _run_fulfill_rfp_gaps_body(
             research=research,
             skip_section_ids=preserved_pre,
             use_llm=use_llm,
+            on_progress=_structure_progress,
         )
         report["logs"].extend(struct_logs)
         report["structureScan"] = struct_logs
@@ -1805,11 +2545,30 @@ async def _run_fulfill_rfp_gaps_body(
             rfp_id,
             len(draft.sections),
         )
+        async def _kb_fact_check_progress(done: int, total: int, title: str) -> None:
+            actual_step = 11
+            actual_total = len(FULFILL_STEPS)
+            if scan_profile == "targeted_fix":
+                target_map = {1: 1, 2: 2, 9: 3, 11: 4, 12: 5, 17: 6, 18: 7}
+                actual_step = target_map.get(11, 11)
+                actual_total = 7
+
+            await record_pipeline_activity(
+                rfp_id,
+                label="Scan RFP: KB fact-check",
+                detail=f"Checking section {done}/{total}: {title}",
+                step_index=actual_step,
+                step_total=actual_total,
+                in_progress_phase=scan_in_progress_phase,
+                scan_profile=scan_profile,
+            )
+
         draft, fc_report = await run_kb_fact_check_pass(
             draft,
             rfp=rfp,
             rfp_context=rfp_text,
             research=research,
+            on_progress=_kb_fact_check_progress,
         )
         fact_check_changed_manuscript = bool(
             fc_report.requirement_repairs

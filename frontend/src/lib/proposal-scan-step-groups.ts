@@ -48,3 +48,80 @@ export const FULFILL_SCAN_STEP_GROUPS: {
     ],
   },
 ];
+
+export const TARGETED_FIX_STEP_GROUPS: {
+  label: string;
+  steps: readonly string[];
+}[] = [
+  {
+    label: "Structure",
+    steps: [
+      "RFP structure (all scored sections)",
+      "Closing & submission tabs",
+    ],
+  },
+  {
+    label: "Content",
+    steps: [
+      "Compliance fabrication guard",
+    ],
+  },
+  {
+    label: "Fact-check",
+    steps: [
+      "KB fact-check (Supermemory)",
+      "RFP contradiction check (LLM)",
+    ],
+  },
+  {
+    label: "Review & submit",
+    steps: [
+      "Pre-submit refresh",
+      "Submission readiness (triage + score)",
+    ],
+  },
+];
+
+/**
+ * Static Sections 1-3 (company / team / our work). Review & Fix skips these,
+ * so they must not appear as chips — mirrors
+ * `_is_static_company_block_section` in proposal_fulfill_rfp_gaps.py.
+ */
+export function isStaticCompanyBlockSection(sectionId: string | undefined): boolean {
+  const id = sectionId ?? "";
+  return (
+    id.startsWith("section-1-") ||
+    id.startsWith("section-2-") ||
+    id.startsWith("section-3-")
+  );
+}
+
+export const TARGETED_FIX_STEP_LABELS = [
+  "RFP structure (all scored sections)",
+  "Closing & submission tabs",
+  "Compliance fabrication guard",
+  "KB fact-check (Supermemory)",
+  "RFP contradiction check (LLM)",
+  "Pre-submit refresh",
+  "Submission readiness (triage + score)",
+] as const;
+
+/**
+ * The two prep stages that run BEFORE the per-section loop in
+ * `_run_targeted_fix_per_section_loop`, and the three finishing stages that
+ * run AFTER it. Together with one step per reviewed section, these form one
+ * continuous step sequence — steps 1..2, then 3..(2+N), then (3+N)..(5+N).
+ * These strings must match the backend labels in
+ * proposal_fulfill_rfp_gaps.py EXACTLY (record_pipeline_activity `label=`
+ * arguments in `_run_targeted_fix_per_section_loop`).
+ */
+export const TARGETED_FIX_PREP_STEP_LABELS = [
+  "Checking RFP-mandated sections",
+  "Reviewing proposal sections against the RFP",
+] as const;
+
+export const TARGETED_FIX_FINISH_STEP_LABELS = [
+  "Checking contradictions across sections",
+  "Filling gaps from past won proposals",
+  "Checking budget against RFP limits",
+] as const;

@@ -46,7 +46,10 @@ from app.services.go_no_go_capability import (
     clamp_score_to_written_cap,
     evidenced_core_craft_ratio,
     gap_matrix_from_requirements,
+    per_track_resource_scores,
+    per_track_technical_scores,
     reconcile_narrative,
+    tracks_in_rows,
     unmet_disqualifying_requirements,
     unverified_core_requirements,
 )
@@ -2033,11 +2036,42 @@ def _format_rfp_requirements_brief(
         "Keep hosting/SLA/office gaps separate from craft/platform gaps.",
         "",
     ]
+
+    tracks = tracks_in_rows(rows or [])
+    if len(tracks) >= 2:
+        tech_by_track = per_track_technical_scores(rows or [])
+        resource_by_track = per_track_resource_scores(rows or [])
+        lines.append(
+            "THIS RFP SPLITS SCOPE INTO TRACKS — SCORE AND RECOMMEND PER TRACK, "
+            "NOT AS ONE BLENDED VERDICT. A vendor may bid one, several, or all "
+            "of the tracks below; pooling every track's requirements into a "
+            "single denominator understates a strong track by diluting it with "
+            "a weak, unrelated one. Name the strongest track."
+        )
+        for track in tracks:
+            tech_score = tech_by_track.get(track)
+            resource_score = resource_by_track.get(track)
+            tech_text = f"{tech_score}/5" if tech_score is not None else "n/a"
+            resource_text = f"{resource_score}/5" if resource_score is not None else "n/a"
+            lines.append(
+                f"  - {track}: Technical Capability {tech_text}, "
+                f"Resource Availability {resource_text}"
+            )
+        lines.append(
+            "Requirement-agnostic rows (compliance, insurance, references — no "
+            "track prefix below) apply to every track and were already folded "
+            "into each track's score above."
+        )
+        lines.append("")
+
     for req in requirements:
         core = "core" if req.is_core else "optional"
         row = by_name.get(req.requirement)
+        prefix = f"[{req.track}] " if req.track else ""
         if row is None:
-            lines.append(f"- [{core}] {req.requirement} — (pending evidence judgment)")
+            lines.append(
+                f"- {prefix}[{core}] {req.requirement} — (pending evidence judgment)"
+            )
             continue
         status = (row.status or "gap").upper()
         evidence = (row.evidence or "").replace("\n", " ").strip()
@@ -2047,7 +2081,7 @@ def _format_rfp_requirements_brief(
             detail = f" | {src}: {evidence[:160]}"
         elif row.downgrade_reason:
             detail = f" | {row.downgrade_reason[:140]}"
-        lines.append(f"- [{core}] {req.requirement} — {status}{detail}")
+        lines.append(f"- {prefix}[{core}] {req.requirement} — {status}{detail}")
     return "\n".join(lines)
 
 
@@ -2663,6 +2697,19 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
         else "Technical Capability will be derived from the requirement evidence matrix."
     )
 
+    rfp_tracks = tracks_in_rows(capability_rows)
+    track_hint = (
+        f"THIS RFP DEFINES MULTIPLE TRACKS ({', '.join(rfp_tracks)}) AND THE VENDOR MAY "
+        "SUBMIT TO ONE OR MORE OF THEM. Your summary MUST give a per-track read — name the "
+        "strongest track and recommend it — instead of one blended verdict. Do NOT let a "
+        "weak or unevidenced track drag down the decisionMatrix Technical Capability score "
+        "for a track that is well evidenced; use the per-track Technical/Resource scores "
+        "shown in the requirements section above as your basis, and say explicitly in the "
+        "summary which track each score reflects."
+        if len(rfp_tracks) >= 2
+        else ""
+    )
+
     from app.services.evidence_trust.personnel_grounding import retired_team_personnel
 
     retired_line = ", ".join(retired_team_personnel()) or "(none)"
@@ -2679,6 +2726,7 @@ async def analyze_rfp(rfp: RfpRecord) -> GoNoGoAnalysis:
 {requirements_brief}
 
 {tech_hint}
+{track_hint}
 
 Emit fitScore, worthScore, recommendation, decisionMatrix (all 5 scores as integers 0–5, never null),
 summary, criticalGaps, conditions, actionFlags, and dimension blocks. Do NOT output stageOneReport or evaluations.

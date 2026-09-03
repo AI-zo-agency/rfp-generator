@@ -7,11 +7,16 @@ The outline planner stays a dedicated hop — that prompt is accuracy-critical.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from datetime import datetime, timezone
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from app.services.proposal_intelligence.agents.checklister import (
+    run_proposal_checklister,
+)
 from app.services.proposal_intelligence.agents.dynamic_section_planner import (
     run_dynamic_section_planner,
 )
@@ -33,6 +38,24 @@ from app.services.proposal_intelligence.schemas import ProposalExecutionPlan
 
 logger = logging.getLogger(__name__)
 
+# Human labels for the six LLM nodes, in graph order, so the BUILD MY PROPOSAL
+# rail can light up Phase 2's internal steps one by one instead of showing a
+# single "Intelligence" dot for the whole phase. The frontend mirrors this in
+# INTELLIGENCE_STEP_LABELS (frontend/src/lib/proposal-pipeline-checkpoint.ts)
+# — keep the two in sync.
+INTELLIGENCE_NODE_LABELS: tuple[tuple[str, str], ...] = (
+    ("opportunity_extract", "Reading the RFP opportunity"),
+    ("strategy_delivery", "Shaping strategy & delivery"),
+    ("execution_plan", "Building the execution plan"),
+    ("dynamic_section", "Planning RFP section tabs"),
+    ("checklister", "Auditing required sections"),
+    ("writing_briefs", "Writing section briefs"),
+)
+_INTELLIGENCE_NODE_LABEL_MAP: dict[str, str] = dict(INTELLIGENCE_NODE_LABELS)
+_INTELLIGENCE_NODE_STEP_INDEX: dict[str, int] = {
+    name: idx for idx, (name, _label) in enumerate(INTELLIGENCE_NODE_LABELS, start=1)
+}
+
 
 class IntelligenceGraphState(TypedDict, total=False):
     rfp_id: str
@@ -46,6 +69,7 @@ class IntelligenceGraphState(TypedDict, total=False):
     legacy: dict[str, Any]
     provider: str
     error: str | None
+    completed_nodes: list[str]
 
 
 def _load_plan(state: IntelligenceGraphState) -> ProposalExecutionPlan:
@@ -77,48 +101,167 @@ def _meta(state: IntelligenceGraphState) -> dict[str, str]:
     return meta
 
 
+def _context_fingerprint(rfp_context: str) -> str:
+    """Hash the FULL rfp_context (never a prefix — a truncated key can collide
+    across different RFP texts, silently resuming from a stale plan)."""
+    return hashlib.sha256((rfp_context or "").encode("utf-8")).hexdigest()
+
+
+async def _load_intelligence_checkpoint(
+    rfp_id: str, fingerprint: str
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Return (plan_dump, completed_nodes) for a resumable checkpoint, or
+    (None, []) when there is none or it belongs to a different RFP text.
+
+    Defensive by design: any checkpoint-store failure degrades to "no
+    checkpoint" rather than breaking an otherwise-working phase.
+    """
+    try:
+        from app.services.proposal_repository import aget_research_cache
+
+        cache = await aget_research_cache(rfp_id)
+        if cache is None or not cache.intelligence_checkpoint:
+            return None, []
+        checkpoint = cache.intelligence_checkpoint
+        if checkpoint.get("fingerprint") != fingerprint:
+            return None, []
+        plan = checkpoint.get("plan") or None
+        completed = list(checkpoint.get("completedNodes") or [])
+        return plan, completed
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load intelligence checkpoint for %s: %s", rfp_id, exc)
+        return None, []
+
+
+async def _save_intelligence_checkpoint(
+    rfp_id: str,
+    fingerprint: str,
+    plan_dump: dict[str, Any],
+    completed: list[str],
+) -> None:
+    """Persist a resumable checkpoint. Failures are logged and swallowed —
+    a checkpoint-store failure must never break a phase that is otherwise
+    working."""
+    try:
+        from app.services.proposal_repository import (
+            aget_research_cache,
+            asave_research_cache,
+        )
+        from app.models.proposal import ProposalResearchCache
+
+        now = datetime.now(timezone.utc).isoformat()
+        cache = await aget_research_cache(rfp_id)
+        if cache is None:
+            cache = ProposalResearchCache(rfp_id=rfp_id, updated_at=now)
+        cache.intelligence_checkpoint = {
+            "fingerprint": fingerprint,
+            "completedNodes": list(completed),
+            "plan": plan_dump,
+            "updatedAt": now,
+        }
+        await asave_research_cache(cache)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to save intelligence checkpoint for %s: %s", rfp_id, exc)
+
+
+async def _clear_intelligence_checkpoint(rfp_id: str) -> None:
+    """Clear a completed phase's checkpoint so the next fresh run redoes
+    everything. Defensive: a failure here must not break a successful run."""
+    try:
+        from app.services.proposal_repository import (
+            aget_research_cache,
+            asave_research_cache,
+        )
+
+        cache = await aget_research_cache(rfp_id)
+        if cache is None or not cache.intelligence_checkpoint:
+            return
+        cache.intelligence_checkpoint = None
+        await asave_research_cache(cache)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to clear intelligence checkpoint for %s: %s", rfp_id, exc)
+
+
 def _wrap(name: str, fn):  # type: ignore[no-untyped-def]
     async def node(state: IntelligenceGraphState) -> dict[str, Any]:
         if state.get("error"):
             return {}
+        if name in (state.get("completed_nodes") or []):
+            log_intel_event("node_skip", node=name, reason="checkpoint")
+            return {}
         from app.services.llm_call_context import llm_call_context
 
         log_intel_event("node_enter", node=name, rfp_id=state.get("rfp_id"))
+        if name in _INTELLIGENCE_NODE_STEP_INDEX:
+            try:
+                from app.services.proposal_pipeline_checkpoint import (
+                    record_pipeline_activity,
+                )
+
+                await record_pipeline_activity(
+                    str(state.get("rfp_id") or ""),
+                    label=_INTELLIGENCE_NODE_LABEL_MAP.get(name, name),
+                    detail=None,
+                    step_index=_INTELLIGENCE_NODE_STEP_INDEX[name],
+                    step_total=len(INTELLIGENCE_NODE_LABELS),
+                    in_progress_phase="phase-2",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to record intelligence progress for node %s: %s", name, exc
+                )
         plan = _load_plan(state)
+        # Build the kwargs from the agent's OWN signature instead of calling and
+        # catching TypeError. The old try/except could not tell "this agent does
+        # not take rfp_context" from "a TypeError was raised INSIDE the agent" —
+        # so a real bug in an agent body (e.g. a wrong kwarg passed on to
+        # safe_chat_json) was retried twice and then reported as a bogus
+        # "missing 1 required keyword-only argument", hiding the true cause.
+        import inspect
+
+        accepted = inspect.signature(fn).parameters
+        call_kwargs: dict[str, Any] = {"plan": plan}
+        if "rfp_context" in accepted:
+            call_kwargs["rfp_context"] = state.get("rfp_context") or ""
+        if "rfp_meta" in accepted:
+            call_kwargs["rfp_meta"] = _meta(state)
+        succeeded = False
         try:
             with llm_call_context(
                 rfp_id=str(state.get("rfp_id") or ""),
                 node_name=name,
             ):
-                plan = await fn(
-                    plan=plan,
-                    rfp_context=state.get("rfp_context") or "",
-                    rfp_meta=_meta(state),
-                )
-        except TypeError:
-            try:
-                with llm_call_context(
-                    rfp_id=str(state.get("rfp_id") or ""),
-                    node_name=name,
-                ):
-                    plan = await fn(plan=plan, rfp_meta=_meta(state))
-            except TypeError:
-                with llm_call_context(
-                    rfp_id=str(state.get("rfp_id") or ""),
-                    node_name=name,
-                ):
-                    plan = await fn(plan=plan)
+                plan = await fn(**call_kwargs)
+            succeeded = True
         except IntelligenceError as exc:
             log_intel_event("node_fail", node=name, error=str(exc)[:200])
             return {"error": str(exc), "plan": _dump_plan(plan)}
         except Exception as exc:  # noqa: BLE001
+            # NOT a success — do not add `name` to completed_nodes below. A node
+            # that silently failed has not produced its work, and marking it
+            # done would bake the gap in permanently on resume.
             logger.warning("Intelligence node %s failed (non-fatal): %s", name, exc)
             log_intel_event("node_warn", node=name, error=str(exc)[:200])
         log_intel_event("node_exit", node=name)
-        return {
-            "plan": _dump_plan(plan),
+        plan_dump = _dump_plan(plan)
+        result: dict[str, Any] = {
+            "plan": plan_dump,
             "provider": plan.metadata.provider or state.get("provider") or "",
         }
+        if succeeded:
+            # The graph is linear, so plain replace semantics (rather than a
+            # LangGraph reducer) are correct here: each node's returned dict
+            # fully supersedes the prior completed_nodes list with itself appended.
+            completed = list(state.get("completed_nodes") or [])
+            completed.append(name)
+            result["completed_nodes"] = completed
+            await _save_intelligence_checkpoint(
+                str(state.get("rfp_id") or ""),
+                _context_fingerprint(state.get("rfp_context") or ""),
+                plan_dump,
+                completed,
+            )
+        return result
 
     return node
 
@@ -193,6 +336,9 @@ def _build_graph() -> Any:
     graph.add_node(
         "dynamic_section", _wrap("dynamic_section", run_dynamic_section_planner)
     )
+    graph.add_node(
+        "checklister", _wrap("checklister", run_proposal_checklister)
+    )
     graph.add_node("writing_briefs", _wrap("writing_briefs", run_writing_briefs))
     graph.add_node("assemble", _assemble)
     graph.add_node("validate", _validate)
@@ -202,7 +348,8 @@ def _build_graph() -> Any:
     graph.add_edge("opportunity_extract", "strategy_delivery")
     graph.add_edge("strategy_delivery", "execution_plan")
     graph.add_edge("execution_plan", "dynamic_section")
-    graph.add_edge("dynamic_section", "writing_briefs")
+    graph.add_edge("dynamic_section", "checklister")
+    graph.add_edge("checklister", "writing_briefs")
     graph.add_edge("writing_briefs", "assemble")
     graph.add_edge("assemble", "validate")
     graph.add_edge("validate", "derive_legacy")
@@ -227,6 +374,17 @@ async def run_intelligence_graph(
     log_path = get_intelligence_log_path()
     log_intel_event("graph_start", rfp_id=rfp_id, log_path=str(log_path))
 
+    fingerprint = _context_fingerprint(rfp_context)
+    checkpoint_plan, completed_nodes = await _load_intelligence_checkpoint(
+        rfp_id, fingerprint
+    )
+    log_intel_event(
+        "checkpoint_loaded",
+        rfp_id=rfp_id,
+        nodes_skipped=len(completed_nodes),
+        completed=completed_nodes,
+    )
+
     initial: IntelligenceGraphState = {
         "rfp_id": rfp_id,
         "rfp_title": rfp_title,
@@ -235,8 +393,9 @@ async def run_intelligence_graph(
         "rfp_location": rfp_location,
         "rfp_context": rfp_context,
         "page_limit": page_limit,
-        "plan": ProposalExecutionPlan(rfpId=rfp_id).model_dump(by_alias=True),
+        "plan": checkpoint_plan or ProposalExecutionPlan(rfpId=rfp_id).model_dump(by_alias=True),
         "legacy": {},
+        "completed_nodes": completed_nodes,
     }
 
     final = await _INTELLIGENCE_GRAPH.ainvoke(initial)
@@ -251,4 +410,5 @@ async def run_intelligence_graph(
         readiness=plan.validation.readiness_status,
         decisions=len(plan.decision_log),
     )
+    await _clear_intelligence_checkpoint(rfp_id)
     return plan, legacy

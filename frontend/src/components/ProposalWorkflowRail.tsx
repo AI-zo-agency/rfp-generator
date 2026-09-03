@@ -7,13 +7,21 @@ import {
   FULFILL_SCAN_PHASE,
   FULFILL_SCAN_STEP_LABELS,
   FULL_PROPOSAL_STEP_LABELS,
+  INTELLIGENCE_STEP_LABELS,
   inProgressPhaseLabel,
   type PipelineInProgressPhase,
   type ProposalPipelineCheckpoint,
 } from "@/lib/proposal-pipeline-checkpoint";
-import { FULFILL_SCAN_STEP_GROUPS } from "@/lib/proposal-scan-step-groups";
+import {
+  FULFILL_SCAN_STEP_GROUPS,
+  TARGETED_FIX_STEP_GROUPS,
+  TARGETED_FIX_PREP_STEP_LABELS,
+  TARGETED_FIX_FINISH_STEP_LABELS,
+  isStaticCompanyBlockSection,
+} from "@/lib/proposal-scan-step-groups";
 import type { LlmCostRfpBreakdown } from "@/lib/llm-cost-service";
 import { capabilityById } from "@/lib/proposal-tool-guide";
+import type { ProposalOutline } from "@/types/proposal";
 
 const FULFILL_TOTAL_STEPS = FULFILL_SCAN_STEP_LABELS.length;
 
@@ -52,6 +60,11 @@ interface ProposalWorkflowRailProps {
   onViewLastResults: () => void;
   goRfpCount?: number;
   onOpenGoRfpPicker?: () => void;
+  outline?: ProposalOutline | null;
+  optimisticScanProfile?: string | null;
+  /** From pipeline status. False = Final checks is switched off server-side, so
+   *  the rail must not list a phase that can never run. */
+  buildFinalizeEnabled?: boolean | null;
 }
 
 function CategoryIcon({ label }: { label: string }) {
@@ -107,6 +120,9 @@ export function ProposalWorkflowRail({
   onViewLastResults,
   goRfpCount,
   onOpenGoRfpPicker,
+  outline,
+  optimisticScanProfile,
+  buildFinalizeEnabled,
 }: ProposalWorkflowRailProps) {
   // Categories show every step (agent) by default — the whole scan pipeline is
   // visible in the rail at a glance; a category can be collapsed to tidy up.
@@ -149,15 +165,67 @@ export function ProposalWorkflowRail({
     inProgressPhase !== FULFILL_SCAN_PHASE &&
     inProgressPhase !== ALIGN_RFP_OUTLINE_PHASE &&
     inProgressPhase !== PACKET_REDISTRIBUTE_PHASE;
+  // Final checks is OFF BY DEFAULT (config.build_finalize_enabled), so the rail
+  // shows it ONLY when the server explicitly reports it enabled. Hiding unless
+  // opted in matches the backend default — the inverse would leave a phase in
+  // the list that can never run whenever the status field is absent or stale.
+  const buildSteps =
+    buildFinalizeEnabled === true
+      ? FULL_PROPOSAL_STEP_LABELS
+      : FULL_PROPOSAL_STEP_LABELS.filter((p) => p.phase !== "build-finalize");
+
   const generatePhaseIndex = isGenerateRun
-    ? FULL_PROPOSAL_STEP_LABELS.findIndex((p) => p.phase === inProgressPhase)
+    ? buildSteps.findIndex((p) => p.phase === inProgressPhase)
     : -1;
+  const isTargetedFix =
+    checkpoint?.scanProfile === "targeted_fix" ||
+    optimisticScanProfile === "targeted_fix";
+  
+  // Dynamically map outline sections as targeted fix groups — static
+  // Sections 1-3 are excluded since Review & Fix never reviews them.
+  const reviewableOutlineSectionLabels = outline?.sections
+    ?.filter((s: any) => !isStaticCompanyBlockSection(s.id))
+    ?.map((s: any) => s.title || s.id || "Untitled Section");
+
+  // Mirrors the backend's one continuous step sequence in
+  // `_run_targeted_fix_per_section_loop`: 2 prep stages, then one step per
+  // reviewed section, then 3 finishing stages — presented as three groups so
+  // the rail reads as a real sequence instead of one lump of section chips.
+  const dynamicTargetedGroups: typeof FULFILL_SCAN_STEP_GROUPS = [
+    {
+      label: "Structure checks",
+      steps: TARGETED_FIX_PREP_STEP_LABELS,
+    },
+    {
+      label: "Review Sections",
+      steps: reviewableOutlineSectionLabels || [],
+    },
+    {
+      label: "Final passes",
+      steps: TARGETED_FIX_FINISH_STEP_LABELS,
+    },
+  ];
+
+  // Flat concatenation in the exact backend order: flat index + 1 must equal
+  // the backend's step_index, since openWorkflowDetail / the active-chip
+  // lookup below resolve via `activeFulfillLabels.indexOf(step) + 1 ===
+  // stepIndex`.
+  const activeFulfillLabels = isTargetedFix
+    ? [
+        ...TARGETED_FIX_PREP_STEP_LABELS,
+        ...(reviewableOutlineSectionLabels || []),
+        ...TARGETED_FIX_FINISH_STEP_LABELS,
+      ]
+    : FULFILL_SCAN_STEP_LABELS;
+    
+  const activeFulfillGroups = isTargetedFix ? dynamicTargetedGroups : FULFILL_SCAN_STEP_GROUPS;
+
   const stepIndex =
     isFulfillRun || isAlignRun || isPlaceRun
       ? checkpoint?.stepIndex ?? null
       : null;
   const stepTotal = isFulfillRun
-    ? checkpoint?.stepTotal ?? FULFILL_TOTAL_STEPS
+    ? checkpoint?.stepTotal ?? activeFulfillLabels.length
     : isAlignRun
       ? checkpoint?.stepTotal ?? ALIGN_STEP_LABELS.length
       : isPlaceRun
@@ -165,7 +233,9 @@ export function ProposalWorkflowRail({
         : null;
 
   const statusLabel = isRunning
-    ? (inProgressPhase ? inProgressPhaseLabel(inProgressPhase) : "Working").toUpperCase()
+    ? (inProgressPhase 
+        ? (isTargetedFix && inProgressPhase === FULFILL_SCAN_PHASE ? "Review Sections" : inProgressPhaseLabel(inProgressPhase)) 
+        : "Working").toUpperCase()
     : manualFillCount === 0 && hasCompletedFulfillReport
       ? "COMPLETE & CLEAN DRAFT"
       : manualFillCount > 0
@@ -173,11 +243,26 @@ export function ProposalWorkflowRail({
         : "READY FOR REVIEW";
 
   const activityLabel = isRunning ? checkpoint?.activityLabel?.trim() || statusLabel : null;
+
+  // The backend numbers steps over the DRAFT's sections; these chips are built
+  // from the outline, which can be ordered differently (the structure pass
+  // reorders tabs mid-run). Matching the live activity label to a chip keeps the
+  // lit chip the section that is actually running, instead of trusting an index
+  // whose two sides can drift. Falls back to the backend index when the label is
+  // not in the list (e.g. a tab added mid-run that this outline predates).
+  const liveStepLabel = isRunning ? checkpoint?.activityLabel?.trim() || "" : "";
+  const labelMatchedStep = liveStepLabel
+    ? activeFulfillLabels.findIndex((l) => l === liveStepLabel) + 1
+    : 0;
+  const effectiveStepIndex =
+    isTargetedFix && labelMatchedStep > 0 ? labelMatchedStep : stepIndex;
   const activityDetail = isRunning ? checkpoint?.activityDetail?.trim() || null : null;
 
   const openWorkflowDetail = () => {
-    const activeGroup = FULFILL_SCAN_STEP_GROUPS.find((group) =>
-      group.steps.some((step) => FULFILL_SCAN_STEP_LABELS.indexOf(step as (typeof FULFILL_SCAN_STEP_LABELS)[number]) + 1 === stepIndex)
+    const activeGroup = activeFulfillGroups.find((group) =>
+      group.steps.some(
+        (step) => activeFulfillLabels.indexOf(step as any) + 1 === effectiveStepIndex
+      )
     );
     // Make sure the running category is expanded (it may have been collapsed).
     if (activeGroup) {
@@ -202,7 +287,7 @@ export function ProposalWorkflowRail({
         <span className="proposal-workflow-status-label">{statusLabel}</span>
         {stepIndex != null && stepTotal ? (
           <span className="proposal-workflow-status-step">
-            Step {stepIndex} of {stepTotal}
+            Step {effectiveStepIndex} of {stepTotal}
           </span>
         ) : null}
       </div>
@@ -244,7 +329,7 @@ export function ProposalWorkflowRail({
                 className="proposal-workflow-category-steps"
                 style={{ "--wf-progress": 1 } as React.CSSProperties}
               >
-                {FULL_PROPOSAL_STEP_LABELS.map((p) => (
+                {buildSteps.map((p) => (
                   <li key={p.phase} className="proposal-workflow-step is-done">
                     <span className="proposal-workflow-step-dot" aria-hidden />
                     <span className="proposal-workflow-step-label">{p.label}</span>
@@ -334,12 +419,16 @@ export function ProposalWorkflowRail({
       <div className="proposal-workflow-section">
         <p className="proposal-workflow-section-label">Workflow categories</p>
         <ul className="proposal-workflow-categories">
-          {FULFILL_SCAN_STEP_GROUPS.map((group) => {
+          {activeFulfillGroups.map((group) => {
             const numbers = group.steps.map(
-              (step) => FULFILL_SCAN_STEP_LABELS.indexOf(step as (typeof FULFILL_SCAN_STEP_LABELS)[number]) + 1
+              (step) => activeFulfillLabels.indexOf(step as any) + 1
             );
-            const doneCount = stepIndex != null ? numbers.filter((n) => n > 0 && stepIndex > n).length : 0;
-            const isActive = stepIndex != null && numbers.includes(stepIndex);
+            const doneCount =
+              effectiveStepIndex != null
+                ? numbers.filter((n) => n > 0 && effectiveStepIndex > n).length
+                : 0;
+            const isActive =
+              effectiveStepIndex != null && numbers.includes(effectiveStepIndex);
             const expanded = !collapsedCategories.has(group.label);
             return (
               <li key={group.label} className="proposal-workflow-category">
@@ -383,10 +472,10 @@ export function ProposalWorkflowRail({
                     }
                   >
                     {group.steps.map((step) => {
-                      const n =
-                        FULFILL_SCAN_STEP_LABELS.indexOf(step as (typeof FULFILL_SCAN_STEP_LABELS)[number]) + 1;
-                      const done = stepIndex != null && n > 0 && stepIndex > n;
-                      const active = stepIndex === n;
+                      const n = activeFulfillLabels.indexOf(step as any) + 1;
+                      const done =
+                        effectiveStepIndex != null && n > 0 && effectiveStepIndex > n;
+                      const active = effectiveStepIndex === n;
                       return (
                         <li
                           key={step}
@@ -413,14 +502,21 @@ export function ProposalWorkflowRail({
               {
                 "--wf-progress":
                   generatePhaseIndex >= 0
-                    ? generatePhaseIndex / FULL_PROPOSAL_STEP_LABELS.length
+                    ? generatePhaseIndex / buildSteps.length
                     : 0,
               } as React.CSSProperties
             }
           >
-            {FULL_PROPOSAL_STEP_LABELS.map((p, i) => {
+            {buildSteps.map((p, i) => {
               const done = generatePhaseIndex >= 0 && i < generatePhaseIndex;
               const active = i === generatePhaseIndex;
+              // While Phase 2 ("Intelligence") runs, light up its internal LLM
+              // nodes one by one instead of showing a single dot for ~3 minutes.
+              const showIntelligenceSubsteps =
+                p.phase === "phase-2" && active && inProgressPhase === "phase-2";
+              const intelligenceStepIndex = showIntelligenceSubsteps
+                ? checkpoint?.stepIndex ?? null
+                : null;
               return (
                 <li
                   key={p.phase}
@@ -428,6 +524,25 @@ export function ProposalWorkflowRail({
                 >
                   <span className="proposal-workflow-step-dot" aria-hidden />
                   <span className="proposal-workflow-step-label">{p.label}</span>
+                  {showIntelligenceSubsteps ? (
+                    <ul className="proposal-workflow-substeps">
+                      {INTELLIGENCE_STEP_LABELS.map((label, si) => {
+                        const n = si + 1;
+                        const subDone =
+                          intelligenceStepIndex != null && intelligenceStepIndex > n;
+                        const subActive = intelligenceStepIndex === n;
+                        return (
+                          <li
+                            key={label}
+                            className={`proposal-workflow-step ${subDone ? "is-done" : ""} ${subActive ? "is-active" : ""}`}
+                          >
+                            <span className="proposal-workflow-step-dot" aria-hidden />
+                            <span className="proposal-workflow-step-label">{label}</span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : null}
                 </li>
               );
             })}

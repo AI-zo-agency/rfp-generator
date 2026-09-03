@@ -239,7 +239,7 @@ async def _plan_fills(
                     "sectionId": gap.section_id,
                     "kbQueries": [
                         (
-                            f"06_WON 07_FIN {rfp_sector} {gap.title} "
+                            f"06_WON {rfp_sector} {gap.title} "
                             f"{' '.join(gap.reasons)[:80]}"
                         ).strip()
                     ],
@@ -259,8 +259,10 @@ async def _plan_fills(
         "TBD lines, empty table cells — VERIFY tags are NOT required), pick up to "
         f"{_MAX_PLAN_FILLS} sections to fill now.\n"
         "For each, write 1-3 focused KB queries — not a single generic one. "
-        "Prefer 06_WON / 07_FIN past won or finalist proposals, then 04_Bio / "
-        "03_CS. When the client/case-study names already in this draft (listed "
+        "Prefer 06_WON past WON proposals (delivered work), then 04_Bio / "
+        "03_CS. Do NOT write 07_FIN into a query: finalist bids were not won "
+        "and not delivered, so they cannot answer 'what have we done'. "
+        "When the client/case-study names already in this draft (listed "
         "below, if any) are relevant to the gap, name them directly in at "
         "least one query instead of only a generic gap-title search — a query "
         "naming the real client finds their reference/contact details far "
@@ -297,7 +299,7 @@ async def _plan_fills(
         return [
             {
                 "sectionId": g.section_id,
-                "kbQueries": [f"06_WON 07_FIN {g.title}"],
+                "kbQueries": [f"06_WON {g.title}"],
                 "gaps": g.reasons,
             }
             for g in gaps[:_MAX_PLAN_FILLS]
@@ -308,7 +310,7 @@ async def _plan_fills(
         return [
             {
                 "sectionId": g.section_id,
-                "kbQueries": [f"06_WON 07_FIN {g.title}"],
+                "kbQueries": [f"06_WON {g.title}"],
                 "gaps": g.reasons,
             }
             for g in gaps[:_MAX_PLAN_FILLS]
@@ -329,7 +331,7 @@ async def _plan_fills(
             # Back-compat with a model that still returns the old single-query
             # shape, and the ultimate fallback if it returns neither.
             single = str(item.get("kbQuery") or item.get("kb_query") or "").strip()
-            queries = [single[:200]] if single else [f"06_WON 07_FIN {sid}"]
+            queries = [single[:200]] if single else [f"06_WON {sid}"]
         planned.append(
             {
                 "sectionId": sid,
@@ -394,6 +396,20 @@ async def _retrieve_queries(queries: list[str]) -> tuple[str, list[str]]:
         if remaining <= 0:
             break
         chunk = text[:remaining].strip()
+        # Provenance is enforced HERE, on the retrieved filenames, not left to
+        # a "prefer 06_WON" instruction the model may ignore. 07_FIN is a
+        # FINALIST bid — proposed work we did not win and never delivered.
+        # Citing it as delivered experience is a fabrication in a submitted
+        # proposal, so the block is labelled before the writer ever sees it.
+        finalist_srcs = [s for s in (srcs or []) if "07_fin" in (s or "").casefold()]
+        if finalist_srcs:
+            chunk = (
+                "[FINALIST BID — NOT DELIVERED WORK. Source(s): "
+                + ", ".join(finalist_srcs[:3])
+                + ". Use ONLY for wording, structure and positioning. NEVER cite "
+                "as a completed project, client engagement, or past performance.]\n"
+                + chunk
+            )
         blocks.append(f"### KB query: {q[:90]}\n{chunk}")
         total += len(chunk)
     return "\n\n".join(blocks), sources
@@ -417,8 +433,12 @@ async def _llm_fill_section(
         "- Cover empty labeled fields, MANUAL FILL stubs, TBD lines, and empty table "
         "cells listed in the gap list — VERIFY tags are not required to act.\n"
         "- Keep substantive prose that is already good.\n"
-        "- Prefer 06_WON / 07_FIN past won/finalist proposals, then 04_Bio / 03_CS / "
-        "draft roster. Never invent clients, metrics, degrees, or contacts.\n"
+        "- Prefer 06_WON past WON proposals, then 04_Bio / 03_CS / draft roster. "
+        "Never invent clients, metrics, degrees, or contacts.\n"
+        "- A block marked [FINALIST BID — NOT DELIVERED WORK] is a bid zö did "
+        "NOT win. Borrow its wording or structure if useful, but NEVER present "
+        "its project as delivered work, a client engagement, or past "
+        "performance — that is a fabricated claim in a submitted proposal.\n"
         "- If evidence is thin for a field, use [VERIFY: …] — never fabricate.\n"
         "- Never write a checklist, numbered to-do list, or description of what "
         "someone else should do instead (\"confirm whether...\", \"select three "
@@ -460,7 +480,9 @@ async def _llm_fill_section(
     # own trailing blank line to keep the same spacing the inlined version had.
     cache_prefix = [
         f"Draft roster / Our Work / company tabs:\n{draft_context[:5_000]}\n\n",
-        f"KB evidence (won proposals + bios):\n{evidence[:_EVIDENCE_CHARS]}\n\n",
+        f"KB evidence (won proposals + bios; finalist blocks are labelled "
+        f"and must not be cited as delivered work):\n"
+        f"{evidence[:_EVIDENCE_CHARS]}\n\n",
     ]
     try:
         raw, _ = await asyncio.wait_for(

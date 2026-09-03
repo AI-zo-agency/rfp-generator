@@ -148,7 +148,7 @@ async def _enqueue_pipeline_phase(
         clear_generation_cancel(rfp_id)
 
         # Mark in-progress before returning so the first poll sees the phase.
-        await record_phase_started(rfp_id, phase)
+        await record_phase_started(rfp_id, phase, scan_profile=job_kwargs.get("mode") if job_kwargs else None)
 
         import uuid
 
@@ -815,7 +815,19 @@ async def generate_full_proposal_endpoint(rfp_id: str) -> ProposalGenerateRespon
 @router.post("/{rfp_id}/proposal/build-finalize")
 async def build_finalize_endpoint(rfp_id: str) -> JSONResponse:
     """Final checks tail for Build My Proposal (subset of Complete Scan)."""
+    from app.core.config import settings as app_settings
     from app.services.proposal_fulfill_rfp_gaps import run_build_finalize_pass
+
+    if not app_settings.build_finalize_enabled:
+        # Final checks is switched OFF (see config.build_finalize_enabled). The
+        # pass is intact — this endpoint just declines to enqueue it for now.
+        return JSONResponse(
+            {
+                "status": "skipped",
+                "phase": "build-finalize",
+                "detail": "Final checks is disabled (config.build_finalize_enabled).",
+            }
+        )
 
     async def work() -> None:
         await run_build_finalize_pass(rfp_id)

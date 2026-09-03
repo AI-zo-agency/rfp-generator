@@ -50,6 +50,7 @@ export interface ProposalPipelineCheckpoint {
   resumeFromPhase?: PipelinePhase | null;
   activityLabel?: string | null;
   activityDetail?: string | null;
+  scanProfile?: string | null;
   stepIndex?: number | null;
   stepTotal?: number | null;
   lastCompletedFulfillStep?: number | null;
@@ -176,6 +177,17 @@ export const FULFILL_SCAN_STEP_LABELS = [
   "Submission readiness (triage + score)",
 ] as const;
 
+// Mirrors INTELLIGENCE_NODE_LABELS in
+// backend/app/services/proposal_intelligence/graph.py — keep in sync.
+export const INTELLIGENCE_STEP_LABELS = [
+  "Reading the RFP opportunity",
+  "Shaping strategy & delivery",
+  "Building the execution plan",
+  "Planning RFP section tabs",
+  "Auditing required sections",
+  "Writing section briefs",
+] as const;
+
 export const FULL_PROPOSAL_STEP_LABELS: { phase: PipelinePhase; label: string }[] = [
   { phase: "sections-1-3", label: "Sections 1–3" },
   { phase: "phase-2", label: "Intelligence" },
@@ -196,12 +208,16 @@ export interface ProposalPipelineStatus {
   lastError?: string | null;
   inProgressPhase?: PipelineInProgressPhase | null;
   phaseLabels: Record<string, string>;
+  /** False when Final checks is switched off server-side
+   * (config.build_finalize_enabled). The rail hides the step rather than
+   * showing one that can never run. Undefined on older payloads = enabled. */
+  buildFinalizeEnabled?: boolean | null;
   checkpoint?: ProposalPipelineCheckpoint | null;
   /** True when a Complete & clean run finished and the draft has not been edited
    * since. Server-derived, so it survives refresh and is the same for every user. */
   fulfillScanUpToDate?: boolean | null;
-  /** ISO time the last Complete & clean run finished (server-side). */
   fulfillScanCompletedAt?: string | null;
+  scanProfile?: string | null;
 }
 
 /** True when the one-click build pipeline finished (through Final checks). */
@@ -529,6 +545,7 @@ export function buildPipelineStatus(
       cp?.lastCleanFulfillScanHash &&
         cp.lastCleanFulfillScanHash === computeDraftContentHash(draft)
     ),
+    scanProfile: cp?.scanProfile ?? null,
   };
 }
 

@@ -136,7 +136,19 @@ async def _enqueue_next_generate_phase(rfp_id: str, completed_phase: str) -> Non
 
         await _redis_clear_job(rfp_id)
 
-    await record_phase_started(rfp_id, next_phase)
+    # Carry the profile forward. Passing None here stamped scanProfile=None on
+    # the checkpoint, which used to make the readers treat a half-finished
+    # Review & Fix as "not ours" and start it over from section 1.
+    prior_profile = None
+    try:
+        from app.services.proposal_repository import aget_research_cache
+
+        _research = await aget_research_cache(rfp_id)
+        _cp = _research.pipeline_checkpoint if _research else None
+        prior_profile = _cp.scan_profile if _cp else None
+    except Exception:  # noqa: BLE001 — never block the chain on a read
+        prior_profile = None
+    await record_phase_started(rfp_id, next_phase, scan_profile=prior_profile)
     async_result = run_pipeline_phase_task.delay(
         rfp_id, next_phase, {"chain_next": True}
     )
