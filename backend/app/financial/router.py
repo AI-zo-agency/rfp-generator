@@ -53,6 +53,11 @@ from app.financial.qb_trend import margin_rows
 from app.financial import financial_llm_cost, qb_chat
 from app.financial.qb_forecast_llm import SOURCE as QB_FORECAST_SOURCE
 from app.financial.qb_forecast import forecast as build_forecast_panel
+from app.financial.qb_forecast_monthly import (
+    SOURCE as QB_FORECAST_MONTHLY_SOURCE,
+    run_backfill as run_monthly_forecast_backfill,
+    scope_key as monthly_forecast_scope,
+)
 from app.financial.qb_insights import SOURCE as QB_INSIGHT_SOURCE
 from app.financial.qb_insights import generate_and_store
 from app.financial.qb_repository import get_panel_cache, get_sync_state
@@ -1682,6 +1687,36 @@ def quickbooks_sync(
     return result
 
 
+@router.post("/quickbooks/forecast/monthly/backfill")
+def quickbooks_monthly_forecast_backfill(
+    request: Request,
+    year: int = Query(..., ge=2000, le=2100),
+):
+    """One-shot past-year monthly revenue scorecard. Cron-secret only."""
+    if not _cron_authorized(request.headers.get("X-Cron-Secret")):
+        logger.warning(
+            "operation=quickbooks_monthly_forecast_backfill year=%s status=unauthorized",
+            year,
+        )
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+    realm_id = settings.quickbooks_realm_id
+    logger.info(
+        "operation=quickbooks_monthly_forecast_backfill realm_id=%s year=%s status=started",
+        realm_id,
+        year,
+    )
+    result = run_monthly_forecast_backfill(realm_id, year)
+    logger.info(
+        "operation=quickbooks_monthly_forecast_backfill realm_id=%s year=%s "
+        "status=%s months=%s",
+        realm_id,
+        year,
+        result.get("status"),
+        result.get("months"),
+    )
+    return result
+
+
 @router.get("/quickbooks/status")
 def quickbooks_status():
     """Connection health — safe to poll, never raises."""
@@ -1776,6 +1811,7 @@ def quickbooks_overview(
     result["forecast"] = _merge_llm_forecast(
         _forecast_panel_or_compute(result, realm_id),
         realm_id,
+        year=year,
     )
     return result
 
@@ -1827,41 +1863,75 @@ def _forecast_panel_or_compute(
     return rebuilt
 
 
+def _monthly_forecast_payload(realm_id: str, year: int) -> dict[str, Any] | None:
+    try:
+        row = get_latest_insight(
+            QB_FORECAST_MONTHLY_SOURCE, monthly_forecast_scope(realm_id, year)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "operation=quickbooks_overview status=monthly_forecast_lookup_failed "
+            "realm_id=%s year=%s error=%s",
+            realm_id,
+            year,
+            str(exc)[:200],
+        )
+        return None
+    if not row:
+        return None
+    payload = row.get("payload") or {}
+    return {
+        **payload,
+        "as_of": row.get("as_of"),
+        "model": row.get("model"),
+    }
+
+
 def _merge_llm_forecast(
-    panel: dict[str, Any] | None, realm_id: str
+    panel: dict[str, Any] | None,
+    realm_id: str,
+    *,
+    year: int,
 ) -> dict[str, Any] | None:
-    """Attach the model's forecasts to the Python ones under a single key.
+    """Attach weekly LLM + monthly revenue forecasts to the Python panel.
 
-    Kept out of `build_overview` because the model runs after the panel cache is
-    written — it forecasts from the same numbers the tab shows, which it could
-    not do if it ran inside the build. Merging here means the frontend makes one
-    request and reads one shape.
-
-    A lookup failure, a missing table, or a night the model produced nothing all
-    leave `llm` as None. The Python year and quarter figures still render, which
-    is the whole reason they are computed separately.
+    Past years never receive live `cash_13w` — that chart is forward-looking
+    from today and must not be relabeled under 2024/2025.
     """
     if panel is None:
         return None
-    try:
-        row = get_latest_insight(QB_FORECAST_SOURCE, realm_id)
-    except Exception as exc:  # noqa: BLE001 — a missing table must not blank the tab
-        logger.warning(
-            "operation=quickbooks_overview status=forecast_lookup_failed "
-            "realm_id=%s error=%s",
-            realm_id,
-            str(exc)[:200],
-        )
-        return {**panel, "llm": None}
-    payload = (row or {}).get("payload") or {}
+    monthly = _monthly_forecast_payload(realm_id, year)
+    current_year = datetime.now().year
+    past_year = year < current_year
+
+    llm_payload: dict[str, Any] | None = None
+    llm_as_of = None
+    llm_model = None
+    llm_stale = False
+    if not past_year:
+        try:
+            row = get_latest_insight(QB_FORECAST_SOURCE, realm_id)
+        except Exception as exc:  # noqa: BLE001 — a missing table must not blank the tab
+            logger.warning(
+                "operation=quickbooks_overview status=forecast_lookup_failed "
+                "realm_id=%s error=%s",
+                realm_id,
+                str(exc)[:200],
+            )
+            row = None
+        if row:
+            llm_payload = row.get("payload") or None
+            llm_as_of = row.get("as_of")
+            llm_model = row.get("model")
+            llm_stale = bool(llm_as_of) and llm_as_of != _today_iso()
+
     return {
         **panel,
-        "llm": payload or None,
-        "llm_as_of": (row or {}).get("as_of"),
-        "llm_model": (row or {}).get("model"),
-        # The model forecasts nightly; a stale stamp means last night's run
-        # failed and the reader is looking at an older view than the ledger.
-        "llm_stale": bool(row) and (row or {}).get("as_of") != _today_iso(),
+        "llm": llm_payload,
+        "llm_as_of": llm_as_of,
+        "llm_model": llm_model,
+        "llm_stale": llm_stale,
+        "monthly": monthly,
     }
 
 

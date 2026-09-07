@@ -501,6 +501,11 @@ def test_nightly_reuses_panel_payload_for_insight_and_survives_a_failed_brief(mo
         "generate_forecast",
         lambda realm_id, overview, year, as_of: "ok",
     )
+    monkeypatch.setattr(
+        qb_sync,
+        "generate_monthly_forecast",
+        lambda realm_id, year, as_of: "ok",
+    )
 
     started = datetime(2026, 8, 13, tzinfo=timezone.utc)
     qb_sync._run_nightly(

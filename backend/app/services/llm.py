@@ -146,6 +146,7 @@ _FINANCIAL_LLM_NODES = frozenset(
         "client_map.link",
         "qb_forecast_cash",
         "qb_forecast_year",
+        "qb_forecast_month",
         # Explains the forecast in plain English. Financial, so it uses the
         # financial key and the prose model — it is listed here and pointedly
         # not in _FORECAST_LLM_NODES below.
@@ -158,7 +159,9 @@ _FINANCIAL_LLM_NODES = frozenset(
 # horizons outright (2.96% on 13-week cash, 0.31% on the year holdout) while
 # producing the most factual errors in its prose; the narrative model is chosen
 # for the opposite property. See `qb_forecast_llm`.
-_FORECAST_LLM_NODES = frozenset({"qb_forecast_cash", "qb_forecast_year"})
+_FORECAST_LLM_NODES = frozenset(
+    {"qb_forecast_cash", "qb_forecast_year", "qb_forecast_month"}
+)
 
 
 def _is_financial_node(node_name: str | None) -> bool:

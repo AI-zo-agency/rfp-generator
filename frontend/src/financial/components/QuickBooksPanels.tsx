@@ -408,6 +408,193 @@ const CONFIDENCE_WORDS: Record<string, string> = {
  */
 function ForecastView({ data }: { data: QuickBooksOverview }) {
   const f = data.forecast;
+  const currentYear = new Date().getFullYear();
+  const isPastYear = data.year < currentYear;
+  const [grain, setGrain] = useState<"weekly" | "monthly">("weekly");
+
+  if (!f) return <Empty>No forecast yet — it is built during the nightly sync.</Empty>;
+
+  if (isPastYear) {
+    return <MonthlyScorecard year={data.year} monthly={f.monthly ?? null} past />;
+  }
+
+  return (
+    <>
+      <div className="qb-toolbar-actions" style={{ marginBottom: 12, justifyContent: "flex-start" }}>
+        <ToggleGroup
+          type="single"
+          value={grain}
+          onValueChange={(v) => {
+            if (v === "weekly" || v === "monthly") setGrain(v);
+          }}
+          className="qb-years"
+          aria-label="Forecast grain"
+        >
+          <ToggleGroupItem value="weekly">Weekly cash</ToggleGroupItem>
+          <ToggleGroupItem value="monthly">Monthly revenue</ToggleGroupItem>
+        </ToggleGroup>
+      </div>
+      {grain === "weekly" ? (
+        <WeeklyCashForecast data={data} />
+      ) : (
+        <MonthlyScorecard year={data.year} monthly={f.monthly ?? null} past={false} />
+      )}
+    </>
+  );
+}
+
+function MonthlyScorecard({
+  year,
+  monthly,
+  past,
+}: {
+  year: number;
+  monthly: NonNullable<QuickBooksOverview["forecast"]>["monthly"] | null;
+  past: boolean;
+}) {
+  const months = monthly?.months ?? [];
+  const chartRows = useMemo(
+    () =>
+      months.map((m) => ({
+        label: m.label.replace(` ${year}`, ""),
+        forecast: m.forecast ?? 0,
+        actual: m.actual ?? null,
+        trail3: m.baseline_trail3 ?? null,
+      })),
+    [months, year],
+  );
+  const scored = months.filter((m) => m.error_pct != null);
+  const mape =
+    monthly?.mape ??
+    (scored.length
+      ? scored.reduce((s, m) => s + (m.error_pct ?? 0), 0) / scored.length
+      : null);
+  const meanAccuracy = mape != null ? Math.max(0, 100 - mape) : null;
+
+  if (!months.length) {
+    return (
+      <Empty>
+        {past
+          ? `No monthly scorecard for ${year} yet — run the monthly forecast backfill.`
+          : "No monthly revenue forecast yet — it refreshes with the nightly sync."}
+      </Empty>
+    );
+  }
+
+  return (
+    <>
+      <div className="qb-moneyline">
+        {mape != null ? (
+          <Figure
+            label={past ? `Mean accuracy, ${year}` : "Score so far this year"}
+            size="lg"
+            metric="booked"
+            value={`${meanAccuracy?.toFixed(0)}%`}
+            sub={`MAPE ${mape.toFixed(1)}% across ${scored.length} closed months`}
+          />
+        ) : null}
+        <Figure
+          label="Months shown"
+          size="lg"
+          metric="income"
+          value={String(months.length)}
+          sub="10-month lookback · low confidence"
+        />
+      </div>
+
+      <Panel
+        title={past ? `Monthly revenue, ${year}` : `Monthly revenue outlook, ${year}`}
+        meta={monthly?.as_of ? `as of ${monthly.as_of}` : undefined}
+        hint={
+          past
+            ? "Coral is what the model predicted from the prior ten months. Teal is what actually booked. The trail-3 line is a simple average of the last three closed months."
+            : "Open months are recommendations (point + range). Closed months show actual against the forecast that was live when the month started. Expect roughly 20–40% error on a typical month."
+        }
+      >
+        <div className="qb-legend">
+          <span>
+            <span className="qb-swatch" style={{ background: "var(--zo-coral)" }} aria-hidden />
+            Forecast
+          </span>
+          <span>
+            <span className="qb-swatch" style={{ background: "var(--zo-teal)" }} aria-hidden />
+            Actual
+          </span>
+          <span>
+            <span className="qb-swatch qb-swatch-line" aria-hidden />
+            Trail-3 mean
+          </span>
+        </div>
+        <ResponsiveContainer width="100%" height={300}>
+          <ComposedChart data={chartRows} margin={{ top: 8, right: 8, bottom: 8, left: -8 }}>
+            <CartesianGrid vertical={false} stroke="var(--zo-border)" />
+            <XAxis dataKey="label" {...AXIS} />
+            <YAxis {...AXIS} width={62} tickFormatter={(v: number) => compact(v)} />
+            <RTooltip cursor={{ fill: "var(--zo-surface)" }} content={<ChartTooltip />} />
+            <Bar dataKey="forecast" name="Forecast" fill="var(--zo-coral)" maxBarSize={28} isAnimationActive={false} />
+            <Bar dataKey="actual" name="Actual" fill="var(--zo-teal)" maxBarSize={28} isAnimationActive={false} />
+            <Line
+              type="monotone"
+              dataKey="trail3"
+              name="Trail-3"
+              stroke="var(--zo-primary)"
+              strokeWidth={2}
+              dot={false}
+              connectNulls={false}
+              isAnimationActive={false}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </Panel>
+
+      <Panel title="Month by month">
+        <div className="qb-scroll">
+          <table className="qb-table">
+            <thead>
+              <tr>
+                <th scope="col">Month</th>
+                <th scope="col">Forecast</th>
+                <th scope="col">Trail-3</th>
+                <th scope="col">Actual</th>
+                <th scope="col">Accuracy</th>
+              </tr>
+            </thead>
+            <tbody>
+              {months.map((m) => (
+                <tr key={m.month}>
+                  <th scope="row">{m.label}</th>
+                  <td>
+                    {m.forecast != null ? usd(m.forecast) : "—"}
+                    {m.low != null && m.high != null ? (
+                      <span className="qb-subhead">
+                        {" "}
+                        {compact(m.low)}–{compact(m.high)}
+                      </span>
+                    ) : null}
+                  </td>
+                  <td>{m.baseline_trail3 != null ? usd(m.baseline_trail3) : "—"}</td>
+                  <td>{m.actual != null ? usd(m.actual) : "—"}</td>
+                  <td>
+                    {m.error_pct != null
+                      ? `${Math.max(0, 100 - m.error_pct).toFixed(0)}%`
+                      : "open"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <Note>
+          Monthly revenue is harder than the full-year figure. Treat each month as a
+          range, not a promise.
+        </Note>
+      </Panel>
+    </>
+  );
+}
+
+function WeeklyCashForecast({ data }: { data: QuickBooksOverview }) {
+  const f = data.forecast;
   const llm = f?.llm ?? null;
   const cash = llm?.cash_13w ?? null;
   const llmYear = llm?.year ?? null;
@@ -441,8 +628,6 @@ function ForecastView({ data }: { data: QuickBooksOverview }) {
 
   const troughIsLastWeek =
     cash?.trough != null && weeks.length > 0 && cash.trough.week >= weeks.length;
-
-  if (!f) return <Empty>No forecast yet — it is built during the nightly sync.</Empty>;
 
   return (
     <>
@@ -649,7 +834,7 @@ function ForecastView({ data }: { data: QuickBooksOverview }) {
           <p className="qb-watch">{plain.watch}</p>
         </Panel>
       ) : null}
-      {f.llm_stale ? (
+      {f?.llm_stale ? (
         <Note>
           These estimates were last updated {f.llm_as_of ?? "earlier"}. Last night&rsquo;s
           update did not run, so they are older than the rest of this page.

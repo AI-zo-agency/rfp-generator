@@ -235,6 +235,33 @@ export interface QuickBooksOverview {
     llm_model?: string | null;
     /** Last night's model run failed; the figures are older than the ledger. */
     llm_stale?: boolean;
+    /**
+     * Month-scoped revenue forecasts. Past years are a scorecard (forecast vs
+     * actual); the current year holds remaining-month recommendations.
+     */
+    monthly?: {
+      year?: number;
+      months: {
+        month: string;
+        label: string;
+        forecast: number | null;
+        low?: number | null;
+        high?: number | null;
+        actual?: number | null;
+        error_pct?: number | null;
+        as_of?: string | null;
+        method?: string | null;
+        baseline_trail3?: number | null;
+        confidence?: "low" | "medium" | "high" | null;
+        reasoning?: string | null;
+      }[];
+      mape?: number | null;
+      scored_months?: number | null;
+      lookback_months?: number | null;
+      generated_at?: string | null;
+      as_of?: string | null;
+      model?: string | null;
+    } | null;
   } | null;
   /**
    * Bills arrive after the month they belong to, so a recent month's cost is
