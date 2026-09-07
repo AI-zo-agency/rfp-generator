@@ -69,6 +69,43 @@ export interface PeriodWeeklyInMonth {
   total_hours: number;
 }
 
+export type TeamworkReconcileRowStatus =
+  | "match"
+  | "mismatch"
+  | "iworker_only"
+  | "no_teamwork_match";
+
+export interface TeamworkReconcileProject {
+  name: string;
+  hours: number;
+}
+
+export interface TeamworkReconcileRow {
+  contractor: string;
+  iworker_hours: number;
+  teamwork_hours: number | null;
+  delta_hours: number | null;
+  status: TeamworkReconcileRowStatus;
+  teamwork_user_id: string | null;
+  teamwork_name: string | null;
+  teamwork_projects: TeamworkReconcileProject[];
+}
+
+export interface TeamworkReconciliation {
+  status: "ok" | "unavailable" | "error";
+  detail?: string;
+  period_start: string;
+  period_end: string;
+  tolerance_hours: number;
+  rows: TeamworkReconcileRow[];
+  summary: {
+    matched: number;
+    mismatched: number;
+    iworker_only: number;
+    no_teamwork_match: number;
+  };
+}
+
 export interface PeriodInsights {
   timezone: string;
   granularity: PeriodGranularity;
@@ -82,6 +119,7 @@ export interface PeriodInsights {
   available_periods: PeriodWindow[];
   expected_hours: number;
   weekly_in_month: PeriodWeeklyInMonth[];
+  teamwork_reconciliation?: TeamworkReconciliation;
 }
 
 export interface IWorkerTabMeta {

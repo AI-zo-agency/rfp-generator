@@ -255,3 +255,25 @@ def test_month_includes_weekly_contractor_breakdown():
     assert aug4["contractors"][0]["name"] == "Murilo"
     aug11 = next(w for w in weeks if w["start"] == "2026-08-10")
     assert aug11["contractors"][0]["hours"] == 6.0
+
+
+def test_agency_expected_hours_sums_contractor_targets():
+    """Sonia demo math: 3 contractors × 20 hrs/week ≈ 60 agency expected."""
+    entries = [
+        _entry(contractor="Murilo Mendes", date="May 13, 2026", hours=1.0, amount=12.5),
+        _entry(contractor="Marcelle Benevides", date="May 13, 2026", hours=1.0, amount=12.5),
+        _entry(contractor="Kelvin Kiruthu", date="May 13, 2026", hours=1.0, amount=12.5),
+    ]
+    out = build_period_insights(
+        entries,
+        granularity="week",
+        period_start="2026-05-04",  # closed prior week → full 7 days
+        now=NOW,
+        expected_hours_by_contractor={
+            "Murilo Mendes": 20.0,
+            "Marcelle Benevides": 20.0,
+            "Kelvin Kiruthu": 20.0,
+        },
+    )
+    assert out["expected_hours"] == 60.0
+    assert len(out["contractors"]) == 3

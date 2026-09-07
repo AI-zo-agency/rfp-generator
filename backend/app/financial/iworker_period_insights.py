@@ -398,9 +398,6 @@ def build_period_insights(
     current, unparsed = build_period_metrics(entries, start, end, contractor)
     previous, _ = build_period_metrics(entries, prev_start, prev_end, contractor)
     expected_map = expected_hours_by_contractor or load_expected_hours_map()
-    expected = expected_hours_for_period(
-        grain, start, end, today, DEFAULT_WEEKLY_EXPECTED_HOURS, contractor, expected_map
-    )
     contractors = []
     names = [contractor] if contractor and contractor.lower() != "all" else _contractor_names(entries)
     for name in names:
@@ -420,6 +417,13 @@ def build_period_insights(
                 "hours_delta_pct": pct_delta(cur["hours"], prev["hours"]),
                 "spend_delta_pct": pct_delta(cur["spend_usd"], prev["spend_usd"]),
             }
+        )
+    # Agency expected = sum of roster targets (3×20 ≈ 60), not a single 20h default.
+    if contractors and (not contractor or contractor.lower() == "all"):
+        expected = round(sum(float(c["expected_hours"]) for c in contractors), 2)
+    else:
+        expected = expected_hours_for_period(
+            grain, start, end, today, DEFAULT_WEEKLY_EXPECTED_HOURS, contractor, expected_map
         )
     payload = {
         "timezone": tz_name,

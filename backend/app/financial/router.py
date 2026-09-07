@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 import logging
 from app.financial import google_sheets, ai_classifier
 from app.financial.iworker_period_insights import build_period_insights, parse_entry_date
+from app.financial.iworker_teamwork_reconcile import reconcile_iworker_vs_teamwork
 from app.financial.iworker_snapshots import (
     list_period_history,
     rows_for_current_periods,
@@ -466,6 +467,27 @@ def _build_audit_queue(
         granularity=granularity,
         period_start=period_start,
     )
+    try:
+        selected = insights.get("selected") or {}
+        roster: list[str] = []
+        seen: set[str] = set()
+        for entry in timesheets:
+            name = str(entry.get("contractor") or "").strip()
+            key = name.lower()
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            roster.append(name)
+        recon = reconcile_iworker_vs_teamwork(
+            timesheets,
+            start=date.fromisoformat(str(selected["start"])),
+            end=date.fromisoformat(str(selected["end"])),
+            roster=roster,
+        )
+        if recon.get("status") == "ok":
+            insights["signals"] = list(insights.get("signals") or []) + list(recon.get("signals") or [])
+    except Exception:
+        logger.exception("operation=audit_queue teamwork_reconciliation=failed")
     items = _build_audit_items_from_timesheets(in_period)
     seen_ids = {item["id"] for item in items}
     for signal in insights.get("signals", []):
@@ -769,6 +791,49 @@ def get_iworker_timesheets(
         contractor=contractor_filter,
     )
     unparsed = period_insights.pop("unparsed_date_count", 0)
+
+    roster = [str(t.get("name") or "").strip() for t in tabs_meta if str(t.get("name") or "").strip()]
+    selected = period_insights.get("selected") or {}
+    teamwork_reconciliation: dict[str, Any] = {
+        "status": "unavailable",
+        "detail": "Teamwork reconciliation was not run.",
+        "period_start": str(selected.get("start") or ""),
+        "period_end": str(selected.get("end") or ""),
+        "tolerance_hours": 0.5,
+        "rows": [],
+        "summary": {
+            "matched": 0,
+            "mismatched": 0,
+            "iworker_only": 0,
+            "no_teamwork_match": 0,
+        },
+        "signals": [],
+    }
+    try:
+        recon_start = date.fromisoformat(str(selected["start"]))
+        recon_end = date.fromisoformat(str(selected["end"]))
+        teamwork_reconciliation = reconcile_iworker_vs_teamwork(
+            filtered,
+            start=recon_start,
+            end=recon_end,
+            roster=roster,
+            contractor_filter=contractor_filter,
+        )
+        if teamwork_reconciliation.get("status") == "ok":
+            period_insights["signals"] = list(period_insights.get("signals") or []) + list(
+                teamwork_reconciliation.get("signals") or []
+            )
+    except Exception:
+        logger.exception(
+            "operation=iworker_timesheets teamwork_reconciliation=failed contractor=%s",
+            contractor_filter or "all",
+        )
+        teamwork_reconciliation = {
+            **teamwork_reconciliation,
+            "status": "error",
+            "detail": "Failed to reconcile Teamwork hours for this period.",
+        }
+    period_insights["teamwork_reconciliation"] = teamwork_reconciliation
 
     grain = "month" if granularity == "month" else "week"
     period_history: list[dict] = []
